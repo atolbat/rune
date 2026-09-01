@@ -483,7 +483,7 @@ export async function fetchStreaming(
 function connectTimeoutTimer(
   controller: AbortController,
   ms: number,
-  external?: AbortSignal,
+  _external?: AbortSignal,
 ): () => void {
   const timer = setTimeout(() => {
     controller.abort(new DOMException('таймаут соединения', 'TimeoutError'))

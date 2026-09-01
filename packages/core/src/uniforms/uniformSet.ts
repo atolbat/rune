@@ -35,7 +35,7 @@ export function createUniformSet<S extends UniformSetSchema>(
   const offsets: Partial<Record<keyof S, number>> = {}
   let attached = false
   let linked: Partial<Record<keyof S, ReadableSignal<any>>> = {}
-  let cache: Partial<Record<keyof S, UniformSetValue>> = {}
+  const cache: Partial<Record<keyof S, UniformSetValue>> = {}
   void options.frequency // хинт для frequency-split арен (реализуется ареной)
 
   function attach(alloc: (type: UniformSetFieldType) => { offset: number; size: number }): void {

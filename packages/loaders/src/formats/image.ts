@@ -63,7 +63,7 @@ export function parseHdrBytes(bytes: Uint8Array, ctx: ParseContext): HdrImage {
   const url = ctx.sourceUrl
   let pos = 0
   const readLine = (): string => {
-    let start = pos
+    const start = pos
     while (pos < bytes.length && bytes[pos] !== 10) pos++
     const s = String.fromCharCode(...bytes.subarray(start, pos))
     pos++

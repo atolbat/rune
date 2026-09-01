@@ -27,8 +27,9 @@ for (const entry of readdirSync(packagesDir)) {
     version: pkg.version ?? '0.1.0',
     type: 'module',
     license: 'MIT',
-    sideEffects: false,
     exports: { '.': './src/index.ts' },
+    // ВНИМАНИЕ: без "sideEffects": false — bun build (1.3.14) перетряхивает
+    // ре-экспортные цепочки в пустой каркас при этом флаге.
     ...(Object.keys(deps).length ? { dependencies: sorted(deps) } : {}),
     ...(Object.keys(devDeps).length ? { devDependencies: sorted(devDeps) } : {}),
   }

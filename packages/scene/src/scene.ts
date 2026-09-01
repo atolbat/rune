@@ -147,7 +147,7 @@ export interface Scene {
 }
 
 /** Опции создания сцены. */
-export interface SceneOptions extends SceneBufferOptions {}
+export type SceneOptions = SceneBufferOptions
 
 /** Создать сцену (локальную или разделяемую с воркером). */
 export function createScene(options: SceneOptions = {}): Scene {
@@ -213,7 +213,7 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
   }
 
   function takeSlot(): number {
-    let head = fullWords[freeList]
+    const head = fullWords[freeList]
     if (!(head >= 0)) {
       throw new Error(`scene: нет свободных слотов (capacity=${views.capacity})`)
     }
@@ -266,7 +266,7 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
 
     create(init = {}) {
       const slot = takeSlot()
-      const { pos, quat, scale, group, payload, nodeFlags, sphereL, generation, world, sphereW, headerU } = views
+      const { pos, quat, scale, group, payload, nodeFlags, sphereL, world, sphereW, headerU } = views
       const i3 = slot * 3
       const i4 = slot * 4
       const i16 = slot * 16
@@ -286,7 +286,6 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
       group[slot] = init.group ?? -1
       payload[slot] = init.payload ?? -1
       nodeFlags[slot] = NF_ALIVE | (init.visible === false ? 0 : NF_VISIBLE)
-      generation[slot] = generation[slot]
       if (init.sphere !== undefined) {
         sphereL[i4] = init.sphere[0]
         sphereL[i4 + 1] = init.sphere[1]
@@ -329,7 +328,7 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
     },
 
     dispose(slot) {
-      const { nodeFlags, parent, generation, headerU } = views
+      const { nodeFlags, generation, headerU } = views
       if ((nodeFlags[slot] & NF_ALIVE) === 0) return
       // Дети становятся корнями (локаль сохраняется — мир пересчитается).
       let c = views.firstChild[slot]

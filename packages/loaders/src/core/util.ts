@@ -6,7 +6,7 @@
  * глобалям (DecompressionStream/createImageBitmap) — headless/воркер-safe.
  */
 
-import type { ImageBitmapLike, ImageDecode, ImageParserOptions, PlatformCaps, UrlResolver } from './types.ts'
+import type { ImageBitmapLike, ImageDecode, PlatformCaps, UrlResolver } from './types.ts'
 import { UnsupportedError } from './errors.ts'
 
 // ─── growable-буфер байтов ───────────────────────────────────────────────────

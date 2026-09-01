@@ -23,18 +23,17 @@
 import type { AutoDrawSpec, BackendDecision, BackendId } from './autoBackend.ts'
 import { resolveBackend } from './autoBackend.ts'
 import { createWebGL2Renderer } from './webgl2Renderer.ts'
-import type { WebGL2Renderer, WebGL2RendererOptions, FrameContext, Recorder, FrameHandle, Texture, TextureView } from './webgl2Renderer.ts'
+import type { WebGL2Renderer, WebGL2RendererOptions, FrameContext, FrameHandle, Texture, TextureView } from './webgl2Renderer.ts'
 import { createWebGpuRenderer } from './webgpuRenderer.ts'
-import type { WebGpuRenderer, WebGpuRendererOptions, GpuFrameContext, GpuRecorder } from './webgpuRenderer.ts'
+import type { WebGpuRenderer, WebGpuRendererOptions, GpuFrameContext } from './webgpuRenderer.ts'
 import type { CompiledCommand, GLImageSource } from '@rune/webgl2'
-import { probeGLCaps, makeGLProbe } from '@rune/webgl2'
 import type { WgpuCommand, GPUImageSource, GPUFacade } from '@rune/webgpu'
 import { probeGPUCaps, makeGPUProbe, externalImageSize } from '@rune/webgpu'
 import type { TapeWriter, UploadScheduler, UploadSchedulerOptions, TransientPool, ReadableSignal, Journal, ResourceJournal, RestoreReport, WorkingSet, EvictionReport, ResidencyStats, TextureFormat, TransportClient, TransportFeedView } from '@rune/core'
 import { createCaps, createStatsCollector } from '@rune/core'
 import type { RendererFeed, RendererFeedOptions } from './rendererFeed.ts'
 import { glFormatFromTextureFormat } from './resourceSessionGL.ts'
-import type { Caps, StatsCollector, RendererStats } from '@rune/core'
+import type { Caps, StatsCollector } from '@rune/core'
 import type { Surface, SurfaceOptions, PassOptions } from './surface.ts'
 import type { AnyCanvas } from './canvasHelpers.ts'
 
@@ -600,7 +599,6 @@ function assertCovers(spec: AutoDrawSpec, decision: BackendDecision, _when: stri
 
 /** Actionable late-reject: что подкрутить. */
 function lateRejectError(spec: AutoDrawSpec, backend: BackendId): Error {
-  const need = backend === 'webgl2' ? 'glsl' : 'wgsl'
   const hasOther = backend === 'webgl2' ? !!spec.shader.wgsl : !!spec.shader.glsl
   const other = backend === 'webgl2' ? 'WGSL' : 'GLSL'
   const target = backend === 'webgl2' ? 'GLSL' : 'WGSL'

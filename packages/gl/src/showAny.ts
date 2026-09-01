@@ -1,5 +1,3 @@
-import { mat4Multiply, mat4Perspective, mat4RotationX, mat4RotationY, mat4Translation } from '@rune/math'
-import { cube } from '@rune/prims'
 import type { WebGL2Renderer } from './webgl2Renderer.ts'
 import type { ShowOptions } from './scene.ts'
 import { show } from './scene.ts'

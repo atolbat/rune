@@ -92,7 +92,7 @@ export function box(params: BoxParams = {}): CubeGeometry {
   const hy = height / 2
   const hz = depth / 2
   const halfOf = (axis: readonly [number, number, number]): number => {
-    const [ax, ay, az] = axis
+    const [ax, ay] = axis
     if (ax !== 0) return hx
     if (ay !== 0) return hy
     return hz

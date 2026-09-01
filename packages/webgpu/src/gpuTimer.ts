@@ -53,13 +53,11 @@ export interface GpuTimerHandle {
  */
 export function createGpuGpuTimer(device: GPUDevice): { timer: GpuTimer; handle: GpuTimerHandle } | null {
   // Проверяем feature через try/catch — features.has может бросать на старых browsers.
-  let hasTimestampQuery = false
   try {
-    hasTimestampQuery = device.features.has('timestamp-query' as GPUFeatureName)
+    if (!device.features.has('timestamp-query' as GPUFeatureName)) return null
   } catch {
     return null
   }
-  if (!hasTimestampQuery) return null
 
   // 2 timestamp slots: BEGIN (0) и END (1).
   let querySet: GPUQuerySet

@@ -25,7 +25,7 @@ export interface TextureUpload {
   readonly done: Promise<void>
 }
 
-export interface TextureUploadResult extends TextureUpload {}
+export type TextureUploadResult = TextureUpload
 
 /** Ширина превью — кратна 64 (WebGPU bytesPerRow-выравнивание 256). */
 function previewWidth(width: number, budget: number): number {

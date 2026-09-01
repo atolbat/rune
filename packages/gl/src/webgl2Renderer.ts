@@ -17,7 +17,7 @@ import type { UploadScheduler, UploadSchedulerOptions, TextureUpload, TransientP
 import type { TextureHandle } from '@rune/webgl2'
 import type { LiveCommand, ReadableSignal } from '@rune/core'
 import { compileDrawSpec, createCompileContext, createExecutor, createRealGL } from '@rune/webgl2'
-import type { CompiledCommand, DrawSpec, GLFacade, UniformStrategy, GLTextureFormat } from '@rune/webgl2'
+import type { CompiledCommand, DrawSpec, GLFacade, UniformStrategy, GLTextureFormat, GLImageSource } from '@rune/webgl2'
 import {
   FULLSCREEN_QUAD,
   PASS_VERT_GLSL,
@@ -147,7 +147,7 @@ export interface Texture extends TextureHandle {
    *  через UNPACK_FLIP_Y_WEBGL; WebGPU — через GPUCopyExternalImageSourceInfo.flipY.
    *  Паритет: при false оба бэкенда пишут source row 0 в texture row 0
    *  — отображение идентично. */
-  uploadImage(source: import('@rune/webgl2').GLImageSource, options?: { flipY?: boolean }): void
+  uploadImage(source: GLImageSource, options?: { flipY?: boolean }): void
   /** Загрузка части текстуры (sub-region) из bitmap/canvas/video.
    *  WebGL2: texSubImage2D overload с TexImageSource (НЕ перезаписывает
    *  остальную текстуру). WebGPU: copyExternalImageToTexture с destination.origin=(x,y).
@@ -160,7 +160,7 @@ export interface Texture extends TextureHandle {
    *  Регион определяется [x, y, x+source.width, y+source.height]. Выходит
    *  за пределы текстуры → GL-error (проверки нет намеренно — дешёвый путь).
    *  options.flipY (default false) — паритет с WebGPU (см. uploadImage). */
-  uploadSubImage(x: number, y: number, source: import('@rune/webgl2').GLImageSource, options?: { flipY?: boolean }): void
+  uploadSubImage(x: number, y: number, source: GLImageSource, options?: { flipY?: boolean }): void
   /** Загрузка конкретного mip-уровня (level 0 = базовый, 1 = 1/2 размер, и т.д.).
    *
    *  WebGL2: texImage2D с level параметром. Source должен иметь размер N/(2^level).
@@ -182,7 +182,7 @@ export interface Texture extends TextureHandle {
    *  Используется MipStreamer'ом для progressive mip upload. */
   uploadMip(
     level: number,
-    source: import('@rune/webgl2').GLImageSource,
+    source: GLImageSource,
     options?: {
       flipY?: boolean
       /** WebGL2 internalFormat GLenum (default RGBA8=0x8058). WebGPU-ignored. */

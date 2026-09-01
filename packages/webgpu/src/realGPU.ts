@@ -804,7 +804,7 @@ export async function createRealGPU(
       }
     }
     record.texture.destroy()
-    record.sampler // GPUSampler не имеет destroy() — GC сам уберёт
+    // GPUSampler не имеет destroy() — GC сам уберёт
     textures.delete(textureId)
   }
 

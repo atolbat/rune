@@ -40,7 +40,7 @@ export async function loadJSON<T = unknown>(url: string, options: LegacyLoadOpti
   try {
     return JSON.parse(text) as T
   } catch (err) {
-    throw new SyntaxError(`loadJSON: ${url} — невалидный JSON: ${(err as Error).message}`)
+    throw new SyntaxError(`loadJSON: ${url} — невалидный JSON: ${(err as Error).message}`, { cause: err })
   }
 }
 

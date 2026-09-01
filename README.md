@@ -62,16 +62,45 @@ renderer.frame((ctx, record) => {
 
 ```bash
 bun install        # зависимости (workspace-симлинки чинит postinstall)
+bun run lint       # ESLint (js.recommended + ts-eslint.recommended) — только packages/*/src
 bun run typecheck  # строгие типы, 0 ошибок
+bun run build      # сборка бандлов в dist/ (см. ниже)
 bun test           # полный набор юнит/интеграционных тестов
 ```
 
-Требуется Bun ≥ 1.1. CI прогоняет typecheck и тесты на каждый push
-(`.github/workflows/ci.yml`).
+Требуется Bun ≥ 1.1. CI (`​.github/workflows/ci.yml`) на каждый push в `dev`/`main`
+и на PR прогоняет: lint → typecheck → build → test, затем headless-смок демо
+в Chromium (SwiftShader). Артефакт `dist/` выкладывается на каждый пуш.
+
+Разработка ведётся в ветке `dev`; `main` обновляется только вручную.
 
 Тяжёлые бинарные фикстуры (например, Mixamo FBX в `@rune/loaders`) в репозиторий
 не входят: соответствующие тесты включаются автоматически, если положить файл
 по пути, указанному в тесте.
+
+## Сборка
+
+`bun run build` производит самодостаточные ESM-бандлы в `dist/`:
+
+| Артефакт | Содержание |
+|----------|------------|
+| `rune.esm.js` | Мета-пакет `@rune/gl` целиком (core/math/prims/webgl2/webgpu) |
+| `rune.esm.min.js` | Минифицированная копия с sourcemap |
+| `rune-loaders.esm.js` | `@rune/loaders` (GLB/glTF, OBJ, FBX — без GPU-кода) |
+
+Типы отдельно не собираются: библиотека распространяется в исходниках TS —
+bun и бандлеры берут типы прямо из `src` через `exports`.
+
+## Демо
+
+`demo/` — страница, импортирующая собранный бандл: вращающийся куб через
+`showAny()` (WebGPU с авто-фолбэком на WebGL2), бейдж бэкенда, пауза/резюм.
+
+```bash
+bun run demo        # сборка + статический сервер на http://localhost:8080/
+bun run demo:smoke  # headless-проверка (Playwright + SwiftShader): анимация,
+                    # бейдж, пауза, отсутствие ошибок консоли
+```
 
 ## Дизайн-досье
 

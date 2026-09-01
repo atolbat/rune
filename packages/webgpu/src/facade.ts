@@ -1,6 +1,7 @@
 // Контракт фасада WebGPU: толстые операции над device/queue.
 
-import type { TextureFormat } from '@rune/core'
+import type { TextureFormat, GpuTimer } from '@rune/core'
+import type { GpuPipelineDesc } from './pipeline/pipelineCache.ts'
 
 /** Источник для атомарной загрузки текстуры (без стриминга/чанков).
  *  WebGPU ExternalImageSource = ImageBitmap | HTMLCanvasElement | HTMLVideoElement |
@@ -157,7 +158,7 @@ export interface GPUFacade {
    *  Task 75: desc — растеризационное состояние (blend/depth/cull/
    *  primitive) из GpuPipelineDesc; раньше пайплайн хардкодил
    *  less+write без блендинга. */
-  ensurePipeline(pipelineId: number, wgsl: string, attrs: readonly GpuAttrSlot[], hasTextures: boolean, desc?: import('./pipeline/pipelineCache.ts').GpuPipelineDesc): void
+  ensurePipeline(pipelineId: number, wgsl: string, attrs: readonly GpuAttrSlot[], hasTextures: boolean, desc?: GpuPipelineDesc): void
   usePipeline(pipelineId: number): void
   bindUniforms(dynamicOffset: number): void
   bindVertexBuffer(slot: number, data: Float32Array, size: number): void
@@ -288,5 +289,5 @@ export interface GPUFacade {
    *  через installTimer внутри createRealGPU — пользователь GPUFacade не
    *  должен вызывать installTimer вручную (если только не подменяет timer
    *  для тестов). */
-  readonly timer: import('@rune/core').GpuTimer | null
+  readonly timer: GpuTimer | null
 }

@@ -13,13 +13,20 @@
   },
   "scripts": {
     "postinstall": "node scripts/postinstall.mjs",
-    "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "lint": "eslint \"packages/*/src/**/*.ts\"",
+    "typecheck": "tsc --noEmit",
+    "build": "bun scripts/build.mjs",
+    "demo": "bun scripts/build.mjs && bun scripts/serve-demo.mjs",
+    "demo:smoke": "bun scripts/demo-smoke.mjs",
+    "test": "bun test"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/bun": "^1.1.0",
     "@webgpu/types": "^0.1.72",
+    "eslint": "^10.9.1",
     "playwright": "1.57.0",
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "typescript-eslint": "^8.69.0"
   }
 }

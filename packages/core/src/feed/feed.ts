@@ -134,7 +134,7 @@ function feedWriter(
   stride: number,
   layout: FeedLayout,
   from: number,
-  count: number,
+  _count: number,
   _policy: FeedPolicy,
 ): FeedWriter {
   const f32 = new Float32Array(buffer, HEADER_BYTES)

@@ -1,4 +1,4 @@
-import type { GLFacade, DepthFunc, CullFace, FrontFace, BlendFactor, PrimitiveKind } from './facade.ts'
+import type { GLFacade, DepthFunc, BlendFactor, PrimitiveKind } from './facade.ts'
 
 /**
  * Настоящий фасад поверх WebGL2RenderingContext.

@@ -408,13 +408,6 @@ function createErrorStorm(report?: (message: string) => void): ErrorStorm {
   }
 }
 
-function resolveCanvas(target: HTMLCanvasElement | string): HTMLCanvasElement {
-  if (typeof target !== 'string') return target
-  const canvas = document.querySelector<HTMLCanvasElement>(target)
-  if (canvas === null) throw new Error(`rune: канвас "${target}" не найден`)
-  return canvas
-}
-
 function defaultRequestFrame(callback: (timestamp: number) => void): () => void {
   // requestAnimationFrame — свойство window, а не прототипа: голый вызов легален
   const id = requestAnimationFrame(callback)

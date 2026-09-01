@@ -8,6 +8,7 @@ import type { TapeView } from '@rune/core'
 import type { WgpuCommand } from './command.ts'
 import type { SliceArena } from './sliceArena.ts'
 import type { GPUFacade } from './facade.ts'
+import type { GpuPipelineDesc } from './pipeline/pipelineCache.ts'
 
 export interface GpuExecutorOptions {
   readonly gpu: GPUFacade
@@ -20,13 +21,10 @@ export interface GpuTapeExecutor {
   run(view: TapeView): void
 }
 
-const DEFAULT_CLEAR = { color: [0.07, 0.08, 0.11, 1] as const, depth: 1 }
-
 export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor {
   const gpu = options.gpu
   const arena = options.arena
   const commands = options.commands
-  const clears = options.clears
 
   function run(view: TapeView): void {
     uploadDirtySlices(view)
@@ -92,7 +90,7 @@ interface RichWgpuCommand extends WgpuCommand {
   readonly pipelineId: number
   readonly wgsl: string
   readonly attrOrder: readonly { readonly data: Float32Array; readonly size: number; readonly stride?: number; readonly offset?: number; readonly step?: 'vertex' | 'instance' }[]
-  readonly pipeline: import('./pipeline/pipelineCache.ts').GpuPipelineDesc
+  readonly pipeline: GpuPipelineDesc
   readonly textureIds: readonly number[]
   readonly sliceOffset: number
   readonly sliceBytes: number

@@ -83,9 +83,9 @@ export function terrain(
         ? (at(i, cells) - at(i, cells - 1)) / step
         : (at(i, j + 1) - at(i, j - 1)) / (2 * step)
     // Нормаль поверхности y = h(x, z): (-∂h/∂x, 1, -∂h/∂z), нормированная
-    let nx = -dhdx
-    let ny = 1
-    let nz = -dhdz
+    const nx = -dhdx
+    const ny = 1
+    const nz = -dhdz
     const len = Math.hypot(nx, ny, nz)
     out[o] = nx / len
     out[o + 1] = ny / len

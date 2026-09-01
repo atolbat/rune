@@ -74,7 +74,7 @@ function terrainEntry(
       { key: 'amp', label: 'Амплитуда', min: 0.4, max: 2.5, step: 0.1, def: preset.amplitude },
       { key: 'segs', label: 'Сегментов', min: 16, max: 256, step: 8, def: 96, segment: true },
     ],
-    make: (v, k) => terrain(
+    make: (v, _k) => terrain(
       TERRAIN_SIZE,
       v.segs ?? 96,
       preset.height(v.seed ?? 7) as TerrainHeightFn,

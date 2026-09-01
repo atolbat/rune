@@ -268,10 +268,9 @@ class FbxDocumentReader {
   }
 
   private lazyArray(kind: LazyArray['kind'], len: number, enc: number, start: number, comp: number, nodeName: string): LazyArray {
-    const self = this
     // Инфляция через нативный DecompressionStream('deflate') — zlib (RFC 1950).
     return new LazyArrayImpl(kind, len, async () => {
-      const raw = self.bytes.subarray(start, start + comp)
+      const raw = this.bytes.subarray(start, start + comp)
       if (enc === 0) {
         if (raw.length < len * scalarOf(kind)) {
           throw new RangeError(`parseFBX: массив узла «${nodeName}» обрезан (${raw.length} байт < ${len * scalarOf(kind)})`)

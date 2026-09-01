@@ -638,7 +638,6 @@ export function selectQuadtreeLeaves(
           if (leafCount >= maxInstances) {
             // ЖЁСТКИЙ кап (урок Task 115: эмиссия без капа переполняла
             // контракт при малых maxInstances — хвост DFS молча писал мимо).
-            sp = 0
             break
           }
           const o = leafCount * 4

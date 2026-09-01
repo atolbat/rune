@@ -230,7 +230,7 @@ const ZERO_STATS: RendererStats = {
 export function createCaps(query: CapsQuery, statsProvider: StatsProvider | null = null): Caps {
   // Snapshot запроса на момент создания. invalidate() — пересоздаёт snapshot
   // (например, после device-loss юзер пере-пробивает и пересоздаёт caps).
-  let snapshot = query
+  const snapshot = query
   let statsRef = statsProvider
 
   function formatKey(f: string, axis: FormatAxis): string {

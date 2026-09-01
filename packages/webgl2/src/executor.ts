@@ -33,7 +33,6 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
 
   let lastProgram = -1
   let lastDepthTest = ''
-  let lastDepthWrite: boolean | null = null
   let lastCull = ''
   let lastBlend = ''
 

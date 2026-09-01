@@ -127,9 +127,9 @@ export function torusKnot(params: TorusKnotParams = {}): Geometry {
     } else {
       // Транспорт: проекция прошлой нормали на плоскость ⊥ тангенсу
       const dot = prevNormal[0] * tangent[0] + prevNormal[1] * tangent[1] + prevNormal[2] * tangent[2]
-      let nx = prevNormal[0] - dot * tangent[0]
-      let ny = prevNormal[1] - dot * tangent[1]
-      let nz = prevNormal[2] - dot * tangent[2]
+      const nx = prevNormal[0] - dot * tangent[0]
+      const ny = prevNormal[1] - dot * tangent[1]
+      const nz = prevNormal[2] - dot * tangent[2]
       const nl = Math.hypot(nx, ny, nz) || 1
       normal = [nx / nl, ny / nl, nz / nl]
     }

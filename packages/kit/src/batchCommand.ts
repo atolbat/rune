@@ -22,7 +22,7 @@
  * helper можно будет упростить.
  */
 
-import type { AnyCommand, AnyRecorder } from '@rune/gl'
+import type { AnyRecorder } from '@rune/gl'
 
 /** Декларация per-instance атрибута. */
 export interface InstanceAttribute {
@@ -92,7 +92,7 @@ export function batchCommand(spec: BatchSpec): BatchCommand {
 
   return {
     id,
-    recordInstances(instances, recorder) {
+    recordInstances(instances, _recorder) {
       if (instances.length === 0) return
       // Interleaved buffer: один Float32Array на все инстансы
       const buffer = new Float32Array(instances.length * totalComponents)

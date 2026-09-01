@@ -34,7 +34,6 @@ import type {
   MaterialData,
   MeshDocument,
   MeshPrimitive,
-  SubMesh,
   TextureInfo,
 } from './mesh.ts'
 import { meshStatsOf } from './mesh.ts'

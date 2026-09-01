@@ -1,6 +1,6 @@
 // Рекордер-фасад GPU: порядок вызовов кадра строками (защита tape-путей).
 
-import type { GPUFacade, GPUImageSource, GpuTimerHandle } from './facade.ts'
+import type { GPUFacade, GPUImageSource } from './facade.ts'
 
 export interface RecordingGPU {
   readonly gpu: GPUFacade

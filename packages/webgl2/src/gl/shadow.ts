@@ -60,7 +60,7 @@ export function applyAction(action: StateAction, shadow: GLShadow, gl: StateProg
     case 'depthTest':
       if (shadow.depthTest !== (action.on ? 1 : 0)) {
         shadow.depthTest = action.on ? 1 : 0
-        action.on ? gl.enableDepthTest() : gl.disableDepthTest()
+        if (action.on) gl.enableDepthTest(); else gl.disableDepthTest()
       }
       break
     case 'depthMask':
@@ -78,7 +78,7 @@ export function applyAction(action: StateAction, shadow: GLShadow, gl: StateProg
     case 'blend':
       if (shadow.blend !== (action.on ? 1 : 0)) {
         shadow.blend = action.on ? 1 : 0
-        action.on ? gl.enableBlend() : gl.disableBlend()
+        if (action.on) gl.enableBlend(); else gl.disableBlend()
       }
       break
     case 'blendFunc':
@@ -91,7 +91,7 @@ export function applyAction(action: StateAction, shadow: GLShadow, gl: StateProg
     case 'cull':
       if (shadow.cull !== (action.on ? 1 : 0)) {
         shadow.cull = action.on ? 1 : 0
-        action.on ? gl.enableCull() : gl.disableCull()
+        if (action.on) gl.enableCull(); else gl.disableCull()
       }
       break
     case 'cullFace':

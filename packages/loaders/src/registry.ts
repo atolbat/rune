@@ -31,7 +31,7 @@
 
 import { asciiDecode, nowMs } from './bytes.ts'
 import {
-  Assembler,
+  type Assembler,
   FetchScheduler,
   allocJobId,
   fetchStreaming,

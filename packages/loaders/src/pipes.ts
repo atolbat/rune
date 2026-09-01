@@ -149,7 +149,7 @@ export function collectBlob(type?: string): TransformStream<Uint8Array, Uint8Arr
  * Связка «pipe»: читает источник через цепочку трансформов.
  * compose([a, b, c]) — конвейер a→b→c с единым ReadableStream на выходе.
  */
-export function compose<TIn, TOut>(transforms: readonly TransformStream<any, any>[]): ReadableStream<TOut> | null {
+export function compose<_TIn, TOut>(transforms: readonly TransformStream<any, any>[]): ReadableStream<TOut> | null {
   if (transforms.length === 0) return null
   // Композиция выполняется вызывающим кодом через pipeThrough — здесь
   // только тип-хелпер контракт: первый вход TIn, последний выход TOut.

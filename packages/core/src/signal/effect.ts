@@ -1,7 +1,7 @@
 import type { ReadableSignal, Unsubscribe } from './types.ts'
 import { pushCollector, popCollector } from './tracking.ts'
 import { schedule } from './batch.ts'
-import { detachAll, pushUnique } from './shared.ts'
+import { detachAll } from './shared.ts'
 
 /** Запускает эффект; возвращает остановку. Внутри batch — один перевыпуск. */
 export function effect(run: () => void): Unsubscribe {

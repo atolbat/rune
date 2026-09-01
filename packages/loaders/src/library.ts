@@ -17,7 +17,7 @@
  */
 
 import { LoadScheduler, nextSchedulerJobId, type SchedulerJob } from './scheduler.ts'
-import { openByteSource, StreamAssembler, type ByteSourceOptions } from './source.ts'
+import { openByteSource, type StreamAssembler, type ByteSourceOptions } from './source.ts'
 import {
   PHASE_WEIGHTS,
   type AssetHandle,

@@ -22,7 +22,7 @@ import type { ReadableSignal, Unsubscribe } from '../signal/types.ts'
 import { signal } from '../signal/signal.ts'
 import type { SignalCell } from '../signal/signal.ts'
 import { createSharedRegistry, attachSharedRegistry, nameHash } from './sharedRegistry.ts'
-import type { SharedRegistry, SharedMirror } from './sharedRegistry.ts'
+import type { SharedMirror } from './sharedRegistry.ts'
 import { createFeed, feedStride } from '../feed/feed.ts'
 import type { Feed, FeedLayout, FeedPolicy, FeedWriter } from '../feed/feed.ts'
 
@@ -638,7 +638,7 @@ function msgFeedFacade(state: MsgState, feedOptions: { layout: FeedLayout; capac
   }
 }
 
-function msgWriter(core: () => MsgFeedCore, from: number, count: number): FeedWriter {
+function msgWriter(core: () => MsgFeedCore, from: number, _count: number): FeedWriter {
   return {
     setFloat: (name, index, value) => writeMsg(core, from + index, name, [value]),
     setVec2: (name, index, x, y) => writeMsg(core, from + index, name, [x, y]),

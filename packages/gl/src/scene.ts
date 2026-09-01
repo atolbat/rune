@@ -1,10 +1,8 @@
 import { createWebGL2Renderer } from './webgl2Renderer.ts'
 import type { WebGL2Renderer, WebGL2RendererOptions } from './webgl2Renderer.ts'
 import type { AnyCanvas } from './canvasHelpers.ts'
-import { createRecordingGL } from '@rune/webgl2'
-
-/** Тип-помощник для инъекций (не утекает в рантайм). */
-function createRecordingGLSafe() { return createRecordingGL() }
+import type { RecordingGL } from '@rune/webgl2'
+import type { GPUFacade } from '@rune/webgpu'
 import { mat4Multiply, mat4Perspective, mat4RotationX, mat4RotationY, mat4Translation } from '@rune/math'
 import { cube } from '@rune/prims'
 
@@ -33,9 +31,9 @@ export interface ShowOptions {
    * для страниц с несколькими рендерерами (табы, сравнение). */
   readonly badge?: string
   /** Инъекции для headless-тестов. */
-  readonly createGL?: () => ReturnType<typeof createRecordingGLSafe>['gl']
+  readonly createGL?: () => RecordingGL['gl']
   /** Инъекция GPU-фасада: рекордер-паттерн для headless-тестов webgpu-пути. */
-  readonly createGPU?: (canvas: AnyCanvas, onError?: (message: string) => void) => Promise<import('@rune/webgpu').GPUFacade>
+  readonly createGPU?: (canvas: AnyCanvas, onError?: (message: string) => void) => Promise<GPUFacade>
   readonly requestFrame?: (callback: (timestamp: number) => void) => () => void
   readonly now?: () => number
   readonly observeResize?: boolean

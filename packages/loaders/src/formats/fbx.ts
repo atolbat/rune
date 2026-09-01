@@ -138,9 +138,6 @@ async function parseNode(
   }
   const endOffset = u64 ? Number(dv.getBigUint64(start, true)) : dv.getUint32(start, true)
   const numProps = u64 ? Number(dv.getBigUint64(start + 8, true)) : dv.getUint32(start + 4, true)
-  const propListLen = u64
-    ? Number(dv.getBigUint64(start + 16, true))
-    : dv.getUint32(start + 8, true)
   const nameLen = dv.getUint8(start + (u64 ? 24 : 12))
   const nameStart = start + (u64 ? 25 : 13)
   if (endOffset > fileEnd || endOffset <= nameStart) {
@@ -159,8 +156,7 @@ async function parseNode(
   while (cursor + (u64 ? 25 : 13) <= endOffset) {
     const child = await parseNode(dv, cursor, endOffset, u64, ctx, url)
     if (child === null) {
-      cursor += u64 ? 25 : 13 // NULL-запись
-      break
+      break // NULL-запись (25/13 байт) — дальше детей нет
     }
     children.push(child.node)
     cursor = child.end
@@ -296,7 +292,6 @@ interface FbxConnection {
 
 /** Собрать MeshDocument из FBX-дерева. */
 export function fbxTreeToMeshDocument(doc: FbxDocument, ctx: ParseContext): MeshDocument {
-  const url = ctx.sourceUrl
   const root = doc.root
 
   // индексирование объектов и связей
@@ -550,7 +545,6 @@ function parseFbxGeometry(node: FbxNode, ctx: ParseContext): MeshPrimitive {
   // массивы лежат в первом пропе ноды (Vertices: 'd' [...])
   const controlPoints = propNumbers(verticesNode.props[0])
   const polyIndex = propInts(pviNode.props[0])
-  const controlCount = controlPoints.length / 3
 
   // полигоны: [start, len] по маркерам ~i
   const polygons: Array<[number, number]> = []
@@ -590,7 +584,6 @@ function parseFbxGeometry(node: FbxNode, ctx: ParseContext): MeshPrimitive {
   const uvPerVertex =
     uvData === null || ((uvData.mapping === 'ByVertice' || uvData.mapping === 'ByVertex') && uvData.indexed === null)
 
-  const cornerCount = polyIndex.length
   if (normalsPerVertex && uvPerVertex) {
     // ── индексированный примитив ──
     // точное число треугольников после веерной триангуляции
@@ -730,7 +723,6 @@ interface LayerData {
 
 function parseLayerElement(node: FbxNode, stride: number): LayerData {
   const mapping = findChildString(node, 'MappingInformationType') ?? 'ByPolygonVertex'
-  const reference = findChildString(node, 'ReferenceInformationType') ?? 'Direct'
   // values: первый числовой массив-ребёнок с нужным stride (Normals/UV/Materials)
   let values: Float64Array | Int32Array = new Float64Array(0)
   let indexed: Int32Array | null = null

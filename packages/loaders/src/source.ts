@@ -103,7 +103,7 @@ export type { AssemblerOptions } from './assembler.ts'
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
-function connectTimeout(controller: AbortController, ms: number, external?: AbortSignal): () => void {
+function connectTimeout(controller: AbortController, ms: number, _external?: AbortSignal): () => void {
   const timer = setTimeout(() => {
     controller.abort(new DOMException('таймаут соединения', 'TimeoutError'))
   }, ms)

@@ -174,7 +174,6 @@ export const GL_UPLOAD_TYPES = {
   FLOAT_32_UNSIGNED_INT_24_8_REV: 0x8dad,
 } as const
 
-const IF = GL_INTERNAL_FORMATS
 const UF = GL_UPLOAD_FORMATS
 const UT = GL_UPLOAD_TYPES
 
