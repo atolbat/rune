@@ -1,0 +1,72 @@
+/**
+ * Приоритетная очередь задач на двоичной куче.
+ * Извлечение — O(log n); изменение приоритета не поддерживается (MVP).
+ */
+
+/** Задача стриминга: байты, приоритет (меньше = раньше) и работа. */
+export interface UploadJob {
+  readonly bytes: number
+  readonly priority: number
+  run(): void
+}
+
+/** Очередь задач с приоритетом. */
+export interface UploadQueue {
+  readonly size: number
+  push(job: UploadJob): void
+  /** Забирает минимальную по приоритету задачу. */
+  pop(): UploadJob | null
+  clear(): void
+}
+
+/** Создаёт приоритетную очередь на двоичной куче. */
+export function createUploadQueue(): UploadQueue {
+  const heap: UploadJob[] = []
+  return {
+    get size() { return heap.length },
+    push: job => {
+      heap.push(job)
+      siftUp(heap, heap.length - 1)
+    },
+    pop: () => {
+      if (heap.length === 0) return null
+      swap(heap, 0, heap.length - 1)
+      const top = heap.pop() as UploadJob
+      if (heap.length > 0) siftDown(heap, 0)
+      return top
+    },
+    clear: () => { heap.length = 0 },
+  }
+}
+
+function less(a: UploadJob, b: UploadJob): boolean {
+  return a.priority < b.priority
+}
+
+function swap(heap: UploadJob[], i: number, j: number): void {
+  const tmp = heap[i]
+  heap[i] = heap[j]
+  heap[j] = tmp
+}
+
+function siftUp(heap: UploadJob[], at: number): void {
+  while (at > 0) {
+    const parent = (at - 1) >> 1
+    if (!less(heap[at], heap[parent])) return
+    swap(heap, at, parent)
+    at = parent
+  }
+}
+
+function siftDown(heap: UploadJob[], at: number): void {
+  for (;;) {
+    const left = at * 2 + 1
+    const right = left + 1
+    let smallest = at
+    if (left < heap.length && less(heap[left], heap[smallest])) smallest = left
+    if (right < heap.length && less(heap[right], heap[smallest])) smallest = right
+    if (smallest === at) return
+    swap(heap, at, smallest)
+    at = smallest
+  }
+}

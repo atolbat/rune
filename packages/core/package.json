@@ -1,0 +1,14 @@
+{
+  "name": "@rune/core",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "devDependencies": {
+    "@rune/webgl2": "workspace:*",
+    "@rune/webgpu": "workspace:*"
+  }
+}

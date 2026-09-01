@@ -1,0 +1,14 @@
+{
+  "name": "@rune/tape",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@rune/core": "workspace:*",
+    "@rune/webgl2": "workspace:*"
+  }
+}

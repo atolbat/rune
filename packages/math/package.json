@@ -1,0 +1,10 @@
+{
+  "name": "@rune/math",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

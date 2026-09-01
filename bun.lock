@@ -1,0 +1,130 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "rune",
+      "devDependencies": {
+        "@types/bun": "^1.1.0",
+        "@webgpu/types": "^0.1.72",
+        "playwright": "1.57.0",
+        "typescript": "^5.5.0",
+      },
+    },
+    "packages/core": {
+      "name": "@rune/core",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@rune/webgl2": "workspace:*",
+        "@rune/webgpu": "workspace:*",
+      },
+    },
+    "packages/debug": {
+      "name": "@rune/debug",
+      "version": "0.1.0",
+    },
+    "packages/gl": {
+      "name": "@rune/gl",
+      "version": "0.1.0",
+      "dependencies": {
+        "@rune/core": "workspace:*",
+        "@rune/math": "workspace:*",
+        "@rune/prims": "workspace:*",
+        "@rune/webgl2": "workspace:*",
+        "@rune/webgpu": "workspace:*",
+      },
+      "devDependencies": {
+        "@rune/kit": "workspace:*",
+      },
+    },
+    "packages/kit": {
+      "name": "@rune/kit",
+      "version": "0.1.0",
+    },
+    "packages/loaders": {
+      "name": "@rune/loaders",
+      "version": "0.1.0",
+    },
+    "packages/math": {
+      "name": "@rune/math",
+      "version": "0.1.0",
+    },
+    "packages/prims": {
+      "name": "@rune/prims",
+      "version": "0.1.0",
+    },
+    "packages/scene": {
+      "name": "@rune/scene",
+      "version": "0.1.0",
+      "dependencies": {
+        "@rune/math": "workspace:*",
+      },
+    },
+    "packages/tape": {
+      "name": "@rune/tape",
+      "version": "0.1.0",
+      "dependencies": {
+        "@rune/core": "workspace:*",
+        "@rune/webgl2": "workspace:*",
+      },
+    },
+    "packages/webgl2": {
+      "name": "@rune/webgl2",
+      "version": "0.1.0",
+      "dependencies": {
+        "@rune/core": "workspace:*",
+      },
+      "devDependencies": {
+        "@rune/gl": "workspace:*",
+      },
+    },
+    "packages/webgpu": {
+      "name": "@rune/webgpu",
+      "version": "0.1.0",
+      "dependencies": {
+        "@rune/core": "workspace:*",
+      },
+    },
+  },
+  "packages": {
+    "@rune/core": ["@rune/core@workspace:packages/core"],
+
+    "@rune/debug": ["@rune/debug@workspace:packages/debug"],
+
+    "@rune/gl": ["@rune/gl@workspace:packages/gl"],
+
+    "@rune/kit": ["@rune/kit@workspace:packages/kit"],
+
+    "@rune/loaders": ["@rune/loaders@workspace:packages/loaders"],
+
+    "@rune/math": ["@rune/math@workspace:packages/math"],
+
+    "@rune/prims": ["@rune/prims@workspace:packages/prims"],
+
+    "@rune/scene": ["@rune/scene@workspace:packages/scene"],
+
+    "@rune/tape": ["@rune/tape@workspace:packages/tape"],
+
+    "@rune/webgl2": ["@rune/webgl2@workspace:packages/webgl2"],
+
+    "@rune/webgpu": ["@rune/webgpu@workspace:packages/webgpu"],
+
+    "@types/bun": ["@types/bun@1.4.0", "", { "dependencies": { "bun-types": "1.4.0" } }, "sha512-K+lZULY23vRgK/CfTjFIV+tyifaNdSMlPh9j+6mQ/cLfpOznLyAuzgV/JQysyECpkBQLVMSyvjlr2fBUSA9wFQ=="],
+
+    "@types/node": ["@types/node@26.3.0", "", { "dependencies": { "undici-types": "~8.3.0" } }, "sha512-L3fgrnchriRC2ExBflb8j4uZZURHZfQsmQeyVzhjcHW4kkwVyo8/0h1B2MVzMTrYUJYu6G7EWs14hW/L9putqw=="],
+
+    "@webgpu/types": ["@webgpu/types@0.1.72", "", {}, "sha512-0cF7RFM2edNoiIS1ODJp0/Gzv4/xSXhwoR0YCza+OWpJWtn4wmo9DvK91aLlH9+uUnwIriP7ZiC3WitmyhuzBw=="],
+
+    "bun-types": ["bun-types@1.4.0", "", { "dependencies": { "@types/node": "*" } }, "sha512-iIKw23BspnQQYd3prITOBxeUsxBHnwzX6YJfGMuNOZzeNcMmVqzIIVGRm1l69ogaPQmb4wB6BN8mA5bE9YuC5Q=="],
+
+    "fsevents": ["fsevents@2.3.2", "", { "os": "darwin" }, "sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA=="],
+
+    "playwright": ["playwright@1.57.0", "", { "dependencies": { "playwright-core": "1.57.0" }, "optionalDependencies": { "fsevents": "2.3.2" }, "bin": { "playwright": "cli.js" } }, "sha512-ilYQj1s8sr2ppEJ2YVadYBN0Mb3mdo9J0wQ+UuDhzYqURwSoW4n1Xs5vs7ORwgDGmyEh33tRMeS8KhdkMoLXQw=="],
+
+    "playwright-core": ["playwright-core@1.57.0", "", { "bin": { "playwright-core": "cli.js" } }, "sha512-agTcKlMw/mjBWOnD6kFZttAAGHgi/Nw0CZ2o6JqWSbMlI219lAFLZZCyqByTsvVAJq5XA5H8cA6PrvBRpBWEuQ=="],
+
+    "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
+
+    "undici-types": ["undici-types@8.3.0", "", {}, "sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ=="],
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": [
+      "ESNext",
+      "DOM"
+    ],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "forceConsistentCasingInFileNames": true,
+    "paths": {
+      "@rune/core": [
+        "./packages/core/src/index.ts"
+      ],
+      "@rune/math": [
+        "./packages/math/src/index.ts"
+      ],
+      "@rune/scene": [
+        "./packages/scene/src/index.ts"
+      ],
+      "@rune/prims": [
+        "./packages/prims/src/index.ts"
+      ],
+      "@rune/webgl2": [
+        "./packages/webgl2/src/index.ts"
+      ],
+      "@rune/webgpu": [
+        "./packages/webgpu/src/index.ts"
+      ],
+      "@rune/gl": [
+        "./packages/gl/src/index.ts"
+      ],
+      "@rune/kit": [
+        "./packages/kit/src/index.ts"
+      ],
+      "@rune/tape": [
+        "./packages/tape/src/index.ts"
+      ],
+      "@rune/loaders": [
+        "./packages/loaders/src/index.ts"
+      ],
+      "@rune/debug": [
+        "./packages/debug/src/index.ts"
+      ]
+    }
+  },
+  "include": [
+    "packages/*/src/**/*.ts",
+    "packages/*/tests/**/*.ts"
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "name": "rune",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Единый рендерер WebGL2/WebGPU: декларативные команды regl, реактивность на сигналах, ленты как валюта кадра",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.mjs",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.0",
+    "@webgpu/types": "^0.1.72",
+    "playwright": "1.57.0",
+    "typescript": "^5.5.0"
+  }
+}
