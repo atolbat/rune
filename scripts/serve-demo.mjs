@@ -45,4 +45,5 @@ Bun.serve({
   },
 })
 
-console.log(`[demo] http://localhost:${port}/  (страница: /demo/, бандлы: /dist/)`)
+console.log(`[demo] http://localhost:${port}/demo/          (галерея демо)`)
+console.log(`[demo] http://localhost:${port}/demo/hello-cube/  (бандлы: /dist/)`)

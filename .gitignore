@@ -8,3 +8,4 @@ dist/
 coverage/
 # тяжёлые бинарные фикстуры (Mixamo и т.п.) не входят в библиотеку
 packages/*/demo/assets/
+.shots/

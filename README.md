@@ -93,13 +93,17 @@ bun и бандлеры берут типы прямо из `src` через `ex
 
 ## Демо
 
-`demo/` — страница, импортирующая собранный бандл: вращающийся куб через
-`showAny()` (WebGPU с авто-фолбэком на WebGL2), бейдж бэкенда, пауза/резюм.
+Каждое демо лежит в своей папке внутри `demo/`, ссылается на собранный бандл
+`dist/rune.esm.js` и следует стандарту: мобильная вёрстка, тумблер бэкендов
+Авто/WebGL2/WebGPU, лог-панель с кнопкой «Копировать». Список, ссылки и
+сам стандарт — [demo/README.md](demo/README.md).
+
+Онлайн (GitHub Pages, деплой из ветки `dev`): https://atolbat.github.io/rune/demo/
 
 ```bash
-bun run demo        # сборка + статический сервер на http://localhost:8080/
-bun run demo:smoke  # headless-проверка (Playwright + SwiftShader): анимация,
-                    # бейдж, пауза, отсутствие ошибок консоли
+bun run demo        # сборка + статический сервер на http://localhost:8080/demo/
+bun run demo:smoke  # headless-проверка стандарта демо (Playwright + SwiftShader):
+                    # бейдж, живая анимация, пауза, тумблер, лог, мобильный viewport
 ```
 
 ## Дизайн-досье

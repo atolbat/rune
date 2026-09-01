@@ -1,0 +1,58 @@
+# Деплой демо на GitHub Pages: https://atolbat.github.io/rune/demo/
+#
+# Публикует demo/ (галерея + папки демо) вместе с собранным бандлом dist/ —
+# демо импортируют ../../dist/rune.esm.js, поэтому бандл обязан ехать рядом.
+#
+# Разовый шаг со стороны владельца: Settings → Pages → Build and deployment
+# → Source: GitHub Actions. Пока это не сделано, job упадёт на deploy-pages
+# с подсказкой включить Pages.
+name: pages
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: demo → GitHub Pages
+    if: github.repository == 'atolbat/rune'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install
+      - name: Build library
+        run: bun run build
+      - name: Stage site (demo/ + dist/)
+        run: |
+          mkdir -p site
+          cp -r demo/. site/
+          rm -f site/README.md
+          cp -r dist site/dist
+          cat > site/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>rune — демо</title>
+          <meta http-equiv="refresh" content="0; url=./demo/">
+          <p><a href="./demo/">rune — демо</a></p>
+          HTML
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
