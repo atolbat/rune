@@ -1,5 +1,7 @@
 # rune
 
+[![ci](https://github.com/atolbat/rune/actions/workflows/ci.yml/badge.svg)](https://github.com/atolbat/rune/actions/workflows/ci.yml)
+
 Единый рендерер WebGL2 / WebGPU. Декларативные команды в духе regl,
 реактивность на сигналах, ленты (tape) как валюта кадра. Чистая TypeScript-библиотека:
 ноль runtime-зависимостей, DOM-free ядро, tests-first разработка.
