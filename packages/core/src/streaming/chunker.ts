@@ -9,6 +9,7 @@ export interface TileRect {
 
 /** Тайлы полной ширины (ряды высотой tileH, крайний обрезается). */
 export function chunkRect(width: number, height: number, tileH: number): TileRect[] {
+  if (tileH < 1) throw new Error('rune: chunkRect требует tileH >= 1')
   const tiles: TileRect[] = []
   for (let y = 0; y < height; y += tileH) {
     const rows = Math.min(tileH, height - y)
@@ -17,9 +18,13 @@ export function chunkRect(width: number, height: number, tileH: number): TileRec
   return tiles
 }
 
-/** Число тайлов без построения массива. */
+/** Число тайлов без построения массива — ровно chunkRect(...).length.
+ *  (Баг-запах прошлой версии: chunkRect.length — арность функции (3),
+ *  а не длина массива; результат «случайно сходился».) */
 export function countTiles(width: number, height: number, tileH: number): number {
-  return chunkRect.length === 0 ? 0 : Math.ceil(height / tileH)
+  if (tileH < 1) throw new Error('rune: countTiles требует tileH >= 1')
+  if (height <= 0) return 0
+  return Math.ceil(height / tileH)
 }
 
 /** Высота тайла под байтовый бюджет (потолок 256 строк, минимум 1). */

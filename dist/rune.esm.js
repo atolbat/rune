@@ -114,8 +114,10 @@ var init_signal = __esm(() => {
 // packages/core/src/signal/derive.ts
 function derive(compute) {
   let deps = [];
+  let depVersions = [];
   let cached = collect();
-  let cachedStamp = stamp();
+  snapshotVersions();
+  let revision = 0;
   const subscribers = new Set;
   let unsubscribes = [];
   function collect() {
@@ -125,11 +127,17 @@ function derive(compute) {
     popCollector();
     return next;
   }
-  function stamp() {
-    let sum = 0;
+  function snapshotVersions() {
+    depVersions = [];
     for (const dep of deps)
-      sum += dep.version;
-    return sum;
+      depVersions.push(dep.version);
+  }
+  function dirty() {
+    for (let at = 0;at < deps.length; at++) {
+      if (deps[at].version !== depVersions[at])
+        return true;
+    }
+    return false;
   }
   function rebind() {
     for (const unsubscribe of unsubscribes)
@@ -140,11 +148,12 @@ function derive(compute) {
     }));
   }
   function revalidate() {
-    if (stamp() === cachedStamp)
+    if (!dirty())
       return false;
     const previous = cached;
     cached = collect();
-    cachedStamp = stamp();
+    snapshotVersions();
+    revision++;
     rebind();
     if (cached !== previous && subscribers.size > 0) {
       for (const fn of [...subscribers])
@@ -168,7 +177,7 @@ function derive(compute) {
     },
     get version() {
       revalidate();
-      return cachedStamp;
+      return revision;
     }
   };
   rebind();
@@ -452,29 +461,56 @@ function parseTape(buffer) {
 }
 
 // packages/core/src/tape/segments.ts
-function createSegmentStore(_capacity) {
+function createSegmentStore(capacity) {
   const segments = new Map;
   let hits = 0;
   let misses = 0;
+  let evictions = 0;
+  let writeEpoch = 0;
   function fetch(commandId) {
     const found = segments.get(commandId);
-    if (found !== undefined)
-      hits++;
-    else
+    if (found === undefined) {
       misses++;
+      return;
+    }
+    hits++;
+    segments.delete(commandId);
+    segments.set(commandId, found);
     return found;
   }
   function store(commandId, rows, count) {
-    segments.set(commandId, { rows, count, writtenAt: 0 });
+    segments.delete(commandId);
+    segments.set(commandId, { rows, count, writtenAt: ++writeEpoch });
+    evict();
   }
   function invalidate(commandId) {
     segments.delete(commandId);
   }
-  return { fetch, store, invalidate, get hits() {
-    return hits;
-  }, get misses() {
-    return misses;
-  } };
+  function evict() {
+    if (capacity < 1)
+      return;
+    while (segments.size > capacity) {
+      const oldest = segments.keys().next().value;
+      if (oldest === undefined)
+        break;
+      segments.delete(oldest);
+      evictions++;
+    }
+  }
+  return {
+    fetch,
+    store,
+    invalidate,
+    get hits() {
+      return hits;
+    },
+    get misses() {
+      return misses;
+    },
+    get evictions() {
+      return evictions;
+    }
+  };
 }
 
 // packages/core/src/live/liveCommand.ts
@@ -561,27 +597,61 @@ function packRows(columns, count) {
   return rows;
 }
 function createScratchWriter() {
-  const capacity = 64;
-  const op = new Int32Array(capacity);
-  const a = new Int32Array(capacity);
-  const b = new Int32Array(capacity);
-  const c = new Int32Array(capacity);
-  const d = new Int32Array(capacity);
+  let capacity = 64;
+  let op = new Int32Array(capacity);
+  let a = new Int32Array(capacity);
+  let b = new Int32Array(capacity);
+  let c = new Int32Array(capacity);
+  let d = new Int32Array(capacity);
   let count = 0;
+  function reset() {
+    count = 0;
+  }
+  function emit(code, pa, pb, pc, pd) {
+    if (count === capacity)
+      grow();
+    op[count] = code;
+    a[count] = pa;
+    b[count] = pb;
+    c[count] = pc;
+    d[count] = pd;
+    count++;
+  }
+  function emitPacked(rows, packed) {
+    if (packed === 0)
+      return;
+    while (count + packed > capacity)
+      grow();
+    const base = count;
+    for (let at = 0;at < packed; at++)
+      op[base + at] = rows[at * 5];
+    for (let at = 0;at < packed; at++)
+      a[base + at] = rows[at * 5 + 1];
+    for (let at = 0;at < packed; at++)
+      b[base + at] = rows[at * 5 + 2];
+    for (let at = 0;at < packed; at++)
+      c[base + at] = rows[at * 5 + 3];
+    for (let at = 0;at < packed; at++)
+      d[base + at] = rows[at * 5 + 4];
+    count = base + packed;
+  }
+  function grow() {
+    capacity *= 2;
+    op = growColumn(op);
+    a = growColumn(a);
+    b = growColumn(b);
+    c = growColumn(c);
+    d = growColumn(d);
+  }
+  function growColumn(column) {
+    const next = new Int32Array(capacity);
+    next.set(column);
+    return next;
+  }
   return {
-    reset: () => {
-      count = 0;
-    },
-    emit: (code, pa, pb, pc, pd) => {
-      if (count >= capacity)
-        return;
-      op[count] = code;
-      a[count] = pa;
-      b[count] = pb;
-      c[count] = pc;
-      d[count] = pd;
-      count++;
-    },
+    reset,
+    emit,
+    emitPacked,
     get count() {
       return count;
     },
@@ -959,6 +1029,8 @@ function createUploadScheduler(options = {}) {
 
 // packages/core/src/streaming/chunker.ts
 function chunkRect(width, height, tileH) {
+  if (tileH < 1)
+    throw new Error("rune: chunkRect требует tileH >= 1");
   const tiles = [];
   for (let y = 0;y < height; y += tileH) {
     const rows = Math.min(tileH, height - y);
@@ -967,7 +1039,11 @@ function chunkRect(width, height, tileH) {
   return tiles;
 }
 function countTiles(width, height, tileH) {
-  return chunkRect.length === 0 ? 0 : Math.ceil(height / tileH);
+  if (tileH < 1)
+    throw new Error("rune: countTiles требует tileH >= 1");
+  if (height <= 0)
+    return 0;
+  return Math.ceil(height / tileH);
 }
 function tileForBudget(width, budgetBytes) {
   const rowBytes = width * 4;
@@ -1104,26 +1180,52 @@ function createLayoutGuard() {
 var HISTORY = 6;
 
 // packages/core/src/transport/seqlock.ts
+function atomicsView(data) {
+  let view = atomicsViews.get(data);
+  if (view === undefined) {
+    if (data.byteOffset % 4 !== 0 || data.byteLength % 4 !== 0) {
+      throw new Error("rune: seqlock требует 4-байтового выравнивания буфера");
+    }
+    view = new Int32Array(data.buffer, data.byteOffset, data.byteLength >> 2);
+    atomicsViews.set(data, view);
+  }
+  return view;
+}
+function versionIndex(versionAt) {
+  if ((versionAt & 3) !== 0)
+    throw new Error("rune: seqlock-версия обязана лежать на 4-байтовой границе");
+  return versionAt >> 2;
+}
 function readSeqlock(data, versionAt, valueAt) {
-  for (;; ) {
-    const before = data.getUint32(versionAt, true);
+  const i32 = atomicsView(data);
+  const at = versionIndex(versionAt);
+  for (let attempt = 0;attempt < MAX_READ_ATTEMPTS; attempt++) {
+    const before = Atomics.load(i32, at);
     if ((before & 1) === 0) {
       const value = data.getFloat64(valueAt, true);
-      const after = data.getUint32(versionAt, true);
+      const after = Atomics.load(i32, at);
       if (before === after)
         return { version: before, value };
     }
   }
+  throw new Error("rune: seqlock не закрылся за предел попыток — писатель держит слот (livelock)");
 }
 function writeSeqlock(data, versionAt, valueAt, value) {
-  const version = data.getUint32(versionAt, true);
-  data.setUint32(versionAt, version + 1, true);
+  const i32 = atomicsView(data);
+  const at = versionIndex(versionAt);
+  const version = Atomics.load(i32, at);
+  Atomics.store(i32, at, version + 1);
   data.setFloat64(valueAt, value, true);
-  data.setUint32(versionAt, version + 2, true);
+  Atomics.store(i32, at, version + 2);
 }
 function seqlockVersion(data, versionAt) {
-  return data.getUint32(versionAt, true);
+  return Atomics.load(atomicsView(data), versionIndex(versionAt));
 }
+var MAX_READ_ATTEMPTS, atomicsViews;
+var init_seqlock = __esm(() => {
+  MAX_READ_ATTEMPTS = 1 << 16;
+  atomicsViews = new WeakMap;
+});
 
 // packages/core/src/transport/sharedRegistry.ts
 function nameHash(name) {
@@ -1261,7 +1363,9 @@ function fireWatchers(view, offset, listeners) {
     subscriber(value);
 }
 var VERSION_OFFSET = 4, VALUE_OFFSET = 8, SLOT_BYTES = 16, SHARED_MAGIC = 1381322323, HEADER_BYTES = 32;
-var init_sharedRegistry = () => {};
+var init_sharedRegistry = __esm(() => {
+  init_seqlock();
+});
 
 // packages/core/src/feed/feed.ts
 function feedStride(layout) {

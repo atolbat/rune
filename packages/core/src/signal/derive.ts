@@ -4,6 +4,13 @@
 // на границе кадра через schedule). Без подписчиков пересчёт ЛЕНИВЫЙ:
 // первая же читка .value увидит новый stamp и пересчитает (глава досье
 // «реактивность без eager-шторма»).
+//
+// Чистота проверяется ПОЭЛЕМЕНТНЫМ сравнением версий зависимостей, а не
+// суммой: сумма коллидирует, когда производный сам является зависимостью
+// другой производной (версия-сумма может УБЫТЬ при смене набора зависимостей
+// и скомпенсировать рост соседа — ложное «чисто»). Публичная version —
+// монотонная ревизия пересчётов: внешний наблюдатель (live-команда,
+// вложенный derive) видит строго возрастающий счётчик.
 
 import { popCollector, pushCollector, reportRead } from './tracking.ts'
 import type { SignalCell } from './signal.ts'
@@ -18,8 +25,10 @@ export interface DerivedSignal<T> {
 
 export function derive<T>(compute: () => T): DerivedSignal<T> {
   let deps: SignalCell<unknown>[] = []
+  let depVersions: number[] = []
   let cached = collect()
-  let cachedStamp = stamp()
+  snapshotVersions()
+  let revision = 0
   const subscribers = new Set<(value: T) => void>()
   let unsubscribes: Unsubscribe[] = []
 
@@ -32,11 +41,18 @@ export function derive<T>(compute: () => T): DerivedSignal<T> {
     return next
   }
 
-  /** Сумма версий зависимостей — дешёвый «снимок» чистоты. */
-  function stamp(): number {
-    let sum = 0
-    for (const dep of deps) sum += (dep as SignalCell<unknown>).version
-    return sum
+  /** Снимок версий зависимостей — поэлементная база dirty-проверки. */
+  function snapshotVersions(): void {
+    depVersions = []
+    for (const dep of deps) depVersions.push((dep as SignalCell<unknown>).version)
+  }
+
+  /** Любая зависимость ушла вперёд — пересчёт (без сумм: коллизий нет). */
+  function dirty(): boolean {
+    for (let at = 0; at < deps.length; at++) {
+      if ((deps[at] as SignalCell<unknown>).version !== depVersions[at]) return true
+    }
+    return false
   }
 
   /** Подписаться на каждую текущую зависимость (после collect). */
@@ -51,10 +67,11 @@ export function derive<T>(compute: () => T): DerivedSignal<T> {
   }
 
   function revalidate(): boolean {
-    if (stamp() === cachedStamp) return false
+    if (!dirty()) return false
     const previous = cached
     cached = collect()
-    cachedStamp = stamp()
+    snapshotVersions()
+    revision++
     rebind()
     if (cached !== previous && subscribers.size > 0) {
       // Снимок подписчиков: колбэк может отписаться или (через derive-цепочку)
@@ -80,7 +97,7 @@ export function derive<T>(compute: () => T): DerivedSignal<T> {
     },
     get version() {
       revalidate()
-      return cachedStamp
+      return revision
     },
   }
   rebind()

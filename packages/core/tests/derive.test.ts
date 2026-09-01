@@ -60,4 +60,38 @@ describe('derive', () => {
     expect(derived.value).toBe(3)
     expect(derived.version).toBeGreaterThan(initial)
   })
+
+  it('регрессия сумм-версий: убывание версии внутреннего не «гасит» внешнего', () => {
+    // Сумма версий зависимостей могла ВОЗВРАЩАТЬСЯ при смене набора
+    // зависимостей (b ушёл, useB вырос) — внешний derive видел «чисто»
+    // и отдавал протухшее значение. Поэлементное сравнение этого не позволяет.
+    const a = signal(1)
+    const b = signal(100)
+    const c = signal(1000)
+    const useB = signal(true)
+    const inner = derive(() => a.value + (useB.value ? b.value : 0))
+    const outer = derive(() => inner.value + c.value)
+    expect(outer.value).toBe(1101) // 1 + 100 + 1000
+
+    b.value = 200
+    expect(outer.value).toBe(1201) // 1 + 200 + 1000
+
+    useB.value = false // inner теряет b: его старая версия-сумма возвращалась к прежней
+    expect(inner.value).toBe(1)
+    expect(outer.value).toBe(1001) // протухший ответ старого кода: 1201
+  })
+
+  it('version — монотонная ревизия: не убывает при смене набора зависимостей', () => {
+    const a = signal(1)
+    const b = signal(100)
+    const useB = signal(true)
+    const inner = derive(() => (useB.value ? a.value + b.value : a.value))
+    const v1 = inner.version
+    b.value = 200
+    const v2 = inner.version
+    useB.value = false // b покидает зависимости — ревизия всё равно растёт
+    const v3 = inner.version
+    expect(v2).toBeGreaterThan(v1)
+    expect(v3).toBeGreaterThan(v2)
+  })
 })

@@ -96,4 +96,64 @@ describe('segment store', () => {
     expect(frame.columns.c[0]).toBe(36)
     expect(frame.columns.d[0]).toBe(1)
   })
+
+  it('writtenAt растёт с каждой записью — диагностика возраста честная', () => {
+    const store = createSegmentStore(4)
+    const writer = createTapeWriter(4)
+    writer.emit(OpCode.Draw, 1, 0, 0, 0)
+    store.store(1, packRows(writer), 1)
+    writer.reset()
+    writer.emit(OpCode.Draw, 2, 0, 0, 0)
+    store.store(2, packRows(writer), 1)
+    expect(store.fetch(1)!.writtenAt).toBeLessThan(store.fetch(2)!.writtenAt)
+  })
+})
+
+describe('вытеснение по capacity (LRU)', () => {
+  it('сверх capacity вытесняется наименее давний сегмент', () => {
+    const store = createSegmentStore(2)
+    const writer = createTapeWriter(4)
+    writer.emit(OpCode.Draw, 1, 0, 0, 0)
+    store.store(1, packRows(writer), 1)
+    writer.reset()
+    writer.emit(OpCode.Draw, 2, 0, 0, 0)
+    store.store(2, packRows(writer), 1)
+    writer.reset()
+    writer.emit(OpCode.Draw, 3, 0, 0, 0)
+    store.store(3, packRows(writer), 1) // вытеснен id 1 — самый давний
+
+    expect(store.fetch(1)).toBeUndefined()
+    expect(store.fetch(2)?.rows[1]).toBe(2)
+    expect(store.fetch(3)?.rows[1]).toBe(3)
+    expect(store.evictions).toBe(1)
+  })
+
+  it('fetch освежает позицию: читанный сегмент переживает вытеснение', () => {
+    const store = createSegmentStore(2)
+    const writer = createTapeWriter(4)
+    writer.emit(OpCode.Draw, 1, 0, 0, 0)
+    store.store(1, packRows(writer), 1)
+    writer.reset()
+    writer.emit(OpCode.Draw, 2, 0, 0, 0)
+    store.store(2, packRows(writer), 1)
+    store.fetch(1) // LRU-освежение: id 1 теперь «свежее» id 2
+    writer.reset()
+    writer.emit(OpCode.Draw, 3, 0, 0, 0)
+    store.store(3, packRows(writer), 1) // вытеснен id 2
+
+    expect(store.fetch(2)).toBeUndefined()
+    expect(store.fetch(1)).toBeDefined()
+  })
+
+  it('capacity < 1 — вытеснение выключено (без лимита)', () => {
+    const store = createSegmentStore(0)
+    const writer = createTapeWriter(4)
+    for (let id = 1; id <= 5; id++) {
+      writer.reset()
+      writer.emit(OpCode.Draw, id, 0, 0, 0)
+      store.store(id, packRows(writer), 1)
+    }
+    expect(store.evictions).toBe(0)
+    expect(store.fetch(3)).toBeDefined()
+  })
 })

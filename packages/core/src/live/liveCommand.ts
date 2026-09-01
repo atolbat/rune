@@ -1,7 +1,7 @@
 // Live-команда: сегмент + dirty по зависимостям + every(n) амортизация.
 
 import type { SegmentStore } from '../tape/segments.ts'
-import type { TapeWriter } from '../tape/writer.ts'
+import type { TapeWriter, WriterColumns } from '../tape/writer.ts'
 import type { ReadableSignal } from '../signal/types.ts'
 
 export interface LiveCommand {
@@ -107,7 +107,7 @@ function replay(writer: TapeWriter, rows: Int32Array, count: number): void {
 }
 
 /** Пакование колонок скретч-писателя в плотные строки. */
-function packRows(columns: { op: Int32Array; a: Int32Array; b: Int32Array; c: Int32Array; d: Int32Array }, count: number): Int32Array {
+function packRows(columns: WriterColumns, count: number): Int32Array {
   const rows = new Int32Array(count * 5)
   for (let at = 0; at < count; at++) {
     const base = at * 5
@@ -120,27 +120,65 @@ function packRows(columns: { op: Int32Array; a: Int32Array; b: Int32Array; c: In
   return rows
 }
 
-/** Личный писатель команды — копия ленты только при перезаписи. */
-function createScratchWriter(): TapeWriter & { columns: { op: Int32Array; a: Int32Array; b: Int32Array; c: Int32Array; d: Int32Array } } {
-  const capacity = 64
-  const op = new Int32Array(capacity)
-  const a = new Int32Array(capacity)
-  const b = new Int32Array(capacity)
-  const c = new Int32Array(capacity)
-  const d = new Int32Array(capacity)
+/** Личный писатель команды — копия ленты только при перезаписи.
+ *  Растёт ×2 как лента: длинная команда (>64 опов) НЕ обрезается —
+ *  «тихая потеря сегмента» хуже аллокации на холодном пути роста. */
+function createScratchWriter(): TapeWriter {
+  let capacity = 64
+  let op: Int32Array = new Int32Array(capacity)
+  let a: Int32Array = new Int32Array(capacity)
+  let b: Int32Array = new Int32Array(capacity)
+  let c: Int32Array = new Int32Array(capacity)
+  let d: Int32Array = new Int32Array(capacity)
   let count = 0
+
+  function reset(): void {
+    count = 0
+  }
+
+  function emit(code: number, pa: number, pb: number, pc: number, pd: number): void {
+    if (count === capacity) grow()
+    op[count] = code
+    a[count] = pa
+    b[count] = pb
+    c[count] = pc
+    d[count] = pd
+    count++
+  }
+
+  function emitPacked(rows: Int32Array, packed: number): void {
+    if (packed === 0) return
+    while (count + packed > capacity) grow()
+    const base = count
+    for (let at = 0; at < packed; at++) op[base + at] = rows[at * 5]
+    for (let at = 0; at < packed; at++) a[base + at] = rows[at * 5 + 1]
+    for (let at = 0; at < packed; at++) b[base + at] = rows[at * 5 + 2]
+    for (let at = 0; at < packed; at++) c[base + at] = rows[at * 5 + 3]
+    for (let at = 0; at < packed; at++) d[base + at] = rows[at * 5 + 4]
+    count = base + packed
+  }
+
+  function grow(): void {
+    capacity *= 2
+    op = growColumn(op)
+    a = growColumn(a)
+    b = growColumn(b)
+    c = growColumn(c)
+    d = growColumn(d)
+  }
+
+  function growColumn(column: Int32Array): Int32Array {
+    const next = new Int32Array(capacity)
+    next.set(column)
+    return next
+  }
+
   return {
-    reset: () => { count = 0 },
-    emit: (code: number, pa: number, pb: number, pc: number, pd: number): void => {
-      if (count >= capacity) return // перерост кэша: команда без сегмента
-      op[count] = code
-      a[count] = pa
-      b[count] = pb
-      c[count] = pc
-      d[count] = pd
-      count++
-    },
+    reset,
+    emit,
+    emitPacked,
     get count() { return count },
+    // Геттер отдаёт СВЕЖИЕ массивы: после grow() старые ссылки устарели.
     get columns() { return { op, a, b, c, d } },
-  } as never
+  }
 }

@@ -14,6 +14,18 @@ describe('чанкер', () => {
     expect(countTiles(0, 2050, 256)).toBe(chunkRect(1024, 2050, 256).length)
   })
 
+  it('countTiles: нулевая высота — ноль тайлов', () => {
+    expect(countTiles(1024, 0, 256)).toBe(0)
+    expect(countTiles(1024, 0, 256)).toBe(chunkRect(1024, 0, 256).length)
+  })
+
+  it('tileH < 1 — явная ошибка, а не вечный цикл', () => {
+    // Регрессия: chunkRect с tileH=0 крутил бы for (y += 0) вечно;
+    // countTiles проверял chunkRect.length (арность функции = 3) — бессмыслица.
+    expect(() => chunkRect(1024, 512, 0)).toThrow('tileH >= 1')
+    expect(() => countTiles(1024, 512, 0)).toThrow('tileH >= 1')
+  })
+
   it('tileForBudget: потолок 256, минимум 1', () => {
     expect(tileForBudget(1024, 1024 * 1024)).toBe(256) // 1 МБ / 4 КБ-ряд = потолок
     expect(tileForBudget(1024, 100 * 1024)).toBe(25)

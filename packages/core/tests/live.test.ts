@@ -70,4 +70,22 @@ describe('live-команды и сегментный кэш', () => {
     buildFrame([live], writer)
     expect(records).toBe(2)
   })
+
+  it('длинная команда (>64 опов) не обрезается: сегмент целиком', () => {
+    // Регрессия: скретч-писатель молча выбрасывал операции после 64-й —
+    // «команда без сегмента» теряла хвост без всякой диагностики.
+    const segments = createSegmentStore(16)
+    const OPS = 200
+    const live = createLiveCommand(segments, writer => {
+      for (let at = 0; at < OPS; at++) writer.emit(OpCode.Draw, at, 0, 0, 0)
+    })
+    const writer = createTapeWriter(8)
+    buildFrame([live], writer)
+    expect(writerView(writer).count).toBe(OPS)
+
+    writer.reset()
+    buildFrame([live], writer) // чистый кадр: реплей полного сегмента
+    expect(writerView(writer).count).toBe(OPS)
+    expect(writerView(writer).a[OPS - 1]).toBe(OPS - 1)
+  })
 })
