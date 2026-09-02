@@ -8012,10 +8012,11 @@ function writeUniforms(command, arena, spec, props, frameCtx) {
     const value = resolve2(declared, props, frameCtx);
     if (value === undefined)
       continue;
+    const numbers = typeof value === "number" ? [value] : value;
     const base = (command.sliceOffset + field.offset) / 4;
     let changed = false;
     for (let at = 0;at < field.size / 4; at++) {
-      const next = value[at] ?? 0;
+      const next = numbers[at] ?? 0;
       if (Math.fround(next) !== arena.floats[base + at]) {
         arena.floats[base + at] = next;
         changed = true;
@@ -8345,6 +8346,7 @@ async function createRealGPU(canvas, onGpuError) {
   let currentPipeline = null;
   let currentPipelineId = -1;
   let currentTarget = 0;
+  const pendingTextureIds = [];
   let timerHandle = null;
   const timerBundle = createGpuGpuTimer(device);
   const gpuTimer = timerBundle === null ? null : timerBundle.timer;
@@ -8458,7 +8460,14 @@ async function createRealGPU(canvas, onGpuError) {
   function ensurePipeline(pipelineId, wgsl, attrs, hasTextures, desc) {
     if (pipelines.has(pipelineId))
       return;
-    const record = { wgsl, attrs, hasTextures, desc: desc ?? {}, variants: new Map };
+    const record = {
+      wgsl,
+      attrs,
+      hasTextures,
+      textureCount: hasTextures ? countGroup1TextureBindings(wgsl) : 0,
+      desc: desc ?? {},
+      variants: new Map
+    };
     pipelines.set(pipelineId, record);
     record.variants.set("float", buildPipeline(record, "float"));
   }
@@ -8482,10 +8491,18 @@ async function createRealGPU(canvas, onGpuError) {
     });
     const layouts = [group0];
     if (record.hasTextures) {
+      const textureEntries = [];
+      for (let slot = 1;slot <= Math.max(1, record.textureCount); slot++) {
+        textureEntries.push({
+          binding: slot,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: variant }
+        });
+      }
       layouts.push(device.createBindGroupLayout({
         entries: [
           { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: { type: variant === "float" ? "filtering" : "non-filtering" } },
-          { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: variant } }
+          ...textureEntries
         ]
       }));
       if (variant === "unfilterable-float" && /\btextureSample\s*\(/.test(wgsl)) {
@@ -8560,6 +8577,7 @@ async function createRealGPU(canvas, onGpuError) {
     if (record === undefined)
       return;
     currentPipelineId = pipelineId;
+    pendingTextureIds.length = 0;
     setPipelineVariant(record, "float");
   }
   function setPipelineVariant(record, variant) {
@@ -8620,47 +8638,75 @@ async function createRealGPU(canvas, onGpuError) {
     }
   }
   function bindTexture(textureOrViewId) {
-    let view;
-    let sampler;
-    let filterable;
+    const record = pipelineOfTexture();
+    const resolved = resolveTexture(textureOrViewId);
+    if (resolved === undefined)
+      return;
+    if (record !== undefined && record.hasTextures) {
+      setPipelineVariant(record, resolved.filterable ? "float" : "unfilterable-float");
+    }
+    if (pendingTextureIds.length < 32)
+      pendingTextureIds.push(textureOrViewId);
+  }
+  function pipelineOfTexture() {
+    return currentPipelineId >= 0 ? pipelines.get(currentPipelineId) : undefined;
+  }
+  function resolveTexture(textureOrViewId) {
     const subView = textureViews.get(textureOrViewId);
     if (subView !== undefined) {
-      const record = textures.get(subView.textureId);
-      if (record === undefined)
+      const record2 = textures.get(subView.textureId);
+      if (record2 === undefined)
         return;
-      view = subView.view;
-      sampler = record.sampler;
-      filterable = record.filterable;
-    } else {
-      const record = textures.get(textureOrViewId);
-      if (record === undefined)
-        return;
-      view = record.view;
-      sampler = record.sampler;
-      filterable = record.filterable;
+      return { view: subView.view, sampler: record2.sampler, filterable: record2.filterable };
     }
-    const pipelineRecord = currentPipelineId >= 0 ? pipelines.get(currentPipelineId) : undefined;
-    if (pipelineRecord !== undefined && pipelineRecord.hasTextures) {
-      setPipelineVariant(pipelineRecord, filterable ? "float" : "unfilterable-float");
+    const record = textures.get(textureOrViewId);
+    if (record === undefined)
+      return;
+    return { view: record.view, sampler: record.sampler, filterable: record.filterable };
+  }
+  function flushTextureBindGroup() {
+    if (pendingTextureIds.length === 0)
+      return;
+    if (pass === null) {
+      pendingTextureIds.length = 0;
+      return;
     }
-    let group = textureBindGroups.get(textureOrViewId);
+    const record = pipelineOfTexture();
+    const count = Math.max(1, record?.textureCount ?? 1);
+    const key = `${currentPipelineId}:${count}:${pendingTextureIds.join(",")}`;
+    let group = textureBindGroups.get(key);
     if (group === undefined) {
+      const first = resolveTexture(pendingTextureIds[0]);
+      if (first === undefined) {
+        pendingTextureIds.length = 0;
+        return;
+      }
+      const variant = first.filterable ? "float" : "unfilterable-float";
+      const entries = [{ binding: 0, resource: first.sampler }];
+      for (let slot = 1;slot <= count; slot++) {
+        const id = pendingTextureIds[Math.min(slot - 1, pendingTextureIds.length - 1)];
+        const resolved = resolveTexture(id);
+        if (resolved === undefined) {
+          pendingTextureIds.length = 0;
+          return;
+        }
+        entries.push({ binding: slot, resource: resolved.view });
+      }
       const layout = device.createBindGroupLayout({
         entries: [
-          { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: { type: filterable ? "filtering" : "non-filtering" } },
-          { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: filterable ? "float" : "unfilterable-float" } }
+          { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: { type: variant === "float" ? "filtering" : "non-filtering" } },
+          ...Array.from({ length: count }, (_, at) => ({
+            binding: at + 1,
+            visibility: GPUShaderStage.FRAGMENT,
+            texture: { sampleType: variant }
+          }))
         ]
       });
-      group = device.createBindGroup({
-        layout,
-        entries: [
-          { binding: 0, resource: sampler },
-          { binding: 1, resource: view }
-        ]
-      });
-      textureBindGroups.set(textureOrViewId, group);
+      group = device.createBindGroup({ layout, entries });
+      textureBindGroups.set(key, group);
     }
-    pass?.setBindGroup(1, group);
+    pass.setBindGroup(1, group);
+    pendingTextureIds.length = 0;
   }
   function beginPass(_clearIndex) {
     bindTarget(0, true);
@@ -8730,6 +8776,7 @@ async function createRealGPU(canvas, onGpuError) {
     currentPipeline = null;
   }
   function draw(count, instances) {
+    flushTextureBindGroup();
     pass?.draw(count, instances);
   }
   function endPass() {
@@ -8823,15 +8870,28 @@ async function createRealGPU(canvas, onGpuError) {
     const record = textures.get(textureId);
     if (record === undefined)
       return;
-    textureBindGroups.delete(textureId);
+    for (const key of textureBindGroups.keys()) {
+      const parts = key.split(":");
+      if (parts.length > 2 && parts[2].split(",").includes(String(textureId))) {
+        textureBindGroups.delete(key);
+      }
+    }
     for (const [viewId, sv] of textureViews) {
       if (sv.textureId === textureId) {
-        textureBindGroups.delete(viewId);
+        invalidateTextureViewBindGroups(viewId);
         textureViews.delete(viewId);
       }
     }
     record.texture.destroy();
     textures.delete(textureId);
+  }
+  function invalidateTextureViewBindGroups(viewId) {
+    for (const key of textureBindGroups.keys()) {
+      const parts = key.split(":");
+      if (parts.length > 2 && parts[2].split(",").includes(String(viewId))) {
+        textureBindGroups.delete(key);
+      }
+    }
   }
   function createTextureView(textureId, options) {
     const record = textures.get(textureId);
@@ -8854,7 +8914,7 @@ async function createRealGPU(canvas, onGpuError) {
     const sv = textureViews.get(viewId);
     if (sv === undefined)
       return;
-    textureBindGroups.delete(viewId);
+    invalidateTextureViewBindGroups(viewId);
     textureViews.delete(viewId);
   }
   function deleteTarget(targetId) {
@@ -8946,6 +9006,12 @@ async function createRealGPU(canvas, onGpuError) {
 }
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+function countGroup1TextureBindings(wgsl) {
+  let count = 0;
+  for (const _match of wgsl.matchAll(/@group\(1\)[^\n;]*var\s+\w+\s*:\s*texture_2d/g))
+    count++;
+  return Math.max(1, count);
 }
 // packages/webgpu/src/capsProbe.ts
 function probeGPUCaps(probe) {
@@ -10542,9 +10608,9 @@ fn vsMain(
 }
 
 @fragment
-fn fsMain(in : VSOut) -> @location(0) vec4<f32> {
-  let lambert = max(dot(normalize(in.worldNormal), normalize(params.u_lightDir.xyz)), 0.0);
-  let tex = textureSample(texTexture, texSampler, in.uv);
+fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
+  let lambert = max(dot(normalize(frag.worldNormal), normalize(params.u_lightDir.xyz)), 0.0);
+  let tex = textureSample(texTexture, texSampler, frag.uv);
   return vec4<f32>(tex.rgb * (0.3 + lambert * 0.7), 1.0);
 }`;
 var WGSL_FLAT = `
@@ -10556,17 +10622,26 @@ struct Params {
 }
 @group(0) @binding(0) var<uniform> params : Params;
 
+struct VSOut {
+  @builtin(position) pos : vec4<f32>,
+  @location(0) worldNormal : vec3<f32>,
+}
+
 @vertex
 fn vsMain(
   @location(0) inPos : vec3<f32>,
   @location(1) inNormal : vec3<f32>,
-) -> @builtin(position) vec4<f32> {
-  return params.u_mvp * vec4<f32>(inPos, 1.0);
+) -> VSOut {
+  var out : VSOut;
+  out.pos = params.u_mvp * vec4<f32>(inPos, 1.0);
+  out.worldNormal = (params.u_model * vec4<f32>(inNormal, 0.0)).xyz;
+  return out;
 }
 
 @fragment
-fn fsMain() -> @location(0) vec4<f32> {
-  return vec4<f32>(params.u_albedo.rgb, 1.0);
+fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
+  let lambert = max(dot(normalize(frag.worldNormal), normalize(params.u_lightDir.xyz)), 0.0);
+  return vec4<f32>(params.u_albedo.rgb * (0.3 + lambert * 0.7), 1.0);
 }`;
 async function showOnWebGpu(canvas, options) {
   const spin = options.spin ?? 0.7;
@@ -10601,6 +10676,7 @@ async function showOnWebGpu(canvas, options) {
     uniforms.u_albedo = [albedo[0], albedo[1], albedo[2], 1];
   const spec = {
     shader: { wgsl: hasTexture ? WGSL_TEX : WGSL_FLAT },
+    pipeline: { depth: { test: "less", write: true }, raster: { cull: "back" } },
     uniforms,
     attributes,
     count: geometry.vertexCount

@@ -94,6 +94,45 @@ describe('showOn() — форсированный бэкенд', () => {
     }
   })
 
+  it('webgpu: куб без текстуры несёт Lambert-освещение (регрессия «плоский куб»)', async () => {
+    // Инцидент: WGSL_FLAT возвращал голый u_albedo — куб на WebGPU был без
+    // затенения граней, в отличие от GLSL-версии. Обёртка над рекордером
+    // ловит WGSL на ensurePipeline и проверяет шейдер на освещение.
+    const original = (globalThis as { navigator?: unknown }).navigator
+    ;(globalThis as { navigator?: unknown }).navigator = { gpu: { requestAdapter: async () => ({}) } }
+    try {
+      const { gpu, calls } = createRecordingGPU()
+      const shaders: string[] = []
+      const capturing = {
+        ...gpu,
+        ensurePipeline: (pipelineId: number, wgsl: string, attrs: never[], hasTextures: boolean, desc: never) => {
+          shaders.push(wgsl)
+          return gpu.ensurePipeline(pipelineId, wgsl, attrs, hasTextures, desc)
+        },
+      } as typeof gpu
+      const show = await showOn(fakeCanvas(), 'webgpu', {
+        createGPU: async () => capturing,
+        observeResize: false,
+        requestFrame: () => () => {},
+        now: () => 0,
+      } as never)
+
+      expect(show.active).toBe('webgpu')
+      show.webgpu!.renderer.step(16)
+      expect(calls.filter(call => call.startsWith('draw(')).length).toBeGreaterThan(0)
+      const flat = shaders.join('\n')
+      // Освещение обязано присутствовать в шейдере без текстуры
+      expect(flat).toContain('lambert')
+      expect(flat).toContain('worldNormal')
+      expect(flat).toContain('u_lightDir')
+      // Регрессия: голый albedo без ламберта
+      expect(flat).not.toMatch(/return\s+vec4<f32>\(\s*params\.u_albedo\.rgb\s*,\s*1\.0\s*\)/)
+      show.stop()
+    } finally {
+      ;(globalThis as { navigator?: unknown }).navigator = original
+    }
+  })
+
   it('теория N: текстура 1024² целиком в первом idle-слоте — ОБА бэкенда', async () => {
     const texture = new Uint8Array(1024 * 1024 * 4)
     const tileCalls = (calls: string[]): string[] =>

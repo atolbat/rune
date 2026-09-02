@@ -9,6 +9,7 @@
 | Демо | Ссылка | Что показывает |
 |------|--------|----------------|
 | hello-cube | https://atolbat.github.io/rune/demo/hello-cube/ | Куб в одну строку: `showAny()` / `showOn()`, тумблер Авто/WebGL2/WebGPU, лог с копированием |
+| model-viewer | https://atolbat.github.io/rune/demo/model-viewer/ | Три модели three.js examples: Forest House (glTF · AVIF · Draco), Samba Dancing (FBX), Nefertiti (glTF · object-space normal map). Кнопка «Загрузить» с прогресс-баром (`AssetLoader`), переключение моделей, вращение драгом, dual-source шейдеры GLSL+WGSL |
 
 Обзор всех демо: **https://atolbat.github.io/rune/demo/**
 
@@ -61,7 +62,12 @@ demo/
 ├── shared/
 │   ├── demo-shell.css  — общий стиль (mobile-first, тёмная тема)
 │   └── demo-shell.js   — каркас: тумблер бэкендов, лог с копированием, watchdog
-└── hello-cube/         — демо «куб в одну строку»
+├── hello-cube/         — демо «куб в одну строку»
+│   ├── index.html
+│   └── main.js
+└── model-viewer/       — демо «сцена с загрузчиком» (три модели three.js)
     ├── index.html
-    └── main.js
+    ├── main.js
+    └── assets/         — forest_house.glb, Nefertiti.glb, samba.fbx
+                          + draco_wasm_wrapper.js / draco_decoder.wasm
 ```

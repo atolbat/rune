@@ -1,17 +1,27 @@
 /**
  * scripts/demo-smoke.mjs — headless-проверка демо (запускать через bun).
  *
- * Поднимает статический сервер, открывает /demo/hello-cube/ в headless
- * Chromium (SwiftShader — программный WebGL2) и проверяет СТАНДАРТ ДЕМО:
+ * Поднимает статический сервер и проверяет СТАНДАРТ ДЕМО в headless
+ * Chromium (SwiftShader — программный WebGL2):
+ *
+ * hello-cube (/demo/hello-cube/):
  *   1. бейдж бэкенда заполнен (WebGPU или WebGL2);
  *   2. анимация живая (два скриншота канваса различаются);
  *   3. пауза замораживает кадры, «Продолжить» оживляет;
  *   4. тумблер бэкендов: форс WebGL2 → бейдж «WebGL2», форс WebGPU →
  *      бейдж начинается с «WebGPU» (работает или честный отказ в логе);
- *   5. лог-панель: записи копятся, «Копировать» отчитывается в логе;
- *   6. мобильный viewport 390×844: нет горизонтального переполнения,
+ *   5. канвас на каждый запуск ровно один.
+ *
+ * model-viewer (/demo/model-viewer/):
+ *   6. кнопка «Загрузить и показать» стартует загрузку с прогресс-баром;
+ *   7. сцена появляется (статы мешей), анимация живая;
+ *   8. переключение на незагруженную модель возвращает кнопку загрузки;
+ *   9. лог-панель: записи копятся, «Копировать» отчитывается в логе.
+ *
+ * Оба демо:
+ *  10. мобильный viewport 390×844: нет горизонтального переполнения,
  *      тач-цели тумблера ≥ 40 px;
- *   7. ноль ошибок консоли/страницы.
+ *  11. ноль ошибок консоли/страницы.
  *
  * Exit 0 — демо соответствует стандарту; 1 — нет. Использование: bun run demo:smoke
  */
@@ -29,6 +39,11 @@ const MIME = {
   '.json': 'application/json',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
+  '.glb': 'model/gltf-binary',
+  '.fbx': 'application/octet-stream',
+  '.wasm': 'application/wasm',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
 }
 
 const server = Bun.serve({
@@ -162,6 +177,74 @@ try {
   console.log(`[smoke] мобильный 390x844: переполнение ${mobile.overflow}px, тач-цель ${mobile.touchTarget}px`)
   const mobileOk = mobile.overflow <= 1 && mobile.touchTarget >= 40
 
+  // ─── model-viewer: кнопка загрузки → прогресс → сцена → анимация ──────────
+  await page.goto(`http://localhost:${port}/demo/model-viewer/`, { waitUntil: 'networkidle' })
+  await page.waitForFunction(
+    () => document.querySelector('#backend')?.textContent !== '…',
+    null,
+    { timeout: 15_000 },
+  )
+  console.log(`[smoke] model-viewer бэкенд: ${await page.textContent('#backend')}`)
+
+  // 6. Кнопка загрузки запускает прогресс
+  const loadText = await page.textContent('.mv-load')
+  console.log(`[smoke] кнопка загрузки: ${loadText ?? 'НЕТ'}`)
+  await page.click('.mv-load')
+  await page.waitForFunction(
+    () => document.querySelector('.mv-progress')?.classList.contains('mv-active') === true
+      || document.querySelector('.mv-stats')?.textContent.includes('верш'),
+    null,
+    { timeout: 10_000 },
+  )
+  console.log('[smoke] прогресс-бар показан')
+
+  // 7. Сцена появилась (Draco+AVIF на SwiftShader — десятки секунд хватит)
+  await page.waitForFunction(
+    () => document.querySelector('.mv-stats')?.textContent.includes('верш'),
+    null,
+    { timeout: 60_000 },
+  )
+  console.log(`[smoke] сцена: ${await page.textContent('.mv-stats')}`)
+  const viewerAlive = await framesDiffer(page)
+  console.log(`[smoke] model-viewer анимация: ${viewerAlive ? 'живая' : 'СТАТИЧНАЯ'}`)
+
+  // 8. Переключение на незагруженную модель возвращает кнопку загрузки
+  await page.click('.mv-tab:nth-child(2)')
+  await page.waitForFunction(
+    () => (document.querySelector('.mv-load')?.textContent ?? '').includes('Загрузить'),
+    null,
+    { timeout: 5_000 },
+  )
+  console.log('[smoke] таб незагруженной модели: кнопка «Загрузить» вернулась')
+
+  // 9. Лог: записи есть, «Копировать» отчитывается
+  const viewerLogEntries = await page.locator('#log-list .rd-entry').count()
+  console.log(`[smoke] model-viewer записей в логе: ${viewerLogEntries}`)
+  await page.click('#log-copy')
+  await page.waitForFunction(
+    () => document.querySelector('#log-list')?.textContent.includes('Лог скопирован'),
+    null,
+    { timeout: 5000 },
+  )
+  console.log('[smoke] копирование лога: отчёт в панели есть')
+
+  // Мобильный viewport model-viewer: канвас и панель не рвут вёрстку
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(`http://localhost:${port}/demo/model-viewer/`, { waitUntil: 'networkidle' })
+  await page.waitForFunction(
+    () => document.querySelector('#backend')?.textContent !== '…',
+    null,
+    { timeout: 15_000 },
+  )
+  const mobileViewer = await page.evaluate(() => {
+    const overflow = document.documentElement.scrollWidth - document.documentElement.clientWidth
+    const target = document.querySelector('.mv-tab')?.getBoundingClientRect()
+    return { overflow, touchTarget: Math.round(target?.height ?? 0) }
+  })
+  console.log(`[smoke] model-viewer мобильный: переполнение ${mobileViewer.overflow}px, тач-цель ${mobileViewer.touchTarget}px`)
+  const mobileViewerOk = mobileViewer.overflow <= 1 && mobileViewer.touchTarget >= 40
+  await page.setViewportSize({ width: 960, height: 720 })
+
   if (errors.length) {
     console.error('[smoke] ошибки страницы:')
     for (const error of errors) console.error(`  ${error}`)
@@ -174,6 +257,11 @@ try {
     canvasCount === 1 &&
     logEntries > 0 &&
     mobileOk &&
+    viewerAlive &&
+    loadText !== null &&
+    loadText.includes('Загрузить') &&
+    viewerLogEntries > 0 &&
+    mobileViewerOk &&
     errors.length === 0
 
   console.log(ok ? '[smoke] OK' : '[smoke] FAIL')

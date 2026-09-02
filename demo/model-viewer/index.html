@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>rune — model viewer</title>
+  <link rel="stylesheet" href="../shared/demo-shell.css" />
+  <style>
+    /* Панель моделей: поверх сцены (absolute), мобильная — во всю ширину. */
+    .mv-panel {
+      position: absolute;
+      inset: 12px 12px auto 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px;
+      border-radius: 12px;
+      background: rgba(11, 13, 19, 0.82);
+      border: 1px solid #26304a;
+      backdrop-filter: blur(6px);
+      max-width: 420px;
+      z-index: 3;
+    }
+    .mv-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+    .mv-tab {
+      flex: 1 1 auto;
+      min-height: 44px;
+      padding: 6px 10px;
+      border-radius: 8px;
+      border: 1px solid #2c3855;
+      background: #121826;
+      color: #dfe5f1;
+      font: 13px/1.35 system-ui, -apple-system, 'Segoe UI', sans-serif;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      text-align: left;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .mv-tab b { font-size: 13px; color: #dfe5f1; }
+    .mv-tab span { font-size: 11px; color: #6b7691; }
+    .mv-tab[aria-pressed="true"] { border-color: #7aa2f7; background: #1a2336; }
+    .mv-tab[aria-pressed="true"] b { color: #9ecbff; }
+    .mv-tab.mv-loaded span::after { content: ' · загружена'; color: #73daca; }
+    .mv-load {
+      min-height: 44px;
+      border-radius: 8px;
+      border: 1px solid #7aa2f7;
+      background: #1a2336;
+      color: #9ecbff;
+      font: 14px/1 system-ui, -apple-system, 'Segoe UI', sans-serif;
+      cursor: pointer;
+      padding: 0 14px;
+    }
+    .mv-load:disabled { opacity: 0.55; cursor: default; }
+    .mv-progress { display: none; flex-direction: column; gap: 4px; }
+    .mv-progress.mv-active { display: flex; }
+    .mv-bar-track {
+      height: 8px;
+      border-radius: 4px;
+      background: #1a2336;
+      overflow: hidden;
+    }
+    .mv-bar {
+      height: 100%;
+      width: 0%;
+      border-radius: 4px;
+      background: linear-gradient(90deg, #7aa2f7, #73daca);
+      transition: width 0.12s linear;
+    }
+    .mv-status { font: 11px/1.4 system-ui, sans-serif; color: #6b7691; }
+    .mv-stats { font: 11px/1.5 system-ui, sans-serif; color: #6b7691; }
+    .mv-hint-drag {
+      position: absolute;
+      right: 12px;
+      bottom: 10px;
+      font: 11px/1.4 system-ui, sans-serif;
+      color: #6b7691;
+      background: rgba(11, 13, 19, 0.7);
+      padding: 4px 8px;
+      border-radius: 6px;
+      z-index: 3;
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script src="../shared/demo-shell.js"></script>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

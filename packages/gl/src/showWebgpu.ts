@@ -6,7 +6,9 @@ import { cube } from '@rune/prims'
 
 /**
  * showOnWebGpu(): показ куба на WebGPU — зеркало WebGL2-версии.
- * Тот же стриминг текстуры, те же опции; ленты + executor.
+ * Тот же стриминг текстуры, те же опции; ленты + executor. Обе ветки шейдера
+ * (с текстурой и без) несут одно и то же Lambert-освещение — паритет
+ * затенения граней с GLSL-версией из scene.ts (инцидент «плоский куб»).
  */
 
 const WGSL_TEX = `
@@ -39,9 +41,9 @@ fn vsMain(
 }
 
 @fragment
-fn fsMain(in : VSOut) -> @location(0) vec4<f32> {
-  let lambert = max(dot(normalize(in.worldNormal), normalize(params.u_lightDir.xyz)), 0.0);
-  let tex = textureSample(texTexture, texSampler, in.uv);
+fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
+  let lambert = max(dot(normalize(frag.worldNormal), normalize(params.u_lightDir.xyz)), 0.0);
+  let tex = textureSample(texTexture, texSampler, frag.uv);
   return vec4<f32>(tex.rgb * (0.3 + lambert * 0.7), 1.0);
 }`
 
@@ -54,17 +56,26 @@ struct Params {
 }
 @group(0) @binding(0) var<uniform> params : Params;
 
+struct VSOut {
+  @builtin(position) pos : vec4<f32>,
+  @location(0) worldNormal : vec3<f32>,
+}
+
 @vertex
 fn vsMain(
   @location(0) inPos : vec3<f32>,
   @location(1) inNormal : vec3<f32>,
-) -> @builtin(position) vec4<f32> {
-  return params.u_mvp * vec4<f32>(inPos, 1.0);
+) -> VSOut {
+  var out : VSOut;
+  out.pos = params.u_mvp * vec4<f32>(inPos, 1.0);
+  out.worldNormal = (params.u_model * vec4<f32>(inNormal, 0.0)).xyz;
+  return out;
 }
 
 @fragment
-fn fsMain() -> @location(0) vec4<f32> {
-  return vec4<f32>(params.u_albedo.rgb, 1.0);
+fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
+  let lambert = max(dot(normalize(frag.worldNormal), normalize(params.u_lightDir.xyz)), 0.0);
+  return vec4<f32>(params.u_albedo.rgb * (0.3 + lambert * 0.7), 1.0);
 }`
 
 /** Показ на WebGPU. Пауза — для табов/переключений (как у WebGL2-версии). */
@@ -113,6 +124,8 @@ export async function showOnWebGpu(canvas: HTMLCanvasElement, options: ShowOptio
 
   const spec: Record<string, unknown> = {
     shader: { wgsl: hasTexture ? WGSL_TEX : WGSL_FLAT },
+    // Паритет растеризации с WebGL2-сценой (scene.ts): тот же depth/cull
+    pipeline: { depth: { test: 'less', write: true }, raster: { cull: 'back' } },
     uniforms,
     attributes,
     count: geometry.vertexCount,

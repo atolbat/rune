@@ -188,11 +188,14 @@ describe('Task 69: rgba32float без float32-filterable — unfilterable bind p
     const sampler = calls.samplers[calls.samplers.length - 1]!
     expect(sampler.magFilter).toBe('nearest')
     expect(sampler.minFilter).toBe('nearest')
-    // пайплайн + бинд текстуры: bind-group layout с unfilterable-float
+    // пайплайн + бинд текстуры + draw: bind-group layout с unfilterable-float.
+    // Мульти-текстурный контракт: bindTexture НАКАПЛИВАЕТ биндинги, bind-группа
+    // фиксируется в draw() (однотекстурные команды — прежний состав группы)
     gpu.ensurePipeline(1, WGSL_LEVEL, [2, 2], true)
     gpu.beginPass(0)
     gpu.usePipeline(1)
     gpu.bindTexture(tex)
+    gpu.draw(3, 1)
     const unfilterableBgl = calls.bglLayouts.find(b => sampleTypeOf(b) === 'unfilterable-float')
     expect(unfilterableBgl).toBeDefined()
     const samplerEntry = unfilterableBgl!.entries.find(e => (e as { sampler?: unknown }).sampler !== undefined)
@@ -218,6 +221,35 @@ describe('Task 69: rgba32float без float32-filterable — unfilterable bind p
     expect(unfilterablePipeline).toBeDefined()
     expect(calls.passSetPipeline[calls.passSetPipeline.length - 1]).toBe(unfilterablePipeline)
     expect(calls.passSetBindGroup.some(([i]) => i === 1)).toBe(true)
+  })
+
+  it('мульти-текстуры: два бинда до draw → ОДНА bind-группа с tex@1 и tex@2', async () => {
+    const { calls, canvas, cleanup } = installMockGpu([])
+    cleanups.push(cleanup)
+    const gpu = await createRealGPU(canvas as never)
+    const baseTex = gpu.createTexture(256, 256)
+    const normalTex = gpu.createTexture(256, 256)
+    // WGSL с ДВУМЯ texture_2d в group 1 — layout обязан дать bindings 1..2
+    const wgsl2 = WGSL_LEVEL.replace(
+      '@group(1) @binding(1) var t : texture_2d<f32>;',
+      '@group(1) @binding(1) var t : texture_2d<f32>;\n@group(1) @binding(2) var n : texture_2d<f32>;',
+    )
+    gpu.ensurePipeline(7, wgsl2, [2, 2], true)
+    gpu.beginPass(0)
+    gpu.usePipeline(7)
+    gpu.bindTexture(baseTex)
+    gpu.bindTexture(normalTex)
+    const bindGroupsBefore = calls.bindGroups.length
+    gpu.draw(3, 1)
+    // ровно ОДНА новая bind-группа на draw (не по одной на каждый бинд)
+    expect(calls.bindGroups.length).toBe(bindGroupsBefore + 1)
+    const bg = calls.bindGroups[calls.bindGroups.length - 1]!
+    expect(bg.entries).toHaveLength(3)
+    expect(bg.entries.map(e => e.binding)).toEqual([0, 1, 2])
+    // texture-слоты 1 и 2 — ДВЕ разные текстуры
+    const textures = bg.entries.filter(e => (e.resource as { viewId?: number }).viewId !== undefined)
+    expect(textures).toHaveLength(2)
+    expect(textures[0]!.resource).not.toBe(textures[1]!.resource)
   })
 
   it('без feature: rgba8unorm → прежний путь (float + filtering, ОДИН пайплайн)', async () => {

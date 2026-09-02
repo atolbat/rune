@@ -86,19 +86,13 @@ export async function createRealGPU(
   // лениво создаётся в bindTexture при первом бинде rgba32float без feature
   // 'float32-filterable'. Layout пайплайна и bind-group обязаны совпадать по
   // sampleType — иначе setBindGroup-валидация падает.
-  const pipelines = new Map<number, {
-    wgsl: string
-    attrs: readonly GpuAttrSlot[]
-    hasTextures: boolean
-    desc: GpuPipelineDesc
-    variants: Map<TextureSampleVariant, GPURenderPipeline>
-  }>()
+  const pipelines = new Map<number, PipelineRecord>()
   // Vertex buffers: keyed по Float32Array (обычно одна команда = один спек =
   // одна data). Если пользователь дропнул ссылку на data — GPUBuffer утечёт,
   // но за весь срок сессии рендерера. dispose() чистит всё. FR не применён:
   // привязка к lifetime команды спецификации, а не user-facing handle.
   const vertexBuffers = new Map<Float32Array, GPUBuffer>()
-  const textureBindGroups = new Map<number, GPUBindGroup>()
+  const textureBindGroups = new Map<string, GPUBindGroup>()
   const targets = new Map<number, {
     view: GPUTextureView
     depthView: GPUTextureView | null
@@ -124,6 +118,9 @@ export async function createRealGPU(
   let currentPipeline: GPURenderPipeline | null = null
   let currentPipelineId = -1
   let currentTarget = 0
+  /** Мульти-текстуры (модель Nefertiti base+normal): текстуры команды
+   *  накапливаются bindTexture'ом, bind-группа фиксируется в draw(). */
+  const pendingTextureIds: number[] = []
   let timerHandle: GpuTimerHandle | null = null
   // Создаём timer ЕСЛИ device имеет 'timestamp-query' feature.
   // createGpuGpuTimer возвращает {timer, handle} или null (если feature нет).
@@ -335,7 +332,16 @@ export async function createRealGPU(
 
   function ensurePipeline(pipelineId: number, wgsl: string, attrs: readonly GpuAttrSlot[], hasTextures: boolean, desc?: GpuPipelineDesc): void {
     if (pipelines.has(pipelineId)) return
-    const record = { wgsl, attrs, hasTextures, desc: desc ?? {}, variants: new Map<TextureSampleVariant, GPURenderPipeline>() }
+    const record = {
+      wgsl,
+      attrs,
+      hasTextures,
+      // Мульти-текстуры: layout group 1 строится по числу texture_2d-деклараций
+      // в WGSL (1 — старый однотекстурный контракт, 2+ — base+normal map и т.п.)
+      textureCount: hasTextures ? countGroup1TextureBindings(wgsl) : 0,
+      desc: desc ?? {},
+      variants: new Map<TextureSampleVariant, GPURenderPipeline>(),
+    }
     pipelines.set(pipelineId, record)
     // Дефолтный вариант 'float' — фильтруемые текстуры (все, кроме rgba32float
     // на устройствах без 'float32-filterable').
@@ -349,7 +355,7 @@ export async function createRealGPU(
    *  rgba32float без feature 'float32-filterable'). WGSL обязан использовать
    *  textureSampleLevel (textureSample требует filterable-текстуру). */
   function buildPipeline(
-    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; desc: GpuPipelineDesc },
+    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; textureCount: number; desc: GpuPipelineDesc },
     variant: TextureSampleVariant,
   ): GPURenderPipeline {
     const wgsl = record.wgsl
@@ -373,10 +379,21 @@ export async function createRealGPU(
     })
     const layouts: GPUBindGroupLayout[] = [group0]
     if (record.hasTextures) {
+      // Мульти-текстуры: bindings 1..N по числу texture_2d в WGSL (N=1 —
+      // прежний однотекстурный layout, бэквард-совместимо). Все текстуры
+      // команды делят один сэмплер (binding 0).
+      const textureEntries: { binding: number; visibility: number; texture: { sampleType: TextureSampleVariant } }[] = []
+      for (let slot = 1; slot <= Math.max(1, record.textureCount); slot++) {
+        textureEntries.push({
+          binding: slot,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: variant },
+        })
+      }
       layouts.push(device.createBindGroupLayout({
         entries: [
           { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: { type: variant === 'float' ? 'filtering' : 'non-filtering' } },
-          { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: variant } },
+          ...textureEntries,
         ],
       }))
       // Проактивная диагностика (Task 69): textureSample в WGSL несовместим с
@@ -464,6 +481,9 @@ export async function createRealGPU(
     const record = pipelines.get(pipelineId)
     if (record === undefined) return
     currentPipelineId = pipelineId
+    // Новая команда — накапливаемые текстуры сбрасываются (бинд-группа
+    // строится в draw() по набору текущей команды)
+    pendingTextureIds.length = 0
     // Дефолтный вариант 'float'; bindTexture переключит на
     // 'unfilterable-float', если биндится rgba32float без feature.
     setPipelineVariant(record, 'float')
@@ -471,7 +491,7 @@ export async function createRealGPU(
 
   /** Установить вариант пайплайна (лениво создаётся при первом обращении). */
   function setPipelineVariant(
-    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; desc: GpuPipelineDesc; variants: Map<TextureSampleVariant, GPURenderPipeline> },
+    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; textureCount: number; desc: GpuPipelineDesc; variants: Map<TextureSampleVariant, GPURenderPipeline> },
     variant: TextureSampleVariant,
   ): void {
     let pipeline = record.variants.get(variant)
@@ -550,11 +570,15 @@ export async function createRealGPU(
   }
 
   function bindTexture(textureOrViewId: number): void {
+    // Мульти-текстуры: биндинги НАКАПЛИВАЮТСЯ до draw() — bind-группа
+    // собирается по всем текстурам команды (layout: sampler@0 + tex@1..N).
+    // Однотекстурные команды: прежнее поведение, но setBindGroup
+    // переносится в draw() (для лент порядок «bindTexture до draw» тот же).
+    //
     // textureOrViewId: либо textureId (1..1M) → default view, либо viewId
     // (1M+) → sub-mip-range view из textureViews Map.
     // Если id ∈ textureViews → берём sub-view (созданный через
     // createTextureView). Иначе — default-view из textures Map.
-    // BindGroup инвалидируется и пересоздаётся при смене id.
     //
     // Task 69: sampleType bind-group-Layout выводится из ФИЛЬТРУЕМОСТИ
     // текстуры: rgba32float без feature 'float32-filterable' →
@@ -565,45 +589,78 @@ export async function createRealGPU(
     // sample types (Float)». Layout пайплайна синхронно переключается на
     // соответствующий вариант (setPipelineVariant) — иначе несовместимость
     // пайплайн/bind-group всплыла бы на draw.
-    let view: GPUTextureView
-    let sampler: GPUSampler
-    let filterable: boolean
+    const record = pipelineOfTexture()
+    const resolved = resolveTexture(textureOrViewId)
+    if (resolved === undefined) return
+    if (record !== undefined && record.hasTextures) {
+      setPipelineVariant(record, resolved.filterable ? 'float' : 'unfilterable-float')
+    }
+    if (pendingTextureIds.length < 32) pendingTextureIds.push(textureOrViewId)
+  }
+
+  /** Текущий пайплайн-рекорд (для варианта и счётчика текстур). */
+  function pipelineOfTexture(): PipelineRecord | undefined {
+    return currentPipelineId >= 0 ? pipelines.get(currentPipelineId) : undefined
+  }
+
+  /** Текстура/саб-вью по id: view + sampler + фильтруемость. */
+  function resolveTexture(textureOrViewId: number): { view: GPUTextureView; sampler: GPUSampler; filterable: boolean } | undefined {
     const subView = textureViews.get(textureOrViewId)
     if (subView !== undefined) {
       const record = textures.get(subView.textureId)
-      if (record === undefined) return
-      view = subView.view
-      sampler = record.sampler
-      filterable = record.filterable
-    } else {
-      const record = textures.get(textureOrViewId)
-      if (record === undefined) return
-      view = record.view
-      sampler = record.sampler
-      filterable = record.filterable
+      if (record === undefined) return undefined
+      return { view: subView.view, sampler: record.sampler, filterable: record.filterable }
     }
-    const pipelineRecord = currentPipelineId >= 0 ? pipelines.get(currentPipelineId) : undefined
-    if (pipelineRecord !== undefined && pipelineRecord.hasTextures) {
-      setPipelineVariant(pipelineRecord, filterable ? 'float' : 'unfilterable-float')
+    const record = textures.get(textureOrViewId)
+    if (record === undefined) return undefined
+    return { view: record.view, sampler: record.sampler, filterable: record.filterable }
+  }
+
+  /** Мульти-текстурная bind-группа: sampler@0 + tex@1..N по всем
+   *  накопленным текстурам (недостающие слоты — повтор последней).
+   *  Кэш по составу (id-строка + вариант) — смена набора = новая группа. */
+  function flushTextureBindGroup(): void {
+    if (pendingTextureIds.length === 0) return
+    if (pass === null) {
+      pendingTextureIds.length = 0
+      return
     }
-    let group = textureBindGroups.get(textureOrViewId)
+    const record = pipelineOfTexture()
+    const count = Math.max(1, record?.textureCount ?? 1)
+    const key = `${currentPipelineId}:${count}:${pendingTextureIds.join(',')}`
+    let group = textureBindGroups.get(key)
     if (group === undefined) {
+      const first = resolveTexture(pendingTextureIds[0])
+      if (first === undefined) {
+        pendingTextureIds.length = 0
+        return
+      }
+      const variant = first.filterable ? 'float' : 'unfilterable-float'
+      const entries: GPUBindGroupEntry[] = [{ binding: 0, resource: first.sampler }]
+      for (let slot = 1; slot <= count; slot++) {
+        const id = pendingTextureIds[Math.min(slot - 1, pendingTextureIds.length - 1)]
+        const resolved = resolveTexture(id)
+        if (resolved === undefined) {
+          pendingTextureIds.length = 0
+          return
+        }
+        entries.push({ binding: slot, resource: resolved.view })
+      }
       const layout = device.createBindGroupLayout({
         entries: [
-          { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: { type: filterable ? 'filtering' : 'non-filtering' } },
-          { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: filterable ? 'float' : 'unfilterable-float' } },
+          { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: { type: variant === 'float' ? 'filtering' : 'non-filtering' } },
+          ...Array.from({ length: count }, (_, at): GPUBindGroupLayoutEntry => ({
+            binding: at + 1,
+            visibility: GPUShaderStage.FRAGMENT,
+            texture: { sampleType: variant },
+          })),
         ],
       })
-      group = device.createBindGroup({
-        layout,
-        entries: [
-          { binding: 0, resource: sampler },
-          { binding: 1, resource: view },
-        ],
-      })
-      textureBindGroups.set(textureOrViewId, group)
+      group = device.createBindGroup({ layout, entries })
+      textureBindGroups.set(key, group)
     }
-    pass?.setBindGroup(1, group)
+    pass.setBindGroup(1, group)
+    pendingTextureIds.length = 0
   }
 
   function beginPass(_clearIndex: number): void {
@@ -683,6 +740,7 @@ export async function createRealGPU(
   }
 
   function draw(count: number, instances: number): void {
+    flushTextureBindGroup()
     pass?.draw(count, instances)
   }
 
@@ -793,19 +851,34 @@ export async function createRealGPU(
   function deleteTexture(textureId: number): void {
     const record = textures.get(textureId)
     if (record === undefined) return
-    // Инвалидация bindGroup: при след. bindTexture он будет пересоздан
-    // (textureBindGroups.get(textureId) на старом record.view больше не валиден).
-    textureBindGroups.delete(textureId)
+    // Инвалидация bind-групп (в т.ч. мульти-текстурных составов), где
+    // участвует эта текстура: при следующем draw() группа будет пересоздана.
+    for (const key of textureBindGroups.keys()) {
+      const parts = key.split(':')
+      if (parts.length > 2 && parts[2].split(',').includes(String(textureId))) {
+        textureBindGroups.delete(key)
+      }
+    }
     // Удалить все sub-views этой текстуры (созданные через createTextureView)
     for (const [viewId, sv] of textureViews) {
       if (sv.textureId === textureId) {
-        textureBindGroups.delete(viewId)
+        invalidateTextureViewBindGroups(viewId)
         textureViews.delete(viewId)
       }
     }
     record.texture.destroy()
     // GPUSampler не имеет destroy() — GC сам уберёт
     textures.delete(textureId)
+  }
+
+  /** Выкидывает из кэша все составы, содержащие саб-вью (viewId). */
+  function invalidateTextureViewBindGroups(viewId: number): void {
+    for (const key of textureBindGroups.keys()) {
+      const parts = key.split(':')
+      if (parts.length > 2 && parts[2].split(',').includes(String(viewId))) {
+        textureBindGroups.delete(key)
+      }
+    }
   }
 
   function createTextureView(
@@ -838,7 +911,7 @@ export async function createRealGPU(
     // GPUTextureView не имеет destroy() — освобождается при destroy()
     // родительской текстуры (device.destroy() неявно). Но мы убираем
     // из Map чтобы bindTexture больше не находил этот view.
-    textureBindGroups.delete(viewId)
+    invalidateTextureViewBindGroups(viewId)
     textureViews.delete(viewId)
   }
 
@@ -944,4 +1017,24 @@ export async function createRealGPU(
 /** Сообщение ошибки одной строкой (для канала onGpuError). */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** Рекорд пайплайна: WGSL + дескриптор + ленивые варианты по sampleType. */
+interface PipelineRecord {
+  readonly wgsl: string
+  readonly attrs: readonly GpuAttrSlot[]
+  readonly hasTextures: boolean
+  /** Мульти-текстуры: число texture_2d-деклараций в group 1 WGSL. */
+  readonly textureCount: number
+  readonly desc: GpuPipelineDesc
+  readonly variants: Map<TextureSampleVariant, GPURenderPipeline>
+}
+
+/** Число texture_2d-биндингов группы 1 в WGSL — размер мульти-текстурного
+ *  layout'а (sampler@0 + tex@1..N). Однотекстурные шейдеры дают 1 — прежний
+ *  контракт v1; base+normal map — 2. */
+export function countGroup1TextureBindings(wgsl: string): number {
+  let count = 0
+  for (const _match of wgsl.matchAll(/@group\(1\)[^\n;]*var\s+\w+\s*:\s*texture_2d/g)) count++
+  return Math.max(1, count)
 }

@@ -214,10 +214,13 @@ function writeUniforms(
     if (declared === undefined) continue
     const value = resolve(declared, props, frameCtx)
     if (value === undefined) continue
+    // Скаляр f32 — тоже валидное значение (паритет с GL-ареной: write
+    // принимает number и ArrayLike; раньше number[0] давал undefined → 0)
+    const numbers: ArrayLike<number> = typeof value === 'number' ? [value] : (value as ArrayLike<number>)
     const base = (command.sliceOffset + field.offset) / 4
     let changed = false
     for (let at = 0; at < field.size / 4; at++) {
-      const next = (value as ArrayLike<number>)[at] ?? 0
+      const next = numbers[at] ?? 0
       if (Math.fround(next) !== arena.floats[base + at]) {
         arena.floats[base + at] = next
         changed = true
