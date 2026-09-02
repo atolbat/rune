@@ -43,6 +43,9 @@
       "@rune/loaders": [
         "./packages/loaders/src/index.ts"
       ],
+      "@rune/animation": [
+        "./packages/animation/src/index.ts"
+      ],
       "@rune/debug": [
         "./packages/debug/src/index.ts"
       ]

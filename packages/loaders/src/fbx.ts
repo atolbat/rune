@@ -55,7 +55,9 @@
  *     blendshapes, cameras, lights, NURBS, instancing, ASCII-FBX.
  */
 
-// ─── Public types (structurally compatible with @rune/kit/anim) ─────────────────
+// ─── Public types (structurally compatible with @rune/animation) ─────────────
+// FbxSkeleton IS a Skeleton, FbxClip IS a Clip — createAnimator(model.skeleton,
+// model.clips[0]) works without adapters or copies.
 
 /** A skeleton bone: rest pose + inverse bind matrix. */
 export interface FbxJoint {

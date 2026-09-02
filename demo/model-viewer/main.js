@@ -5,9 +5,11 @@
 // Flow: a Load button → progress bar (AssetLoader: fetch → parse → decode) →
 // the scene. Model switching; loaded models show instantly. Rotation via
 // drag (touch/mouse) + auto-spin; zoom via pinch (two fingers) and wheel.
-// The demo imports the BUILT bundles: dist/rune.esm.js + dist/rune-loaders.esm.js.
+// The demo imports the BUILT bundles: dist/rune.esm.js + dist/rune-loaders.esm.js
+// + dist/rune-animation.esm.js.
 import { createRenderer } from '../../dist/rune.esm.js'
 import { AssetLoader } from '../../dist/rune-loaders.esm.js'
+import { createAnimator } from '../../dist/rune-animation.esm.js'
 
 /* ─── Models ─────────────────────────────────────────────────────────────── */
 
@@ -642,9 +644,10 @@ function prepareGltf(model) {
   return finishPrepared(meshes, model.stats)
 }
 
-/** FBX (Samba): skinned soup + an animation player (the FBX loader already
- *  decodes skeleton/skin/clips — the player samples the clip, evaluates the
- *  joint hierarchy and fills the u_bones palette). */
+/** FBX (Samba): skinned soup + an animation player. The FBX loader
+ *  decodes skeleton/skin/clips; @rune/animation samples the clip and
+ *  fills the u_bones palette (the loader's types pass structurally —
+ *  no adapters, no copies). */
 function prepareFbx(model) {
   const meshes = []
   const SKIN_TONE = [0.72, 0.53, 0.42]
@@ -667,7 +670,10 @@ function prepareFbx(model) {
       skinned: mesh.skin !== undefined,
     })
   }
-  const animation = createAnimationPlayer(model)
+  // The animator samples the clip, evaluates the joint hierarchy
+  // (parents first — the loader sorts so) and writes skin = world × invBind
+  // into the palette (16 floats per joint).
+  const animation = createAnimator(model.skeleton, model.clips[0] ?? null)
   const preparedModel = finishPrepared(meshes, { vertices: 0, triangles: 0 })
   preparedModel.animation = animation
   return preparedModel
@@ -698,148 +704,6 @@ function deindexedSkinned(mesh) {
     }
   }
   return { positions, normals, joints, weights }
-}
-
-/* ─── Skeletal animation: clip sampling → joint hierarchy → bone palette ── */
-
-/** Creates the player for an FBX model: samples tracksT/tracksR per joint,
- *  evaluates the world hierarchy (parents first — the loader sorts so) and
- *  writes skin = world × invBind into palette (16 floats per joint). */
-function createAnimationPlayer(model) {
-  const joints = model.skeleton.joints
-  const clip = model.clips[0] ?? null
-  const jointCount = joints.length
-  const palette = new Float32Array(jointCount * 16)
-  const world = []
-  for (let i = 0; i < jointCount; i++) world.push(M())
-  const localT = new Float32Array(jointCount * 3)
-  const localQ = new Float32Array(jointCount * 4)
-  const localS = new Float32Array(jointCount * 3)
-  const trackT = new Array(jointCount).fill(null)
-  const trackR = new Array(jointCount).fill(null)
-  if (clip !== null) {
-    for (const t of clip.tracksT) trackT[t.joint] = t
-    for (const r of clip.tracksR) trackR[r.joint] = r
-  }
-  // rest pose into the local buffers (tracks override their joints each frame)
-  for (let i = 0; i < jointCount; i++) {
-    localT.set(joints[i].restT, i * 3)
-    localQ.set(joints[i].restQ, i * 4)
-    localS.set(joints[i].restS, i * 3)
-  }
-
-  const local = M()
-
-  function sample() {
-    if (clip === null) return
-    const t = time % clip.duration
-    for (let i = 0; i < jointCount; i++) {
-      const tT = trackT[i]
-      if (tT !== null) sampleVec3(tT, t, localT, i * 3)
-      const tR = trackR[i]
-      if (tR !== null) sampleQuat(tR, t, localQ, i * 4)
-    }
-    for (let i = 0; i < jointCount; i++) {
-      const j = joints[i]
-      mat4FromTrs(local, localT.subarray(i * 3, i * 3 + 3), localQ.subarray(i * 4, i * 4 + 4), localS.subarray(i * 3, i * 3 + 3))
-      if (j.parent < 0) world[i].set(local)
-      else mat4Multiply(world[i], world[j.parent], local)
-      const out = palette.subarray(i * 16, i * 16 + 16)
-      if (j.invBind !== undefined) mat4Multiply(out, world[i], j.invBind)
-      else out.set(world[i])
-    }
-  }
-
-  let time = 0
-  const player = {
-    jointCount,
-    clipName: clip?.name ?? null,
-    duration: clip?.duration ?? 0,
-    palette,
-    /** Advances the clip and refreshes the palette. dt is seconds. */
-    advance(dt) {
-      if (clip === null) return
-      time += dt
-      if (time > clip.duration) time %= clip.duration
-      sample()
-    },
-    /** The palette at t=0 — the pose shown before the first frame. */
-    poseAtStart() {
-      time = 0
-      sample()
-      return palette
-    },
-  }
-  player.poseAtStart()
-  return player
-}
-
-/** Frame counters of a track: linear translation sampling. */
-function sampleVec3(track, t, out, off) {
-  const times = track.times
-  const values = track.values
-  if (t <= times[0]) { out[off] = values[0]; out[off + 1] = values[1]; out[off + 2] = values[2]; return }
-  const last = times.length - 1
-  if (t >= times[last]) { out[off] = values[last * 3]; out[off + 1] = values[last * 3 + 1]; out[off + 2] = values[last * 3 + 2]; return }
-  // binary search: times[i] <= t < times[i+1]
-  let lo = 0, hi = last
-  while (hi - lo > 1) {
-    const mid = (lo + hi) >> 1
-    if (times[mid] <= t) lo = mid
-    else hi = mid
-  }
-  const span = times[hi] - times[lo]
-  const u = span > 1e-9 ? (t - times[lo]) / span : 0
-  for (let c = 0; c < 3; c++) {
-    out[off + c] = values[lo * 3 + c] + (values[hi * 3 + c] - values[lo * 3 + c]) * u
-  }
-}
-
-/** Rotation sampling: slerp between the two quats around t (nlerp shortcut
- *  for nearly-parallel quats keeps fingers from flipping). */
-function sampleQuat(track, t, out, off) {
-  const times = track.times
-  const quats = track.quats
-  if (t <= times[0] || times.length === 1) { out.set(quats.subarray(0, 4), off); return }
-  const last = times.length - 1
-  if (t >= times[last]) { out.set(quats.subarray(last * 4, last * 4 + 4), off); return }
-  let lo = 0, hi = last
-  while (hi - lo > 1) {
-    const mid = (lo + hi) >> 1
-    if (times[mid] <= t) lo = mid
-    else hi = mid
-  }
-  const span = times[hi] - times[lo]
-  const u = span > 1e-9 ? (t - times[lo]) / span : 0
-  slerpQuat(quats, lo * 4, quats, hi * 4, u, out, off)
-}
-
-/** slerp(a, b, u) → out[off..off+3] (xyzw, normalized). */
-function slerpQuat(a, ao, b, bo, u, out, off) {
-  let ax = a[ao], ay = a[ao + 1], az = a[ao + 2], aw = a[ao + 3]
-  let bx = b[bo], by = b[bo + 1], bz = b[bo + 2], bw = b[bo + 3]
-  let dot = ax * bx + ay * by + az * bz + aw * bw
-  if (dot < 0) { bx = -bx; by = -by; bz = -bz; bw = -bw; dot = -dot }
-  if (dot > 0.9995) {
-    // nlerp: the angle is tiny, linear interpolation + normalize is exact enough
-    let x = ax + (bx - ax) * u
-    let y = ay + (by - ay) * u
-    let z = az + (bz - az) * u
-    let w = aw + (bw - aw) * u
-    const len = Math.hypot(x, y, z, w) || 1
-    out[off] = x / len; out[off + 1] = y / len; out[off + 2] = z / len; out[off + 3] = w / len
-    return
-  }
-  const theta = Math.acos(dot)
-  const sinTheta = Math.sin(theta)
-  const wa = Math.sin((1 - u) * theta) / sinTheta
-  const wb = Math.sin(u * theta) / sinTheta
-  let x = ax * wa + bx * wb
-  let y = ay * wa + by * wb
-  let z = az * wa + bz * wb
-  let w = aw * wa + bw * wb
-  const len = Math.hypot(x, y, z, w) || 1
-  out[off] = x / len; out[off + 1] = y / len; out[off + 2] = z / len; out[off + 3] = w / len
 }
 
 function finishPrepared(meshes, stats) {

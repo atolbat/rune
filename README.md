@@ -19,6 +19,7 @@ zero runtime dependencies, a DOM-free core, tests-first development.
 | `@rune/scene` | Flat data-oriented scene graph: cameras, frustum culling, instance groups, pipeline moved into a worker over a SharedArrayBuffer |
 | `@rune/tape` | Recording tapes in workers without a GPU and playing them back on the owner: stub tapes, frame delivery, cross-world replay |
 | `@rune/loaders` | Streaming asset parsers without GPU code: GLB/glTF, OBJ, MTL, FBX (binary and ASCII), images, configs; loading scheduler with AIMD discipline, `AssetLibrary` with an LRU cache |
+| `@rune/animation` | Skeletal animation in a separate layer: clip sampling (binary key search, lerp/slerp), parents-first hierarchy evaluation, skin palette (world × invBind) — flat SoA scratch, zero allocations per frame, loaders-compatible skeleton/clip types, `createAnimator` facade |
 | `@rune/kit` | High-level utilities on top of `@rune/gl`: AssetCache with refcount/TTL/churn-window, canvas compositing hygiene |
 | `@rune/debug` | Debugging tools (roadmap stage M8) |
 
