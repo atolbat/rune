@@ -19,9 +19,17 @@ export interface MaterialDesc {
 /** Compiled-facing facade: the cached AssembledMaterial. */
 export type Material = AssembledMaterial
 
-/** Composite cache key: feature mask (low 20 bits) + jointCount (shifted). */
+/** Composite cache key: features × 8192 + jointCount.
+ *  (The old `features + (jointCount << 20)` overlapped feature bits ≥ 20 —
+ *  the PBR family bits live there now, so EMISSIVE at bit 26 would have
+ *  collided with jointCount = 64: same key, different palette size. The
+ *  multiplicative form is injective for features < 2^28 and joints < 8192,
+ *  and both stay exact in the f64 integer range. assemble() enforces the
+ *  joint bound.) */
+const KEY_STRIDE = 8192
+
 function keyOf(features: number, jointCount: number): number {
-  return features + (jointCount << 20)
+  return features * KEY_STRIDE + jointCount
 }
 
 const cache = new Map<number, Material>()

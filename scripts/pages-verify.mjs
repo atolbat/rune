@@ -48,13 +48,18 @@ try {
   const shotA = await page.locator('#canvas').screenshot()
   await page.waitForTimeout(900)
   const shotB = await page.locator('#canvas').screenshot()
-  viewerOk = shotA.length > 5000 && !shotA.equals(shotB)
+  // The first model is the Forest House — now the Cook-Torrance PBR pipeline
+  // (the assembled GLSL/WGSL variant must compile clean on the live backend)
+  const logText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
+  const gpuClean = !/too small|Invalid CommandBuffer|storm|rendering stopped|GL: GL_|GPU: /i.test(logText)
+  viewerOk = shotA.length > 5000 && !shotA.equals(shotB) && gpuClean
   await page.screenshot({ path: join(OUT, 'live-model-viewer.png') })
   console.log(`model-viewer scene: ${await page.textContent('.mv-stats')}`)
+  console.log(`house PBR GPU log: ${gpuClean ? 'clean' : 'ERRORS'}`)
 } catch (error) {
   console.log(`model-viewer check failed: ${error instanceof Error ? error.message : String(error)}`)
 }
-console.log(viewerOk ? 'model-viewer LIVE OK' : 'model-viewer LIVE FAIL')
+console.log(viewerOk ? 'model-viewer LIVE OK (house PBR)' : 'model-viewer LIVE FAIL')
 
 // ─── samba: the skinned FBX path on the LIVE page (stats + animation +
 // a clean GPU log — no binding/storm errors) ─────────────────────────────

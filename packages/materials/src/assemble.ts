@@ -22,12 +22,12 @@
 //   uniforms    u_mvp, u_model (always) + feature uniforms
 //   WGSL        one Params struct @group(0) @binding(0) (all uniforms);
 //               textures @group(1): texSampler@0, texTexture@1, nrmTexture@2,
-//               matTexture@3
+//               matTexture@3, mrTexture@4
 //
-// The fragment stage computes `lit` (LAMBERT or MATCAP — or plain base.rgb),
-// the post effects (EMISSIVE, FOG) mutate it, and the assembler appends the
-// SINGLE final color write. A pure unlit variant keeps the direct shape
-// `o_color = base;` / `return base;`.
+// The fragment stage computes `lit` (LAMBERT, MATCAP or PBR — or plain
+// base.rgb), the post effects (EMISSIVE, FOG) mutate it, and the assembler
+// appends the SINGLE final color write. A pure unlit variant keeps the
+// direct shape `o_color = base;` / `return base;`.
 
 import {
   ALPHA_CUTOFF,
@@ -39,6 +39,16 @@ import {
   LAMBERT,
   MATCAP,
   NORMALMAP,
+  PBR,
+  PBR_D_GGX,
+  PBR_D_MODELS,
+  PBR_DIFF_MODELS,
+  PBR_F_MODELS,
+  PBR_G_SMITH,
+  PBR_G_SMITH_HEIGHT,
+  PBR_G_MODELS,
+  PBR_MR_TEXTURE,
+  PBR_SUB_MODELS,
   SKIN,
   TEXTURE,
   type AsmCtx,
@@ -88,13 +98,13 @@ export function assemble(mask: number, jointCount: number): AssembledMaterial {
   const ctx: AsmCtx = { mask, jointCount }
   resetScratch()
 
-  const needsNormal = (mask & (LAMBERT | MATCAP)) !== 0 && (mask & NORMALMAP) === 0
-  const needsUv = (mask & (TEXTURE | NORMALMAP)) !== 0
+  const needsNormal = (mask & (LAMBERT | MATCAP | PBR)) !== 0 && (mask & NORMALMAP) === 0
+  const needsUv = (mask & (TEXTURE | NORMALMAP | PBR_MR_TEXTURE)) !== 0
   sc.attrs.push({ name: 'position', glslType: 'vec3', wgslType: 'vec3<f32>' })
   if (needsNormal) sc.attrs.push({ name: 'normal', glslType: 'vec3', wgslType: 'vec3<f32>' })
   if (needsUv) sc.attrs.push({ name: 'uv', glslType: 'vec2', wgslType: 'vec2<f32>' })
 
-  const hasLight = (mask & (LAMBERT | MATCAP)) !== 0
+  const hasLight = (mask & (LAMBERT | MATCAP | PBR)) !== 0
   const hasPost = (mask & (EMISSIVE | FOG)) !== 0
   let litFallback = false
 
@@ -151,6 +161,7 @@ export function assemble(mask: number, jointCount: number): AssembledMaterial {
   if ((mask & TEXTURE) !== 0) sc.samplers.push('u_tex')
   if ((mask & NORMALMAP) !== 0) sc.samplers.push('u_normalMap')
   if ((mask & MATCAP) !== 0) sc.samplers.push('u_matcap')
+  if ((mask & PBR_MR_TEXTURE) !== 0) sc.samplers.push('u_mrTex')
 
   const glsl = buildGlsl(mask, sc.vertUniforms, sc.fragUniforms)
   const wgsl = buildWgsl(mask, pos)
@@ -178,6 +189,15 @@ function resetScratch(): void {
 }
 
 /** Combination rules — actionable errors at assembly (not at draw time). */
+const LIGHT_MODELS_ALL = LAMBERT | MATCAP | PBR
+
+/** Number of set bits (family membership counting). */
+function popcount(v: number): number {
+  let c = 0
+  while (v !== 0) { v &= v - 1; c++ }
+  return c
+}
+
 function validate(mask: number, jointCount: number): void {
   if ((mask & (TEXTURE | FLAT_ALBEDO)) === (TEXTURE | FLAT_ALBEDO)) {
     throw new Error('rune/materials: TEXTURE and FLAT_ALBEDO are mutually exclusive (one base color source)')
@@ -190,11 +210,50 @@ function validate(mask: number, jointCount: number): void {
     // Without a base there is no `base` — refuse a silently-broken shader.
     throw new Error('rune/materials: a material needs a base color source (TEXTURE or FLAT_ALBEDO)')
   }
-  if ((mask & (LAMBERT | MATCAP)) === (LAMBERT | MATCAP)) {
-    throw new Error('rune/materials: LAMBERT and MATCAP are mutually exclusive light models')
+  if (popcount(mask & LIGHT_MODELS_ALL) > 1) {
+    throw new Error('rune/materials: LAMBERT, MATCAP and PBR are mutually exclusive light models')
   }
   if ((mask & SKIN) !== 0 && (!Number.isInteger(jointCount) || jointCount < 1)) {
     throw new Error('rune/materials: SKIN requires jointCount >= 1')
+  }
+  if ((mask & (PBR_SUB_MODELS | PBR_MR_TEXTURE)) !== 0 && (mask & PBR) === 0) {
+    throw new Error('rune/materials: the PBR sub-model bits require PBR')
+  }
+  if ((mask & PBR) !== 0) {
+    if (popcount(mask & PBR_D_MODELS) !== 1) {
+      throw new Error(
+        `rune/materials: PBR needs exactly one distribution (got ${popcount(mask & PBR_D_MODELS)} of ` +
+        `PBR_D_GGX | PBR_D_BECKMANN | PBR_D_BLINN — pbrMask() defaults to GGX)`,
+      )
+    }
+    if (popcount(mask & PBR_G_MODELS) !== 1) {
+      throw new Error(
+        `rune/materials: PBR needs exactly one geometry model (got ${popcount(mask & PBR_G_MODELS)} of ` +
+        `PBR_G_SMITH | PBR_G_SMITH_SCHLICK | PBR_G_SMITH_HEIGHT | PBR_G_IMPLICIT | PBR_G_NEUMANN | PBR_G_KELEMEN)`,
+      )
+    }
+    if (popcount(mask & PBR_F_MODELS) !== 1) {
+      throw new Error(
+        `rune/materials: PBR needs exactly one fresnel model (got ${popcount(mask & PBR_F_MODELS)} of ` +
+        `PBR_F_SCHLICK | PBR_F_EXACT)`,
+      )
+    }
+    if (popcount(mask & PBR_DIFF_MODELS) !== 1) {
+      throw new Error(
+        `rune/materials: PBR needs exactly one diffuse model (got ${popcount(mask & PBR_DIFF_MODELS)} of ` +
+        `PBR_DIFF_LAMBERT | PBR_DIFF_OREN_NAYAR | PBR_DIFF_BURLEY)`,
+      )
+    }
+    // The exact Smith terms are Smith-GGX: pairing them with Beckmann or
+    // Blinn-Phong is silently wrong (a different Λ), so refuse it.
+    if ((mask & (PBR_G_SMITH | PBR_G_SMITH_HEIGHT)) !== 0 && (mask & PBR_D_GGX) === 0) {
+      throw new Error('rune/materials: PBR_G_SMITH and PBR_G_SMITH_HEIGHT are Smith-GGX terms — they require PBR_D_GGX')
+    }
+  }
+  // The cache key stride (material.ts): jointCount must stay below it or
+  // the composite key would not be injective.
+  if (jointCount >= 8192) {
+    throw new Error('rune/materials: jointCount must be < 8192 (the variant cache key stride)')
   }
 }
 
@@ -235,12 +294,18 @@ function buildGlsl(
   pushBody(vert, 'void main() {', sc.vertGlsl, '}')
 
   const frag = sc.fragParts
-  frag.push('#version 300 es', 'precision mediump float;')
+  // PBR fragments run exp/sqrt chains and 4th-power products: mediump (a
+  // 10-bit mantissa on mobile GPUs) banding-breaks them — highp costs
+  // nothing on desktop. The simpler light models stay mediump (the mobile
+  // win the demo tuning relies on). WGSL has no precision qualifiers (f32
+  // IS highp there), so this is GLSL-only.
+  frag.push('#version 300 es', (mask & PBR) !== 0 ? 'precision highp float;' : 'precision mediump float;')
   // NORMALMAP reads u_model in the fragment (object-space → world).
   if ((mask & NORMALMAP) !== 0) frag.push('uniform mat4 u_model;')
   if ((mask & TEXTURE) !== 0) frag.push('uniform sampler2D u_tex;')
   if ((mask & NORMALMAP) !== 0) frag.push('uniform sampler2D u_normalMap;')
   if ((mask & MATCAP) !== 0) frag.push('uniform sampler2D u_matcap;')
+  if ((mask & PBR_MR_TEXTURE) !== 0) frag.push('uniform sampler2D u_mrTex;')
   for (const varying of sc.varyings) frag.push(`in ${varying.glslType} ${varying.glslName};`)
   for (const uniform of fragUniforms) frag.push(uniform.glsl)
   frag.push('out vec4 o_color;')
@@ -256,12 +321,13 @@ function buildWgsl(mask: number, pos: string): string {
   for (const uniform of sc.uniforms) lines.push(`  ${uniform.wgsl}`)
   lines.push('}')
   lines.push('@group(0) @binding(0) var<uniform> params : Params;')
-  if ((mask & (TEXTURE | NORMALMAP | MATCAP)) !== 0) {
+  if ((mask & (TEXTURE | NORMALMAP | MATCAP | PBR_MR_TEXTURE)) !== 0) {
     lines.push('@group(1) @binding(0) var texSampler : sampler;')
   }
   if ((mask & TEXTURE) !== 0) lines.push('@group(1) @binding(1) var texTexture : texture_2d<f32>;')
   if ((mask & NORMALMAP) !== 0) lines.push('@group(1) @binding(2) var nrmTexture : texture_2d<f32>;')
   if ((mask & MATCAP) !== 0) lines.push('@group(1) @binding(3) var matTexture : texture_2d<f32>;')
+  if ((mask & PBR_MR_TEXTURE) !== 0) lines.push('@group(1) @binding(4) var mrTexture : texture_2d<f32>;')
 
   lines.push('struct VSOut {', '  @builtin(position) pos : vec4<f32>,')
   sc.varyings.forEach((varying, at) =>

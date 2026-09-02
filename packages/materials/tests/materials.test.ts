@@ -4,6 +4,7 @@ import {
   resetMaterials,
   variantCount,
   assemble,
+  pbrMask,
   SKIN,
   INSTANCED,
   NORMALMAP,
@@ -14,11 +15,28 @@ import {
   ALPHA_CUTOFF,
   LAMBERT,
   MATCAP,
+  PBR,
+  PBR_D_GGX,
+  PBR_D_BECKMANN,
+  PBR_D_BLINN,
+  PBR_G_SMITH,
+  PBR_G_SMITH_SCHLICK,
+  PBR_G_SMITH_HEIGHT,
+  PBR_G_IMPLICIT,
+  PBR_G_NEUMANN,
+  PBR_G_KELEMEN,
+  PBR_F_SCHLICK,
+  PBR_F_EXACT,
+  PBR_DIFF_LAMBERT,
+  PBR_DIFF_OREN_NAYAR,
+  PBR_DIFF_BURLEY,
+  PBR_MR_TEXTURE,
   EMISSIVE,
   FOG,
+  type PbrModelChoice,
 } from '../src/index.ts'
 import { reflectGlsl } from '@rune/webgl2'
-import { reflectWgsl } from '@rune/webgpu'
+import { reflectWgsl, lintWgsl } from '@rune/webgpu'
 import { createUniformArena } from '@rune/core'
 
 /** The combinations exercised by the live demo models. */
@@ -223,10 +241,13 @@ describe('fog', () => {
   it('the view-space depth drives the fade toward u_fogColor', () => {
     resetMaterials()
     const mat = materialOf({ features: TEXTURE | LAMBERT | FOG })
-    expect(mat.glsl.vertex).toContain('v_viewZ = (u_view * u_model * position4).z;')
+    // Audit: the product is right-associated (32 mults, not the 48 of the
+    // left-assoc matrix-matrix form) and the negation lives in the vertex.
+    expect(mat.glsl.vertex).toContain('v_viewZ = -(u_view * (u_model * position4)).z;')
     expect(mat.glsl.fragment).toContain('lit = mix(lit, u_fogColor, fogFactor);')
-    expect(mat.wgsl).toContain('out.viewZ = (params.u_view * params.u_model * position4).z;')
+    expect(mat.wgsl).toContain('out.viewZ = -(params.u_view * (params.u_model * position4)).z;')
     expect(mat.wgsl).toContain('lit = mix(lit, params.u_fogColor.rgb, fogFactor);')
+    expect(mat.glsl.fragment).toContain('clamp((v_viewZ - u_fogNear)')
     expect(mat.uniforms.map(u => u.name)).toEqual(
       expect.arrayContaining(['u_view', 'u_fogColor', 'u_fogNear', 'u_fogFar']),
     )
@@ -241,7 +262,8 @@ describe('instanced', () => {
     expect(inst).toEqual(['i_col0', 'i_col1', 'i_col2', 'i_col3'])
     expect(mat.glsl.vertex).toContain('vec4 position4Inst = i_model * position4;')
     expect(mat.glsl.vertex).toContain('gl_Position = u_mvp * position4Inst;')
-    expect(mat.glsl.vertex).toContain('v_normal = mat3(u_model) * mat3(i_model) * normal;')
+    expect(mat.glsl.vertex).toContain('v_normal = mat3(u_model) * (mat3(i_model) * normal);')
+    expect(mat.wgsl).toContain('out.worldNormal = mat3x3<f32>(params.u_model[0].xyz, params.u_model[1].xyz, params.u_model[2].xyz) * (mat3x3<f32>(i_col0.xyz, i_col1.xyz, i_col2.xyz) * normal);')
     expect(mat.wgsl).toContain('out.pos = params.u_mvp * position4Inst;')
   })
 
@@ -262,8 +284,13 @@ describe('instanced', () => {
     resetMaterials()
     const mat = materialOf({ features: SKIN | INSTANCED | FLAT_ALBEDO | LAMBERT, jointCount: 4 })
     expect(mat.glsl.vertex).toContain('gl_Position = u_mvp * position4Inst;')
-    expect(mat.glsl.vertex).toContain('mat3(u_model) * mat3(i_model) * mat3(skin) * normal;')
-    expect(mat.wgsl).toContain('(i_model * (skin * vec4<f32>(normal, 0.0)))')
+    // The audit: the matrix-matrix product never forms — the chain is
+    // right-associated (3 × mat3×vec3 = 27 mults, not 63), and the WGSL side
+    // builds mat3x3 from the columns instead of dragging a vec4 through
+    // three mat4 products (48 → 27).
+    expect(mat.glsl.vertex).toContain('mat3(u_model) * (mat3(i_model) * (mat3(skin) * normal));')
+    expect(mat.wgsl).toContain('mat3x3<f32>(skin[0].xyz, skin[1].xyz, skin[2].xyz) * normal)')
+    expect(mat.wgsl).toContain('(mat3x3<f32>(i_col0.xyz, i_col1.xyz, i_col2.xyz) * (mat3x3<f32>(skin[0].xyz, skin[1].xyz, skin[2].xyz) * normal));')
   })
 })
 
@@ -351,5 +378,314 @@ describe('backend integration (the real compilers)', () => {
     expect(locations).toEqual([0, 1, 2, 3])
     const names = reflection.attributes.map(a => a.name)
     expect(names).toEqual(mat.attributes.map(a => a.name))
+  })
+})
+
+/* ── PBR: the optionable sub-models ───────────────────────────────────────── */
+
+/** Every VALID distribution×geometry pair (the exact Smith forms pair with
+ *  GGX only); × 2 fresnel × 3 diffuse = 84 BRDF variants in the sweep. */
+const D_G_PAIRS: Array<[name: string, d: number, g: number]> = [
+  ['ggx+smith', PBR_D_GGX, PBR_G_SMITH],
+  ['ggx+smith-schlick', PBR_D_GGX, PBR_G_SMITH_SCHLICK],
+  ['ggx+smith-height', PBR_D_GGX, PBR_G_SMITH_HEIGHT],
+  ['ggx+implicit', PBR_D_GGX, PBR_G_IMPLICIT],
+  ['ggx+neumann', PBR_D_GGX, PBR_G_NEUMANN],
+  ['ggx+kelemen', PBR_D_GGX, PBR_G_KELEMEN],
+  ['beckmann+smith-schlick', PBR_D_BECKMANN, PBR_G_SMITH_SCHLICK],
+  ['beckmann+implicit', PBR_D_BECKMANN, PBR_G_IMPLICIT],
+  ['beckmann+neumann', PBR_D_BECKMANN, PBR_G_NEUMANN],
+  ['beckmann+kelemen', PBR_D_BECKMANN, PBR_G_KELEMEN],
+  ['blinn+smith-schlick', PBR_D_BLINN, PBR_G_SMITH_SCHLICK],
+  ['blinn+implicit', PBR_D_BLINN, PBR_G_IMPLICIT],
+  ['blinn+neumann', PBR_D_BLINN, PBR_G_NEUMANN],
+  ['blinn+kelemen', PBR_D_BLINN, PBR_G_KELEMEN],
+]
+const FRESNELS = [PBR_F_SCHLICK, PBR_F_EXACT]
+const DIFFUSES = [PBR_DIFF_LAMBERT, PBR_DIFF_OREN_NAYAR, PBR_DIFF_BURLEY]
+
+describe('pbr: the sub-model catalog', () => {
+  it('pbrMask defaults to the exact Smith-GGX + Schlick + Lambert', () => {
+    expect(pbrMask()).toBe(PBR | PBR_D_GGX | PBR_G_SMITH | PBR_F_SCHLICK | PBR_DIFF_LAMBERT)
+  })
+
+  it('pbrMask routes every named choice to its bit', () => {
+    const choice: PbrModelChoice = {
+      distribution: 'beckmann',
+      geometry: 'kelemen',
+      fresnel: 'exact',
+      diffuse: 'burley',
+    }
+    expect(pbrMask(choice)).toBe(PBR | PBR_D_BECKMANN | PBR_G_KELEMEN | PBR_F_EXACT | PBR_DIFF_BURLEY)
+  })
+
+  it('the framework: world position varying, view vector, the shared uniforms', () => {
+    resetMaterials()
+    const mat = materialOf({ features: pbrMask() | FLAT_ALBEDO })
+    expect(mat.glsl.vertex).toContain('v_worldPos = (u_model * position4).xyz;')
+    expect(mat.wgsl).toContain('out.worldPos = (params.u_model * position4).xyz;')
+    expect(mat.glsl.fragment).toContain('vec3 v = normalize(u_camPos - v_worldPos);')
+    expect(mat.wgsl).toContain('let v = normalize(params.u_camPos.xyz - frag.worldPos);')
+    expect(mat.uniforms.map(u => u.name)).toEqual(
+      ['u_albedo', 'u_lightDir', 'u_lightColor', 'u_camPos', 'u_roughness', 'u_metallic'],
+    )
+    // energy conservation + the final combine
+    expect(mat.glsl.fragment).toContain('vec3 kd = (1.0 - metal) * (vec3(1.0) - F);')
+    expect(mat.glsl.fragment).toContain('vec3 lit = (diffuse + (D * vis) * F) * u_lightColor * nDotL;')
+  })
+
+  it('each distribution emits its own formula — and ONLY it', () => {
+    resetMaterials()
+    const ggx = assemble(pbrMask() | FLAT_ALBEDO, 0)
+    expect(ggx.glsl.fragment).toContain('float dd = nDotH * nDotH * (a2 - 1.0) + 1.0;')
+    expect(ggx.wgsl).toContain('let dd = nDotH * nDotH * (a2 - 1.0) + 1.0;')
+    expect(ggx.glsl.fragment).not.toContain('exp(')
+    expect(ggx.glsl.fragment).not.toContain('pow(')
+
+    const beckmann = assemble(pbrMask({ distribution: 'beckmann', geometry: 'kelemen' }) | FLAT_ALBEDO, 0)
+    expect(beckmann.glsl.fragment).toContain('exp((nh2 - 1.0)')
+    expect(beckmann.wgsl).toContain('exp((nh2 - 1.0)')
+    expect(beckmann.glsl.fragment).not.toContain('pow(')
+
+    const blinn = assemble(pbrMask({ distribution: 'blinn-phong', geometry: 'kelemen' }) | FLAT_ALBEDO, 0)
+    expect(blinn.glsl.fragment).toContain('pow(nDotH, blinnExp)')
+    expect(blinn.wgsl).toContain('pow(nDotH, blinnExp)')
+    expect(blinn.glsl.fragment).not.toContain('exp(')
+  })
+
+  it('the geometry family: every term in the FOLDED visibility form', () => {
+    resetMaterials()
+    const smith = assemble(pbrMask() | FLAT_ALBEDO, 0)
+    expect(smith.glsl.fragment).toContain('float vis = 1.0 / ((1.0 + sqL) * (1.0 + sqV));')
+    expect(smith.wgsl).toContain('let vis = 1.0 / ((1.0 + sqL) * (1.0 + sqV));')
+
+    const height = assemble(pbrMask({ geometry: 'smith-height' }) | FLAT_ALBEDO, 0)
+    expect(height.glsl.fragment).toContain('float lamL = (sqL - 1.0) * 0.5;')
+    expect(height.glsl.fragment).toContain('max(4.0 * nDotL * nDotV * (1.0 + lamL + lamV), 1e-8)')
+
+    const karis = assemble(pbrMask({ geometry: 'smith-schlick' }) | FLAT_ALBEDO, 0)
+    expect(karis.glsl.fragment).toContain('float kk = (rough + 1.0) * (rough + 1.0) * 0.125;')
+
+    // IMPLICIT folds to a constant — no division at all in the geometry
+    const implicit = assemble(pbrMask({ geometry: 'implicit' }) | FLAT_ALBEDO, 0)
+    expect(implicit.glsl.fragment).toContain('float vis = 0.25;')
+    expect(implicit.wgsl).toContain('let vis = 0.25;')
+    expect(implicit.glsl.fragment).not.toContain('sqL')
+
+    const neumann = assemble(pbrMask({ geometry: 'neumann' }) | FLAT_ALBEDO, 0)
+    expect(neumann.glsl.fragment).toContain('float vis = 0.25 / max(nDotL, nDotV);')
+
+    const kelemen = assemble(pbrMask({ geometry: 'kelemen' }) | FLAT_ALBEDO, 0)
+    expect(kelemen.glsl.fragment).toContain('float vis = 0.25 / max(vDotH * vDotH, 1e-8);')
+    expect(kelemen.glsl.fragment).not.toContain('sqL')
+  })
+
+  it('the Schlick fresnel expands the 5th power — no pow, in both languages', () => {
+    resetMaterials()
+    const mat = assemble(pbrMask() | FLAT_ALBEDO, 0)
+    expect(mat.glsl.fragment).toContain('float fT = 1.0 - vDotH;')
+    expect(mat.wgsl).toContain('let fT = 1.0 - vDotH;')
+    expect(mat.glsl.fragment).toContain('float fT5 = fT4 * fT;')
+    expect(mat.wgsl).toContain('let fT5 = fT4 * fT;')
+    // the only allowed pow is the Blinn distribution's — Schlick never uses it
+    expect(mat.glsl.fragment).not.toContain('pow(')
+    expect(mat.wgsl).not.toContain('pow(')
+  })
+
+  it('the exact fresnel declares u_ior and the dielectric term; Schlick does not', () => {
+    resetMaterials()
+    const exact = assemble(pbrMask({ fresnel: 'exact' }) | FLAT_ALBEDO, 0)
+    expect(exact.uniforms.map(u => u.name)).toContain('u_ior')
+    expect(exact.glsl.fragment).toContain('float fG = sqrt(max(u_ior * u_ior + fC * fC - 1.0, 0.0));')
+    expect(exact.wgsl).toContain('let fG = sqrt(max(params.u_ior * params.u_ior + fC * fC - 1.0, 0.0));')
+    const schlick = assemble(pbrMask() | FLAT_ALBEDO, 0)
+    expect(schlick.uniforms.map(u => u.name)).not.toContain('u_ior')
+  })
+
+  it('the diffuse family: Lambert / Oren-Nayar / Burley markers', () => {
+    resetMaterials()
+    const lambert = assemble(pbrMask() | FLAT_ALBEDO, 0)
+    expect(lambert.glsl.fragment).toContain('vec3 diffuse = kd * base.rgb * 0.318309886;')
+
+    const oren = assemble(pbrMask({ diffuse: 'oren-nayar' }) | FLAT_ALBEDO, 0)
+    expect(oren.glsl.fragment).toContain('float A = 1.0 - 0.5 * s2 / (s2 + 0.33);')
+    // the azimuthal cosφ (the spherical identity), not the dot(l,v) shortcut
+    expect(oren.glsl.fragment).toContain('inversesqrt(max((1.0 - nDotL * nDotL) * (1.0 - nDotV * nDotV), 1e-4))')
+    expect(oren.wgsl).toContain('let cosPhi = clamp((dot(l, v) - nDotL * nDotV)')
+
+    const burley = assemble(pbrMask({ diffuse: 'burley' }) | FLAT_ALBEDO, 0)
+    expect(burley.glsl.fragment).toContain('float FD90 = 0.5 + 2.0 * vDotH * vDotH * rough;')
+    expect(burley.wgsl).toContain('let FD90 = 0.5 + 2.0 * vDotH * vDotH * rough;')
+  })
+
+  it('the metallic-roughness texture: one .gb sample, factor multiply, binding 4', () => {
+    resetMaterials()
+    const mat = materialOf({ features: pbrMask() | FLAT_ALBEDO | PBR_MR_TEXTURE })
+    expect(mat.glsl.fragment).toContain('vec2 mr = texture(u_mrTex, v_uv).gb;')
+    expect(mat.glsl.fragment).toContain('float rough = clamp(u_roughness * mr.x, 0.045, 1.0);')
+    expect(mat.wgsl).toContain('let mr = textureSample(mrTexture, texSampler, frag.uv).gb;')
+    expect(mat.wgsl).toContain('@group(1) @binding(4) var mrTexture : texture_2d<f32>;')
+    expect(mat.wgsl).toContain('@group(1) @binding(0) var texSampler : sampler;')
+    expect(mat.samplers).toEqual(['u_mrTex'])
+    // FLAT_ALBEDO + MR still gets the uv attribute (the gap-filler entry)
+    expect(mat.attributes.map(a => a.name)).toEqual(['position', 'normal', 'uv'])
+    expect(mat.glsl.vertex).toContain('v_uv = uv;')
+    expect(mat.glsl.fragment).toContain('in vec2 v_uv;')
+    // exactly ONE texture sample for the MR data
+    expect(mat.glsl.fragment.match(/texture\(u_mrTex/g)?.length).toBe(1)
+  })
+
+  it('PBR fragments are highp; the simple light models stay mediump', () => {
+    resetMaterials()
+    const pbr = materialOf({ features: pbrMask() | FLAT_ALBEDO })
+    expect(pbr.glsl.fragment).toContain('precision highp float;')
+    const lambert = materialOf({ features: LAMBERT | FLAT_ALBEDO })
+    expect(lambert.glsl.fragment).toContain('precision mediump float;')
+    const matcap = materialOf({ features: MATCAP | FLAT_ALBEDO })
+    expect(matcap.glsl.fragment).toContain('precision mediump float;')
+  })
+
+  it('the roughness is clamped (the mirrored-surface NaN guard)', () => {
+    resetMaterials()
+    const mat = materialOf({ features: pbrMask() | FLAT_ALBEDO })
+    expect(mat.glsl.fragment).toContain('clamp(u_roughness, 0.045, 1.0)')
+    expect(mat.wgsl).toContain('clamp(params.u_roughness, 0.045, 1.0)')
+  })
+
+  it('invalid combinations fail with actionable family errors', () => {
+    resetMaterials()
+    expect(() => materialOf({ features: LAMBERT | pbrMask() | FLAT_ALBEDO })).toThrow(/mutually exclusive light models/)
+    expect(() => materialOf({ features: MATCAP | pbrMask() | FLAT_ALBEDO })).toThrow(/mutually exclusive light models/)
+    // a bare sub-model bit without PBR
+    expect(() => materialOf({ features: FLAT_ALBEDO | PBR_D_GGX })).toThrow(/require PBR/)
+    expect(() => materialOf({ features: FLAT_ALBEDO | PBR_MR_TEXTURE })).toThrow(/require PBR/)
+    // exactly-one per family
+    expect(() => materialOf({ features: PBR | PBR_D_GGX | PBR_D_BECKMANN | PBR_G_SMITH | PBR_F_SCHLICK | PBR_DIFF_LAMBERT | FLAT_ALBEDO }))
+      .toThrow(/exactly one distribution/)
+    expect(() => materialOf({ features: PBR | PBR_D_GGX | PBR_G_SMITH | PBR_G_KELEMEN | PBR_F_SCHLICK | PBR_DIFF_LAMBERT | FLAT_ALBEDO }))
+      .toThrow(/exactly one geometry model/)
+    expect(() => materialOf({ features: PBR | PBR_D_GGX | PBR_G_SMITH | PBR_F_SCHLICK | PBR_F_EXACT | PBR_DIFF_LAMBERT | FLAT_ALBEDO }))
+      .toThrow(/exactly one fresnel model/)
+    expect(() => materialOf({ features: PBR | PBR_D_GGX | PBR_G_SMITH | PBR_F_SCHLICK | PBR_DIFF_LAMBERT | PBR_DIFF_BURLEY | FLAT_ALBEDO }))
+      .toThrow(/exactly one diffuse model/)
+    // PBR with NO sub-model bits: all four families are missing
+    expect(() => materialOf({ features: PBR | FLAT_ALBEDO })).toThrow(/exactly one distribution/)
+    // the exact Smith forms are Smith-GGX
+    expect(() => materialOf({ features: pbrMask({ distribution: 'beckmann' }) | FLAT_ALBEDO })).toThrow(/Smith-GGX/)
+    expect(() => materialOf({ features: pbrMask({ distribution: 'blinn-phong' }) | FLAT_ALBEDO })).toThrow(/Smith-GGX/)
+  })
+
+  it('the jointCount bound of the cache key stride', () => {
+    expect(() => materialOf({ features: SKIN | LAMBERT | FLAT_ALBEDO, jointCount: 8192 })).toThrow(/8192/)
+  })
+
+  it('ALL 84 valid BRDF variants: clean WGSL (lint) + uniform parity + minimality', () => {
+    resetMaterials()
+    let assembled = 0
+    for (const [name, d, g] of D_G_PAIRS) {
+      for (const f of FRESNELS) {
+        for (const diff of DIFFUSES) {
+          const mask = PBR | d | g | f | diff | FLAT_ALBEDO
+          const mat = materialOf({ features: mask })
+          assembled++
+          // the WGSL linter: statement-level sanity of the generated source
+          expect(lintWgsl(mat.wgsl)).toEqual([])
+          // the reflected uniform NAMES agree between the two languages
+          const glsl = reflectGlsl(mat.glsl.vertex, mat.glsl.fragment)
+          const wgsl = reflectWgsl(mat.wgsl)
+          const glslNames = [...new Set(glsl.uniforms.filter(u => u.type !== 'sampler2D').map(u => u.name))].sort()
+          const wgslNames = wgsl.uniforms.map(u => u.name).sort()
+          expect(glslNames).toEqual(wgslNames)
+          // minimality: the exact fresnel's u_ior appears in exactly the
+          // exact variants; the Smith sqrt pair in the Smith variants only
+          if (f !== PBR_F_EXACT) expect(wgslNames).not.toContain('u_ior')
+          else expect(wgslNames).toContain('u_ior')
+          const smithy = (g === PBR_G_SMITH || g === PBR_G_SMITH_HEIGHT)
+          expect(mat.glsl.fragment.includes('float sqL =')).toBe(smithy)
+          void name
+        }
+      }
+    }
+    expect(assembled).toBe(14 * 2 * 3)
+    expect(variantCount()).toBe(84)
+  })
+
+  it('PBR composes with the base/post features: skin, normal map, alpha, fog', () => {
+    resetMaterials()
+    const mat = materialOf({ features: SKIN | pbrMask() | FLAT_ALBEDO | DOUBLE_SIDED | EMISSIVE | FOG, jointCount: 4 })
+    expect(mat.glsl.vertex).toContain('u_bones[4]')
+    expect(mat.glsl.vertex).toContain('v_worldPos = (u_model * position4).xyz;')
+    // fog AFTER the light model (the worldPos and viewZ coexist)
+    expect(mat.glsl.fragment.indexOf('vec3 lit =')).toBeLessThan(mat.glsl.fragment.indexOf('lit = mix(lit, u_fogColor'))
+    expect(mat.glsl.fragment).toContain('lit += u_emissive;')
+    // `lit` must be reassignable when post effects mutate it
+    expect(mat.wgsl).toContain('var lit = (diffuse + (D * vis) * F)')
+    // the normal map path: the normal from the map, the worldPos still there
+    const nmap = materialOf({ features: TEXTURE | NORMALMAP | pbrMask() | DOUBLE_SIDED })
+    expect(nmap.glsl.vertex).not.toContain('v_normal')
+    expect(nmap.glsl.fragment).toContain('vec3 n = normalize(mat3(u_model)')
+    expect(nmap.glsl.fragment).toContain('v_worldPos')
+    expect(nmap.glsl.fragment).not.toContain('normalize(v_normal)')
+  })
+})
+
+describe('the variant cache key (the bit-overlap fix)', () => {
+  it('EMISSIVE at bit 26 no longer aliases jointCount 64 (features × 8192)', () => {
+    resetMaterials()
+    // Under the old `features + (jointCount << 20)` these two produced the
+    // SAME key (bit 26 = 64 × 2^20) — one palette size silently served both.
+    const a = materialOf({ features: SKIN | LAMBERT | FLAT_ALBEDO | EMISSIVE, jointCount: 64 })
+    const b = materialOf({ features: SKIN | LAMBERT | FLAT_ALBEDO | EMISSIVE, jointCount: 1 })
+    expect(b).not.toBe(a)
+    expect(a.glsl.vertex).toContain('u_bones[64]')
+    expect(b.glsl.vertex).toContain('u_bones[1]')
+    // and the PBR sub-bits (up to bit 25) keep distinct variants too
+    const c = materialOf({ features: SKIN | pbrMask() | FLAT_ALBEDO, jointCount: 33 })
+    const d = materialOf({ features: SKIN | pbrMask() | FLAT_ALBEDO, jointCount: 1 })
+    expect(d).not.toBe(c)
+    expect(c.glsl.vertex).toContain('u_bones[33]')
+  })
+})
+
+describe('pbr backend integration (the real compilers)', () => {
+  it('GLSL: compileDrawSpec consumes the assembled PBR pair', async () => {
+    resetMaterials()
+    const { createCompileContext, compileDrawSpec } = await import('@rune/webgl2')
+    const arena = createUniformArena(1 << 16)
+    const ctx = createCompileContext(arena, 'codegen')
+    const mat = materialOf({ features: pbrMask() | FLAT_ALBEDO })
+    const command = compileDrawSpec({
+      shader: { glsl: mat.glsl },
+      pipeline: { depth: { test: 'less', write: true } },
+      uniforms: {
+        u_mvp: MAT4,
+        u_lightDir: [0.5, 0.8, 0.6],
+        u_lightColor: [1, 1, 1],
+        u_camPos: [0, 0.55, 3.2],
+        u_roughness: 0.9,
+        u_metallic: 0,
+        u_albedo: [0.8, 0.7, 0.5],
+      },
+      attributes: {
+        position: { data: TRI, size: 3 },
+        normal: { data: TRI, size: 3 },
+      },
+      count: 3,
+    }, ctx)
+    expect(command.id).toBe(0)
+    const bindings = (command as unknown as { bindings: Array<{ name: string }> }).bindings.map(b => b.name)
+    for (const name of ['u_lightDir', 'u_lightColor', 'u_camPos', 'u_roughness', 'u_metallic']) {
+      expect(bindings).toContain(name)
+    }
+  })
+
+  it('WGSL: reflectWgsl sizes the uniform window with the PBR fields', () => {
+    resetMaterials()
+    const mat = materialOf({ features: pbrMask() | FLAT_ALBEDO })
+    const reflection = reflectWgsl(mat.wgsl)
+    // 2 mat4 (128 B) + 3 vec4 (48) + 2 f32 (8, padded to 16) >= 192
+    expect(reflection.uniformBytes).toBeGreaterThanOrEqual(192)
+    const names = reflection.uniforms.map(u => u.name)
+    expect(names).toEqual(['u_mvp', 'u_model', 'u_albedo', 'u_lightDir', 'u_lightColor', 'u_camPos', 'u_roughness', 'u_metallic'])
   })
 })

@@ -210,6 +210,12 @@ try {
   console.log(`[smoke] scene: ${await page.textContent('.mv-stats')}`)
   const viewerAlive = await framesDiffer(page)
   console.log(`[smoke] model-viewer animation: ${viewerAlive ? 'alive' : 'STATIC'}`)
+  // 7b. The house renders through the PBR pipeline (Cook-Torrance) — the
+  // GLSL compile of the assembled variant must leave no validation errors
+  const pbrLogText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
+  const pbrGpuClean = !/too small|Invalid CommandBuffer|storm|rendering stopped|GL: GL_|GPU: /i.test(pbrLogText)
+  console.log(`[smoke] house PBR GPU health: ${pbrGpuClean ? 'clean (no compile/validation errors)' : 'GPU ERRORS in the log'}`)
+  if (!pbrGpuClean) console.log(`[smoke] log tail: ${pbrLogText.slice(-600)}`)
 
   // 8. Switching to a not-yet-loaded model brings the load button back
   await page.click('.mv-pill') // open the model sheet
@@ -364,6 +370,7 @@ try {
     logEntries > 0 &&
     mobileOk &&
     viewerAlive &&
+    pbrGpuClean &&
     loadText !== null &&
     loadText.includes('Load') &&
     sambaStatsOk &&

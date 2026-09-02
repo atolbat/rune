@@ -1,7 +1,8 @@
-import { materialOf, resetMaterials, assemble, type AssembledMaterial } from '../src/index.ts'
+import { materialOf, resetMaterials, assemble, pbrMask, type AssembledMaterial, type PbrModelChoice } from '../src/index.ts'
 import {
   SKIN, INSTANCED, NORMALMAP, TEXTURE, FLAT_ALBEDO, VERTEX_COLOR,
   DOUBLE_SIDED, ALPHA_CUTOFF, LAMBERT, MATCAP, EMISSIVE, FOG,
+  PBR_MR_TEXTURE,
 } from '../src/index.ts'
 
 /**
@@ -22,6 +23,15 @@ import {
  * must be numeric. The cache hit is what a frame actually pays.
  */
 
+/** A few named PBR configurations (the sub-model matrix). */
+const PBR_VARIANTS: Array<[name: string, choice: PbrModelChoice]> = [
+  ['pbr default (ggx+smith+schlick+lambert)', {}],
+  ['pbr karis (smith-schlick+burley)', { geometry: 'smith-schlick', diffuse: 'burley' }],
+  ['pbr height-correlated', { geometry: 'smith-height' }],
+  ['pbr oren-nayar (kelemen+exact)', { geometry: 'kelemen', fresnel: 'exact', diffuse: 'oren-nayar' }],
+  ['pbr blinn (schlick)', { distribution: 'blinn-phong', geometry: 'implicit' }],
+]
+
 const VARIANTS: Array<[name: string, features: number, joints: number]> = [
   ['unlit-flat', FLAT_ALBEDO, 0],
   ['lambert-flat', FLAT_ALBEDO | LAMBERT, 0],
@@ -39,6 +49,13 @@ const VARIANTS: Array<[name: string, features: number, joints: number]> = [
   ['glow (flat+emissive)', FLAT_ALBEDO | EMISSIVE, 0],
   ['instanced (flat+lambert)', FLAT_ALBEDO | LAMBERT | INSTANCED, 0],
 ]
+for (const [name, choice] of PBR_VARIANTS) {
+  VARIANTS.push([name, pbrMask(choice) | FLAT_ALBEDO, 0])
+}
+VARIANTS.push(['pbr-house (tex+2s+mask)', pbrMask() | TEXTURE | DOUBLE_SIDED | ALPHA_CUTOFF, 0])
+VARIANTS.push(['pbr-nmap (tex+nmap)', pbrMask() | TEXTURE | NORMALMAP, 0])
+VARIANTS.push(['pbr-mr (flat+mr texture)', pbrMask() | FLAT_ALBEDO | PBR_MR_TEXTURE, 0])
+VARIANTS.push(['pbr-skin (skin 67)', SKIN | pbrMask() | FLAT_ALBEDO | DOUBLE_SIDED, 67])
 
 function bestOf(repeats: number, run: () => void): number {
   let best = Infinity
@@ -97,6 +114,32 @@ function retainedFootprint(): { factor: number; perVariant: number } | null {
 }
 const footprint = retainedFootprint()
 
+// ── 5. The full BRDF matrix: all 84 valid D×G×F×diffuse combinations ────────
+// (the sub-model proof: every one is a distinct, minimal, lint-clean variant)
+// Bit positions: D 11..13 (ggx, beckmann, blinn), G 14..19 (smith, schlick,
+// height, implicit, neumann, kelemen), F 20..21 (schlick, exact), diff 22..24.
+const D_G: Array<[d: number, g: number]> = [
+  [11, 14], [11, 15], [11, 16], [11, 17], [11, 18], [11, 19],
+  [12, 15], [12, 17], [12, 18], [12, 19],
+  [13, 15], [13, 17], [13, 18], [13, 19],
+]
+const F = [20, 21]  // schlick, exact
+const DIFF = [22, 23, 24]  // lambert, oren-nayar, burley
+const SUB_BITS = (0b111 << 11) | (0b111111 << 14) | (0b11 << 20) | (0b111 << 22)
+const PBR_CLEAR = pbrMask() & ~SUB_BITS
+let brdfCount = 0
+const brdfMs = bestOf(20, () => {
+  for (const [dShift, gShift] of D_G) {
+    for (const fShift of F) {
+      for (const diffShift of DIFF) {
+        const mask = PBR_CLEAR | (1 << dShift) | (1 << gShift) | (1 << fShift) | (1 << diffShift)
+        assemble(mask | FLAT_ALBEDO, 0)
+        brdfCount++
+      }
+    }
+  }
+})
+
 // ── report ─────────────────────────────────────────────────────────────────
 console.log('── Materials: the assembly pipeline ──')
 console.log('cold assembly (one variant, best of 200):')
@@ -111,3 +154,5 @@ if (footprint === null) {
     `${footprint.factor.toFixed(2)}x the source bytes (results only — the scratch is shared)`)
 }
 console.log(`variant count after warmup   : ${VARIANTS.length} combos share ${VARIANTS.length} shader pairs`)
+console.log(`the 84-variant BRDF matrix   : ${brdfCount} assemblies in ${(brdfMs * 1000).toFixed(0)} µs ` +
+  `(${(brdfMs * 1000 / brdfCount).toFixed(1)} µs per variant, best of 20)`)

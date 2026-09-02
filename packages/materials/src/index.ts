@@ -8,6 +8,14 @@
 // the assembled sources as-is — the attribute names are the same in both
 // languages, so one `attributes` record feeds two backends.
 //
+// PBR is a FAMILY, not a single model: the distribution (GGX / Beckmann /
+// Blinn-Phong), the geometry term (the exact Smith, Karis's approximation,
+// the height-correlated Smith, implicit / Neumann / Kelemen), the Fresnel
+// (Schlick / the exact dielectric form) and the diffuse lobe (Lambert /
+// Oren-Nayar / Burley) are each an assembly-time option — pbrMask() is the
+// ergonomic route, the raw bits the explicit one. A variant carries ONLY
+// the chosen formulas, with the Cook-Torrance algebra folded at assembly.
+//
 // Layers:
 //   features.ts  — the catalog (bits + GLSL/WGSL snippets)
 //   assemble.ts  — the one-shot builder (pure, zero ghost allocations)
@@ -28,10 +36,32 @@ export {
   ALPHA_CUTOFF,
   LAMBERT,
   MATCAP,
+  PBR,
+  PBR_D_GGX,
+  PBR_D_BECKMANN,
+  PBR_D_BLINN,
+  PBR_G_SMITH,
+  PBR_G_SMITH_SCHLICK,
+  PBR_G_SMITH_HEIGHT,
+  PBR_G_IMPLICIT,
+  PBR_G_NEUMANN,
+  PBR_G_KELEMEN,
+  PBR_F_SCHLICK,
+  PBR_F_EXACT,
+  PBR_DIFF_LAMBERT,
+  PBR_DIFF_OREN_NAYAR,
+  PBR_DIFF_BURLEY,
+  PBR_MR_TEXTURE,
   EMISSIVE,
   FOG,
   LIGHT_MODELS,
   POST_EFFECTS,
+  PBR_D_MODELS,
+  PBR_G_MODELS,
+  PBR_F_MODELS,
+  PBR_DIFF_MODELS,
+  PBR_SUB_MODELS,
+  pbrMask,
 } from './features.ts'
 export type {
   FeatureBit,
@@ -42,6 +72,7 @@ export type {
   VertSnippets,
   FragSnippets,
   FeatureDef,
+  PbrModelChoice,
 } from './features.ts'
 
 export { assemble } from './assemble.ts'

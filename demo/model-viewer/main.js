@@ -1,5 +1,8 @@
 // "model-viewer" demo: a scene with a loader — three models from the three.js examples
-//   Forest House — glTF + AVIF textures + Draco (webgl_loader_gltf_avif)
+//   Forest House — glTF + AVIF textures + Draco (webgl_loader_gltf_avif),
+//     shaded by the PBR light model (Cook-Torrance: the exact separable
+//     Smith-GGX + Schlick Fresnel + Lambert diffuse, its glTF factors for
+//     metallic/roughness) — the pbrMask() defaults of @rune/materials
 //   Samba Dancing — FBX, skeleton, skinning, clip playback (webgl_loader_fbx)
 //   Nefertiti — glTF + object-space normal map (webgl_materials_normalmap_object_space)
 //   Matcap Cube — a procedural geometry shaded by the MATCAP pipeline feature
@@ -17,6 +20,7 @@ import { AssetLoader } from '../../dist/rune-loaders.esm.js'
 import { createAnimator } from '../../dist/rune-animation.esm.js'
 import {
   materialOf,
+  pbrMask,
   SKIN,
   NORMALMAP,
   TEXTURE,
@@ -33,9 +37,10 @@ const MODELS = [
   {
     id: 'house',
     title: 'Forest House',
-    sub: 'glTF · AVIF · Draco',
+    sub: 'glTF · AVIF · Draco · PBR',
     url: 'assets/forest_house.glb',
     bytes: 303_984,
+    pbr: true,
   },
   {
     id: 'samba',
@@ -63,6 +68,9 @@ const MODELS = [
 
 const MODE_NAMES = { auto: 'Auto (WebGPU → WebGL2 fallback)', webgl2: 'WebGL2', webgpu: 'WebGPU' }
 const LIGHT_DIR = [0.5, 0.8, 0.6]
+// The direct-light radiance for the PBR model (the sun; the Lambert path
+// bakes its level into the ambient terms instead).
+const LIGHT_COLOR = [4.0, 4.0, 4.0]
 
 /* ─── Materials (the @rune/materials assembly pipeline) ───────────────── */
 
@@ -72,7 +80,13 @@ const LIGHT_DIR = [0.5, 0.8, 0.6]
 // across the two languages: one binding per buffer.
 const NJ = 67 // samba skeleton: 67 joints (see the load log)
 const MATERIALS = {
-  // Forest House: textured Lambert, MASK alpha, open surfaces
+  // Forest House: Cook-Torrance PBR (the exact separable Smith-GGX + Schlick
+  // + Lambert diffuse — the pbrMask defaults), textured, MASK alpha, open
+  // surfaces; the metallic/roughness factors come from the glTF materials
+  pbr: () => materialOf({ features: pbrMask() | TEXTURE | DOUBLE_SIDED | ALPHA_CUTOFF }),
+  // A PBR mesh with an object-space normal map (general glTF shape)
+  pbrNmap: () => materialOf({ features: pbrMask() | TEXTURE | NORMALMAP | DOUBLE_SIDED }),
+  // Textured Lambert (the pre-PBR house look)
   textured: () => materialOf({ features: TEXTURE | LAMBERT | DOUBLE_SIDED | ALPHA_CUTOFF }),
   // Nefertiti: the normal comes from an object-space normal map
   normalmap: () => materialOf({ features: TEXTURE | NORMALMAP | LAMBERT | DOUBLE_SIDED }),
@@ -365,7 +379,7 @@ async function decodeDraco(bytes, attributes) {
 const loader = new AssetLoader({ dracoDecoder: decodeDraco })
 
 /** glTF/GLB: nodes → world matrices → baking → deindexing + materials. */
-function prepareGltf(model) {
+function prepareGltf(model, entry) {
   const meshes = []
   const nodeMatrix = M()
   const visit = (nodeIndex, parent) => {
@@ -397,11 +411,20 @@ function prepareGltf(model) {
             normalBitmap: material?.normalImage !== null && material?.normalImage !== undefined
               ? model.images[material.normalImage]
               : null,
+            // The glTF PBR factors (used by the PBR light model; defaults 1.0
+            // per the spec) + the optional metallicRoughness texture
+            // (G = roughness, B = metallic — multiplied by the factors).
+            roughness: material?.roughnessFactor ?? 1,
+            metallic: material?.metallicFactor ?? 1,
+            mrBitmap: material?.mrImage !== null && material?.mrImage !== undefined
+              ? model.images[material.mrImage]
+              : null,
             albedo: material?.baseColorFactor?.slice(0, 3) ?? [1, 1, 1],
             blend: material?.alphaMode === 'BLEND',
             alphaCutoff: material?.alphaMode === 'MASK' ? (material.alphaCutoff || 0.5) : 0,
             cull: material?.doubleSided === true ? 'none' : 'back',
             name: mesh.name,
+            pbr: entry.pbr === true,
           })
         }
       }
@@ -722,7 +745,7 @@ async function loadModel(model) {
       // LoadHandle is thenable: awaiting the handle yields the parsed asset
       const asset = await handle
       if (seq !== loadSeq) return
-      preparedModel = model.id === 'samba' ? prepareFbx(asset) : prepareGltf(asset)
+      preparedModel = model.id === 'samba' ? prepareFbx(asset) : prepareGltf(asset, model)
     }
     prepared.set(model.id, preparedModel)
     shell.log.event(
@@ -809,11 +832,13 @@ async function attachScene(id) {
   if (model === undefined || activeRenderer === null) return
   const drawMeshes = []
   for (const mesh of model.meshes) {
-    const variant = mesh.skinned === true
-      ? 'skinned'
-      : mesh.matcap === true
-        ? 'matcap'
-        : mesh.normalBitmap !== null ? 'normalmap' : mesh.bitmap !== null ? 'textured' : 'flat'
+    const variant = mesh.pbr === true && mesh.bitmap !== null
+      ? (mesh.normalBitmap !== null ? 'pbrNmap' : 'pbr')
+      : mesh.skinned === true
+        ? 'skinned'
+        : mesh.matcap === true
+          ? 'matcap'
+          : mesh.normalBitmap !== null ? 'normalmap' : mesh.bitmap !== null ? 'textured' : 'flat'
     const bitmap = await resolveBitmap(mesh.bitmap)
     if (mesh.bitmap !== null && bitmap === null) {
       shell.log.warn(`mesh “${mesh.name}”: texture failed to decode — drawing albedo`)
@@ -829,7 +854,18 @@ async function attachScene(id) {
       u_model: (p) => p.model,
       u_lightDir: LIGHT_DIR,
     }
-    if (variant === 'textured') {
+    if (variant === 'pbr' || variant === 'pbrNmap') {
+      // The Cook-Torrance inputs: camera position (the view vector), the
+      // glTF metallic/roughness factors, the light radiance
+      attributes.position = { data: mesh.positions, size: 3 }
+      attributes.normal = { data: mesh.normals, size: 3 }
+      attributes.uv = { data: mesh.uvs, size: 2 }
+      uniforms.u_lightColor = LIGHT_COLOR
+      uniforms.u_camPos = (p) => p.camPos
+      uniforms.u_roughness = mesh.roughness
+      uniforms.u_metallic = mesh.metallic
+      if (variant === 'pbr') uniforms.u_alphaCutoff = mesh.alphaCutoff
+    } else if (variant === 'textured') {
       attributes.position = { data: mesh.positions, size: 3 }
       attributes.normal = { data: mesh.normals, size: 3 }
       attributes.uv = { data: mesh.uvs, size: 2 }
@@ -862,7 +898,28 @@ async function attachScene(id) {
 
     // Textures: glTF bitmaps are already decoded by the parser (createImageBitmap)
     let glTexture = null
-    if (variant === 'textured' && bitmap !== null) {
+    if ((variant === 'pbr' || variant === 'pbrNmap') && bitmap !== null) {
+      glTexture = activeRenderer.texture(bitmap.width, bitmap.height)
+      glTexture.uploadImage(bitmap)
+      textures.u_tex = glTexture
+      textures.texTexture = glTexture
+      if (variant === 'pbrNmap' && normalBitmap !== null) {
+        const glNormal = activeRenderer.texture(normalBitmap.width, normalBitmap.height)
+        glNormal.uploadImage(normalBitmap)
+        textures.u_normalMap = glNormal
+        textures.nrmTexture = glNormal
+      }
+      // The glTF metallicRoughness map (G = roughness, B = metallic)
+      if (mesh.mrBitmap !== null) {
+        const mrBitmap = await resolveBitmap(mesh.mrBitmap)
+        if (mrBitmap !== null) {
+          const glMr = activeRenderer.texture(mrBitmap.width, mrBitmap.height)
+          glMr.uploadImage(mrBitmap)
+          textures.u_mrTex = glMr
+          textures.mrTexture = glMr
+        }
+      }
+    } else if (variant === 'textured' && bitmap !== null) {
       glTexture = activeRenderer.texture(bitmap.width, bitmap.height)
       glTexture.uploadImage(bitmap)
       textures.u_tex = glTexture
@@ -935,6 +992,9 @@ const spin = M()
 const fit = M()
 const model = M()
 const mvp = M()
+// The camera eye (the mat4LookAt origin) — reused per frame, feeds the PBR
+// view vector (u_camPos); x/y are the fixed orbit pivot, z follows camDist.
+const camPos = new Float32Array([0, 0.55, 3.2])
 let cachedAspect = 0
 
 // Rotation: auto-spin + drag (touch/mouse), pitch is clamped.
@@ -1034,6 +1094,7 @@ function frameCallback(ctx, record) {
   }
   mat4LookAt(view, 0, 0.55, camDist, 0, 0, 0)
   mat4Multiply(viewProj, projection, view)
+  camPos[2] = camDist
 
   // auto-spin: paused while dragging and for 1.5 s after
   if (!dragging && performance.now() - lastInteraction > 1500) yaw += ctx.dt * 0.35
@@ -1059,8 +1120,9 @@ function frameCallback(ctx, record) {
   const animation = current?.animation
   if (animation !== undefined) animation.advance(ctx.dt)
   const bones = animation !== undefined ? animation.palette : null
-  // `view` feeds the matcap (the view-space normal lookup)
-  for (const command of scene.meshes) record(command, { mvp, model, bones, view })
+  // `view` feeds the matcap (the view-space normal lookup); `camPos` feeds
+  // the PBR view vector.
+  for (const command of scene.meshes) record(command, { mvp, model, bones, view, camPos })
 }
 
 async function boot(mode) {
