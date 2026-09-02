@@ -326,7 +326,7 @@ describe('Task 114: the T3 feed writer', () => {
     const b1 = feed.push(2)
     b1.setVec3('position', 0, 1, 2, 3)
     b1.setFloat('radius', 1, 0.5)
-    const firstBuffer = feed.buffer
+    const firstBuffer = feed.buffer as ArrayBuffer
     const msg1 = host.flush()
     expect(msg1!.chunks[0]!.bytes).toBe(firstBuffer)
 
@@ -337,7 +337,7 @@ describe('Task 114: the T3 feed writer', () => {
     expect(b2).toBe(b1)
     b2.setVec3('position', 0, 7, 8, 9)
     b2.setFloat('radius', 1, 1.5)
-    const secondBuffer = feed.buffer
+    const secondBuffer = feed.buffer as ArrayBuffer
     expect(secondBuffer).not.toBe(firstBuffer)
     const msg2 = host.flush()
     expect(msg2!.chunks[0]!.bytes).toBe(secondBuffer)
