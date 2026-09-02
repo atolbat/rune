@@ -125,6 +125,21 @@ export function isVisibleRank(
   return (views.bits[base + (rank >>> 5)] & (1 << (rank & 31))) !== 0
 }
 
+/** Pushes the child subtree ranges of [s, e) onto the module stack.
+ *  A module-level function (not a closure): cull runs per camera per frame —
+ *  the old closure was a hidden per-call allocation. */
+function splitChildrenOf(order: Int32Array, subtreeEnd: Int32Array, s: number, e: number, mask: number, sp: number): number {
+  let r2 = s + 1
+  while (r2 < e) {
+    const child = order[r2]
+    const childEnd = subtreeEnd[child]
+    const end = childEnd > r2 ? childEnd : r2 + 1
+    sp = pushRange(r2, end, mask, sp)
+    r2 = end
+  }
+  return sp
+}
+
 /**
  * Hierarchical culling of camera cameraIndex into buffer bufferIndex (0/1).
  * Requires fresh spheres (updateWorld + refitGroupBounds) and pack().
@@ -152,16 +167,6 @@ export function cullViewsHierarchical(
 
   // Forest roots: subtree ranges + the full mask (at the top — all 6).
   let sp = 0
-  function splitChildren(s: number, e: number, mask: number): void {
-    let r2 = s + 1
-    while (r2 < e) {
-      const child = order[r2]
-      const childEnd = subtreeEnd[child]
-      const end = childEnd > r2 ? childEnd : r2 + 1
-      sp = pushRange(r2, end, mask, sp)
-      r2 = end
-    }
-  }
   for (let r = 0; r < n; ) {
     const slot = order[r]
     const end = subtreeEnd[slot]
@@ -221,7 +226,7 @@ export function cullViewsHierarchical(
       } else {
         // The node's point is outside, but the children may protrude into view — its own bit only.
         bits[base + (s >>> 5)] &= ~(1 << (s & 31))
-        splitChildren(s, e, mask)
+        sp = splitChildrenOf(order, subtreeEnd, s, e, mask, sp)
       }
       continue
     }
@@ -237,7 +242,7 @@ export function cullViewsHierarchical(
     // masks=false — the A/B mode "before Task 85": the mask is not narrowed,
     // nodes below test all 6 planes (the result is identical — only costlier).
     bits[base + (s >>> 5)] |= 1 << (s & 31)
-    if (!leaf) splitChildren(s, e, masks && enclosing ? interMask : mask)
+    if (!leaf) sp = splitChildrenOf(order, subtreeEnd, s, e, masks && enclosing ? interMask : mask, sp)
   }
 
   if (out !== undefined) {

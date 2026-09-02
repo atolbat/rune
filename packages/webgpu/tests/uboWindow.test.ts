@@ -180,6 +180,8 @@ describe('UBO dynamic-offset binding window', () => {
     const [index, group, dynamicOffsets] = calls.passSetBindGroup[0]!
     expect(index).toBe(0)
     expect(group).toBe(calls.bindGroups[0]!)
-    expect(dynamicOffsets).toEqual([256])
+    // A scratch Uint32Array is passed (no array allocation per draw) —
+    // the WebGPU API accepts any sequence; compare contents, not the wrapper.
+    expect(Array.from(dynamicOffsets as ArrayLike<number>)).toEqual([256])
   })
 })

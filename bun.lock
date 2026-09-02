@@ -22,6 +22,15 @@
         "@rune/math": "workspace:*",
       },
     },
+    "packages/materials": {
+      "name": "@rune/materials",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@rune/core": "workspace:*",
+        "@rune/webgl2": "workspace:*",
+        "@rune/webgpu": "workspace:*",
+      },
+    },
     "packages/core": {
       "name": "@rune/core",
       "version": "0.1.0",
@@ -135,6 +144,8 @@
     "@rune/kit": ["@rune/kit@workspace:packages/kit"],
 
     "@rune/loaders": ["@rune/loaders@workspace:packages/loaders"],
+
+    "@rune/materials": ["@rune/materials@workspace:packages/materials"],
 
     "@rune/math": ["@rune/math@workspace:packages/math"],
 

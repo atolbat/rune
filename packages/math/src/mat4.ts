@@ -73,16 +73,21 @@ export function mat4Multiply(out: Float32Array, a: Float32Array, b: Float32Array
   // a is read across all columns while out is written column by column:
   // with out === a the input would be clobbered on the first write. b is read
   // strictly before its own column is written — aliasing with b is safe without a copy.
-  const left = out === a ? new Float32Array(a) : a
+  // out === a — the 16 inputs are hoisted into locals (gl-matrix style):
+  // no Float32Array copy on the aliased path.
+  const a0 = a[0], a1 = a[1], a2 = a[2], a3 = a[3]
+  const a4 = a[4], a5 = a[5], a6 = a[6], a7 = a[7]
+  const a8 = a[8], a9 = a[9], a10 = a[10], a11 = a[11]
+  const a12 = a[12], a13 = a[13], a14 = a[14], a15 = a[15]
   for (let col = 0; col < 4; col++) {
     const b0 = b[col * 4]
     const b1 = b[col * 4 + 1]
     const b2 = b[col * 4 + 2]
     const b3 = b[col * 4 + 3]
-    out[col * 4] = left[0] * b0 + left[4] * b1 + left[8] * b2 + left[12] * b3
-    out[col * 4 + 1] = left[1] * b0 + left[5] * b1 + left[9] * b2 + left[13] * b3
-    out[col * 4 + 2] = left[2] * b0 + left[6] * b1 + left[10] * b2 + left[14] * b3
-    out[col * 4 + 3] = left[3] * b0 + left[7] * b1 + left[11] * b2 + left[15] * b3
+    out[col * 4] = a0 * b0 + a4 * b1 + a8 * b2 + a12 * b3
+    out[col * 4 + 1] = a1 * b0 + a5 * b1 + a9 * b2 + a13 * b3
+    out[col * 4 + 2] = a2 * b0 + a6 * b1 + a10 * b2 + a14 * b3
+    out[col * 4 + 3] = a3 * b0 + a7 * b1 + a11 * b2 + a15 * b3
   }
   return out
 }

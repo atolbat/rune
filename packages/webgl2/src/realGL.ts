@@ -128,6 +128,8 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
   let nextTexture = 1
   let nextTarget = 1
   let currentProgram: WebGLProgram | null = null
+  /** Numeric twin of currentProgram (fast-path compare in useProgram). */
+  let currentProgramId = -1
   let currentTarget = 0
   let canvasWidth = 1
   let canvasHeight = 1
@@ -194,25 +196,31 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
   }
 
   function useProgram(programId: number): void {
+    // Numeric early-out: the common case (the same program as the previous
+    // uniform call) must not hash the programs Map per uniform.
+    if (programId === currentProgramId) return
     const record = programs.get(programId)
     if (record === undefined || record.program === currentProgram) return
     currentProgram = record.program
+    currentProgramId = programId
     gl.useProgram(record.program)
   }
 
   function location(programId: number, name: string): WebGLUniformLocation | null {
     const record = programs.get(programId)
     if (record === undefined) return null
-    if (!record.uniforms.has(name)) {
-      let loc = gl.getUniformLocation(record.program, name)
-      // Array uniforms: some drivers only accept the first element's name
-      // ("u_bones[0]"); the GLES3 spec allows both — try the fallback once.
-      if (loc === null && !name.includes('[')) {
-        loc = gl.getUniformLocation(record.program, `${name}[0]`)
-      }
-      record.uniforms.set(name, loc)
+    // Single Map probe: undefined — not queried yet, null — a cached
+    // "optimized out" (both are valid cacheable states).
+    const cached = record.uniforms.get(name)
+    if (cached !== undefined) return cached
+    let loc = gl.getUniformLocation(record.program, name)
+    // Array uniforms: some drivers only accept the first element's name
+    // ("u_bones[0]"); the GLES3 spec allows both — try the fallback once.
+    if (loc === null && !name.includes('[')) {
+      loc = gl.getUniformLocation(record.program, `${name}[0]`)
     }
-    return record.uniforms.get(name) ?? null
+    record.uniforms.set(name, loc)
+    return loc
   }
 
   function createBuffer(data: Float32Array): number {
@@ -791,6 +799,7 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
     if (currentProgram === record.program) {
       gl.useProgram(null)
       currentProgram = null
+      currentProgramId = -1
     }
     gl.deleteProgram(record.program)
     programs.delete(programId)

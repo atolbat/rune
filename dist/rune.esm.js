@@ -466,7 +466,7 @@ function createSegmentStore(capacity) {
   let hits = 0;
   let misses = 0;
   let evictions = 0;
-  let writeEpoch = 0;
+  let epoch = 0;
   function fetch(commandId) {
     const found = segments.get(commandId);
     if (found === undefined) {
@@ -474,13 +474,12 @@ function createSegmentStore(capacity) {
       return;
     }
     hits++;
-    segments.delete(commandId);
-    segments.set(commandId, found);
+    found.touchedAt = ++epoch;
     return found;
   }
   function store(commandId, rows, count) {
     segments.delete(commandId);
-    segments.set(commandId, { rows, count, writtenAt: ++writeEpoch });
+    segments.set(commandId, { rows, count, writtenAt: ++epoch, touchedAt: epoch });
     evict();
   }
   function invalidate(commandId) {
@@ -490,10 +489,17 @@ function createSegmentStore(capacity) {
     if (capacity < 1)
       return;
     while (segments.size > capacity) {
-      const oldest = segments.keys().next().value;
-      if (oldest === undefined)
+      let victimId;
+      let victimEpoch = Infinity;
+      for (const [id, segment] of segments) {
+        if (segment.touchedAt < victimEpoch) {
+          victimEpoch = segment.touchedAt;
+          victimId = id;
+        }
+      }
+      if (victimId === undefined)
         break;
-      segments.delete(oldest);
+      segments.delete(victimId);
       evictions++;
     }
   }
@@ -680,7 +686,9 @@ function createUniformArena(floats = 1 << 16) {
   const buffer = new Float32Array(floats);
   const bytes = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
   const slots = [];
+  const bases = [];
   let cursor = 0;
+  let lastHit = 0;
   function alloc(sizeOrType) {
     if (typeof sizeOrType === "string") {
       const byteSize = TYPE_BYTES[sizeOrType];
@@ -695,6 +703,7 @@ function createUniformArena(floats = 1 << 16) {
       throw new Error(`rune: uniform arena overflowed (${floats} float)`);
     const slot = { base: cursor, size, dirty: true };
     cursor += size;
+    bases.push(slot.base);
     slots.push(slot);
     return slot;
   }
@@ -704,6 +713,7 @@ function createUniformArena(floats = 1 << 16) {
       throw new Error(`rune: uniform arena overflowed (${floats} float)`);
     const slot = { base: cursor, size, dirty: true };
     cursor += size;
+    bases.push(slot.base);
     slots.push(slot);
     return { offset: slot.base * 4, size: byteSize };
   }
@@ -728,12 +738,30 @@ function createUniformArena(floats = 1 << 16) {
     return changed;
   }
   function slotAt(floatIndex) {
-    for (let at = 0;at < slots.length; at++) {
-      const slot = slots[at];
-      if (floatIndex >= slot.base && floatIndex < slot.base + slot.size)
-        return slot;
+    const hit = slots[lastHit];
+    if (hit !== undefined && floatIndex >= hit.base && floatIndex < hit.base + hit.size)
+      return hit;
+    if (bases.length === 0)
+      return null;
+    let low = 0;
+    let high = bases.length - 1;
+    let found = -1;
+    while (low <= high) {
+      const mid = low + high >>> 1;
+      if (bases[mid] <= floatIndex) {
+        found = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
     }
-    return null;
+    if (found === -1)
+      return null;
+    const owner = slots[found];
+    if (floatIndex >= owner.base + owner.size)
+      return null;
+    lastHit = found;
+    return owner;
   }
   function byteOffsetOf(slot) {
     return typeof slot === "number" ? slot : slot.offset;
@@ -761,12 +789,21 @@ function createUniformArena(floats = 1 << 16) {
   function writeVec4(slot, x, y, z, w) {
     const base = floatIndexOf(slot);
     let changed = false;
-    const values = [x, y, z, w];
-    for (let at = 0;at < 4; at++) {
-      if (Math.fround(values[at]) !== buffer[base + at]) {
-        buffer[base + at] = values[at];
-        changed = true;
-      }
+    if (Math.fround(x) !== buffer[base]) {
+      buffer[base] = x;
+      changed = true;
+    }
+    if (Math.fround(y) !== buffer[base + 1]) {
+      buffer[base + 1] = y;
+      changed = true;
+    }
+    if (Math.fround(z) !== buffer[base + 2]) {
+      buffer[base + 2] = z;
+      changed = true;
+    }
+    if (Math.fround(w) !== buffer[base + 3]) {
+      buffer[base + 3] = w;
+      changed = true;
     }
     if (changed) {
       const owner = slotAt(base);
@@ -781,23 +818,32 @@ function createUniformArena(floats = 1 << 16) {
   function dirtySlots() {
     return slots.filter((slot) => slot.dirty);
   }
+  const dirtyRangesOut = [];
   function dirtyRanges() {
-    const dirty = slots.filter((slot) => slot.dirty).map((slot) => ({
-      from: slot.base * 4,
-      to: (slot.base + slot.size) * 4
-    }));
-    dirty.sort((a, b) => a.from - b.from);
-    const ranges = [];
-    for (const range of dirty) {
-      const last = ranges[ranges.length - 1];
-      if (last !== undefined && range.from <= last.to) {
-        if (range.to > last.to)
-          last.to = range.to;
+    let write2 = 0;
+    for (let at = 0;at < slots.length; at++) {
+      const slot = slots[at];
+      if (!slot.dirty)
+        continue;
+      const from = slot.base * 4;
+      const to = (slot.base + slot.size) * 4;
+      const last = write2 > 0 ? dirtyRangesOut[write2 - 1] : undefined;
+      if (last !== undefined && from <= last.to) {
+        if (to > last.to)
+          last.to = to;
       } else {
-        ranges.push({ from: range.from, to: range.to });
+        if (write2 < dirtyRangesOut.length) {
+          const reuse = dirtyRangesOut[write2];
+          reuse.from = from;
+          reuse.to = to;
+        } else {
+          dirtyRangesOut.push({ from, to });
+        }
+        write2++;
       }
     }
-    return ranges;
+    dirtyRangesOut.length = write2;
+    return dirtyRangesOut;
   }
   function importBytes(from, source) {
     if (source.byteLength === 0)
@@ -3912,6 +3958,7 @@ function createRealGL(gl) {
   let nextTexture = 1;
   let nextTarget = 1;
   let currentProgram = null;
+  let currentProgramId = -1;
   let currentTarget = 0;
   let canvasWidth = 1;
   let canvasHeight = 1;
@@ -3965,24 +4012,28 @@ function createRealGL(gl) {
     return shader;
   }
   function useProgram(programId) {
+    if (programId === currentProgramId)
+      return;
     const record = programs.get(programId);
     if (record === undefined || record.program === currentProgram)
       return;
     currentProgram = record.program;
+    currentProgramId = programId;
     gl.useProgram(record.program);
   }
   function location(programId, name) {
     const record = programs.get(programId);
     if (record === undefined)
       return null;
-    if (!record.uniforms.has(name)) {
-      let loc = gl.getUniformLocation(record.program, name);
-      if (loc === null && !name.includes("[")) {
-        loc = gl.getUniformLocation(record.program, `${name}[0]`);
-      }
-      record.uniforms.set(name, loc);
+    const cached = record.uniforms.get(name);
+    if (cached !== undefined)
+      return cached;
+    let loc = gl.getUniformLocation(record.program, name);
+    if (loc === null && !name.includes("[")) {
+      loc = gl.getUniformLocation(record.program, `${name}[0]`);
     }
-    return record.uniforms.get(name) ?? null;
+    record.uniforms.set(name, loc);
+    return loc;
   }
   function createBuffer(data) {
     const buffer = gl.createBuffer();
@@ -4358,6 +4409,7 @@ function createRealGL(gl) {
     if (currentProgram === record.program) {
       gl.useProgram(null);
       currentProgram = null;
+      currentProgramId = -1;
     }
     gl.deleteProgram(record.program);
     programs.delete(programId);
@@ -7842,7 +7894,7 @@ function createSliceArena(capacityBytes) {
   }
   function writeVec4(slot, x, y, z, w) {
     const at = slot.offset >> 2;
-    if (floats[at] !== x || floats[at + 1] !== y || floats[at + 2] !== z || floats[at + 3] !== w) {
+    if (Math.fround(x) !== floats[at] || Math.fround(y) !== floats[at + 1] || Math.fround(z) !== floats[at + 2] || Math.fround(w) !== floats[at + 3]) {
       floats[at] = x;
       floats[at + 1] = y;
       floats[at + 2] = z;
@@ -8059,11 +8111,12 @@ function writeUniforms(command, arena, spec, props, frameCtx) {
     const value = resolve2(declared, props, frameCtx);
     if (value === undefined)
       continue;
-    const numbers = typeof value === "number" ? [value] : value;
+    const scalar = typeof value === "number";
+    const numbers = scalar ? EMPTY : value;
     const base = (command.sliceOffset + field.offset) / 4;
     let changed = false;
     for (let at = 0;at < field.size / 4; at++) {
-      const next = numbers[at] ?? 0;
+      const next = scalar ? at === 0 ? value : 0 : numbers[at] ?? 0;
       if (Math.fround(next) !== arena.floats[base + at]) {
         arena.floats[base + at] = next;
         changed = true;
@@ -8073,6 +8126,7 @@ function writeUniforms(command, arena, spec, props, frameCtx) {
       command.needsUpload = true;
   }
 }
+var EMPTY = [0];
 // packages/webgpu/src/executor.ts
 function createGpuExecutor(options) {
   const gpu = options.gpu;
@@ -8100,8 +8154,11 @@ function createGpuExecutor(options) {
       const command = commands[view.a[at]];
       if (command === undefined || !command.needsUpload)
         continue;
-      const bytes = Math.min(command.uniformBytes ?? command.sliceBytes, command.sliceBytes);
-      gpu.uploadUniforms(command.sliceOffset, arena.bytes.subarray(command.sliceOffset, command.sliceOffset + bytes));
+      if (command.sliceView === undefined) {
+        const bytes = Math.min(command.uniformBytes ?? command.sliceBytes, command.sliceBytes);
+        command.sliceView = arena.bytes.subarray(command.sliceOffset, command.sliceOffset + bytes);
+      }
+      gpu.uploadUniforms(command.sliceOffset, command.sliceView);
       command.needsUpload = false;
     }
   }
@@ -8117,7 +8174,11 @@ function createGpuExecutor(options) {
     }
     gpu.usePipeline(command.pipelineId);
     gpu.bindUniforms(command.sliceOffset);
-    command.attrOrder.forEach((attribute, slot) => gpu.bindVertexBuffer(slot, attribute.data, attribute.size));
+    const attrOrder = command.attrOrder;
+    for (let slot = 0;slot < attrOrder.length; slot++) {
+      const attribute = attrOrder[slot];
+      gpu.bindVertexBuffer(slot, attribute.data, attribute.size);
+    }
     for (const textureId of command.textureIds)
       gpu.bindTexture(textureId);
     gpu.draw(count, instances);
@@ -8395,6 +8456,7 @@ async function createRealGPU(canvas, onGpuError) {
   let currentPipelineId = -1;
   let currentTarget = 0;
   const pendingTextureIds = [];
+  const dynamicOffsetScratch = new Uint32Array(1);
   let timerHandle = null;
   const timerBundle = createGpuGpuTimer(device);
   const gpuTimer = timerBundle === null ? null : timerBundle.timer;
@@ -8649,7 +8711,8 @@ async function createRealGPU(canvas, onGpuError) {
     pass?.setPipeline(pipeline);
   }
   function bindUniforms(dynamicOffset) {
-    pass?.setBindGroup(0, uboGroup, [dynamicOffset]);
+    dynamicOffsetScratch[0] = dynamicOffset;
+    pass?.setBindGroup(0, uboGroup, dynamicOffsetScratch);
   }
   function bindVertexBuffer(slot, data, _size) {
     let buffer = vertexBuffers.get(data);
@@ -8708,19 +8771,27 @@ async function createRealGPU(canvas, onGpuError) {
   function pipelineOfTexture() {
     return currentPipelineId >= 0 ? pipelines.get(currentPipelineId) : undefined;
   }
+  const resolveScratch = { view: null, sampler: null, filterable: false };
   function resolveTexture(textureOrViewId) {
     const subView = textureViews.get(textureOrViewId);
     if (subView !== undefined) {
       const record2 = textures.get(subView.textureId);
       if (record2 === undefined)
         return;
-      return { view: subView.view, sampler: record2.sampler, filterable: record2.filterable };
+      resolveScratch.view = subView.view;
+      resolveScratch.sampler = record2.sampler;
+      resolveScratch.filterable = record2.filterable;
+      return resolveScratch;
     }
     const record = textures.get(textureOrViewId);
     if (record === undefined)
       return;
-    return { view: record.view, sampler: record.sampler, filterable: record.filterable };
+    resolveScratch.view = record.view;
+    resolveScratch.sampler = record.sampler;
+    resolveScratch.filterable = record.filterable;
+    return resolveScratch;
   }
+  let flushMemoBox = null;
   function flushTextureBindGroup() {
     if (pendingTextureIds.length === 0)
       return;
@@ -8730,6 +8801,21 @@ async function createRealGPU(canvas, onGpuError) {
     }
     const record = pipelineOfTexture();
     const count = Math.max(1, record?.textureCount ?? 1);
+    const memo = flushMemoBox;
+    if (memo !== null && memo.pipelineId === currentPipelineId && memo.count === count && memo.ids.length === pendingTextureIds.length) {
+      let same = true;
+      for (let at = 0;at < memo.ids.length; at++) {
+        if (memo.ids[at] !== pendingTextureIds[at]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) {
+        pass.setBindGroup(1, memo.group);
+        pendingTextureIds.length = 0;
+        return;
+      }
+    }
     const key = `${currentPipelineId}:${count}:${pendingTextureIds.join(",")}`;
     let group = textureBindGroups.get(key);
     if (group === undefined) {
@@ -8763,6 +8849,7 @@ async function createRealGPU(canvas, onGpuError) {
       textureBindGroups.set(key, group);
     }
     pass.setBindGroup(1, group);
+    flushMemoBox = { pipelineId: currentPipelineId, count, ids: pendingTextureIds.slice(), group };
     pendingTextureIds.length = 0;
   }
   function beginPass(_clearIndex) {
@@ -8927,6 +9014,8 @@ async function createRealGPU(canvas, onGpuError) {
     const record = textures.get(textureId);
     if (record === undefined)
       return;
+    if (flushMemoBox !== null && flushMemoBox.ids.includes(textureId))
+      flushMemoBox = null;
     for (const key of textureBindGroups.keys()) {
       const parts = key.split(":");
       if (parts.length > 2 && parts[2].split(",").includes(String(textureId))) {
@@ -8943,6 +9032,8 @@ async function createRealGPU(canvas, onGpuError) {
     textures.delete(textureId);
   }
   function invalidateTextureViewBindGroups(viewId) {
+    if (flushMemoBox !== null && flushMemoBox.ids.includes(viewId))
+      flushMemoBox = null;
     for (const key of textureBindGroups.keys()) {
       const parts = key.split(":");
       if (parts.length > 2 && parts[2].split(",").includes(String(viewId))) {
@@ -10503,16 +10594,19 @@ function mat4RotationY(out, angle) {
   return out;
 }
 function mat4Multiply(out, a, b) {
-  const left = out === a ? new Float32Array(a) : a;
+  const a0 = a[0], a1 = a[1], a2 = a[2], a3 = a[3];
+  const a4 = a[4], a5 = a[5], a6 = a[6], a7 = a[7];
+  const a8 = a[8], a9 = a[9], a10 = a[10], a11 = a[11];
+  const a12 = a[12], a13 = a[13], a14 = a[14], a15 = a[15];
   for (let col = 0;col < 4; col++) {
     const b0 = b[col * 4];
     const b1 = b[col * 4 + 1];
     const b2 = b[col * 4 + 2];
     const b3 = b[col * 4 + 3];
-    out[col * 4] = left[0] * b0 + left[4] * b1 + left[8] * b2 + left[12] * b3;
-    out[col * 4 + 1] = left[1] * b0 + left[5] * b1 + left[9] * b2 + left[13] * b3;
-    out[col * 4 + 2] = left[2] * b0 + left[6] * b1 + left[10] * b2 + left[14] * b3;
-    out[col * 4 + 3] = left[3] * b0 + left[7] * b1 + left[11] * b2 + left[15] * b3;
+    out[col * 4] = a0 * b0 + a4 * b1 + a8 * b2 + a12 * b3;
+    out[col * 4 + 1] = a1 * b0 + a5 * b1 + a9 * b2 + a13 * b3;
+    out[col * 4 + 2] = a2 * b0 + a6 * b1 + a10 * b2 + a14 * b3;
+    out[col * 4 + 3] = a3 * b0 + a7 * b1 + a11 * b2 + a15 * b3;
   }
   return out;
 }

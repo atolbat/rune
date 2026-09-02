@@ -8,6 +8,8 @@
  *   dist/rune-loaders.esm.js  — a self-contained @rune/loaders (GLB/glTF/OBJ/FBX).
  *   dist/rune-animation.esm.js — a self-contained @rune/animation (skeletal
  *                               animation: sampling, hierarchy, skin palette).
+ *   dist/rune-materials.esm.js — a self-contained @rune/materials (the
+ *                               feature-mask shader assembly pipeline).
  *
  * Types are not needed here: the library ships as TS sources,
  * bun/bundlers take the types straight from src (exports → src/index.ts).
@@ -27,6 +29,7 @@ const targets = [
   { entrypoint: 'packages/gl/src/index.ts', outfile: 'rune.esm.min.js', minify: true },
   { entrypoint: 'packages/loaders/src/index.ts', outfile: 'rune-loaders.esm.js' },
   { entrypoint: 'packages/animation/src/index.ts', outfile: 'rune-animation.esm.js' },
+  { entrypoint: 'packages/materials/src/index.ts', outfile: 'rune-materials.esm.js' },
 ]
 
 let failed = false

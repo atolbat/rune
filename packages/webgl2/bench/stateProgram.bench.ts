@@ -1,86 +1,54 @@
-import {
-  createCompileContext,
-  compileDrawSpec,
-  createCountingGL,
-  createExecutor,
-} from '../src/index.ts'
-import type { DrawSpec } from '../src/index.ts'
-import {
-  createUniformArena,
-  createTapeWriter,
-  serializeTape,
-  parseTape,
-  signal,
-  OpCode,
-} from '@rune/core'
-import type { TapeView } from '@rune/core'
+import { compileStateProgram, createGLShadow, createCountingGL } from '../src/index.ts'
+import type { PipelineDesc, StateProgram, StateProgramGL } from '../src/index.ts'
 
 /**
  * Theory A: state programs — interpreter versus codegen.
- * Hypothesis: codegen (inline comparisons, no switch dispatcher) is faster
- * than the interpreter on a frame of thousands of draws. The winner becomes the default.
+ * A frame of 1000 draws over two pipelines (a switch every 10th draw):
+ * both modes produce the same GL traffic, only the dispatch differs.
+ * The interpreter walks an action array with a switch dispatcher; codegen —
+ * a specialized function with inline comparisons (turbo mode).
+ *
+ * Note: the draw-spec compile context's `mode` field is dead configuration
+ * (compileDrawSpec ignores it); the honest interpreter/codegen split lives
+ * here, in compileStateProgram.
  */
 
-const VERT = `#version 300 es
-in vec3 position;
-uniform mat4 u_mvp;
-uniform vec4 u_tint;
-uniform float u_time;
-uniform vec3 u_offset;
-void main() { gl_Position = u_mvp * vec4(position + u_offset, u_time); }`
+const OPAQUE: PipelineDesc = {
+  depth: { test: 'less', write: true },
+  raster: { cull: 'back', frontFace: 'ccw' },
+}
 
-const FRAG = `#version 300 es
-precision mediump float;
-uniform vec4 u_tint;
-out vec4 o; void main() { o = u_tint; }`
+const TRANSPARENT: PipelineDesc = {
+  depth: { test: 'lequal', write: false },
+  blend: { src: 'src-alpha', dst: 'one-minus-src-alpha' },
+}
 
 const DRAWS = 1000
+const SWITCH_EVERY = 10
 
-const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
+interface World {
+  run(): void
+  readonly totalCalls: number
+}
 
-function makeSpec(): DrawSpec {
+function makeWorld(mode: 'interpret' | 'codegen'): World {
+  const gl = createCountingGL() as unknown as StateProgramGL
+  const shadow = createGLShadow()
+  const opaque = compileStateProgram(OPAQUE, 1, mode)
+  const transparent = compileStateProgram(TRANSPARENT, 2, mode)
+  const programs: StateProgram[] = [opaque, transparent]
   return {
-    shader: { glsl: { vertex: VERT, fragment: FRAG } },
-    pipeline: {
-      depth: { test: 'less', write: true },
-      blend: { src: 'src-alpha', dst: 'one-minus-src-alpha' },
-      raster: { cull: 'back', frontFace: 'ccw' },
+    run: () => {
+      for (let at = 0; at < DRAWS; at++) {
+        programs[at % SWITCH_EVERY === 0 ? 1 : 0](gl, shadow)
+      }
     },
-    uniforms: {
-      u_mvp: () => IDENTITY,
-      u_tint: signal([1, 0.5, 0.25, 1] as const),
-      u_time: 0.5,
-      u_offset: [0.1, 0.2, 0.3],
-    },
-    count: 6,
+    get totalCalls() { return (gl as { totalCalls: number }).totalCalls },
   }
 }
 
-function measure(mode: 'interpret' | 'codegen', repeats: number): number {
-  const arena = createUniformArena()
-  const ctx = createCompileContext(arena, mode)
-  const command = compileDrawSpec(makeSpec(), ctx)
-  const gl = createCountingGL()
-  const executor = createExecutor({
-    gl,
-    arena,
-    commands: ctx.commands,
-    clears: [],
-    uniformStrategy: 'per-call',
-  })
-
-  const writer = createTapeWriter(DRAWS * 2 + 4)
-  writer.emit(OpCode.BeginPass, 0, -1, 0, 0)
-  for (let i = 0; i < DRAWS; i++) command.record({}, {}, writer)
-  writer.emit(OpCode.EndPass, 0, 0, 0, 0)
-  const tape = parseTape(serializeTape(writer))
-
-  warmUp(executor, tape)
-  return bestOf(repeats, () => executor.run(tape))
-}
-
-function warmUp(executor: { run(tape: TapeView): void }, tape: TapeView): void {
-  for (let i = 0; i < 60; i++) executor.run(tape)
+function warmUp(world: World, repeats: number): void {
+  for (let i = 0; i < repeats; i++) world.run()
 }
 
 function bestOf(repeats: number, run: () => void): number {
@@ -94,10 +62,16 @@ function bestOf(repeats: number, run: () => void): number {
   return best
 }
 
-const interpretMs = measure('interpret', 9)
-const codegenMs = measure('codegen', 9)
+const interpretWorld = makeWorld('interpret')
+const codegenWorld = makeWorld('codegen')
+warmUp(interpretWorld, 60)
+warmUp(codegenWorld, 60)
 
-console.log('── Theory A: state programs, frame of 1000 draws ──')
+const interpretMs = bestOf(15, () => interpretWorld.run())
+const codegenMs = bestOf(15, () => codegenWorld.run())
+
+console.log('── Theory A: state programs, frame of 1000 draws (switch every 10th) ──')
 console.log(`interpreter   : ${interpretMs.toFixed(3)} ms`)
 console.log(`codegen       : ${codegenMs.toFixed(3)} ms`)
 console.log(`codegen is ${(interpretMs / codegenMs).toFixed(2)}x faster`)
+console.log(`GL calls (must match): interpret ${interpretWorld.totalCalls}, codegen ${codegenWorld.totalCalls}`)

@@ -46,6 +46,9 @@
       "@rune/animation": [
         "./packages/animation/src/index.ts"
       ],
+      "@rune/materials": [
+        "./packages/materials/src/index.ts"
+      ],
       "@rune/debug": [
         "./packages/debug/src/index.ts"
       ]

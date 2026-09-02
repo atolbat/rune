@@ -86,7 +86,11 @@ export function createSliceArena(capacityBytes: number): SliceArena {
 
   function writeVec4(slot: SliceSlot, x: number, y: number, z: number, w: number): void {
     const at = slot.offset >> 2
-    if (floats[at] !== x || floats[at + 1] !== y || floats[at + 2] !== z || floats[at + 3] !== w) {
+    // fround comparisons: the storage is f32, the inputs are f64 — without
+    // rounding, an f32-inexact value (time, camera pos) reads as "changed"
+    // every write, defeating upload suppression (parity with core's arena).
+    if (Math.fround(x) !== floats[at] || Math.fround(y) !== floats[at + 1]
+      || Math.fround(z) !== floats[at + 2] || Math.fround(w) !== floats[at + 3]) {
       floats[at] = x
       floats[at + 1] = y
       floats[at + 2] = z

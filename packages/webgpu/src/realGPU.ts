@@ -133,6 +133,9 @@ export async function createRealGPU(
   /** Multi-textures (Nefertiti model base+normal): command textures
    *  accumulate via bindTexture, the bind group is fixed in draw(). */
   const pendingTextureIds: number[] = []
+  /** Scratch for setBindGroup dynamic offsets (a typed array is a valid
+   *  sequence for the WebGPU API; avoids an array allocation per draw). */
+  const dynamicOffsetScratch = new Uint32Array(1)
   let timerHandle: GpuTimerHandle | null = null
   // Create the timer IF the device has the 'timestamp-query' feature.
   // createGpuGpuTimer returns {timer, handle} or null (if no feature).
@@ -541,7 +544,10 @@ export async function createRealGPU(
   }
 
   function bindUniforms(dynamicOffset: number): void {
-    pass?.setBindGroup(0, uboGroup!, [dynamicOffset])
+    // Scratch buffer instead of a fresh [offset] array per draw — the array
+    // crosses an external API boundary, so the allocator cannot elide it.
+    dynamicOffsetScratch[0] = dynamicOffset
+    pass?.setBindGroup(0, uboGroup!, dynamicOffsetScratch)
   }
 
   function bindVertexBuffer(slot: number, data: Float32Array, _size: number): void {
@@ -643,22 +649,35 @@ export async function createRealGPU(
     return currentPipelineId >= 0 ? pipelines.get(currentPipelineId) : undefined
   }
 
-  /** Texture/sub-view by id: view + sampler + filterability. */
+  /** Texture/sub-view by id: view + sampler + filterability. Writes into a
+   *  REUSED scratch record (hot path — one bindTexture per draw); the result
+   *  must be consumed before the next call, never retained. */
+  const resolveScratch = { view: null as GPUTextureView | null, sampler: null as GPUSampler | null, filterable: false }
   function resolveTexture(textureOrViewId: number): { view: GPUTextureView; sampler: GPUSampler; filterable: boolean } | undefined {
     const subView = textureViews.get(textureOrViewId)
     if (subView !== undefined) {
       const record = textures.get(subView.textureId)
       if (record === undefined) return undefined
-      return { view: subView.view, sampler: record.sampler, filterable: record.filterable }
+      resolveScratch.view = subView.view
+      resolveScratch.sampler = record.sampler
+      resolveScratch.filterable = record.filterable
+      return resolveScratch as { view: GPUTextureView; sampler: GPUSampler; filterable: boolean }
     }
     const record = textures.get(textureOrViewId)
     if (record === undefined) return undefined
-    return { view: record.view, sampler: record.sampler, filterable: record.filterable }
+    resolveScratch.view = record.view
+    resolveScratch.sampler = record.sampler
+    resolveScratch.filterable = record.filterable
+    return resolveScratch as { view: GPUTextureView; sampler: GPUSampler; filterable: boolean }
   }
 
   /** Multi-texture bind group: sampler@0 + tex@1..N from all accumulated
    *  textures (missing slots — repeat of the last one). Cached by
-   *  composition (id string + variant) — a set change = a new group. */
+   *  composition (id string + variant) — a set change = a new group.
+   *  Hot path: a per-draw memo (pipelineId + count + ids, compared
+   *  numerically) skips the string key and the Map lookup when the
+   *  command repeats the same texture set — the common case. */
+  let flushMemoBox: { pipelineId: number; count: number; ids: number[]; group: GPUBindGroup } | null = null
   function flushTextureBindGroup(): void {
     if (pendingTextureIds.length === 0) return
     if (pass === null) {
@@ -667,6 +686,21 @@ export async function createRealGPU(
     }
     const record = pipelineOfTexture()
     const count = Math.max(1, record?.textureCount ?? 1)
+    // Memo fast path: the same texture set on the same pipeline class —
+    // bind the remembered group directly (no key string, no Map.get).
+    const memo = flushMemoBox
+    if (memo !== null && memo.pipelineId === currentPipelineId && memo.count === count
+      && memo.ids.length === pendingTextureIds.length) {
+      let same = true
+      for (let at = 0; at < memo.ids.length; at++) {
+        if (memo.ids[at] !== pendingTextureIds[at]) { same = false; break }
+      }
+      if (same) {
+        pass.setBindGroup(1, memo.group)
+        pendingTextureIds.length = 0
+        return
+      }
+    }
     const key = `${currentPipelineId}:${count}:${pendingTextureIds.join(',')}`
     let group = textureBindGroups.get(key)
     if (group === undefined) {
@@ -700,6 +734,7 @@ export async function createRealGPU(
       textureBindGroups.set(key, group)
     }
     pass.setBindGroup(1, group)
+    flushMemoBox = { pipelineId: currentPipelineId, count, ids: pendingTextureIds.slice(), group }
     pendingTextureIds.length = 0
   }
 
@@ -893,6 +928,7 @@ export async function createRealGPU(
     if (record === undefined) return
     // Invalidate bind groups (including multi-texture compositions) that
     // involve this texture: on the next draw() the group will be recreated.
+    if (flushMemoBox !== null && flushMemoBox.ids.includes(textureId)) flushMemoBox = null
     for (const key of textureBindGroups.keys()) {
       const parts = key.split(':')
       if (parts.length > 2 && parts[2].split(',').includes(String(textureId))) {
@@ -913,6 +949,7 @@ export async function createRealGPU(
 
   /** Evicts from the cache all compositions containing the sub-view (viewId). */
   function invalidateTextureViewBindGroups(viewId: number): void {
+    if (flushMemoBox !== null && flushMemoBox.ids.includes(viewId)) flushMemoBox = null
     for (const key of textureBindGroups.keys()) {
       const parts = key.split(':')
       if (parts.length > 2 && parts[2].split(',').includes(String(viewId))) {

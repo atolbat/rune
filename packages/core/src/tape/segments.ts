@@ -8,6 +8,8 @@ export interface Segment {
   readonly count: number
   /** Epoch of the last write — age diagnostics. */
   writtenAt: number
+  /** Epoch of the last touch (store or fetch) — recency for LRU eviction. */
+  touchedAt: number
 }
 
 export interface SegmentStore {
@@ -20,13 +22,16 @@ export interface SegmentStore {
   readonly evictions: number
 }
 
-/** LRU segment cache: Map order = recency (the end is the freshest). */
+/** LRU segment cache. Recency — O(1) epoch touches (no Map reordering on
+ *  fetch: a replay of 1000 segments must not churn ~2000 Map operations per
+ *  frame); eviction scans for the minimal epoch — a rare path that only runs
+ *  when the store grows over capacity. */
 export function createSegmentStore(capacity: number): SegmentStore {
   const segments = new Map<number, Segment>()
   let hits = 0
   let misses = 0
   let evictions = 0
-  let writeEpoch = 0
+  let epoch = 0
 
   function fetch(commandId: number): Segment | undefined {
     const found = segments.get(commandId)
@@ -35,15 +40,14 @@ export function createSegmentStore(capacity: number): SegmentStore {
       return undefined
     }
     hits++
-    // LRU: the end of the Map becomes the fresh one — delete+set moves the position.
-    segments.delete(commandId)
-    segments.set(commandId, found)
+    // LRU touch: an epoch write instead of delete+set Map reordering.
+    found.touchedAt = ++epoch
     return found
   }
 
   function store(commandId: number, rows: Int32Array, count: number): void {
     segments.delete(commandId)
-    segments.set(commandId, { rows, count, writtenAt: ++writeEpoch })
+    segments.set(commandId, { rows, count, writtenAt: ++epoch, touchedAt: epoch })
     evict()
   }
 
@@ -51,13 +55,22 @@ export function createSegmentStore(capacity: number): SegmentStore {
     segments.delete(commandId)
   }
 
-  /** Eviction over capacity (capacity < 1 — no limit: eviction is disabled). */
+  /** Eviction over capacity (capacity < 1 — no limit: eviction is disabled).
+ *  The victim is the entry with the minimal touch epoch; a store of an
+ *  existing id does not grow the map, so the steady state never scans. */
   function evict(): void {
     if (capacity < 1) return
     while (segments.size > capacity) {
-      const oldest = segments.keys().next().value
-      if (oldest === undefined) break
-      segments.delete(oldest)
+      let victimId: number | undefined
+      let victimEpoch = Infinity
+      for (const [id, segment] of segments) {
+        if (segment.touchedAt < victimEpoch) {
+          victimEpoch = segment.touchedAt
+          victimId = id
+        }
+      }
+      if (victimId === undefined) break
+      segments.delete(victimId)
       evictions++
     }
   }

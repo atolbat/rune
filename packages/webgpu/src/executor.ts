@@ -47,8 +47,13 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
       // Upload — the actual uniform bytes (without the slice's trailing padding
       // up to dynamic-offset granularity): writeBuffer allows a multiple-of-4
       // size, the shader reads exactly as much as declared in the struct.
-      const bytes = Math.min(command.uniformBytes ?? command.sliceBytes, command.sliceBytes)
-      gpu.uploadUniforms(command.sliceOffset, arena.bytes.subarray(command.sliceOffset, command.sliceOffset + bytes))
+      // The subarray view is cached on the command (the slice window is
+      // constant per command — no per-frame view allocation).
+      if (command.sliceView === undefined) {
+        const bytes = Math.min(command.uniformBytes ?? command.sliceBytes, command.sliceBytes)
+        command.sliceView = arena.bytes.subarray(command.sliceOffset, command.sliceOffset + bytes)
+      }
+      gpu.uploadUniforms(command.sliceOffset, command.sliceView)
       command.needsUpload = false
     }
   }
@@ -77,7 +82,12 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
     }
     gpu.usePipeline(command.pipelineId)
     gpu.bindUniforms(command.sliceOffset)
-    command.attrOrder.forEach((attribute, slot) => gpu.bindVertexBuffer(slot, attribute.data, attribute.size))
+    // Indexed loop — no closure allocation per draw.
+    const attrOrder = command.attrOrder
+    for (let slot = 0; slot < attrOrder.length; slot++) {
+      const attribute = attrOrder[slot]
+      gpu.bindVertexBuffer(slot, attribute.data, attribute.size)
+    }
     for (const textureId of command.textureIds) gpu.bindTexture(textureId)
     gpu.draw(count, instances)
   }
@@ -96,6 +106,8 @@ interface RichWgpuCommand extends WgpuCommand {
   readonly sliceBytes: number
   /** Actual uniform bytes (upload without the slice's trailing padding). */
   readonly uniformBytes?: number
+  /** Cached view of the arena slice window (constant per command). */
+  sliceView?: Uint8Array
   needsUpload: boolean
   pipelineReady: boolean
 }

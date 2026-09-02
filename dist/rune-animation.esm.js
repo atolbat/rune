@@ -197,7 +197,7 @@ function sampleQuatTrack(times, quats, t, out, off) {
   slerpOffset(quats, lo * 4, quats, hi * 4, u, out, off);
 }
 function slerpOffset(a, ao, b, bo, u, out, off) {
-  let ax = a[ao], ay = a[ao + 1], az = a[ao + 2], aw = a[ao + 3];
+  const ax = a[ao], ay = a[ao + 1], az = a[ao + 2], aw = a[ao + 3];
   let bx = b[bo], by = b[bo + 1], bz = b[bo + 2], bw = b[bo + 3];
   let dot = ax * bx + ay * by + az * bz + aw * bw;
   if (dot < 0) {
@@ -208,10 +208,10 @@ function slerpOffset(a, ao, b, bo, u, out, off) {
     dot = -dot;
   }
   if (dot > 0.9995) {
-    let x2 = ax + (bx - ax) * u;
-    let y2 = ay + (by - ay) * u;
-    let z2 = az + (bz - az) * u;
-    let w2 = aw + (bw - aw) * u;
+    const x2 = ax + (bx - ax) * u;
+    const y2 = ay + (by - ay) * u;
+    const z2 = az + (bz - az) * u;
+    const w2 = aw + (bw - aw) * u;
     const len2 = Math.hypot(x2, y2, z2, w2) || 1;
     out[off] = x2 / len2;
     out[off + 1] = y2 / len2;

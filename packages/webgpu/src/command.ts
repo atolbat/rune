@@ -215,12 +215,14 @@ function writeUniforms(
     const value = resolve(declared, props, frameCtx)
     if (value === undefined) continue
     // A scalar f32 is also a valid value (parity with the GL arena: write
-    // accepts number and ArrayLike; previously number[0] gave undefined → 0)
-    const numbers: ArrayLike<number> = typeof value === 'number' ? [value] : (value as ArrayLike<number>)
+    // accepts number and ArrayLike). The scalar path reads the number
+    // directly — no [value] array allocation per field per frame.
+    const scalar = typeof value === 'number'
+    const numbers: ArrayLike<number> = scalar ? EMPTY : (value as ArrayLike<number>)
     const base = (command.sliceOffset + field.offset) / 4
     let changed = false
     for (let at = 0; at < field.size / 4; at++) {
-      const next = numbers[at] ?? 0
+      const next = scalar ? (at === 0 ? value : 0) : (numbers[at] ?? 0)
       if (Math.fround(next) !== arena.floats[base + at]) {
         arena.floats[base + at] = next
         changed = true
@@ -229,3 +231,6 @@ function writeUniforms(
     if (changed) command.needsUpload = true
   }
 }
+
+/** Placeholder for the scalar path (the loop reads the number itself). */
+const EMPTY: ArrayLike<number> = [0]

@@ -59,7 +59,9 @@ export interface UniformArena {
   readFloat(slot: number | UniformSlotBytes, index?: number): number
   /** All slots marked dirty (a snapshot). */
   dirtySlots(): UniformSlot[]
-  /** Dirty ranges in BYTES, merged from adjacent slots (byte-API). */
+  /** Dirty ranges in BYTES, merged from adjacent slots (byte-API).
+   *  The returned array is REUSED between calls — consume it (or copy)
+   *  before calling dirtyRanges() again. */
   dirtyRanges(): ByteRange[]
   /** Write a vec4 into a slot with value-compare (byte-API). */
   writeVec4(slot: UniformSlot | UniformSlotBytes, x: number, y: number, z: number, w: number): void
@@ -89,7 +91,11 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
   const buffer = new Float32Array(floats)
   const bytes = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
   const slots: UniformSlot[] = []
+  const /** slot bases, ascending (bump allocation) */ bases: number[] = []
   let cursor = 0
+  // Last slot hit by a lookup: writes of one command's fields are clustered,
+  // so a single comparison usually resolves the owner (O(1) fast path).
+  let lastHit = 0
 
   function alloc(sizeOrType: number | string): UniformSlot | UniformSlotBytes {
     if (typeof sizeOrType === 'string') {
@@ -104,6 +110,7 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
     if (cursor + size > floats) throw new Error(`rune: uniform arena overflowed (${floats} float)`)
     const slot: UniformSlot = { base: cursor, size, dirty: true }
     cursor += size
+    bases.push(slot.base)
     slots.push(slot)
     return slot
   }
@@ -114,6 +121,7 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
     if (cursor + size > floats) throw new Error(`rune: uniform arena overflowed (${floats} float)`)
     const slot: UniformSlot = { base: cursor, size, dirty: true }
     cursor += size
+    bases.push(slot.base)
     slots.push(slot)
     return { offset: slot.base * 4, size: byteSize }
   }
@@ -140,12 +148,27 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
     return changed
   }
 
+  /** Owner lookup — O(log S): the bump allocator guarantees strictly ascending,
+ *  non-overlapping bases, so a binary search over bases is exact (no
+ *  forward-walk correction needed; the found candidate IS the only owner). */
   function slotAt(floatIndex: number): UniformSlot | null {
-    for (let at = 0; at < slots.length; at++) {
-      const slot = slots[at]
-      if (floatIndex >= slot.base && floatIndex < slot.base + slot.size) return slot
+    // Fast path: the previous hit (a command's fields are written in clusters).
+    const hit = slots[lastHit]
+    if (hit !== undefined && floatIndex >= hit.base && floatIndex < hit.base + hit.size) return hit
+    if (bases.length === 0) return null
+    // Binary search: the greatest base <= floatIndex.
+    let low = 0
+    let high = bases.length - 1
+    let found = -1
+    while (low <= high) {
+      const mid = (low + high) >>> 1
+      if (bases[mid] <= floatIndex) { found = mid; low = mid + 1 } else { high = mid - 1 }
     }
-    return null
+    if (found === -1) return null
+    const owner = slots[found]
+    if (floatIndex >= owner.base + owner.size) return null
+    lastHit = found
+    return owner
   }
 
   function byteOffsetOf(slot: number | UniformSlotBytes): number {
@@ -177,13 +200,11 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
   function writeVec4(slot: UniformSlot | UniformSlotBytes, x: number, y: number, z: number, w: number): void {
     const base = floatIndexOf(slot)
     let changed = false
-    const values = [x, y, z, w]
-    for (let at = 0; at < 4; at++) {
-      if (Math.fround(values[at]) !== buffer[base + at]) {
-        buffer[base + at] = values[at]
-        changed = true
-      }
-    }
+    // Four direct scalar comparisons (no [x,y,z,w] allocation on the hot path).
+    if (Math.fround(x) !== buffer[base]) { buffer[base] = x; changed = true }
+    if (Math.fround(y) !== buffer[base + 1]) { buffer[base + 1] = y; changed = true }
+    if (Math.fround(z) !== buffer[base + 2]) { buffer[base + 2] = z; changed = true }
+    if (Math.fround(w) !== buffer[base + 3]) { buffer[base + 3] = w; changed = true }
     if (changed) {
       const owner = slotAt(base)
       if (owner !== null) owner.dirty = true
@@ -199,22 +220,34 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
     return slots.filter(slot => slot.dirty)
   }
 
+  /** Dirty ranges in BYTES, merged from adjacent slots (byte-API).
+ *  Slots are ascending by construction — one pass, no sort, no filter/map
+ *  intermediate arrays; the output array is reused between calls (copy it
+ *  if you need to keep it). */
+  const dirtyRangesOut: ByteRange[] = []
   function dirtyRanges(): ByteRange[] {
-    const dirty = slots.filter(slot => slot.dirty).map(slot => ({
-      from: slot.base * 4,
-      to: (slot.base + slot.size) * 4,
-    }))
-    dirty.sort((a, b) => a.from - b.from)
-    const ranges: ByteRange[] = []
-    for (const range of dirty) {
-      const last = ranges[ranges.length - 1]
-      if (last !== undefined && range.from <= last.to) {
-        if (range.to > last.to) last.to = range.to
+    let write = 0
+    for (let at = 0; at < slots.length; at++) {
+      const slot = slots[at]
+      if (!slot.dirty) continue
+      const from = slot.base * 4
+      const to = (slot.base + slot.size) * 4
+      const last = write > 0 ? dirtyRangesOut[write - 1] : undefined
+      if (last !== undefined && from <= last.to) {
+        if (to > last.to) last.to = to
       } else {
-        ranges.push({ from: range.from, to: range.to })
+        if (write < dirtyRangesOut.length) {
+          const reuse = dirtyRangesOut[write]
+          reuse.from = from
+          reuse.to = to
+        } else {
+          dirtyRangesOut.push({ from, to })
+        }
+        write++
       }
     }
-    return ranges
+    dirtyRangesOut.length = write
+    return dirtyRangesOut
   }
 
   function importBytes(from: number, source: Uint8Array): void {
