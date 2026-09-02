@@ -159,6 +159,39 @@ await viewerPhone.click('.mv-pill')
 await viewerPhone.waitForTimeout(400)
 await viewerPhone.screenshot({ path: join(out, 'mobile-mv-sheet.png') })
 
+// ─── particles: the four presets (desktop) + the phone sheet ───────────────
+const pt = await browser.newPage({ viewport: { width: 960, height: 720 } })
+await pt.goto(`http://localhost:${port}/demo/particles/`, { waitUntil: 'networkidle' })
+await pt.waitForFunction(() => document.querySelector('#backend')?.textContent !== '…', null, { timeout: 15000 })
+await pt.waitForFunction(
+  () => /\/ 8,192 · [1-9][\d,]* verts/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+  null,
+  { timeout: 30_000 },
+)
+await pt.waitForTimeout(1500)
+await pt.screenshot({ path: join(out, 'desktop-particles-fountain.png') })
+
+for (const name of ['Fireworks', 'Galaxy', 'Embers']) {
+  await pt.evaluate((n) => {
+    const rows = [...document.querySelectorAll('.pt-row')]
+    rows.find(r => r.textContent.includes(n))?.dispatchEvent(new Event('click', { bubbles: true }))
+  }, name)
+  await pt.waitForFunction(
+    (n) => (document.querySelector('.pt-pill')?.textContent ?? '').includes(n),
+    name,
+    { timeout: 10_000 },
+  )
+  await pt.waitForTimeout(3000)
+  await pt.screenshot({ path: join(out, `desktop-particles-${name.toLowerCase()}.png`) })
+}
+
+// phone: the preset sheet as the entry point
+const ptPhone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
+await ptPhone.goto(`http://localhost:${port}/demo/particles/`, { waitUntil: 'networkidle' })
+await ptPhone.waitForFunction(() => document.querySelector('#backend')?.textContent !== '…', null, { timeout: 15000 })
+await ptPhone.waitForTimeout(2000)
+await ptPhone.screenshot({ path: join(out, 'mobile-particles-scene.png') })
+
 await browser.close()
 server.stop(true)
 console.log(`[shots] screenshots in ${out}`)

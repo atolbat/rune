@@ -49,6 +49,9 @@
       "@rune/materials": [
         "./packages/materials/src/index.ts"
       ],
+      "@rune/particles": [
+        "./packages/particles/src/index.ts"
+      ],
       "@rune/debug": [
         "./packages/debug/src/index.ts"
       ]

@@ -10,6 +10,9 @@
  *                               animation: sampling, hierarchy, skin palette).
  *   dist/rune-materials.esm.js — a self-contained @rune/materials (the
  *                               feature-mask shader assembly pipeline).
+ *   dist/rune-particles.esm.js  — a self-contained @rune/particles (the
+ *                               CPU-simulated particle system + the
+ *                               billboard soup view).
  *
  * Types are not needed here: the library ships as TS sources,
  * bun/bundlers take the types straight from src (exports → src/index.ts).
@@ -30,6 +33,7 @@ const targets = [
   { entrypoint: 'packages/loaders/src/index.ts', outfile: 'rune-loaders.esm.js' },
   { entrypoint: 'packages/animation/src/index.ts', outfile: 'rune-animation.esm.js' },
   { entrypoint: 'packages/materials/src/index.ts', outfile: 'rune-materials.esm.js' },
+  { entrypoint: 'packages/particles/src/index.ts', outfile: 'rune-particles.esm.js' },
 ]
 
 let failed = false

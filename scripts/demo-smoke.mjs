@@ -357,6 +357,72 @@ try {
     !mobileViewer.bodyScrolls
   await page.setViewportSize({ width: 960, height: 720 })
 
+  // ─── particles: the @rune/particles demo — presets, one draw, clean GPU ──
+  await page.goto(`http://localhost:${port}/demo/particles/`, { waitUntil: 'networkidle' })
+  await page.waitForFunction(
+    () => document.querySelector('#backend')?.textContent !== '…',
+    null,
+    { timeout: 15_000 },
+  )
+  console.log(`[smoke] particles backend: ${await page.textContent('#backend')}`)
+  // the fountain settles into its steady state: live particles + verts in the pill
+  await page.waitForFunction(
+    () => /\/ 8,192 · [1-9][\d,]* verts/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+    null,
+    { timeout: 20_000 },
+  )
+  const particlesPill = await page.textContent('.pt-pill')
+  console.log(`[smoke] particles pill: ${particlesPill}`)
+  const particlesOk = particlesPill.includes('Fountain') && particlesPill.includes('verts')
+  const particlesAlive = await framesDiffer(page)
+  console.log(`[smoke] particles animation: ${particlesAlive ? 'alive (the soup re-bakes per frame)' : 'STATIC'}`)
+  // preset switch: the galaxy (a disc + tangential orbits)
+  await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('.pt-row')]
+    rows.find(r => r.textContent.includes('Galaxy'))?.dispatchEvent(new Event('click', { bubbles: true }))
+  })
+  await page.waitForFunction(
+    () => (document.querySelector('.pt-pill')?.textContent ?? '').includes('Galaxy'),
+    null,
+    { timeout: 10_000 },
+  )
+  await page.waitForFunction(
+    () => /Galaxy · [1-9][\d,]* \//.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+    null,
+    { timeout: 20_000 },
+  )
+  const galaxyPill = await page.textContent('.pt-pill')
+  console.log(`[smoke] particles preset switch: ${galaxyPill}`)
+  const particlesLogText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
+  const particlesGpuClean = !/too small|Invalid CommandBuffer|storm|rendering stopped|GL: GL_|GPU: |failed/i.test(particlesLogText)
+  console.log(`[smoke] particles GPU health: ${particlesGpuClean ? 'clean' : 'GPU ERRORS in the log'}`)
+  if (!particlesGpuClean) console.log(`[smoke] log tail: ${particlesLogText.slice(-600)}`)
+  // mobile viewport: fullscreen canvas, compact pill
+  await page.setViewportSize({ width: 390, height: 844 })
+  const mobileParticles = await page.evaluate(() => {
+    const overflow = document.documentElement.scrollWidth - document.documentElement.clientWidth
+    const pill = document.querySelector('.pt-pill')?.getBoundingClientRect()
+    const canvas = document.querySelector('#canvas')?.getBoundingClientRect()
+    return {
+      overflow,
+      touchTarget: Math.round(pill?.height ?? 0),
+      canvasW: Math.round(canvas?.width ?? 0),
+      canvasH: Math.round(canvas?.height ?? 0),
+      bodyScrolls: document.body.scrollHeight > window.innerHeight + 1,
+    }
+  })
+  console.log(
+    `[smoke] particles mobile: overflow ${mobileParticles.overflow}px, pill target ${mobileParticles.touchTarget}px, ` +
+    `canvas ${mobileParticles.canvasW}x${mobileParticles.canvasH}, body scrolls: ${mobileParticles.bodyScrolls}`,
+  )
+  const mobileParticlesOk =
+    mobileParticles.overflow <= 1 &&
+    mobileParticles.touchTarget >= 40 &&
+    mobileParticles.canvasW === 390 &&
+    mobileParticles.canvasH === 844 &&
+    !mobileParticles.bodyScrolls
+  await page.setViewportSize({ width: 960, height: 720 })
+
   if (errors.length) {
     console.error('[smoke] page errors:')
     for (const error of errors) console.error(`  ${error}`)
@@ -380,6 +446,10 @@ try {
     matcapOk &&
     matcapAlive &&
     matcapGpuClean &&
+    particlesOk &&
+    particlesAlive &&
+    particlesGpuClean &&
+    mobileParticlesOk &&
     viewerLogEntries > 0 &&
     mobileViewerOk &&
     errors.length === 0

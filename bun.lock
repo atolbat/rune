@@ -22,15 +22,6 @@
         "@rune/math": "workspace:*",
       },
     },
-    "packages/materials": {
-      "name": "@rune/materials",
-      "version": "0.1.0",
-      "devDependencies": {
-        "@rune/core": "workspace:*",
-        "@rune/webgl2": "workspace:*",
-        "@rune/webgpu": "workspace:*",
-      },
-    },
     "packages/core": {
       "name": "@rune/core",
       "version": "0.1.0",
@@ -65,8 +56,21 @@
       "name": "@rune/loaders",
       "version": "0.1.0",
     },
+    "packages/materials": {
+      "name": "@rune/materials",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@rune/core": "workspace:*",
+        "@rune/webgl2": "workspace:*",
+        "@rune/webgpu": "workspace:*",
+      },
+    },
     "packages/math": {
       "name": "@rune/math",
+      "version": "0.1.0",
+    },
+    "packages/particles": {
+      "name": "@rune/particles",
       "version": "0.1.0",
     },
     "packages/prims": {
@@ -148,6 +152,8 @@
     "@rune/materials": ["@rune/materials@workspace:packages/materials"],
 
     "@rune/math": ["@rune/math@workspace:packages/math"],
+
+    "@rune/particles": ["@rune/particles@workspace:packages/particles"],
 
     "@rune/prims": ["@rune/prims@workspace:packages/prims"],
 

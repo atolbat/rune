@@ -11,6 +11,7 @@ toggle, a log panel.
 |------|------|---------------|
 | hello-cube | https://atolbat.github.io/rune/demo/hello-cube/ | A cube in one line: `showAny()` / `showOn()`, an Auto/WebGL2/WebGPU toggle, a log with copy |
 | model-viewer | https://atolbat.github.io/rune/demo/model-viewer/ | Three three.js example models: Forest House (glTF · AVIF · Draco — Cook-Torrance PBR from its glTF factors), Samba Dancing (FBX — skeleton, skinning, a looping clip), Nefertiti (glTF · object-space normal map), plus a procedural Matcap Cube. A fullscreen mobile-first viewer: a Load button with a progress bar (`AssetLoader`), model switching, drag rotation + pinch zoom; every shader is assembled by `@rune/materials` (a feature mask per mesh — no hand-written GLSL/WGSL) |
+| particles | https://atolbat.github.io/rune/demo/particles/ | `@rune/particles` live: four presets (fountain, fireworks, galaxy, embers) built from the `createParticles` facade — a CPU-simulated SoA store with deterministic hash spawning and over-life ramps, baked each frame into a camera-facing billboard soup (one interleaved buffer, one blended draw call, dynamic vertex count, zero allocations per frame); orbit + pinch zoom |
 
 Overview of all demos: **https://atolbat.github.io/rune/demo/**
 

@@ -124,5 +124,32 @@ try {
 }
 console.log(matcapOk ? 'MATCAP LIVE OK' : 'MATCAP LIVE FAIL')
 
+// ─── particles: the @rune/particles demo on the LIVE page (the steady
+// state pill, the frame-to-frame soup change, a clean GPU log) ──────────
+let particlesLiveOk = false
+try {
+  await page.goto(`${BASE}/demo/particles/`, { waitUntil: 'networkidle' })
+  await page.waitForFunction(() => document.querySelector('#backend')?.textContent !== '…', null, { timeout: 20000 })
+  await page.waitForFunction(
+    () => /\/ 8,192 · [1-9][\d,]* verts/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+    null,
+    { timeout: 30_000 },
+  )
+  await page.waitForTimeout(900)
+  const shotA = await page.locator('#canvas').screenshot()
+  await page.waitForTimeout(900)
+  const shotB = await page.locator('#canvas').screenshot()
+  const pill = await page.textContent('.pt-pill')
+  const logText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
+  const gpuClean = !/too small|Invalid CommandBuffer|storm|rendering stopped|GL: GL_|GPU: |failed/i.test(logText)
+  await page.screenshot({ path: join(OUT, 'live-particles.png') })
+  console.log(`particles pill: ${pill}`)
+  console.log(`particles GPU log: ${gpuClean ? 'clean' : 'ERRORS'}`)
+  particlesLiveOk = pill.includes('verts') && !shotA.equals(shotB) && gpuClean
+} catch (error) {
+  console.log(`particles check failed: ${error instanceof Error ? error.message : String(error)}`)
+}
+console.log(particlesLiveOk ? 'PARTICLES LIVE OK' : 'PARTICLES LIVE FAIL')
+
 await browser.close()
-process.exit(cubeOk && viewerOk && sambaOk && matcapOk && errors.length === 0 ? 0 : 1)
+process.exit(cubeOk && viewerOk && sambaOk && matcapOk && particlesLiveOk && errors.length === 0 ? 0 : 1)
