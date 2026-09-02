@@ -88,5 +88,36 @@ try {
 }
 console.log(sambaOk ? 'SAMBA LIVE OK' : 'SAMBA LIVE FAIL')
 
+// ─── matcap: the procedural MATCAP feature on the LIVE page (the assembled
+// shader pair + the view-space normal lookup + the generated sphere texture) ─
+let matcapOk = false
+try {
+  await page.click('.mv-pill')
+  await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('.mv-row')]
+    rows.find(r => r.textContent.includes('Matcap'))?.dispatchEvent(new Event('click', { bubbles: true }))
+  })
+  await page.waitForTimeout(300)
+  await page.click('.mv-load')
+  await page.waitForFunction(
+    () => (document.querySelector('.mv-stats')?.textContent ?? '').includes('36 verts'),
+    null,
+    { timeout: 30_000 },
+  )
+  await page.waitForTimeout(800)
+  const shotA = await page.locator('#canvas').screenshot()
+  await page.waitForTimeout(1200)
+  const shotB = await page.locator('#canvas').screenshot()
+  const logText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
+  const gpuClean = !/too small|Invalid CommandBuffer|storm|rendering stopped|GL: GL_|GPU: /i.test(logText)
+  await page.screenshot({ path: join(OUT, 'live-matcap.png') })
+  console.log(`matcap scene: ${await page.textContent('.mv-stats')}`)
+  console.log(`matcap GPU log: ${gpuClean ? 'clean' : 'ERRORS'}`)
+  matcapOk = !shotA.equals(shotB) && gpuClean
+} catch (error) {
+  console.log(`matcap check failed: ${error instanceof Error ? error.message : String(error)}`)
+}
+console.log(matcapOk ? 'MATCAP LIVE OK' : 'MATCAP LIVE FAIL')
+
 await browser.close()
-process.exit(cubeOk && viewerOk && sambaOk && errors.length === 0 ? 0 : 1)
+process.exit(cubeOk && viewerOk && sambaOk && matcapOk && errors.length === 0 ? 0 : 1)

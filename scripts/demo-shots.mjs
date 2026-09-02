@@ -108,6 +108,37 @@ await viewer.waitForFunction(
 await viewer.waitForTimeout(2500) // a few seconds into the dance
 await viewer.screenshot({ path: join(out, 'desktop-mv-samba.png') })
 
+// Nefertiti: the object-space normal-map path
+await viewer.click('.mv-pill')
+await viewer.evaluate(() => {
+  const rows = [...document.querySelectorAll('.mv-row')]
+  rows.find(r => r.textContent.includes('Nefertiti'))?.dispatchEvent(new Event('click', { bubbles: true }))
+})
+await viewer.click('.mv-load')
+await viewer.waitForFunction(
+  () => (document.querySelector('.mv-stats')?.textContent ?? '').includes('verts') &&
+    !((document.querySelector('.mv-stats')?.textContent ?? '').includes('joints')),
+  null,
+  { timeout: 90_000 },
+)
+await viewer.waitForTimeout(1500)
+await viewer.screenshot({ path: join(out, 'desktop-mv-nefertiti.png') })
+
+// Matcap Cube: the procedural MATCAP feature (no download)
+await viewer.click('.mv-pill')
+await viewer.evaluate(() => {
+  const rows = [...document.querySelectorAll('.mv-row')]
+  rows.find(r => r.textContent.includes('Matcap'))?.dispatchEvent(new Event('click', { bubbles: true }))
+})
+await viewer.click('.mv-load')
+await viewer.waitForFunction(
+  () => (document.querySelector('.mv-stats')?.textContent ?? '').includes('36 verts'),
+  null,
+  { timeout: 30_000 },
+)
+await viewer.waitForTimeout(1200)
+await viewer.screenshot({ path: join(out, 'desktop-mv-matcap.png') })
+
 // phone: initial sheet, then the fullscreen scene with the pill
 const viewerPhone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
 await viewerPhone.goto(`http://localhost:${port}/demo/model-viewer/`, { waitUntil: 'networkidle' })

@@ -20,7 +20,7 @@ zero runtime dependencies, a DOM-free core, tests-first development.
 | `@rune/tape` | Recording tapes in workers without a GPU and playing them back on the owner: stub tapes, frame delivery, cross-world replay |
 | `@rune/loaders` | Streaming asset parsers without GPU code: GLB/glTF, OBJ, MTL, FBX (binary and ASCII), images, configs; loading scheduler with AIMD discipline, `AssetLibrary` with an LRU cache |
 | `@rune/animation` | Skeletal animation in a separate layer: clip sampling (binary key search, lerp/slerp), parents-first hierarchy evaluation, skin palette (world × invBind) — flat SoA scratch, zero allocations per frame, loaders-compatible skeleton/clip types, `createAnimator` facade |
-| `@rune/materials` | Constructor material library: a feature bitmask (skin/normal map/texture/light model/alpha mask) → an assembly pipeline of minimal GLSL+WGSL variants, a numeric-key cache (a cache hit is one Map probe); unified attribute names across both backends — no uber-shader |
+| `@rune/materials` | Constructor material library: a feature bitmask (skin, instancing, normal map, texture, flat albedo, vertex color, alpha mask, Lambert/matcap light models, emissive, fog) → an assembly pipeline of minimal GLSL+WGSL variants, a numeric-key cache (a cache hit is one Map probe); unified attribute names across both backends, one join per stage — no ghost string blocks, no uber-shader |
 | `@rune/kit` | High-level utilities on top of `@rune/gl`: AssetCache with refcount/TTL/churn-window, canvas compositing hygiene |
 | `@rune/debug` | Debugging tools (roadmap stage M8) |
 

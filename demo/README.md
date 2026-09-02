@@ -10,7 +10,7 @@ toggle, a log panel.
 | Demo | Link | What it shows |
 |------|------|---------------|
 | hello-cube | https://atolbat.github.io/rune/demo/hello-cube/ | A cube in one line: `showAny()` / `showOn()`, an Auto/WebGL2/WebGPU toggle, a log with copy |
-| model-viewer | https://atolbat.github.io/rune/demo/model-viewer/ | Three three.js example models: Forest House (glTF · AVIF · Draco), Samba Dancing (FBX — skeleton, skinning, a looping clip), Nefertiti (glTF · object-space normal map). A fullscreen mobile-first viewer: a Load button with a progress bar (`AssetLoader`), model switching, drag rotation + pinch zoom, dual-source GLSL+WGSL shaders |
+| model-viewer | https://atolbat.github.io/rune/demo/model-viewer/ | Three three.js example models: Forest House (glTF · AVIF · Draco), Samba Dancing (FBX — skeleton, skinning, a looping clip), Nefertiti (glTF · object-space normal map), plus a procedural Matcap Cube. A fullscreen mobile-first viewer: a Load button with a progress bar (`AssetLoader`), model switching, drag rotation + pinch zoom; every shader is assembled by `@rune/materials` (a feature mask per mesh — no hand-written GLSL/WGSL) |
 
 Overview of all demos: **https://atolbat.github.io/rune/demo/**
 
@@ -73,7 +73,7 @@ demo/
 ├── hello-cube/         — the "cube in one line" demo
 │   ├── index.html
 │   └── main.js
-└── model-viewer/       — the "scene with a loader" demo (three three.js models)
+└── model-viewer/       — the "scene with a loader" demo (three three.js models + the matcap cube)
     ├── index.html
     ├── main.js
     └── assets/         — forest_house.glb, Nefertiti.glb, samba.fbx

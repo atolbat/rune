@@ -284,6 +284,27 @@ try {
     `[smoke] pinch zoom: figure pixels ${figureBefore} → ${figureAfter} (${pinchZoomed ? 'zoomed in' : 'NO ZOOM'})`,
   )
 
+  // 8e. Matcap Cube — the procedural model on the MATCAP pipeline feature
+  // (no download: the geometry and the matcap texture are generated client-side,
+  // the shader comes from @rune/materials like every other mesh in the scene)
+  await page.click('.mv-pill')
+  await page.locator('.mv-rows .mv-row').nth(3).click()
+  await page.click('.mv-load')
+  await page.waitForFunction(
+    () => (document.querySelector('.mv-stats')?.textContent ?? '').includes('verts'),
+    null,
+    { timeout: 30_000 },
+  )
+  const matcapStats = await page.textContent('.mv-stats')
+  const matcapOk = matcapStats.includes('36 verts')
+  console.log(`[smoke] matcap cube: ${matcapStats} (${matcapOk ? 'ok' : 'UNEXPECTED stats'})`)
+  const matcapAlive = await framesDiffer(page)
+  console.log(`[smoke] matcap animation: ${matcapAlive ? 'alive (turntable spins)' : 'STATIC'}`)
+  const matcapLogText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
+  const matcapGpuClean = !/too small|Invalid CommandBuffer|storm|rendering stopped|GL: GL_|GPU: /i.test(matcapLogText)
+  console.log(`[smoke] matcap GPU health: ${matcapGpuClean ? 'clean' : 'GPU ERRORS in the log'}`)
+  if (!matcapGpuClean) console.log(`[smoke] log tail: ${matcapLogText.slice(-600)}`)
+
   // 9. Log: entries exist, Copy reports (the shell controls sit behind the FAB)
   const viewerLogEntries = await page.locator('#log-list .rd-entry').count()
   console.log(`[smoke] model-viewer log entries: ${viewerLogEntries}`)
@@ -349,6 +370,9 @@ try {
     sambaAlive &&
     gpuHealthy &&
     pinchZoomed &&
+    matcapOk &&
+    matcapAlive &&
+    matcapGpuClean &&
     viewerLogEntries > 0 &&
     mobileViewerOk &&
     errors.length === 0

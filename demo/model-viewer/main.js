@@ -1,15 +1,31 @@
-// "model-viewer" demo: a scene with a loader — three models from the three.js examples.
+// "model-viewer" demo: a scene with a loader — three models from the three.js examples
 //   Forest House — glTF + AVIF textures + Draco (webgl_loader_gltf_avif)
 //   Samba Dancing — FBX, skeleton, skinning, clip playback (webgl_loader_fbx)
 //   Nefertiti — glTF + object-space normal map (webgl_materials_normalmap_object_space)
+//   Matcap Cube — a procedural geometry shaded by the MATCAP pipeline feature
+// ALL shaders come from @rune/materials — the assembly pipeline: a feature
+// mask per mesh variant, one minimal dual-source (GLSL+WGSL) shader pair per
+// combination, shared through the numeric-key variant cache. No hand-written
+// GLSL/WGSL lives in this file.
 // Flow: a Load button → progress bar (AssetLoader: fetch → parse → decode) →
 // the scene. Model switching; loaded models show instantly. Rotation via
 // drag (touch/mouse) + auto-spin; zoom via pinch (two fingers) and wheel.
 // The demo imports the BUILT bundles: dist/rune.esm.js + dist/rune-loaders.esm.js
-// + dist/rune-animation.esm.js.
+// + dist/rune-animation.esm.js + dist/rune-materials.esm.js.
 import { createRenderer } from '../../dist/rune.esm.js'
 import { AssetLoader } from '../../dist/rune-loaders.esm.js'
 import { createAnimator } from '../../dist/rune-animation.esm.js'
+import {
+  materialOf,
+  SKIN,
+  NORMALMAP,
+  TEXTURE,
+  FLAT_ALBEDO,
+  DOUBLE_SIDED,
+  LAMBERT,
+  ALPHA_CUTOFF,
+  MATCAP,
+} from '../../dist/rune-materials.esm.js'
 
 /* ─── Models ─────────────────────────────────────────────────────────────── */
 
@@ -35,286 +51,38 @@ const MODELS = [
     url: 'assets/Nefertiti.glb',
     bytes: 1_233_240,
   },
+  {
+    id: 'matcap',
+    title: 'Matcap Cube',
+    sub: 'procedural · matcap shading',
+    url: null,
+    bytes: 0,
+    prepare: prepareMatcapCube,
+  },
 ]
 
 const MODE_NAMES = { auto: 'Auto (WebGPU → WebGL2 fallback)', webgl2: 'WebGL2', webgpu: 'WebGPU' }
 const LIGHT_DIR = [0.5, 0.8, 0.6]
 
-/* ─── Shaders (dual-source: GLSL + WGSL — one spec, both backends) ──────── */
+/* ─── Materials (the @rune/materials assembly pipeline) ───────────────── */
 
-// Textured Lambert (Forest House): tex.rgb * (ambient + lambert).
-// alphaCutoff: MASK materials discard transparent fragments; BLEND ones are
-// drawn with blending (pipeline), OPAQUE — cutoff 0 (never triggers).
-const TEXTURED_VERT = `#version 300 es
-layout(location = 0) in vec3 position;
-layout(location = 1) in vec3 normal;
-layout(location = 2) in vec2 uv;
-uniform mat4 u_mvp;
-uniform mat4 u_model;
-out vec3 v_normal;
-out vec2 v_uv;
-void main() {
-  v_normal = mat3(u_model) * normal;
-  v_uv = uv;
-  gl_Position = u_mvp * vec4(position, 1.0);
-}`
-
-const TEXTURED_FRAG = `#version 300 es
-precision mediump float;
-in vec3 v_normal;
-in vec2 v_uv;
-uniform sampler2D u_tex;
-uniform vec3 u_lightDir;
-uniform float u_alphaCutoff;
-out vec4 o_color;
-void main() {
-  vec3 n = normalize(v_normal);
-  if (!gl_FrontFacing) n = -n; // doubleSided materials of the house
-  float lambert = max(dot(n, normalize(u_lightDir)), 0.0);
-  vec4 tex = texture(u_tex, v_uv);
-  if (tex.a < u_alphaCutoff) discard;
-  o_color = vec4(tex.rgb * (0.35 + 0.65 * lambert), tex.a);
-}`
-
-const TEXTURED_WGSL = `
-struct Params {
-  u_mvp     : mat4x4<f32>,
-  u_model   : mat4x4<f32>,
-  u_lightDir : vec4<f32>,
-  u_alphaCutoff : f32,
-}
-@group(0) @binding(0) var<uniform> params : Params;
-@group(1) @binding(0) var texSampler : sampler;
-@group(1) @binding(1) var texTexture : texture_2d<f32>;
-
-struct VSOut {
-  @builtin(position) pos : vec4<f32>,
-  @location(0) worldNormal : vec3<f32>,
-  @location(1) uv : vec2<f32>,
-}
-
-@vertex
-fn vsMain(
-  @location(0) inPos : vec3<f32>,
-  @location(1) inNormal : vec3<f32>,
-  @location(2) inUv : vec2<f32>,
-) -> VSOut {
-  var out : VSOut;
-  out.pos = params.u_mvp * vec4<f32>(inPos, 1.0);
-  out.worldNormal = (params.u_model * vec4<f32>(inNormal, 0.0)).xyz;
-  out.uv = inUv;
-  return out;
-}
-
-struct FSIn {
-  @location(0) worldNormal : vec3<f32>,
-  @location(1) uv : vec2<f32>,
-  @builtin(front_facing) ff : bool,
-}
-
-@fragment
-fn fsMain(frag : FSIn) -> @location(0) vec4<f32> {
-  var n = normalize(frag.worldNormal);
-  n = select(-n, n, frag.ff); // doubleSided materials of the house
-  let lambert = max(dot(n, normalize(params.u_lightDir.xyz)), 0.0);
-  let tex = textureSample(texTexture, texSampler, frag.uv);
-  if (tex.a < params.u_alphaCutoff) { discard; }
-  return vec4<f32>(tex.rgb * (0.35 + 0.65 * lambert), tex.a);
-}`
-
-// Flat Lambert (Samba): albedo * (ambient + lambert), no textures.
-const FLAT_VERT = `#version 300 es
-layout(location = 0) in vec3 position;
-layout(location = 1) in vec3 normal;
-uniform mat4 u_mvp;
-uniform mat4 u_model;
-out vec3 v_normal;
-void main() {
-  v_normal = mat3(u_model) * normal;
-  gl_Position = u_mvp * vec4(position, 1.0);
-}`
-
-const FLAT_FRAG = `#version 300 es
-precision mediump float;
-in vec3 v_normal;
-uniform vec3 u_lightDir;
-uniform vec3 u_albedo;
-out vec4 o_color;
-void main() {
-  vec3 n = normalize(v_normal);
-  float lambert = max(dot(n, normalize(u_lightDir)), 0.0);
-  o_color = vec4(u_albedo * (0.3 + 0.7 * lambert), 1.0);
-}`
-
-const FLAT_WGSL = `
-struct Params {
-  u_mvp     : mat4x4<f32>,
-  u_model   : mat4x4<f32>,
-  u_lightDir : vec4<f32>,
-  u_albedo   : vec4<f32>,
-}
-@group(0) @binding(0) var<uniform> params : Params;
-
-struct VSOut {
-  @builtin(position) pos : vec4<f32>,
-  @location(0) worldNormal : vec3<f32>,
-}
-
-@vertex
-fn vsMain(
-  @location(0) inPos : vec3<f32>,
-  @location(1) inNormal : vec3<f32>,
-) -> VSOut {
-  var out : VSOut;
-  out.pos = params.u_mvp * vec4<f32>(inPos, 1.0);
-  out.worldNormal = (params.u_model * vec4<f32>(inNormal, 0.0)).xyz;
-  return out;
-}
-
-@fragment
-fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
-  let lambert = max(dot(normalize(frag.worldNormal), normalize(params.u_lightDir.xyz)), 0.0);
-  return vec4<f32>(params.u_albedo.rgb * (0.3 + lambert * 0.7), 1.0);
-}`
-
-// Skinned Lambert (Samba): a bone palette u_bones[NJ] (the FBX skeleton) and
-// 4 influences per vertex. Joint indices travel as float attributes (u16 is
-// not a DrawAttribute type) — the shader rounds them to array indices.
+// One feature mask per mesh variant — the assembler stitches the minimal
+// GLSL + WGSL pair, the numeric-key cache returns the SAME object on every
+// attach (backend switches included). The attribute names are unified
+// across the two languages: one binding per buffer.
 const NJ = 67 // samba skeleton: 67 joints (see the load log)
-const SKINNED_VERT = `#version 300 es
-layout(location = 0) in vec3 position;
-layout(location = 1) in vec3 normal;
-layout(location = 2) in vec4 a_joints;
-layout(location = 3) in vec4 a_weights;
-uniform mat4 u_mvp;
-uniform mat4 u_model;
-uniform mat4 u_bones[${NJ}];
-out vec3 v_normal;
-void main() {
-  mat4 skin =
-      u_bones[int(a_joints.x + 0.5)] * a_weights.x
-    + u_bones[int(a_joints.y + 0.5)] * a_weights.y
-    + u_bones[int(a_joints.z + 0.5)] * a_weights.z
-    + u_bones[int(a_joints.w + 0.5)] * a_weights.w;
-  vec4 skinned = skin * vec4(position, 1.0);
-  v_normal = mat3(u_model) * mat3(skin) * normal;
-  gl_Position = u_mvp * skinned;
-}`
-
-const SKINNED_FRAG = FLAT_FRAG
-
-const SKINNED_WGSL = `
-struct Params {
-  u_mvp : mat4x4<f32>,
-  u_model : mat4x4<f32>,
-  u_lightDir : vec4<f32>,
-  u_albedo : vec4<f32>,
-  u_bones : array<mat4x4<f32>, ${NJ}>,
+const MATERIALS = {
+  // Forest House: textured Lambert, MASK alpha, open surfaces
+  textured: () => materialOf({ features: TEXTURE | LAMBERT | DOUBLE_SIDED | ALPHA_CUTOFF }),
+  // Nefertiti: the normal comes from an object-space normal map
+  normalmap: () => materialOf({ features: TEXTURE | NORMALMAP | LAMBERT | DOUBLE_SIDED }),
+  // Samba: a 67-joint skin palette, flat albedo, open Mixamo folds
+  skinned: () => materialOf({ features: SKIN | LAMBERT | FLAT_ALBEDO | DOUBLE_SIDED, jointCount: NJ }),
+  // Unskinned fallback: flat Lambert
+  flat: () => materialOf({ features: FLAT_ALBEDO | LAMBERT }),
+  // The matcap cube: the light comes from a sampled sphere, no light dir
+  matcap: () => materialOf({ features: MATCAP | FLAT_ALBEDO }),
 }
-@group(0) @binding(0) var<uniform> params : Params;
-
-struct VSOut {
-  @builtin(position) pos : vec4<f32>,
-  @location(0) worldNormal : vec3<f32>,
-}
-
-@vertex
-fn vsMain(
-  @location(0) inPos : vec3<f32>,
-  @location(1) inNormal : vec3<f32>,
-  @location(2) inJoints : vec4<f32>,
-  @location(3) inWeights : vec4<f32>,
-) -> VSOut {
-  let skin =
-      params.u_bones[u32(inJoints.x + 0.5)] * inWeights.x
-    + params.u_bones[u32(inJoints.y + 0.5)] * inWeights.y
-    + params.u_bones[u32(inJoints.z + 0.5)] * inWeights.z
-    + params.u_bones[u32(inJoints.w + 0.5)] * inWeights.w;
-  let skinned = skin * vec4<f32>(inPos, 1.0);
-  var out : VSOut;
-  out.pos = params.u_mvp * skinned;
-  out.worldNormal = (params.u_model * (skin * vec4<f32>(inNormal, 0.0))).xyz;
-  return out;
-}
-
-@fragment
-fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
-  let lambert = max(dot(normalize(frag.worldNormal), normalize(params.u_lightDir.xyz)), 0.0);
-  return vec4<f32>(params.u_albedo.rgb * (0.3 + lambert * 0.7), 1.0);
-}`
-
-// Object-space normal map (Nefertiti): the normal comes FROM the normal map
-// (RGB → object space), geometric normals are not needed — as in the original
-// three.js example (deleteAttribute('normal')).
-const NORMALMAP_VERT = `#version 300 es
-layout(location = 0) in vec3 position;
-layout(location = 1) in vec2 uv;
-uniform mat4 u_mvp;
-uniform mat4 u_model;
-out vec2 v_uv;
-void main() {
-  v_uv = uv;
-  gl_Position = u_mvp * vec4(position, 1.0);
-}`
-
-const NORMALMAP_FRAG = `#version 300 es
-precision mediump float;
-in vec2 v_uv;
-uniform sampler2D u_tex;
-uniform sampler2D u_normalMap;
-uniform mat4 u_model;
-uniform vec3 u_lightDir;
-out vec4 o_color;
-void main() {
-  vec3 nObj = texture(u_normalMap, v_uv).xyz * 2.0 - 1.0;
-  vec3 n = normalize(mat3(u_model) * nObj);
-  if (!gl_FrontFacing) n = -n; // doubleSided: the bust is open on both sides
-  float lambert = max(dot(n, normalize(u_lightDir)), 0.0);
-  vec3 base = texture(u_tex, v_uv).rgb;
-  o_color = vec4(base * (0.22 + 0.78 * lambert), 1.0);
-}`
-
-const NORMALMAP_WGSL = `
-struct Params {
-  u_mvp     : mat4x4<f32>,
-  u_model   : mat4x4<f32>,
-  u_lightDir : vec4<f32>,
-}
-@group(0) @binding(0) var<uniform> params : Params;
-@group(1) @binding(0) var texSampler : sampler;
-@group(1) @binding(1) var texTexture : texture_2d<f32>;
-@group(1) @binding(2) var nrmTexture : texture_2d<f32>;
-
-struct VSOut {
-  @builtin(position) pos : vec4<f32>,
-  @location(0) uv : vec2<f32>,
-}
-
-@vertex
-fn vsMain(
-  @location(0) inPos : vec3<f32>,
-  @location(1) inUv : vec2<f32>,
-) -> VSOut {
-  var out : VSOut;
-  out.pos = params.u_mvp * vec4<f32>(inPos, 1.0);
-  out.uv = inUv;
-  return out;
-}
-
-struct FSIn {
-  @location(0) uv : vec2<f32>,
-  @builtin(front_facing) ff : bool,
-}
-
-@fragment
-fn fsMain(frag : FSIn) -> @location(0) vec4<f32> {
-  let nObj = textureSample(nrmTexture, texSampler, frag.uv).xyz * 2.0 - 1.0;
-  var n = normalize((params.u_model * vec4<f32>(nObj, 0.0)).xyz);
-  n = select(-n, n, frag.ff);
-  let lambert = max(dot(n, normalize(params.u_lightDir.xyz)), 0.0);
-  let base = textureSample(texTexture, texSampler, frag.uv);
-  return vec4<f32>(base.rgb * (0.22 + 0.78 * lambert), 1.0);
-}`
 
 /* ─── Local mat4 math (column-major, like @rune/math) ────────────────────── */
 
@@ -679,6 +447,78 @@ function prepareFbx(model) {
   return preparedModel
 }
 
+/** Matcap Cube: a procedural soup (no asset to download) shaded by the
+ *  MATCAP feature — the light comes from a pre-lit sphere texture sampled
+ *  by the view-space normal. The matcap itself is drawn on a canvas: a
+ *  studio sphere (highlight upper-left, cool rim) — symmetric, so the
+ *  classic V-flip pitfalls of third-party matcaps do not apply. */
+function prepareMatcapCube() {
+  const { positions, normals } = cubeSoup(1)
+  const meshes = [{
+    positions,
+    normals,
+    uvs: null,
+    bitmap: null,
+    normalBitmap: null,
+    matcap: true,
+    matcapSource: matcapCanvas(),
+    albedo: [1, 1, 1], // white tint — the matcap provides the color
+    blend: false,
+    alphaCutoff: 0,
+    cull: 'back',
+    name: 'cube',
+  }]
+  return finishPrepared(meshes, { vertices: 0, triangles: 0 })
+}
+
+/** 6 faces × 2 triangles × 3 vertices = 36 vertices — the same construction
+ *  as @rune/prims cube(): tangential basis per face (cross(u, v) = n),
+ *  corners in CCW front order. */
+function cubeSoup(half) {
+  const FACES = [
+    { n: [0, 0, 1], u: [1, 0, 0], v: [0, 1, 0] },
+    { n: [0, 0, -1], u: [-1, 0, 0], v: [0, 1, 0] },
+    { n: [1, 0, 0], u: [0, 0, -1], v: [0, 1, 0] },
+    { n: [-1, 0, 0], u: [0, 0, 1], v: [0, 1, 0] },
+    { n: [0, 1, 0], u: [1, 0, 0], v: [0, 0, -1] },
+    { n: [0, -1, 0], u: [1, 0, 0], v: [0, 0, 1] },
+  ]
+  const CORNERS = [[-1, -1], [1, -1], [1, 1], [-1, 1]]
+  const positions = new Float32Array(36 * 3)
+  const normals = new Float32Array(36 * 3)
+  let at = 0
+  for (const face of FACES) {
+    for (const index of [0, 1, 2, 0, 2, 3]) {
+      const [cu, cv] = CORNERS[index]
+      positions[at * 3] = (face.u[0] * cu + face.v[0] * cv) * half
+      positions[at * 3 + 1] = (face.u[1] * cu + face.v[1] * cv) * half
+      positions[at * 3 + 2] = (face.u[2] * cu + face.v[2] * cv) * half
+      normals[at * 3] = face.n[0]
+      normals[at * 3 + 1] = face.n[1]
+      normals[at * 3 + 2] = face.n[2]
+      at++
+    }
+  }
+  return { positions, normals }
+}
+
+let matcapCanvasCache = null
+function matcapCanvas() {
+  if (matcapCanvasCache !== null) return matcapCanvasCache
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = 256
+  const g = canvas.getContext('2d')
+  const grad = g.createRadialGradient(112, 96, 12, 128, 128, 128)
+  grad.addColorStop(0, '#ffffff')
+  grad.addColorStop(0.45, '#8fb4ff')
+  grad.addColorStop(0.8, '#3c5a96')
+  grad.addColorStop(1, '#141b30')
+  g.fillStyle = grad
+  g.fillRect(0, 0, 256, 256)
+  matcapCanvasCache = canvas
+  return canvas
+}
+
 /** Expands the indexed skin into a vertex soup with 4-float joints/weights
  *  (rune tapes draw via drawArrays; joint indices travel as f32 attributes). */
 function deindexedSkinned(mesh) {
@@ -813,7 +653,7 @@ function renderRows() {
     main.append(title, sub)
     const size = document.createElement('span')
     size.className = 'mv-size'
-    size.textContent = `${(model.bytes / 1024 / 1024).toFixed(1)} MB`
+    size.textContent = model.bytes > 0 ? `${(model.bytes / 1024 / 1024).toFixed(1)} MB` : 'built-in'
     row.append(main, size)
     row.addEventListener('click', () => selectModel(model.id))
     rows.append(row)
@@ -843,7 +683,9 @@ function renderSheetState() {
   const isPrepared = prepared.has(currentModelId)
   loadButton.textContent = isPrepared
     ? 'Show'
-    : `Load & show · ${(model.bytes / 1024 / 1024).toFixed(1)} MB`
+    : model.bytes > 0
+      ? `Load & show · ${(model.bytes / 1024 / 1024).toFixed(1)} MB`
+      : 'Create & show'
   loadButton.disabled = loadBusy
   if (isPrepared && !loadBusy) hideProgress()
   renderRows()
@@ -860,19 +702,28 @@ async function loadModel(model) {
   loadBusy = true
   renderSheetState()
   setProgress(0, 'queued')
-  shell.log.event(`Loading “${model.title}” (${(model.bytes / 1024 / 1024).toFixed(1)} MB)…`)
+  shell.log.event(model.bytes > 0
+    ? `Loading “${model.title}” (${(model.bytes / 1024 / 1024).toFixed(1)} MB)…`
+    : `Building “${model.title}” (procedural — no download)…`)
   const startedAt = performance.now()
   try {
-    const handle = loader.load(model.url, {
-      onProgress: phase => {
-        if (seq !== loadSeq) return
-        setProgress(phase.ratio, `${phaseDetail(phase)} · ${(phase.loaded / 1024).toFixed(0)} KB`)
-      },
-    })
-    // LoadHandle is thenable: awaiting the handle yields the parsed asset
-    const asset = await handle
-    if (seq !== loadSeq) return
-    const preparedModel = model.id === 'samba' ? prepareFbx(asset) : prepareGltf(asset)
+    let preparedModel
+    if (model.prepare !== undefined) {
+      // Procedural models (the matcap cube): the geometry is generated, not fetched
+      setProgress(1, 'building')
+      preparedModel = model.prepare()
+    } else {
+      const handle = loader.load(model.url, {
+        onProgress: phase => {
+          if (seq !== loadSeq) return
+          setProgress(phase.ratio, `${phaseDetail(phase)} · ${(phase.loaded / 1024).toFixed(0)} KB`)
+        },
+      })
+      // LoadHandle is thenable: awaiting the handle yields the parsed asset
+      const asset = await handle
+      if (seq !== loadSeq) return
+      preparedModel = model.id === 'samba' ? prepareFbx(asset) : prepareGltf(asset)
+    }
     prepared.set(model.id, preparedModel)
     shell.log.event(
       `“${model.title}” ready: ${preparedModel.stats.vertices.toLocaleString('en-US')} vertices, ` +
@@ -960,12 +811,17 @@ async function attachScene(id) {
   for (const mesh of model.meshes) {
     const variant = mesh.skinned === true
       ? 'skinned'
-      : mesh.normalBitmap !== null ? 'normalmap' : mesh.bitmap !== null ? 'textured' : 'flat'
+      : mesh.matcap === true
+        ? 'matcap'
+        : mesh.normalBitmap !== null ? 'normalmap' : mesh.bitmap !== null ? 'textured' : 'flat'
     const bitmap = await resolveBitmap(mesh.bitmap)
     if (mesh.bitmap !== null && bitmap === null) {
       shell.log.warn(`mesh “${mesh.name}”: texture failed to decode — drawing albedo`)
     }
     const normalBitmap = mesh.normalBitmap !== null ? await resolveBitmap(mesh.normalBitmap) : null
+    // ONE binding per buffer: the pipeline's attribute names are the same
+    // in GLSL and WGSL (position/normal/uv/joints/weights) — no inPos/a_joints
+    // dual bookkeeping like the hand-written shaders had.
     const attributes = {}
     const textures = {}
     const uniforms = {
@@ -977,47 +833,32 @@ async function attachScene(id) {
       attributes.position = { data: mesh.positions, size: 3 }
       attributes.normal = { data: mesh.normals, size: 3 }
       attributes.uv = { data: mesh.uvs, size: 2 }
-      attributes.inPos = attributes.position
-      attributes.inNormal = attributes.normal
-      attributes.inUv = attributes.uv
       uniforms.u_alphaCutoff = mesh.alphaCutoff
     } else if (variant === 'normalmap') {
       attributes.position = { data: mesh.positions, size: 3 }
       attributes.uv = { data: mesh.uvs, size: 2 }
-      attributes.inPos = attributes.position
-      attributes.inUv = attributes.uv
     } else if (variant === 'skinned') {
       attributes.position = { data: mesh.positions, size: 3 }
       attributes.normal = { data: mesh.normals, size: 3 }
-      attributes.a_joints = { data: mesh.joints, size: 4 }
-      attributes.a_weights = { data: mesh.weights, size: 4 }
-      // WGSL names — the same buffers under the WGSL @location signature
-      attributes.inPos = attributes.position
-      attributes.inNormal = attributes.normal
-      attributes.inJoints = attributes.a_joints
-      attributes.inWeights = attributes.a_weights
+      attributes.joints = { data: mesh.joints, size: 4 }
+      attributes.weights = { data: mesh.weights, size: 4 }
       uniforms.u_albedo = mesh.albedo
       uniforms.u_bones = (p) => p.bones
+    } else if (variant === 'matcap') {
+      attributes.position = { data: mesh.positions, size: 3 }
+      attributes.normal = { data: mesh.normals, size: 3 }
+      // the view matrix: the matcap is sampled by the VIEW-space normal
+      uniforms.u_view = (p) => p.view
+      uniforms.u_albedo = mesh.albedo
     } else {
       attributes.position = { data: mesh.positions, size: 3 }
       attributes.normal = { data: mesh.normals, size: 3 }
-      attributes.inPos = attributes.position
-      attributes.inNormal = attributes.normal
       uniforms.u_albedo = mesh.albedo
     }
 
-    const glslOf = () => {
-      if (variant === 'textured') return { vertex: TEXTURED_VERT, fragment: TEXTURED_FRAG }
-      if (variant === 'normalmap') return { vertex: NORMALMAP_VERT, fragment: NORMALMAP_FRAG }
-      if (variant === 'skinned') return { vertex: SKINNED_VERT, fragment: SKINNED_FRAG }
-      return { vertex: FLAT_VERT, fragment: FLAT_FRAG }
-    }
-    const wgslOf = () => {
-      if (variant === 'textured') return TEXTURED_WGSL
-      if (variant === 'normalmap') return NORMALMAP_WGSL
-      if (variant === 'skinned') return SKINNED_WGSL
-      return FLAT_WGSL
-    }
+    // The material: a feature mask → the assembled minimal GLSL+WGSL pair,
+    // cached by the numeric key (the same object on every re-attach).
+    const material = MATERIALS[variant]()
 
     // Textures: glTF bitmaps are already decoded by the parser (createImageBitmap)
     let glTexture = null
@@ -1035,11 +876,17 @@ async function attachScene(id) {
       textures.u_normalMap = glNormal
       textures.texTexture = glTexture
       textures.nrmTexture = glNormal
+    } else if (variant === 'matcap' && mesh.matcapSource !== null) {
+      const matcapBitmap = await createImageBitmap(mesh.matcapSource)
+      glTexture = activeRenderer.texture(256, 256)
+      glTexture.uploadImage(matcapBitmap)
+      textures.u_matcap = glTexture
+      textures.matTexture = glTexture
     }
 
     const spec = {
       id: `${id}:${mesh.name}:${variant}`,
-      shader: { glsl: glslOf(), wgsl: wgslOf() },
+      shader: { glsl: material.glsl, wgsl: material.wgsl },
       pipeline: {
         depth: { test: 'less', write: true },
         raster: { cull: mesh.cull },
@@ -1212,7 +1059,8 @@ function frameCallback(ctx, record) {
   const animation = current?.animation
   if (animation !== undefined) animation.advance(ctx.dt)
   const bones = animation !== undefined ? animation.palette : null
-  for (const command of scene.meshes) record(command, { mvp, model, bones })
+  // `view` feeds the matcap (the view-space normal lookup)
+  for (const command of scene.meshes) record(command, { mvp, model, bones, view })
 }
 
 async function boot(mode) {

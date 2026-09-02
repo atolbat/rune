@@ -6,17 +6,38 @@
 // (material.ts); this module is pure — the hot path (a cache hit) never
 // lands here.
 //
+// MEMORY CONTRACT — how the sources are glued (the "no ghost blocks" rule):
+//   * exactly ONE final string per stage leaves this module (vertex / fragment
+//     / wgsl) — produced by a single join, never by `a + b + c` chains that
+//     rope-flatten into intermediate blocks;
+//   * the line buffers, the parts lists and the declaration registries are
+//     MODULE-LEVEL SCRATCH, reset per assembly and shared by every variant —
+//     a cold batch of N variants does not churn N × ~100 array objects;
+//   * there are NO per-line indent copies: the 2-space indentation comes from
+//     the join separator ('\n  '), so the only strings allocated per variant
+//     are the ones that end up inside the final sources.
+//
 // Naming conventions (unified across GLSL and WGSL):
-//   attributes  position | normal | uv | joints | weights  (the same names)
+//   attributes  position | normal | uv | color | joints | weights | i_col0..3
 //   uniforms    u_mvp, u_model (always) + feature uniforms
 //   WGSL        one Params struct @group(0) @binding(0) (all uniforms);
-//               textures @group(1): texSampler@0, texTexture@1, nrmTexture@2
+//               textures @group(1): texSampler@0, texTexture@1, nrmTexture@2,
+//               matTexture@3
+//
+// The fragment stage computes `lit` (LAMBERT or MATCAP — or plain base.rgb),
+// the post effects (EMISSIVE, FOG) mutate it, and the assembler appends the
+// SINGLE final color write. A pure unlit variant keeps the direct shape
+// `o_color = base;` / `return base;`.
 
 import {
   ALPHA_CUTOFF,
   CATALOG,
+  EMISSIVE,
   FLAT_ALBEDO,
+  FOG,
+  INSTANCED,
   LAMBERT,
+  MATCAP,
   NORMALMAP,
   SKIN,
   TEXTURE,
@@ -38,71 +59,122 @@ export interface AssembledMaterial {
   readonly attributes: readonly AttrDecl[]
   /** Non-sampler uniforms (name + types); the order = the WGSL struct order. */
   readonly uniforms: readonly UniformDecl[]
-  /** Sampler names of the GLSL fragment (u_tex / u_normalMap). */
+  /** Sampler names of the GLSL fragment (u_tex / u_normalMap / u_matcap). */
   readonly samplers: readonly string[]
+}
+
+// ── the scratch: reused by every assembly (see the memory contract) ─────────
+const sc = {
+  vertUniforms: [] as UniformDecl[],
+  fragUniforms: [] as UniformDecl[],
+  attrs: [] as AttrDecl[],
+  varyings: [] as VaryingDecl[],
+  vertGlsl: [] as string[],
+  vertWgslPre: [] as string[],
+  vertWgslOut: [] as string[],
+  fragGlsl: [] as string[],
+  fragWgsl: [] as string[],
+  vertBody: [] as string[],
+  vertParts: [] as string[],
+  fragParts: [] as string[],
+  wgslParts: [] as string[],
+  uniforms: [] as UniformDecl[], // the deduped vert+frag order (WGSL struct)
+  samplers: [] as string[],
 }
 
 /** Assembles the variant for a mask. Throws on invalid combinations. */
 export function assemble(mask: number, jointCount: number): AssembledMaterial {
   validate(mask, jointCount)
   const ctx: AsmCtx = { mask, jointCount }
+  resetScratch()
+
+  const needsNormal = (mask & (LAMBERT | MATCAP)) !== 0 && (mask & NORMALMAP) === 0
+  const needsUv = (mask & (TEXTURE | NORMALMAP)) !== 0
+  sc.attrs.push({ name: 'position', glslType: 'vec3', wgslType: 'vec3<f32>' })
+  if (needsNormal) sc.attrs.push({ name: 'normal', glslType: 'vec3', wgslType: 'vec3<f32>' })
+  if (needsUv) sc.attrs.push({ name: 'uv', glslType: 'vec2', wgslType: 'vec2<f32>' })
+
+  const hasLight = (mask & (LAMBERT | MATCAP)) !== 0
+  const hasPost = (mask & (EMISSIVE | FOG)) !== 0
+  let litFallback = false
 
   // ── collect snippets in catalog order (ascending bit = semantic order) ──
-  const vertUniforms: UniformDecl[] = []
-  const fragUniforms: UniformDecl[] = []
-  const attrs: AttrDecl[] = [{ name: 'position', glslType: 'vec3', wgslType: 'vec3<f32>' }]
-  const varyings: VaryingDecl[] = []
-  const vertGlsl: string[] = []
-  const vertWgslPre: string[] = []
-  const vertWgslOut: string[] = []
-  const fragGlsl: string[] = []
-  const fragWgsl: string[] = []
-  let frontFacing = false
-
-  const needsNormal = (mask & LAMBERT) !== 0 && (mask & NORMALMAP) === 0
-  if (needsNormal) attrs.push({ name: 'normal', glslType: 'vec3', wgslType: 'vec3<f32>' })
-  if ((mask & (TEXTURE | NORMALMAP)) !== 0) attrs.push({ name: 'uv', glslType: 'vec2', wgslType: 'vec2<f32>' })
-
   for (const feature of CATALOG) {
     if ((mask & feature.bit) === 0) continue
+    // The unlit fallback must exist before the first post effect touches `lit`.
+    if (!hasLight && !litFallback && (feature.bit === EMISSIVE || feature.bit === FOG)) {
+      sc.fragGlsl.push('vec3 lit = base.rgb;')
+      sc.fragWgsl.push('var lit = base.rgb;')
+      litFallback = true
+    }
     const v = feature.vert(ctx)
-    if (v.uniforms !== undefined) appendUnique(vertUniforms, v.uniforms, byName)
-    if (v.attrs !== undefined) appendUnique(attrs, v.attrs, byName)
-    if (v.varyings !== undefined) appendUnique(varyings, v.varyings, item => item.glslName)
-    if (v.glslBody !== undefined) vertGlsl.push(...v.glslBody)
-    if (v.wgslPre !== undefined) vertWgslPre.push(...v.wgslPre)
-    if (v.wgslOut !== undefined) vertWgslOut.push(...v.wgslOut)
+    if (v.uniforms !== undefined) appendUnique(sc.vertUniforms, v.uniforms, byName)
+    if (v.attrs !== undefined) appendUnique(sc.attrs, v.attrs, byName)
+    if (v.varyings !== undefined) appendUnique(sc.varyings, v.varyings, item => item.glslName)
+    if (v.glslBody !== undefined) sc.vertGlsl.push(...v.glslBody)
+    if (v.wgslPre !== undefined) sc.vertWgslPre.push(...v.wgslPre)
+    if (v.wgslOut !== undefined) sc.vertWgslOut.push(...v.wgslOut)
     const f = feature.frag(ctx)
-    if (f.uniforms !== undefined) appendUnique(fragUniforms, f.uniforms, byName)
-    if (f.glslBody !== undefined) fragGlsl.push(...f.glslBody)
-    if (f.wgslBody !== undefined) fragWgsl.push(...f.wgslBody)
+    if (f.uniforms !== undefined) appendUnique(sc.fragUniforms, f.uniforms, byName)
+    if (f.glslBody !== undefined) sc.fragGlsl.push(...f.glslBody)
+    if (f.wgslBody !== undefined) sc.fragWgsl.push(...f.wgslBody)
     if (f.frontFacing === true) frontFacing = true
   }
 
-  // No light model → the base color as is (unlit).
-  if ((mask & LAMBERT) === 0) {
-    fragGlsl.push('o_color = base;')
-    fragWgsl.push('return base;')
-  }
-
-  // The default position expression: SKIN declares its own position4;
-  // every other combination starts from the raw attribute.
+  // The default position expression: SKIN declares its own position4; every
+  // other combination starts from the raw attribute. INSTANCED rewraps it.
+  const pos = (mask & INSTANCED) !== 0 ? 'position4Inst' : 'position4'
   if ((mask & SKIN) === 0) {
-    vertGlsl.unshift('vec4 position4 = vec4(position, 1.0);')
-    vertWgslPre.unshift('let position4 = vec4<f32>(position, 1.0);')
+    sc.vertGlsl.unshift('vec4 position4 = vec4(position, 1.0);')
+    sc.vertWgslPre.unshift('let position4 = vec4<f32>(position, 1.0);')
+  }
+  // The clip-space position — the LAST vertex body line (after skin/instance).
+  sc.vertGlsl.push(`gl_Position = u_mvp * ${pos};`)
+
+  // The single final color write (the light models / post effects own `lit`).
+  if (hasLight || hasPost) {
+    // Demo-tuned parity: the object-space normal-map materials are opaque.
+    const alpha = (mask & NORMALMAP) !== 0 ? '1.0' : 'base.a'
+    sc.fragGlsl.push(`o_color = vec4(lit, ${alpha});`)
+    sc.fragWgsl.push(`return vec4<f32>(lit, ${alpha});`)
+  } else {
+    sc.fragGlsl.push('o_color = base;')
+    sc.fragWgsl.push('return base;')
   }
 
   // The uniform block order (GLSL declaration order + the WGSL struct):
-  // u_mvp, u_model, vertex-stage features, fragment-stage features.
-  const uniforms = [...vertUniforms, ...fragUniforms]
+  // u_mvp, u_model, vertex-stage features, fragment-stage features —
+  // deduped by name (u_view may be wanted by BOTH stages: FOG vert, MATCAP frag).
+  appendUnique(sc.uniforms, sc.vertUniforms, byName)
+  appendUnique(sc.uniforms, sc.fragUniforms, byName)
 
-  const glsl = buildGlsl(mask, attrs, varyings, vertUniforms, fragUniforms, vertGlsl, fragGlsl)
-  const wgsl = buildWgsl(mask, attrs, varyings, uniforms, vertWgslPre, vertWgslOut, fragWgsl, frontFacing)
-  const samplers: string[] = []
-  if ((mask & TEXTURE) !== 0) samplers.push('u_tex')
-  if ((mask & NORMALMAP) !== 0) samplers.push('u_normalMap')
+  if ((mask & TEXTURE) !== 0) sc.samplers.push('u_tex')
+  if ((mask & NORMALMAP) !== 0) sc.samplers.push('u_normalMap')
+  if ((mask & MATCAP) !== 0) sc.samplers.push('u_matcap')
 
-  return { mask, jointCount, glsl, wgsl, attributes: attrs, uniforms, samplers }
+  const glsl = buildGlsl(mask, sc.vertUniforms, sc.fragUniforms)
+  const wgsl = buildWgsl(mask, pos)
+  return {
+    mask,
+    jointCount,
+    glsl,
+    wgsl,
+    attributes: sc.attrs.slice(),
+    uniforms: sc.uniforms.slice(),
+    samplers: sc.samplers.slice(),
+  }
+}
+
+/** front-facing request flag (DOUBLE_SIDED) — reset per assembly. */
+let frontFacing = false
+
+function resetScratch(): void {
+  frontFacing = false
+  for (const list of [
+    sc.vertUniforms, sc.fragUniforms, sc.attrs, sc.varyings,
+    sc.vertGlsl, sc.vertWgslPre, sc.vertWgslOut, sc.fragGlsl, sc.fragWgsl,
+    sc.vertBody, sc.vertParts, sc.fragParts, sc.wgslParts, sc.uniforms, sc.samplers,
+  ]) list.length = 0
 }
 
 /** Combination rules — actionable errors at assembly (not at draw time). */
@@ -110,12 +182,19 @@ function validate(mask: number, jointCount: number): void {
   if ((mask & (TEXTURE | FLAT_ALBEDO)) === (TEXTURE | FLAT_ALBEDO)) {
     throw new Error('rune/materials: TEXTURE and FLAT_ALBEDO are mutually exclusive (one base color source)')
   }
-  if ((mask & SKIN) !== 0 && (!Number.isInteger(jointCount) || jointCount < 1)) {
-    throw new Error('rune/materials: SKIN requires jointCount >= 1')
-  }
   if ((mask & ALPHA_CUTOFF) !== 0 && (mask & TEXTURE) === 0) {
     // A cutoff without a texture alpha is dead code — refuse silently-wrong builds.
     throw new Error('rune/materials: ALPHA_CUTOFF requires TEXTURE (the alpha comes from the map)')
+  }
+  if ((mask & (TEXTURE | FLAT_ALBEDO)) === 0) {
+    // Without a base there is no `base` — refuse a silently-broken shader.
+    throw new Error('rune/materials: a material needs a base color source (TEXTURE or FLAT_ALBEDO)')
+  }
+  if ((mask & (LAMBERT | MATCAP)) === (LAMBERT | MATCAP)) {
+    throw new Error('rune/materials: LAMBERT and MATCAP are mutually exclusive light models')
+  }
+  if ((mask & SKIN) !== 0 && (!Number.isInteger(jointCount) || jointCount < 1)) {
+    throw new Error('rune/materials: SKIN requires jointCount >= 1')
   }
 }
 
@@ -130,94 +209,88 @@ function appendUnique<T>(into: T[], from: readonly T[], keyOf: (item: T) => stri
   }
 }
 
+/** A brace block with 2-space-indented lines — the indentation comes from the
+ *  join separator, NOT from per-line string copies (the memory contract). */
+function pushBody(parts: string[], open: string, lines: readonly string[], close: string): void {
+  if (lines.length === 0) {
+    parts.push(open, close)
+    return
+  }
+  parts.push(open, '  ' + lines.join('\n  '), close)
+}
+
 /** GLSL pair: dense locations (0..n), varyings linked by name. */
 function buildGlsl(
   mask: number,
-  attrs: readonly AttrDecl[],
-  varyings: readonly VaryingDecl[],
   vertUniforms: readonly UniformDecl[],
   fragUniforms: readonly UniformDecl[],
-  vertBody: readonly string[],
-  fragBody: readonly string[],
 ): { vertex: string; fragment: string } {
-  const vert: string[] = ['#version 300 es']
-  attrs.forEach((attr, at) => vert.push(`layout(location = ${at}) in ${attr.glslType} ${attr.name};`))
+  const vert = sc.vertParts
+  vert.push('#version 300 es')
+  sc.attrs.forEach((attr, at) => vert.push(`layout(location = ${at}) in ${attr.glslType} ${attr.name};`))
   vert.push('uniform mat4 u_mvp;')
   vert.push('uniform mat4 u_model;')
   for (const uniform of vertUniforms) vert.push(uniform.glsl)
-  for (const varying of varyings) vert.push(`out ${varying.glslType} ${varying.glslName};`)
-  vert.push('void main() {')
-  vert.push(...indent(vertBody))
-  vert.push('  gl_Position = u_mvp * position4;')
-  vert.push('}')
+  for (const varying of sc.varyings) vert.push(`out ${varying.glslType} ${varying.glslName};`)
+  pushBody(vert, 'void main() {', sc.vertGlsl, '}')
 
-  const frag: string[] = ['#version 300 es', 'precision mediump float;']
+  const frag = sc.fragParts
+  frag.push('#version 300 es', 'precision mediump float;')
   // NORMALMAP reads u_model in the fragment (object-space → world).
   if ((mask & NORMALMAP) !== 0) frag.push('uniform mat4 u_model;')
   if ((mask & TEXTURE) !== 0) frag.push('uniform sampler2D u_tex;')
   if ((mask & NORMALMAP) !== 0) frag.push('uniform sampler2D u_normalMap;')
-  for (const varying of varyings) frag.push(`in ${varying.glslType} ${varying.glslName};`)
+  if ((mask & MATCAP) !== 0) frag.push('uniform sampler2D u_matcap;')
+  for (const varying of sc.varyings) frag.push(`in ${varying.glslType} ${varying.glslName};`)
   for (const uniform of fragUniforms) frag.push(uniform.glsl)
   frag.push('out vec4 o_color;')
-  frag.push('void main() {')
-  frag.push(...indent(fragBody))
-  frag.push('}')
+  pushBody(frag, 'void main() {', sc.fragGlsl, '}')
 
   return { vertex: vert.join('\n'), fragment: frag.join('\n') }
 }
 
 /** WGSL: one Params struct (ALL uniforms), group(1) textures, two entries. */
-function buildWgsl(
-  mask: number,
-  attrs: readonly AttrDecl[],
-  varyings: readonly VaryingDecl[],
-  uniforms: readonly UniformDecl[],
-  vertPre: readonly string[],
-  vertOut: readonly string[],
-  fragBody: readonly string[],
-  frontFacing: boolean,
-): string {
-  const lines: string[] = ['struct Params {', '  u_mvp : mat4x4<f32>,', '  u_model : mat4x4<f32>,']
-  for (const uniform of uniforms) {
-    if (uniform.wgsl !== '') lines.push(`  ${uniform.wgsl}`)
-  }
+function buildWgsl(mask: number, pos: string): string {
+  const lines = sc.wgslParts
+  lines.push('struct Params {', '  u_mvp : mat4x4<f32>,', '  u_model : mat4x4<f32>,')
+  for (const uniform of sc.uniforms) lines.push(`  ${uniform.wgsl}`)
   lines.push('}')
   lines.push('@group(0) @binding(0) var<uniform> params : Params;')
-  if ((mask & (TEXTURE | NORMALMAP)) !== 0) {
+  if ((mask & (TEXTURE | NORMALMAP | MATCAP)) !== 0) {
     lines.push('@group(1) @binding(0) var texSampler : sampler;')
   }
   if ((mask & TEXTURE) !== 0) lines.push('@group(1) @binding(1) var texTexture : texture_2d<f32>;')
   if ((mask & NORMALMAP) !== 0) lines.push('@group(1) @binding(2) var nrmTexture : texture_2d<f32>;')
+  if ((mask & MATCAP) !== 0) lines.push('@group(1) @binding(3) var matTexture : texture_2d<f32>;')
 
   lines.push('struct VSOut {', '  @builtin(position) pos : vec4<f32>,')
-  varyings.forEach((varying, at) => lines.push(`  @location(${at}) ${varying.wgslName} : ${varying.wgslType},`))
+  sc.varyings.forEach((varying, at) =>
+    lines.push(`  @location(${at}) ${varying.wgslName} : ${varying.wgslType},`))
   lines.push('}')
 
   lines.push('@vertex')
   lines.push('fn vsMain(')
-  attrs.forEach((attr, at) => lines.push(`  @location(${at}) ${attr.name} : ${attr.wgslType},`))
-  lines.push(') -> VSOut {')
-  lines.push(...indent(vertPre))
-  lines.push('  var out : VSOut;')
-  lines.push('  out.pos = params.u_mvp * position4;')
-  lines.push(...indent(vertOut))
-  lines.push('  return out;')
-  lines.push('}')
+  sc.attrs.forEach((attr, at) => lines.push(`  @location(${at}) ${attr.name} : ${attr.wgslType},`))
+  // one scratch reuse: the vertex body (pre + out + return)
+  const body = sc.vertBody
+  body.push(...sc.vertWgslPre)
+  body.push('var out : VSOut;')
+  body.push(`out.pos = params.u_mvp * ${pos};`)
+  body.push(...sc.vertWgslOut)
+  body.push('return out;')
+  pushBody(lines, ') -> VSOut {', body, '}')
 
   if (frontFacing) {
     lines.push('struct FSIn {')
-    varyings.forEach((varying, at) => lines.push(`  @location(${at}) ${varying.wgslName} : ${varying.wgslType},`))
+    sc.varyings.forEach((varying, at) =>
+      lines.push(`  @location(${at}) ${varying.wgslName} : ${varying.wgslType},`))
     lines.push('  @builtin(front_facing) ff : bool,')
     lines.push('}')
   }
   lines.push('@fragment')
   lines.push(`fn fsMain(frag : ${frontFacing ? 'FSIn' : 'VSOut'}) -> @location(0) vec4<f32> {`)
-  lines.push(...indent(fragBody))
+  if (sc.fragWgsl.length > 0) lines.push('  ' + sc.fragWgsl.join('\n  '))
   lines.push('}')
 
   return lines.join('\n')
-}
-
-function indent(lines: readonly string[]): string[] {
-  return lines.map(line => `  ${line}`)
 }

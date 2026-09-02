@@ -10,7 +10,7 @@
 //
 // Layers:
 //   features.ts  — the catalog (bits + GLSL/WGSL snippets)
-//   assemble.ts  — the one-shot builder (pure)
+//   assemble.ts  — the one-shot builder (pure, zero ghost allocations)
 //   material.ts  — the variant cache (the hot path)
 //
 // This package has ZERO dependencies: it only produces strings and lists;
@@ -19,12 +19,19 @@
 export {
   CATALOG,
   SKIN,
+  INSTANCED,
   NORMALMAP,
   TEXTURE,
   FLAT_ALBEDO,
+  VERTEX_COLOR,
   DOUBLE_SIDED,
-  LAMBERT,
   ALPHA_CUTOFF,
+  LAMBERT,
+  MATCAP,
+  EMISSIVE,
+  FOG,
+  LIGHT_MODELS,
+  POST_EFFECTS,
 } from './features.ts'
 export type {
   FeatureBit,
