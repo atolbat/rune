@@ -775,6 +775,13 @@ async function propArray(node: RawNode, childName: string): Promise<Float64Array
       for (let i = 0; i < lazy.length; i++) out[i] = Number(dv.getBigInt64(i * 8, true))
       return out
     }
+    // Float32 arrays (KeyValueFloat) must NOT go through f64(): that would
+    // reinterpret the same bytes as doubles — two f32 keys pack into one
+    // garbage f64 (≈3e13). Read as f32, then widen.
+    if (lazy.kind === 'f32') {
+      const f32 = await lazy.f32()
+      return Float64Array.from(f32)
+    }
     return lazy.f64()
   }
   if (prop instanceof Float64Array) return prop
@@ -838,22 +845,33 @@ function f32From(src: Float64Array | Float32Array): Float32Array {
 }
 
 function triangulate(polygonIndex: Int32Array): { indices: Uint32Array } {
+  // The LAST corner of each polygon is stored as ~index (a negative number).
+  // Every index pushed below must be POSITIVE: a negative one would be wrapped
+  // by Uint32Array.from() into a huge value, and positions[huge] is undefined
+  // → NaN vertices → the triangle silently disappears (the "grater" bug:
+  // one broken triangle per quad = exactly half of a quad mesh).
   const indices: number[] = []
   let polyStart = 0
   for (let i = 0; i < polygonIndex.length; i++) {
     const v = polygonIndex[i]
-    if (v < 0) {
-      const last = ~v
-      const len = i - polyStart + 1
-      const v0 = polygonIndex[polyStart]
-      for (let k = 1; k < len - 1; k++) {
-        indices.push(v0, polygonIndex[polyStart + k], polygonIndex[polyStart + k + 1])
-      }
-      void last
-      polyStart = i + 1
+    if (v >= 0) continue
+    const last = ~v
+    const len = i - polyStart + 1
+    const v0 = positiveIndex(polygonIndex[polyStart])
+    for (let k = 1; k + 1 < len; k++) {
+      // k + 1 === len - 1 → the corner IS the (negatively encoded) last one.
+      const c1 = positiveIndex(polygonIndex[polyStart + k])
+      const c2 = k + 2 === len ? last : positiveIndex(polygonIndex[polyStart + k + 1])
+      indices.push(v0, c1, c2)
     }
+    polyStart = i + 1
   }
   return { indices: Uint32Array.from(indices) }
+}
+
+/** A polygon corner index with the ~-encoding of the last corner removed. */
+function positiveIndex(v: number): number {
+  return v < 0 ? ~v : v
 }
 
 function computeNormals(vertices: Float64Array, polygonIndex: Int32Array): Float32Array {
@@ -865,14 +883,16 @@ function computeNormals(vertices: Float64Array, polygonIndex: Int32Array): Float
     if (v >= 0) continue
     const len = i - polyStart + 1
     if (len >= 3) {
-      const a = polygonIndex[polyStart] * 3
-      const b = polygonIndex[polyStart + 1] * 3
-      const c = polygonIndex[polyStart + len - 1] * 3
+      // ~-encoded last corner: positiveIndex, otherwise out[negative] += is a
+      // silent no-op (a typed-array OOB write) and the corner loses its normal.
+      const a = positiveIndex(polygonIndex[polyStart]) * 3
+      const b = positiveIndex(polygonIndex[polyStart + 1]) * 3
+      const c = positiveIndex(polygonIndex[polyStart + len - 1]) * 3
       const ux = vertices[b] - vertices[a], uy = vertices[b + 1] - vertices[a + 1], uz = vertices[b + 2] - vertices[a + 2]
       const vx = vertices[c] - vertices[a], vy = vertices[c + 1] - vertices[a + 1], vz = vertices[c + 2] - vertices[a + 2]
       const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx
       for (let k = 0; k < len; k++) {
-        const vi = polygonIndex[polyStart + k] * 3
+        const vi = positiveIndex(polygonIndex[polyStart + k]) * 3
         out[vi] += nx; out[vi + 1] += ny; out[vi + 2] += nz
       }
     }

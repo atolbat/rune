@@ -2232,6 +2232,10 @@ async function propArray(node, childName) {
         out[i] = Number(dv.getBigInt64(i * 8, true));
       return out;
     }
+    if (lazy.kind === "f32") {
+      const f32 = await lazy.f32();
+      return Float64Array.from(f32);
+    }
     return lazy.f64();
   }
   if (prop instanceof Float64Array)
@@ -2296,17 +2300,22 @@ function triangulate(polygonIndex) {
   let polyStart = 0;
   for (let i = 0;i < polygonIndex.length; i++) {
     const v = polygonIndex[i];
-    if (v < 0) {
-      const last = ~v;
-      const len = i - polyStart + 1;
-      const v0 = polygonIndex[polyStart];
-      for (let k = 1;k < len - 1; k++) {
-        indices.push(v0, polygonIndex[polyStart + k], polygonIndex[polyStart + k + 1]);
-      }
-      polyStart = i + 1;
+    if (v >= 0)
+      continue;
+    const last = ~v;
+    const len = i - polyStart + 1;
+    const v0 = positiveIndex(polygonIndex[polyStart]);
+    for (let k = 1;k + 1 < len; k++) {
+      const c1 = positiveIndex(polygonIndex[polyStart + k]);
+      const c2 = k + 2 === len ? last : positiveIndex(polygonIndex[polyStart + k + 1]);
+      indices.push(v0, c1, c2);
     }
+    polyStart = i + 1;
   }
   return { indices: Uint32Array.from(indices) };
+}
+function positiveIndex(v) {
+  return v < 0 ? ~v : v;
 }
 function computeNormals(vertices, polygonIndex) {
   const count = vertices.length / 3;
@@ -2318,14 +2327,14 @@ function computeNormals(vertices, polygonIndex) {
       continue;
     const len = i - polyStart + 1;
     if (len >= 3) {
-      const a = polygonIndex[polyStart] * 3;
-      const b = polygonIndex[polyStart + 1] * 3;
-      const c = polygonIndex[polyStart + len - 1] * 3;
+      const a = positiveIndex(polygonIndex[polyStart]) * 3;
+      const b = positiveIndex(polygonIndex[polyStart + 1]) * 3;
+      const c = positiveIndex(polygonIndex[polyStart + len - 1]) * 3;
       const ux = vertices[b] - vertices[a], uy = vertices[b + 1] - vertices[a + 1], uz = vertices[b + 2] - vertices[a + 2];
       const vx = vertices[c] - vertices[a], vy = vertices[c + 1] - vertices[a + 1], vz = vertices[c + 2] - vertices[a + 2];
       const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
       for (let k = 0;k < len; k++) {
-        const vi = polygonIndex[polyStart + k] * 3;
+        const vi = positiveIndex(polygonIndex[polyStart + k]) * 3;
         out[vi] += nx;
         out[vi + 1] += ny;
         out[vi + 2] += nz;

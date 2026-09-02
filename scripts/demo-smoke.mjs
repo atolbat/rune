@@ -29,6 +29,7 @@
 import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { chromium } from 'playwright'
+import { PNG } from 'pngjs'
 
 const root = resolve(import.meta.dirname, '..')
 const port = 8123
@@ -220,6 +221,60 @@ try {
   )
   console.log('[smoke] not-loaded model row: the "Load" button is back')
 
+  // 8b. Load the FBX model — the skeleton/skin/clip pipeline (the loader
+  // decode + the skinned draw path with the u_bones palette)
+  await page.click('.mv-load')
+  await page.waitForFunction(
+    () => (document.querySelector('.mv-stats')?.textContent ?? '').includes('joints'),
+    null,
+    { timeout: 90_000 },
+  )
+  console.log(`[smoke] samba scene: ${await page.textContent('.mv-stats')}`)
+  const sambaStats = await page.textContent('.mv-stats')
+  const sambaStatsOk = sambaStats.includes('joints') && sambaStats.includes('clip')
+  console.log(`[smoke] samba stats (skeleton + clip): ${sambaStatsOk ? 'ok' : 'MISSING joints/clip'}`)
+
+  // 8c. The clip actually advances (the pose changes between frames)
+  const sambaAlive = await framesDiffer(page)
+  console.log(`[smoke] samba animation: ${sambaAlive ? 'alive (dance frames differ)' : 'STATIC'}`)
+
+  // 8d. Pinch zoom (two synthetic touch pointers spreading apart) — the
+  // camera distance shrinks, the figure visibly grows (canvas screenshots:
+  // readPixels outside rAF reads a cleared buffer without preserveDrawingBuffer)
+  const countFigurePixels = async () => {
+    const shot = await page.locator('#canvas').screenshot()
+    const png = PNG.sync.read(shot)
+    let nonBg = 0
+    for (let i = 0; i < png.data.length; i += 4) {
+      if (!(Math.abs(png.data[i] - 18) < 12 && Math.abs(png.data[i + 1] - 20) < 12 && Math.abs(png.data[i + 2] - 24) < 12)) nonBg++
+    }
+    return nonBg
+  }
+  const figureBefore = await countFigurePixels()
+  await page.evaluate(() => {
+    const canvas = document.querySelector('#canvas')
+    const fire = (type, id, x, y) => {
+      canvas.dispatchEvent(new PointerEvent(type, {
+        pointerId: id, pointerType: 'touch', isPrimary: id === 1, clientX: x, clientY: y, bubbles: true,
+      }))
+    }
+    const cx = 480, cy = 300
+    fire('pointerdown', 1, cx - 80, cy)
+    fire('pointerdown', 2, cx + 80, cy)
+    for (let s = 1; s <= 10; s++) {
+      fire('pointermove', 1, cx - 80 - s * 9, cy)
+      fire('pointermove', 2, cx + 80 + s * 9, cy)
+    }
+    fire('pointerup', 1, cx - 170, cy)
+    fire('pointerup', 2, cx + 170, cy)
+  })
+  await page.waitForTimeout(500)
+  const figureAfter = await countFigurePixels()
+  const pinchZoomed = figureAfter > figureBefore * 1.2
+  console.log(
+    `[smoke] pinch zoom: figure pixels ${figureBefore} → ${figureAfter} (${pinchZoomed ? 'zoomed in' : 'NO ZOOM'})`,
+  )
+
   // 9. Log: entries exist, Copy reports (the shell controls sit behind the FAB)
   const viewerLogEntries = await page.locator('#log-list .rd-entry').count()
   console.log(`[smoke] model-viewer log entries: ${viewerLogEntries}`)
@@ -281,6 +336,9 @@ try {
     viewerAlive &&
     loadText !== null &&
     loadText.includes('Load') &&
+    sambaStatsOk &&
+    sambaAlive &&
+    pinchZoomed &&
     viewerLogEntries > 0 &&
     mobileViewerOk &&
     errors.length === 0

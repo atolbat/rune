@@ -27,8 +27,14 @@ export interface WgslReflection {
   readonly uniformBytes: number
 }
 
-/** std140 alignment of WGSL types (simplified: mat4/vec4/vec3/vec2/f32). */
+/** std140 alignment of WGSL types (simplified: mat4/vec4/vec3/vec2/f32 + arrays). */
 function alignOf(type: string): number {
+  const arr = arrayOf(type)
+  // An array is aligned like its element (std140).
+  return alignOfBase(arr !== null ? arr.elem : type)
+}
+
+function alignOfBase(type: string): number {
   if (type.startsWith('mat4x4')) return 16
   if (type.startsWith('vec4')) return 16
   if (type.startsWith('vec3')) return 16
@@ -37,11 +43,29 @@ function alignOf(type: string): number {
 }
 
 function sizeOf(type: string): number {
+  const arr = arrayOf(type)
+  if (arr !== null) {
+    // std140 array stride: roundUp(elementSize, elementAlignment)
+    const elemSize = sizeOfBase(arr.elem)
+    const stride = Math.ceil(elemSize / alignOfBase(arr.elem)) * alignOfBase(arr.elem)
+    return stride * arr.count
+  }
+  return sizeOfBase(type)
+}
+
+function sizeOfBase(type: string): number {
   if (type.startsWith('mat4x4')) return 64
   if (type.startsWith('vec4')) return 16
   if (type.startsWith('vec3')) return 12
   if (type.startsWith('vec2')) return 8
   return 4
+}
+
+/** `array<mat4x4<f32>, 67>` → { elem: 'mat4x4<f32>', count: 67 }; null — not an array. */
+function arrayOf(type: string): { elem: string; count: number } | null {
+  const match = /^array\s*<\s*(mat4x4|vec4|vec3|vec2|f32)\s*(?:<\s*f32\s*>)?\s*,\s*(\d+)\s*>$/.exec(type.trim())
+  if (match === null) return null
+  return { elem: match[1] === 'f32' ? 'f32' : `${match[1]}<f32>`, count: Number(match[2]) }
 }
 
 export function reflectWgsl(wgsl: string): WgslReflection {
@@ -63,14 +87,38 @@ function scanUniforms(wgsl: string): WgslUniformInfo[] {
   if (structMatch === null) return []
   const fields: WgslUniformInfo[] = []
   let cursor = 0
-  const fieldRe = /(\w+)\s*:\s*([\w<>]+)\s*,/g
-  for (const field of structMatch[1].matchAll(fieldRe)) {
-    const type = field[2]
+  for (const raw of splitStructFields(structMatch[1])) {
+    // `name : type` — the type may be `array<mat4x4<f32>, 67>` (contains
+    // commas/spaces, splitStructFields keeps it intact).
+    const normalized = raw.trim().replace(/\s+/g, ' ')
+    const field = /^(\w+)\s*:\s*(.+)$/.exec(normalized)
+    if (field === null) continue
+    const type = field[2].trim().replace(/,\s*$/, '')
     cursor = align(cursor, alignOf(type))
     fields.push({ name: field[1], offset: cursor, size: sizeOf(type), type })
     cursor += sizeOf(type)
   }
   return fields
+}
+
+/** Struct body → field strings, split on TOP-LEVEL commas only (<> depth 0).
+ *  A naive `body.split(',')` would cut `array<mat4x4<f32>, 67>` in half. */
+function splitStructFields(body: string): string[] {
+  const out: string[] = []
+  let depth = 0
+  let current = ''
+  for (const ch of body) {
+    if (ch === '<') depth++
+    else if (ch === '>') depth--
+    if (ch === ',' && depth === 0) {
+      out.push(current)
+      current = ''
+    } else {
+      current += ch
+    }
+  }
+  if (current.trim() !== '') out.push(current)
+  return out
 }
 
 function scanAttributes(wgsl: string): WgslAttributeInfo[] {

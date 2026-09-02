@@ -204,7 +204,13 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
     const record = programs.get(programId)
     if (record === undefined) return null
     if (!record.uniforms.has(name)) {
-      record.uniforms.set(name, gl.getUniformLocation(record.program, name))
+      let loc = gl.getUniformLocation(record.program, name)
+      // Array uniforms: some drivers only accept the first element's name
+      // ("u_bones[0]"); the GLES3 spec allows both — try the fallback once.
+      if (loc === null && !name.includes('[')) {
+        loc = gl.getUniformLocation(record.program, `${name}[0]`)
+      }
+      record.uniforms.set(name, loc)
     }
     return record.uniforms.get(name) ?? null
   }

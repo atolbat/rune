@@ -3630,10 +3630,11 @@ function reflectGlsl2(vertex, fragment) {
 }
 function scanUniforms(source) {
   const found = [];
-  const re = /uniform\s+(mat4|vec4|vec3|vec2|float|int|sampler2D)\s+(\w+)\s*;/g;
+  const re = /uniform\s+(mat4|vec4|vec3|vec2|float|int|sampler2D)\s+(\w+)\s*(?:\[\s*(\d+)\s*\])?\s*;/g;
   for (const match of source.matchAll(re)) {
     const type = match[1];
-    found.push({ name: match[2], type, size: SIZE[type] });
+    const count = match[3] !== undefined ? Number(match[3]) : 1;
+    found.push({ name: match[2], type, size: SIZE[type] * count });
   }
   return found;
 }
@@ -3975,7 +3976,11 @@ function createRealGL(gl) {
     if (record === undefined)
       return null;
     if (!record.uniforms.has(name)) {
-      record.uniforms.set(name, gl.getUniformLocation(record.program, name));
+      let loc = gl.getUniformLocation(record.program, name);
+      if (loc === null && !name.includes("[")) {
+        loc = gl.getUniformLocation(record.program, `${name}[0]`);
+      }
+      record.uniforms.set(name, loc);
     }
     return record.uniforms.get(name) ?? null;
   }
@@ -7677,6 +7682,10 @@ init_src();
 
 // packages/webgpu/src/wgslReflect.ts
 function alignOf(type) {
+  const arr = arrayOf(type);
+  return alignOfBase(arr !== null ? arr.elem : type);
+}
+function alignOfBase(type) {
   if (type.startsWith("mat4x4"))
     return 16;
   if (type.startsWith("vec4"))
@@ -7688,6 +7697,15 @@ function alignOf(type) {
   return 4;
 }
 function sizeOf(type) {
+  const arr = arrayOf(type);
+  if (arr !== null) {
+    const elemSize = sizeOfBase(arr.elem);
+    const stride = Math.ceil(elemSize / alignOfBase(arr.elem)) * alignOfBase(arr.elem);
+    return stride * arr.count;
+  }
+  return sizeOfBase(type);
+}
+function sizeOfBase(type) {
   if (type.startsWith("mat4x4"))
     return 64;
   if (type.startsWith("vec4"))
@@ -7697,6 +7715,12 @@ function sizeOf(type) {
   if (type.startsWith("vec2"))
     return 8;
   return 4;
+}
+function arrayOf(type) {
+  const match = /^array\s*<\s*(mat4x4|vec4|vec3|vec2|f32)\s*(?:<\s*f32\s*>)?\s*,\s*(\d+)\s*>$/.exec(type.trim());
+  if (match === null)
+    return null;
+  return { elem: match[1] === "f32" ? "f32" : `${match[1]}<f32>`, count: Number(match[2]) };
 }
 function reflectWgsl2(wgsl) {
   return {
@@ -7717,14 +7741,37 @@ function scanUniforms2(wgsl) {
     return [];
   const fields = [];
   let cursor = 0;
-  const fieldRe = /(\w+)\s*:\s*([\w<>]+)\s*,/g;
-  for (const field of structMatch[1].matchAll(fieldRe)) {
-    const type = field[2];
+  for (const raw of splitStructFields(structMatch[1])) {
+    const normalized = raw.trim().replace(/\s+/g, " ");
+    const field = /^(\w+)\s*:\s*(.+)$/.exec(normalized);
+    if (field === null)
+      continue;
+    const type = field[2].trim().replace(/,\s*$/, "");
     cursor = align(cursor, alignOf(type));
     fields.push({ name: field[1], offset: cursor, size: sizeOf(type), type });
     cursor += sizeOf(type);
   }
   return fields;
+}
+function splitStructFields(body) {
+  const out = [];
+  let depth2 = 0;
+  let current = "";
+  for (const ch of body) {
+    if (ch === "<")
+      depth2++;
+    else if (ch === ">")
+      depth2--;
+    if (ch === "," && depth2 === 0) {
+      out.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim() !== "")
+    out.push(current);
+  return out;
 }
 function scanAttributes2(wgsl) {
   const found = [];

@@ -1,10 +1,10 @@
 // "model-viewer" demo: a scene with a loader — three models from the three.js examples.
 //   Forest House — glTF + AVIF textures + Draco (webgl_loader_gltf_avif)
-//   Samba Dancing — FBX, skeleton, bind pose (webgl_loader_fbx)
+//   Samba Dancing — FBX, skeleton, skinning, clip playback (webgl_loader_fbx)
 //   Nefertiti — glTF + object-space normal map (webgl_materials_normalmap_object_space)
 // Flow: a Load button → progress bar (AssetLoader: fetch → parse → decode) →
 // the scene. Model switching; loaded models show instantly. Rotation via
-// drag (touch/mouse) + auto-spin.
+// drag (touch/mouse) + auto-spin; zoom via pinch (two fingers) and wheel.
 // The demo imports the BUILT bundles: dist/rune.esm.js + dist/rune-loaders.esm.js.
 import { createRenderer } from '../../dist/rune.esm.js'
 import { AssetLoader } from '../../dist/rune-loaders.esm.js'
@@ -22,7 +22,7 @@ const MODELS = [
   {
     id: 'samba',
     title: 'Samba Dancing',
-    sub: 'FBX · skeleton · bind pose',
+    sub: 'FBX · skeleton · animation',
     url: 'assets/samba.fbx',
     bytes: 3_681_360,
   },
@@ -166,6 +166,72 @@ fn vsMain(
   var out : VSOut;
   out.pos = params.u_mvp * vec4<f32>(inPos, 1.0);
   out.worldNormal = (params.u_model * vec4<f32>(inNormal, 0.0)).xyz;
+  return out;
+}
+
+@fragment
+fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
+  let lambert = max(dot(normalize(frag.worldNormal), normalize(params.u_lightDir.xyz)), 0.0);
+  return vec4<f32>(params.u_albedo.rgb * (0.3 + lambert * 0.7), 1.0);
+}`
+
+// Skinned Lambert (Samba): a bone palette u_bones[NJ] (the FBX skeleton) and
+// 4 influences per vertex. Joint indices travel as float attributes (u16 is
+// not a DrawAttribute type) — the shader rounds them to array indices.
+const NJ = 67 // samba skeleton: 67 joints (see the load log)
+const SKINNED_VERT = `#version 300 es
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 normal;
+layout(location = 2) in vec4 a_joints;
+layout(location = 3) in vec4 a_weights;
+uniform mat4 u_mvp;
+uniform mat4 u_model;
+uniform mat4 u_bones[${NJ}];
+out vec3 v_normal;
+void main() {
+  mat4 skin =
+      u_bones[int(a_joints.x + 0.5)] * a_weights.x
+    + u_bones[int(a_joints.y + 0.5)] * a_weights.y
+    + u_bones[int(a_joints.z + 0.5)] * a_weights.z
+    + u_bones[int(a_joints.w + 0.5)] * a_weights.w;
+  vec4 skinned = skin * vec4(position, 1.0);
+  v_normal = mat3(u_model) * mat3(skin) * normal;
+  gl_Position = u_mvp * skinned;
+}`
+
+const SKINNED_FRAG = FLAT_FRAG
+
+const SKINNED_WGSL = `
+struct Params {
+  u_mvp : mat4x4<f32>,
+  u_model : mat4x4<f32>,
+  u_lightDir : vec4<f32>,
+  u_albedo : vec4<f32>,
+  u_bones : array<mat4x4<f32>, ${NJ}>,
+}
+@group(0) @binding(0) var<uniform> params : Params;
+
+struct VSOut {
+  @builtin(position) pos : vec4<f32>,
+  @location(0) worldNormal : vec3<f32>,
+}
+
+@vertex
+fn vsMain(
+  @location(0) inPos : vec3<f32>,
+  @location(1) inNormal : vec3<f32>,
+  @location(2) inJoints : vec4<f32>,
+  @location(3) inWeights : vec4<f32>,
+) -> VSOut {
+  let skin =
+      params.u_bones[u32(inJoints.x + 0.5)] * inWeights.x
+    + params.u_bones[u32(inJoints.y + 0.5)] * inWeights.y
+    + params.u_bones[u32(inJoints.z + 0.5)] * inWeights.z
+    + params.u_bones[u32(inJoints.w + 0.5)] * inWeights.w;
+  let skinned = skin * vec4<f32>(inPos, 1.0);
+  var out : VSOut;
+  out.pos = params.u_mvp * skinned;
+  out.worldNormal = (params.u_model * (skin * vec4<f32>(inNormal, 0.0))).xyz;
   return out;
 }
 
@@ -576,16 +642,20 @@ function prepareGltf(model) {
   return finishPrepared(meshes, model.stats)
 }
 
-/** FBX (Samba): meshes are already in world space — only deindexing + color. */
+/** FBX (Samba): skinned soup + an animation player (the FBX loader already
+ *  decodes skeleton/skin/clips — the player samples the clip, evaluates the
+ *  joint hierarchy and fills the u_bones palette). */
 function prepareFbx(model) {
   const meshes = []
   const SKIN_TONE = [0.72, 0.53, 0.42]
   const JOINT_TONE = [0.42, 0.5, 0.62]
   for (const mesh of model.meshes) {
-    const flat = deindexed(mesh.positions, mesh.normals, null, mesh.indices)
+    const flat = deindexedSkinned(mesh)
     meshes.push({
       positions: flat.positions,
       normals: flat.normals,
+      joints: flat.joints,
+      weights: flat.weights,
       uvs: null,
       bitmap: null,
       normalBitmap: null,
@@ -594,9 +664,182 @@ function prepareFbx(model) {
       alphaCutoff: 0,
       cull: 'none', // Mixamo bind pose: armpits/folds are open on both sides
       name: mesh.name,
+      skinned: mesh.skin !== undefined,
     })
   }
-  return finishPrepared(meshes, { vertices: 0, triangles: 0 })
+  const animation = createAnimationPlayer(model)
+  const preparedModel = finishPrepared(meshes, { vertices: 0, triangles: 0 })
+  preparedModel.animation = animation
+  return preparedModel
+}
+
+/** Expands the indexed skin into a vertex soup with 4-float joints/weights
+ *  (rune tapes draw via drawArrays; joint indices travel as f32 attributes). */
+function deindexedSkinned(mesh) {
+  const count = mesh.indices.length
+  const positions = new Float32Array(count * 3)
+  const normals = new Float32Array(count * 3)
+  const joints = new Float32Array(count * 4)
+  const weights = new Float32Array(count * 4)
+  const skin = mesh.skin
+  for (let i = 0; i < count; i++) {
+    const src = mesh.indices[i]
+    positions[i * 3] = mesh.positions[src * 3]
+    positions[i * 3 + 1] = mesh.positions[src * 3 + 1]
+    positions[i * 3 + 2] = mesh.positions[src * 3 + 2]
+    normals[i * 3] = mesh.normals[src * 3]
+    normals[i * 3 + 1] = mesh.normals[src * 3 + 1]
+    normals[i * 3 + 2] = mesh.normals[src * 3 + 2]
+    if (skin !== undefined) {
+      for (let c = 0; c < 4; c++) {
+        joints[i * 4 + c] = skin.jointIndices[src * 4 + c]
+        weights[i * 4 + c] = skin.jointWeights[src * 4 + c]
+      }
+    }
+  }
+  return { positions, normals, joints, weights }
+}
+
+/* ─── Skeletal animation: clip sampling → joint hierarchy → bone palette ── */
+
+/** Creates the player for an FBX model: samples tracksT/tracksR per joint,
+ *  evaluates the world hierarchy (parents first — the loader sorts so) and
+ *  writes skin = world × invBind into palette (16 floats per joint). */
+function createAnimationPlayer(model) {
+  const joints = model.skeleton.joints
+  const clip = model.clips[0] ?? null
+  const jointCount = joints.length
+  const palette = new Float32Array(jointCount * 16)
+  const world = []
+  for (let i = 0; i < jointCount; i++) world.push(M())
+  const localT = new Float32Array(jointCount * 3)
+  const localQ = new Float32Array(jointCount * 4)
+  const localS = new Float32Array(jointCount * 3)
+  const trackT = new Array(jointCount).fill(null)
+  const trackR = new Array(jointCount).fill(null)
+  if (clip !== null) {
+    for (const t of clip.tracksT) trackT[t.joint] = t
+    for (const r of clip.tracksR) trackR[r.joint] = r
+  }
+  // rest pose into the local buffers (tracks override their joints each frame)
+  for (let i = 0; i < jointCount; i++) {
+    localT.set(joints[i].restT, i * 3)
+    localQ.set(joints[i].restQ, i * 4)
+    localS.set(joints[i].restS, i * 3)
+  }
+
+  const local = M()
+
+  function sample() {
+    if (clip === null) return
+    const t = time % clip.duration
+    for (let i = 0; i < jointCount; i++) {
+      const tT = trackT[i]
+      if (tT !== null) sampleVec3(tT, t, localT, i * 3)
+      const tR = trackR[i]
+      if (tR !== null) sampleQuat(tR, t, localQ, i * 4)
+    }
+    for (let i = 0; i < jointCount; i++) {
+      const j = joints[i]
+      mat4FromTrs(local, localT.subarray(i * 3, i * 3 + 3), localQ.subarray(i * 4, i * 4 + 4), localS.subarray(i * 3, i * 3 + 3))
+      if (j.parent < 0) world[i].set(local)
+      else mat4Multiply(world[i], world[j.parent], local)
+      const out = palette.subarray(i * 16, i * 16 + 16)
+      if (j.invBind !== undefined) mat4Multiply(out, world[i], j.invBind)
+      else out.set(world[i])
+    }
+  }
+
+  let time = 0
+  const player = {
+    jointCount,
+    clipName: clip?.name ?? null,
+    duration: clip?.duration ?? 0,
+    palette,
+    /** Advances the clip and refreshes the palette. dt is seconds. */
+    advance(dt) {
+      if (clip === null) return
+      time += dt
+      if (time > clip.duration) time %= clip.duration
+      sample()
+    },
+    /** The palette at t=0 — the pose shown before the first frame. */
+    poseAtStart() {
+      time = 0
+      sample()
+      return palette
+    },
+  }
+  player.poseAtStart()
+  return player
+}
+
+/** Frame counters of a track: linear translation sampling. */
+function sampleVec3(track, t, out, off) {
+  const times = track.times
+  const values = track.values
+  if (t <= times[0]) { out[off] = values[0]; out[off + 1] = values[1]; out[off + 2] = values[2]; return }
+  const last = times.length - 1
+  if (t >= times[last]) { out[off] = values[last * 3]; out[off + 1] = values[last * 3 + 1]; out[off + 2] = values[last * 3 + 2]; return }
+  // binary search: times[i] <= t < times[i+1]
+  let lo = 0, hi = last
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1
+    if (times[mid] <= t) lo = mid
+    else hi = mid
+  }
+  const span = times[hi] - times[lo]
+  const u = span > 1e-9 ? (t - times[lo]) / span : 0
+  for (let c = 0; c < 3; c++) {
+    out[off + c] = values[lo * 3 + c] + (values[hi * 3 + c] - values[lo * 3 + c]) * u
+  }
+}
+
+/** Rotation sampling: slerp between the two quats around t (nlerp shortcut
+ *  for nearly-parallel quats keeps fingers from flipping). */
+function sampleQuat(track, t, out, off) {
+  const times = track.times
+  const quats = track.quats
+  if (t <= times[0] || times.length === 1) { out.set(quats.subarray(0, 4), off); return }
+  const last = times.length - 1
+  if (t >= times[last]) { out.set(quats.subarray(last * 4, last * 4 + 4), off); return }
+  let lo = 0, hi = last
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1
+    if (times[mid] <= t) lo = mid
+    else hi = mid
+  }
+  const span = times[hi] - times[lo]
+  const u = span > 1e-9 ? (t - times[lo]) / span : 0
+  slerpQuat(quats, lo * 4, quats, hi * 4, u, out, off)
+}
+
+/** slerp(a, b, u) → out[off..off+3] (xyzw, normalized). */
+function slerpQuat(a, ao, b, bo, u, out, off) {
+  let ax = a[ao], ay = a[ao + 1], az = a[ao + 2], aw = a[ao + 3]
+  let bx = b[bo], by = b[bo + 1], bz = b[bo + 2], bw = b[bo + 3]
+  let dot = ax * bx + ay * by + az * bz + aw * bw
+  if (dot < 0) { bx = -bx; by = -by; bz = -bz; bw = -bw; dot = -dot }
+  if (dot > 0.9995) {
+    // nlerp: the angle is tiny, linear interpolation + normalize is exact enough
+    let x = ax + (bx - ax) * u
+    let y = ay + (by - ay) * u
+    let z = az + (bz - az) * u
+    let w = aw + (bw - aw) * u
+    const len = Math.hypot(x, y, z, w) || 1
+    out[off] = x / len; out[off + 1] = y / len; out[off + 2] = z / len; out[off + 3] = w / len
+    return
+  }
+  const theta = Math.acos(dot)
+  const sinTheta = Math.sin(theta)
+  const wa = Math.sin((1 - u) * theta) / sinTheta
+  const wb = Math.sin(u * theta) / sinTheta
+  let x = ax * wa + bx * wb
+  let y = ay * wa + by * wb
+  let z = az * wa + bz * wb
+  let w = aw * wa + bw * wb
+  const len = Math.hypot(x, y, z, w) || 1
+  out[off] = x / len; out[off + 1] = y / len; out[off + 2] = z / len; out[off + 3] = w / len
 }
 
 function finishPrepared(meshes, stats) {
@@ -808,10 +1051,14 @@ async function showModel(id) {
   if (!attached.has(id)) await attachScene(id)
   const scene = attached.get(id)
   if (scene !== undefined) {
+    const animation = prepared.get(id)?.animation
+    const animInfo = animation !== undefined && animation.clipName !== null
+      ? ` · ${animation.jointCount} joints · ${animation.duration.toFixed(1)} s clip`
+      : ''
     statsLine.textContent =
       `${scene.stats.vertices.toLocaleString('en-US')} verts · ` +
       `${Math.round(scene.stats.triangles).toLocaleString('en-US')} tris · ` +
-      `${scene.meshes.length} meshes`
+      `${scene.meshes.length} meshes${animInfo}`
   }
   dragHint.classList.remove('mv-gone')
   shell.log.event(`Scene: “${MODELS.find(m => m.id === id).title}”`)
@@ -847,7 +1094,9 @@ async function attachScene(id) {
   if (model === undefined || activeRenderer === null) return
   const drawMeshes = []
   for (const mesh of model.meshes) {
-    const variant = mesh.normalBitmap !== null ? 'normalmap' : mesh.bitmap !== null ? 'textured' : 'flat'
+    const variant = mesh.skinned === true
+      ? 'skinned'
+      : mesh.normalBitmap !== null ? 'normalmap' : mesh.bitmap !== null ? 'textured' : 'flat'
     const bitmap = await resolveBitmap(mesh.bitmap)
     if (mesh.bitmap !== null && bitmap === null) {
       shell.log.warn(`mesh “${mesh.name}”: texture failed to decode — drawing albedo`)
@@ -873,6 +1122,18 @@ async function attachScene(id) {
       attributes.uv = { data: mesh.uvs, size: 2 }
       attributes.inPos = attributes.position
       attributes.inUv = attributes.uv
+    } else if (variant === 'skinned') {
+      attributes.position = { data: mesh.positions, size: 3 }
+      attributes.normal = { data: mesh.normals, size: 3 }
+      attributes.a_joints = { data: mesh.joints, size: 4 }
+      attributes.a_weights = { data: mesh.weights, size: 4 }
+      // WGSL names — the same buffers under the WGSL @location signature
+      attributes.inPos = attributes.position
+      attributes.inNormal = attributes.normal
+      attributes.inJoints = attributes.a_joints
+      attributes.inWeights = attributes.a_weights
+      uniforms.u_albedo = mesh.albedo
+      uniforms.u_bones = (p) => p.bones
     } else {
       attributes.position = { data: mesh.positions, size: 3 }
       attributes.normal = { data: mesh.normals, size: 3 }
@@ -884,11 +1145,13 @@ async function attachScene(id) {
     const glslOf = () => {
       if (variant === 'textured') return { vertex: TEXTURED_VERT, fragment: TEXTURED_FRAG }
       if (variant === 'normalmap') return { vertex: NORMALMAP_VERT, fragment: NORMALMAP_FRAG }
+      if (variant === 'skinned') return { vertex: SKINNED_VERT, fragment: SKINNED_FRAG }
       return { vertex: FLAT_VERT, fragment: FLAT_FRAG }
     }
     const wgslOf = () => {
       if (variant === 'textured') return TEXTURED_WGSL
       if (variant === 'normalmap') return NORMALMAP_WGSL
+      if (variant === 'skinned') return SKINNED_WGSL
       return FLAT_WGSL
     }
 
@@ -929,6 +1192,12 @@ async function attachScene(id) {
   // Transparent meshes after opaque ones (the house: grass/leaves/windows on top)
   drawMeshes.sort((a, b) => a.order - b.order)
   attached.set(id, { meshes: drawMeshes.map(m => m.command), stats: model.stats })
+  if (model.animation !== undefined && model.animation.clipName !== null) {
+    shell.log.event(
+      `Animation: clip “${model.animation.clipName}” — ${model.animation.jointCount} joints, ` +
+      `${model.animation.duration.toFixed(1)} s loop`,
+    )
+  }
 }
 
 /** Bitmap from a GltfImage (promise) — null if decoding fails. */
@@ -958,44 +1227,101 @@ const mvp = M()
 let cachedAspect = 0
 
 // Rotation: auto-spin + drag (touch/mouse), pitch is clamped.
+// Zoom: two-finger pinch (the distance ratio) + mouse wheel.
 let yaw = 0.6
 let pitch = 0.18
+let camDist = 3.2
+const CAM_DIST_MIN = 1.7
+const CAM_DIST_MAX = 6.5
 let dragging = false
 let lastX = 0
 let lastY = 0
 let lastInteraction = 0
 
-function bindDrag(canvas) {
-  canvas.style.touchAction = 'none'
-  canvas.addEventListener('pointerdown', (event) => {
-    dragging = true
-    lastX = event.clientX
-    lastY = event.clientY
-    lastInteraction = performance.now()
-    canvas.setPointerCapture(event.pointerId)
-  })
-  canvas.addEventListener('pointermove', (event) => {
-    if (!dragging) return
-    const dx = event.clientX - lastX
-    const dy = event.clientY - lastY
-    lastX = event.clientX
-    lastY = event.clientY
-    yaw += dx * 0.006
-    pitch = Math.min(1.2, Math.max(-1.2, pitch + dy * 0.006))
-    lastInteraction = performance.now()
-  })
-  const stop = () => { dragging = false }
-  canvas.addEventListener('pointerup', stop)
-  canvas.addEventListener('pointercancel', stop)
+function clampDist(d) {
+  return Math.min(CAM_DIST_MAX, Math.max(CAM_DIST_MIN, d))
 }
 
-/** Frame: a fixed camera, the model rotates (turntable). */
+function bindInput(canvas) {
+  canvas.style.touchAction = 'none'
+  const pointers = new Map() // id → {x, y}
+  let pinchStartDist = 0
+  let pinchStartCam = camDist
+
+  const distance = () => {
+    const [a, b] = pointers.values()
+    return Math.hypot(a.x - b.x, a.y - b.y)
+  }
+
+  canvas.addEventListener('pointerdown', (event) => {
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+    if (pointers.size === 1) {
+      dragging = true
+      lastX = event.clientX
+      lastY = event.clientY
+    } else {
+      dragging = false // two fingers — pinch, not orbit
+      pinchStartDist = distance()
+      pinchStartCam = camDist
+    }
+    lastInteraction = performance.now()
+    // Pointer capture is best-effort: synthetic/test events have no active
+    // pointer, and a lost pointer must not break the gesture.
+    try { canvas.setPointerCapture(event.pointerId) } catch { /* released or synthetic */ }
+  })
+  canvas.addEventListener('pointermove', (event) => {
+    const tracked = pointers.get(event.pointerId)
+    if (tracked === undefined) return
+    tracked.x = event.clientX
+    tracked.y = event.clientY
+    if (pointers.size >= 2) {
+      // pinch zoom: the same gesture distance ratio → camera distance ratio
+      const d = distance()
+      if (pinchStartDist > 1) {
+        camDist = clampDist(pinchStartCam * (pinchStartDist / Math.max(d, 1)))
+      }
+    } else if (dragging) {
+      const dx = event.clientX - lastX
+      const dy = event.clientY - lastY
+      lastX = event.clientX
+      lastY = event.clientY
+      yaw += dx * 0.006
+      pitch = Math.min(1.2, Math.max(-1.2, pitch + dy * 0.006))
+    }
+    lastInteraction = performance.now()
+  })
+  const stop = (event) => {
+    pointers.delete(event.pointerId)
+    if (pointers.size === 0) dragging = false
+    // one finger left after a pinch — restart the orbit from its position
+    if (pointers.size === 1) {
+      const [a] = pointers.values()
+      lastX = a.x
+      lastY = a.y
+      dragging = true
+    }
+  }
+  canvas.addEventListener('pointerup', stop)
+  canvas.addEventListener('pointercancel', stop)
+  canvas.addEventListener('pointerleave', (event) => {
+    if (event.pointerType === 'mouse' && pointers.size === 0) dragging = false
+  })
+  // desktop: wheel zoom
+  canvas.addEventListener('wheel', (event) => {
+    event.preventDefault()
+    camDist = clampDist(camDist * (1 + event.deltaY * 0.0012))
+    lastInteraction = performance.now()
+  }, { passive: false })
+}
+
+/** Frame: an orbit camera (drag/pinch/wheel), the model rotates (turntable)
+ *  and animated models advance their clips. */
 function frameCallback(ctx, record) {
   if (ctx.aspect !== cachedAspect) {
     cachedAspect = ctx.aspect
     mat4Perspective(projection, Math.PI / 3.4, ctx.aspect, 0.1, 100)
   }
-  mat4LookAt(view, 0, 0.55, 3.2, 0, 0, 0)
+  mat4LookAt(view, 0, 0.55, camDist, 0, 0, 0)
   mat4Multiply(viewProj, projection, view)
 
   // auto-spin: paused while dragging and for 1.5 s after
@@ -1007,7 +1333,8 @@ function frameCallback(ctx, record) {
 
   const scene = attached.get(currentModelId)
   if (scene === undefined) return
-  const bounds = prepared.get(currentModelId)?.bounds
+  const current = prepared.get(currentModelId)
+  const bounds = current?.bounds
   if (bounds !== undefined) {
     const scale = 1.5 / bounds.radius
     mat4Scale(fit, scale)
@@ -1017,7 +1344,11 @@ function frameCallback(ctx, record) {
   }
   mat4Multiply(model, spin, fit)
   mat4Multiply(mvp, viewProj, model)
-  for (const command of scene.meshes) record(command, { mvp, model })
+  // skeletal animation: advance the clip and hand the bone palette over
+  const animation = current?.animation
+  if (animation !== undefined) animation.advance(ctx.dt)
+  const bones = animation !== undefined ? animation.palette : null
+  for (const command of scene.meshes) record(command, { mvp, model, bones })
 }
 
 async function boot(mode) {
@@ -1032,7 +1363,7 @@ async function boot(mode) {
   const canvas = document.createElement('canvas')
   canvas.id = 'canvas'
   shell.slot.append(canvas, pill, sheet, dragHint)
-  bindDrag(canvas)
+  bindInput(canvas)
   // the drag hint disappears at the first touch of the scene
   canvas.addEventListener('pointerdown', () => dragHint.classList.add('mv-gone'), { once: true })
   setTimeout(() => dragHint.classList.add('mv-gone'), 8000)

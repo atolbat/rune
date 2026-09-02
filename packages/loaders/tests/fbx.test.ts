@@ -4,11 +4,70 @@ import { existsSync } from 'node:fs'
 import { parseFBX } from '../src/fbx.ts'
 import { AssetLoader } from '../src/registry.ts'
 import type { FbxModel } from '../src/index.ts'
-const SAMBA = new URL('../../demo/assets/samba-dancing.fbx', import.meta.url)
-// The heavy Mixamo fixture is not part of the library: the tests are enabled
-// automatically if the file is placed at packages/loaders/demo/assets/.
+import { buildFbx, fbxNode } from './helpers.ts'
+
+// The heavy Mixamo fixture is shared with the model-viewer demo
+// (demo/model-viewer/assets/samba.fbx): the tests are enabled automatically
+// wherever the repo checkout is complete.
+const SAMBA = new URL('../../../demo/model-viewer/assets/samba.fbx', import.meta.url)
 const hasFixture = existsSync(SAMBA)
 const it = test.skipIf(!hasFixture)
+
+// ─── fan triangulation: the ~-encoded last corner of every polygon ─────────────
+
+test('parseFBX: a quad polygon triangulates without the wrapped-negative-index bug', async () => {
+  // Quad 0-1-2-3 (the last corner stored as ~3 = -4) + a separate triangle.
+  // Regression (the "grater" bug): triangulate() pushed the raw negative
+  // -4, Uint32Array.from() wrapped it to 4294967292, positions[huge] → NaN,
+  // and every second triangle of a quad mesh silently disappeared.
+  const quad = fbxNode('Objects', [], [
+    fbxNode('Geometry', [
+      { type: 'L', value: 100n },
+      { type: 'S', value: 'Quad\u0000\u0001Geometry' },
+    ], [
+      fbxNode('Vertices', [{ type: 'd', value: [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 2, 0, 1, 3, 0, 1, 3, 1, 1] }], null),
+      fbxNode('PolygonVertexIndex', [{ type: 'i', value: [0, 1, 2, ~3, 4, 5, ~6] }], null),
+    ]),
+  ])
+  const bytes = buildFbx(7400, [quad])
+  const model = await parseFBX(bytes.buffer as ArrayBuffer)
+  expect(model.meshes.length).toBe(1)
+  const mesh = model.meshes[0]
+  // quad → 2 triangles, triangle → 1: 3 triangles total
+  expect(mesh.indices.length).toBe(9)
+  // every index must be a valid vertex index (the bug: 4294967292)
+  for (const index of mesh.indices) {
+    expect(index).toBeGreaterThanOrEqual(0)
+    expect(index).toBeLessThan(mesh.vertexCount)
+  }
+  // fan of the quad: (0,1,2) and (0,2,3)
+  expect(Array.from(mesh.indices.slice(0, 6))).toEqual([0, 1, 2, 0, 2, 3])
+  // the triangle (4,5,6) survives intact
+  expect(Array.from(mesh.indices.slice(6, 9))).toEqual([4, 5, 6])
+})
+
+test('parseFBX: computed normals cover every corner (no OOB silent drop)', async () => {
+  // No LayerElementNormal → computeNormals() fallback. The ~-encoded last
+  // corner used to write to out[negative] — a typed-array no-op, so the last
+  // corner of each polygon lost its normal contribution.
+  const quad = fbxNode('Objects', [], [
+    fbxNode('Geometry', [
+      { type: 'L', value: 100n },
+      { type: 'S', value: 'Quad\u0000\u0001Geometry' },
+    ], [
+      fbxNode('Vertices', [{ type: 'd', value: [0, 0, 0, 2, 0, 0, 2, 2, 0, 0, 2, 0] }], null),
+      fbxNode('PolygonVertexIndex', [{ type: 'i', value: [0, 1, 2, ~3] }], null),
+    ]),
+  ])
+  const model = await parseFBX(buildFbx(7400, [quad]).buffer as ArrayBuffer)
+  const normals = model.meshes[0].normals
+  // a flat quad: every vertex normal points at +Z after normalization
+  for (let v = 0; v < 4; v++) {
+    expect(normals[v * 3 + 2]).toBeCloseTo(1, 5)
+    expect(normals[v * 3]).toBeCloseTo(0, 5)
+    expect(normals[v * 3 + 1]).toBeCloseTo(0, 5)
+  }
+})
 
 it('parseFBX: Mixamo Samba Dancing — skeleton, skin, clips', async () => {
   const buffer = await readFile(SAMBA)
@@ -22,6 +81,12 @@ it('parseFBX: Mixamo Samba Dancing — skeleton, skin, clips', async () => {
   for (const mesh of model.meshes) {
     expect(mesh.positions.length).toBe(mesh.vertexCount * 3)
     expect(mesh.indices.length % 3).toBe(0)
+    // regression (the "grater" on the real file): half the triangles used a
+    // wrapped ~-encoded corner index (4294967xxx) and rendered as NaN holes
+    for (const index of mesh.indices) {
+      expect(index).toBeGreaterThanOrEqual(0)
+      expect(index).toBeLessThan(mesh.vertexCount)
+    }
     // a skin is mandatory for an animatable model
     expect(mesh.skin).toBeDefined()
     expect(mesh.skin!.jointIndices.length).toBe(mesh.vertexCount * 4)
@@ -55,6 +120,11 @@ it('parseFBX: Mixamo Samba Dancing — skeleton, skin, clips', async () => {
       expect(track.times.length).toBeGreaterThan(0)
       expect(track.values.length).toBe(track.times.length * 3)
       expect(track.joint).toBeLessThan(joints.length)
+      // regression (KeyValueFloat f32 read as f64): values were ≈3e13 garbage
+      // — two f32 keys packed into one double; real translations are centimeters
+      for (let k = 0; k < track.values.length; k++) {
+        expect(Math.abs(track.values[k])).toBeLessThan(1e6)
+      }
     }
     for (const track of clip.tracksR) {
       expect(track.times.length).toBeGreaterThan(0)

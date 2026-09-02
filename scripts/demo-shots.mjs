@@ -91,6 +91,23 @@ await viewer.click('#rd-fab')
 await viewer.waitForTimeout(400)
 await viewer.screenshot({ path: join(out, 'desktop-mv-fab-sheet.png') })
 
+// Samba: the skinned path — load, let the clip advance, capture a dance frame
+// (the model sheet from the step above is still open — select the row directly)
+await viewer.click('#rd-fab') // close the shell sheet
+await viewer.evaluate(() => {
+  const rows = [...document.querySelectorAll('.mv-row')]
+  rows.find(r => r.textContent.includes('Samba'))?.dispatchEvent(new Event('click', { bubbles: true }))
+})
+await viewer.waitForTimeout(300)
+await viewer.click('.mv-load')
+await viewer.waitForFunction(
+  () => (document.querySelector('.mv-stats')?.textContent ?? '').includes('joints'),
+  null,
+  { timeout: 90_000 },
+)
+await viewer.waitForTimeout(2500) // a few seconds into the dance
+await viewer.screenshot({ path: join(out, 'desktop-mv-samba.png') })
+
 // phone: initial sheet, then the fullscreen scene with the pill
 const viewerPhone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
 await viewerPhone.goto(`http://localhost:${port}/demo/model-viewer/`, { waitUntil: 'networkidle' })

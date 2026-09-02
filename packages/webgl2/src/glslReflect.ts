@@ -42,10 +42,14 @@ export function reflectGlsl(vertex: string, fragment: string): GlslReflection {
 
 function scanUniforms(source: string): UniformInfo[] {
   const found: UniformInfo[] = []
-  const re = /uniform\s+(mat4|vec4|vec3|vec2|float|int|sampler2D)\s+(\w+)\s*;/g
+  // Array uniforms: `uniform mat4 u_bones[52];` — one arena slot of 16×52
+  // floats; setUniformMatrix4fv/4fv upload the whole array in one call
+  // (the location of `u_bones` names its first element).
+  const re = /uniform\s+(mat4|vec4|vec3|vec2|float|int|sampler2D)\s+(\w+)\s*(?:\[\s*(\d+)\s*\])?\s*;/g
   for (const match of source.matchAll(re)) {
     const type = match[1] as UniformGlType
-    found.push({ name: match[2], type, size: SIZE[type] })
+    const count = match[3] !== undefined ? Number(match[3]) : 1
+    found.push({ name: match[2], type, size: SIZE[type] * count })
   }
   return found
 }
