@@ -644,29 +644,39 @@ class FbxDocumentReader {
         if (curves.x === undefined && curves.y === undefined && curves.z === undefined) continue
 
         // The shared time grid: the union of the three axes' keys (sorted).
+        // The grid stays f64 (as the axis times are): rounding it to f32 HERE
+        // would shrink each key below the axis' own f64 key time and the step
+        // sampler would return the PREVIOUS key — the whole clip lagged one
+        // key behind (visible vs three.js: baked euler at k === euler at k-1).
+        // f32 conversion happens only on the way out (times: Float32Array).
         const keySet = new Set<number>()
         for (const axis of ['x', 'y', 'z'] as const) {
           if (curves[axis] !== undefined) for (const t of curves[axis]!.times) keySet.add(t)
         }
-        const times = Float32Array.from([...keySet].sort((a, b) => a - b))
+        const grid = [...keySet].sort((a, b) => a - b)
         const boneName = this.objName(bone)
 
         if (isTranslation) {
-          const values = new Float32Array(times.length * 3)
-          for (let k = 0; k < times.length; k++) {
-            const sampled = sampleAxes(curves, times[k])
+          const values = new Float32Array(grid.length * 3)
+          for (let k = 0; k < grid.length; k++) {
+            const sampled = sampleAxes(curves, grid[k])
             values[k * 3] = sampled[0]; values[k * 3 + 1] = sampled[1]; values[k * 3 + 2] = sampled[2]
           }
-          pendingT.push({ boneName, times, values })
+          pendingT.push({ boneName, times: Float32Array.from(grid), values })
         } else {
-          const quats = new Float32Array(times.length * 4)
+          const quats = new Float32Array(grid.length * 4)
           const deg = [0, 0, 0]
-          for (let k = 0; k < times.length; k++) {
-            const sampled = sampleAxes(curves, times[k])
+          // The bone's eRotationOrder (absent → 0 = eEulerXYZ). The keys are
+          // DEGREES; quatFromFbxEuler converts them (deg→rad happens INSIDE it
+          // — a former version fed raw degrees into a radians-only function
+          // and every joint got a ~57× amplified "breakdance").
+          const order = rotationOrderOf(bone.children.find(c => c.name === 'Properties70'))
+          for (let k = 0; k < grid.length; k++) {
+            const sampled = sampleAxes(curves, grid[k])
             deg[0] = sampled[0]; deg[1] = sampled[1]; deg[2] = sampled[2]
-            quatFromEulerXYZ(deg, quats, k * 4)
+            quatFromFbxEuler(deg, order, quats, k * 4)
           }
-          pendingR.push({ boneName, times, quats })
+          pendingR.push({ boneName, times: Float32Array.from(grid), quats })
         }
       }
       if (pendingT.length === 0 && pendingR.length === 0) continue
@@ -756,8 +766,14 @@ function readRestPose(p70: RawNode | undefined): { t: [number, number, number]; 
   const r = p70Values(p70, 'Lcl Rotation') ?? [0, 0, 0]
   const s = p70Values(p70, 'Lcl Scaling') ?? [1, 1, 1]
   const q = [0, 0, 0, 1] as [number, number, number, number]
-  quatFromEulerXYZ([r[0] * DEG2RAD, r[1] * DEG2RAD, r[2] * DEG2RAD], q, 0)
+  quatFromFbxEuler([r[0] ?? 0, r[1] ?? 0, r[2] ?? 0], rotationOrderOf(p70), q, 0)
   return { t: [t[0] ?? 0, t[1] ?? 0, t[2] ?? 0], q, s: [s[0] ?? 1, s[1] ?? 1, s[2] ?? 1] }
+}
+
+/** The node's eRotationOrder (Properties70 "RotationOrder", 0–5; absent → 0). */
+function rotationOrderOf(p70: RawNode | undefined): number {
+  const order = p70Values(p70, 'RotationOrder')?.[0]
+  return Number.isFinite(order) && order! >= 0 && order! <= 5 ? Math.trunc(order!) : 0
 }
 
 async function propArray(node: RawNode, childName: string): Promise<Float64Array | undefined> {
@@ -797,17 +813,57 @@ function strippedClusterName(name: string): string {
 
 const DEG2RAD = Math.PI / 180
 
-/** Euler XYZ (three.js convention: q = qx⊗qy⊗qz) → a quaternion in out[off..off+3] (x,y,z,w). */
-export function quatFromEulerXYZ(euler: readonly number[], out: Float32Array | number[], off: number): void {
-  const x = euler[0] / 2, y = euler[1] / 2, z = euler[2] / 2
-  const sx = Math.sin(x), cx = Math.cos(x)
-  const sy = Math.sin(y), cy = Math.cos(y)
-  const sz = Math.sin(z), cz = Math.cos(z)
-  // qx⊗qy⊗qz
-  out[off] = sx * cy * cz + cx * sy * sz
-  out[off + 1] = cx * sy * cz - sx * cy * sz
-  out[off + 2] = cx * cy * sz + sx * sy * cz
-  out[off + 3] = cx * cy * cz - sx * sy * sz
+/**
+ * FBX eRotationOrder enum → the extrinsic axis sequence: 0 eEulerXYZ,
+ * 1 eEulerXZY, 2 eEulerYZX, 3 eEulerYXZ, 4 eEulerZXY, 5 eEulerZYX.
+ * FBX composes the LISTED axes extrinsically (a fixed frame): eEulerXYZ is
+ * the matrix Rz·Ry·Rx — the rotation three.js calls Euler order 'ZYX'
+ * (see FBXLoader.getEulerOrder). Verified against three.js 0.170 on the
+ * Samba Dancing fixture: |dot| = 1.000000 at multi-axis keys, while the
+ * three.js-'XYZ' composition tops out at 0.993.
+ */
+const FBX_EULER_ORDERS = ['XYZ', 'XZY', 'YZX', 'YXZ', 'ZXY', 'ZYX'] as const
+
+const AXIS_INDEX: Record<string, number> = { X: 0, Y: 1, Z: 2 }
+
+/** The quaternion of an axis rotation in degrees (xyzw). */
+function axisQuat(axis: string, deg: number): [number, number, number, number] {
+  const h = (deg * DEG2RAD) / 2
+  const s = Math.sin(h)
+  const c = Math.cos(h)
+  return axis === 'X' ? [s, 0, 0, c] : axis === 'Y' ? [0, s, 0, c] : [0, 0, s, c]
+}
+
+/** Hamilton product a ⊗ b (xyzw). */
+function quatMul(a: readonly number[], b: readonly number[]): [number, number, number, number] {
+  const [ax, ay, az, aw] = a
+  const [bx, by, bz, bw] = b
+  return [
+    aw * bx + ax * bw + ay * bz - az * by,
+    aw * by - ax * bz + ay * bw + az * bx,
+    aw * bz + ax * by - ay * bx + az * bw,
+    aw * bw - ax * bx - ay * by - az * bz,
+  ]
+}
+
+/**
+ * FBX euler DEGREES → quaternion in out[off..off+3] (x,y,z,w).
+ * `order` is the node's eRotationOrder (0–5, default 0). The degrees are
+ * converted to radians HERE — call sites always pass the raw FBX numbers,
+ * so a deg/rad mixup is structurally impossible. The axes compose
+ * extrinsically: eEulerXYZ → q = qz ⊗ qy ⊗ qx.
+ */
+export function quatFromFbxEuler(deg: readonly number[], order: number, out: Float32Array | number[], off: number): void {
+  const axes = FBX_EULER_ORDERS[order] ?? FBX_EULER_ORDERS[0]
+  // extrinsic A→B→C = matrix R_C·R_B·R_A = quaternion q_C ⊗ q_B ⊗ q_A
+  const qa = axisQuat(axes[0], deg[AXIS_INDEX[axes[0]]] ?? 0)
+  const qb = axisQuat(axes[1], deg[AXIS_INDEX[axes[1]]] ?? 0)
+  const qc = axisQuat(axes[2], deg[AXIS_INDEX[axes[2]]] ?? 0)
+  const q = quatMul(qc, quatMul(qb, qa))
+  out[off] = q[0]
+  out[off + 1] = q[1]
+  out[off + 2] = q[2]
+  out[off + 3] = q[3]
 }
 
 /** 4×4 inversion (column-major, general). */

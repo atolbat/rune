@@ -8388,6 +8388,7 @@ async function createRealGPU(canvas, onGpuError) {
   let ubo = null;
   let uboSize = 0;
   let uboGroup = null;
+  let uboBindingWindow = 256;
   let encoder = null;
   let pass = null;
   let currentPipeline = null;
@@ -8473,7 +8474,12 @@ async function createRealGPU(canvas, onGpuError) {
     device.queue.copyExternalImageToTexture({ source, flipY: flipY === true }, { texture: record.texture, mipLevel, origin: { x: dstX, y: dstY, z: 0 } }, { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 });
   }
   function uploadUniforms(offset, data) {
-    ensureUBO(offset + data.length);
+    const window2 = Math.ceil(data.length / 256) * 256;
+    if (window2 > uboBindingWindow) {
+      uboBindingWindow = window2;
+      uboGroup = null;
+    }
+    ensureUBO(offset + Math.max(data.length, uboBindingWindow));
     try {
       device.queue.writeBuffer(ubo, offset, data);
     } catch (error) {
@@ -8482,10 +8488,20 @@ async function createRealGPU(canvas, onGpuError) {
   }
   function ensureUBO(needed) {
     const rounded = Math.ceil(needed / 256) * 256;
-    if (ubo !== null && rounded <= uboSize)
+    const grow = ubo === null || rounded > uboSize;
+    if (!grow && uboGroup !== null)
       return;
-    const size = Math.max(65536, rounded);
-    const next = device.createBuffer({ size, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    if (grow) {
+      const size = Math.max(65536, rounded);
+      const next = device.createBuffer({ size, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      if (ubo !== null)
+        ubo.destroy();
+      ubo = next;
+      uboSize = size;
+      uboGroup = null;
+      currentPipeline = null;
+      pipelines.clear();
+    }
     const layout = device.createBindGroupLayout({
       entries: [{
         binding: 0,
@@ -8495,14 +8511,8 @@ async function createRealGPU(canvas, onGpuError) {
     });
     uboGroup = device.createBindGroup({
       layout,
-      entries: [{ binding: 0, resource: { buffer: next, size: 256 } }]
+      entries: [{ binding: 0, resource: { buffer: ubo, size: uboBindingWindow } }]
     });
-    if (ubo !== null)
-      ubo.destroy();
-    ubo = next;
-    uboSize = size;
-    currentPipeline = null;
-    pipelines.clear();
   }
   function ensurePipeline(pipelineId, wgsl, attrs, hasTextures, desc) {
     if (pipelines.has(pipelineId))
@@ -8999,6 +9009,7 @@ async function createRealGPU(canvas, onGpuError) {
     ubo = null;
     uboSize = 0;
     uboGroup = null;
+    uboBindingWindow = 256;
     for (const buf of vertexBuffers.values()) {
       buf.destroy();
     }

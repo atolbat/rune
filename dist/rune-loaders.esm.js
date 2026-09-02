@@ -2079,11 +2079,11 @@ class FbxDocumentReader {
           const keyValue = await propArray(child, "KeyValueFloat");
           if (keyTime === undefined || keyValue === undefined)
             continue;
-          const times2 = new Float64Array(keyTime.length);
+          const times = new Float64Array(keyTime.length);
           for (let i = 0;i < keyTime.length; i++)
-            times2[i] = keyTime[i] / KTIME_PER_SECOND;
-          curves[key] = { times: times2, values: f32From(keyValue) };
-          const last = times2.length > 0 ? times2[times2.length - 1] : 0;
+            times[i] = keyTime[i] / KTIME_PER_SECOND;
+          curves[key] = { times, values: f32From(keyValue) };
+          const last = times.length > 0 ? times[times.length - 1] : 0;
           if (last > duration)
             duration = last;
         }
@@ -2095,28 +2095,29 @@ class FbxDocumentReader {
             for (const t of curves[axis].times)
               keySet.add(t);
         }
-        const times = Float32Array.from([...keySet].sort((a, b) => a - b));
+        const grid = [...keySet].sort((a, b) => a - b);
         const boneName = this.objName(bone);
         if (isTranslation) {
-          const values = new Float32Array(times.length * 3);
-          for (let k = 0;k < times.length; k++) {
-            const sampled = sampleAxes(curves, times[k]);
+          const values = new Float32Array(grid.length * 3);
+          for (let k = 0;k < grid.length; k++) {
+            const sampled = sampleAxes(curves, grid[k]);
             values[k * 3] = sampled[0];
             values[k * 3 + 1] = sampled[1];
             values[k * 3 + 2] = sampled[2];
           }
-          pendingT.push({ boneName, times, values });
+          pendingT.push({ boneName, times: Float32Array.from(grid), values });
         } else {
-          const quats = new Float32Array(times.length * 4);
+          const quats = new Float32Array(grid.length * 4);
           const deg = [0, 0, 0];
-          for (let k = 0;k < times.length; k++) {
-            const sampled = sampleAxes(curves, times[k]);
+          const order = rotationOrderOf(bone.children.find((c) => c.name === "Properties70"));
+          for (let k = 0;k < grid.length; k++) {
+            const sampled = sampleAxes(curves, grid[k]);
             deg[0] = sampled[0];
             deg[1] = sampled[1];
             deg[2] = sampled[2];
-            quatFromEulerXYZ(deg, quats, k * 4);
+            quatFromFbxEuler(deg, order, quats, k * 4);
           }
-          pendingR.push({ boneName, times, quats });
+          pendingR.push({ boneName, times: Float32Array.from(grid), quats });
         }
       }
       if (pendingT.length === 0 && pendingR.length === 0)
@@ -2215,8 +2216,12 @@ function readRestPose(p70) {
   const r = p70Values(p70, "Lcl Rotation") ?? [0, 0, 0];
   const s = p70Values(p70, "Lcl Scaling") ?? [1, 1, 1];
   const q = [0, 0, 0, 1];
-  quatFromEulerXYZ([r[0] * DEG2RAD, r[1] * DEG2RAD, r[2] * DEG2RAD], q, 0);
+  quatFromFbxEuler([r[0] ?? 0, r[1] ?? 0, r[2] ?? 0], rotationOrderOf(p70), q, 0);
   return { t: [t[0] ?? 0, t[1] ?? 0, t[2] ?? 0], q, s: [s[0] ?? 1, s[1] ?? 1, s[2] ?? 1] };
+}
+function rotationOrderOf(p70) {
+  const order = p70Values(p70, "RotationOrder")?.[0];
+  return Number.isFinite(order) && order >= 0 && order <= 5 ? Math.trunc(order) : 0;
 }
 async function propArray(node, childName) {
   const prop = node.children.find((c) => c.name === childName)?.props[0];
@@ -2250,15 +2255,34 @@ function strippedClusterName(name) {
   return name.startsWith("Cluster ") ? name.slice("Cluster ".length) : name;
 }
 var DEG2RAD = Math.PI / 180;
-function quatFromEulerXYZ(euler, out, off) {
-  const x = euler[0] / 2, y = euler[1] / 2, z = euler[2] / 2;
-  const sx = Math.sin(x), cx = Math.cos(x);
-  const sy = Math.sin(y), cy = Math.cos(y);
-  const sz = Math.sin(z), cz = Math.cos(z);
-  out[off] = sx * cy * cz + cx * sy * sz;
-  out[off + 1] = cx * sy * cz - sx * cy * sz;
-  out[off + 2] = cx * cy * sz + sx * sy * cz;
-  out[off + 3] = cx * cy * cz - sx * sy * sz;
+var FBX_EULER_ORDERS = ["XYZ", "XZY", "YZX", "YXZ", "ZXY", "ZYX"];
+var AXIS_INDEX = { X: 0, Y: 1, Z: 2 };
+function axisQuat(axis, deg) {
+  const h = deg * DEG2RAD / 2;
+  const s = Math.sin(h);
+  const c = Math.cos(h);
+  return axis === "X" ? [s, 0, 0, c] : axis === "Y" ? [0, s, 0, c] : [0, 0, s, c];
+}
+function quatMul(a, b) {
+  const [ax, ay, az, aw] = a;
+  const [bx, by, bz, bw] = b;
+  return [
+    aw * bx + ax * bw + ay * bz - az * by,
+    aw * by - ax * bz + ay * bw + az * bx,
+    aw * bz + ax * by - ay * bx + az * bw,
+    aw * bw - ax * bx - ay * by - az * bz
+  ];
+}
+function quatFromFbxEuler(deg, order, out, off) {
+  const axes = FBX_EULER_ORDERS[order] ?? FBX_EULER_ORDERS[0];
+  const qa = axisQuat(axes[0], deg[AXIS_INDEX[axes[0]]] ?? 0);
+  const qb = axisQuat(axes[1], deg[AXIS_INDEX[axes[1]]] ?? 0);
+  const qc = axisQuat(axes[2], deg[AXIS_INDEX[axes[2]]] ?? 0);
+  const q = quatMul(qc, quatMul(qb, qa));
+  out[off] = q[0];
+  out[off + 1] = q[1];
+  out[off + 2] = q[2];
+  out[off + 3] = q[3];
 }
 function invert4(m) {
   const out = new Float32Array(16);
@@ -7689,7 +7713,7 @@ export {
   signalAbortError,
   resolveUrl,
   registerConfigParser,
-  quatFromEulerXYZ,
+  quatFromFbxEuler,
   parseZml,
   parseObj,
   parseMtlText,

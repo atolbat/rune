@@ -135,7 +135,7 @@ export {
   type MtlStats,
 } from './mtl.ts'
 
-export { parseFBX, quatFromEulerXYZ, invert4, type FbxClip, type FbxJoint, type FbxMesh, type FbxModel, type FbxSkin, type FbxSkeleton, type FbxTrackR, type FbxTrackT } from './fbx.ts'
+export { parseFBX, quatFromFbxEuler, invert4, type FbxClip, type FbxJoint, type FbxMesh, type FbxModel, type FbxSkin, type FbxSkeleton, type FbxTrackR, type FbxTrackT } from './fbx.ts'
 
 export {
   parseImage,

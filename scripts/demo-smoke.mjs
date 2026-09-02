@@ -238,6 +238,15 @@ try {
   const sambaAlive = await framesDiffer(page)
   console.log(`[smoke] samba animation: ${sambaAlive ? 'alive (dance frames differ)' : 'STATIC'}`)
 
+  // 8c2. GPU health: the skinned draw must leave no validation errors in
+  // the log — the WebGPU failure mode was "bound with size 256 ... too small;
+  // the pipeline requires at least 4448 bytes" → Invalid CommandBuffer →
+  // "rendering stopped (storm pause)" on the whole demo
+  const viewerLogText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
+  const gpuHealthy = !/too small|Invalid CommandBuffer|storm|rendering stopped/i.test(viewerLogText)
+  console.log(`[smoke] samba GPU health: ${gpuHealthy ? 'clean (no binding/storm errors)' : 'GPU ERRORS in the log'}`)
+  if (!gpuHealthy) console.log(`[smoke] log tail: ${viewerLogText.slice(-600)}`)
+
   // 8d. Pinch zoom (two synthetic touch pointers spreading apart) — the
   // camera distance shrinks, the figure visibly grows (canvas screenshots:
   // readPixels outside rAF reads a cleared buffer without preserveDrawingBuffer)
@@ -338,6 +347,7 @@ try {
     loadText.includes('Load') &&
     sambaStatsOk &&
     sambaAlive &&
+    gpuHealthy &&
     pinchZoomed &&
     viewerLogEntries > 0 &&
     mobileViewerOk &&

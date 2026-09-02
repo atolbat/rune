@@ -116,6 +116,15 @@ export async function createRealGPU(
   let ubo: GPUBuffer | null = null
   let uboSize = 0
   let uboGroup: GPUBindGroup | null = null
+  // The dynamic-offset binding window: the bind group exposes [offset,
+  // offset + window) of the UBO to the pipeline. Dawn validates it against
+  // the shader's uniform block — a hardcoded 256-byte window rejected every
+  // draw whose block is larger (the skinned model-viewer: "binding ... is
+  // too small; the pipeline requires at least 4448 bytes" → Invalid
+  // CommandBuffer → rendering stopped). The window grows to the largest
+  // uniform slice ever uploaded, rounded to the 256-byte dynamic-offset
+  // granularity.
+  let uboBindingWindow = 256
   let encoder: GPUCommandEncoder | null = null
   let pass: GPURenderPassEncoder | null = null
   let currentPipeline: GPURenderPipeline | null = null
@@ -303,7 +312,15 @@ export async function createRealGPU(
   }
 
   function uploadUniforms(offset: number, data: Uint8Array): void {
-    ensureUBO(offset + data.length)
+    // The window must cover the WHOLE slice (the shader's uniform block +
+    // any padding up to it) for the pipeline to accept the binding, and the
+    // buffer must fit offset + window for the dynamic-offset range check.
+    const window = Math.ceil(data.length / 256) * 256
+    if (window > uboBindingWindow) {
+      uboBindingWindow = window
+      uboGroup = null // rebuilt with the larger window in ensureUBO
+    }
+    ensureUBO(offset + Math.max(data.length, uboBindingWindow))
     try {
       device.queue.writeBuffer(ubo!, offset, data as Uint8Array<ArrayBuffer>)
     } catch (error) {
@@ -317,9 +334,21 @@ export async function createRealGPU(
 
   function ensureUBO(needed: number): void {
     const rounded = Math.ceil(needed / 256) * 256
-    if (ubo !== null && rounded <= uboSize) return
-    const size = Math.max(65536, rounded)
-    const next = device.createBuffer({ size, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+    const grow = ubo === null || rounded > uboSize
+    if (!grow && uboGroup !== null) return
+    if (grow) {
+      const size = Math.max(65536, rounded)
+      const next = device.createBuffer({ size, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+      if (ubo !== null) ubo.destroy()
+      ubo = next
+      uboSize = size
+      uboGroup = null
+      currentPipeline = null // rebuild layout-dependent pipeline caches
+      pipelines.clear()
+    }
+    // The shared group-0 bind group: the binding covers the window (not a
+    // fixed 256 B). The BGL descriptor is byte-identical to buildPipeline's
+    // group0 — structurally equal layouts are pipeline-compatible.
     const layout = device.createBindGroupLayout({
       entries: [{
         binding: 0,
@@ -329,13 +358,8 @@ export async function createRealGPU(
     })
     uboGroup = device.createBindGroup({
       layout,
-      entries: [{ binding: 0, resource: { buffer: next, size: 256 } }],
+      entries: [{ binding: 0, resource: { buffer: ubo!, size: uboBindingWindow } }],
     })
-    if (ubo !== null) ubo.destroy()
-    ubo = next
-    uboSize = size
-    currentPipeline = null // rebuild layout-dependent pipeline caches
-    pipelines.clear()
   }
 
   function ensurePipeline(pipelineId: number, wgsl: string, attrs: readonly GpuAttrSlot[], hasTextures: boolean, desc?: GpuPipelineDesc): void {
@@ -973,6 +997,7 @@ export async function createRealGPU(
     ubo = null
     uboSize = 0
     uboGroup = null
+    uboBindingWindow = 256
     // 4. Vertex buffers — keyed by Float32Array
     for (const buf of vertexBuffers.values()) {
       buf.destroy()
