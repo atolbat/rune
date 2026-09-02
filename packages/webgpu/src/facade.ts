@@ -1,11 +1,11 @@
-// Контракт фасада WebGPU: толстые операции над device/queue.
+// WebGPU facade contract: fat operations over device/queue.
 
 import type { TextureFormat, GpuTimer } from '@rune/core'
 import type { GpuPipelineDesc } from './pipeline/pipelineCache.ts'
 
-/** Источник для атомарной загрузки текстуры (без стриминга/чанков).
+/** Source for atomic texture upload (without streaming/chunking).
  *  WebGPU ExternalImageSource = ImageBitmap | HTMLCanvasElement | HTMLVideoElement |
- *  VideoFrame | OffscreenCanvas (с getContext('2d') | 'webgl' | 'webgl2' | 'webgpu'). */
+ *  VideoFrame | OffscreenCanvas (with getContext('2d') | 'webgl' | 'webgl2' | 'webgpu'). */
 export type GPUImageSource =
   | ImageBitmap
   | HTMLCanvasElement
@@ -13,28 +13,29 @@ export type GPUImageSource =
   | OffscreenCanvas
   | VideoFrame
 
-/** Размеры источника для copyExternalImageToTexture.
+/** Source dimensions for copyExternalImageToTexture.
  *
- *  WebGPU требует, чтобы copySize соответствовал размеру копируемого региона
- *  источника — иначе "Copy rect is out of bounds of external image". Мы не можем
- *  передать «размер текстуры-назначения» как copySize (что раньше делал unified
- *  renderer): source меньше → out of bounds.
+ *  WebGPU requires copySize to match the size of the copied source
+ *  region — otherwise "Copy rect is out of bounds of external image". We
+ *  cannot pass the "destination texture size" as copySize (which the
+ *  unified renderer did before): a smaller source → out of bounds.
  *
- *  Извлекаем width/height из source:
+ *  We extract width/height from source:
  *   • ImageBitmap / OffscreenCanvas / HTMLCanvasElement: .width / .height
- *   • HTMLVideoElement: .videoWidth / .videoHeight (видео может быть не полностью
- *     загружено — тогда 0×0, что WebGPU отвергнет; это ответственность вызывающего)
- *   • VideoFrame: .displayWidth / .displayHeight (coded* могут включать padding)
+ *   • HTMLVideoElement: .videoWidth / .videoHeight (the video may not be
+ *     fully loaded — then 0×0, which WebGPU will reject; that is the
+ *     caller's responsibility)
+ *   • VideoFrame: .displayWidth / .displayHeight (coded* may include padding)
  */
 export function externalImageSize(source: GPUImageSource): readonly [number, number] {
-  // ImageBitmap, HTMLCanvasElement, OffscreenCanvas — все имеют .width/.height
-  // HTMLVideoElement — имеет .videoWidth/.videoHeight (а .width/.height — это
-  // CSS-размер элемента, бесполезен для GPU)
+  // ImageBitmap, HTMLCanvasElement, OffscreenCanvas — all have .width/.height
+  // HTMLVideoElement — has .videoWidth/.videoHeight (while .width/.height is
+  // the element's CSS size, useless for the GPU)
   if (typeof HTMLVideoElement !== 'undefined' && source instanceof HTMLVideoElement) {
     return [source.videoWidth || 0, source.videoHeight || 0]
   }
-  // VideoFrame — displayWidth/displayHeight (предпочтительнее coded*, которые
-  // могут включать выравнивание кодека)
+  // VideoFrame — displayWidth/displayHeight (preferred over coded*, which
+  // may include codec alignment)
   const vf = source as { displayWidth?: number; displayHeight?: number; codedWidth?: number; codedHeight?: number }
   if (typeof vf.displayWidth === 'number' && typeof vf.displayHeight === 'number' && vf.displayWidth > 0) {
     return [vf.displayWidth, vf.displayHeight]
@@ -42,33 +43,34 @@ export function externalImageSize(source: GPUImageSource): readonly [number, num
   if (typeof vf.codedWidth === 'number' && typeof vf.codedHeight === 'number' && vf.codedWidth > 0) {
     return [vf.codedWidth, vf.codedHeight]
   }
-  // ImageBitmap / HTMLCanvasElement / OffscreenCanvas — простой путь
+  // ImageBitmap / HTMLCanvasElement / OffscreenCanvas — the simple path
   const s = source as { width?: number; height?: number }
   return [s.width ?? 0, s.height ?? 0]
 }
 
-// Утилита типа для ConditionalTypes (вынесен, чтобы не плодить копии в типах)
-// (globalType удалён в Task 71: единственное применение — условный VideoFrame —
-// заменён на прямую ссылку VideoFrame из lib.dom; WebCodecs-типы в среде есть.)
+// Type utility for ConditionalTypes (moved out to avoid spawning copies in types)
+// (globalType was removed in Task 71: the only use — a conditional VideoFrame —
+// was replaced with a direct VideoFrame reference from lib.dom; WebCodecs types
+// exist in the environment.)
 
-/** Handle, который GPUFacade дёргает в нужные моменты для writeTimestamp.
- *  Создаётся createGpuGpuTimer вместе с GpuTimer (core). Устанавливается в
- *  GPUFacade через installTimer(). realGPU вызывает handle.onBeginPass /
- *  onEndPass / onSubmit в нужные моменты командного потока. */
+/** Handle that GPUFacade invokes at the right moments for writeTimestamp.
+ *  Created by createGpuGpuTimer together with GpuTimer (core). Installed
+ *  into GPUFacade via installTimer(). realGPU calls handle.onBeginPass /
+ *  onEndPass / onSubmit at the right moments of the command stream. */
 export interface GpuTimerHandle {
   onBeginPass(pass: GPURenderPassEncoder): void
   onEndPass(pass: GPURenderPassEncoder): void
   onSubmit(encoder: GPUCommandEncoder): void
 }
 
-/** M5 (Task 73): слот вершинного буфера пайплайна.
- *  number — tight-раскладка (arrayStride = size*4, offset 0);
- *  объект — интерливинг фида: stride (байты записи) + offset (байты поля).
- *  Пайплайн строит GPUVertexBufferLayout: arrayStride=stride,
- *  attribute offset=offset, формат по size.
- *  Task 75: step='instance' → stepMode 'instance' (запись фида читается
- *  один раз на инстанс — квады-звёзды; углы разворачиваются из
- *  @builtin(vertex_index) в шейдере). */
+/** M5 (Task 73): pipeline vertex buffer slot.
+ *  number — tight layout (arrayStride = size*4, offset 0);
+ *  object — feed interleaving: stride (record bytes) + offset (field bytes).
+ *  The pipeline builds GPUVertexBufferLayout: arrayStride=stride,
+ *  attribute offset=offset, format by size.
+ *  Task 75: step='instance' → stepMode 'instance' (a feed record is read
+ *  once per instance — quad-stars; corners are expanded from
+ *  @builtin(vertex_index) in the shader). */
 export type GpuAttrSlot = number | {
   readonly size: number
   readonly stride?: number
@@ -79,23 +81,25 @@ export type GpuAttrSlot = number | {
 export interface GPUFacade {
   configure(width: number, height: number): void
   resize(width: number, height: number): void
-  /** format 'canvas' — формат канваса (нужен поверхностям-целям,
-   *  чтобы пайплайны подходили и канвасу, и поверхности).
-   *  Task 67 HDR: 'rgba16float' (8 б/пиксель, filterable+renderable core)
-   *  и 'rgba32float' (16 б/пиксель, renderable core; линейная фильтрация
-   *  требует feature 'float32-filterable' — без неё sampler фасада
-   *  деградирует до nearest). Паритет с WebGL2 createTexture({format}).
+  /** format 'canvas' — the canvas format (targets need it so that
+   *  pipelines fit both the canvas and the surface).
+   *  Task 67 HDR: 'rgba16float' (8 B/pixel, filterable+renderable core)
+   *  and 'rgba32float' (16 B/pixel, renderable core; linear filtering
+   *  requires feature 'float32-filterable' — without it the facade's
+   *  sampler degrades to nearest). Parity with WebGL2 createTexture({format}).
    *
-   *  options.mipLevels (default 1): кол-во mip-уровней в цепи. Если >1 —
-   *  mipLevelCount в descriptor, sampler с mipmapFilter='linear' (минификация
-   *  выбирает mip по distance, аналог LINEAR_MIPMAP_LINEAR в WebGL2).
-   *  copyExternalImageToTexture пишет в mip 0; для других мипов —
+   *  options.mipLevels (default 1): the number of mip levels in the chain.
+   *  If >1 — mipLevelCount in the descriptor, a sampler with
+   *  mipmapFilter='linear' (minification picks the mip by distance, the
+   *  analogue of LINEAR_MIPMAP_LINEAR in WebGL2).
+   *  copyExternalImageToTexture writes into mip 0; for other mips —
    *  copyExternalImageToTextureMip.
    *
-   *  Контракт: WebGPU автоматически использует mip-chain при sampling, если
-   *  mipLevelCount>1. Незагруженные мипы возвращают нули. Для progressive
-   *  streaming (MipStreamer) рекомендуется держать lodMaxClamp на максимальный
-   *  загруженный мип — но это уже responsibility texture-обёртки, не facade. */
+   *  Contract: WebGPU automatically uses the mip-chain when sampling if
+   *  mipLevelCount>1. Unloaded mips return zeros. For progressive
+   *  streaming (MipStreamer) it is recommended to keep lodMaxClamp at the
+   *  highest loaded mip — but that is the responsibility of the texture
+   *  wrapper, not the facade. */
   createTexture(
     width: number,
     height: number,
@@ -103,25 +107,25 @@ export interface GPUFacade {
     options?: { mipLevels?: number; maxAnisotropy?: number },
   ): number
   texSubImage2D(textureId: number, x: number, y: number, width: number, height: number, bytes: Uint8Array): void
-  /** Атомарная загрузка из bitmap/canvas/video в mip 0 — одним вызовом
-   *  copyExternalImageToTexture.
+  /** Atomic upload from bitmap/canvas/video into mip 0 — a single
+   *  copyExternalImageToTexture call.
    *
-   *  Семантика (исправление бага «Copy rect is out of bounds of external image»):
-   *   • dstX, dstY — origin в текстуре-назначении (куда писать)
-   *   • copyWidth, copyHeight — размер копируемого региона (= размер source,
-   *     НЕ размер текстуры). Должны быть ≤ source.width/height и ≤
-   *     (texture.width - dstX) / (texture.height - dstY), иначе WebGPU
-   *     бросит validation error.
-   *   • flipY (default false) — если true, источник переворачивается по Y
-   *     ПЕРЕД копированием. WebGPU нативно поддерживает эту опцию через
-   *     GPUCopyExternalImageSourceInfo.flipY. Паритет с WebGL2:
-   *     UNPACK_FLIP_Y_WEBGL делает то же самое — flipY=true на обоих
-   *     бэкендах даёт идентичный результат.
+   *  Semantics (fix for the "Copy rect is out of bounds of external image" bug):
+   *   • dstX, dstY — origin in the destination texture (where to write)
+   *   • copyWidth, copyHeight — size of the copied region (= source size,
+   *     NOT the texture size). Must be ≤ source.width/height and ≤
+   *     (texture.width - dstX) / (texture.height - dstY), otherwise WebGPU
+   *     will throw a validation error.
+   *   • flipY (default false) — if true, the source is flipped along Y
+   *     BEFORE copying. WebGPU supports this option natively via
+   *     GPUCopyExternalImageSourceInfo.flipY. Parity with WebGL2:
+   *     UNPACK_FLIP_Y_WEBGL does the same — flipY=true on both backends
+   *     gives an identical result.
    *
-   *  Для full-texture upload: dstX=0, dstY=0, copyWidth=texture.width,
-   *  copyHeight=texture.height (при совпадающем размере source).
+   *  For a full-texture upload: dstX=0, dstY=0, copyWidth=texture.width,
+   *  copyHeight=texture.height (when the source size matches).
    *
-   *  Для sub-region upload (atlas packing): dstX=slot.x, dstY=slot.y,
+   *  For a sub-region upload (atlas packing): dstX=slot.x, dstY=slot.y,
    *  copyWidth=source.width, copyHeight=source.height. */
   copyExternalImageToTexture(
     textureId: number,
@@ -132,15 +136,15 @@ export interface GPUFacade {
     copyHeight: number,
     flipY?: boolean,
   ): void
-  /** Загрузка конкретного mip-уровня. copyExternalImageToTexture с
-   *  destination.mipLevel=level. Source должен иметь размер N/(2^level).
-   *  Используется MipStreamer'ом для progressive mip upload.
+  /** Upload of a specific mip level. copyExternalImageToTexture with
+   *  destination.mipLevel=level. The source must have size N/(2^level).
+   *  Used by MipStreamer for progressive mip upload.
    *
-   *  Семантика: dstX/dstY — origin в mip level, copyWidth/copyHeight —
-   *  размер копируемого региона (обычно = mip size = N/(2^level)).
-   *  flipY (default false) — аналог copyExternalImageToTexture (см. выше).
+   *  Semantics: dstX/dstY — origin in the mip level, copyWidth/copyHeight —
+   *  size of the copied region (usually = mip size = N/(2^level)).
+   *  flipY (default false) — analogue of copyExternalImageToTexture (see above).
    *
-   *  WebGPU-паритет с WebGL2 texImage2DLevel. */
+   *  WebGPU parity with WebGL2 texImage2DLevel. */
   copyExternalImageToTextureMip(
     textureId: number,
     mipLevel: number,
@@ -152,42 +156,42 @@ export interface GPUFacade {
     flipY?: boolean,
   ): void
   uploadUniforms(offset: number, data: Uint8Array): void
-  /** M5 (Task 73): слот вершинного буфера — число (tight: size×4 байта,
-   *  offset 0 — обратная совместимость) ИЛИ дескриптор интерливинга фида
-   *  (size компонент, stride байты записи, offset байты поля).
-   *  Task 75: desc — растеризационное состояние (blend/depth/cull/
-   *  primitive) из GpuPipelineDesc; раньше пайплайн хардкодил
-   *  less+write без блендинга. */
+  /** M5 (Task 73): vertex buffer slot — a number (tight: size×4 bytes,
+   *  offset 0 — backward compatibility) OR a feed interleaving descriptor
+   *  (size components, stride record bytes, offset field bytes).
+   *  Task 75: desc — rasterization state (blend/depth/cull/
+   *  primitive) from GpuPipelineDesc; previously the pipeline hardcoded
+   *  less+write without blending. */
   ensurePipeline(pipelineId: number, wgsl: string, attrs: readonly GpuAttrSlot[], hasTextures: boolean, desc?: GpuPipelineDesc): void
   usePipeline(pipelineId: number): void
   bindUniforms(dynamicOffset: number): void
   bindVertexBuffer(slot: number, data: Float32Array, size: number): void
-  /** M5 (Task 73): динамический вершинный буфер фида — writeBuffer одним
-   *  вызовом на кадр (грязный диапазон [0, byteLength)). Ключ — сама
-   *  Float32Array (стабильная у рендерера фида). Биндинг — executor'ом
-   *  через bindVertexBuffer (тот же keyed-кэш). */
+  /** M5 (Task 73): the feed's dynamic vertex buffer — writeBuffer in a
+   *  single call per frame (dirty range [0, byteLength)). The key is the
+   *  Float32Array itself (stable in the feed renderer). Binding is done by
+   *  the executor via bindVertexBuffer (the same keyed cache). */
   syncVertexBuffer(data: Float32Array, byteLength: number): void
   bindTexture(textureId: number): void
   beginPass(clearIndex: number): void
   draw(count: number, instances: number): void
   endPass(): void
   submit(): void
-  /** Task 80 (readback): прочитать пиксели ЦЕЛИ (surface) — Promise<Uint8Array>.
+  /** Task 80 (readback): read the pixels of the TARGET (surface) — Promise<Uint8Array>.
    *
-   *  Контракт паритета с GL-фасадом (readTargetPixels → Uint8Array):
-   *   - RGBA8, tight-раскладка (rowBytes = width*4, без 256-байтового
-   *     выравнивания WebGPU — фасад уплотняет строки);
-   *   - строки СВЕРХУ ВНИЗ: data[0..3] = верхний-левый пиксель (texture
-   *     row 0; GL-фасад переворачивает readPixels ради этого же контракта);
-   *   - каналы RGBA: канвасные bgra8unorm-форматы свиззлируются (B↔R).
+   *  Parity contract with the GL facade (readTargetPixels → Uint8Array):
+   *   - RGBA8, tight layout (rowBytes = width*4, without WebGPU's 256-byte
+   *     alignment — the facade compacts rows);
+   *   - rows TOP-DOWN: data[0..3] = top-left pixel (texture
+   *     row 0; the GL facade flips readPixels for this same contract);
+   *   - RGBA channels: canvas bgra8unorm formats are swizzled (B↔R).
    *
-   *  Асинхронность: copyTextureToBuffer → submit → mapAsync (WebGPU-путь
-   *  читает только через маппинг буфера). Открытый render-pass закрывается
-   *  фасадом; копия дописывается в тот же командный буфер (порядок сохранён).
-   *  targetId 0 (канвас) не читается — honest reject (presented-текстура
-   *  живёт один кадр); читайте поверхность (renderer.surface().read()). */
+   *  Asynchrony: copyTextureToBuffer → submit → mapAsync (the WebGPU path
+   *  reads only via buffer mapping). An open render-pass is closed by the
+   *  facade; the copy is appended to the same command buffer (order preserved).
+   *  targetId 0 (canvas) is not read — honest reject (a presented texture
+   *  lives one frame); read the surface (renderer.surface().read()). */
   readTargetPixels(targetId: number): Promise<Uint8Array>
-  /** Цель рендера: пасс пишет в текстуру (view + опциональная глубина). */
+  /** Render target: the pass writes into a texture (view + optional depth). */
   createTarget(
     textureId: number,
     width: number,
@@ -195,99 +199,102 @@ export interface GPUFacade {
     depth: boolean,
     color: readonly [number, number, number, number],
   ): number
-  /** Переключить цель: 0 = канвас (закрывает текущий пасс, открывает новый). */
+  /** Switch the target: 0 = canvas (closes the current pass, opens a new one). */
   bindTarget(targetId: number, clear: boolean): void
 
-  /** Adapter — для caps probing (probeGPUCaps через exposeGPUCaps).
-   *  null если caps-probing не нужен (headless/mock). */
+  /** Adapter — for caps probing (probeGPUCaps via exposeGPUCaps).
+   *  null if caps probing is not needed (headless/mock). */
   readonly adapter: GPUAdapter | null
-  /** Device — для caps probing (device.limits.maxAnisotropy и др.).
-   *  null в recording-фасаде (нет device). У некоторых браузеров
-   *  adapter.limits НЕ содержит maxAnisotropy, но device.limits — да
-   *  (после requestDevice()). Поэтому probeGPUCaps использует device
-   *  как fallback к adapter.limits. */
+  /** Device — for caps probing (device.limits.maxAnisotropy etc.).
+   *  null in the recording facade (no device). In some browsers
+   *  adapter.limits does NOT contain maxAnisotropy, but device.limits does
+   *  (after requestDevice()). Therefore probeGPUCaps uses the device
+   *  as a fallback to adapter.limits. */
   readonly device: GPUDevice | null
-  /** Preferred canvas format — нужен capsProbe для bgra8unorm baseline. */
+  /** Preferred canvas format — needed by capsProbe for the bgra8unorm baseline. */
   readonly preferredFormat: GPUTextureFormat
 
   // ─── Disposal (M1 §9.9 disposal discipline) ───────────────────────────
-  // WebGPU-ресурсы: texture (GPUTexture) и target (color view + опц. depth).
-  // Pipelines/bindGroupLayouts/shaderModule/device — НЕ освобождаются вручную
-  // до полного dispose(), т.к. они одноразово создаются под компиляцию спека
-  // и живут до конца сессии рендерера (внутренний кэш).
-  // VertexBuffers — особый случай: они keyed по Float32Array и освобождаются
-  // автоматически через FinalizationRegistry (см. realGPU.ts).
+  // WebGPU resources: texture (GPUTexture) and target (color view + optional
+  // depth). Pipelines/bindGroupLayouts/shaderModule/device — NOT freed manually
+  // before the full dispose(), because they are created once per spec
+  // compilation and live until the end of the renderer session (internal
+  // cache).
+  // VertexBuffers — a special case: they are keyed by Float32Array and freed
+  // automatically via FinalizationRegistry (see realGPU.ts).
 
-  /** Удалить текстуру: GPUTexture.destroy + удаление из кэша.
-   *  BindGroup для неё инвалидирован и будет пересоздан при след. bindTexture. */
+  /** Delete a texture: GPUTexture.destroy + removal from the cache.
+   *  Its BindGroup is invalidated and will be recreated on the next bindTexture. */
   deleteTexture(textureId: number): void
-  /** Удалить цель: уничтожает целевую depth-текстуру (если была). Цветовая
-   *  текстура НЕ трогается (она — отдельный ресурс, см. deleteTexture). */
+  /** Delete a target: destroys the target's depth texture (if any). The
+   *  color texture is NOT touched (it is a separate resource, see deleteTexture). */
   deleteTarget(targetId: number): void
-  /** Создать GPUTextureView с sub-mip-range. По умолчанию createTexture()
-   *  создаёт default-view на всю mip-chain. Этот метод позволяет создать
-   *  дополнительные views с ограниченным диапазоном мипов — для deep-zoom
-   *  paging (sampler сэмплит только конкретный мип, без avg между уровнями).
+  /** Create a GPUTextureView with a sub-mip-range. By default createTexture()
+   *  creates a default view over the whole mip-chain. This method allows
+   *  creating additional views with a limited mip range — for deep-zoom
+   *  paging (the sampler samples only a specific mip, no avg between levels).
    *
-   *  WebGPU: GPUTextureViewDescriptor с baseMipLevel/mipLevelCount.
-   *  WebGL2: эмулируется через TEXTURE_BASE_LEVEL / TEXTURE_MAX_LEVEL при
-   *  bindTexture (per-texture state, переписывается каждый bind для
-   *  предотвращения утечки состояния между view'ами). Реализовано в Task 56
+   *  WebGPU: GPUTextureViewDescriptor with baseMipLevel/mipLevelCount.
+   *  WebGL2: emulated via TEXTURE_BASE_LEVEL / TEXTURE_MAX_LEVEL at
+   *  bindTexture (per-texture state, rewritten on every bind to prevent
+   *  state leaking between views). Implemented in Task 56
    *  (GLFacade.createTextureView + deleteTextureView, disjoint id namespace
-   *  с textureId через границу 1M). Паритет LOD-clamp на обоих бэкендах.
+   *  with textureId across the 1M boundary). LOD-clamp parity on both
+   *  backends.
    *
-   *  Контракт: createTextureView не требует mipLevels>1 в createTexture.
-   *  Если textureId указывает на текстуру с mipLevels=1, а в options
-   *  передаётся baseMipLevel=2 — WebGPU бросит validation error (асинхронно
-   *  через onGpuError). Рекомендуется проверить texture.mipLevels перед
-   *  созданием view.
+   *  Contract: createTextureView does not require mipLevels>1 in createTexture.
+   *  If textureId points to a texture with mipLevels=1 while options pass
+   *  baseMipLevel=2 — WebGPU will throw a validation error (asynchronously
+   *  via onGpuError). It is recommended to check texture.mipLevels before
+   *  creating a view.
    *
-   *  @returns viewId — целочисленный handle. Используется в bindTexture(viewId).
-   *  При dispose() фасада view уничтожается автоматически (GPUTextureView
-   *  освобождается через device.destroy() неявно, как и оригинальный texture).
-   *  Для поштучного освобождения — deleteTextureView(viewId). */
+   *  @returns viewId — an integer handle. Used in bindTexture(viewId).
+   *  On facade dispose() the view is destroyed automatically (the
+   *  GPUTextureView is freed implicitly via device.destroy(), like the
+   *  original texture).
+   *  For per-item freeing — deleteTextureView(viewId). */
   createTextureView(
     textureId: number,
     options?: { baseMipLevel?: number; mipLevelCount?: number; baseArrayLayer?: number; arrayLayerCount?: number },
   ): number
-  /** Удалить GPUTextureView (если был создан через createTextureView).
-   *  Default-view (созданный в createTexture) не может быть удалён этим
-   *  методом — он управляется вместе с текстурой (deleteTexture).
-   *  Идемпотентно: повторный deleteTextureView того же id — no-op. */
+  /** Delete a GPUTextureView (if created via createTextureView).
+   *  A default view (created in createTexture) cannot be deleted by this
+   *  method — it is managed together with the texture (deleteTexture).
+   *  Idempotent: deleting the same id again — no-op. */
   deleteTextureView(viewId: number): void
-  /** Полный teardown фасада: уничтожает ВСЕ GPUTexture (textures map),
-   *  UBO, vertex buffers, depth-texture (canvas attachment), target
-   *  depth-textures, и в финале — device.destroy(). Идемпотентно:
-   *  повторный dispose — no-op.
+  /** Full teardown of the facade: destroys ALL GPUTexture (textures map),
+   *  UBO, vertex buffers, the depth texture (canvas attachment), target
+   *  depth textures, and finally — device.destroy(). Idempotent:
+   *  a repeated dispose — no-op.
    *
-   *  WebGPU-специфика: device.destroy() детерминированно освобождает всю
-   *  GPU-память, выделенную устройством, включая все текстуры/буферы/
-   *  пайплайны/семплеры, даже если они не были уничтожены явно. Это
-   *  критично при частом switch backend (kit-demo): каждое переключение
-   *  создаёт новое устройство. Без destroy() старые устройства остаются
-   *  живыми до unload страницы → утечка GPU-памяти.
+   *  WebGPU specifics: device.destroy() deterministically frees all
+   *  GPU memory allocated by the device, including all textures/buffers/
+   *  pipelines/samplers, even if they were not destroyed explicitly. This
+   *  is critical with frequent backend switching (kit-demo): each switch
+   *  creates a new device. Without destroy() old devices stay alive until
+   *  page unload → GPU memory leak.
    *
-   *  После dispose рендерер должен пересоздать фасад через createRealGPU —
-   *  использовать старый GPUFacade нельзя (все ресурсы и device мертвы). */
+   *  After dispose the renderer must recreate the facade via createRealGPU —
+   *  the old GPUFacade must not be used (all resources and the device are dead). */
   dispose(): void
-  /** Установить GPU-timer handle для writeTimestamp hooks. handle != null
-   *  включает begin/endPass + onSubmit hooks для timestamp-query. handle=null
-   *  снимает hooks (для dispose или при ошибке timer'а).
+  /** Install a GPU-timer handle for writeTimestamp hooks. handle != null
+   *  enables begin/endPass + onSubmit hooks for timestamp-query. handle=null
+   *  removes the hooks (for dispose or on a timer error).
    *
-   *  realGPU вызывает handle.onBeginPass(pass) сразу после beginRenderPass,
-   *  handle.onEndPass(pass) перед pass.end(), handle.onSubmit(encoder)
-   *  перед encoder.finish() — это закрывает timestamps в правильном порядке.
+   *  realGPU calls handle.onBeginPass(pass) right after beginRenderPass,
+   *  handle.onEndPass(pass) before pass.end(), handle.onSubmit(encoder)
+   *  before encoder.finish() — this closes timestamps in the correct order.
    *
-   *  Возвращает предыдущий handle (или null) — для chain/uninstall. */
+   *  Returns the previous handle (or null) — for chain/uninstall. */
   installTimer(handle: GpuTimerHandle | null): GpuTimerHandle | null
-  /** GpuTimer (core), если device имеет 'timestamp-query' feature. null —
-   *  если feature недоступна или timer деактивирован (device lost, mapAsync
-   *  failed). Подключается к StatsCollector.setGpuTimer() в renderer.ts.
+  /** GpuTimer (core) if the device has the 'timestamp-query' feature. null —
+   *  if the feature is unavailable or the timer is deactivated (device lost,
+   *  mapAsync failed). Wired to StatsCollector.setGpuTimer() in renderer.ts.
    *
-   *  Важно: timer инициализирован внутри realGPU (querySet + resolveBuffer
-   *  + readBuffer созданы на device). handle уже подключен к этому timer'у
-   *  через installTimer внутри createRealGPU — пользователь GPUFacade не
-   *  должен вызывать installTimer вручную (если только не подменяет timer
-   *  для тестов). */
+   *  Important: the timer is initialized inside realGPU (querySet +
+   *  resolveBuffer + readBuffer are created on the device). The handle is
+   *  already wired to this timer via installTimer inside createRealGPU —
+   *  the GPUFacade user must not call installTimer manually (unless
+   *  replacing the timer for tests). */
   readonly timer: GpuTimer | null
 }

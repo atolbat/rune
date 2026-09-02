@@ -1,32 +1,32 @@
 import type { TapeWriter } from '@rune/core'
 import type { PortableSpec, BackendAdapter, CompiledOnBackend } from './adapters.ts'
 
-/** Устойчивый хэндл команды: переживает смену бэкенда и потерю устройства. */
+/** A durable command handle: survives backend switches and device loss. */
 export interface PortableCommand {
   readonly id: number
   record(props: any, ctx: any, writer: TapeWriter): void
 }
 
-/** Декларация команды в журнале харнесса: declare/destroy (append-only). */
+/** Command declaration in the harness journal: declare/destroy (append-only). */
 export interface CommandDecl {
   readonly kind: 'declare' | 'destroy'
   readonly id: number
 }
 
-/** Журнал команд харнесса: append-only, length — для аудита/тестов. */
+/** Harness command journal: append-only, length is for audit/tests. */
 export interface CommandJournal {
   declare(id: number): void
   destroy(id: number): void
   readonly length: number
 }
 
-/** Итог восстановления: сколько живых команд пере-декларировано. */
+/** Recovery result: how many live commands were re-declared. */
 export interface ReplaySummary {
   readonly recompiled: number
   readonly backend: 'webgl2' | 'webgpu'
 }
 
-/** Харнесс переносимости: журнал команд + два бэкенда + один механизм replay. */
+/** Portability harness: command journal + two backends + one replay mechanism. */
 export interface PortabilityHarness {
   readonly backend: 'webgl2' | 'webgpu'
   readonly journal: CommandJournal
@@ -36,15 +36,15 @@ export interface PortabilityHarness {
   simulateLoss(): ReplaySummary
 }
 
-/** Создаёт харнесс: switchBackend и simulateLoss — один и тот же replay. */
+/** Creates a harness: switchBackend and simulateLoss share the same replay. */
 export function createPortability(
   adapters: { readonly webgl2: BackendAdapter; readonly webgpu: BackendAdapter },
   initial: 'webgl2' | 'webgpu' = 'webgl2',
 ): PortabilityHarness {
-  // Журнал команд: тот же принцип, что у ресурсного Journal из @rune/core
-  // (append-only декларации + replay), но домен — переносимые команды,
-  // а не GPU-ресурсы (спецификация команды сериализуема и бэкенд-
-  // независима — replay = повторная компиляция на новом контексте).
+  // Command journal: the same principle as the resource Journal from @rune/core
+  // (append-only declarations + replay), but the domain is portable commands,
+  // not GPU resources (a command spec is serializable and backend-
+  // independent — replay = recompilation on the new context).
   const ops: CommandDecl[] = []
   const journal: CommandJournal = {
     declare: id => ops.push({ kind: 'declare', id }),
@@ -120,7 +120,7 @@ function compileOn(
   return adapters[kind].compile(context, spec)
 }
 
-/** Фасад делегирует текущей компиляции: хэндл стабилен между бэкендами. */
+/** The facade delegates to the current compilation: the handle is stable across backends. */
 function makeFacade(entry: LiveEntry): PortableCommand {
   return {
     id: entry.id,

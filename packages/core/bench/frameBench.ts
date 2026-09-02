@@ -9,7 +9,7 @@ import {
 } from '../src/index.ts'
 import type { SignalCell, ReadableSignal, TapeWriter, LiveCommand, SegmentStore } from '../src/index.ts'
 
-/** Результат бенчмарка кадра: полная перезапись против сегментного кэша. */
+/** Frame benchmark result: full rewrite vs segment cache. */
 export interface FrameBenchResult {
   readonly commands: number
   readonly opsPerCommand: number
@@ -26,7 +26,7 @@ interface World {
   readonly deps: readonly SignalCell<number>[]
 }
 
-/** Сравнивает два пути сборки кадра при заданном числе команд и грязных. */
+/** Compares the two frame assembly paths for a given number of commands and dirty ones. */
 export function measureFrameBuilders(
   commands: number,
   opsPerCommand: number,
@@ -56,11 +56,11 @@ function makeWorld(commands: number, opsPerCommand: number): World {
   return { store, frame: createTapeWriter(commands * 2), lives, deps }
 }
 
-/** Репрезентативный recorder: как реальная live-команда — читает зависимость
- *  и на каждый опс резолвит «uniform-значение» (сигнал + математика +
- *  fround-compare против прошлого значения — ровно та работа, которую
- *  сегментный кэш пропускает: арена.write делает value-compare на каждый
- *  элемент, компилятор — resolve на каждый uniform). */
+/** Representative recorder: like a real live command — reads the dependency
+ *  and resolves a "uniform value" for every op (signal + math +
+ *  fround-compare against the previous value — exactly the work that
+ *  the segment cache skips: arena.write does a value-compare on every
+ *  element, the compiler — a resolve on every uniform). */
 function recorderFor(ops: number, dep: SignalCell<number>): (writer: TapeWriter) => void {
   let previous = new Float32Array(ops)
   return writer => {
@@ -77,7 +77,7 @@ function recorderFor(ops: number, dep: SignalCell<number>): (writer: TapeWriter)
 function warmUp(world: World): void {
   buildFrame(world.lives, world.frame)
   for (let i = 0; i < 64; i++) runCachedFrame(world, 4)
-  for (let i = 0; i < 4; i++) runFullFrame(world) // разгон TurboFan/FTL для полного пути
+  for (let i = 0; i < 4; i++) runFullFrame(world) // warm up TurboFan/FTL for the full path
 }
 
 function runFullFrame(world: World): void {

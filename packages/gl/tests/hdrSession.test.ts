@@ -1,13 +1,13 @@
-// Task 67: HDR-форматы через сессии — журнал, восстановление, residency.
+// Task 67: HDR formats via sessions — journal, restore, residency.
 //
-// Контракт «одно и то же в живом режиме и при восстановлении»:
-//  • facade.createTexture({format:'rgba16f'}) → texture.create-опс несёт
-//    журнальное имя 'rgba16float' (единое для обоих бэкендов);
-//  • restore(workingSet)/ensureResident пересоздают текстуру С тем же
-//    форматом (raw.createTexture получает options.format='rgba16f' на GL /
-//    format='rgba16float' на GPU);
-//  • residencyStats/evictLRU считают HDR честно: rgba16float — 8 б/пиксель,
-//    rgba32float — 16 (вытеснение HDR-текстуры освобождает 2×/4×).
+// The contract "the same in live mode and during restore":
+//  • facade.createTexture({format:'rgba16f'}) → the texture.create op carries
+//    the journal name 'rgba16float' (unified for both backends);
+//  • restore(workingSet)/ensureResident recreate the texture WITH the same
+//    format (raw.createTexture receives options.format='rgba16f' on GL /
+//    format='rgba16float' on GPU);
+//  • residencyStats/evictLRU count HDR honestly: rgba16float — 8 b/pixel,
+//    rgba32float — 16 (evicting an HDR texture frees 2×/4×).
 
 import { describe, test, expect } from 'bun:test'
 import { createResourceJournal } from '@rune/core'
@@ -76,8 +76,8 @@ function makeFakeGPU(): { facade: GPUFacade; calls: GLCall[] } {
   return { facade: facade as unknown as GPUFacade, calls }
 }
 
-describe('Task 67 — HDR в журнале и восстановлении (GL)', () => {
-  test('createTexture({format}) пишет texture.create с журнальным именем формата', () => {
+describe('Task 67 — HDR in the journal and restore (GL)', () => {
+  test('createTexture({format}) writes texture.create with the journal format name', () => {
     const j = createResourceJournal()
     const { facade } = makeFakeGL()
     const s = createResourceSessionGL(facade, j)
@@ -87,7 +87,7 @@ describe('Task 67 — HDR в журнале и восстановлении (GL)
     expect(op!.kind === 'texture.create' && op!.options).toEqual({ mipLevels: 4 })
   })
 
-  test('restore(workingSet) пересоздаёт HDR-текстуру тем же форматом', () => {
+  test('restore(workingSet) recreates the HDR texture with the same format', () => {
     const j = createResourceJournal()
     const { facade } = makeFakeGL()
     const s = createResourceSessionGL(facade, j)
@@ -95,7 +95,7 @@ describe('Task 67 — HDR в журнале и восстановлении (GL)
     s.facade.texImage2DFromSource(hdr, src(128, 128) as never, { flipY: false })
     j.compact()
 
-    // Потеря → свежий фасад, soft reset только сцены.
+    // Loss → a fresh facade, a soft reset of the scene only.
     const { facade: gl2, calls } = makeFakeGL()
     const s2 = createResourceSessionGL(gl2, j)
     const report = s2.restore({ textureIds: [hdr] })
@@ -105,7 +105,7 @@ describe('Task 67 — HDR в журнале и восстановлении (GL)
     expect(create[0]!.args).toEqual([128, 128, { mipLevels: 3, format: 'rgba16f' }])
   })
 
-  test('ensureResident лениво возвращает отложенную rgba32f-текстуру с форматом', () => {
+  test('ensureResident lazily brings back the deferred rgba32f texture with its format', () => {
     const j = createResourceJournal()
     const { facade } = makeFakeGL()
     const s = createResourceSessionGL(facade, j)
@@ -116,7 +116,7 @@ describe('Task 67 — HDR в журнале и восстановлении (GL)
 
     const { facade: gl2, calls } = makeFakeGL()
     const s2 = createResourceSessionGL(gl2, j)
-    s2.restore({ textureIds: [scene] }) // hdr — deferred
+    s2.restore({ textureIds: [scene] }) // hdr is deferred
     calls.length = 0
     const report = s2.ensureResident(hdr)
     expect(report).not.toBeNull()
@@ -125,8 +125,8 @@ describe('Task 67 — HDR в журнале и восстановлении (GL)
   })
 })
 
-describe('Task 67 — HDR в журнале и восстановлении (GPU)', () => {
-  test('createTexture с форматом → опс + restore передаёт формат в raw-фасад', () => {
+describe('Task 67 — HDR in the journal and restore (GPU)', () => {
+  test('createTexture with a format → an op + restore passes the format to the raw facade', () => {
     const j = createResourceJournal()
     const { facade } = makeFakeGPU()
     const s = createResourceSessionGPU(facade, j)
@@ -143,21 +143,21 @@ describe('Task 67 — HDR в журнале и восстановлении (GPU
   })
 })
 
-describe('Task 67 — HDR в residency/evictLRU', () => {
-  test('GL: rgba16float весит 8 б/пиксель, rgba32f — 16 (residencyStats)', () => {
+describe('Task 67 — HDR in residency/evictLRU', () => {
+  test('GL: rgba16float weighs 8 b/pixel, rgba32f — 16 (residencyStats)', () => {
     const j = createResourceJournal()
     const { facade } = makeFakeGL()
     const s = createResourceSessionGL(facade, j)
-    s.facade.createTexture(100, 100)                       // 40 000 байт
-    s.facade.createTexture(100, 100, { format: 'rgba16f' }) // 80 000 байт
-    s.facade.createTexture(100, 100, { format: 'rgba32f' }) // 160 000 байт
+    s.facade.createTexture(100, 100)                       // 40 000 bytes
+    s.facade.createTexture(100, 100, { format: 'rgba16f' }) // 80 000 bytes
+    s.facade.createTexture(100, 100, { format: 'rgba32f' }) // 160 000 bytes
     const stats = s.residencyStats()
     expect(stats.totalBytes).toBe(40_000 + 80_000 + 160_000)
     const byBytes = [...stats.textures].sort((a, b) => a.bytes - b.bytes).map(t => t.bytes)
     expect(byBytes).toEqual([40_000, 80_000, 160_000])
   })
 
-  test('GPU: HDR-оценка учитывает формат', () => {
+  test('GPU: the HDR estimate accounts for the format', () => {
     const j = createResourceJournal()
     const { facade } = makeFakeGPU()
     const s = createResourceSessionGPU(facade, j)
@@ -167,23 +167,23 @@ describe('Task 67 — HDR в residency/evictLRU', () => {
     expect(s.residencyStats().totalBytes).toBe(40_000 + 80_000 + 160_000)
   })
 
-  test('GL: evictLRU освобождает честные 2× байта для rgba16float', () => {
+  test('GL: evictLRU frees an honest 2× bytes for rgba16float', () => {
     const j = createResourceJournal()
     const { facade, calls } = makeFakeGL()
     const s = createResourceSessionGL(facade, j)
     const scene = s.facade.createTexture(100, 100)                    // 40 KB
     const hdr = s.facade.createTexture(100, 100, { format: 'rgba16f' }) // 80 KB
-    s.facade.bindTexture(scene, 0) // сцена свежее — HDR уходит LRU-первой
+    s.facade.bindTexture(scene, 0) // the scene is fresher — HDR goes LRU-first
     const report = s.evictLRU({ budgetBytes: 40_000, pinned: { textureIds: [scene] } })
     expect(report.textures).toEqual([hdr])
     expect(report.freedBytes).toBe(80_000)
     expect(report.residentBytes).toBe(40_000)
-    // raw-вызов освобождения был, журнальных опсов — нет.
+    // the raw free call happened, there are no journal ops.
     expect(calls.some(c => c.method === 'deleteTexture')).toBe(true)
-    expect(j.size).toBe(2) // 2 createTexture, вытеснение не пишет опсов
+    expect(j.size).toBe(2) // 2 createTexture, eviction writes no ops
   })
 
-  test('GL: вытесненная HDR-текстура возвращается ensureResident С форматом', () => {
+  test('GL: an evicted HDR texture is brought back by ensureResident WITH its format', () => {
     const j = createResourceJournal()
     const { facade } = makeFakeGL()
     const s = createResourceSessionGL(facade, j)

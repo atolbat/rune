@@ -1,23 +1,23 @@
 /**
- * layout.ts — единая раскладка памяти сцены (Task 81, @rune/scene).
+ * layout.ts — the single scene memory layout (Task 81, @rune/scene).
  *
- * Один буфер — один контракт: сцена живёт ЛИБО в локальном ArrayBuffer
- * (T0, один поток), ЛИБО в SharedArrayBuffer (T1/T2, воркер обновляет
- * трансформы/видимость параллельно с main). Инвариант транспортов досье
- * (§7.2): меняется только латентность, не семантика — горячие циклы
- * (updateWorld / cull / collectInstances) работают с одними и теми же
- * views и НЕ знают, в каком потоке исполняются.
+ * One buffer — one contract: the scene lives EITHER in a local ArrayBuffer
+ * (T0, one thread) OR in a SharedArrayBuffer (T1/T2, the worker updates
+ * transforms/visibility in parallel with main). The dossier's transport
+ * invariant (§7.2): only the latency changes, not the semantics — the hot
+ * loops (updateWorld / cull / collectInstances) work with the same
+ * views and do NOT know which thread they run in.
  *
- * Раскладка — data-oriented SoA (flecs-style иерархии, NullGraph'2026):
- * всё — плоские типизированные массивы по слотам узлов; ни одного JS-объекта
- * на узел в горячих путях.
+ * The layout is data-oriented SoA (flecs-style hierarchies, NullGraph'2026):
+ * everything is flat typed arrays by node slot; not a single JS object
+ * per node in hot paths.
  *
- * Битсеты видимости и пул инстанс-матриц — ДВУХБУФЕРНЫЕ (epoch & 1):
- * воркер пишет в буфер эпохи k, main читает буфер предыдущей свежей эпохи —
- * tearing исключён без блокировок (seq-cst атомики заголовка упорядочивают).
+ * The visibility bitsets and the instance-matrix pool are DOUBLE-BUFFERED
+ * (epoch & 1): the worker writes into the buffer of epoch k, main reads
+ * the buffer of the previous fresh epoch — tearing is excluded without
  */
 
-/** Индексы слов заголовка (Int32Array/Uint32Array, слово 0..H_WORDS-1). */
+/** Header word indices (Int32Array/Uint32Array, word 0..H_WORDS-1). */
 export const H_MAGIC = 0
 export const H_CAPACITY = 1
 export const H_NODE_COUNT = 2
@@ -37,109 +37,109 @@ export const H_INT_WORDS = 15
 export const H_FLOAT_FLOATS = 16
 export const H_MAX_INSTANCES = 17
 export const H_GROUP_MAX = 18
-/** Task 85: H_LAYOUT_EPOCH, который видел последний collectInstances (дифф видимости между эпохами валиден только при неизменных рангах). */
+/** Task 85: the H_LAYOUT_EPOCH seen by the last collectInstances (a visibility diff between epochs is valid only with unchanged ranks). */
 export const H_COLLECT_LAYOUT_EPOCH = 19
 export const H_WORDS = 20
 
-/** Магическое слово 'RNS2' (int32 LE; v2 — groupTouch + dirtyBounds). */
+/** The magic word 'RNS2' (int32 LE; v2 — groupTouch + dirtyBounds). */
 export const SCENE_MAGIC = 0x3253_4e52
 
-/** Флаги кадровой команды (H_CMD_FLAGS) для воркера. */
+/** Frame command flags (H_CMD_FLAGS) for the worker. */
 export const CMD_UPDATE_WORLD = 1
 export const CMD_CULL = 2
 export const CMD_INSTANCES = 4
 export const CMD_REFIT = 8
 export const CMD_ALL = CMD_UPDATE_WORLD | CMD_CULL | CMD_INSTANCES | CMD_REFIT
-/** Останов воркера (мост dispose()). */
+/** Stop the worker (the bridge's dispose()). */
 export const CMD_STOP = 1 << 30
 
-/** Флаги узла (nodeFlags). */
+/** Node flags (nodeFlags). */
 export const NF_VISIBLE = 1
-/** Слот занят живым узлом (0 — свободный слот). */
+/** The slot is occupied by a live node (0 — a free slot). */
 export const NF_ALIVE = 2
 
-/** Параметры аллокации буфера сцены. */
+/** Scene buffer allocation parameters. */
 export interface SceneBufferOptions {
-  /** Максимум узлов (слоты). Default 1024. */
+  /** Maximum nodes (slots). Default 1024. */
   readonly capacity?: number
-  /** Максимум камер с битовыми полями видимости. Default 4. */
+  /** Maximum cameras with visibility bit fields. Default 4. */
   readonly cameraMax?: number
-  /** Максимум инстанс-групп (плотные id 0..G-1). Default 64. */
+  /** Maximum instance groups (dense ids 0..G-1). Default 64. */
   readonly groupMax?: number
-  /** Максимум видимых инстансов на кадр (пул матриц). Default = capacity. */
+  /** Maximum visible instances per frame (the matrix pool). Default = capacity. */
   readonly maxInstances?: number
-  /** SharedArrayBuffer (воркер) вместо ArrayBuffer (T0). Default false. */
+  /** SharedArrayBuffer (worker) instead of ArrayBuffer (T0). Default false. */
   readonly shared?: boolean
 }
 
-/** Все views поверх одного буфера сцены. */
+/** All views over a single scene buffer. */
 export interface SceneViews {
   readonly buffer: ArrayBufferLike
-  /** Знаковые слова заголовка (магия/счётчики). */
+  /** Signed header words (magic/counters). */
   readonly headerI: Int32Array
-  /** Беззнаковые слова заголовка (эпохи/штампы). */
+  /** Unsigned header words (epochs/stamps). */
   readonly headerU: Uint32Array
 
-  // ─── структура (слот → …) ───────────────────────────────────────────
+  // ─── structure (slot → …) ───────────────────────────────────────────
   readonly parent: Int32Array
   readonly firstChild: Int32Array
   readonly nextSibling: Int32Array
   readonly prevSibling: Int32Array
-  /** rank → slot: порядок обхода в глубину (parent всегда раньше детей). */
+  /** rank → slot: the depth-first traversal order (a parent always before the children). */
   readonly order: Int32Array
-  /** slot → конец поддерева (rank, эксклюзивно). */
+  /** slot → the end of the subtree (rank, exclusive). */
   readonly subtreeEnd: Int32Array
   readonly group: Int32Array
   readonly payload: Int32Array
   readonly nodeFlags: Int32Array
   readonly generation: Int32Array
 
-  // ─── грязь (u32-штампы монотонного H_CLOCK) ─────────────────────────
+  // ─── dirt (u32 stamps of the monotonic H_CLOCK) ─────────────────────────
   readonly localStamp: Uint32Array
   readonly worldStamp: Uint32Array
 
-  // ─── видимость (двухбуферная, ранговое пространство) ────────────────
-  /** 2 × cameraMax × bitsWords слов; буфер = epoch & 1. */
+  // ─── visibility (double-buffered, rank space) ────────────────
+  /** 2 × cameraMax × bitsWords words; buffer = epoch & 1. */
   readonly bits: Uint32Array
-  /** 2 × cameraMax × groupMax: видимых инстансов группы g (камера × буфер). */
+  /** 2 × cameraMax × groupMax: visible instances of group g (camera × buffer). */
   readonly instCounts: Int32Array
-  /** 2 × cameraMax × groupMax: офсет группы g в instPool (камера × буфер). */
+  /** 2 × cameraMax × groupMax: the offset of group g in instPool (camera × buffer). */
   readonly instOffsets: Int32Array
 
-  // ─── Task 85: оптимизационные области ─────────────────────────────
-  /** groupMax: штамп H_CLOCK последнего изменения КОНТЕНТА группы (все
-   *  камеры): мир любого узла группы пересчитан (updateWorld) или состав
-   *  сменился (setVisible). Живёт в SAB: пишет конвейерный поток. */
+  // ─── Task 85: optimization regions ─────────────────────────────
+  /** groupMax: the H_CLOCK stamp of the group's last CONTENT change (all
+   *  cameras): the world of any node of the group recomputed (updateWorld) or the
+   *  composition changed (setVisible). Lives in the SAB: written by the pipeline thread. */
   readonly groupTouch: Int32Array
-  /** cameraMax × groupMax: штамп последнего ФЛИПА видимости узла группы
-   *  ДЛЯ КОНКРЕТНОЙ камеры (Task 85): флип дрона не должен перевыгружать
-   *  статику миникарты — инстанс-буферы у камер РАЗНЫЕ, и грязь тоже.
-   * Индекс: cameraIndex × groupMax + group. */
+  /** cameraMax × groupMax: the stamp of the last visibility FLIP of a node
+   *  of the group FOR A SPECIFIC camera (Task 85): a drone flip must not
+   *  re-upload the minimap's statics — instance buffers differ per camera, and so does the dirt.
+   * Index: cameraIndex × groupMax + group. */
   readonly groupFlip: Int32Array
-  /** bitsWords (по биту на УЗЕЛ, не на ранг — слот-адресуемо): «поддерево
-   *  узла могло изменить границы — refit должен пересобрать». Ставится в
-   *  updateWorld (рекомпьют узла + подъём по предкам), снимается refit'ом.
- *  Чисто оптимизационная подсказка: лишний бит = лишняя работа, ошибочно
-   *  СНЯТЫЙ бит невозможен (снимает только сам refit после обработки). */
+  /** bitsWords (one bit per NODE, not per rank — slot-addressable): "the
+   *  node's subtree may have changed its bounds — refit must rebuild". Set in
+   *  updateWorld (a node recompute + a walk up the ancestors), cleared by refit.
+ *  A purely optimization hint: an extra bit = extra work, an erroneously
+   *  CLEARED bit is impossible (only refit itself clears it after processing). */
   readonly dirtyBounds: Uint32Array
 
-  // ─── геометрия (слоты) ──────────────────────────────────────────────
+  // ─── geometry (slots) ──────────────────────────────────────────────
   readonly pos: Float32Array
   readonly quat: Float32Array
   readonly scale: Float32Array
   readonly world: Float32Array
-  /** Локальная сфера (cx, cy, cz, r); r ≤ 0 у внутреннего узла — авто. */
+  /** The local sphere (cx, cy, cz, r); r ≤ 0 on an internal node — auto. */
   readonly sphereL: Float32Array
   readonly sphereW: Float32Array
 
-  // ─── камеры и инстансы ──────────────────────────────────────────────
-  /** cameraMax × 24: плоскости фрустума (нормированные). */
+  // ─── cameras and instances ──────────────────────────────────────────────
+  /** cameraMax × 24: the frustum planes (normalized). */
   readonly planes: Float32Array
-  /** 2 × cameraMax × maxInstances × 16: матрицы миров видимых инстансов
-   *  (сегмент на камеру — мульткамерные пулы не конфликтуют). */
+  /** 2 × cameraMax × maxInstances × 16: the world matrices of visible
+   *  instances (a segment per camera — multi-camera pools do not conflict). */
   readonly instPool: Float32Array
 
-  // ─── производные размеры ────────────────────────────────────────────
+  // ─── derived sizes ────────────────────────────────────────────
   readonly capacity: number
   readonly cameraMax: number
   readonly groupMax: number
@@ -147,17 +147,17 @@ export interface SceneViews {
   readonly bitsWords: number
 }
 
-/** Число 32-битных слов битсета на камеру. */
+/** The number of 32-bit bitset words per camera. */
 export function sceneBitsWords(capacity: number): number {
   return (capacity + 31) >> 5
 }
 
-/** Точка входа свободного списка в int-регионе (после 12 массивов слотов). */
+/** The free list entry point in the int region (after the 12 slot arrays). */
 export function freeListWord(views: Pick<SceneViews, 'capacity'>): number {
   return H_WORDS + views.capacity * 12
 }
 
-/** Аллоцирует буфер сцены и инициализирует заголовок. */
+/** Allocates the scene buffer and initializes the header. */
 export function createSceneBuffer(options: SceneBufferOptions = {}): ArrayBufferLike {
   const capacity = Math.max(1, options.capacity ?? 1024)
   const cameraMax = Math.max(1, options.cameraMax ?? 4)
@@ -172,7 +172,7 @@ export function createSceneBuffer(options: SceneBufferOptions = {}): ArrayBuffer
     2 * cameraMax * bitsWords +
     2 * cameraMax * groupMax * 2 +
     groupMax + // groupTouch (Task 85)
-    cameraMax * groupMax + // groupFlip — перкамерные штампы флипов (Task 85)
+    cameraMax * groupMax + // groupFlip — per-camera flip stamps (Task 85)
     bitsWords // dirtyBounds (Task 85)
   const floatFloats =
     capacity * (3 + 4 + 3 + 16 + 4 + 4) +
@@ -203,7 +203,7 @@ export function createSceneBuffer(options: SceneBufferOptions = {}): ArrayBuffer
   headerI[H_MAX_INSTANCES] = maxInstances
   headerI[H_GROUP_MAX] = groupMax
 
-  // Структурные массивы: значения «пусто».
+  // Structural arrays: the "empty" values.
   const views = buildSceneViews(buffer)
   views.parent.fill(-1)
   views.firstChild.fill(-1)
@@ -212,15 +212,15 @@ export function createSceneBuffer(options: SceneBufferOptions = {}): ArrayBuffer
   views.subtreeEnd.fill(0)
   views.group.fill(-1)
   views.payload.fill(-1)
-  views.nodeFlags.fill(0) // все слоты свободны; NF_ALIVE ставит create()
+  views.nodeFlags.fill(0) // all slots are free; create() sets NF_ALIVE
   views.instCounts.fill(0)
   views.instOffsets.fill(0)
   views.groupTouch.fill(0)
   views.groupFlip.fill(0)
   views.dirtyBounds.fill(0)
 
-  // Свободный список: slot i → slot i+1 (через nextSibling), голова 0.
-  // Пишем через ПОЛНЫЙ int-вью (headerI ограничен H_WORDS словами).
+  // The free list: slot i → slot i+1 (via nextSibling), head 0.
+  // We write through the FULL int view (headerI is limited to H_WORDS words).
   const full = new Int32Array(buffer)
   const freeList = freeListWord(views)
   full[freeList] = capacity > 0 ? 0 : -1
@@ -228,7 +228,7 @@ export function createSceneBuffer(options: SceneBufferOptions = {}): ArrayBuffer
   for (let i = 0; i < capacity - 1; i++) views.nextSibling[i] = i + 1
   views.nextSibling[capacity - 1] = -1
 
-  // Единичные трансформы.
+  // Identity transforms.
   for (let i = 0; i < capacity; i++) {
     views.quat[i * 4 + 3] = 1
     views.scale[i * 3] = 1
@@ -238,14 +238,14 @@ export function createSceneBuffer(options: SceneBufferOptions = {}): ArrayBuffer
   return buffer
 }
 
-/** Строит все views поверх существующего буфера (+валидация магии). */
+/** Builds all views over an existing buffer (+ magic validation). */
 export function buildSceneViews(buffer: ArrayBufferLike): SceneViews {
   if (buffer.byteLength < H_WORDS * 4) {
-    throw new Error('scene: буфер слишком мал для заголовка')
+    throw new Error('scene: the buffer is too small for the header')
   }
   const probe = new Int32Array(buffer, 0, H_WORDS)
   if (probe[H_MAGIC] !== SCENE_MAGIC) {
-    throw new Error('scene: буфер не является сценой (магия не совпадает)')
+    throw new Error('scene: the buffer is not a scene (magic mismatch)')
   }
   const capacity = probe[H_CAPACITY]
   const cameraMax = probe[H_CAMERA_MAX]
@@ -256,7 +256,7 @@ export function buildSceneViews(buffer: ArrayBufferLike): SceneViews {
   const floatFloats = probe[H_FLOAT_FLOATS]
   const expectedBytes = intWords * 4 + floatFloats * 4
   if (buffer.byteLength < expectedBytes) {
-    throw new Error(`scene: буфер меньше раскладки (${buffer.byteLength} < ${expectedBytes})`)
+    throw new Error(`scene: the buffer is smaller than the layout (${buffer.byteLength} < ${expectedBytes})`)
   }
 
   const headerI = probe
@@ -286,7 +286,7 @@ export function buildSceneViews(buffer: ArrayBufferLike): SceneViews {
   const generation = int(capacity)
   const localStamp = uint(capacity)
   const worldStamp = uint(capacity)
-  int(2) // freeHead, freeCount — за пределами H_WORDS (freeListWord)
+  int(2) // freeHead, freeCount — beyond H_WORDS (freeListWord)
 
   const bits = uint(2 * cameraMax * bitsWords)
   const instCounts = int(2 * cameraMax * groupMax)
@@ -295,7 +295,7 @@ export function buildSceneViews(buffer: ArrayBufferLike): SceneViews {
   const groupFlip = int(cameraMax * groupMax)
   const dirtyBounds = uint(bitsWords)
   if (w !== intWords) {
-    throw new Error(`scene: раскладка int-региона разъехалась (${w} ≠ ${intWords})`)
+    throw new Error(`scene: the int-region layout has drifted (${w} ≠ ${intWords})`)
   }
 
   let f = intWords
@@ -313,7 +313,7 @@ export function buildSceneViews(buffer: ArrayBufferLike): SceneViews {
   const planes = floats(cameraMax * 24)
   const instPool = floats(2 * cameraMax * Math.max(maxInstances, 0) * 16)
   if (f !== intWords + floatFloats) {
-    throw new Error(`scene: раскладка float-региона разъехалась (${f} ≠ ${intWords + floatFloats})`)
+    throw new Error(`scene: the float-region layout has drifted (${f} ≠ ${intWords + floatFloats})`)
   }
 
   return {

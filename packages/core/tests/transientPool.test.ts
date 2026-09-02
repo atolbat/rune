@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'bun:test'
 import { createTransientPool } from '../src/pool/transientPool.ts'
 
-/** Transient-пул (идея №2): кадровые скретч-массивы без GC-давления. */
+/** Transient pool (idea #2): per-frame scratch arrays without GC pressure. */
 describe('createTransientPool', () => {
-  it('внутри кадра выдачи различны: коллизий скретша нет', () => {
+  it('within a frame allocations differ: no scratch collisions', () => {
     const pool = createTransientPool(2)
     const a = pool.f32(16)
     const b = pool.f32(16)
@@ -11,19 +11,19 @@ describe('createTransientPool', () => {
     expect(pool.stats().created).toBe(2)
   })
 
-  it('через depth кадров буфер переиспользуется (тот же объект)', () => {
+  it('after depth frames the buffer is reused (the same object)', () => {
     const pool = createTransientPool(2)
     const a = pool.f32(16)
-    pool.beginFrame() // кадр 1: a ещё занят
+    pool.beginFrame() // frame 1: a is still busy
     const early = pool.f32(16)
-    expect(early).not.toBe(a) // слишком рано — новый буфер
-    pool.beginFrame() // кадр 2: a прожил depth кадров
+    expect(early).not.toBe(a) // too early — a new buffer
+    pool.beginFrame() // frame 2: a has lived through depth frames
     const reused = pool.f32(16)
-    expect(reused).toBe(a) // тот же объект, ноль новых аллокаций
+    expect(reused).toBe(a) // the same object, zero new allocations
     expect(pool.stats().created).toBe(2)
   })
 
-  it('типы и длины изолированы по бинам', () => {
+  it('types and lengths are isolated per bin', () => {
     const pool = createTransientPool(1)
     const f32 = pool.f32(16)
     const f64 = pool.f64(16)
@@ -36,7 +36,7 @@ describe('createTransientPool', () => {
     expect(pool.stats().created).toBe(4)
   })
 
-  it('счётчики честные: pooled + leased = created', () => {
+  it('counters are honest: pooled + leased = created', () => {
     const pool = createTransientPool(2)
     pool.f32(16)
     pool.f32(16)
@@ -47,21 +47,21 @@ describe('createTransientPool', () => {
     expect(stats.pooled).toBe(0)
     expect(stats.frames).toBe(1)
     pool.beginFrame()
-    pool.f32(16) // вытесняет оба в free и берёт один
+    pool.f32(16) // evicts both into free and takes one
     const after = pool.stats()
     expect(after.pooled).toBe(1)
     expect(after.leased).toBe(1)
     expect(after.created).toBe(2)
   })
 
-  it('байты считаются по типу: f64 в два раза тяжелее f32', () => {
+  it('bytes are counted by type: f64 is twice as heavy as f32', () => {
     const pool = createTransientPool(1)
     pool.f32(100)
     pool.f64(100)
     expect(pool.stats().bytes).toBe(100 * 4 + 100 * 8)
   })
 
-  it('память стабильна: сотни кадров не растят created', () => {
+  it('memory is stable: hundreds of frames do not grow created', () => {
     const pool = createTransientPool(2)
     for (let frame = 0; frame < 200; frame++) {
       pool.beginFrame()
@@ -69,7 +69,7 @@ describe('createTransientPool', () => {
       pool.f32(1024)
     }
     const stats = pool.stats()
-    expect(stats.created).toBe(4) // 2 длины × depth кадров
+    expect(stats.created).toBe(4) // 2 lengths × depth frames
     expect(stats.frames).toBe(200)
   })
 })

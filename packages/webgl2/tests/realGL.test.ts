@@ -1,8 +1,8 @@
-// REGRESSION (демо-10, «пустой кадр 2+»): glClear маскируется depthMask.
-// Полноэкранный проход оставляет depthMask(false); если clear() цели или
-// канваса не поднимет маску — глубина НЕ чистится, и сцена следующего
-// кадра z-fighting'ит с прошлым (пустой канвас / блобы на спине).
-// Мок-GL фиксирует порядок depthMask → clear.
+// REGRESSION (demo-10, "empty frame 2+"): glClear is masked by depthMask.
+// A fullscreen pass leaves depthMask(false); if clear() of the target or
+// canvas does not raise the mask — the depth is NOT cleared, and the next
+// frame's scene z-fights with the previous one (an empty canvas / blobs on the back).
+// The mock GL records the depthMask → clear order.
 
 import { describe, expect, test } from 'bun:test'
 import { createRealGL } from '../src/realGL.ts'
@@ -18,7 +18,7 @@ function mockGL(): CallLog {
   let fbo = 0
   let renderbuffer = 0
   const gl = {
-    // Константы, которые realGL читает с контекста
+    // Constants that realGL reads from the context
     FRAMEBUFFER: 36009,
     FRAMEBUFFER_COMPLETE: 36053,
     COLOR_ATTACHMENT0: 36064,
@@ -59,15 +59,15 @@ function mockGL(): CallLog {
   return { calls, gl }
 }
 
-describe('realGL: clear маскируется depthMask (регрессия демо-10)', () => {
-  test('bindTarget(поверхность, clear) поднимает depthMask ДО clear глубины', () => {
+describe('realGL: clear is masked by depthMask (demo-10 regression)', () => {
+  test('bindTarget(surface, clear) raises depthMask BEFORE the depth clear', () => {
     const { calls, gl } = mockGL()
     const facade = createRealGL(gl)
     const textureId = facade.createTexture(64, 64)
     const targetId = facade.createTarget(textureId, 64, 64, true, [0, 0, 0, 1])
     calls.length = 0
 
-    // Симуляция прошлого прохода: depthMask(false) остался от полноэкранного
+    // Simulation of the previous pass: depthMask(false) left over from a fullscreen pass
     facade.setDepthMode('always', false)
     calls.length = 0
 
@@ -75,15 +75,15 @@ describe('realGL: clear маскируется depthMask (регрессия д�
     const maskAt = calls.indexOf('depthMask(1)')
     const clearAt = calls.findIndex(call => call.startsWith('clear('))
     expect(maskAt).toBeGreaterThanOrEqual(0)
-    expect(clearAt).toBeGreaterThan(maskAt) // маска поднята ДО очистки
-    // И глубина действительно входит в очистку (COLOR|DEPTH = 16640)
+    expect(clearAt).toBeGreaterThan(maskAt) // the mask is raised BEFORE the clear
+    // And the depth is indeed included in the clear (COLOR|DEPTH = 16640)
     expect(calls[clearAt]).toBe('clear(16640)')
   })
 
-  test('clear() канваса с глубиной тоже поднимает depthMask', () => {
+  test('clear() of the canvas with depth also raises depthMask', () => {
     const { calls, gl } = mockGL()
     const facade = createRealGL(gl)
-    facade.setDepthMode('always', false) // после полноэкранного прохода
+    facade.setDepthMode('always', false) // after a fullscreen pass
     calls.length = 0
 
     facade.clear([0.1, 0.1, 0.1, 1], 1)
@@ -93,7 +93,7 @@ describe('realGL: clear маскируется depthMask (регрессия д�
     expect(clearAt).toBeGreaterThan(maskAt)
   })
 
-  test('clear() без глубины не трогает маску (цветовая очистка не маскируется)', () => {
+  test('clear() without depth does not touch the mask (a color clear is not masked)', () => {
     const { calls, gl } = mockGL()
     const facade = createRealGL(gl)
     calls.length = 0
@@ -102,7 +102,7 @@ describe('realGL: clear маскируется depthMask (регрессия д�
     expect(calls.some(call => call.startsWith('clear('))).toBe(true)
   })
 
-  test('повторный bindTarget той же цели без clear — no-op', () => {
+  test('a repeated bindTarget of the same target without clear — a no-op', () => {
     const { calls, gl } = mockGL()
     const facade = createRealGL(gl)
     const textureId = facade.createTexture(32, 32)
@@ -110,7 +110,7 @@ describe('realGL: clear маскируется depthMask (регрессия д�
     calls.length = 0
     facade.bindTarget(targetId, false)
     const afterFirst = calls.length
-    facade.bindTarget(targetId, false) // skip: та же цель, без очистки
+    facade.bindTarget(targetId, false) // skip: the same target, no clear
     expect(calls.length).toBe(afterFirst)
   })
 })

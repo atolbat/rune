@@ -22,7 +22,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 }`
 
 describe('wgsl reflect', () => {
-  it('раскрывает поля структуры var<uniform> с group/binding', () => {
+  it('exposes var<uniform> struct fields with group/binding', () => {
     const reflection = reflectWgsl(WGSL)
     expect(reflection.uniforms.map(u => u.name)).toEqual(['u_viewProj', 'u_tint', 'u_time'])
     for (const uniform of reflection.uniforms) {
@@ -31,18 +31,18 @@ describe('wgsl reflect', () => {
     }
   })
 
-  it('маппит типы WGSL на типы ABI', () => {
+  it('maps WGSL types to ABI types', () => {
     const reflection = reflectWgsl(WGSL)
     const types = reflection.uniforms.map(u => u.type)
     expect(types).toEqual(['mat4', 'vec4', 'float'])
   })
 
-  it('собирает текстуры отдельно от юниформов', () => {
+  it('collects textures separately from uniforms', () => {
     const reflection = reflectWgsl(WGSL)
     expect(reflection.textures.map(t => t.name)).toEqual(['u_tex', 'u_shadow'])
   })
 
-  it('читает @location атрибуты вершинного входа', () => {
+  it('reads @location attributes of the vertex input', () => {
     const reflection = reflectWgsl(WGSL)
     expect(reflection.attributes).toEqual([
       { name: 'position', location: 0 },
@@ -50,14 +50,14 @@ describe('wgsl reflect', () => {
     ])
   })
 
-  it('находит точки входа', () => {
+  it('finds entry points', () => {
     const reflection = reflectWgsl(WGSL)
     expect(reflection.entries.vertex).toBe('vs_main')
     expect(reflection.entries.fragment).toBe('fs_main')
     expect(reflection.entries.compute).toBeNull()
   })
 
-  it('игнорирует комментарии', () => {
+  it('ignores comments', () => {
     const commented = `// struct Fake { x: f32 }
 /* var<uniform> bogus: Fake; */
 struct Real { u_a: f32 }

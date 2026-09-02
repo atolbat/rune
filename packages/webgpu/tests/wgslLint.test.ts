@@ -31,18 +31,18 @@ fn fsMain() -> @location(0) vec4<f32> {
   return vec4<f32>(lambert, lambert, lambert, 1.0);
 }`
 
-describe('wgsl lint (REGRESSION: пропущенные точки с запятой)', () => {
-  it('ловит операторы без ";" — с точными строками', () => {
+describe('wgsl lint (REGRESSION: missing semicolons)', () => {
+  it('catches statements without ";" — with exact lines', () => {
     const problems = lintWgsl(BAD_WGSL)
     expect(problems.map(p => p.line)).toEqual([8, 9, 10])
     expect(problems[0].text).toContain('var result')
   })
 
-  it('корректный шейдер проходит без замечаний', () => {
+  it('a correct shader passes without remarks', () => {
     expect(lintWgsl(GOOD_WGSL)).toEqual([])
   })
 
-  it('ловит несколько пропусков в одном шейдере', () => {
+  it('catches several misses in one shader', () => {
     const problems = lintWgsl(BAD_WGSL + GOOD_WGSL)
     expect(problems.length).toBeGreaterThan(0)
     expect(problems.every(p => p.line > 0)).toBe(true)

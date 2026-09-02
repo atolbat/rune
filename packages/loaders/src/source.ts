@@ -1,30 +1,30 @@
 /**
- * source.ts — сетевой источник байт: fetch + прогресс + отмена + ретраи,
- * и StreamAssembler — универсальный накопитель стрима для парсеров.
+ * source.ts — network source of bytes: fetch + progress + cancel + retries,
+ * and StreamAssembler — a universal stream accumulator for parsers.
  *
- * Ключевая идея «загрузка и парсинг параллельно»: fetch-стрим строго
- * последователен, поэтому «полученный префикс» — это watermark
- * (кол-во принятых байт). Парсер может:
- *   await assembler.waitFor(n)          — дождаться n байт;
- *   assembler.rangeReady(off, len)      — проверить готовность диапазона;
- *   assembler.slice(off, len)           — вырезать копию диапазона;
- *   assembler.onRange(cb)               — колбэк продвижения watermark
- * (прогрессивный парсинг: GLB-JSON читается до конца BIN-чанка,
- * имаги декодируются, как только их байтовые диапазоны получены).
+ * Key idea "download and parse in parallel": the fetch stream is strictly
+ * sequential, so the "received prefix" is a watermark
+ * (the number of received bytes). A parser can:
+ *   await assembler.waitFor(n)          — wait for n bytes;
+ *   assembler.rangeReady(off, len)      — check range readiness;
+ *   assembler.slice(off, len)           — cut out a copy of a range;
+ *   assembler.onRange(cb)               — watermark advance callback
+ * (progressive parsing: GLB-JSON is read before the BIN chunk finishes,
+ * images are decoded as soon as their byte ranges arrive).
  *
- * Буфер — один Uint8Array (Content-Length известен — точного размера,
- * иначе растёт удвоением): никаких конкатенаций строк и Blob'ов.
+ * The buffer is a single Uint8Array (Content-Length known — exact size,
+ * otherwise grows by doubling): no string or Blob concatenations.
  */
 
 export interface ByteSourceOptions {
   readonly signal?: AbortSignal
-  /** Таймаут на установку соединения (headers), не на тело. Default 30s. */
+  /** Timeout for establishing the connection (headers), not the body. Default 30s. */
   readonly connectTimeoutMs?: number
-  /** Повторы при сетевых ошибках и 5xx. Default 1 (всего 2 попытки). */
+  /** Retries on network errors and 5xx. Default 1 (2 attempts total). */
   readonly retries?: number
-  /** Подмена fetch — для тестов и «синтетических» источников (data:). */
+  /** fetch override — for tests and "synthetic" sources (data:). */
   readonly fetchImpl?: typeof fetch
-  /** Колбэк байтового прогресса (каждый чанк тела). */
+  /** Byte progress callback (every body chunk). */
   readonly onBytes?: (loaded: number, total: number) => void
 }
 
@@ -32,11 +32,11 @@ export interface ByteSource {
   readonly url: string
   readonly contentLength: number | undefined
   readonly assembler: Assembler
-  /** Дождаться полного тела. */
+  /** Wait for the complete body. */
   readonly done: Promise<void>
 }
 
-/** Открыть источник: fetch (с ретраями) → ассемблер, качающийся в фоне. */
+/** Open a source: fetch (with retries) → an assembler downloading in the background. */
 export async function openByteSource(url: string, options: ByteSourceOptions = {}): Promise<ByteSource> {
   const fetchImpl = options.fetchImpl ?? fetch
   const retries = Math.max(0, options.retries ?? 1)
@@ -49,11 +49,11 @@ export async function openByteSource(url: string, options: ByteSourceOptions = {
     const stopTimeout = connectTimeout(controller, connectTimeoutMs, options.signal)
     try {
       const response = await fetchImpl(url, { signal: controller.signal })
-      // Соединение установлено: таймаут больше не нужен, но сигнал — жив.
+      // Connection established: the timeout is no longer needed, but the signal is alive.
       stopTimeout()
       followAbort(options.signal, controller)
       if (!response.ok || response.body === null) {
-        // 5xx — ретраим; 4xx — бессмысленно (клиентская ошибка).
+        // 5xx — retry; 4xx — pointless (client error).
         const retryable = response.status >= 500 || response.status === 429
         lastError = new TypeError(`HTTP ${response.status} ${response.statusText} — ${url}`)
         if (retryable && attempt < retries) {
@@ -86,31 +86,31 @@ export async function openByteSource(url: string, options: ByteSourceOptions = {
       throw error
     }
   }
-  throw lastError ?? new Error(`источник недоступен: ${url}`)
+  throw lastError ?? new Error(`source unavailable: ${url}`)
 }
 
 // ─── StreamAssembler ───────────────────────────────────────────────────────
 
-// Унификация (реставрация): раньше watermark-накопитель дублировался в двух
-// слоях (assembler.ts для корневых парсеров и source.ts для Task-88). Теперь
-// ОДИН класс Assembler: приватные поля делали структурную совместимость
-// невозможной, поэтому StreamAssembler — каноническое имя для слоя источника.
+// Unification (restoration): the watermark accumulator used to be duplicated in two
+// layers (assembler.ts for root parsers and source.ts for Task-88). Now
+// there is ONE Assembler class: private fields made structural compatibility
+// impossible, so StreamAssembler is the canonical name for the source layer.
 import { Assembler } from './assembler.ts'
 export { Assembler as StreamAssembler } from './assembler.ts'
 export type { AssemblerOptions } from './assembler.ts'
 
-/** Имя потока сборки для слоя источника (Task 88) — см. assembler.ts. */
+/** Name of the assembly stream for the source layer (Task 88) — see assembler.ts. */
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
 function connectTimeout(controller: AbortController, ms: number, _external?: AbortSignal): () => void {
   const timer = setTimeout(() => {
-    controller.abort(new DOMException('таймаут соединения', 'TimeoutError'))
+    controller.abort(new DOMException('connection timeout', 'TimeoutError'))
   }, ms)
   return () => clearTimeout(timer)
 }
 
-/** Прокинуть внешний сигнал в контроллер ПОСЛЕ заголовков. */
+/** Forward an external signal into the controller AFTER headers. */
 function followAbort(external: AbortSignal | undefined, controller: AbortController): void {
   if (external === undefined) return
   if (external.aborted) {
@@ -144,7 +144,7 @@ function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 function abortError(signal: AbortSignal | undefined): unknown {
-  return signal?.reason instanceof Error ? signal.reason : new DOMException('загрузка отменена', 'AbortError')
+  return signal?.reason instanceof Error ? signal.reason : new DOMException('loading cancelled', 'AbortError')
 }
 
 function isAbort(error: unknown): boolean {

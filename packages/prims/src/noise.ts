@@ -1,16 +1,16 @@
 /**
- * Детерминированный value-noise 2D для террейнов @rune/prims.
+ * Deterministic 2D value noise for @rune/prims terrains.
  *
- * ПОЧЕМУ НЕ Math.random(): геометрия обязана воспроизводиться — одинаковый
- * seed → побайтово одинаковые вершины (тесты, golden-скриншоты, повторный
- * заход в демо без «ландшафт каждый раз другой»).
+ * WHY NOT Math.random(): geometry must be reproducible — the same seed →
+ * byte-identical vertices (tests, golden screenshots, revisiting the demo
+ * without "a different landscape every time").
  *
- * Схема: целочисленный хеш решётки (Wang-подобный mix) → сглаженная
- * билинейная интерполяция quintic-фейдом (C²-гладкость производных —
- * нормали центральных разностей без ступенек).
+ * Scheme: integer lattice hash (Wang-like mix) → smoothed bilinear
+ * interpolation with a quintic fade (C²-smooth derivatives —
+ * central-difference normals without steps).
  */
 
-/** Целочисленный хеш пары + seed → [0, 1). Детерминирован (без Math.random). */
+/** Integer hash of a pair + seed → [0, 1). Deterministic (no Math.random). */
 export function hash2i(x: number, y: number, seed: number): number {
   let h = (x | 0) * 374761393 + (y | 0) * 668265263 + (seed | 0) * 2147483647
   h = (h ^ (h >>> 13)) | 0
@@ -19,15 +19,15 @@ export function hash2i(x: number, y: number, seed: number): number {
   return h / 4294967296
 }
 
-/** Quintic fade (как в Perlin): 6t⁵ − 15t⁴ + 10t³. */
+/** Quintic fade (as in Perlin): 6t⁵ − 15t⁴ + 10t³. */
 function fade(t: number): number {
   return t * t * t * (t * (t * 6 - 15) + 10)
 }
 
 /**
- * Value noise 2D на решётке 1×1: по углам клетки — хеш-значения, внутри —
- * quintic-билинейная интерполяция. Выход ∈ [0, 1); непрерывен; в узлах
- * решётки равен hash2i.
+ * 2D value noise on a 1×1 lattice: hash values at the cell corners, inside —
+ * quintic-bilinear interpolation. Output ∈ [0, 1); continuous; at lattice
+ * nodes equals hash2i.
  */
 export function valueNoise2D(x: number, y: number, seed: number): number {
   const xi = Math.floor(x)
@@ -44,8 +44,8 @@ export function valueNoise2D(x: number, y: number, seed: number): number {
 }
 
 /**
- * Фрактальное блуждание (fBm): сумма октав value-noise с удвоением частоты
- * и затуханием амплитуды (gain). Выход нормализован в [0, 1] — холмы.
+ * Fractal Brownian motion (fBm): a sum of value-noise octaves with frequency
+ * doubling and amplitude decay (gain). Output normalized to [0, 1] — hills.
  */
 export function fbm2D(
   x: number,
@@ -71,9 +71,9 @@ export function fbm2D(
 }
 
 /**
- * Гребневый мультимфрактал (ridged): 1 − |2·noise − 1| — острые хребты
- * вместо холмов; возведение в степень ridgePower заостряет вершины.
- * Выход ∈ [0, 1], нормирован по сумме амплитуд.
+ * Ridged multifractal: 1 − |2·noise − 1| — sharp ridges instead of hills;
+ * raising to the ridgePower power sharpens the peaks.
+ * Output ∈ [0, 1], normalized by the sum of amplitudes.
  */
 export function ridged2D(
   x: number,

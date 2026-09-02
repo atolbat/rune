@@ -31,7 +31,7 @@ import { withJournalGpu } from './journalGpu.ts'
 import { createResourceSessionGPU } from './resourceSessionGPU.ts'
 import type { ResourceJournal, RestoreReport, WorkingSet, EvictionReport, ResidencyStats } from '@rune/core'
 
-/** Контекст кадра WebGPU-рендерера (совместим с WebGL2-фасадом по форме). */
+/** WebGPU renderer frame context (shape-compatible with the WebGL2 facade). */
 export interface GpuFrameContext {
   time: number
   dt: number
@@ -39,61 +39,61 @@ export interface GpuFrameContext {
   size: readonly [number, number]
 }
 
-/** Запись WG-команды текущего кадра (в ленту, как в WebGL2). */
+/** Records a WG command of the current frame (into the tape, as in WebGL2). */
 export type GpuRecorder = (command: WgpuCommand, props?: unknown) => void
 
-/** Кадровый колбэк: контекст + запись команд в ленту. */
+/** Frame callback: context + recording commands into the tape. */
 export type GpuFrameCallback = (ctx: GpuFrameContext, record: GpuRecorder) => void
-/** Рендерер на WebGPU: device, авто-цикл, resize/DPR, sim-time. */
+/** WebGPU renderer: device, auto loop, resize/DPR, sim-time. */
 export interface WebGpuRenderer {
   readonly gpu: GPUFacade
-  /** Task 62: replay ResourceJournal v2 на СВЕЖЕМ фасаде этой сессии —
-   *  device-loss recovery. Присутствует только при опции resources.
-   *  Task 65: options.workingSet — soft reset (восстановить только сцену;
-   *  остальное лениво через ensureResident). */
+  /** Task 62: replay ResourceJournal v2 on a FRESH facade of this session —
+   *  device-loss recovery. Present only with the resources option.
+   *  Task 65: options.workingSet — soft reset (restore only the scene;
+   *  the rest lazily via ensureResident). */
   restoreResources?(options?: { workingSet?: WorkingSet }): RestoreReport
-  /** Task 65: ленивый возврат ОДНОГО отложенного ресурса после soft reset
-   *  (texture/view/target id). null — уже резидентен / нет сессии. */
+  /** Task 65: lazily bring back ONE deferred resource after a soft reset
+   *  (texture/view/target id). null — already resident / no session. */
   ensureResident?(resourceId: number): RestoreReport | null
-  /** Task 66: LRU-вытеснение резидентных текстур до бюджета GPU-памяти
-   *  (паритет с WebGL2-рендерером; давление памяти между потерями). */
+  /** Task 66: LRU eviction of resident textures down to a GPU memory budget
+   *  (parity with the WebGL2 renderer; memory pressure between losses). */
   evictLRU?(options?: { budgetBytes?: number; pinned?: WorkingSet }): EvictionReport
-  /** Task 66: оценка резидентной GPU-памяти + LRU-порядок (диагностика). */
+  /** Task 66: resident GPU memory estimate + LRU order (diagnostics). */
   residencyStats?(): ResidencyStats
   readonly size: ReadableSignal<readonly [number, number]>
   readonly aspect: ReadableSignal<number>
   readonly time: ReadableSignal<number>
-  /** Стриминг-планировщик: задачи в idle-слоте каждого кадра. */
+  /** Streaming scheduler: tasks in each frame's idle slot. */
   readonly uploads: UploadScheduler
-  /** Кадровый пул скретч-массивов (идея №2): паритет с WebGL2-рендерером. */
+  /** Per-frame scratch array pool (idea #2): parity with the WebGL2 renderer. */
   readonly transients: TransientPool
-  /** M5 (Task 73): транспорт-клиент читателя — диагностика режима
-   *  (renderer.transport.mode, досье §7.2). null — без транспорта. */
+  /** M5 (Task 73): reader transport client — mode diagnostics
+   *  (renderer.transport.mode, dossier §7.2). null — no transport. */
   readonly transport: TransportClient | null
-  /** M5 (Task 73): фид рендерера (dual-bind: vertex-атрибуты + storage;
-   *  sync — writeBuffer одним вызовом на границе кадра). */
+  /** M5 (Task 73): renderer feed (dual-bind: vertex attributes + storage;
+   *  sync — one writeBuffer call at the frame boundary). */
   feed(options: RendererFeedOptions | TransportFeedView): RendererFeed
-  /** Компилирует WG-спек в команду (ленты, слайс-арена, ленивый пайплайн). */
+  /** Compiles a WG spec into a command (tapes, slice arena, lazy pipeline). */
   command(spec: WgpuDrawSpec): WgpuCommand
-  /** Полноэкранный проход в канвас: входы → фрагмент → экран. */
+  /** Fullscreen pass to the canvas: inputs → fragment → screen. */
   pass(fragment: string, options?: PassOptions): WgpuCommand
-  /** Поверхность-цель: текстура + полноэкранные проходы в неё. */
+  /** Target surface: texture + fullscreen passes into it. */
   surface(options?: SurfaceOptions): Surface<WgpuCommand>
   frame(callback: GpuFrameCallback): { cancel(): void }
   resize(cssWidth: number, cssHeight: number): void
   step(nowMs: number): void
   start(): void
   stop(): void
-  /** Снимает паузу шторма ошибок и продолжает цикл. */
+  /** Clears the error-storm pause and resumes the loop. */
   restart(): void
-  /** Полный teardown: stop rAF + disconnect ResizeObserver + GPUFacade.dispose()
-   *  (уничтожение всех текстур/буферов/пайплайнов + device.destroy()).
-   *  В отличие от WebGL2, WebGPU-устройство детерминированно освобождает
-   *  всю GPU-память через device.destroy() — это критично при частом
-   *  switch backend в kit-demo: без destroy() утечка GPU-памяти.
-   *  Для поштучного освобождения WebGL2-текстур используйте
-   *  Texture.dispose() / Surface.dispose() — это gpu.deleteTexture.
-   *  Идемпотентно: повторный dispose — no-op. */
+  /** Full teardown: stop rAF + disconnect ResizeObserver + GPUFacade.dispose()
+   *  (destroying all textures/buffers/pipelines + device.destroy()).
+   *  Unlike WebGL2, a WebGPU device deterministically frees
+   *  all GPU memory via device.destroy() — this is critical with frequent
+   *  switch backend in kit-demo: without destroy() GPU memory leaks.
+   *  For releasing WebGL2 textures one by one use
+   *  Texture.dispose() / Surface.dispose() — that is gpu.deleteTexture.
+   *  Idempotent: a repeated dispose is a no-op. */
   dispose(): void
 }
 
@@ -101,41 +101,41 @@ export interface WebGpuRendererOptions {
   readonly canvas: AnyCanvas | string
   readonly dpr?: number
   readonly uploads?: UploadSchedulerOptions
-  /** Инъекция GPU-фасада для headless-тестов. */
+  /** GPU facade injection for headless tests. */
   readonly createGPU?: (canvas: AnyCanvas, onError?: (message: string) => void) => Promise<GPUFacade>
-  /** Приём тихих ошибок валидации WebGPU (они не бросают исключений). */
+  /** Sink for silent WebGPU validation errors (they throw no exceptions). */
   readonly onGpuError?: (message: string) => void
   readonly requestFrame?: (callback: (timestamp: number) => void) => () => void
   readonly observeResize?: boolean
   readonly now?: () => number
-  /** Journal — реестр долгоживущих деклараций для device-loss recovery
-   *  (= switchBackend = worker migration). Task 57: WebGPU-паритет с WebGL2.
-   *  Если передан, GPUFacade оборачивается декоратором withJournalGpu:
-   *  create/destroy-опсы (createTexture, createTarget, createTextureView,
-   *  copyExternalImageToTexture как full-texture upload) пишутся автоматически.
-   *  Replay — через replayJournalOnGpu(journal, newGpu, sourceFor).
+  /** Journal — a registry of long-lived declarations for device-loss recovery
+   *  (= switchBackend = worker migration). Task 57: WebGPU parity with WebGL2.
+   *  If passed, the GPUFacade is wrapped with the withJournalGpu decorator:
+   *  create/destroy ops (createTexture, createTarget, createTextureView,
+   *  copyExternalImageToTexture as a full-texture upload) are written automatically.
+   *  Replay — via replayJournalOnGpu(journal, newGpu, sourceFor).
    *
-   *  Frame-опсы (usePipeline, bindUniforms, bindTexture, draw, submit и пр.)
-   *  НЕ журналируются — это per-frame, идут в Tape, не в Journal.
-   *  WGSL-источник пайплайнов хранится в WgpuCommand (compiled), поэтому для
-   *  device-loss recovery достаточно replay-нуть только текстуры/цели/views —
-   *  пайплайны пересоздадутся автоматически при первом draw на новом device. */
+   *  Frame ops (usePipeline, bindUniforms, bindTexture, draw, submit etc.)
+   *  are NOT journaled — those are per-frame, they go to the Tape, not the Journal.
+   *  The WGSL source of pipelines is stored in WgpuCommand (compiled), so for
+   *  device-loss recovery it is enough to replay only textures/targets/views —
+   *  pipelines are recreated automatically on the first draw on the new device. */
   readonly journal?: Journal
-  /** Task 62: ResourceJournal v2 — стабильные id + контент в журнале.
-   *  Паритет с WebGL2-путём (webgl2Renderer.ts): GPUFacade оборачивается
-   *  resourceSession-декоратором, restoreResources() восстанавливает
-   *  текстуры/цели/views и ИХ КОНТЕНТ на свежем устройстве.
-   *  Приоритет над journal (v1). */
+  /** Task 62: ResourceJournal v2 — stable ids + content in the journal.
+   *  Parity with the WebGL2 path (webgl2Renderer.ts): the GPUFacade is wrapped
+   *  with the resourceSession decorator, restoreResources() restores
+   *  textures/targets/views AND THEIR CONTENT on a fresh device.
+   *  Takes priority over journal (v1). */
   readonly resources?: ResourceJournal
-  /** M5 (Task 73): транспорт-клиент читателя (renderer.transport). */
+  /** M5 (Task 73): reader transport client (renderer.transport). */
   readonly transport?: TransportClient
 }
 
-/** Порог шторма: после стольких ошибок GPU рендер ставится на паузу. */
+/** Storm threshold: after this many GPU errors the renderer is paused. */
 const ERROR_STORM_LIMIT = 3
 
-/** Создаёт WebGPU-рендерер: кадр = beginPass → колбэки → endPass → submit.
- * Защита от шторма: после ERROR_STORM_LIMIT ошибок GPU цикл останавливается. */
+/** Creates a WebGPU renderer: frame = beginPass → callbacks → endPass → submit.
+ * Storm protection: after ERROR_STORM_LIMIT GPU errors the loop stops. */
 export async function createWebGpuRenderer(options: WebGpuRendererOptions): Promise<WebGpuRenderer> {
   const canvas = resolveCanvasAny(options.canvas)
   const dpr = canvasDpr(canvas, options.dpr)
@@ -143,10 +143,10 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
   const rawGpu = options.createGPU !== undefined
     ? await options.createGPU(canvas, storm.handle)
     : await createRealGPU(canvas, storm.handle)
-  // Task 62: resourceSession (v2) — приоритет над journal (v1).
-  // Стабильные id над фасадом + контент в журнале + restoreResources().
+  // Task 62: resourceSession (v2) — priority over journal (v1).
+  // Stable ids above the facade + content in the journal + restoreResources().
   const session = options.resources !== undefined ? createResourceSessionGPU(rawGpu, options.resources) : null
-  // Task 57 (v1): Journal-декоратор для WebGPU (паритет с WebGL2).
+  // Task 57 (v1): Journal decorator for WebGPU (parity with WebGL2).
   const gpu: GPUFacade = session !== null
     ? session.facade
     : (options.journal !== undefined ? withJournalGpu(rawGpu, options.journal) : rawGpu)
@@ -154,13 +154,13 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
   const epoch = createEpoch()
   const layoutGuard = createLayoutGuard()
   const uploads = createUploadScheduler(options.uploads ?? {})
-  const transients = createTransientPool() // идея №2: скретч без GC
-  const feeds = new Set<RendererFeed>() // M5: sync на границе кадра
-  const builtinValues = createPassBuiltins() // u_time/u_resolution/u_texel проходов
+  const transients = createTransientPool() // idea #2: scratch without GC
+  const feeds = new Set<RendererFeed>() // M5: sync at the frame boundary
+  const builtinValues = createPassBuiltins() // u_time/u_resolution/u_texel of passes
   const writer = createTapeWriter(64)
   const arena: SliceArena = createSliceArena(1 << 16)
   const wgslCtx: WgpuCompileContext = createWgpuContext(arena)
-  // executor держит ТУ ЖЕ ссылку на массив команд: compileWgslSpec дополняет её
+  // the executor holds THE SAME reference to the command array: compileWgslSpec appends to it
   const executor: GpuTapeExecutor = createGpuExecutor({ gpu, arena, commands: wgslCtx.commands, clears: [] })
   const [initW, initH] = getCanvasCssSize(canvas)
   const size = signal<readonly [number, number]>([initW, initH])
@@ -195,8 +195,8 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
     const height = surfaceOptions.height ?? 512
     const depth = surfaceOptions.depth ?? false
     const color = surfaceOptions.color ?? DEFAULT_SURFACE_COLOR
-    // Формат канваса: пайплайны (targets: [format]) подходят и канвасу,
-    // и поверхности — без второй ветки создания пайплайнов
+    // Canvas format: pipelines (targets: [format]) fit both the canvas
+    // and the surface — no second pipeline-creation branch
     const textureId = gpu.createTexture(width, height, 'canvas')
     const targetId = gpu.createTarget(textureId, width, height, depth, color)
     let surfaceDisposed = false
@@ -209,11 +209,11 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
         createPassCommand(fragment, passOptions, targetId, () => [width, height]),
       capture: (command: WgpuCommand, captureOptions: { clear?: boolean } = {}) =>
         withTarget(command, targetId, captureOptions.clear !== false),
-      // Task 80: readback — асинхронный (copyTextureToBuffer → submit →
-      // mapAsync); фасад отдаёт уже tight RGBA сверху-вниз — как GL.
+      // Task 80: readback — asynchronous (copyTextureToBuffer → submit →
+      // mapAsync); the facade returns already tight RGBA top-down — like GL.
       read: () => {
         if (surfaceDisposed) {
-          return Promise.reject(new Error('rune: surface.read() после dispose — поверхность уже освобождена'))
+          return Promise.reject(new Error('rune: surface.read() after dispose — surface already released'))
         }
         return gpu.readTargetPixels(targetId).then(data => ({ width, height, data }))
       },
@@ -241,7 +241,7 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
   ): WgpuCommand {
     const inputs = Object.entries(passOptions.inputs ?? {})
     if (inputs.length > 1) {
-      throw new Error('rune: v1 WebGPU-проход — один текстурный вход (bind-группа group 1); для цепочек используйте последовательные проходы')
+      throw new Error('rune: v1 WebGPU pass — a single texture input (bind group group 1); use sequential passes for chains')
     }
     const builtins = scanBuiltins(fragment)
     const uniforms: Record<string, unknown> = { ...passOptions.uniforms }
@@ -263,7 +263,7 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
     return withTarget(compiled, targetId, passOptions.clear === true)
   }
 
-  /** Записывает WG-команду в ленту кадра (вызывается из колбэков frame). */
+  /** Records a WG command into the frame tape (called from frame callbacks). */
   function recordIntoWriter(command: WgpuCommand, props: unknown = {}): void {
     command.record(props, frameCtx, writer)
   }
@@ -281,12 +281,12 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
   }
 
   function step(nowMs: number): void {
-    if (storm.paused) return // шторм ошибок: рендер на паузе
+    if (storm.paused) return // error storm: rendering paused
     updateFrameContext(nowMs)
-    transients.beginFrame() // скретч прошлого кадра начинает стареть
+    transients.beginFrame() // last frame's scratch starts aging
     epoch.frame(() => {
-      // M5 (Task 73): транспорт — снапшот слотов на границе кадра (эпоха),
-      // затем фиды — writeBuffer грязного диапазона одним вызовом.
+      // M5 (Task 73): transport — snapshot of slots at the frame boundary (epoch),
+      // then feeds — one writeBuffer call for the dirty range.
       options.transport?.sampleAll()
       for (const feed of feeds) feed.sync()
       time.value = frameCtx.time
@@ -294,8 +294,8 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
       writer.emit(OpCode.BeginPass, 0, 0, 0, 0)
       for (const callback of [...callbacks]) callback(frameCtx, recordIntoWriter)
       writer.emit(OpCode.EndPass, 0, 0, 0, 0)
-      executor.run(writerView(writer)) // ленты: тот же путь, что и WebGL2
-      uploads.drain() // idle-слот: стриминг после кадра
+      executor.run(writerView(writer)) // tapes: the same path as WebGL2
+      uploads.drain() // idle slot: streaming after the frame
     })
   }
 
@@ -309,7 +309,7 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
 
   function start(): void {
     if (running) return
-    if (storm.paused) return // после шторма старт вручную через restart()
+    if (storm.paused) return // after a storm, start manually via restart()
     running = true
     scheduleNext()
   }
@@ -348,8 +348,8 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
     return observer
   }
 
-  /** M5 (Task 73): фид рендерера — keyed-буфер по стабильному view,
-   *  writeBuffer одним вызовом на границе кадра. */
+  /** M5 (Task 73): renderer feed — keyed buffer by stable view,
+   *  one writeBuffer call at the frame boundary. */
   function feed(feedOptions: RendererFeedOptions | TransportFeedView): RendererFeed {
     const rendererFeed = createRendererFeedGPU(gpu, feedOptions)
     feeds.add(rendererFeed)
@@ -361,26 +361,26 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
     disposed = true
     stop()
     resizeObserver?.disconnect()
-    // M5: фиды (keyed-буферы фасада — device.destroy() в gpu.dispose()
-    // освобождает их детерминированно).
+    // M5: feeds (facade keyed buffers — device.destroy() in gpu.dispose()
+    // frees them deterministically).
     for (const rendererFeed of feeds) rendererFeed.dispose()
     feeds.clear()
-    // Полный teardown GPU-фасада: device.destroy() освобождает всю
-    // GPU-память устройства детерминированно (текстуры/буферы/
-    // пайплайны/семплеры, включая не уничтоженные явно). Это
-    // критично при частом switch backend в kit-demo: без destroy()
-    // каждое переключение создавало бы новое GPUDevice, а старые
-    // оставались живыми до unload страницы → утечка GPU-памяти.
+    // Full GPU facade teardown: device.destroy() deterministically frees all
+    // of the device's GPU memory (textures/buffers/
+    // pipelines/samplers, including ones not explicitly destroyed). This is
+    // critical with frequent switch backend in kit-demo: without destroy()
+    // each switch would create a new GPUDevice while the old ones
+    // stayed alive until page unload → GPU memory leak.
     gpu.dispose()
   }
 
   return { gpu, size, aspect, time, uploads, transients, transport: options.transport ?? null, feed, restoreResources: session !== null ? (options?: { workingSet?: WorkingSet }) => session.restore(options?.workingSet) : undefined, ensureResident: session !== null ? (resourceId: number) => session.ensureResident(resourceId) : undefined, evictLRU: session !== null ? (options?: { budgetBytes?: number; pinned?: WorkingSet }) => session.evictLRU(options) : undefined, residencyStats: session !== null ? () => session.residencyStats() : undefined, command, pass, surface, frame, resize, step, start, stop, restart, dispose }
 }
 
-/** Цвет очистки поверхностей по умолчанию — фон рендерера. */
+/** Default surface clear color — the renderer background. */
 const DEFAULT_SURFACE_COLOR: readonly [number, number, number, number] = [0.07, 0.08, 0.11, 1]
 
-/** Шторм-охранник: считает ошибки GPU; после лимита глушит цикл. */
+/** Storm guard: counts GPU errors; past the limit it stops the loop. */
 interface ErrorStorm {
   readonly paused: boolean
   readonly handle: (message: string) => void
@@ -393,12 +393,12 @@ function createErrorStorm(report?: (message: string) => void): ErrorStorm {
   return {
     get paused() { return paused },
     handle: (message: string): void => {
-      if (paused) return // тишина после паузы: без спама
+      if (paused) return // silence after the pause: no spam
       count++
       report?.(message)
       if (count >= ERROR_STORM_LIMIT) {
         paused = true
-        report?.(`обнаружено ${count} ошибок GPU — рендер остановлен (пауза шторма)`)
+        report?.(`detected ${count} GPU errors — rendering stopped (storm pause)`)
       }
     },
     resume(): void {
@@ -409,14 +409,14 @@ function createErrorStorm(report?: (message: string) => void): ErrorStorm {
 }
 
 function defaultRequestFrame(callback: (timestamp: number) => void): () => void {
-  // requestAnimationFrame — свойство window, а не прототипа: голый вызов легален
+  // requestAnimationFrame is a property of window, not of the prototype: a bare call is legal
   const id = requestAnimationFrame(callback)
   return () => cancelAnimationFrame(id)
 }
 
 function defaultNow(): number {
-  return performance.now() // вызывается от владельца: вырванный из объекта
-  // нативный метод кидает в Chrome «Illegal invocation»
+  return performance.now() // called from its owner: a native method torn
+  // out of its object throws "Illegal invocation" in Chrome
 }
 
 function removeItem<T>(list: T[], item: T): void {

@@ -1,16 +1,16 @@
 /**
- * zeroAlloc.test.ts — Task 87: горячий кадр без аллокаций + A/B-режимы.
+ * zeroAlloc.test.ts — Task 87: a hot frame without allocations + A/B modes.
  *
- * Проверяем ПОВЕДЕНИЕ новых безаллокационных путей (паритет со старыми):
- *   • scene.cull({ out }) — переиспользуемые записи статистики = те же числа;
- *   • masks=false — битсет ПОБИТОВО равен brute (A/B «до Task 85», только
- *     дороже: planeTests не меньше);
- *   • scene.updateWorld(true) — принудительный пересчёт = байт-в-байт тот же
- *     мир, что и грязевый (паритет);
- *   • instanceCountOf/instanceOffsetOf/instancePoolBase — числа согласованы
- *     с instanceMatricesView (тот же сегмент пула);
- *   • scene.cull({ masks: false }) и иерархический по умолчанию — одинаковые
- *     битсеты (маски не меняют результат).
+ * We verify the BEHAVIOR of the new allocation-free paths (parity with the old ones):
+ *   • scene.cull({ out }) — reusable stats records = the same numbers;
+ *   • masks=false — the bitset is BITWISE-equal to brute (A/B "before Task 85",
+ *     only more expensive: planeTests not lower);
+ *   • scene.updateWorld(true) — forced recomputation = a byte-for-byte identical
+ *     world to the dirty one (parity);
+ *   • instanceCountOf/instanceOffsetOf/instancePoolBase — numbers consistent
+ *     with instanceMatricesView (the same pool segment);
+ *   • scene.cull({ masks: false }) and hierarchical by default — identical
+ *     bitsets (masks do not change the result).
  */
 import { describe, expect, it } from 'bun:test'
 import {
@@ -53,8 +53,8 @@ function buildTree(seed: number, targetNodes: number) {
   return scene
 }
 
-describe('Task 87: cull с out-записями (ноль аллокаций)', () => {
-  it('out-статистика = свежие объекты (те же числа, переиспользование)', () => {
+describe('Task 87: cull with out records (zero allocations)', () => {
+  it('out stats = fresh objects (same numbers, reuse)', () => {
     const scene = buildTree(7, 400)
     const cam = createCamera()
     cam.setPerspective(1.2, 1.5, 0.5, 300)
@@ -66,25 +66,25 @@ describe('Task 87: cull с out-записями (ноль аллокаций)', 
       { tested: -1, visible: -1, trivialRejects: -1, trivialAccepts: -1, planeTests: -1 },
     ]
     const res = scene.cull([cam], { bufferIndex: 0, out })
-    // out-запись заполнена и совпадает с аллоцированной копией
+    // the out record is filled and matches the allocated copy
     expect(out[0]!.tested).toBe(res.stats[0]!.tested)
     expect(out[0]!.visible).toBe(res.stats[0]!.visible)
     expect(out[0]!.trivialRejects).toBe(res.stats[0]!.trivialRejects)
     expect(out[0]!.trivialAccepts).toBe(res.stats[0]!.trivialAccepts)
     expect(out[0]!.planeTests).toBe(res.stats[0]!.planeTests)
     expect(out[0]!.visible).toBeGreaterThan(0)
-    // второй кадр перезаписывает ту же запись
+    // the second frame overwrites the same record
     const res2 = scene.cull([cam], { bufferIndex: 1, out })
     expect(out[0]!.tested).toBe(res2.stats[0]!.tested)
   })
 })
 
-describe('Task 87: masks=false — A/B «до Task 85» (тот же битсет, дороже)', () => {
-  it('битсеты побитово равны; planeTests не меньше (маски — чистая экономия)', () => {
-    // Контракт сцены: user-сфера внутреннего узла = границы ПОДДЕРЕВА
-    // (culling.ts); поэтому эталон для A/B масок — САМА иерархическая
-    // проверка с масками, а не brute (сравнение с brute на произвольных
-    // user-сферах — отдельный тест optimizations.test.ts).
+describe('Task 87: masks=false — A/B "before Task 85" (same bitset, more expensive)', () => {
+  it('bitsets bitwise equal; planeTests not lower (masks — pure savings)', () => {
+    // Scene contract: a user sphere of an internal node = SUBTREE
+    // bounds (culling.ts); hence the reference for mask A/B is the hierarchical
+    // check itself with masks, not brute (comparison with brute on arbitrary
+    // user spheres — a separate test in optimizations.test.ts).
     const scene = buildTree(11, 500)
     const cam = createCamera()
     cam.setPerspective(1.0, 1.7, 0.5, 300)
@@ -99,30 +99,30 @@ describe('Task 87: masks=false — A/B «до Task 85» (тот же битсе�
     const b0 = bitsBase(scene.views, 0, 0)
     const b1 = bitsBase(scene.views, 1, 0)
     for (let w = 0; w < words; w++) {
-      expect(scene.views.bits[b1 + w]).toBe(scene.views.bits[b0 + w]) // A/B не меняет результат
+      expect(scene.views.bits[b1 + w]).toBe(scene.views.bits[b0 + w]) // A/B does not change the result
     }
     expect(withoutMasks.stats[0]!.visible).toBe(withMasks.stats[0]!.visible)
     expect(withoutMasks.stats[0]!.trivialRejects).toBe(withMasks.stats[0]!.trivialRejects)
     expect(withoutMasks.stats[0]!.trivialAccepts).toBe(withMasks.stats[0]!.trivialAccepts)
-    // маски реально экономят тесты «сфера×плоскость»
+    // masks really save "sphere×plane" tests
     expect(withMasks.stats[0]!.planeTests).toBeLessThan(withoutMasks.stats[0]!.planeTests)
   })
 })
 
-describe('Task 87: updateWorld(force) — паритет с грязевым', () => {
-  it('принудительный пересчёт даёт байт-в-байт тот же мир', () => {
+describe('Task 87: updateWorld(force) — parity with the dirty one', () => {
+  it('forced recomputation gives a byte-for-byte identical world', () => {
     const scene = buildTree(23, 300)
     const cam = createCamera()
     cam.setPerspective(1.0, 1.5, 0.5, 300)
     cam.setViewLookAt(10, 15, 10, 0, 0, 0, 0, 1, 0)
     scene.updateWorld()
     scene.refitGroupBounds()
-    // грязевый кадр после правки локали
+    // dirty frame after a local edit
     const slot = 5
     scene.setLocalTR(slot, 1, 2, 3, 0, 0.6, 0, 0.8, 1, 1, 1)
     const dirty = scene.updateWorld(false)
     const worldDirty = scene.views.world.slice()
-    // принудительный кадр: пересчитаны ВСЕ, мир тот же
+    // forced frame: ALL recomputed, the world is the same
     const forced = scene.updateWorld(true)
     expect(forced).toBe(scene.count)
     expect(dirty).toBeLessThan(scene.count)
@@ -133,8 +133,8 @@ describe('Task 87: updateWorld(force) — паритет с грязевым', (
   })
 })
 
-describe('Task 87: числовые доступы инстансов (без subarray)', () => {
-  it('countOf/offsetOf/poolBase согласованы с instanceMatricesView', () => {
+describe('Task 87: numeric instance accesses (without subarray)', () => {
+  it('countOf/offsetOf/poolBase are consistent with instanceMatricesView', () => {
     const scene = buildTree(31, 400)
     const cam = createCamera()
     cam.setPerspective(1.0, 1.4, 0.5, 300)
@@ -151,12 +151,12 @@ describe('Task 87: числовые доступы инстансов (без su
     const seg = instanceMatricesView(scene.views, 0, 0, g)
     expect(seg.count).toBe(count)
     if (count > 0) {
-      // первый элемент сегмента = пул[base + offset*16]
+      // first element of the segment = pool[base + offset*16]
       const pool = scene.views.instPool
       expect(seg.matrices[0]).toBe(pool[base + offset * 16]!)
       expect(seg.matrices[count * 16 - 1]).toBe(pool[base + (offset + count) * 16 - 1]!)
     }
-    // база зависит от камеры (перкамерные пулы не пересекаются)
+    // the base depends on the camera (per-camera pools do not overlap)
     const base1 = scene.instancePoolBase(1, 0)
     expect(base1).not.toBe(base)
   })

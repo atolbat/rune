@@ -1,70 +1,76 @@
 /**
- * Динамическая геометрия (Task 109): фиды, пересобирающие геометрию по
- * внешнему состоянию (камера/дистанция) — «CLOD на уровне переделывания
- * геометрии». ОБЩИЙ КОНТРАКТ фида:
- *   • geometry  — текущая геометрия (ссылка стабильна между пересборками);
- *   • update(…) — проверить состояние; true = геометрия пересобрана
- *     (ссылка НОВАЯ — перепушьте атрибуты в команду рендера);
- *   • rebuilds  — счётчик пересборок (диагностика/лог).
+ * Dynamic geometry (Task 109): feeds that rebuild geometry based on
+ * external state (camera/distance) — "CLOD at the level of reworking the
+ * geometry". The COMMON CONTRACT of a feed:
+ *   • geometry  — the current geometry (the reference is stable between
+ *     rebuilds);
+ *   • update(…) — check the state; true = the geometry has been rebuilt
+ *     (the reference is NEW — re-push the attributes into the render
+ *     command);
+ *   • rebuilds  — rebuild counter (diagnostics/logging).
  *
- * Точка интеграции с рендером — горячая подмена атрибутов команды
- * (CompiledCommand.updateAttributes в @rune/gl): фид вернул true →
- * updateAttributes({a_pos, a_normal, a_uv}) + динамический count.
+ * The integration point with the renderer — hot swapping of command
+ * attributes (CompiledCommand.updateAttributes in @rune/gl): the feed
+ * returned true → updateAttributes({a_pos, a_normal, a_uv}) + a dynamic
+ * count.
  *
- * SSBO-перспектива: фид, чья геометрия считается НА GPU (кернел пишет
- * позиции в storage-буфер, вершины тянутся из SSBO в шейдере), держит
- * тот же контракт update(), но не пересоздаёт атрибуты — он перезапускает
- * dispatch (см. DESIGN.md §5.5, «GPU-дисплейс» — следующий срез).
+ * SSBO perspective: a feed whose geometry is computed ON the GPU (a kernel
+ * writes positions into a storage buffer, vertices are pulled from the
+ * SSBO in the shader) keeps the same update() contract but does not
+ * recreate attributes — it re-launches the dispatch (see DESIGN.md §5.5,
+ * "GPU displacement" — the next slice).
  */
 
 import type { Geometry } from './types.ts'
 
 export interface PrimitiveFeedParams {
-  /** Генератор геометрии уровня: множитель детализации k → Geometry. */
+  /** Level geometry generator: detail multiplier k → Geometry. */
   readonly make: (detailK: number) => Geometry
   /**
-   * Множители детализации уровней, БЛИЖНИЙ → ДАЛЬНИЙ
+   * Level detail multipliers, NEAR → FAR
    * (default [2, 1, 0.5, 0.25]).
    */
   readonly levels?: readonly number[]
   /**
-   * Пороги дистанции между уровнями, по возрастанию; length = levels−1
+   * Distance thresholds between levels, ascending; length = levels−1
    * (default [3, 6, 12]).
    */
   readonly thresholds?: readonly number[]
   /**
-   * Гистерезис против дребезга: уровень меняется «дальше» при
-   * dist > порог·(1+h), «ближе» при dist < порог·(1−h)
-   * (default 0.15 — как PRESSURE_HYSTERESIS в present).
+   * Hysteresis against chattering: the level switches "farther" when
+   * dist > threshold·(1+h), "closer" when dist < threshold·(1−h)
+   * (default 0.15 — like PRESSURE_HYSTERESIS in present).
    */
   readonly hysteresis?: number
 }
 
 export interface PrimitiveFeed {
-  /** Текущая геометрия уровня (ссылка меняется после update() = true). */
+  /** Current level geometry (the reference changes after update() = true). */
   readonly geometry: Geometry
-  /** Индекс текущего уровня (0 — самый детальный). */
+  /** Index of the current level (0 — the most detailed). */
   readonly level: number
-  /** Проверить дистанцию; true = уровень сменился, geometry новая. */
+  /** Check the distance; true = the level changed, geometry is new. */
   update(dist: number): boolean
-  /** Счётчик пересборок геометрии. */
+  /** Geometry rebuild counter. */
   readonly rebuilds: number
 }
 
 /**
- * LOD-фид ОДНОГО примитива: приближение камеры → выше разрешение,
- * отдаление → ниже (пересборка ТОЛЬКО при смене уровня — не каждый кадр).
+ * An LOD feed for ONE primitive: the camera approaching → higher
+ * resolution, moving away → lower (rebuild ONLY on level change — not
+ * every frame).
  *
- * Гистерезис: в полосе порог·(1±h) решение придерживается — орбита
- * камеры с длиной около порога не устраивает пилу пересборок.
+ * Hysteresis: within the threshold·(1±h) band the decision sticks — a
+ * camera orbit of length near the threshold must not cause a sawtooth of
+ * rebuilds.
  */
 export function createPrimitiveFeed(params: PrimitiveFeedParams): PrimitiveFeed {
   const levels = params.levels ?? [2, 1, 0.5, 0.25]
   const thresholds = params.thresholds ?? [3, 6, 12]
   const hysteresis = params.hysteresis ?? 0.15
-  if (levels.length < 1) throw new Error('rune: prims — LOD-фид требует хотя бы один уровень')
+  if (levels.length < 1) throw new Error('rune: prims — the LOD feed requires at least one level')
   if (thresholds.length !== levels.length - 1) {
-    throw new Error(`rune: prims — LOD-фид: порогов ${thresholds.length}, уровней ${levels.length} (нужно levels−1 = ${levels.length - 1})`)
+    throw new Error(`rune: prims — the LOD feed: ${thresholds.length} thresholds, ${levels.length} levels (need levels−1 = ${levels.length - 1})`)
   }
   let level = 0
   let geometry = params.make(levels[0]!)
@@ -81,11 +87,11 @@ export function createPrimitiveFeed(params: PrimitiveFeedParams): PrimitiveFeed 
     },
     update(dist: number): boolean {
       let next = level
-      // Отдаление: порог проходится ВВЕРХ только с запасом (1+h)
+      // Moving away: a threshold is crossed UPWARD only with a margin (1+h)
       for (let i = level; i < thresholds.length; i++) {
         if (dist > thresholds[i]! * (1 + hysteresis)) next = i + 1
       }
-      // Приближение: порог проходится ВНИЗ только с запасом (1−h)
+      // Approaching: a threshold is crossed DOWNWARD only with a margin (1−h)
       for (let i = level - 1; i >= 0; i--) {
         if (dist < thresholds[i]! * (1 - hysteresis)) next = i
       }

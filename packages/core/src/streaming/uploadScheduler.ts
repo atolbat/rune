@@ -1,20 +1,22 @@
 /**
- * Планировщик стриминга: двоичная куча по приоритету (теория J) +
- * AIMD-окно байтов на кадр (анти-лаг: большая загрузка растягивается
- * по кадрам, не выбивая рендер). Окно растёт с спросом (+1/8), в покое
- * мягко распускается (×7/8) — additive increase, multiplicative decay.
+ * Streaming scheduler: binary heap by priority (J theory) +
+ * an AIMD window of bytes per frame (anti-lag: a large upload is spread
+ * over frames without choking rendering). The window grows with demand
+ * (+1/8), and in idle it softly decays (×7/8) — additive increase,
+ * multiplicative decay.
  *
- * Теория N (мгновенная текстура): demand-бёрст — стример поднимает окно
- * под размер текстуры (до maxBurstBytes): текстура размером до капа
- * грузится ЦЕЛИКОМ в первый idle-слот, без видимого заполнения по кадрам.
- * Инцидент-урок: разгон окна с 256 КиБ растягивал 1024² на ~10 кадров —
- * заказчик буквально видел, как текстура заполняется.
+ * N theory (instant texture): a demand burst — the streamer raises the
+ * window to the texture size (up to maxBurstBytes): a texture up to the
+ * cap in size loads ENTIRELY into the first idle slot, with no visible
+ * frame-by-frame fill-in. Incident lesson: ramping the window from 256 KiB
+ * stretched 1024² over ~10 frames — the customer literally watched the
+ * texture fill in.
  */
 
 export interface UploadJob {
-  /** Цена задачи в байтах (окно считает байты). */
+  /** Task cost in bytes (the window counts bytes). */
   readonly bytes: number
-  /** Выше — раньше; превью обгоняет чанки на +1. */
+  /** Higher — earlier; the preview overtakes chunks by +1. */
   readonly priority: number
   run(): void
 }
@@ -23,32 +25,32 @@ export interface UploadSchedulerOptions {
   readonly initialBytes?: number
   readonly minBytes?: number
   readonly maxBytes?: number
-  /** Потолок demand-бёрста в байтах (default 4 МиБ). */
+  /** Demand burst ceiling in bytes (default 4 MiB). */
   readonly maxBurstBytes?: number
 }
 
 export interface UploadScheduler {
   push(job: UploadJob): void
-  /** Поднять окно под разовый спрос (теория N): маленькая текстура
-   * не должна стримиться по кадрам — пользователь видит заполнение. */
+  /** Raise the window for one-off demand (N theory): a small texture
+   * must not stream over frames — the user sees the fill-in. */
   burst(bytes: number): void
-  /** Исполнить задачи в рамках окна; выбывающая задача закрывает кадр. */
+  /** Execute tasks within the window; a closing task ends the frame. */
   drain(): void
   readonly pending: number
-  /** Текущее окно в байтах (диагностика). */
+  /** Current window in bytes (diagnostics). */
   readonly window: number
 }
 
 export function createUploadScheduler(options: UploadSchedulerOptions = {}): UploadScheduler {
-  // Константы восстановления инцидента: initial 2 МиБ и max 16 МиБ —
-  // старые значения до сброса окружения (было 256 КиБ / 8 МиБ).
+  // Incident recovery constants: initial 2 MiB and max 16 MiB —
+  // the old values before the environment reset (it was 256 KiB / 8 MiB).
   const min = options.minBytes ?? 64 * 1024
   const max = options.maxBytes ?? 16 * 1024 * 1024
   const maxBurst = options.maxBurstBytes ?? 4 * 1024 * 1024
   let window = Math.min(max, Math.max(min, options.initialBytes ?? 2 * 1024 * 1024))
   const heap: UploadJob[] = []
 
-  /** Теория N: окно под спрос, не выше бёрст-капа и max, не ниже текущего. */
+  /** N theory: window under demand, no higher than the burst cap and max, no lower than current. */
   function burst(bytes: number): void {
     window = Math.min(max, Math.max(window, Math.min(bytes, maxBurst)))
   }
@@ -70,8 +72,9 @@ export function createUploadScheduler(options: UploadSchedulerOptions = {}): Upl
         budget -= job.bytes
         executed++
       } else {
-        // Не влезает в остаток окна: исполняется как выбывающая и
-        // ЗАКРЫВАЕТ кадр (урок M6: continue вместо break не ограничивал байты)
+        // Doesn't fit into the window remainder: executed as a closing
+        // task and CLOSES the frame (lesson M6: continue instead of break
+        // did not limit bytes)
         pop()
         job.run()
         executed++
@@ -82,7 +85,7 @@ export function createUploadScheduler(options: UploadSchedulerOptions = {}): Upl
     adaptWindow(executed, closingJob)
   }
 
-  /** AIMD: спрос двигает окно вверх, простой мягко вниз. */
+  /** AIMD: demand moves the window up, idle softly down. */
   function adaptWindow(executed: number, closingJob: boolean): void {
     if (closingJob || (executed > 0 && heap.length === 0)) {
       window = Math.min(max, window + Math.max(1, Math.floor(window / 8)))

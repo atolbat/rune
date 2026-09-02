@@ -1,26 +1,27 @@
 /**
- * instances.ts — компакция видимых инстансов (Task 81; Task 85 — штампы групп).
+ * instances.ts — compaction of visible instances (Task 81; Task 85 — group stamps).
  *
- * Инстанс-группа — плотный id ≥ 0 в slot.group (−1 — узел вне инстансинга).
- * Проход по рангам с битом видимости камеры собирает МИРОВЫЕ матрицы
- * видимых узлов группы в непрерывный сегмент пула → один draw-instanced
- * на группу (матрицы — готовый instance-атрибут float32×16: stride 64,
- * divisor 1 — вёрстка rendererFeed / batchCommand из @rune/gl-мира).
+ * An instance group is a dense id ≥ 0 in slot.group (−1 — the node is not instanced).
+ * A pass over the ranks with the camera's visibility bit collects the WORLD matrices
+ * of the group's visible nodes into a contiguous pool segment → one draw-instanced
+ * per group (the matrices are a ready float32×16 instance attribute: stride 64,
+ * divisor 1 — the rendererFeed / batchCommand wiring of the @rune/gl world).
  *
- * Task 85 — ШТАМПЫ ГРУПП для скипа аплоада: инстанс-буфер (группа × камера)
- * валиден, пока (а) счётчик группы не изменился, (б) ни один узел группы
- * не сменил видимость ДЛЯ ЭТОЙ камеры, (в) ни один узел группы не пересчитал
- * мир/состав. (в) штампует updateWorld/setVisible → groupTouch (общий);
- * (б) — этот проход: дифф битсетов текущей и ПРЕДЫДУЩЕЙ эпохи (двойные
- * битсеты — как раз для этого) → ПЕРКАМЕРНЫЙ groupFlip — флип дрона не
- * перевыгружает статику миникарты. Ранги между эпохами сравнимы только при
- * неизменном layout — иначе (pack!) трогаем все группы всех камер.
+ * Task 85 — GROUP STAMPS for upload skipping: an instance buffer (group × camera)
+ * stays valid while (a) the group's counter has not changed, (b) no node of the
+ * group has changed visibility FOR THIS camera, (c) no node of the group has
+ * recomputed its world/composition. (c) is stamped by updateWorld/setVisible →
+ * groupTouch (shared); (b) — by this pass: a diff of the current and the
+ * PREVIOUS epoch's bitsets (double bitsets — exactly for this) → a PER-CAMERA
+ * groupFlip — a drone flip does not re-upload the minimap's statics. Ranks
+ * between epochs are comparable only with an unchanged layout — otherwise
+ * (pack!) we touch all groups of all cameras.
  *
- * Честная инженерия: word-skip обход битсетов (ctz-извлечение битов) ПОПРОБОВАН
- * и ОТКАЗАН — на реальной видимости демо (40–70%) он стабильно медленнее
- * рангового цикла с ранним бит-тестом (замеры: scripts/micro-collect.ts,
- * probe-прогоны Task 85); вырывается вперёд только при <10% видимости,
- * где компакция и так почти бесплатна. Оставлен простой ранговый обход.
+ * Honest engineering: a word-skip bitset traversal (ctz bit extraction) was TRIED
+ * and REJECTED — on the demo's real visibility (40–70%) it is consistently slower
+ * than the rank loop with an early bit test (measurements: scripts/micro-collect.ts,
+ * Task 85 probe runs); it pulls ahead only below <10% visibility, where the
+ * compaction is nearly free anyway. The simple rank traversal stays.
  */
 import type { SceneViews } from './layout.ts'
 import {
@@ -35,31 +36,31 @@ import {
 } from './layout.ts'
 import { bitsBase } from './culling.ts'
 
-/** Скретч-курсоры по группам. */
+/** Scratch cursors per group. */
 let cursors = new Int32Array(64)
 
-/** База инстанс-счётчиков камеры в буфере b (в Int32Array instCounts). */
+/** The base of a camera's instance counters in buffer b (in the Int32Array instCounts). */
 function instBase(views: SceneViews, bufferIndex: number, cameraIndex: number): number {
   return (bufferIndex * views.cameraMax + cameraIndex) * views.groupMax
 }
 
-/** База пула матриц камеры в буфере b (во Float32Array instPool).
- * Task 87 — экспорт для потребителей без аллокаций: чтение матриц группы
- * напрямую из views.instPool по числам (база + офсет×16), минуя
- * instanceMatricesView с его subarray-view на каждую группу каждый кадр. */
+/** The base of a camera's matrix pool in buffer b (in the Float32Array instPool).
+ * Task 87 — an export for allocation-free consumers: reading a group's matrices
+ * directly from views.instPool by numbers (base + offset×16), bypassing
+ * instanceMatricesView with its per-group subarray view every frame. */
 export function instancePoolBase(views: SceneViews, bufferIndex: number, cameraIndex: number): number {
   return (bufferIndex * views.cameraMax + cameraIndex) * views.headerI[H_MAX_INSTANCES] * 16
 }
 
-/** Виден ли ранг (бит + флаг узла). */
+/** Whether a rank is visible (bit + node flag). */
 function rankVisible(views: SceneViews, base: number, r: number, slot: number): boolean {
   if ((views.bits[base + (r >>> 5)] & (1 << (r & 31))) === 0) return false
   return (views.nodeFlags[slot] & NF_VISIBLE) !== 0
 }
 
 /**
- * Собирает инстансы всех групп для камеры cameraIndex из буфера bufferIndex.
- * Возвращает суммарное число собранных матриц.
+ * Collects the instances of all groups for camera cameraIndex from buffer bufferIndex.
+ * Returns the total number of collected matrices.
  */
 export function collectInstancesViews(
   views: SceneViews,
@@ -78,11 +79,11 @@ export function collectInstancesViews(
 
   if (cursors.length < groupCount) cursors = new Int32Array(groupCount)
 
-  // ── Task 85: дифф видимости против предыдущей эпохи → перкамерные штампы ──
+  // ── Task 85: a visibility diff against the previous epoch → per-camera stamps ──
   const flipBase = cameraIndex * views.groupMax
   if (headerI[H_COLLECT_LAYOUT_EPOCH] !== headerI[H_LAYOUT_EPOCH]) {
-    // Ранги перемешаны pack'ом — дифф по рангам бессмысленен: трогаем все
-    // группы ВСЕХ камер (консервативно — лишний аплоад, но не пропущенный).
+    // The ranks were reshuffled by pack — a diff over ranks is meaningless: we touch
+    // all groups of ALL cameras (conservatively — an extra upload, not a skipped one).
     headerI[H_COLLECT_LAYOUT_EPOCH] = headerI[H_LAYOUT_EPOCH]
     const stamp = headerU[H_CLOCK] + 1
     for (let c = 0; c < views.cameraMax; c++) {
@@ -105,7 +106,7 @@ export function collectInstancesViews(
         const lb = flips & -flips
         flips ^= lb
         const r = rBase + 31 - Math.clz32(lb)
-        if (r >= n) break // паддинг последнего слова — не узлы
+        if (r >= n) break // the last word's padding — not nodes
         const g = group[order[r]]
         if (g >= 0 && g < groupCount) {
           groupFlip[flipBase + g] = stamp
@@ -116,7 +117,7 @@ export function collectInstancesViews(
     if (touched) headerU[H_CLOCK] = stamp
   }
 
-  // 1) Подсчёт по группам (ранговый обход; замеры Task 85 — см. шапку).
+  // 1) Counting per group (a rank traversal; Task 85 measurements — see the header).
   for (let g = 0; g < groupCount; g++) instCounts[countsBase + g] = 0
   const nodeFlags = views.nodeFlags
   for (let r = 0; r < n; r++) {
@@ -127,7 +128,7 @@ export function collectInstancesViews(
     if ((nodeFlags[slot] & NF_VISIBLE) !== 0) instCounts[countsBase + g]++
   }
 
-  // 2) Префикс-офсеты (сегменты групп идут в порядке id).
+  // 2) Prefix offsets (the group segments go in id order).
   let total = 0
   for (let g = 0; g < groupCount; g++) {
     instOffsets[offsetsBase + g] = total
@@ -135,7 +136,7 @@ export function collectInstancesViews(
     total += instCounts[countsBase + g]
   }
 
-  // 3) Заполнение пула.
+  // 3) Filling the pool.
   let dropped = 0
   for (let r = 0; r < n; r++) {
     if ((bits[bitsBaseV + (r >>> 5)] & (1 << (r & 31))) === 0) continue
@@ -157,7 +158,7 @@ export function collectInstancesViews(
   return total - dropped
 }
 
-/** Сегмент матриц группы g камеры в буфере b (view — без копий). */
+/** The matrix segment of group g of a camera in buffer b (a view — no copies). */
 export function instanceMatricesView(
   views: SceneViews,
   bufferIndex: number,
@@ -175,8 +176,8 @@ export function instanceMatricesView(
 }
 
 /**
- * Простой сбор инстансов в пользовательский массив (T0-путь без пула):
- * матрицы видимых узлов группы подряд. Возвращает число записанных.
+ * Simple instance collection into a user array (the T0 path without a pool):
+ * the matrices of the group's visible nodes, back to back. Returns the number written.
  */
 export function collectGroupMatrices(
   views: SceneViews,

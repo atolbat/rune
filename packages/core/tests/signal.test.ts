@@ -2,8 +2,8 @@ import { describe, expect, it } from 'bun:test'
 import { signal } from '../src/signal/signal.ts'
 import { derive } from '../src/signal/derive.ts'
 
-describe('сигналы', () => {
-  it('запись меняет значение и двигает версию', () => {
+describe('signals', () => {
+  it('a write changes the value and bumps the version', () => {
     const cell = signal(1)
     expect(cell.value).toBe(1)
     expect(cell.version).toBe(0)
@@ -12,13 +12,13 @@ describe('сигналы', () => {
     expect(cell.version).toBe(1)
   })
 
-  it('повторная запись того же значения не двигает версию', () => {
+  it('a repeat write of the same value does not bump the version', () => {
     const cell = signal(5)
     cell.value = 5
     expect(cell.version).toBe(0)
   })
 
-  it('подписка получает значения, отписка молчит', () => {
+  it('a subscription receives values, unsubscribe stays silent', () => {
     const cell = signal(0)
     const seen: number[] = []
     const off = cell.subscribe(v => seen.push(v))
@@ -29,7 +29,7 @@ describe('сигналы', () => {
     expect(seen).toEqual([1, 2])
   })
 
-  it('derive пересчитывается по зависимости', () => {
+  it('derive recomputes on dependency change', () => {
     const width = signal(800)
     const height = signal(600)
     const aspect = derive(() => width.value / height.value)
@@ -38,7 +38,7 @@ describe('сигналы', () => {
     expect(aspect.peek()).toBeCloseTo(2)
   })
 
-  it('peek derive не считает заново при чистых зависимостях', () => {
+  it('peek of derive does not recompute on clean dependencies', () => {
     let computations = 0
     const base = signal(1)
     const derived = derive(() => { computations++; return base.value * 2 })

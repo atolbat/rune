@@ -15,7 +15,7 @@ function assemblerOf(text: string, total?: number): Assembler {
 }
 
 const CUBE = `
-# вершины куба
+# cube vertices
 v -1 -1 -1
 v  1 -1 -1
 v  1  1 -1
@@ -45,10 +45,10 @@ f 4/1/6 8/2/6 5/3/6 1/4/6
 mtllib crate.mtl
 `
 
-test('parseObj: куб — вершины, UV, нормали, группы, mtllib', async () => {
+test('parseObj: cube — vertices, UV, normals, groups, mtllib', async () => {
   const model: ObjModel = await parseObj(assemblerOf(CUBE, CUBE.length))
   expect(model.kind).toBe('obj')
-  // 6 граней-квадратов веером → 12 треугольников → 36 expanded-вершин
+  // 6 square faces fanned → 12 triangles → 36 expanded vertices
   expect(model.vertexCount).toBe(36)
   expect(model.positions.length).toBe(108)
   expect(model.stats.vertices).toBe(8)
@@ -61,11 +61,11 @@ test('parseObj: куб — вершины, UV, нормали, группы, mtl
   expect(model.mtllib).toBe('crate.mtl')
   expect(model.uvs).not.toBeNull()
   expect(model.uvs!.length).toBe(72)
-  // нормали заданы (vn) — не плоские; строк распарсено ровно 28
+  // normals are given (vn) — not flat; exactly 28 lines parsed
   expect(model.stats.lines).toBe(28)
 })
 
-test('parseObj: стриминг кусками и CRLF — результат идентичен', async () => {
+test('parseObj: streaming in pieces and CRLF — the result is identical', async () => {
   const bytes = new TextEncoder().encode(CUBE.replace(/\n/g, '\r\n'))
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -77,25 +77,25 @@ test('parseObj: стриминг кусками и CRLF — результат �
   const model = await parseObj(new Assembler(stream, { total: bytes.length }))
   expect(model.vertexCount).toBe(36)
   expect(model.groups).toHaveLength(1)
-  // последняя строка без терминатора тоже разбирается
+  // the last line without a terminator is also parsed
   expect(model.mtllib).toBe('crate.mtl')
 })
 
-test('parseObj: без vn — плоские нормали; без vt — uvs null', async () => {
+test('parseObj: without vn — flat normals; without vt — uvs null', async () => {
   const model = await parseObj(assemblerOf('v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n'))
   expect(model.uvs).toBeNull()
   expect(model.vertexCount).toBe(3)
-  // плоская нормаль треугольника в плоскости XY → (0,0,1)
+  // the flat normal of a triangle in the XY plane → (0,0,1)
   expect(Array.from(model.normals.slice(0, 3))).toEqual([0, 0, 1])
 })
 
-test('parseObj: отрицательные (относительные) индексы', async () => {
+test('parseObj: negative (relative) indices', async () => {
   const model = await parseObj(assemblerOf('v 0 0 0\nv 1 0 0\nv 0 1 0\nf -3 -2 -1\n'))
   expect(model.vertexCount).toBe(3)
   expect(Array.from(model.positions)).toEqual([0, 0, 0, 1, 0, 0, 0, 1, 0])
 })
 
-test('parseObj: несколько групп и смена usemtl', async () => {
+test('parseObj: several groups and a usemtl change', async () => {
   const model = await parseObj(
     assemblerOf(
       'v 0 0 0\nv 1 0 0\nv 0 1 0\nv 2 0 0\ng a\nf 1 2 3\nusemtl red\ng b\nf 1 3 4\n',
@@ -109,7 +109,7 @@ test('parseObj: несколько групп и смена usemtl', async () =>
 // ─── MTL ──────────────────────────────────────────────────────────────────────
 
 const MTL = `
-# комментарий
+# comment
 newmtl crate
 Kd 0.8 0.6 0.4
 Ka 0.1 0.1 0.1
@@ -125,7 +125,7 @@ Tr 0.6
 map_d alpha.png
 `
 
-test('parseMtl: материалы, прозрачность, пути текстур', () => {
+test('parseMtl: materials, transparency, texture paths', () => {
   const model: MtlModel = parseMtlText(MTL)
   expect(model.kind).toBe('mtl')
   expect(model.materials).toHaveLength(2)
@@ -137,7 +137,7 @@ test('parseMtl: материалы, прозрачность, пути текс�
   expect(crate!.shininess).toBe(96)
   expect(crate!.opacity).toBeCloseTo(0.75)
   expect(crate!.illum).toBe(2)
-  // опции map_Kd отрезаются — остаётся чистый путь
+  // map_Kd options are cut off — a clean path remains
   expect(crate!.mapKd).toBe('crate_diffuse.png')
   expect(crate!.mapBump).toBe('crate_normal.png')
 
@@ -150,7 +150,7 @@ test('parseMtl: материалы, прозрачность, пути текс�
   expect(model.stats.withMapKd).toBe(1)
 })
 
-test('parseMtl: байты → та же модель', () => {
+test('parseMtl: bytes → the same model', () => {
   const bytes = new TextEncoder().encode(MTL)
   const model = parseMtl(bytes)
   expect(model.materials).toHaveLength(2)

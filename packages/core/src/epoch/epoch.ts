@@ -1,15 +1,15 @@
-// Эпоха: счётчик кадров с охватом — колбэки кадра видят согласованное состояние.
-// frame() = batch(): уведомления сигналов, записанных внутри тела кадра,
-// выходят ОДИН раз на внешней границе (§9.11.2). Вложенные frame атомарны
-// относительно внешнего: индекс поднимает только внешняя граница, флэш
-// уведомлений происходит один раз — на выходе из внешнего кадра.
+// Epoch: a frame counter with a span — frame callbacks see consistent state.
+// frame() = batch(): notifications of signals written inside the frame body
+// go out ONCE at the outer boundary (§9.11.2). Nested frames are atomic
+// relative to the outer one: only the outer boundary raises the index, the
+// notification flush happens once — on exit from the outer frame.
 
 import { batch } from '../signal/batch.ts'
 
 export interface EpochHarness {
-  /** Номер текущей эпохи (кадра) — растёт на каждой ВНЕШНЕЙ границе. */
+  /** Current epoch (frame) number — grows at every OUTER boundary. */
   readonly index: number
-  /** Инкремент (внешняя граница) + выполнение тела кадра внутри эпохи. */
+  /** Increment (outer boundary) + run the frame body inside the epoch. */
   frame<T>(body: () => T): T
 }
 
@@ -19,8 +19,8 @@ export function createEpoch(): EpochHarness {
   return {
     get index() { return index },
     frame<T>(body: () => T): T {
-      // Внешняя граница: поднять индекс и выполнить тело внутри batch.
-      // Вложенные границы индекс не двигают (атомарность относительно внешнего).
+      // Outer boundary: raise the index and run the body inside batch.
+      // Nested boundaries do not move the index (atomicity relative to the outer one).
       if (nesting === 0) index++
       nesting++
       try {

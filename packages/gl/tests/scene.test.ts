@@ -2,9 +2,9 @@ import { describe, expect, it } from 'bun:test'
 import { show } from '../src/index.ts'
 import { createRecordingGL } from '@rune/webgl2'
 
-/** scene(): сахар на инъекциях — полный путь без браузера. */
-describe('show() — куб в одну строку', () => {
-  it('без текстуры: рендер стартует, кадр рисует куб', () => {
+/** scene(): sugar over injections — the full path without a browser. */
+describe('show() — a cube in one line', () => {
+  it('without a texture: rendering starts, the frame draws a cube', () => {
     const { gl, calls } = createRecordingGL()
     const world = show(fakeCanvas() as unknown as HTMLCanvasElement, {
       createGL: () => gl,
@@ -21,9 +21,9 @@ describe('show() — куб в одну строку', () => {
     world.stop()
   })
 
-  it('с текстурой: создаётся текстура и стриминг доезжает до 100%', () => {
+  it('with a texture: the texture is created and streaming reaches 100%', () => {
     const { gl, calls } = createRecordingGL()
-    const texture = new Uint8Array(64 * 64 * 4) // 64×64 — маленькая, влезает в окно
+    const texture = new Uint8Array(64 * 64 * 4) // 64×64 — small, fits into the window
     texture.fill(200)
     const progress: number[] = []
 
@@ -37,11 +37,11 @@ describe('show() — куб в одну строку', () => {
       now: () => 0,
     } as never)
 
-    world.renderer.step(16) // idle-слот исполняет превью + чанки
+    world.renderer.step(16) // the idle slot runs the preview + chunks
     world.renderer.step(32)
 
-    expect(calls.some(call => call.startsWith('texSubImage2D('))).toBe(true) // тайлы грузятся
-    expect(progress[progress.length - 1]).toBeGreaterThan(0) // прогресс двигается
+    expect(calls.some(call => call.startsWith('texSubImage2D('))).toBe(true) // tiles are loading
+    expect(progress[progress.length - 1]).toBeGreaterThan(0) // progress is moving
     world.stop()
   })
 })

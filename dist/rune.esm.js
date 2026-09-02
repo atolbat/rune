@@ -442,12 +442,12 @@ function serializeTape(writer) {
 }
 function parseTape(buffer) {
   if (buffer.byteLength < 4 || buffer.byteLength % 4 !== 0) {
-    throw new Error("rune: parseTape — повреждённый буфер ленты");
+    throw new Error("rune: parseTape — corrupted tape buffer");
   }
   const words = new Int32Array(buffer);
   const count = words[0];
   if (count < 0 || (1 + count * 5) * 4 > buffer.byteLength) {
-    throw new Error(`rune: parseTape — count ${count} не согласуется с размером буфера`);
+    throw new Error(`rune: parseTape — count ${count} is inconsistent with the buffer size`);
   }
   return {
     count,
@@ -525,7 +525,7 @@ function createLiveCommand(segments, record, deps = []) {
   let dirty = true;
   function every(n) {
     if (n < 1)
-      throw new Error("rune: every(n) требует n >= 1");
+      throw new Error("rune: every(n) requires n >= 1");
     frameStride = n;
     framePhase = frameCounter % n;
     return command;
@@ -685,14 +685,14 @@ function createUniformArena(floats = 1 << 16) {
     if (typeof sizeOrType === "string") {
       const byteSize = TYPE_BYTES[sizeOrType];
       if (byteSize === undefined)
-        throw new Error(`rune: неизвестный uniform-тип "${sizeOrType}"`);
+        throw new Error(`rune: unknown uniform type "${sizeOrType}"`);
       return allocBytes(byteSize);
     }
     return allocFloats(sizeOrType);
   }
   function allocFloats(size) {
     if (cursor + size > floats)
-      throw new Error(`rune: uniform-арена переполнена (${floats} float)`);
+      throw new Error(`rune: uniform arena overflowed (${floats} float)`);
     const slot = { base: cursor, size, dirty: true };
     cursor += size;
     slots.push(slot);
@@ -701,7 +701,7 @@ function createUniformArena(floats = 1 << 16) {
   function allocBytes(byteSize) {
     const size = byteSize / 4;
     if (cursor + size > floats)
-      throw new Error(`rune: uniform-арена переполнена (${floats} float)`);
+      throw new Error(`rune: uniform arena overflowed (${floats} float)`);
     const slot = { base: cursor, size, dirty: true };
     cursor += size;
     slots.push(slot);
@@ -741,7 +741,7 @@ function createUniformArena(floats = 1 << 16) {
   function writeFloat(slot, value) {
     const offset = byteOffsetOf(slot);
     if (offset % 4 !== 0 || offset < 0 || offset >= buffer.byteLength) {
-      throw new Error(`rune: writeFloat — неверное смещение ${offset}`);
+      throw new Error(`rune: writeFloat — invalid offset ${offset}`);
     }
     const floatIndex = offset >> 2;
     if (Math.fround(value) !== buffer[floatIndex]) {
@@ -803,7 +803,7 @@ function createUniformArena(floats = 1 << 16) {
     if (source.byteLength === 0)
       return;
     if (from < 0 || from + source.byteLength > buffer.byteLength) {
-      throw new Error("rune: importBytes выходит за границы арены");
+      throw new Error("rune: importBytes goes out of the arena bounds");
     }
     bytes.set(source, from);
     const fromFloat = from >> 2;
@@ -1030,7 +1030,7 @@ function createUploadScheduler(options = {}) {
 // packages/core/src/streaming/chunker.ts
 function chunkRect(width, height, tileH) {
   if (tileH < 1)
-    throw new Error("rune: chunkRect требует tileH >= 1");
+    throw new Error("rune: chunkRect requires tileH >= 1");
   const tiles = [];
   for (let y = 0;y < height; y += tileH) {
     const rows = Math.min(tileH, height - y);
@@ -1040,7 +1040,7 @@ function chunkRect(width, height, tileH) {
 }
 function countTiles(width, height, tileH) {
   if (tileH < 1)
-    throw new Error("rune: countTiles требует tileH >= 1");
+    throw new Error("rune: countTiles requires tileH >= 1");
   if (height <= 0)
     return 0;
   return Math.ceil(height / tileH);
@@ -1184,7 +1184,7 @@ function atomicsView(data) {
   let view = atomicsViews.get(data);
   if (view === undefined) {
     if (data.byteOffset % 4 !== 0 || data.byteLength % 4 !== 0) {
-      throw new Error("rune: seqlock требует 4-байтового выравнивания буфера");
+      throw new Error("rune: seqlock requires 4-byte buffer alignment");
     }
     view = new Int32Array(data.buffer, data.byteOffset, data.byteLength >> 2);
     atomicsViews.set(data, view);
@@ -1193,7 +1193,7 @@ function atomicsView(data) {
 }
 function versionIndex(versionAt) {
   if ((versionAt & 3) !== 0)
-    throw new Error("rune: seqlock-версия обязана лежать на 4-байтовой границе");
+    throw new Error("rune: seqlock version must lie on a 4-byte boundary");
   return versionAt >> 2;
 }
 function readSeqlock(data, versionAt, valueAt) {
@@ -1208,7 +1208,7 @@ function readSeqlock(data, versionAt, valueAt) {
         return { version: before, value };
     }
   }
-  throw new Error("rune: seqlock не закрылся за предел попыток — писатель держит слот (livelock)");
+  throw new Error("rune: seqlock did not close within the attempt limit — the writer holds the slot (livelock)");
 }
 function writeSeqlock(data, versionAt, valueAt, value) {
   const i32 = atomicsView(data);
@@ -1276,9 +1276,9 @@ function putHeader(view, names) {
 }
 function checkSchema(view, names) {
   if (view.getUint32(0, true) !== SHARED_MAGIC)
-    throw new Error("rune: повреждённый реестр сигналов");
+    throw new Error("rune: corrupted signal registry");
   if (view.getUint32(4, true) !== schemaHash(names)) {
-    throw new Error("rune: версия схемы общих сигналов не совпадает — обнови оба мира");
+    throw new Error("rune: shared signal schema version mismatch — update both worlds");
   }
 }
 function putSlots(view, names) {
@@ -1294,7 +1294,7 @@ function indexSlots(view, names) {
   }
   for (const name of names) {
     if (!slots.has(nameHash(name)))
-      throw new Error(`rune: сигнал "${name}" не зарегистрирован`);
+      throw new Error(`rune: signal "${name}" is not registered`);
   }
   return slots;
 }
@@ -1330,7 +1330,7 @@ function removeListener(listeners, subscriber) {
 function requireSlot(slots, name) {
   const offset = slots.get(nameHash(name));
   if (offset === undefined)
-    throw new Error(`rune: сигнал "${name}" не зарегистрирован`);
+    throw new Error(`rune: signal "${name}" is not registered`);
   return offset;
 }
 function captureVersions(view, names, slots) {
@@ -1483,7 +1483,7 @@ function fieldOffsets(layout) {
 function requireOffset(offsets, name) {
   const offset = offsets.get(name);
   if (offset === undefined)
-    throw new Error(`rune: поле фида "${name}" не объявлено`);
+    throw new Error(`rune: feed field "${name}" is not declared`);
   return offset;
 }
 var HEADER_BYTES2 = 64;
@@ -1633,7 +1633,7 @@ function sabClient(mode, names, signals, feedMeta) {
         return known;
       const meta = feedMeta.get(id);
       if (meta === undefined || meta.buffer === undefined) {
-        throw new Error(`rune: SAB-фид ${id} не описан в дескрипторе — передай buffer`);
+        throw new Error(`rune: SAB feed ${id} is not described in the descriptor — pass buffer`);
       }
       const view = sabFeedView(id, meta.buffer, layout, capacity);
       views.set(id, view);
@@ -1682,7 +1682,7 @@ async function waitSlotChange(mirror, sab, names, name, timeoutMs = 1000) {
 function versionWordIndex(names, name) {
   const at = names.indexOf(name);
   if (at < 0)
-    throw new Error(`rune: сигнал "${name}" не зарегистрирован`);
+    throw new Error(`rune: signal "${name}" is not registered`);
   return 32 + at * 16 + 4 >> 2;
 }
 function createMsgState(names, feedMetas) {
@@ -1746,7 +1746,7 @@ function msgClient(state) {
     shared: (name) => {
       const cell = cells.get(name);
       if (cell === undefined)
-        throw new Error(`rune: сигнал "${name}" не зарегистрирован`);
+        throw new Error(`rune: signal "${name}" is not registered`);
       return cell;
     },
     sampleAll: () => {
@@ -1890,7 +1890,7 @@ function msgFeedFacade(state, feedOptions, forcedId) {
       const c = core();
       const local = from - c.base;
       if (local < 0 || from + count > c.base + c.capacity) {
-        throw new Error(`rune: T3-фид append-only — view(${from},${count}) вне окна [${c.base}, ${c.base + c.capacity})`);
+        throw new Error(`rune: T3 feed is append-only — view(${from},${count}) is outside the window [${c.base}, ${c.base + c.capacity})`);
       }
       if (local + count > c.written)
         c.written = local + count;
@@ -1922,7 +1922,7 @@ function msgWriter(core, from, _count) {
       const offsets = byteOffsets(c.layout);
       const at = (from + index) * c.stride + (offsets.get(name) ?? -1);
       if (at < 0)
-        throw new Error(`rune: поле фида "${name}" не объявлено`);
+        throw new Error(`rune: feed field "${name}" is not declared`);
       const u8 = new Uint8Array(c.current);
       u8[at] = r;
       u8[at + 1] = g;
@@ -1936,10 +1936,10 @@ function writeMsg(core, logicalIndex, name, values) {
   const offsets = byteOffsets(c.layout);
   const fieldAt = offsets.get(name);
   if (fieldAt === undefined)
-    throw new Error(`rune: поле фида "${name}" не объявлено`);
+    throw new Error(`rune: feed field "${name}" is not declared`);
   const local = logicalIndex - c.base;
   if (local < 0 || local >= c.capacity) {
-    throw new Error(`rune: T3-фид append-only — индекс ${logicalIndex} вне окна [${c.base}, ${c.base + c.capacity})`);
+    throw new Error(`rune: T3 feed is append-only — index ${logicalIndex} is outside the window [${c.base}, ${c.base + c.capacity})`);
   }
   const f32 = new Float32Array(c.current);
   const at = local * c.stride + fieldAt >> 2;
@@ -2026,7 +2026,7 @@ function signalClient(mode, cells) {
     shared: (name) => {
       const cell = cells.get(name);
       if (cell === undefined)
-        throw new Error(`rune: сигнал "${name}" не зарегистрирован`);
+        throw new Error(`rune: signal "${name}" is not registered`);
       return cell;
     },
     sampleAll: () => 0,
@@ -2034,7 +2034,7 @@ function signalClient(mode, cells) {
     takeRecycled: () => [],
     feed: () => null,
     attachFeed: () => {
-      throw new Error("rune: T0-фиды не регистрируются транспортом — канал общий");
+      throw new Error("rune: T0 feeds are not registered by the transport — the channel is shared");
     },
     waitForChange: () => Promise.resolve(false)
   };
@@ -2042,17 +2042,17 @@ function signalClient(mode, cells) {
 function requireCell(cells, name) {
   const cell = cells.get(name);
   if (cell === undefined)
-    throw new Error(`rune: сигнал "${name}" не зарегистрирован`);
+    throw new Error(`rune: signal "${name}" is not registered`);
   return cell;
 }
 function requireName(names, name) {
   if (!names.includes(name))
-    throw new Error(`rune: сигнал "${name}" не зарегистрирован`);
+    throw new Error(`rune: signal "${name}" is not registered`);
 }
 function requireMsgSlot(state, name) {
   const slot = state.slots.get(name);
   if (slot === undefined)
-    throw new Error(`rune: сигнал "${name}" не зарегистрирован`);
+    throw new Error(`rune: signal "${name}" is not registered`);
   return slot;
 }
 var byteOffsetCache;
@@ -3210,7 +3210,7 @@ function decideRecovery(event, history = []) {
       recover: false,
       strategy: "abort",
       kind: "loss-storm",
-      message: `Шторм потерь: ${recent.length} потерь за ${LOSS_STORM_WINDOW_MS / 1000} с — ` + `система деградировала (драйвер/GPU/память). Восстановление замаскирует проблему и уйдёт в цикл. ` + `Останавливаем рендер; перезапусти страницу или освободи память.`
+      message: `Loss storm: ${recent.length} losses within ${LOSS_STORM_WINDOW_MS / 1000} s — ` + `the system has degraded (driver/GPU/memory). Recovery would mask the problem and loop forever. ` + `We stop rendering; restart the page or free up memory.`
     };
   }
   switch (event.kind) {
@@ -3219,49 +3219,49 @@ function decideRecovery(event, history = []) {
         recover: true,
         strategy: "soft",
         kind: event.kind,
-        message: "Контекст упал из-за нехватки GPU-памяти (out-of-memory). " + "Полный replay повторил бы те же аллокации — вместо него SOFT RESET: " + "восстанавливаю только рабочее множество сцены, остальные ресурсы " + "остаются в журнале и вернутся в GPU-память лениво по требованию " + "(ensureResident). Если памяти не хватает даже сцене — уменьши размер " + "текстур/атласов, число целей рендера или разрешение канваса."
+        message: "The context was lost due to a GPU memory shortage (out-of-memory). " + "A full replay would repeat the same allocations — instead we do a SOFT RESET: " + "restoring only the scene working set, the remaining resources " + "stay in the journal and will return to GPU memory lazily on demand " + "(ensureResident). If memory is not enough even for the scene — reduce the size of " + "textures/atlas pages, the number of render targets, or the canvas resolution."
       };
     case "shader-compile":
       return {
         recover: false,
         strategy: "abort",
         kind: event.kind,
-        message: "Контекст убит, по-видимому, компиляцией сверхтяжёлого шейдера " + "(driver watchdog / переполнение). Ленивое восстановление не спасёт: " + "первый же draw перекомпилирует тот же шейдер — потеря повторится. " + "Упрости шейдер (меньше инструкций/циклов/семплов) и перезапусти."
+        message: "The context was killed, apparently by compiling an ultra-heavy shader " + "(driver watchdog / overflow). Lazy recovery will not help: " + "the very first draw will recompile the same shader — the loss will repeat. " + "Simplify the shader (fewer instructions/loops/samples) and restart."
       };
     case "context-lost":
       return {
         recover: true,
         strategy: "full",
         kind: event.kind,
-        message: "WebGL2-контекст потерян (обычная потеря). Восстанавливаем: replay журнала " + "первичных ресурсов вернёт текстуры/цели/views и их контент."
+        message: "The WebGL2 context was lost (an ordinary loss). Recovering: a replay of the journal " + "of primary resources will restore textures/targets/views and their content."
       };
     case "device-destroyed":
       return {
         recover: true,
         strategy: "full",
         kind: event.kind,
-        message: "GPU-устройство уничтожено (ожидаемо при смене бэкенда/dispose). " + "Восстанавливаем replay-ем журнала на новом устройстве."
+        message: "The GPU device was destroyed (expected on backend switch/dispose). " + "Recovering by replaying the journal on the new device."
       };
     case "device-unknown":
       return {
         recover: true,
         strategy: "full",
         kind: event.kind,
-        message: "GPU-устройство потеряно по неизвестной причине (драйвер/ОС/reset). " + "Пробуем восстановить replay-ем журнала; при повторе сработает бюджет шторма."
+        message: "The GPU device was lost for an unknown reason (driver/OS/reset). " + "We try to recover by replaying the journal; if it repeats, the storm budget will fire."
       };
     case "loss-storm":
       return {
         recover: false,
         strategy: "abort",
         kind: event.kind,
-        message: "Шторм потерь устройства. Восстановление отменено."
+        message: "Device loss storm. Recovery cancelled."
       };
     default:
       return {
         recover: true,
         strategy: "full",
         kind: "unknown",
-        message: "Потеря устройства неизвестного типа. Пробуем восстановить replay-ем журнала."
+        message: "Device loss of an unknown type. We try to recover by replaying the journal."
       };
   }
 }
@@ -3539,7 +3539,7 @@ function coversBackend(backend, coverage) {
 function missingSpecs(backend, coverage) {
   const field = backend === "webgpu" ? "hasWgsl" : "hasGlsl";
   const want = backend === "webgpu" ? "WGSL" : "GLSL";
-  return coverage.filter((c) => !c[field]).map((c) => `"${c.id ?? "<без id>"}" (нет ${want})`);
+  return coverage.filter((c) => !c[field]).map((c) => `"${c.id ?? "<no id>"}" (no ${want})`);
 }
 function resolveBackend(input) {
   const order = input.order ?? ["webgpu", "webgl2"];
@@ -3548,11 +3548,11 @@ function resolveBackend(input) {
   const hardware = input.hardware;
   const invalid = coverage.filter((c) => !c.hasGlsl && !c.hasWgsl);
   if (invalid.length > 0) {
-    const names = invalid.map((c) => `"${c.id ?? "<без id>"}"`).join(", ");
+    const names = invalid.map((c) => `"${c.id ?? "<no id>"}"`).join(", ");
     return decision(null, order, coverage, hardware, {
-      webgpu: { available: hardware.webgpu, covers: false, rejected: `невалидный спек: ${names}` },
-      webgl2: { available: hardware.webgl2, covers: false, rejected: `невалидный спек: ${names}` }
-    }, `Невалидный спек (нет ни GLSL, ни WGSL): ${names}. Добавьте хотя бы один вариант шейдера.`);
+      webgpu: { available: hardware.webgpu, covers: false, rejected: `invalid spec: ${names}` },
+      webgl2: { available: hardware.webgl2, covers: false, rejected: `invalid spec: ${names}` }
+    }, `Invalid spec (neither GLSL nor WGSL): ${names}. Add at least one shader variant.`);
   }
   const verdicts = {
     webgpu: verdictFor("webgpu", hardware.webgpu, coversBackend("webgpu", coverage), coverage),
@@ -3564,13 +3564,13 @@ function resolveBackend(input) {
 }
 function verdictFor(backend, available, covers, coverage) {
   if (!available && !covers) {
-    return { available: false, covers, rejected: `нет адаптера и покрытие не прошло: ${missingSpecs(backend, coverage).join(", ")}` };
+    return { available: false, covers, rejected: `no adapter and coverage failed: ${missingSpecs(backend, coverage).join(", ")}` };
   }
   if (!available) {
-    return { available: false, covers, rejected: "нет адаптера" };
+    return { available: false, covers, rejected: "no adapter" };
   }
   if (!covers) {
-    return { available, covers: false, rejected: `спек не имеет варианта для ${backend === "webgpu" ? "WGSL" : "GLSL"}: ${missingSpecs(backend, coverage).join(", ")}` };
+    return { available, covers: false, rejected: `spec has no variant for ${backend === "webgpu" ? "WGSL" : "GLSL"}: ${missingSpecs(backend, coverage).join(", ")}` };
   }
   return { available: true, covers: true };
 }
@@ -3586,25 +3586,25 @@ function messageFor(chosen, order, verdicts, coverage) {
     if (chosen === null) {
       const v = verdicts[only];
       if (!v.available) {
-        return `Принудительный ${label(only)} недоступен: ${v.rejected}. Смягчите order=${JSON.stringify(["webgpu", "webgl2"])} для фолбэка.`;
+        return `Forced ${label(only)} unavailable: ${v.rejected}. Soften order=${JSON.stringify(["webgpu", "webgl2"])} to allow fallback.`;
       }
-      return `Принудительный ${label(only)} не покрывает спеки: ${v.rejected}. Добавьте ${only === "webgpu" ? "WGSL" : "GLSL"} к спекам.`;
+      return `Forced ${label(only)} does not cover the specs: ${v.rejected}. Add ${only === "webgpu" ? "WGSL" : "GLSL"} to the specs.`;
     }
-    return `Принудительный выбор (order=${JSON.stringify(order)})`;
+    return `Forced choice (order=${JSON.stringify(order)})`;
   }
   if (chosen !== null) {
     const forcedBy = coverage.filter((c) => chosen === "webgpu" ? !c.hasGlsl : !c.hasWgsl);
     if (forcedBy.length > 0) {
-      const names = forcedBy.map((c) => `"${c.id ?? "<без id>"}"`).join(", ");
+      const names = forcedBy.map((c) => `"${c.id ?? "<no id>"}"`).join(", ");
       const other = order.filter((b) => b !== chosen)[0];
-      const otherRejected = verdicts[other]?.rejected ?? "нет";
+      const otherRejected = verdicts[other]?.rejected ?? "none";
       const missingVariant = chosen === "webgpu" ? "GLSL" : "WGSL";
-      return `Выбран ${label(chosen)} — доступен; спекы без ${missingVariant}: ${names} — фолбэк-кандидат ${label(other)} отсеян (${otherRejected})`;
+      return `Chosen ${label(chosen)} — available; specs without ${missingVariant}: ${names} — fallback candidate ${label(other)} rejected (${otherRejected})`;
     }
-    return `Выбран ${label(chosen)} — доступен и покрывает все спеки`;
+    return `Chosen ${label(chosen)} — available and covers all specs`;
   }
-  const rejections = order.map((b) => `${label(b)}: ${verdicts[b].rejected ?? "неизвестно"}`).join("; ");
-  return `Конфликт — ни один бэкенд из order=${JSON.stringify(order)} не прошёл. Вердикты: ${rejections}`;
+  const rejections = order.map((b) => `${label(b)}: ${verdicts[b].rejected ?? "unknown"}`).join("; ");
+  return `Conflict — no backend from order=${JSON.stringify(order)} passed. Verdicts: ${rejections}`;
 }
 
 // packages/gl/src/webgl2Renderer.ts
@@ -3944,7 +3944,7 @@ function createRealGL(gl) {
     gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragment));
     gl.linkProgram(program);
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      throw new Error(`rune: линковка программы: ${gl.getProgramInfoLog(program)}`);
+      throw new Error(`rune: program linking: ${gl.getProgramInfoLog(program)}`);
     }
     const id = nextProgram++;
     programs.set(id, { program, uniforms: new Map });
@@ -3953,13 +3953,13 @@ function createRealGL(gl) {
   function compile(type, source) {
     const shader = gl.createShader(type);
     if (shader === null)
-      throw new Error("rune: createShader вернул null");
+      throw new Error("rune: createShader returned null");
     gl.shaderSource(shader, source);
     gl.compileShader(shader);
     if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
       const log = gl.getShaderInfoLog(shader);
       gl.deleteShader(shader);
-      throw new Error(`rune: компиляция шейдера: ${log}`);
+      throw new Error(`rune: shader compilation: ${log}`);
     }
     return shader;
   }
@@ -4141,19 +4141,19 @@ function createRealGL(gl) {
   function createTextureView(textureId, options) {
     const meta = textureMeta.get(textureId);
     if (meta === undefined) {
-      throw new Error(`rune: createTextureView — текстура ${textureId} не найдена`);
+      throw new Error(`rune: createTextureView — texture ${textureId} not found`);
     }
     const mipLevels = meta.mipLevels;
     if (mipLevels < 2) {
-      throw new Error(`rune: createTextureView — текстура ${textureId} имеет mipLevels=${mipLevels} ` + "(нет mip-chain). Sub-mip view имеет смысл только при mipLevels ≥ 2.");
+      throw new Error(`rune: createTextureView — texture ${textureId} has mipLevels=${mipLevels} ` + "(no mip-chain). A sub-mip view only makes sense with mipLevels ≥ 2.");
     }
     const baseMipLevel = options?.baseMipLevel ?? 0;
     if (baseMipLevel < 0 || baseMipLevel >= mipLevels) {
-      throw new Error(`rune: createTextureView — baseMipLevel=${baseMipLevel} вне диапазона [0, ${mipLevels - 1}] ` + `(textureId=${textureId}, mipLevels=${mipLevels})`);
+      throw new Error(`rune: createTextureView — baseMipLevel=${baseMipLevel} out of range [0, ${mipLevels - 1}] ` + `(textureId=${textureId}, mipLevels=${mipLevels})`);
     }
     const mipLevelCount = options?.mipLevelCount ?? mipLevels - baseMipLevel;
     if (mipLevelCount < 1 || baseMipLevel + mipLevelCount > mipLevels) {
-      throw new Error(`rune: createTextureView — baseMipLevel=${baseMipLevel} + mipLevelCount=${mipLevelCount} ` + `превышает mipLevels=${mipLevels} (textureId=${textureId})`);
+      throw new Error(`rune: createTextureView — baseMipLevel=${baseMipLevel} + mipLevelCount=${mipLevelCount} ` + `exceeds mipLevels=${mipLevels} (textureId=${textureId})`);
     }
     const viewId = nextTextureViewId++;
     textureViews.set(viewId, {
@@ -4174,14 +4174,14 @@ function createRealGL(gl) {
   function createTarget(textureId, width, height, depth2, color) {
     const fbo = gl.createFramebuffer();
     if (fbo === null)
-      throw new Error("rune: createFramebuffer вернул null");
+      throw new Error("rune: createFramebuffer returned null");
     let depthRenderbuffer = null;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, textures.get(textureId) ?? null, 0);
     if (depth2) {
       depthRenderbuffer = gl.createRenderbuffer();
       if (depthRenderbuffer === null)
-        throw new Error("rune: createRenderbuffer вернул null");
+        throw new Error("rune: createRenderbuffer returned null");
       gl.bindRenderbuffer(gl.RENDERBUFFER, depthRenderbuffer);
       gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, width, height);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthRenderbuffer);
@@ -4192,7 +4192,7 @@ function createRealGL(gl) {
       if (depthRenderbuffer !== null)
         gl.deleteRenderbuffer(depthRenderbuffer);
       gl.deleteFramebuffer(fbo);
-      throw new Error(`rune: FBO поверхности неполный (статус ${status}) — размер ${width}x${height}`);
+      throw new Error(`rune: surface FBO incomplete (status ${status}) — size ${width}x${height}`);
     }
     const id = nextTarget++;
     targets.set(id, {
@@ -4249,11 +4249,11 @@ function createRealGL(gl) {
   }
   function readTargetPixels(targetId) {
     if (targetId === 0) {
-      throw new Error("rune: readTargetPixels(0) — канвас не читается (паритет с WebGPU: presented-текстура живёт один кадр). Читайте ПОВЕРХНОСТЬ: renderer.surface(...) → capture/проходы → surface.read()");
+      throw new Error("rune: readTargetPixels(0) — the canvas cannot be read (parity with WebGPU: the presented texture lives for one frame). Read the SURFACE instead: renderer.surface(...) → capture/passes → surface.read()");
     }
     const target = targets.get(targetId);
     if (target === undefined) {
-      throw new Error(`rune: readTargetPixels — цель ${targetId} не найдена (удалена или не создана)`);
+      throw new Error(`rune: readTargetPixels — target ${targetId} not found (deleted or never created)`);
     }
     const w = target.width;
     const h = target.height;
@@ -5499,7 +5499,7 @@ function dodecahedron(params = {}) {
         ring.push(dv[f]);
     }
     if (ring.length !== 5) {
-      throw new Error(`rune: prims — двойственность сломана: у вершины икосаэдра ${ring.length} смежных граней (ожидалось 5)`);
+      throw new Error(`rune: prims — duality broken: an icosahedron vertex has ${ring.length} adjacent faces (expected 5)`);
     }
     const up = Math.abs(c[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
     const u = [
@@ -5759,12 +5759,12 @@ function heightVolcano(seed = 13) {
   };
 }
 var terrainPresets = {
-  hills: { label: "Холмы", height: heightHills, amplitude: 1, note: "fBm value-noise: мягкие курганы, 5 октав" },
-  ridged: { label: "Хребты", height: heightRidged, amplitude: 1, note: "ridged-мультимфрактал: острые гряды 1−|2n−1|" },
-  island: { label: "Остров", height: heightIsland, amplitude: 1.4, note: "холмы × радиальный спад: пляж → горы" },
-  dunes: { label: "Дюны", height: heightDunes, amplitude: 0.8, note: "анизотропные |sin|-гряды, искривлённые шумом" },
-  canyon: { label: "Каньон", height: heightCanyon, amplitude: 1.2, note: "террасы-ступени fBm: столовые плато" },
-  volcano: { label: "Вулкан", height: heightVolcano, amplitude: 1.5, note: "конус с кратером + шумовой обод" }
+  hills: { label: "Hills", height: heightHills, amplitude: 1, note: "fBm value noise: soft mounds, 5 octaves" },
+  ridged: { label: "Ridges", height: heightRidged, amplitude: 1, note: "ridged multifractal: sharp ridges 1−|2n−1|" },
+  island: { label: "Island", height: heightIsland, amplitude: 1.4, note: "hills × radial falloff: beach → mountains" },
+  dunes: { label: "Dunes", height: heightDunes, amplitude: 0.8, note: "anisotropic |sin| ridges warped by noise" },
+  canyon: { label: "Canyon", height: heightCanyon, amplitude: 1.2, note: "fBm step terraces: table plateaus" },
+  volcano: { label: "Volcano", height: heightVolcano, amplitude: 1.5, note: "a cone with a crater + a noisy rim" }
 };
 
 // packages/prims/src/adaptive.ts
@@ -5986,11 +5986,11 @@ function worldIsland(seed = 3) {
   };
 }
 var adaptivePresets = {
-  hills: { label: "Холмы", height: worldHills, amplitude: 1, note: "fBm по миру: кольца LOD вокруг камеры, юбки на стыках" },
-  ridged: { label: "Хребты", height: worldRidged, amplitude: 1.1, note: "ridged-гряды: острые вершины уходят в грубые дальние кольца" },
-  island: { label: "Остров", height: worldIsland, amplitude: 1.3, note: "радиальный спад: океан до тумана — видно, как LOD глушит даль" },
-  dunes: { label: "Дюны", height: worldDunes, amplitude: 0.6, note: "анизотропные гряды: юбки держат стыки при displace" },
-  canyon: { label: "Каньон", height: worldCanyon, amplitude: 1, note: "террасы-ступени: плоские плато читаются на любом LOD" }
+  hills: { label: "Hills", height: worldHills, amplitude: 1, note: "fBm over the world: LOD rings around the camera, skirts at seams" },
+  ridged: { label: "Ridges", height: worldRidged, amplitude: 1.1, note: "ridged ridges: sharp peaks fade into coarse far rings" },
+  island: { label: "Island", height: worldIsland, amplitude: 1.3, note: "radial falloff: an ocean up to the fog — you can see LOD muting the distance" },
+  dunes: { label: "Dunes", height: worldDunes, amplitude: 0.6, note: "anisotropic ridges: skirts hold the seams under displace" },
+  canyon: { label: "Canyon", height: worldCanyon, amplitude: 1, note: "step terraces: flat plateaus read at any LOD" }
 };
 
 // packages/prims/src/registry.ts
@@ -6003,14 +6003,14 @@ function terrainEntry(id, presetKey, note) {
   return {
     id,
     label: preset.label,
-    group: "Террейны",
+    group: "Terrains",
     note,
     offsetY: -0.25,
     dist: 3.4,
     params: [
-      { key: "seed", label: "Seed рельефа", min: 1, max: 999, step: 1, def: 7, integer: true },
-      { key: "amp", label: "Амплитуда", min: 0.4, max: 2.5, step: 0.1, def: preset.amplitude },
-      { key: "segs", label: "Сегментов", min: 16, max: 256, step: 8, def: 96, segment: true }
+      { key: "seed", label: "Relief seed", min: 1, max: 999, step: 1, def: 7, integer: true },
+      { key: "amp", label: "Amplitude", min: 0.4, max: 2.5, step: 0.1, def: preset.amplitude },
+      { key: "segs", label: "Segments", min: 16, max: 256, step: 8, def: 96, segment: true }
     ],
     make: (v, _k) => terrain(TERRAIN_SIZE, v.segs ?? 96, preset.height(v.seed ?? 7), { amplitude: v.amp ?? preset.amplitude })
   };
@@ -6020,17 +6020,17 @@ function adaptiveEntry(id, presetKey, note) {
   return {
     id,
     label: preset.label,
-    group: "Адаптивный рельеф",
+    group: "Adaptive relief",
     note,
     offsetY: -0.2,
     dist: 7.5,
     params: [
-      { key: "seed", label: "Seed рельефа", min: 1, max: 999, step: 1, def: 7, integer: true },
-      { key: "amp", label: "Амплитуда", min: 0.3, max: 2.5, step: 0.1, def: preset.amplitude },
-      { key: "radius", label: "Радиус построения", min: 8, max: 48, step: 4, def: 20, integer: true },
-      { key: "tile", label: "Размер тайла", min: 2, max: 8, step: 1, def: 4, integer: true },
-      { key: "maxSeg", label: "Макс. сегментов", min: 8, max: 64, step: 8, def: 24, segment: true },
-      { key: "skirt", label: "Юбки на стыках", min: 0, max: 1, step: 1, def: 1, bool: true }
+      { key: "seed", label: "Relief seed", min: 1, max: 999, step: 1, def: 7, integer: true },
+      { key: "amp", label: "Amplitude", min: 0.3, max: 2.5, step: 0.1, def: preset.amplitude },
+      { key: "radius", label: "Build radius", min: 8, max: 48, step: 4, def: 20, integer: true },
+      { key: "tile", label: "Tile size", min: 2, max: 8, step: 1, def: 4, integer: true },
+      { key: "maxSeg", label: "Max segments", min: 8, max: 64, step: 8, def: 24, segment: true },
+      { key: "skirt", label: "Skirts at seams", min: 0, max: 1, step: 1, def: 1, bool: true }
     ],
     make: (v, k) => {
       return createAdaptiveTerrain({
@@ -6055,16 +6055,16 @@ function adaptiveEntry(id, presetKey, note) {
 var RAW_SHAPES = [
   {
     id: "box",
-    label: "Бокс",
-    group: "Базовые",
-    note: "width×height×depth, СЕГМЕНТЫ НА КАЖДУЮ ГРАНЬ (как BoxGeometry three.js)",
+    label: "Box",
+    group: "Basic",
+    note: "width×height×depth, SEGMENTS PER FACE (like three.js BoxGeometry)",
     params: [
-      { key: "width", label: "Ширина X", min: 0.4, max: 2.5, step: 0.05, def: 1.4 },
-      { key: "height", label: "Высота Y", min: 0.4, max: 2.5, step: 0.05, def: 1.4 },
-      { key: "depth", label: "Глубина Z", min: 0.4, max: 2.5, step: 0.05, def: 1.4 },
-      { key: "segX", label: "Сегментов X", min: 1, max: 24, step: 1, def: 6, segment: true },
-      { key: "segY", label: "Сегментов Y", min: 1, max: 24, step: 1, def: 6, segment: true },
-      { key: "segZ", label: "Сегментов Z", min: 1, max: 24, step: 1, def: 6, segment: true }
+      { key: "width", label: "Width X", min: 0.4, max: 2.5, step: 0.05, def: 1.4 },
+      { key: "height", label: "Height Y", min: 0.4, max: 2.5, step: 0.05, def: 1.4 },
+      { key: "depth", label: "Depth Z", min: 0.4, max: 2.5, step: 0.05, def: 1.4 },
+      { key: "segX", label: "Segments X", min: 1, max: 24, step: 1, def: 6, segment: true },
+      { key: "segY", label: "Segments Y", min: 1, max: 24, step: 1, def: 6, segment: true },
+      { key: "segZ", label: "Segments Z", min: 1, max: 24, step: 1, def: 6, segment: true }
     ],
     make: (v) => box({
       width: v.width,
@@ -6077,14 +6077,14 @@ var RAW_SHAPES = [
   },
   {
     id: "plane",
-    label: "Плоскость",
-    group: "Базовые",
-    note: "Прямоугольник width×height с НЕЗАВИСИМЫМИ сегментами по осям, нормаль +Y",
+    label: "Plane",
+    group: "Basic",
+    note: "A width×height rectangle with INDEPENDENT segments per axis, +Y normal",
     params: [
-      { key: "width", label: "Ширина X", min: 0.5, max: 4, step: 0.1, def: 2.2 },
-      { key: "height", label: "Глубина Z", min: 0.5, max: 4, step: 0.1, def: 1.6 },
-      { key: "segX", label: "Сегментов X", min: 1, max: 96, step: 1, def: 24, segment: true },
-      { key: "segY", label: "Сегментов Z", min: 1, max: 96, step: 1, def: 16, segment: true }
+      { key: "width", label: "Width X", min: 0.5, max: 4, step: 0.1, def: 2.2 },
+      { key: "height", label: "Depth Z", min: 0.5, max: 4, step: 0.1, def: 1.6 },
+      { key: "segX", label: "Segments X", min: 1, max: 96, step: 1, def: 24, segment: true },
+      { key: "segY", label: "Segments Z", min: 1, max: 96, step: 1, def: 16, segment: true }
     ],
     make: (v) => plane({
       width: v.width,
@@ -6095,13 +6095,13 @@ var RAW_SHAPES = [
   },
   {
     id: "sphere",
-    label: "Сфера",
-    group: "Базовые",
-    note: "UV-сфера: widthSegments × heightSegments (как SphereGeometry), полюса без дыр",
+    label: "Sphere",
+    group: "Basic",
+    note: "UV sphere: widthSegments × heightSegments (like SphereGeometry), poles without holes",
     params: [
-      { key: "radius", label: "Радиус", min: 0.5, max: 2, step: 0.05, def: 1 },
-      { key: "segW", label: "Сегментов (долгота)", min: 8, max: 256, step: 4, def: 48, segment: true },
-      { key: "segH", label: "Поясов (широта)", min: 4, max: 128, step: 2, def: 32, segment: true }
+      { key: "radius", label: "Radius", min: 0.5, max: 2, step: 0.05, def: 1 },
+      { key: "segW", label: "Segments (longitude)", min: 8, max: 256, step: 4, def: 48, segment: true },
+      { key: "segH", label: "Bands (latitude)", min: 4, max: 128, step: 2, def: 32, segment: true }
     ],
     make: (v) => sphere({
       radius: v.radius,
@@ -6111,16 +6111,16 @@ var RAW_SHAPES = [
   },
   {
     id: "cylinder",
-    label: "Цилиндр",
-    group: "Базовые",
-    note: "Усечённый конус с крышками; rTop=0 — конус; openEnded — без крышек",
+    label: "Cylinder",
+    group: "Basic",
+    note: "A truncated cone with caps; rTop=0 — a cone; openEnded — without caps",
     params: [
-      { key: "rTop", label: "Радиус верха", min: 0, max: 1.2, step: 0.05, def: 0.7 },
-      { key: "rBot", label: "Радиус низа", min: 0.3, max: 1.2, step: 0.05, def: 0.9 },
-      { key: "height", label: "Высота", min: 0.6, max: 2.6, step: 0.1, def: 1.8 },
-      { key: "segR", label: "Сегментов (вокруг)", min: 3, max: 256, step: 1, def: 48, segment: true },
-      { key: "segH", label: "Поясов (высота)", min: 1, max: 32, step: 1, def: 1, segment: true },
-      { key: "open", label: "Без крышек (openEnded)", min: 0, max: 1, step: 1, def: 0, bool: true }
+      { key: "rTop", label: "Top radius", min: 0, max: 1.2, step: 0.05, def: 0.7 },
+      { key: "rBot", label: "Bottom radius", min: 0.3, max: 1.2, step: 0.05, def: 0.9 },
+      { key: "height", label: "Height", min: 0.6, max: 2.6, step: 0.1, def: 1.8 },
+      { key: "segR", label: "Segments (around)", min: 3, max: 256, step: 1, def: 48, segment: true },
+      { key: "segH", label: "Bands (height)", min: 1, max: 32, step: 1, def: 1, segment: true },
+      { key: "open", label: "No caps (openEnded)", min: 0, max: 1, step: 1, def: 0, bool: true }
     ],
     make: (v) => cylinder({
       radiusTop: v.rTop,
@@ -6133,15 +6133,15 @@ var RAW_SHAPES = [
   },
   {
     id: "cone",
-    label: "Конус",
-    group: "Базовые",
-    note: "Апекс без вырожденных треугольников; openEnded — без основания",
+    label: "Cone",
+    group: "Basic",
+    note: "An apex without degenerate triangles; openEnded — without the base",
     params: [
-      { key: "radius", label: "Радиус", min: 0.4, max: 1.2, step: 0.05, def: 0.9 },
-      { key: "height", label: "Высота", min: 0.8, max: 2.6, step: 0.1, def: 1.8 },
-      { key: "segR", label: "Сегментов (вокруг)", min: 3, max: 256, step: 1, def: 48, segment: true },
-      { key: "segH", label: "Поясов (высота)", min: 1, max: 32, step: 1, def: 1, segment: true },
-      { key: "open", label: "Без основания", min: 0, max: 1, step: 1, def: 0, bool: true }
+      { key: "radius", label: "Radius", min: 0.4, max: 1.2, step: 0.05, def: 0.9 },
+      { key: "height", label: "Height", min: 0.8, max: 2.6, step: 0.1, def: 1.8 },
+      { key: "segR", label: "Segments (around)", min: 3, max: 256, step: 1, def: 48, segment: true },
+      { key: "segH", label: "Bands (height)", min: 1, max: 32, step: 1, def: 1, segment: true },
+      { key: "open", label: "Without the base", min: 0, max: 1, step: 1, def: 0, bool: true }
     ],
     make: (v) => cone({
       radius: v.radius,
@@ -6153,14 +6153,14 @@ var RAW_SHAPES = [
   },
   {
     id: "capsule",
-    label: "Капсула",
-    group: "Базовые",
-    note: "Цилиндр + полусферы (height — цилиндрическая часть, как в three.js)",
+    label: "Capsule",
+    group: "Basic",
+    note: "Cylinder + hemispheres (height — the cylindrical part, as in three.js)",
     params: [
-      { key: "radius", label: "Радиус", min: 0.25, max: 0.9, step: 0.05, def: 0.55 },
-      { key: "height", label: "Длина тела", min: 0.4, max: 1.8, step: 0.05, def: 1.1 },
-      { key: "segR", label: "Сегментов (вокруг)", min: 3, max: 128, step: 1, def: 40, segment: true },
-      { key: "segH", label: "Поясов на полусферу", min: 2, max: 64, step: 1, def: 12, segment: true }
+      { key: "radius", label: "Radius", min: 0.25, max: 0.9, step: 0.05, def: 0.55 },
+      { key: "height", label: "Body length", min: 0.4, max: 1.8, step: 0.05, def: 1.1 },
+      { key: "segR", label: "Segments (around)", min: 3, max: 128, step: 1, def: 40, segment: true },
+      { key: "segH", label: "Bands per hemisphere", min: 2, max: 64, step: 1, def: 12, segment: true }
     ],
     make: (v) => capsule({
       radius: v.radius,
@@ -6171,14 +6171,14 @@ var RAW_SHAPES = [
   },
   {
     id: "torus",
-    label: "Тор",
-    group: "Кривые",
-    note: "Трубка tube вокруг кольца radius; radial — вокруг трубки, tubular — вокруг оси",
+    label: "Torus",
+    group: "Curves",
+    note: "A tube of tube around a radius ring; radial — around the tube, tubular — around the axis",
     params: [
-      { key: "radius", label: "Радиус кольца", min: 0.6, max: 1.5, step: 0.05, def: 1 },
-      { key: "tube", label: "Радиус трубки", min: 0.12, max: 0.6, step: 0.02, def: 0.38 },
-      { key: "segR", label: "Сегментов трубки", min: 3, max: 96, step: 1, def: 28, segment: true },
-      { key: "segT", label: "Сегментов кольца", min: 8, max: 256, step: 4, def: 64, segment: true }
+      { key: "radius", label: "Ring radius", min: 0.6, max: 1.5, step: 0.05, def: 1 },
+      { key: "tube", label: "Tube radius", min: 0.12, max: 0.6, step: 0.02, def: 0.38 },
+      { key: "segR", label: "Tube segments", min: 3, max: 96, step: 1, def: 28, segment: true },
+      { key: "segT", label: "Ring segments", min: 8, max: 256, step: 4, def: 64, segment: true }
     ],
     make: (v) => torus({
       radius: v.radius,
@@ -6189,17 +6189,17 @@ var RAW_SHAPES = [
   },
   {
     id: "knot",
-    label: "Узел (p,q)",
-    group: "Кривые",
-    note: "Тороидальный узел: p витков × q захлёстов; меняйте p/q — узел перестраивается",
+    label: "Knot (p,q)",
+    group: "Curves",
+    note: "A torus knot: p windings × q loops; change p/q — the knot reconfigures",
     dist: 4.6,
     params: [
-      { key: "p", label: "p (витки)", min: 1, max: 5, step: 1, def: 2, integer: true },
-      { key: "q", label: "q (захлёсты)", min: 2, max: 7, step: 1, def: 3, integer: true },
-      { key: "tube", label: "Радиус трубки", min: 0.08, max: 0.4, step: 0.02, def: 0.26 },
-      { key: "scale", label: "Масштаб", min: 0.25, max: 0.8, step: 0.05, def: 0.45 },
-      { key: "segT", label: "Сегментов кривой", min: 16, max: 640, step: 8, def: 220, segment: true },
-      { key: "segR", label: "Сегментов трубки", min: 3, max: 32, step: 1, def: 14, segment: true }
+      { key: "p", label: "p (windings)", min: 1, max: 5, step: 1, def: 2, integer: true },
+      { key: "q", label: "q (loops)", min: 2, max: 7, step: 1, def: 3, integer: true },
+      { key: "tube", label: "Tube radius", min: 0.08, max: 0.4, step: 0.02, def: 0.26 },
+      { key: "scale", label: "Scale", min: 0.25, max: 0.8, step: 0.05, def: 0.45 },
+      { key: "segT", label: "Curve segments", min: 16, max: 640, step: 8, def: 220, segment: true },
+      { key: "segR", label: "Tube segments", min: 3, max: 32, step: 1, def: 14, segment: true }
     ],
     make: (v) => torusKnot({
       p: Math.round(v.p ?? 2),
@@ -6212,82 +6212,82 @@ var RAW_SHAPES = [
   },
   {
     id: "tetra",
-    label: "Тетраэдр",
-    group: "Платоновы",
-    note: "4 грани, плоское затенение; detail — сабдивизия с проекцией на сферу",
+    label: "Tetrahedron",
+    group: "Platonic",
+    note: "4 faces, flat shading; detail — subdivision with projection onto the sphere",
     params: [
-      { key: "radius", label: "Радиус", min: 0.6, max: 1.6, step: 0.05, def: 1.1 },
-      { key: "detail", label: "Детализация (сабдивизия)", min: 0, max: 4, step: 1, def: 0, integer: true }
+      { key: "radius", label: "Radius", min: 0.6, max: 1.6, step: 0.05, def: 1.1 },
+      { key: "detail", label: "Detail (subdivision)", min: 0, max: 4, step: 1, def: 0, integer: true }
     ],
     make: (v) => tetrahedron({ radius: v.radius, detail: v.detail })
   },
   {
     id: "octa",
-    label: "Октаэдр",
-    group: "Платоновы",
-    note: "8 граней; detail ≥ 1 — геодезическая сфера из октаэдра",
+    label: "Octahedron",
+    group: "Platonic",
+    note: "8 faces; detail ≥ 1 — a geodesic sphere from the octahedron",
     params: [
-      { key: "radius", label: "Радиус", min: 0.6, max: 1.6, step: 0.05, def: 1.1 },
-      { key: "detail", label: "Детализация (сабдивизия)", min: 0, max: 4, step: 1, def: 0, integer: true }
+      { key: "radius", label: "Radius", min: 0.6, max: 1.6, step: 0.05, def: 1.1 },
+      { key: "detail", label: "Detail (subdivision)", min: 0, max: 4, step: 1, def: 0, integer: true }
     ],
     make: (v) => octahedron({ radius: v.radius, detail: v.detail })
   },
   {
     id: "icosa",
-    label: "Икосаэдр",
-    group: "Платоновы",
-    note: "20 граней; detail 1/2/3 — геодезические сферы 80/320/1280 граней",
+    label: "Icosahedron",
+    group: "Platonic",
+    note: "20 faces; detail 1/2/3 — geodesic spheres with 80/320/1280 faces",
     params: [
-      { key: "radius", label: "Радиус", min: 0.6, max: 1.6, step: 0.05, def: 1.1 },
-      { key: "detail", label: "Детализация (сабдивизия)", min: 0, max: 4, step: 1, def: 0, integer: true }
+      { key: "radius", label: "Radius", min: 0.6, max: 1.6, step: 0.05, def: 1.1 },
+      { key: "detail", label: "Detail (subdivision)", min: 0, max: 4, step: 1, def: 0, integer: true }
     ],
     make: (v) => icosahedron({ radius: v.radius, detail: v.detail })
   },
   {
     id: "dodeca",
-    label: "Додекаэдр",
-    group: "Платоновы",
-    note: "12 пятиугольных граней (двойственен икосаэдру); detail — сфера-додека",
+    label: "Dodecahedron",
+    group: "Platonic",
+    note: "12 pentagonal faces (dual to the icosahedron); detail — a sphere-dodeca",
     params: [
-      { key: "radius", label: "Радиус", min: 0.6, max: 1.6, step: 0.05, def: 1.1 },
-      { key: "detail", label: "Детализация (сабдивизия)", min: 0, max: 3, step: 1, def: 0, integer: true }
+      { key: "radius", label: "Radius", min: 0.6, max: 1.6, step: 0.05, def: 1.1 },
+      { key: "detail", label: "Detail (subdivision)", min: 0, max: 3, step: 1, def: 0, integer: true }
     ],
     make: (v) => dodecahedron({ radius: v.radius, detail: v.detail })
   },
   {
     id: "disk",
-    label: "Диск",
-    group: "Прочие",
-    note: "Круг в плоскости XZ, нормаль +Y (CircleGeometry)",
+    label: "Disk",
+    group: "Other",
+    note: "A circle in the XZ plane, +Y normal (CircleGeometry)",
     params: [
-      { key: "radius", label: "Радиус", min: 0.5, max: 1.6, step: 0.05, def: 1.1 },
-      { key: "segs", label: "Сегментов", min: 3, max: 256, step: 1, def: 64, segment: true }
+      { key: "radius", label: "Radius", min: 0.5, max: 1.6, step: 0.05, def: 1.1 },
+      { key: "segs", label: "Segments", min: 3, max: 256, step: 1, def: 64, segment: true }
     ],
     make: (v) => disk({ radius: v.radius, segments: v.segs })
   },
   {
     id: "ring",
-    label: "Кольцо",
-    group: "Прочие",
-    note: "Annulus — плоская шайба (RingGeometry)",
+    label: "Ring",
+    group: "Other",
+    note: "Annulus — a flat washer (RingGeometry)",
     params: [
-      { key: "inner", label: "Внутренний R", min: 0.2, max: 0.9, step: 0.05, def: 0.55 },
-      { key: "outer", label: "Внешний R", min: 0.8, max: 1.6, step: 0.05, def: 1.1 },
-      { key: "segs", label: "Сегментов", min: 3, max: 256, step: 1, def: 64, segment: true }
+      { key: "inner", label: "Inner R", min: 0.2, max: 0.9, step: 0.05, def: 0.55 },
+      { key: "outer", label: "Outer R", min: 0.8, max: 1.6, step: 0.05, def: 1.1 },
+      { key: "segs", label: "Segments", min: 3, max: 256, step: 1, def: 64, segment: true }
     ],
     make: (v) => ring({ innerRadius: v.inner, outerRadius: v.outer, segments: v.segs })
   },
-  terrainEntry("t-hills", "hills", "Одна плоскость с heightmap (fBm): база адаптивного рельефа"),
-  terrainEntry("t-ridged", "ridged", "Ridged-мультимфрактал: острые гряды"),
-  terrainEntry("t-island", "island", "Холмы × радиальный спад: пляж → горы"),
-  terrainEntry("t-dunes", "dunes", "Анизотропные |sin|-гряды, ветровые пески"),
-  terrainEntry("t-canyon", "canyon", "Террасы-ступени: столовые плато"),
-  terrainEntry("t-volcano", "volcano", "Конус с кратером + шумовой обод"),
-  adaptiveEntry("a-hills", "hills", "Тайлы LOD вокруг камеры: ближние подробные, дальние грубые; юбки на стыках"),
-  adaptiveEntry("a-ridged", "ridged", "Хребты кольцами LOD — острые гряды гаснут вдали"),
-  adaptiveEntry("a-island", "island", "Остров в океане до тумана: видно, как даль глушится LOD-ом"),
-  adaptiveEntry("a-dunes", "dunes", "Дюны: стыки тайлов держат юбки при дисплейсе"),
-  adaptiveEntry("a-canyon", "canyon", "Каньон: плоские плато читаются на любом уровне LOD")
+  terrainEntry("t-hills", "hills", "A single plane with a heightmap (fBm): the base of the adaptive relief"),
+  terrainEntry("t-ridged", "ridged", "Ridged multifractal: sharp ridges"),
+  terrainEntry("t-island", "island", "Hills × radial falloff: beach → mountains"),
+  terrainEntry("t-dunes", "dunes", "Anisotropic |sin| ridges, wind-blown sands"),
+  terrainEntry("t-canyon", "canyon", "Step terraces: table plateaus"),
+  terrainEntry("t-volcano", "volcano", "A cone with a crater + a noisy rim"),
+  adaptiveEntry("a-hills", "hills", "LOD tiles around the camera: near ones detailed, far ones coarse; skirts at seams"),
+  adaptiveEntry("a-ridged", "ridged", "Ridges in LOD rings — sharp ridges fade in the distance"),
+  adaptiveEntry("a-island", "island", "An island in an ocean up to the fog: you can see the distance being muted by LOD"),
+  adaptiveEntry("a-dunes", "dunes", "Dunes: tile seams keep their skirts under displacement"),
+  adaptiveEntry("a-canyon", "canyon", "Canyon: flat plateaus read at any LOD level")
 ];
 var SHAPES = RAW_SHAPES.map(withDetail);
 function withDetail(shape) {
@@ -6333,10 +6333,10 @@ function terrainCanyon(seed = 9) {
   return (x, z) => terrace(fbm2D(x / 1500, z / 1500, seed, 4)) * 120 + fbm2D(x / 300, z / 300, seed + 2, 3) * 6;
 }
 var terrainQuadtreePresets = [
-  { id: "hills", label: "Холмы", note: "fBm 5 октав, амплитуда 34 м", heightFn: terrainHills(), amplitude: 34 },
-  { id: "ridges", label: "Хребты", note: "ridged fBm, амплитуда 90 м", heightFn: terrainRidges(), amplitude: 90 },
-  { id: "dunes", label: "Дюны", note: "анизотропные гряды, амплитуда 19 м", heightFn: terrainDunes(), amplitude: 19 },
-  { id: "canyon", label: "Каньон", note: "террасы с обрывами", heightFn: terrainCanyon(), amplitude: 126 }
+  { id: "hills", label: "Hills", note: "fBm 5 octaves, amplitude 34 m", heightFn: terrainHills(), amplitude: 34 },
+  { id: "ridges", label: "Ridges", note: "ridged fBm, amplitude 90 m", heightFn: terrainRidges(), amplitude: 90 },
+  { id: "dunes", label: "Dunes", note: "anisotropic ridges, amplitude 19 m", heightFn: terrainDunes(), amplitude: 19 },
+  { id: "canyon", label: "Canyon", note: "terraces with cliffs", heightFn: terrainCanyon(), amplitude: 126 }
 ];
 // packages/gl/src/surface.ts
 init_src();
@@ -6442,11 +6442,11 @@ function resolveCanvasAny(target) {
   if (typeof target !== "string")
     return target;
   if (typeof document === "undefined") {
-    throw new Error("rune: селектор канваса требует DOM — передайте элемент или OffscreenCanvas напрямую");
+    throw new Error("rune: canvas selector requires DOM — pass an element or OffscreenCanvas directly");
   }
   const canvas = document.querySelector(target);
   if (canvas === null) {
-    throw new Error(`rune: канвас "${target}" не найден — инициализация раньше DOM? ` + "Оберните createRenderer в DOMContentLoaded или передайте элемент/OffscreenCanvas.");
+    throw new Error(`rune: canvas "${target}" not found — initialization before DOM? ` + "Wrap createRenderer in DOMContentLoaded or pass an element/OffscreenCanvas.");
   }
   return canvas;
 }
@@ -6638,21 +6638,21 @@ function createResourceSessionGL(raw, journal) {
   const rawTex = (id) => {
     const mapped = texMap.get(id);
     if (mapped === undefined) {
-      throw new Error(`resourceSession: неизвестный стабильный textureId=${id}. ` + `Ресурс не создан в этой сессии (или restore() не выполнен после потери устройства).`);
+      throw new Error(`resourceSession: unknown stable textureId=${id}. ` + `The resource was not created in this session (or restore() has not been run after device loss).`);
     }
     return mapped;
   };
   const rawView = (id) => {
     const mapped = viewMap.get(id);
     if (mapped === undefined) {
-      throw new Error(`resourceSession: неизвестный стабильный viewId=${id}.`);
+      throw new Error(`resourceSession: unknown stable viewId=${id}.`);
     }
     return mapped;
   };
   const rawTarget = (id) => {
     const mapped = targetMap.get(id);
     if (mapped === undefined) {
-      throw new Error(`resourceSession: неизвестный стабильный targetId=${id}.`);
+      throw new Error(`resourceSession: unknown stable targetId=${id}.`);
     }
     return mapped;
   };
@@ -7226,7 +7226,7 @@ function createRendererFeedGPU(gpu, options) {
 function requireField(core, field) {
   const info = core.fields.get(field);
   if (info === undefined) {
-    throw new Error(`rune: поле фида "${field}" не объявлено в layout`);
+    throw new Error(`rune: feed field "${field}" is not declared in the layout`);
   }
   return info;
 }
@@ -7314,7 +7314,7 @@ function createWebGL2Renderer(options) {
       capture: (command2, captureOptions = {}) => withTarget(command2, targetId, captureOptions.clear !== false),
       read: () => {
         if (surfaceDisposed) {
-          return Promise.reject(new Error("rune: surface.read() после dispose — поверхность уже освобождена"));
+          return Promise.reject(new Error("rune: surface.read() after dispose — the surface is already released"));
         }
         try {
           return Promise.resolve({ width, height, data: gl.readTargetPixels(targetId) });
@@ -7493,7 +7493,7 @@ function createWebGL2Renderer(options) {
       return;
     lastGlErrorKey = key;
     const described = codes.map((c) => `${glErrorName(c)} (0x${c.toString(16)})`).join(", ");
-    options.onGlError?.(`GL error: ${described} — ошибка накоплена в последнем кадре (создание текстур/загрузки/draw)`);
+    options.onGlError?.(`GL error: ${described} — an error accumulated in the last frame (texture creation/uploads/draw)`);
   }
   function updateFrameContext(nowMs) {
     frameCtx.time = (nowMs - startedAt) / 1000;
@@ -7621,7 +7621,7 @@ function acquireWebGL2(canvas) {
       return gl;
   }
   const inIframe = typeof window !== "undefined" && window.self !== window.top;
-  throw new Error(inIframe ? "rune: WebGL2 недоступен внутри этого превью-окна (iframe без доступа к GPU). " + "Откройте страницу напрямую в браузере — в новой вкладке Chrome/Edge/Safari." : "rune: WebGL2 недоступен. Включите аппаратное ускорение в настройках браузера " + "(система → Использовать аппаратное ускорение, перезапуск) или откройте файл " + "в Chrome/Edge/Firefox свежей версии.");
+  throw new Error(inIframe ? "rune: WebGL2 is unavailable inside this preview window (an iframe without GPU access). " + "Open the page directly in the browser — in a new Chrome/Edge/Safari tab." : "rune: WebGL2 is unavailable. Enable hardware acceleration in the browser settings " + "(system → Use hardware acceleration, restart) or open the file in an " + "up-to-date Chrome/Edge/Firefox.");
 }
 function defaultNow() {
   return performance.now();
@@ -7776,7 +7776,7 @@ function createSliceArena(capacityBytes) {
   function alloc(sizeBytes) {
     const size = Math.max(ALIGN, Math.ceil(sizeBytes / ALIGN) * ALIGN);
     if (cursor + size > capacityBytes) {
-      throw new Error(`rune: slice-арена переполнена (${capacityBytes} Б)`);
+      throw new Error(`rune: slice arena overflowed (${capacityBytes} B)`);
     }
     const offset = cursor;
     cursor += size;
@@ -7785,7 +7785,7 @@ function createSliceArena(capacityBytes) {
   function allocSlice(sizeBytes) {
     const base = Math.ceil(cursor / ALIGN) * ALIGN;
     if (base + sizeBytes > capacityBytes) {
-      throw new Error(`rune: slice-арена переполнена (${capacityBytes} Б)`);
+      throw new Error(`rune: slice arena overflowed (${capacityBytes} B)`);
     }
     cursor = base + sizeBytes;
     return { base, bytes: sizeBytes };
@@ -8303,7 +8303,7 @@ function astcEntries() {
 async function createRealGPU(canvas, onGpuError) {
   const adapter = await navigator.gpu.requestAdapter();
   if (adapter === null)
-    throw new Error("rune: WebGPU-адаптер недоступен");
+    throw new Error("rune: WebGPU adapter unavailable");
   const requiredFeatures = [];
   if (adapter.features.has("timestamp-query")) {
     requiredFeatures.push("timestamp-query");
@@ -8322,7 +8322,7 @@ async function createRealGPU(canvas, onGpuError) {
   });
   const context = canvas.getContext("webgpu");
   if (context === null)
-    throw new Error("rune: webgpu-контекст канваса недоступен");
+    throw new Error("rune: webgpu canvas context unavailable");
   const gpuContext = context;
   const format = navigator.gpu.getPreferredCanvasFormat();
   const textures = new Map;
@@ -8373,7 +8373,7 @@ async function createRealGPU(canvas, onGpuError) {
   function resolveGpuFormat(id) {
     const info = GPU_FORMATS[id];
     if (info === undefined) {
-      throw new TypeError(`WebGPU не поддерживает формат '${id}' (GL-only или вне каталога)`);
+      throw new TypeError(`WebGPU does not support format '${id}' (GL-only or out of catalog)`);
     }
     return info.gpu;
   }
@@ -8430,7 +8430,7 @@ async function createRealGPU(canvas, onGpuError) {
     try {
       device.queue.writeBuffer(ubo, offset, data);
     } catch (error) {
-      onGpuError?.(`writeBuffer(uniforms, ${data.length} байт @${offset}) отклонён: ${errorMessage(error)}`);
+      onGpuError?.(`writeBuffer(uniforms, ${data.length} bytes @${offset}) rejected: ${errorMessage(error)}`);
     }
   }
   function ensureUBO(needed) {
@@ -8479,7 +8479,7 @@ async function createRealGPU(canvas, onGpuError) {
     module.getCompilationInfo().then((info) => {
       for (const message of info.messages) {
         if (message.type === "error")
-          onGpuError?.(`WGSL: ${message.message} (строка ${message.lineNum})`);
+          onGpuError?.(`WGSL: ${message.message} (line ${message.lineNum})`);
       }
     }).catch(() => {});
     const group0 = device.createBindGroupLayout({
@@ -8506,7 +8506,7 @@ async function createRealGPU(canvas, onGpuError) {
         ]
       }));
       if (variant === "unfilterable-float" && /\btextureSample\s*\(/.test(wgsl)) {
-        onGpuError?.("rgba32float без feature float32-filterable: WGSL вызывает textureSample — он требует filterable-текстуру (sampleType float). Для unfilterable-float допустим textureSampleLevel(t, s, uv, level) — он валиден и для фильтруемых текстур (level 0 = базовый мип).");
+        onGpuError?.("rgba32float without feature float32-filterable: WGSL calls textureSample — it requires a filterable texture (sampleType float). For unfilterable-float, textureSampleLevel(t, s, uv, level) is allowed — it is valid for filterable textures too (level 0 = base mip).");
       }
     }
     return device.createRenderPipeline({
@@ -8616,7 +8616,7 @@ async function createRealGPU(canvas, onGpuError) {
   function guardedWriteVertex(buffer, data, byteLength) {
     const capped = Math.min(byteLength, buffer.size);
     if (capped !== byteLength) {
-      onGpuError?.(`writeBuffer(vertex) clamp: ${byteLength} → ${capped} байт (размер буфера ${buffer.size})`);
+      onGpuError?.(`writeBuffer(vertex) clamp: ${byteLength} → ${capped} bytes (buffer size ${buffer.size})`);
     }
     if (capped <= 0)
       return;
@@ -8634,7 +8634,7 @@ async function createRealGPU(canvas, onGpuError) {
       }
       device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, capped);
     } catch (error) {
-      onGpuError?.(`writeBuffer(vertex, ${capped} байт) отклонён: ${errorMessage(error)}`);
+      onGpuError?.(`writeBuffer(vertex, ${capped} bytes) rejected: ${errorMessage(error)}`);
     }
   }
   function bindTexture(textureOrViewId) {
@@ -8714,7 +8714,7 @@ async function createRealGPU(canvas, onGpuError) {
   function createTarget(textureId, targetWidth, targetHeight, depth2, color) {
     const record = textures.get(textureId);
     if (record === undefined)
-      throw new Error(`rune: createTarget — текстура ${textureId} не найдена`);
+      throw new Error(`rune: createTarget — texture ${textureId} not found`);
     let targetDepthView = null;
     let targetDepthTexture = null;
     if (depth2) {
@@ -8796,17 +8796,17 @@ async function createRealGPU(canvas, onGpuError) {
   function readTargetPixels(targetId) {
     return new Promise((resolve3, reject) => {
       if (targetId === 0) {
-        reject(new Error("rune: readTargetPixels(0) — канвас не читается (presented-текстура живёт один кадр). Читайте ПОВЕРХНОСТЬ: renderer.surface(...) → capture/проходы → surface.read()"));
+        reject(new Error("rune: readTargetPixels(0) — the canvas cannot be read (a presented texture lives one frame). Read the SURFACE: renderer.surface(...) → capture/passes → surface.read()"));
         return;
       }
       const target = targets.get(targetId);
       if (target === undefined) {
-        reject(new Error(`rune: readTargetPixels — цель ${targetId} не найдена (удалена или не создана)`));
+        reject(new Error(`rune: readTargetPixels — target ${targetId} not found (deleted or never created)`));
         return;
       }
       const record = textures.get(target.textureId);
       if (record === undefined) {
-        reject(new Error(`rune: readTargetPixels — текстура ${target.textureId} цели ${targetId} не найдена`));
+        reject(new Error(`rune: readTargetPixels — texture ${target.textureId} of target ${targetId} not found`));
         return;
       }
       try {
@@ -8859,7 +8859,7 @@ async function createRealGPU(canvas, onGpuError) {
           try {
             buffer.destroy();
           } catch {}
-          reject(e instanceof Error ? e : new Error(`readTargetPixels: mapAsync отвергнут (${String(e)})`));
+          reject(e instanceof Error ? e : new Error(`readTargetPixels: mapAsync rejected (${String(e)})`));
         });
       } catch (e) {
         reject(e instanceof Error ? e : new Error(String(e)));
@@ -8896,7 +8896,7 @@ async function createRealGPU(canvas, onGpuError) {
   function createTextureView(textureId, options) {
     const record = textures.get(textureId);
     if (record === undefined) {
-      throw new Error(`rune: createTextureView — текстура ${textureId} не найдена`);
+      throw new Error(`rune: createTextureView — texture ${textureId} not found`);
     }
     const view = record.texture.createView({
       baseMipLevel: options?.baseMipLevel ?? 0,
@@ -9387,21 +9387,21 @@ function createResourceSessionGPU(raw, journal) {
   const rawTex = (id) => {
     const mapped = texMap.get(id);
     if (mapped === undefined) {
-      throw new Error(`resourceSession: неизвестный стабильный textureId=${id}. ` + `Ресурс не создан в этой сессии (или restore() не выполнен после потери устройства).`);
+      throw new Error(`resourceSession: unknown stable textureId=${id}. ` + `The resource was not created in this session (or restore() has not been run after device loss).`);
     }
     return mapped;
   };
   const rawView = (id) => {
     const mapped = viewMap.get(id);
     if (mapped === undefined) {
-      throw new Error(`resourceSession: неизвестный стабильный viewId=${id}.`);
+      throw new Error(`resourceSession: unknown stable viewId=${id}.`);
     }
     return mapped;
   };
   const rawTarget = (id) => {
     const mapped = targetMap.get(id);
     if (mapped === undefined) {
-      throw new Error(`resourceSession: неизвестный стабильный targetId=${id}.`);
+      throw new Error(`resourceSession: unknown stable targetId=${id}.`);
     }
     return mapped;
   };
@@ -9827,7 +9827,7 @@ async function createWebGpuRenderer(options) {
       capture: (command2, captureOptions = {}) => withTarget(command2, targetId, captureOptions.clear !== false),
       read: () => {
         if (surfaceDisposed) {
-          return Promise.reject(new Error("rune: surface.read() после dispose — поверхность уже освобождена"));
+          return Promise.reject(new Error("rune: surface.read() after dispose — surface already released"));
         }
         return gpu.readTargetPixels(targetId).then((data) => ({ width, height, data }));
       },
@@ -9849,7 +9849,7 @@ async function createWebGpuRenderer(options) {
   function createPassCommand(fragment, passOptions, targetId, resolutionSource) {
     const inputs = Object.entries(passOptions.inputs ?? {});
     if (inputs.length > 1) {
-      throw new Error("rune: v1 WebGPU-проход — один текстурный вход (bind-группа group 1); для цепочек используйте последовательные проходы");
+      throw new Error("rune: v1 WebGPU pass — a single texture input (bind group group 1); use sequential passes for chains");
     }
     const builtins = scanBuiltins(fragment);
     const uniforms = { ...passOptions.uniforms };
@@ -9989,7 +9989,7 @@ function createErrorStorm(report) {
       report?.(message);
       if (count >= ERROR_STORM_LIMIT) {
         paused = true;
-        report?.(`обнаружено ${count} ошибок GPU — рендер остановлен (пауза шторма)`);
+        report?.(`detected ${count} GPU errors — rendering stopped (storm pause)`);
       }
     },
     resume() {
@@ -10032,7 +10032,7 @@ function createRenderer(options) {
   let statsCollector = null;
   function requireInner(method) {
     if (inner === null) {
-      throw new Error(`rune: renderer.${method}() требует .start(). ` + "Сначала дождитесь await renderer.start(), потом создавайте поверхности/текстуры/проходы.");
+      throw new Error(`rune: renderer.${method}() requires .start(). ` + "First await renderer.start(), then create surfaces/textures/passes.");
     }
     return inner;
   }
@@ -10342,12 +10342,12 @@ function lateRejectError(spec, backend) {
   const hasOther = backend === "webgl2" ? !!spec.shader.wgsl : !!spec.shader.glsl;
   const other = backend === "webgl2" ? "WGSL" : "GLSL";
   const target = backend === "webgl2" ? "GLSL" : "WGSL";
-  const id = spec.id ?? "<без id>";
+  const id = spec.id ?? "<no id>";
   const altOrder = backend === "webgl2" ? '["webgpu","webgl2"]' : '["webgl2","webgpu"]';
   if (hasOther) {
-    return new Error(`Spec "${id}" имеет только ${other}, а активный бэкенд — ${backend.toUpperCase()} (нет ${target}). ` + `Перезапустите с backend=${altOrder} ИЛИ добавьте ${target} к спеку.`);
+    return new Error(`Spec "${id}" has only ${other}, while the active backend is ${backend.toUpperCase()} (no ${target}). ` + `Restart with backend=${altOrder} OR add ${target} to the spec.`);
   }
-  return new Error(`Spec "${id}" не имеет ни GLSL, ни WGSL. Невалидный спек — добавьте хотя бы один вариант шейдера.`);
+  return new Error(`Spec "${id}" has neither GLSL nor WGSL. Invalid spec — add at least one shader variant.`);
 }
 function adaptAndCompile(spec, backend, inner) {
   if (backend === "webgpu") {
@@ -10378,7 +10378,7 @@ function makeProxyCommand() {
     id: -1,
     record(props, frameCtx, writer) {
       if (real === null) {
-        throw new Error("rune: вызван command.record() до renderer.start(). Сначала дождитесь await renderer.start().");
+        throw new Error("rune: command.record() called before renderer.start(). First await renderer.start().");
       }
       real.record(props, frameCtx, writer);
       lastPropsValue = props;
@@ -10736,7 +10736,7 @@ async function bootWebGl2(target, options) {
 async function bootWebGpu(target, options) {
   const canvas = resolveCanvas(target);
   if (!await probeWebGpu()) {
-    return dead("webgpu", new Error("WebGPU недоступен: navigator.gpu отсутствует или адаптер не получен"));
+    return dead("webgpu", new Error("WebGPU unavailable: navigator.gpu is missing or no adapter was obtained"));
   }
   try {
     const webgpu = await showOnWebGpu(canvas, options);
@@ -10781,10 +10781,10 @@ function resolveCanvas(target) {
   if (typeof target !== "string")
     return target;
   if (typeof document === "undefined")
-    throw new Error("rune: showOn без DOM требует элемент");
+    throw new Error("rune: showOn without DOM requires an element");
   const canvas = document.querySelector(target);
   if (canvas === null)
-    throw new Error(`rune: канвас "${target}" не найден`);
+    throw new Error(`rune: canvas "${target}" not found`);
   return canvas;
 }
 function setLabel(selector, text) {
@@ -10809,17 +10809,17 @@ async function showAny(target, options = {}) {
   }
   const fresh = freshCanvas(canvas);
   const webgl2 = show(fresh, options);
-  setBackendLabel2("WebGL2 (фолбэк)", options.badge);
+  setBackendLabel2("WebGL2 (fallback)", options.badge);
   return { backend: "webgl2", webgl2, stop: () => webgl2.stop() };
 }
 function resolveCanvas2(target) {
   if (typeof target !== "string")
     return target;
   if (typeof document === "undefined")
-    throw new Error("rune: show без DOM требует элемент");
+    throw new Error("rune: show without DOM requires an element");
   const canvas = document.querySelector(target);
   if (canvas === null)
-    throw new Error(`rune: канвас "${target}" не найден`);
+    throw new Error(`rune: canvas "${target}" not found`);
   return canvas;
 }
 function freshCanvas(old) {
@@ -10841,8 +10841,8 @@ function reportFallbackReason(error) {
   if (reason === null)
     return;
   reason.style.display = "block";
-  reason.textContent = `WebGPU не запустился: ${String(error instanceof Error ? error.message : error)}
-Рендерим на WebGL2.`;
+  reason.textContent = `WebGPU failed to start: ${String(error instanceof Error ? error.message : error)}
+Falling back to WebGL2.`;
 }
 // packages/gl/src/webgpuScope.ts
 var WEBUGPU_PROBE_MARKER = "__runeWebgpuProbe";
@@ -10959,27 +10959,27 @@ function probeWebgpuScope(options = {}) {
 function describeWebgpuScope(a) {
   switch (a.scope) {
     case "everywhere":
-      return "WebGPU API выдан везде: navigator.gpu есть и в главном потоке, и в воркерах.";
+      return "WebGPU API is granted everywhere: navigator.gpu exists both in the main thread and in workers.";
     case "main-only":
-      return "WebGPU API только в главном потоке: воркерам navigator.gpu не выдан (Chrome на Android, Safari, Firefox). Рендер в воркере на WebGPU невозможен — там только WebGL2.";
+      return "WebGPU API only in the main thread: workers are not granted navigator.gpu (Chrome on Android, Safari, Firefox). WebGPU rendering in a worker is impossible — only WebGL2 there.";
     case "worker-only":
-      return "WebGPU API только в воркерах: в главном потоке navigator.gpu отсутствует (редкая конфигурация).";
+      return "WebGPU API only in workers: navigator.gpu is missing in the main thread (a rare configuration).";
     case "nowhere":
-      return "WebGPU API отсутствует и в главном потоке, и в воркерах — WebGPU в этом окружении нет.";
+      return "WebGPU API is missing both in the main thread and in workers — there is no WebGPU in this environment.";
   }
   if (a.workerProbe === "unsupported") {
-    return "WebGPU-скоуп неизвестен: микро-проба воркера не поднялась (Worker/Blob недоступны или CSP).";
+    return "WebGPU scope unknown: the worker micro-probe did not start (Worker/Blob unavailable or CSP).";
   }
   if (a.workerProbe === "timeout") {
-    return "WebGPU-скоуп неизвестен: микро-проба воркера не ответила вовремя.";
+    return "WebGPU scope unknown: the worker micro-probe did not answer in time.";
   }
   if (a.workerProbe === "pending") {
-    return "WebGPU-скоуп выясняется: микро-проба воркера в полёте (миллисекунды, без GPU-инициализации).";
+    return "WebGPU scope is being determined: the worker micro-probe is in flight (milliseconds, no GPU initialization).";
   }
   if (a.main === null) {
-    return `WebGPU-скоуп неизвестен: факт главного потока не сообщён (снапшот взят вне main; факт текущего потока: navigator.gpu ${a.here ? "есть" : "нет"}).`;
+    return `WebGPU scope unknown: the main-thread fact was not reported (the snapshot was taken outside main; the current thread's fact: navigator.gpu ${a.here ? "present" : "absent"}).`;
   }
-  return `WebGPU-скоуп выяснен частично: main=${a.main ? "yes" : "no"}, воркер неизвестен — вызовите probeWebgpuScope().`;
+  return `WebGPU scope determined partially: main=${a.main ? "yes" : "no"}, worker unknown — call probeWebgpuScope().`;
 }
 // packages/gl/src/adapters.ts
 init_src();

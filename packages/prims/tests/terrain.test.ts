@@ -1,11 +1,11 @@
 /**
- * Террейны и шум @rune/prims (Task 107):
- *   • шум ДЕТЕРМИНИРОВАН (seed → побайтово одна геометрия), в [0,1],
- *     непрерывен, узлы решётки = хеш;
- *   • террейн: сетка segments² ячеек, нормали центральных разностей
- *     единичные и ПРАВИЛЬНЫЕ (проверка на плоскости и известном наклоне);
- *   • UV: v = нормализованная высота [0,1] (min/max поля);
- *   • пресеты: разные seed → разный рельеф; рельеф в разумном диапазоне.
+ * Terrains and noise of @rune/prims (Task 107):
+ *   • the noise is DETERMINISTIC (seed → byte-identical geometry), in [0,1],
+ *     continuous, lattice nodes = hash;
+ *   • terrain: a grid of segments² cells, central-difference normals
+ *     are unit and CORRECT (checked on a plane and a known slope);
+ *   • UV: v = normalized height [0,1] (the field's min/max);
+ *   • presets: different seeds → different relief; the relief is in a sane range.
  */
 
 import { describe, test, expect } from 'bun:test'
@@ -15,8 +15,8 @@ import {
 } from '../src/terrain.ts'
 import { hash2i, valueNoise2D, fbm2D, ridged2D } from '../src/noise.ts'
 
-describe('prims/noise — детерминированный value-noise', () => {
-  test('hash2i детерминирован и в [0,1), разные входы расходятся', () => {
+describe('prims/noise — deterministic value-noise', () => {
+  test('hash2i is deterministic and in [0,1), different inputs diverge', () => {
     expect(hash2i(3, 7, 11)).toBe(hash2i(3, 7, 11))
     expect(hash2i(3, 7, 11)).not.toBe(hash2i(3, 7, 12))
     expect(hash2i(3, 7, 11)).not.toBe(hash2i(4, 7, 11))
@@ -26,10 +26,10 @@ describe('prims/noise — детерминированный value-noise', () =>
       expect(v).toBeLessThan(1)
     }
   })
-  test('valueNoise2D: непрерывен, в узлах решётки = хеш, диапазон [0,1]', () => {
-    // узел решётки — точное хеш-значение
+  test('valueNoise2D: continuous, equal to the hash at lattice nodes, range [0,1]', () => {
+    // a lattice node — the exact hash value
     expect(valueNoise2D(4, 2, 9)).toBeCloseTo(hash2i(4, 2, 9), 10)
-    // непрерывность: середина между узлами близка к среднему соседей
+    // continuity: the midpoint between nodes is close to the average of the neighbors
     const mid = valueNoise2D(4.5, 2, 9)
     const a = valueNoise2D(4, 2, 9)
     const b = valueNoise2D(5, 2, 9)
@@ -41,7 +41,7 @@ describe('prims/noise — детерминированный value-noise', () =>
       expect(v).toBeLessThanOrEqual(1)
     }
   })
-  test('fbm2D/ridged2D: детерминированы, диапазон [0,1]', () => {
+  test('fbm2D/ridged2D: deterministic, range [0,1]', () => {
     expect(fbm2D(1.3, 2.7, 5)).toBe(fbm2D(1.3, 2.7, 5))
     expect(ridged2D(1.3, 2.7, 5)).toBe(ridged2D(1.3, 2.7, 5))
     for (let i = 0; i < 100; i++) {
@@ -57,36 +57,36 @@ describe('prims/noise — детерминированный value-noise', () =>
   })
 })
 
-describe('prims/terrain — сетка и нормали', () => {
-  test('счёт: segments² ячеек × 2 треугольника × 3 вершины; массивы согласованы', () => {
+describe('prims/terrain — grid and normals', () => {
+  test('count: segments² cells × 2 triangles × 3 vertices; arrays are consistent', () => {
     const g = terrain(2, 8, () => 0)
     expect(g.vertexCount).toBe(8 * 8 * 6)
     expect(g.positions.length).toBe(g.vertexCount * 3)
     expect(g.normals.length).toBe(g.vertexCount * 3)
     expect(g.uvs.length).toBe(g.vertexCount * 2)
   })
-  test('плоский рельеф: все нормали +Y, высота const, UV.y вырожден-константен', () => {
+  test('flat relief: all normals +Y, height const, UV.y is degenerate-constant', () => {
     const g = terrain(2, 4, () => 0.3)
     for (let i = 0; i < g.vertexCount; i++) {
       expect(g.positions[i * 3 + 1]!).toBeCloseTo(0.3, 6)
       expect(g.normals[i * 3]!).toBeCloseTo(0, 6)
       expect(g.normals[i * 3 + 1]!).toBeCloseTo(1, 6)
       expect(g.normals[i * 3 + 2]!).toBeCloseTo(0, 6)
-      // одно-высотное поле: span → 1e-6, нормализованная высота ≡ 0
+      // a single-height field: span → 1e-6, normalized height ≡ 0
       expect(g.uvs[i * 2 + 1]!).toBeCloseTo(0, 6)
     }
   })
-  test('линейный склон: нормали перпендикулярны градиенту (аналитически известно)', () => {
+  test('linear slope: normals are perpendicular to the gradient (known analytically)', () => {
     // h(x,z) = 0.5·x → ∂h/∂x = 0.5, ∂h/∂z = 0
     const g = terrain(2, 6, (x) => 0.5 * x)
-    // Нормаль ∝ (−0.5, 1, 0)/‖·‖ → ny/nx = −2
+    // Normal ∝ (−0.5, 1, 0)/‖·‖ → ny/nx = −2
     for (let i = 0; i < g.vertexCount; i++) {
       expect(g.normals[i * 3 + 1]! / g.normals[i * 3]!).toBeCloseTo(-2, 3)
       expect(g.normals[i * 3 + 2]!).toBeCloseTo(0, 3)
     }
   })
-  test('UV: v = нормализованная высота поля [0,1] (min→0, max→1)', () => {
-    const g = terrain(2, 6, (x, z) => Math.hypot(x, z)) // конус: центр 0, край ~√2
+  test('UV: v = normalized field height [0,1] (min→0, max→1)', () => {
+    const g = terrain(2, 6, (x, z) => Math.hypot(x, z)) // a cone: center 0, edge ~√2
     let vMin = 1
     let vMax = 0
     for (let i = 0; i < g.vertexCount; i++) {
@@ -95,7 +95,7 @@ describe('prims/terrain — сетка и нормали', () => {
     }
     expect(vMin).toBeCloseTo(0, 5)
     expect(vMax).toBeCloseTo(1, 5)
-    // u — по X: левый край 0, правый 1
+    // u — along X: left edge 0, right edge 1
     let uMin = 1
     let uMax = 0
     for (let i = 0; i < g.vertexCount; i++) {
@@ -105,16 +105,16 @@ describe('prims/terrain — сетка и нормали', () => {
     expect(uMin).toBeCloseTo(0, 5)
     expect(uMax).toBeCloseTo(1, 5)
   })
-  test('нормали единичные на резком рельефе', () => {
+  test('normals are unit on steep relief', () => {
     const g = terrain(2, 16, (x, z) => (Math.abs(x) < 0.1 && Math.abs(z) < 0.1 ? 5 : 0))
     for (let i = 0; i < g.vertexCount; i++) {
       const len = Math.hypot(g.normals[i * 3]!, g.normals[i * 3 + 1]!, g.normals[i * 3 + 2]!)
       expect(len).toBeCloseTo(1, 4)
     }
   })
-  test('WINDING (Task 108): грани CCW при взгляде СВЕРХУ — Y нормали cross(b−a, c−a) > 0', () => {
-    // Прежняя сетка шла CW сверху (cross = −Y): рельеф рендерился НИЖНЕЙ
-    // стороной при cull:back. Обход (i,j) → (i,j+1) → (i+1,j+1) даёт +Y.
+  test('WINDING (Task 108): faces CCW when viewed FROM ABOVE — the Y of the normal cross(b−a, c−a) > 0', () => {
+    // The former grid went CW from above (cross = −Y): the relief rendered its
+    // UNDERSIDE with cull:back. Winding (i,j) → (i,j+1) → (i+1,j+1) gives +Y.
     for (const g of [terrain(2, 8, (x, z) => x * z), terrainHills(2, 12, { seed: 7 })]) {
       for (let t = 0; t < g.vertexCount / 3; t++) {
         const o = t * 9
@@ -127,12 +127,12 @@ describe('prims/terrain — сетка и нормали', () => {
   })
 })
 
-describe('prims/terrain — пресеты', () => {
-  test('детерминизм: одинаковый seed → равные позиции поэлементно, другой seed — другой рельеф', () => {
+describe('prims/terrain — presets', () => {
+  test('determinism: the same seed → element-wise equal positions, another seed — another relief', () => {
     const a = terrainHills(2, 12, { seed: 42 })
     const b = terrainHills(2, 12, { seed: 42 })
-    // (Buffer.from(Float32Array) усекает значения до байтов — сравниваем
-    // поэлементно, это честная проверка побайтовости)
+    // (Buffer.from(Float32Array) truncates values to bytes — we compare
+    // element-wise, an honest check of byte-identity)
     let same = true
     for (let i = 0; i < a.positions.length; i++) {
       if (a.positions[i] !== b.positions[i]) { same = false; break }
@@ -145,7 +145,7 @@ describe('prims/terrain — пресеты', () => {
     }
     expect(diff).toBeGreaterThan(0)
   })
-  test('все 6 пресетов: согласованность + диапазон высот + нормали единичные', () => {
+  test('all 6 presets: consistency + height range + unit normals', () => {
     const makers = [terrainHills, terrainRidged, terrainIsland, terrainDunes, terrainCanyon, terrainVolcano]
     for (const make of makers) {
       const g = make(2, 10, { seed: 7 })
@@ -158,17 +158,17 @@ describe('prims/terrain — пресеты', () => {
         minY = Math.min(minY, g.positions[i * 3 + 1]!)
         maxY = Math.max(maxY, g.positions[i * 3 + 1]!)
       }
-      // рельеф не вырожден (есть перепад) и не безумен (|h| < 3)
+      // the relief is not degenerate (there is a spread) and not insane (|h| < 3)
       expect(maxY - minY).toBeGreaterThan(0.1)
       expect(Math.abs(minY)).toBeLessThan(3)
       expect(Math.abs(maxY)).toBeLessThan(3)
     }
   })
-  test('остров: центр выше края (гора в середине, океан по краю)', () => {
+  test('island: the center is higher than the edge (a mountain in the middle, ocean at the rim)', () => {
     const cells = 24
     const island = terrainIsland(2, cells, { seed: 3 })
-    // высота ближайшей к (nx,nz) вершины СЕТКИ: первая вершина ячейки (i,j)
-    // — это её узел (i,j) (emit(i,j) идёт первым в ячейке)
+    // the height of the GRID vertex closest to (nx,nz): the first vertex of cell (i,j)
+    // is its node (i,j) (emit(i,j) comes first in the cell)
     const hAt = (nx: number, nz: number): number => {
       const i = Math.round(((nx + 1) / 2) * cells)
       const j = Math.round(((nz + 1) / 2) * cells)
@@ -177,7 +177,7 @@ describe('prims/terrain — пресеты', () => {
     }
     expect(hAt(0, 0)).toBeGreaterThan(hAt(0.9, 0.9) + 0.05)
   })
-  test('вулкан: центр ниже обода (кратер)', () => {
+  test('volcano: the center is lower than the rim (a crater)', () => {
     const cells = 32
     const volcano = terrainVolcano(2, cells, { seed: 13 })
     const hAt = (nx: number): number => {
@@ -190,7 +190,7 @@ describe('prims/terrain — пресеты', () => {
     const center = hAt(0)
     expect(rim).toBeGreaterThan(center + 0.1)
   })
-  test('таблица пресетов: 6 записей с label/amplitude/note', () => {
+  test('preset table: 6 entries with label/amplitude/note', () => {
     const keys = Object.keys(terrainPresets)
     expect(keys.sort()).toEqual(['canyon', 'dunes', 'hills', 'island', 'ridged', 'volcano'])
     for (const key of keys) {
@@ -201,7 +201,7 @@ describe('prims/terrain — пресеты', () => {
       expect(typeof p.height(1)).toBe('function')
     }
   })
-  test('heightHills — чистая функция высоты (без геометрии)', () => {
+  test('heightHills — a pure height function (no geometry)', () => {
     const h = heightHills(9)
     const a = h(0.3, -0.7)
     expect(a).toBe(h(0.3, -0.7))

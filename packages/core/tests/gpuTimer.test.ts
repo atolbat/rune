@@ -1,12 +1,12 @@
 /**
- * Тесты GpuTimer — интерфейс + StatsCollector integration.
+ * GpuTimer tests — the interface + StatsCollector integration.
  *
- * Покрываем:
- *  - GpuTimer: mock begin/end/result — результат сдвинут на 1 кадр
+ * Covers:
+ *  - GpuTimer: mock begin/end/result — the result is shifted by one frame
  *  - StatsCollector.setGpuTimer(null) → gpuMs = null
- *  - StatsCollector.setGpuTimer(timer) → gpuMs появляется после 2-х кадров
- *  - Snapshot отражает текущий gpuMs
- *  - Disjoint (timer.result=null) → gpuMs сбрасывается в null
+ *  - StatsCollector.setGpuTimer(timer) → gpuMs appears after 2 frames
+ *  - Snapshot reflects the current gpuMs
+ *  - Disjoint (timer.result=null) → gpuMs resets to null
  */
 
 import { test } from 'bun:test'
@@ -14,7 +14,7 @@ import { expect } from 'bun:test'
 import { createStatsCollector } from '@rune/core'
 import type { GpuTimer } from '@rune/core'
 
-// ─── Mock GpuTimer — фиксированные результаты для тестов ─────────────────────
+// ─── Mock GpuTimer — fixed results for tests ─────────────────────
 
 function createMockGpuTimer(results: (number | null)[]): GpuTimer {
   let idx = 0
@@ -27,7 +27,7 @@ function createMockGpuTimer(results: (number | null)[]): GpuTimer {
       active = false
     },
     result() {
-      // Возвращает следующий результат из массива (или последний)
+      // Returns the next result from the array (or the last one)
       if (idx < results.length) {
         return results[idx++]!
       }
@@ -36,9 +36,9 @@ function createMockGpuTimer(results: (number | null)[]): GpuTimer {
   }
 }
 
-// ─── StatsCollector без timer → gpuMs=null ───────────────────────────────────
+// ─── StatsCollector without a timer → gpuMs=null ───────────────────────────────────
 
-test('StatsCollector без timer → gpuMs = null в snapshot', () => {
+test('StatsCollector without a timer → gpuMs = null in the snapshot', () => {
   let t = 0
   const sc = createStatsCollector(() => t)
   sc.beginFrame()
@@ -50,7 +50,7 @@ test('StatsCollector без timer → gpuMs = null в snapshot', () => {
   expect(s.gpuMs).toBeNull()
 })
 
-// ─── StatsCollector.setGpuTimer(null) → gpuMs остаётся null ──────────────────
+// ─── StatsCollector.setGpuTimer(null) → gpuMs stays null ──────────────────
 
 test('StatsCollector.setGpuTimer(null) → gpuMs = null', () => {
   let t = 0
@@ -61,114 +61,114 @@ test('StatsCollector.setGpuTimer(null) → gpuMs = null', () => {
   expect(sc.snapshot().gpuMs).toBeNull()
 })
 
-// ─── GpuTimer: 1-й кадр → result=null (нет предыдущего), 2-й кадр → число ────
+// ─── GpuTimer: frame 1 → result=null (no previous), frame 2 → a number ────
 
-test('GpuTimer mock: 1-й кадр result() возвращает null, 2-й кадр — число', () => {
+test('GpuTimer mock: frame 1 result() returns null, frame 2 — a number', () => {
   let t = 0
-  // Последовательность: кадр 1 begin/end → result=null (нет прошлого)
-  //                       кадр 2 begin/end → result=12.3 (прошлый кадр)
+  // Sequence: frame 1 begin/end → result=null (no past)
+  //                       frame 2 begin/end → result=12.3 (the previous frame)
   const timer = createMockGpuTimer([null, 12.3])
   const sc = createStatsCollector(() => t)
   sc.setGpuTimer(timer)
 
-  // Кадр 1
-  sc.beginFrame() // timer.begin() — query открыт
+  // Frame 1
+  sc.beginFrame() // timer.begin() — the query is open
   t = 5
-  sc.endFrame() // timer.end() — query закрыт
+  sc.endFrame() // timer.end() — the query is closed
 
-  // На момент snapshot после 1-го кадра — gpuMs=null (нет прошлого query)
-  // (begin прочитал null от timer.result() — это и есть gpuMs)
+  // At snapshot time after frame 1 — gpuMs=null (no past query)
+  // (begin read null from timer.result() — that is the gpuMs)
   expect(sc.snapshot().gpuMs).toBeNull()
 
-  // Кадр 2
-  sc.beginFrame() // timer.begin() → timer.result() возвращает 12.3 (прошлый)
+  // Frame 2
+  sc.beginFrame() // timer.begin() → timer.result() returns 12.3 (the previous one)
   t = 10
   sc.endFrame()
   expect(sc.snapshot().gpuMs).toBe(12.3)
 })
 
-// ─── GpuTimer: disjoint → result=null → gpuMs сбрасывается ──────────────────
+// ─── GpuTimer: disjoint → result=null → gpuMs resets ──────────────────
 
-test('GpuTimer mock: disjoint (result=null в середине) → gpuMs=null', () => {
+test('GpuTimer mock: disjoint (result=null in the middle) → gpuMs=null', () => {
   let t = 0
-  // Последовательность: кадр 1 → result=null (нет прошлого)
-  //                       кадр 2 → result=15.5 (прошлый кадр)
-  //                       кадр 3 → result=null (disjoint, сброс)
+  // Sequence: frame 1 → result=null (no past)
+  //                       frame 2 → result=15.5 (the previous frame)
+  //                       frame 3 → result=null (disjoint, reset)
   const timer = createMockGpuTimer([null, 15.5, null])
   const sc = createStatsCollector(() => t)
   sc.setGpuTimer(timer)
 
-  // Кадр 1 — gpuMs = null (нет прошлого)
+  // Frame 1 — gpuMs = null (no past)
   sc.beginFrame()
   sc.endFrame()
   expect(sc.snapshot().gpuMs).toBeNull()
 
-  // Кадр 2 — gpuMs = 15.5 (прошлый кадр)
+  // Frame 2 — gpuMs = 15.5 (the previous frame)
   sc.beginFrame()
   sc.endFrame()
   expect(sc.snapshot().gpuMs).toBe(15.5)
 
-  // Кадр 3 — gpuMs = null (disjoint сброс)
+  // Frame 3 — gpuMs = null (disjoint reset)
   sc.beginFrame()
   sc.endFrame()
   expect(sc.snapshot().gpuMs).toBeNull()
 })
 
-// ─── setGpuTimer после 1-го кадра — следующий кадр читает null ───────────────
+// ─── setGpuTimer after frame 1 — the next frame reads null ───────────────
 
-test('setGpuTimer(t) после 1-го кадра → следующий кадр gpuMs=null (нет прошлого)', () => {
+test('setGpuTimer(t) after frame 1 → next frame gpuMs=null (no past)', () => {
   let t = 0
   const sc = createStatsCollector(() => t)
-  // Кадр 1 без timer
+  // Frame 1 without a timer
   sc.beginFrame()
   sc.endFrame()
   expect(sc.snapshot().gpuMs).toBeNull()
 
-  // Подключаем timer после 1-го кадра
+  // Attach the timer after frame 1
   const timer = createMockGpuTimer([null, 42.0])
   sc.setGpuTimer(timer)
 
-  // Кадр 2 — timer.begin дёргает result() → null (прошлого нет)
+  // Frame 2 — timer.begin pulls result() → null (no past)
   sc.beginFrame()
   sc.endFrame()
   expect(sc.snapshot().gpuMs).toBeNull()
 
-  // Кадр 3 — timer.begin дёргает result() → 42.0 (кадр 2 закрыт)
+  // Frame 3 — timer.begin pulls result() → 42.0 (frame 2 is closed)
   sc.beginFrame()
   sc.endFrame()
   expect(sc.snapshot().gpuMs).toBe(42.0)
 })
 
-// ─── setGpuTimer(null) после работы timer → gpuMs снова null ─────────────────
+// ─── setGpuTimer(null) after the timer has run → gpuMs is null again ─────────────────
 
-test('setGpuTimer(null) после работы → gpuMs снова null', () => {
+test('setGpuTimer(null) after running → gpuMs is null again', () => {
   let t = 0
   const timer = createMockGpuTimer([null, 99.9])
   const sc = createStatsCollector(() => t)
   sc.setGpuTimer(timer)
 
-  // Кадр 1
+  // Frame 1
   sc.beginFrame()
   sc.endFrame()
   expect(sc.snapshot().gpuMs).toBeNull()
 
-  // Кадр 2
+  // Frame 2
   sc.beginFrame()
   sc.endFrame()
   expect(sc.snapshot().gpuMs).toBe(99.9)
 
-  // Отключаем timer
+  // Detach the timer
   sc.setGpuTimer(null)
 
-  // Кадр 3 — gpuMs снова null (нет timer)
+  // Frame 3 — gpuMs is null again (no timer)
   sc.beginFrame()
   sc.endFrame()
   expect(sc.snapshot().gpuMs).toBeNull()
 })
 
-// ─── drawCalls и memory не зависят от timer ─────────────────────────────────
+// ─── drawCalls and memory do not depend on the timer ─────────────────────────────────
 
-test('StatsCollector с timer: drawCalls и memoryEstimate работают независимо', () => {
+test('StatsCollector with a timer: drawCalls and memoryEstimate work independently', () => {
   let t = 0
   const timer = createMockGpuTimer([null, 7.7])
   const sc = createStatsCollector(() => t)
@@ -184,24 +184,24 @@ test('StatsCollector с timer: drawCalls и memoryEstimate работают не
   expect(s.cpuMs).toBe(3)
   expect(s.drawCalls).toBe(2)
   expect(s.memoryEstimate).toBe(1024)
-  expect(s.gpuMs).toBeNull() // первый кадр, нет прошлого
+  expect(s.gpuMs).toBeNull() // first frame, no past
 
-  // Кадр 2
+  // Frame 2
   sc.beginFrame()
   sc.addDrawCall()
   sc.endFrame()
   const s2 = sc.snapshot()
   expect(s2.gpuMs).toBe(7.7)
-  expect(s2.drawCalls).toBe(1) // новый кадр, обнулён
-  expect(s2.memoryEstimate).toBe(1024) // аккумулятор
+  expect(s2.drawCalls).toBe(1) // a new frame, reset to zero
+  expect(s2.memoryEstimate).toBe(1024) // an accumulator
   expect(s2.frameCount).toBe(2)
 })
 
-// ─── GpuTimer idempotent: begin дважды = no-op ───────────────────────────────
+// ─── GpuTimer idempotent: begin twice = no-op ───────────────────────────────
 
-test('GpuTimer mock: begin дважды подряд = no-op (не падает)', () => {
+test('GpuTimer mock: begin twice in a row = no-op (does not throw)', () => {
   const timer = createMockGpuTimer([5.0])
-  // Дважды begin без end между ними
+  // begin twice with no end in between
   expect(() => {
     timer.begin()
     timer.begin()
@@ -210,9 +210,9 @@ test('GpuTimer mock: begin дважды подряд = no-op (не падает)
   expect(timer.result()).toBe(5.0)
 })
 
-// ─── GpuTimer end без begin = no-op ──────────────────────────────────────────
+// ─── GpuTimer end without begin = no-op ──────────────────────────────────────────
 
-test('GpuTimer mock: end без begin = no-op', () => {
+test('GpuTimer mock: end without begin = no-op', () => {
   const timer = createMockGpuTimer([3.3])
   expect(() => timer.end()).not.toThrow()
   expect(timer.result()).toBe(3.3)

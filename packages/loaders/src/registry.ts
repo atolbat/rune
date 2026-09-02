@@ -1,32 +1,32 @@
 /**
- * Реестр форматов + AssetLoader — фасад загрузки всех ассетов.
+ * Format registry + AssetLoader — the loading facade for all assets.
  *
  * ══════════════════════════════════════════════════════════════════════════
- * КОНТРАКТ:
+ * CONTRACT:
  *
  *   const loader = new AssetLoader({ scheduler, fetchImpl, ... })
  *   const handle = loader.load('model.glb', { onProgress, priority })
  *   const model: GltfModel = await handle        // handle — thenable
- *   handle.cancel('не нужен')
+ *   handle.cancel('not needed')
  *
- *   • Формат выбирается автоматически: расширение → magic-байты
- *     (glTF/FBX → 'glb'/'fbx', остальное → 'bytes').
- *   • Прогресс — честный, фазовый: queued → fetching (0.7) →
- *     parsing (0.2) → transforming (0.1) → done. Байтовый прогресс
- *     стриминга, фазовый — парсеров (onPhase).
- *   • Дедупликация по URL: параллельные load() одного URL получают
- *     ОДИН handle (jobs-Map). Кэш LRU с бюджетом байт (256 МБ
- *     по умолчанию), eviction НЕ трогает активные задачи.
- *   • Группа: loadGroup([...]) — агрегированный прогресс/отмена.
- *   • Свои форматы: registerFormat(id, extensions, parse) —
- *     приоритетнее встроенных (unshift).
+ *   • The format is chosen automatically: extension → magic bytes
+ *     (glTF/FBX → 'glb'/'fbx', everything else → 'bytes').
+ *   • Progress is honest, phased: queued → fetching (0.7) →
+ *     parsing (0.2) → transforming (0.1) → done. Byte progress is
+ *     from streaming, phase progress from parsers (onPhase).
+ *   • Deduplication by URL: parallel load() calls of the same URL get
+ *     ONE handle (jobs-Map). LRU cache with a byte budget (256 MB
+ *     by default), eviction does NOT touch active jobs.
+ *   • Group: loadGroup([...]) — aggregated progress/cancellation.
+ *   • Custom formats: registerFormat(id, extensions, parse) —
+ *     take precedence over the built-ins (unshift).
  *
- * СОСТАВ встроенных форматов: glb, gltf (.gltf + внешние буферы),
- * obj, mtl, fbx (скелетная анимация — parseFBX), image (MIME по
- * magic-байтам), config (json/zml/ini/txt + регистрируемые),
- * bytes (bin/ktx2 — сырые байты).
+ * COMPOSITION of built-in formats: glb, gltf (.gltf + external buffers),
+ * obj, mtl, fbx (skeletal animation — parseFBX), image (MIME by
+ * magic bytes), config (json/zml/ini/txt + registered ones),
+ * bytes (bin/ktx2 — raw bytes).
  *
- * Лоадер не знает про GPU: ассеты — декодированные данные.
+ * The loader knows nothing about the GPU: assets are decoded data.
  */
 
 import { asciiDecode, nowMs } from './bytes.ts'
@@ -46,83 +46,83 @@ import { parseImage } from './image.ts'
 import { parseConfig, registerConfigParser, configParserOf, type ConfigParser } from './config.ts'
 import { parseFBX } from './fbx.ts'
 
-// ─── Типы ────────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
-/** Фаза жизненного цикла загрузки. */
+/** Load lifecycle phase. */
 export type LoadPhase = 'queued' | 'fetching' | 'parsing' | 'transforming' | 'done' | 'error' | 'cancelled'
 
 export type OnAssetPhase = (phase: GltfPhase) => void
 
-/** Снапшот прогресса (immutable, идёт в onProgress и события). */
+/** Progress snapshot (immutable, goes to onProgress and events). */
 export interface LoadProgress {
   readonly phase: LoadPhase
   readonly loaded: number
   readonly total: number
-  /** Прогресс внутри текущей фазы (0..1). */
+  /** Progress within the current phase (0..1). */
   readonly phaseRatio: number
-  /** Общий прогресс с весами фаз (0..1). */
+  /** Overall progress with phase weights (0..1). */
   readonly ratio: number
   readonly url: string
   readonly cached: boolean
   readonly detail: string
 }
 
-/** Контекст, передаваемый парсеру формата. */
+/** Context passed to a format parser. */
 export interface ParserContext {
   readonly url: string
   readonly assembler: Assembler
-  /** Составной сигнал: отмена задачи + внешняя. */
+  /** Composite signal: job cancellation + external. */
   readonly signal: AbortSignal
   readonly onPhase: OnAssetPhase
-  /** Разрешённый относительный URI → байты (внешние буферы .gltf). */
+  /** Resolve a relative URI → bytes (external .gltf buffers). */
   readonly loadExternal: (uri: string) => Promise<Uint8Array>
   readonly createBitmap?: CreateBitmap
   readonly dracoDecoder?: DracoDecoder
 }
 
-/** Описание формата в реестре. */
+/** Format description in the registry. */
 export interface FormatDescriptor {
   readonly id: string
   readonly extensions: readonly string[]
   readonly parse: (ctx: ParserContext) => Promise<unknown>
 }
 
-/** Пост-обработка ассета (конверсии, кэш-сборка, LOD-стриппинг). */
+/** Asset post-processing (conversions, cache assembly, LOD stripping). */
 export type TransformHook = (
   asset: unknown,
   meta: { url: string; bytes: number; fetchedMs: number; parsedMs: number },
 ) => unknown | Promise<unknown>
 
-/** Опции единичной загрузки. */
+/** Single load options. */
 export interface LoadOptions {
-  /** Приоритет в планировщике (меньше = раньше). По умолчанию 5. */
+  /** Priority in the scheduler (lower = earlier). Default 5. */
   readonly priority?: number
-  /** Начальный вес байт для бюджета планировщика. По умолчанию 8 МБ. */
+  /** Initial byte weight for the scheduler budget. Default 8 MB. */
   readonly weightBytes?: number
   readonly signal?: AbortSignal
   readonly connectTimeoutMs?: number
   readonly retries?: number
-  /** Форсировать парсер по id (мимо расширения/magic-байтов). */
+  /** Force a parser by id (bypassing extension/magic bytes). */
   readonly parser?: string
-  /** Не класть результат в кэш. */
+  /** Do not put the result into the cache. */
   readonly noCache?: boolean
   readonly transform?: readonly TransformHook[]
   readonly onProgress?: (progress: LoadProgress) => void
 }
 
-/** Опции конструктора AssetLoader. */
+/** AssetLoader constructor options. */
 export interface AssetLoaderOptions {
   readonly scheduler?: FetchScheduler
   readonly fetchImpl?: typeof fetch
-  /** Бюджет байт-кэша; ≤0 — кэш без ограничений. По умолчанию 256 МБ. */
+  /** Byte cache budget; ≤0 — unlimited cache. Default 256 MB. */
   readonly cacheBytesLimit?: number
   readonly createBitmap?: CreateBitmap
   readonly dracoDecoder?: DracoDecoder
-  /** Дефолты, применяемые к каждой загрузке. */
+  /** Defaults applied to every load. */
   readonly defaults?: LoadOptions
 }
 
-/** События загрузчика (on('progress'|'done'|'error'|'cancelled'|'evicted')). */
+/** Loader events (on('progress'|'done'|'error'|'cancelled'|'evicted')). */
 export type LoaderEvent =
   | { type: 'progress'; handle: LoadHandle }
   | { type: 'done'; handle: LoadHandle }
@@ -130,7 +130,7 @@ export type LoaderEvent =
   | { type: 'cancelled'; handle: LoadHandle }
   | { type: 'evicted'; url: string; bytes: number }
 
-/** Агрегированная статистика загрузчика. */
+/** Aggregated loader statistics. */
 export interface LoaderStats {
   readonly cached: number
   readonly cacheBytes: number
@@ -142,7 +142,7 @@ export interface LoaderStats {
   readonly cacheHits: number
 }
 
-/** Результат loadGroup: агрегированный прогресс + общая отмена. */
+/** loadGroup result: aggregated progress + shared cancellation. */
 export interface LoadGroup {
   readonly urls: readonly string[]
   readonly promise: Promise<unknown[]>
@@ -150,16 +150,16 @@ export interface LoadGroup {
   cancel(reason?: string): void
 }
 
-// ─── Веса фаз общего прогресса ───────────────────────────────────────────────
+// ─── Weights of phases in overall progress ───────────────────────────────────────────────
 
-/** Вклад фаз в ratio: скачивание 70%, парсинг 20%, transform 10%. */
+/** Phase contribution to ratio: download 70%, parse 20%, transform 10%. */
 export const PHASE_WEIGHTS = { fetch: 0.7, parse: 0.2, transform: 0.1 } as const
 
 // ─── LoadHandle ──────────────────────────────────────────────────────────────
 
 /**
- * Хэндл загрузки: thenable (await даёт ассет) + управление
- * (cancel/setPriority) + снимок прогресса (handle.progress).
+ * Load handle: thenable (await gives the asset) + control
+ * (cancel/setPriority) + progress snapshot (handle.progress).
  */
 export class LoadHandle {
   private promise: Promise<unknown>
@@ -219,14 +219,14 @@ export class LoadHandle {
   }
 }
 
-// ─── Встроенные форматы ──────────────────────────────────────────────────────
+// ─── Built-in formats ──────────────────────────────────────────────────────
 
-/** Магия бинарного FBX: «Kaydara FBX Binary  \x1a\x00». */
+/** Magic of binary FBX: "Kaydara FBX Binary  \x1a\x00". */
 export function isBinaryFbx(bytes: Uint8Array): boolean {
   return bytes.length >= 23 && asciiDecode(bytes, 0, 20) === 'Kaydara FBX Binary  '
 }
 
-/** Реестр форматов по умолчанию (порядок = приоритет выбора по расширению). */
+/** Default format registry (order = selection priority by extension). */
 export function defaultFormats(): FormatDescriptor[] {
   return [
     {
@@ -258,7 +258,7 @@ export function defaultFormats(): FormatDescriptor[] {
       parse: async (ctx) => {
         await ctx.assembler.completion
         const bytes = ctx.assembler.fullView()
-        // fullView — вид над буфером сборки; parseFBX нужен точный ArrayBuffer
+        // fullView — a view over the assembly buffer; parseFBX needs an exact ArrayBuffer
         const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
         return parseFBX(buffer)
       },
@@ -317,10 +317,10 @@ interface JobEntry {
 }
 
 /**
- * Фасад загрузки: планировщик + стриминг + реестр форматов + LRU-кэш
- * + события. Один AssetLoader на приложение; класс без глобального
- * состояния — инстанцируйте сколько нужно (например, изолированный
- * для воркера).
+ * Loading facade: scheduler + streaming + format registry + LRU cache
+ * + events. One AssetLoader per application; the class has no global
+ * state — instantiate as many as you need (e.g., an isolated one
+ * for a worker).
  */
 export class AssetLoader {
   private scheduler: FetchScheduler
@@ -346,12 +346,12 @@ export class AssetLoader {
     this.defaults = options.defaults ?? {}
   }
 
-  /** Загрузка ассета; повторные вызовы того же URL — один и тот же handle. */
+  /** Load an asset; repeated calls of the same URL — the same handle. */
   load(url: string, options: LoadOptions = {}): LoadHandle {
     const opts: LoadOptions = { ...this.defaults, ...options }
     const key = url
 
-    // Кэш: готовый ассет отдаётся мгновенно «выполненным» хэндлом
+    // Cache: a ready asset is returned instantly by a "completed" handle
     const cached = this.cache.get(key)
     if (cached !== undefined) {
       cached.lastAccess = nowMs()
@@ -368,7 +368,7 @@ export class AssetLoader {
           ratio: 1,
           url,
           cached: true,
-          detail: 'из кэша',
+          detail: 'from cache',
         },
         () => false,
         () => false,
@@ -379,7 +379,7 @@ export class AssetLoader {
       return handle
     }
 
-    // Дедупликация: активная задача уже качается
+    // Deduplication: an active job is already downloading
     const active = this.jobs.get(key)
     if (active !== undefined) return active.handle
 
@@ -388,7 +388,7 @@ export class AssetLoader {
     let loaded = 0
     let total = 0
     let phaseRatio = 0
-    let detail = 'в очереди'
+    let detail = 'queued'
     let resolveAsset!: (asset: unknown) => void
     let rejectAsset!: (reason: unknown) => void
     const assetPromise = new Promise<unknown>((resolve, reject) => {
@@ -428,7 +428,7 @@ export class AssetLoader {
       start: async (schedulerSignal) => {
         const startedAt = nowMs()
         phase = 'fetching'
-        reportProgress('соединение')
+        reportProgress('connecting')
         const controller = new AbortController()
         const external = opts.signal
         if (external?.aborted) throw toAbortError(external.reason)
@@ -446,12 +446,12 @@ export class AssetLoader {
           onBytes: (received: number, declared: number) => {
             loaded = received
             if (declared > 0 && received <= declared && declared !== total) {
-              // Content-Length стал известен: уточняем вес задачи
+              // Content-Length became known: refine the job weight
               total = declared
               weight = declared
               this.scheduler.updateWeight(job)
             } else if (total > 0 && received > total) {
-              // Сервер соврал в большую сторону — сбрасываем тотал
+              // The server overstated it — reset the total
               total = 0
             }
             phaseRatio = total > 0 ? loaded / total : unknownTotalRatio(loaded)
@@ -471,7 +471,7 @@ export class AssetLoader {
           const parse = await this.resolveParser(url, opts, response.assembler)
           phase = 'parsing'
           phaseRatio = 0
-          reportProgress('парсинг')
+          reportProgress('parsing')
           const parseStartedAt = nowMs()
           const asset = await parse({
             url,
@@ -509,7 +509,7 @@ export class AssetLoader {
           this.downloadBytes += loaded
           phase = 'done'
           phaseRatio = 1
-          reportProgress(`готово за ${formatDuration(nowMs() - startedAt)}`)
+          reportProgress(`done in ${formatDuration(nowMs() - startedAt)}`)
           forgetJob()
           resolveAsset(result)
           handle.markSettled()
@@ -541,7 +541,7 @@ export class AssetLoader {
         ratio: 0,
         url,
         cached: false,
-        detail: 'в очереди',
+        detail: 'queued',
       },
       (reason) => {
         if (handle.isSettled) return false
@@ -566,7 +566,7 @@ export class AssetLoader {
     return handle
   }
 
-  /** Массовая предзагрузка: ошибки не роняют пачку, а собираются. */
+  /** Bulk preload: errors do not fail the batch, they are collected. */
   async preload(urls: readonly string[], options: LoadOptions = {}): Promise<{ ok: string[]; failed: Array<{ url: string; error: unknown }> }> {
     const ok: string[] = []
     const failed: Array<{ url: string; error: unknown }> = []
@@ -583,7 +583,7 @@ export class AssetLoader {
     return { ok, failed }
   }
 
-  /** Группа загрузок: агрегированный прогресс + общая отмена. */
+  /** Group of loads: aggregated progress + shared cancellation. */
   loadGroup(entries: ReadonlyArray<{ url: string; options?: LoadOptions }>): LoadGroup {
     const handles: LoadHandle[] = entries.map((entry) => this.load(entry.url, entry.options ?? {}))
     const promise = Promise.all(handles.map((handle) => handle.then((asset) => asset)))
@@ -622,7 +622,7 @@ export class AssetLoader {
         }
         const groupRatio = weightSum > 0 ? ratioWeighted / weightSum : 0
         const text =
-          `${doneCount}/${handles.length} готово · ` +
+          `${doneCount}/${handles.length} done · ` +
           (worstPhase === 'fetching'
             ? `${formatBytes(loadedSum)}${totalSum > 0 ? ` / ${formatBytes(totalSum)}` : ''}`
             : worstPhase)
@@ -632,7 +632,7 @@ export class AssetLoader {
           total: totalSum,
           phaseRatio: groupRatio,
           ratio: groupRatio,
-          url: entries.length === 1 ? entries[0].url : `${handles.length} ассетов`,
+          url: entries.length === 1 ? entries[0].url : `${handles.length} assets`,
           cached: false,
           detail: text,
         }
@@ -643,12 +643,12 @@ export class AssetLoader {
     }
   }
 
-  /** Ассет из кэша (undefined — не загружен). */
+  /** Asset from the cache (undefined — not loaded). */
   get(url: string): unknown {
     return this.cache.get(url)?.asset
   }
 
-  /** Хэндл активной задачи по URL (undefined — задача завершена/отсутствует). */
+  /** Handle of an active job by URL (undefined — job finished/absent). */
   getHandle(url: string): LoadHandle | undefined {
     return this.jobs.get(url)?.handle
   }
@@ -669,7 +669,7 @@ export class AssetLoader {
     }
   }
 
-  /** Выбросить один URL из кэша. */
+  /** Evict one URL from the cache. */
   dispose(url: string): boolean {
     return this.cache.delete(url)
   }
@@ -678,7 +678,7 @@ export class AssetLoader {
     this.cache.clear()
   }
 
-  /** Подписка на события; отписка — возвращенная функция. */
+  /** Subscribe to events; the returned function unsubscribes. */
   on<T extends LoaderEvent['type']>(type: T, listener: (event: Extract<LoaderEvent, { type: T }>) => void): () => void {
     let list = this.listeners.get(type)
     if (list === undefined) {
@@ -694,12 +694,12 @@ export class AssetLoader {
     }
   }
 
-  /** Свой формат — приоритетнее встроенных. */
+  /** Custom format — takes precedence over the built-ins. */
   registerFormat(id: string, extensions: readonly string[], parse: (ctx: ParserContext) => Promise<unknown>): void {
     this.formats.unshift({ id, extensions, parse })
   }
 
-  /** Доступ к реестру конфиг-парсеров (registerConfigParser/configParserOf). */
+  /** Access to the config parser registry (registerConfigParser/configParserOf). */
   get configParsers(): {
     register: (extension: string, parser: ConfigParser) => void
     of: (extension: string) => ConfigParser | undefined
@@ -710,12 +710,12 @@ export class AssetLoader {
     }
   }
 
-  /** Выбор парсера: явный id → расширение → magic-байты (glb/fbx/bytes). */
+  /** Parser selection: explicit id → extension → magic bytes (glb/fbx/bytes). */
   async resolveParser(url: string, options: LoadOptions, assembler: Assembler): Promise<(ctx: ParserContext) => Promise<unknown>> {
     if (options.parser !== undefined) {
       const format = this.formats.find((f) => f.id === options.parser)
       if (format !== undefined) return format.parse
-      throw new Error(`парсер «${options.parser}» не зарегистрирован`)
+      throw new Error(`parser "${options.parser}" is not registered`)
     }
     const extension = extensionOf(url)
     if (extension !== '') {
@@ -736,7 +736,7 @@ export class AssetLoader {
       try {
         listener(event)
       } catch {
-        // Слушатель не должен ломать загрузку
+        // A listener must not break the load
       }
   }
 
@@ -747,7 +747,7 @@ export class AssetLoader {
     while (bytes > this.cacheBytesLimit) {
       let victim: { key: string; entry: CacheEntry } | undefined
       for (const [key, entry] of this.cache) {
-        // Активные задачи не выкидываем — их ассет ещё нужен
+        // Active jobs are not evicted — their assets are still needed
         if (this.jobs.has(key)) continue
         if (victim === undefined || entry.lastAccess < victim.entry.lastAccess) victim = { key, entry }
       }
@@ -759,9 +759,9 @@ export class AssetLoader {
   }
 }
 
-// ─── Вспомогательные ─────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────
 
-/** Расширение URL (без query/hash, в нижнем регистре; '' — нет). */
+/** URL extension (no query/hash, lower-case; '' — none). */
 export function extensionOf(url: string): string {
   const path = url.split('?')[0]?.split('#')[0] ?? ''
   const lastSlash = path.lastIndexOf('/')
@@ -770,7 +770,7 @@ export function extensionOf(url: string): string {
   return path.slice(lastDot + 1).toLowerCase()
 }
 
-/** Общий ratio по фазам и весам. */
+/** Overall ratio by phases and weights. */
 function overallRatio(phase: LoadPhase, phaseRatio: number, loaded: number, total: number): number {
   switch (phase) {
     case 'queued':
@@ -789,12 +789,12 @@ function overallRatio(phase: LoadPhase, phaseRatio: number, loaded: number, tota
   }
 }
 
-/** Аптайм без total: сатурация 1-e^(-bytes/8MB) (cap 95%). */
+/** Uptime without total: saturation 1-e^(-bytes/8MB) (cap 95%). */
 function unknownTotalRatio(bytes: number): number {
   return Math.min(0.95, 1 - Math.exp(-bytes / 8388608))
 }
 
-/** Разрешение относительного URI против базового URL. */
+/** Resolve a relative URI against a base URL. */
 export function resolveUrl(baseUrl: string, uri: string): string {
   if (/^https?:\/\//i.test(uri) || uri.startsWith('data:')) return uri
   try {
@@ -812,15 +812,15 @@ function formatBytes(bytes: number): string {
   return `${bytes} B`
 }
 
-/** «1.2 с» / «890 мс». */
+/** "1.2 s" / "890 ms". */
 function formatDuration(ms: number): string {
-  return ms >= 1000 ? `${(ms / 1000).toFixed(1)} с` : `${Math.round(ms)} мс`
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms)} ms`
 }
 
-// ─── Мост к слою Task 88 (core/ + formats/) ─────────────────────────────────
-// Реставрация: менеджер (core/manager.ts) ждёт от корневого registry.ts
-// фабрику реестра парсеров и сниффер. Сами парсеры живут в formats/ и
-// реализуют интерфейс Parser из core/types.ts.
+// ─── Bridge to the Task 88 layer (core/ + formats/) ─────────────────────────────────
+// Restoration: the manager (core/manager.ts) expects a parser registry
+// factory and a sniffer from the root registry.ts. The parsers themselves live in formats/ and
+// implement the Parser interface from core/types.ts.
 
 export { sniffKind } from './core/util.ts'
 export type { SniffResult } from './core/util.ts'
@@ -833,17 +833,17 @@ import { hdrParser, createImageParser } from './formats/image.ts'
 import { bytesParser, textParser, jsonParser, zmlParser } from './formats/config.ts'
 import type { MtlModel } from './mtl.ts'
 
-/** Опции фабрики реестра парсеров (контракт core/manager.ts). */
+/** Parser registry factory options (core/manager.ts contract). */
 export interface ParserRegistryOptions {
   readonly fetchImpl?: typeof fetch
   readonly resolveUrl?: UrlResolver
-  /** zlib-inflate для FBX; null запрещает (контракт передаётся парсеру через ctx). */
+  /** zlib-inflate for FBX; null forbids it (the contract is passed to the parser via ctx). */
   readonly inflate?: ((bytes: Uint8Array) => Promise<Uint8Array>) | null
-  /** Декодер картинок; null → image-парсер бросит UnsupportedError. */
+  /** Image decoder; null → the image parser throws UnsupportedError. */
   readonly decodeImage?: ImageDecode | null
 }
 
-/** MTL-парсер поверх корневого parseMtl (MtlModel). */
+/** MTL parser on top of the root parseMtl (MtlModel). */
 const mtlParserAdapter: Parser<MtlModel> = {
   kind: 'mtl',
   extensions: ['.mtl'],
@@ -853,8 +853,8 @@ const mtlParserAdapter: Parser<MtlModel> = {
 }
 
 /**
- * Реестр парсеров по умолчанию для LoadManager (Task 88): kinds → парсеры.
- * 'glb' на сниффе менеджер сам отображает на 'gltf'.
+ * Default parser registry for LoadManager (Task 88): kinds → parsers.
+ * The manager itself maps 'glb' to 'gltf' when sniffing.
  */
 export function createParserRegistry(
   options: ParserRegistryOptions = {},

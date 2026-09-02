@@ -4,31 +4,31 @@ import { readSeqlock, writeSeqlock, seqlockVersion } from './seqlock.ts'
 const VERSION_OFFSET = 4
 const VALUE_OFFSET = 8
 
-/** Слот реестра: nameHash + seqlock. */
+/** Registry slot: nameHash + seqlock. */
 const SLOT_BYTES = 16
 
-/** Магический заголовок реестра общих сигналов. */
+/** Magic header of the shared signal registry. */
 export const SHARED_MAGIC = 0x52554e53 // 'RUNS'
 
-/** Реестр на стороне владельца: пишет, читатели семплируют. */
+/** Owner-side registry: writes, readers sample. */
 export interface SharedRegistry {
   readonly buffer: SharedArrayBuffer
-  /** Связывает сигнал со слотом; записи утекают в SAB (владелец-писатель). */
+  /** Binds a signal to a slot; writes leak into the SAB (owner-writer). */
   bind(signal: ReadableSignal<number>, name: string): Unsubscribe
-  /** Пишет значение напрямую (сглаженные источники, тесты). */
+  /** Writes the value directly (smoothed sources, tests). */
   write(name: string, value: number): void
 }
 
-/** Зеркало реестра в другом мире: чтение seqlock, эпоховые уведомления. */
+/** Mirror of the registry in another world: seqlock reads, epoch notifications. */
 export interface SharedMirror {
-  /** Сигнал-представление слота (чтение всегда свежее). */
+  /** Signal representation of a slot (reads are always fresh). */
   signal(name: string): ReadableSignal<number>
-  /** Эпоха: уведомляет подписчиков изменившихся слотов; вернувшее — их число. */
+  /** Epoch: notifies subscribers of changed slots; the return value is their count. */
   sampleAll(): number
   readonly transport: 'sab'
 }
 
-/** Хэш имени — ключ слота (FNV-1a, устойчив в обоих мирах). */
+/** Name hash — the slot key (FNV-1a, stable across both worlds). */
 export function nameHash(name: string): number {
   let hash = 0x811c9dc5
   for (let i = 0; i < name.length; i++) {
@@ -38,12 +38,12 @@ export function nameHash(name: string): number {
   return hash >>> 0
 }
 
-/** Схема-хэш: несовпадение layout ловится при привязке. */
+/** Schema hash: a layout mismatch is caught at attach time. */
 export function schemaHash(names: readonly string[]): number {
   return nameHash(names.join('\u0000'))
 }
 
-/** Создаёт реестр на стороне владельца (T1/T2: SAB доступен). */
+/** Creates a registry on the owner side (T1/T2: SAB is available). */
 export function createSharedRegistry(names: readonly string[]): SharedRegistry {
   const view = new DataView(new SharedArrayBuffer(headerBytes() + names.length * SLOT_BYTES))
   putHeader(view, names)
@@ -61,7 +61,7 @@ function writeSlot(view: DataView, slots: Map<number, number>, name: string, val
   writeSeqlock(view, offset + VERSION_OFFSET, offset + VALUE_OFFSET, value)
 }
 
-/** Привязывается к реестру из любого мира (читатель). */
+/** Attaches to the registry from any world (reader). */
 export function attachSharedRegistry(buffer: SharedArrayBuffer, names: readonly string[]): SharedMirror {
   const view = new DataView(buffer)
   checkSchema(view, names)
@@ -88,20 +88,20 @@ function putHeader(view: DataView, names: readonly string[]): void {
 }
 
 function checkSchema(view: DataView, names: readonly string[]): void {
-  if (view.getUint32(0, true) !== SHARED_MAGIC) throw new Error('rune: повреждённый реестр сигналов')
+  if (view.getUint32(0, true) !== SHARED_MAGIC) throw new Error('rune: corrupted signal registry')
   if (view.getUint32(4, true) !== schemaHash(names)) {
-    throw new Error('rune: версия схемы общих сигналов не совпадает — обнови оба мира')
+    throw new Error('rune: shared signal schema version mismatch — update both worlds')
   }
 }
 
-/** Записывает nameHash слотов во вновь созданный реестр. */
+/** Writes slot nameHashes into a newly created registry. */
 function putSlots(view: DataView, names: readonly string[]): void {
   names.forEach((name, i) => {
     view.setUint32(HEADER_BYTES + i * SLOT_BYTES, nameHash(name), true)
   })
 }
 
-/** nameHash → смещение слота. */
+/** nameHash → slot offset. */
 function indexSlots(view: DataView, names: readonly string[]): Map<number, number> {
   const slots = new Map<number, number>()
   const count = view.getUint32(8, true)
@@ -109,7 +109,7 @@ function indexSlots(view: DataView, names: readonly string[]): Map<number, numbe
     slots.set(view.getUint32(HEADER_BYTES + i * SLOT_BYTES, true), HEADER_BYTES + i * SLOT_BYTES)
   }
   for (const name of names) {
-    if (!slots.has(nameHash(name))) throw new Error(`rune: сигнал "${name}" не зарегистрирован`)
+    if (!slots.has(nameHash(name))) throw new Error(`rune: signal "${name}" is not registered`)
   }
   return slots
 }
@@ -154,7 +154,7 @@ function removeListener(listeners: Subscriber<number>[], subscriber: Subscriber<
 
 function requireSlot(slots: Map<number, number>, name: string): number {
   const offset = slots.get(nameHash(name))
-  if (offset === undefined) throw new Error(`rune: сигнал "${name}" не зарегистрирован`)
+  if (offset === undefined) throw new Error(`rune: signal "${name}" is not registered`)
   return offset
 }
 
@@ -167,7 +167,7 @@ function captureVersions(view: DataView, names: readonly string[], slots: Map<nu
   return seen
 }
 
-/** Эпоха: стреляет подписчиками изменившихся слотов; вернувшее — их число. */
+/** Epoch: fires subscribers of changed slots; the return value is their count. */
 function sampleChanged(
   view: DataView,
   names: readonly string[],

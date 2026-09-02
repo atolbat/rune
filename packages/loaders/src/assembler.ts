@@ -1,75 +1,75 @@
 /**
- * Стриминг-инфраструктура загрузки: Assembler + FetchScheduler + fetchStreaming.
+ * Streaming loading infrastructure: Assembler + FetchScheduler + fetchStreaming.
  *
  * ══════════════════════════════════════════════════════════════════════════
- * КОНТРАКТ:
+ * CONTRACT:
  *
  *   fetchStreaming(url, options) → { url, contentLength, assembler, done }
  *
- *   Assembler (k8) — собирает тело ответа в растущий Uint8Array:
- *     .watermark    — сколько байт уже получено (граница доступности)
- *     .isDone       — поток дочитан до конца
- *     .completion   — Promise<void>, резолвится/реджектится с потоком
- *     .waitFor(n)   — подождать n байт от начала
+ *   Assembler (k8) — assembles the response body into a growing Uint8Array:
+ *     .watermark    — how many bytes have been received (availability boundary)
+ *     .isDone       — the stream has been read to the end
+ *     .completion   — Promise<void>, resolves/rejects along with the stream
+ *     .waitFor(n)   — wait for n bytes from the start
  *     .rangeReady(off, len) / .onRange(cb) / .slice(off, len)
- *     .prefixView(n) / .fullView() — нулевые копии по требованию
+ *     .prefixView(n) / .fullView() — zero copies on demand
  *
- *   FetchScheduler (q7) — приоритетная очередь загрузок с бюджетом байт:
- *     maxConcurrent (default 3), maxBytesInFlight (default 64 МБ),
+ *   FetchScheduler (q7) — priority queue of loads with a byte budget:
+ *     maxConcurrent (default 3), maxBytesInFlight (default 64 MB),
  *     submit/setPriority/cancel/pause/resume/updateWeight/stats.
  *
- * Зачем: парсеры (GLB/OBJ/FBX) начинают работу ДО полного скачивания —
- * по waitFor(20) читают заголовки, по onRange ждут нужные диапазоны.
- * Отсюда мгновенный первый кадр на больших файлах.
+ * Why: parsers (GLB/OBJ/FBX) start working BEFORE the download completes —
+ * they read headers via waitFor(20) and wait for needed ranges via onRange.
+ * Hence an instant first frame on large files.
  *
- * Ключевой инвариант zero-copy: когда contentLength известен, буфер
- * аллоцируется точно под файл и НЕ переаллоцируется — выданные через
- * prefixView/fullView срезы остаются валидными до конца жизни Assembler.
+ * Key zero-copy invariant: when contentLength is known, the buffer
+ * is allocated exactly for the file and is NOT reallocated — slices handed
+ * out via prefixView/fullView remain valid for the Assembler's lifetime.
  */
 
-/** Чтение потока/байтов прогресса. */
+/** Reads the stream / progress bytes. */
 export interface OnBytes {
   (loaded: number, total: number): void
 }
 
-/** Опции fetchStreaming. */
+/** fetchStreaming options. */
 export interface FetchStreamingOptions {
-  /** Подстановка fetch для тестов/SSRF-политик. По умолчанию globalThis.fetch. */
+  /** fetch substitution for tests/SSRF policies. Defaults to globalThis.fetch. */
   readonly fetchImpl?: typeof fetch
-  /** Число повторов при 5xx/429 и сетевых сбоях. По умолчанию 1 (одна повторная попытка). */
+  /** Number of retries on 5xx/429 and network failures. Defaults to 1 (one retry). */
   readonly retries?: number
-  /** Таймаут на установку соединения, мс. По умолчанию 30000. */
+  /** Connect timeout, ms. Defaults to 30000. */
   readonly connectTimeoutMs?: number
-  /** Внешняя отмена. */
+  /** External cancellation. */
   readonly signal?: AbortSignal
-  /** Коллбэк прогресса байтов. */
+  /** Byte progress callback. */
   readonly onBytes?: OnBytes
 }
 
-/** Результат fetchStreaming: стримящееся тело ответа. */
+/** fetchStreaming result: the streaming response body. */
 export interface StreamingResponse {
   readonly url: string
-  /** Content-Length, если сервер его сообщил. */
+  /** Content-Length, if the server reported it. */
   readonly contentLength: number | undefined
   readonly assembler: Assembler
-  /** Promise<void> — тело дочитано полностью. */
+  /** Promise<void> — the body has been fully read. */
   readonly done: Promise<void>
 }
 
-/** Ошибка отмены из сигнала (сохраняет причину, если она Error). */
+/** Cancellation error from a signal (preserves the reason if it is an Error). */
 export function signalAbortError(signal?: AbortSignal): Error {
   return signal?.reason instanceof Error
     ? signal.reason
-    : new DOMException('загрузка отменена', 'AbortError')
+    : new DOMException('load cancelled', 'AbortError')
 }
 
-/** Приводит произвольную причину к Error/DOMException(AbortError). */
+/** Coerces an arbitrary reason to Error/DOMException(AbortError). */
 export function toAbortError(reason: unknown): Error {
   if (reason instanceof Error) return reason
-  return new DOMException(typeof reason === 'string' ? reason : 'загрузка отменена', 'AbortError')
+  return new DOMException(typeof reason === 'string' ? reason : 'load cancelled', 'AbortError')
 }
 
-/** AbortError/TimeoutError — отмена, а не сбой источника. */
+/** AbortError/TimeoutError — cancellation, not a source failure. */
 export function isAbortError(error: unknown): boolean {
   return (
     error instanceof DOMException && (error.name === 'AbortError' || error.name === 'TimeoutError')
@@ -78,20 +78,20 @@ export function isAbortError(error: unknown): boolean {
 
 // ─── Assembler ───────────────────────────────────────────────────────────────
 
-/** Опции Assembler. */
+/** Assembler options. */
 export interface AssemblerOptions {
-  /** Ожидаемый полный размер (Content-Length). Оптимизирует аллокации. */
+  /** Expected total size (Content-Length). Optimizes allocations. */
   readonly total?: number
-  /** Внешняя отмена — фейлит assembler и отменяет чтение потока. */
+  /** External cancellation — fails the assembler and cancels stream reading. */
   readonly signal?: AbortSignal
-  /** Коллбэк прогресса байтов. */
+  /** Byte progress callback. */
   readonly onBytes?: OnBytes
 }
 
 /**
- * Собирает ReadableStream<Uint8Array> в один буфер с инкрементальной
- * доступностью: watermark растёт по мере прихода чанков, парсеры
- * подписываются на onRange и читают срезы, не дожидаясь конца файла.
+ * Assembles a ReadableStream<Uint8Array> into a single buffer with
+ * incremental availability: the watermark grows as chunks arrive, parsers
+ * subscribe to onRange and read slices without waiting for the file to end.
  */
 export class Assembler {
   readonly total: number | undefined
@@ -104,7 +104,7 @@ export class Assembler {
   readonly completion: Promise<void>
   private releaseCompletion!: () => void
   private rejectCompletion!: (reason: unknown) => void
-  /** Ридер захвачен в pump; отмена потока идёт через него (поток залочен). */
+  /** The reader is held by pump; stream cancellation goes through it (the stream is locked). */
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null
 
   constructor(body: ReadableStream<Uint8Array>, options: AssemblerOptions = {}) {
@@ -114,7 +114,7 @@ export class Assembler {
       this.releaseCompletion = resolve
       this.rejectCompletion = reject
     })
-    // Не даём висеть unhandled rejection, если completion никто не ждёт
+    // Do not let an unhandled rejection dangle if nobody awaits completion
     this.completion.catch(() => {})
 
     const signal = options.signal
@@ -125,8 +125,8 @@ export class Assembler {
     signal?.addEventListener(
       'abort',
       () => {
-        // body.cancel() на залоченном потоке бросает TypeError — только
-        // через reader: это ещё и рвёт соединение на стороне источника
+        // body.cancel() on a locked stream throws TypeError — only
+        // via reader: this also breaks the connection on the source side
         this.reader?.cancel().catch(() => {})
         this.fail(signalAbortError(signal))
       },
@@ -135,22 +135,22 @@ export class Assembler {
     this.pump(body, options.onBytes).catch((err: unknown) => this.fail(err))
   }
 
-  /** Сколько байт доступно для чтения (граница «сплошной» доступности). */
+  /** How many bytes are available for reading (the "contiguous" availability boundary). */
   get watermark(): number {
     return this.received
   }
 
-  /** Поток дочитан (успешно или с ошибкой). */
+  /** The stream has been read to the end (successfully or with an error). */
   get isDone(): boolean {
     return this.finished
   }
 
-  /** Диапазон [offset, offset+length) уже получен целиком. */
+  /** The range [offset, offset+length) has already been received in full. */
   rangeReady(offset: number, length: number): boolean {
     return this.received >= offset + length
   }
 
-  /** Ждёт, пока с начала файла накопится не меньше bytes байт. */
+  /** Waits until at least bytes bytes have accumulated from the start of the file. */
   async waitFor(bytes: number): Promise<void> {
     if (this.received >= bytes || this.finished) return
     await new Promise<void>((resolve, reject) => {
@@ -158,7 +158,7 @@ export class Assembler {
     })
   }
 
-  /** Подписка на рост watermark; отписка — вызовом возвращенной функции. */
+  /** Subscribes to watermark growth; unsubscribe by calling the returned function. */
   onRange(listener: (watermark: number) => void): () => void {
     this.rangeListeners.push(listener)
     return () => {
@@ -167,23 +167,23 @@ export class Assembler {
     }
   }
 
-  /** КОПИЯ диапазона [offset, offset+length) — диапазон обязан быть готов. */
+  /** COPY of the range [offset, offset+length) — the range must be ready. */
   slice(offset: number, length: number): Uint8Array {
     if (this.received < offset + length)
-      throw new Error(`range [${offset}, ${offset + length}) не получен (watermark ${this.received})`)
+      throw new Error(`range [${offset}, ${offset + length}) not received (watermark ${this.received})`)
     return this.buffer.slice(offset, offset + length)
   }
 
-  /** Нулевая копия первых length байт — префикс файла (заголовки). */
+  /** Zero copy of the first length bytes — the file prefix (headers). */
   prefixView(length: number): Uint8Array {
     if (this.received < length)
-      throw new Error(`prefix ${length} не получен (watermark ${this.received})`)
+      throw new Error(`prefix ${length} not received (watermark ${this.received})`)
     return new Uint8Array(this.buffer.buffer, 0, length)
   }
 
-  /** Нулевая копия всего тела; только после завершения потока. */
+  /** Zero copy of the whole body; only after the stream has finished. */
   fullView(): Uint8Array {
-    if (!this.finished) throw new Error('тело ещё не получено полностью')
+    if (!this.finished) throw new Error('body not fully received yet')
     return new Uint8Array(this.buffer.buffer, 0, this.received)
   }
 
@@ -239,27 +239,27 @@ export class Assembler {
 
 // ─── FetchScheduler ──────────────────────────────────────────────────────────
 
-/** Описание задачи для планировщика (реализуется загрузчиком ассетов). */
+/** Task description for the scheduler (implemented by the asset loader). */
 export interface SchedulerJob {
   readonly id: number
   priority: number
-  /** Порядковый номер подачи — стабильность сортировки при равном приоритете. */
+  /** Submission sequence number — stable sorting at equal priority. */
   readonly seq: number
-  /** Текущий «вес» задачи в байтах (для бюджета bytesInFlight). */
+  /** Current "weight" of the task in bytes (for the bytesInFlight budget). */
   weight(): number
   onCancelledBeforeStart?(reason?: string): void
-  /** Запуск; signal — составной (отмена планировщика). */
+  /** Start; signal is composite (scheduler cancellation). */
   start(signal: AbortSignal): Promise<void>
 }
 
 let nextJobId = 1
 
-/** Монотонный id задач планировщика. */
+/** Monotonic scheduler job id. */
 export function allocJobId(): number {
   return nextJobId++
 }
 
-/** Статистика планировщика. */
+/** Scheduler statistics. */
 export interface SchedulerStats {
   running: number
   queued: number
@@ -271,10 +271,11 @@ export interface SchedulerStats {
 }
 
 /**
- * Приоритетная очередь сетевых задач. Меньше priority — раньше.
- * Вдобавок к числу задач держит бюджет байт в полёте: тяжёлая загрузка
- * не даст «зависнуть» очереди мелких (пока не начатые не считаются).
- * Первая задача стартует всегда — иначе бюджет блокирует сам себя.
+ * Priority queue of network jobs. Lower priority — earlier.
+ * In addition to the number of jobs, it keeps a bytes-in-flight budget:
+ * a heavy load will not let a queue of small ones "hang" (not-yet-started
+ * jobs do not count). The first job always starts — otherwise the budget
+ * would block itself.
  */
 export class FetchScheduler {
   private maxConcurrent: number
@@ -299,7 +300,7 @@ export class FetchScheduler {
     this.pump()
   }
 
-  /** Смена приоритета; true если задача ещё в очереди (сортировка обновлена). */
+  /** Priority change; true if the job is still queued (sorting updated). */
   setPriority(job: SchedulerJob, priority: number): boolean {
     if (job.priority === priority) return false
     job.priority = priority
@@ -309,7 +310,7 @@ export class FetchScheduler {
     return inQueue
   }
 
-  /** Отмена: из очереди — коллбеком, запущенной — abort контроллера. */
+  /** Cancel: queued — via callback, running — via controller abort. */
   cancel(job: SchedulerJob, reason?: string): boolean {
     const idx = this.queue.indexOf(job)
     if (idx >= 0) {
@@ -320,7 +321,7 @@ export class FetchScheduler {
     }
     const entry = this.running.get(job.id)
     if (entry !== undefined) {
-      entry.controller.abort(new DOMException(reason ?? 'загрузка отменена', 'AbortError'))
+      entry.controller.abort(new DOMException(reason ?? 'load cancelled', 'AbortError'))
       return true
     }
     return false
@@ -339,13 +340,13 @@ export class FetchScheduler {
     return this.paused
   }
 
-  /** Динамический бюджет байт в полёте. */
+  /** Dynamic bytes-in-flight budget. */
   setBytesQuota(maxBytes: number): void {
     this.maxBytesInFlight = Math.max(1, maxBytes)
     this.pump()
   }
 
-  /** Обновление веса бега (content-length стал известен). */
+  /** Running weight update (content-length became known). */
   updateWeight(job: SchedulerJob): void {
     if (!this.running.has(job.id)) return
     const previous = this.weights.get(job.id)
@@ -374,7 +375,7 @@ export class FetchScheduler {
     }
   }
 
-  /** Уведомление «очередь и полёт пусты». */
+  /** "queue and flight are empty" notification. */
   onDrain(listener: () => void): () => void {
     this.drainListeners.add(listener)
     return () => this.drainListeners.delete(listener)
@@ -395,7 +396,7 @@ export class FetchScheduler {
       const job = this.queue[0]
       if (job === undefined) break
       const weight = Math.max(1, job.weight())
-      // Бюджет действует начиная со второй задачи: первая всегда стартует
+      // The budget applies starting from the second job: the first always starts
       if (this.running.size > 0 && this.bytesInFlight + weight > this.maxBytesInFlight) break
       this.queue.shift()
       const controller = new AbortController()
@@ -427,9 +428,9 @@ export class FetchScheduler {
 // ─── fetchStreaming ──────────────────────────────────────────────────────────
 
 /**
- * HTTP-GET со стримингом: коннект-таймаут, повторы (5xx/429/сеть) с
- * экспоненциальным backoff, отмена, прогресс байтов. Возвращает
- * Assembler над телом ответа — парсеры могут стартовать немедленно.
+ * Streaming HTTP GET: connect timeout, retries (5xx/429/network) with
+ * exponential backoff, cancellation, byte progress. Returns an
+ * Assembler over the response body — parsers can start immediately.
  */
 export async function fetchStreaming(
   url: string,
@@ -466,7 +467,7 @@ export async function fetchStreaming(
       return { url, contentLength: assembler.total, assembler, done: assembler.completion }
     } catch (error) {
       clearTimer()
-      // Отмену пользователя не ретраим — она финальна
+      // User cancellation is not retried — it is final
       if (isAbortError(error)) throw error
       lastError = error
       if (attempt < retries) {
@@ -476,22 +477,22 @@ export async function fetchStreaming(
       throw error
     }
   }
-  throw lastError ?? new Error(`источник недоступен: ${url}`)
+  throw lastError ?? new Error(`source unavailable: ${url}`)
 }
 
-/** Коннект-таймаут: снимается первым успешным await fetch. */
+/** Connect timeout: cleared by the first successful await fetch. */
 function connectTimeoutTimer(
   controller: AbortController,
   ms: number,
   _external?: AbortSignal,
 ): () => void {
   const timer = setTimeout(() => {
-    controller.abort(new DOMException('таймаут соединения', 'TimeoutError'))
+    controller.abort(new DOMException('connection timeout', 'TimeoutError'))
   }, ms)
   return () => clearTimeout(timer)
 }
 
-/** Пробрасывает внешнюю отмену в контроллер запроса. */
+/** Forwards external cancellation to the request controller. */
 function chainAbort(external: AbortSignal | undefined, controller: AbortController): void {
   if (external === undefined) return
   if (external.aborted) {
@@ -507,7 +508,7 @@ function chainAbort(external: AbortSignal | undefined, controller: AbortControll
   )
 }
 
-/** Экспоненциальный backoff: 250мс → 500мс → 1с → 2с → 4с (cap). */
+/** Exponential backoff: 250ms → 500ms → 1s → 2s → 4s (cap). */
 async function backoffDelay(attempt: number, signal?: AbortSignal): Promise<void> {
   const delay = Math.min(4000, 250 * 2 ** attempt)
   await sleepAbortable(delay, signal)
@@ -530,13 +531,13 @@ function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Распаковка zlib-deflate массивов FBX (compressedLength > 0) через
- * нативный DecompressionStream — без JS-реализации zlib.
+ * Inflates FBX zlib-deflate arrays (compressedLength > 0) via the
+ * native DecompressionStream — without a JS zlib implementation.
  */
 export async function inflateDeflate(compressed: Uint8Array): Promise<Uint8Array> {
   if (typeof DecompressionStream > 'u')
     throw new Error(
-      'DecompressionStream недоступен — бинарный FBX с zlib-сжатием не поддерживается в этой среде',
+      'DecompressionStream unavailable — binary FBX with zlib compression is not supported in this environment',
     )
   const reader = new Blob([compressed as Uint8Array<ArrayBuffer>])
     .stream()

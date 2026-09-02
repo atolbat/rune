@@ -1,21 +1,21 @@
 /**
- * Матрицы 4×4, колонко-мажорные (как WebGL/WGSL): element[col*4 + row].
- * Все функции пишут в out и возвращают его; входы не мутируются.
+ * 4×4 matrices, column-major (as in WebGL/WGSL): element[col*4 + row].
+ * All functions write into out and return it; inputs are not mutated.
  */
 
-/** Аллоцирует новую матрицу 4×4 и заполняет единичной (gl-matrix-стиль). */
+/** Allocates a new 4×4 matrix and fills it with the identity (gl-matrix style). */
 export function mat4Create(): Float32Array {
   return mat4Identity(new Float32Array(16))
 }
 
-/** Единичная матрица. */
+/** Identity matrix. */
 export function mat4Identity(out: Float32Array): Float32Array {
   out.fill(0)
   out[0] = out[5] = out[10] = out[15] = 1
   return out
 }
 
-/** Трансляция. */
+/** Translation. */
 export function mat4Translation(out: Float32Array, x: number, y: number, z: number): Float32Array {
   mat4Identity(out)
   out[12] = x
@@ -24,7 +24,7 @@ export function mat4Translation(out: Float32Array, x: number, y: number, z: numb
   return out
 }
 
-/** Перспектива (OpenGL-конвенция, взгляд в −Z). */
+/** Perspective (OpenGL convention, looking down −Z). */
 export function mat4Perspective(
   out: Float32Array,
   fovy: number,
@@ -42,7 +42,7 @@ export function mat4Perspective(
   return out
 }
 
-/** Вращение вокруг X. */
+/** Rotation around X. */
 export function mat4RotationX(out: Float32Array, angle: number): Float32Array {
   const c = Math.cos(angle)
   const s = Math.sin(angle)
@@ -54,7 +54,7 @@ export function mat4RotationX(out: Float32Array, angle: number): Float32Array {
   return out
 }
 
-/** Вращение вокруг Y. */
+/** Rotation around Y. */
 export function mat4RotationY(out: Float32Array, angle: number): Float32Array {
   const c = Math.cos(angle)
   const s = Math.sin(angle)
@@ -66,13 +66,13 @@ export function mat4RotationY(out: Float32Array, angle: number): Float32Array {
   return out
 }
 
-/** Произведение out = a · b (колонко-мажорное). Алиасинг безопасен:
- *  out === a и out === b дают результат отдельного out (REGRESSION «гиперкуба»:
- *  демо писало произведение в первый же операнд). */
+/** Product out = a · b (column-major). Aliasing is safe:
+ *  out === a and out === b yield the result of a separate out (the "hypercube"
+ *  REGRESSION: the demo wrote the product into the very first operand). */
 export function mat4Multiply(out: Float32Array, a: Float32Array, b: Float32Array): Float32Array {
-  // a читается по всем колонкам, пока out пишется колонка за колонкой:
-  // при out === a вход затирался бы на первой записи. b читается строго
-  // перед записью своей колонки — алиасинг с b безопасен без копии.
+  // a is read across all columns while out is written column by column:
+  // with out === a the input would be clobbered on the first write. b is read
+  // strictly before its own column is written — aliasing with b is safe without a copy.
   const left = out === a ? new Float32Array(a) : a
   for (let col = 0; col < 4; col++) {
     const b0 = b[col * 4]

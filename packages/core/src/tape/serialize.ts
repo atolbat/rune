@@ -1,18 +1,19 @@
-// Сериализация ленты: переносимый снимок колонок писателя.
-// Формат (little-endian i32): [count][op×count][a×count][b×count][c×count][d×count].
-// Буфер transferable — основа доставки кадров между мирами (tape-пакет:
-// воркер пишет ленту + арену, владелец парсит и исполняет тем же executor'ом).
+// Tape serialization: a portable snapshot of the writer's columns.
+// Format (little-endian i32): [count][op×count][a×count][b×count][c×count][d×count].
+// The buffer is transferable — the basis for delivering frames between
+// worlds (tape packet: a worker writes the tape + arena, the owner parses
+// and executes it with the same executor).
 
 import type { TapeWriter } from './writer.ts'
 import type { TapeView } from './layout.ts'
 
-/** Распарсенная лента: те же SoA-колонки поверх полученного буфера. */
+/** Parsed tape: the same SoA columns over the received buffer. */
 export interface ParsedTape extends TapeView {
-  /** Алиас count (совместимо со старыми диагностиками). */
+  /** Alias of count (compatible with old diagnostics). */
   readonly opCount: number
 }
 
-/** Снимает ленту в новый ArrayBuffer (плотная копия использованных колонок). */
+/** Snapshots the tape into a new ArrayBuffer (a dense copy of the used columns). */
 export function serializeTape(writer: TapeWriter): ArrayBuffer {
   const count = writer.count
   const columns = writer.columns
@@ -27,15 +28,15 @@ export function serializeTape(writer: TapeWriter): ArrayBuffer {
   return buffer
 }
 
-/** Восстанавливает ленту из буфера: колонки-виды без копий (буфер принадлежит вызывающему). */
+/** Restores the tape from a buffer: column views without copies (the buffer belongs to the caller). */
 export function parseTape(buffer: ArrayBuffer): ParsedTape {
   if (buffer.byteLength < 4 || buffer.byteLength % 4 !== 0) {
-    throw new Error('rune: parseTape — повреждённый буфер ленты')
+    throw new Error('rune: parseTape — corrupted tape buffer')
   }
   const words = new Int32Array(buffer)
   const count = words[0]
   if (count < 0 || (1 + count * 5) * 4 > buffer.byteLength) {
-    throw new Error(`rune: parseTape — count ${count} не согласуется с размером буфера`)
+    throw new Error(`rune: parseTape — count ${count} is inconsistent with the buffer size`)
   }
   return {
     count,

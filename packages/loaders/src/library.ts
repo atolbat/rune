@@ -1,19 +1,19 @@
 /**
- * library.ts — AssetLibrary: публичный фасад загрузки ассетов.
+ * library.ts — AssetLibrary: the public asset loading facade.
  *
- * Обязанности:
+ * Responsibilities:
  *   - load(url, opts) → AssetHandle: thenable + progress + cancel + priority;
- *   - dedup: параллельные load одного URL делят ОДНУ задачу;
- *   - кэш с LRU-вытеснением по байтовому бюджету (cacheBytesLimit);
- *   - preload(urls) — прогрев кэша (ошибки — в отчёт, не бросаются);
- *   - loadGroup — агрегатный прогресс/отмена пачки;
- *   - события (progress/done/error/cancelled/evicted) для UI;
- *   - реестр форматов: расширение + магик-сниффинг (glb/fbx) + регистрация
- *     своих парсеров (registerFormat).
+ *   - dedup: parallel loads of one URL share ONE job;
+ *   - cache with LRU eviction by a byte budget (cacheBytesLimit);
+ *   - preload(urls) — cache warm-up (errors go into the report, not thrown);
+ *   - loadGroup — aggregated progress/cancellation of a batch;
+ *   - events (progress/done/error/cancelled/evicted) for the UI;
+ *   - format registry: extension + magic sniffing (glb/fbx) + registration
+ *     of custom parsers (registerFormat).
  *
- * Слои НЕ смешиваются: библиотека знает про сеть/форматы/кэш, но не про
- * GPU — «голое ядро» получает типизированные массивы и ImageBitmap;
- * интеграция в рендер — на потребителе (демо / @rune/kit).
+ * Layers do NOT mix: the library knows about network/formats/cache, but not the
+ * GPU — the "bare core" receives typed arrays and ImageBitmaps;
+ * integration with rendering is the consumer's job (demo / @rune/kit).
  */
 
 import { LoadScheduler, nextSchedulerJobId, type SchedulerJob } from './scheduler.ts'
@@ -39,18 +39,18 @@ import { configParserOf, parseConfig, parseTextBytes, registerConfigParser, type
 export type LoadedAsset = GltfModel | ObjModel | FbxModel | MtlLibrary | ImageAsset | unknown
 
 export interface AssetLibraryOptions {
-  /** Свой планировщик (default: maxConcurrent 3, 64 MB in-flight). */
+  /** Custom scheduler (default: maxConcurrent 3, 64 MB in-flight). */
   readonly scheduler?: LoadScheduler
-  /** Подмена fetch — тесты/синтетика. */
+  /** fetch override — tests/synthetics. */
   readonly fetchImpl?: typeof fetch
-  /** Бюджет кэша в байтах (default 256 MB; 0 = без лимита). */
+  /** Cache budget in bytes (default 256 MB; 0 = no limit). */
   readonly cacheBytesLimit?: number
-  /** Инъекция фабрики ImageBitmap (тесты). */
+  /** ImageBitmap factory injection (tests). */
   readonly createBitmap?: (bytes: Uint8Array, mimeType: string) => Promise<ImageBitmap>
-  /** Инъекция Draco-декодера (KHR_draco_mesh_compression): движок не тянет
-   *  wasm — потребитель (демо/приложение) подключает внешний декодер. */
+  /** Draco decoder injection (KHR_draco_mesh_compression): the engine does not
+   *  carry wasm — the consumer (demo/app) plugs in an external decoder. */
   readonly dracoDecoder?: DracoGeometryDecoder
-  /** Дефолты, применяемые к каждой загрузке. */
+  /** Defaults applied to every load. */
   readonly defaults?: Partial<LoadOptions>
 }
 
@@ -59,10 +59,10 @@ export interface ParserContext {
   readonly assembler: StreamAssembler
   readonly signal?: AbortSignal
   readonly onPhase: (info: { stage: string; ratio: number; detail: string }) => void
-  /** Загрузить внешний ресурс (для .gltf с внешними буферами). */
+  /** Load an external resource (for .gltf with external buffers). */
   loadExternal(uri: string): Promise<Uint8Array>
   createBitmap?: (bytes: Uint8Array, mimeType: string) => Promise<ImageBitmap>
-  /** Draco-декодер из опций библиотеки (инъекция). */
+  /** Draco decoder from library options (injection). */
   dracoDecoder?: DracoGeometryDecoder
 }
 
@@ -74,7 +74,7 @@ interface FormatEntry {
   readonly parse: ParserFn
 }
 
-// ─── Реестр форматов ───────────────────────────────────────────────────────
+// ─── Format registry ───────────────────────────────────────────────────────
 
 function defaultFormats(): FormatEntry[] {
   return [
@@ -131,7 +131,7 @@ function gltfOptions(ctx: ParserContext): GltfParseOptions {
   return { signal: ctx.signal, onPhase: ctx.onPhase, createBitmap: ctx.createBitmap, dracoDecoder: ctx.dracoDecoder }
 }
 
-/** Расширение URL (без query/hash, lower-case). */
+/** URL extension (no query/hash, lower-case). */
 function extensionOf(url: string): string {
   const clean = url.split('?')[0]?.split('#')[0] ?? ''
   const slash = clean.lastIndexOf('/')
@@ -140,7 +140,7 @@ function extensionOf(url: string): string {
   return clean.slice(dot + 1).toLowerCase()
 }
 
-// ─── Хэндл ─────────────────────────────────────────────────────────────────
+// ─── Handle ─────────────────────────────────────────────────────────────────
 
 class AssetHandleImpl<T> implements AssetHandle<T> {
   private snapshot: AssetProgress
@@ -197,7 +197,7 @@ class AssetHandleImpl<T> implements AssetHandle<T> {
   }
 }
 
-// ─── Библиотека ────────────────────────────────────────────────────────────
+// ─── Library ────────────────────────────────────────────────────────────
 
 interface CacheEntry {
   asset: unknown
@@ -229,14 +229,14 @@ export class AssetLibrary {
     this.defaults = options.defaults ?? {}
   }
 
-  // ── Публичный API ───────────────────────────────────────────────────
+  // ── Public API ───────────────────────────────────────────────────
 
-  /** Загрузить ассет: thenable-хэндл с прогрессом/отменой/приоритетом. */
+  /** Load an asset: a thenable handle with progress/cancel/priority. */
   load<T = LoadedAsset>(url: string, options: LoadOptions = {}): AssetHandle<T> {
     const merged: LoadOptions = { ...this.defaults, ...options }
     const key = url
 
-    // Кэш: мгновенный хэндл (без сети).
+    // Cache: an instant handle (no network).
     const cached = this.cache.get(key)
     if (cached !== undefined) {
       cached.lastAccess = now()
@@ -245,18 +245,18 @@ export class AssetLibrary {
         url,
         key,
         Promise.resolve(cached.asset as T),
-        { phase: 'done', loaded: cached.bytes, total: cached.bytes, phaseRatio: 1, ratio: 1, url, cached: true, detail: 'из кэша' },
+        { phase: 'done', loaded: cached.bytes, total: cached.bytes, phaseRatio: 1, ratio: 1, url, cached: true, detail: 'from cache' },
         () => false,
         () => false,
       )
       handle.markSettled()
-      // Кэш-хит — прогресс-колбэк тоже получает финальный снимок.
+      // Cache hit — the progress callback also gets the final snapshot.
       options.onProgress?.(handle.progress)
       this.emit({ type: 'done', handle: handle as never })
       return handle
     }
 
-    // Dedup: параллельные load одного URL делят задачу и хэндл.
+    // Dedup: parallel loads of one URL share the job and the handle.
     const existing = this.jobs.get(key)
     if (existing !== undefined) {
       return existing.handle as AssetHandle<T>
@@ -267,7 +267,7 @@ export class AssetLibrary {
     let loaded = 0
     let total = 0
     let phaseRatio = 0
-    let detail = 'в очереди'
+    let detail = 'queued'
 
     let resolveAsset!: (asset: unknown) => void
     let rejectAsset!: (error: unknown) => void
@@ -309,9 +309,9 @@ export class AssetLibrary {
       start: async signal => {
         const startedAt = now()
         phase = 'fetching'
-        pushProgress('соединение')
+        pushProgress('connecting')
 
-        // Композитная отмена: планировщик + внешний сигнал.
+        // Composite cancellation: scheduler + external signal.
         const controller = new AbortController()
         const external = merged.signal
         if (external?.aborted) throw cancelError(external.reason)
@@ -331,8 +331,8 @@ export class AssetLibrary {
                 currentWeight = contentTotal
                 this.scheduler.updateWeight(schedulerJob)
               } else if (total > 0 && received > total) {
-                // gzip-трансфер: content-length сжатый, тело длиннее —
-                // считаем длину неизвестной (асимптотический прогресс).
+                // gzip transfer: content-length is compressed, the body is longer —
+                // treat the length as unknown (asymptotic progress).
                 total = 0
               }
               phaseRatio = total > 0 ? received / total : asymptotic(received)
@@ -353,7 +353,7 @@ export class AssetLibrary {
 
           phase = 'parsing'
           phaseRatio = 0
-          pushProgress('парсинг')
+          pushProgress('parsing')
           const parseStartedAt = now()
           const asset = await parser({
             url,
@@ -374,7 +374,7 @@ export class AssetLibrary {
           })
           const parseMs = now() - parseStartedAt
 
-          // Трансформы пользователя — пайп пост-обработки.
+          // User transforms — the post-processing pipe.
           const transforms = merged.transform ?? []
           let value: unknown = asset
           if (transforms.length > 0) {
@@ -394,7 +394,7 @@ export class AssetLibrary {
           this.downloadBytes += loaded
           phase = 'done'
           phaseRatio = 1
-          pushProgress(`готово за ${fmtMs(now() - startedAt)}`)
+          pushProgress(`done in ${fmtMs(now() - startedAt)}`)
           finishJob()
           resolveAsset(value)
           handle.markSettled()
@@ -418,7 +418,7 @@ export class AssetLibrary {
       url,
       key,
       promise,
-      { phase: 'queued', loaded: 0, total: 0, phaseRatio: 0, ratio: 0, url, cached: false, detail: 'в очереди' },
+      { phase: 'queued', loaded: 0, total: 0, phaseRatio: 0, ratio: 0, url, cached: false, detail: 'queued' },
       reason => {
         if (handle.isSettled) return false
         const job = this.jobs.get(key)
@@ -436,12 +436,12 @@ export class AssetLibrary {
       const snap = snapshot()
       handle.update(snap)
       merged.onProgress?.(snap)
-      // emit — через замыкание библиотеки (this недоступен в function):
+      // emit — via the library closure (this is unavailable in a function):
       emitProgress(snap)
     }
 
-    // Стрелка-мостик: pushProgress объявлен до handle, но вызывается
-    // после его создания — hoisting function + замыкание корректны.
+    // Arrow bridge: pushProgress is declared before the handle, but called
+    // after its creation — function hoisting + the closure are correct.
     const emitProgress = (snap: AssetProgress): void => {
       this.emit({ type: 'progress', handle: handle as never })
       void snap
@@ -452,7 +452,7 @@ export class AssetLibrary {
     return handle as AssetHandle<T>
   }
 
-  /** Прелоад: прогреть кэш (ошибки — в отчёт, не бросаются). */
+  /** Preload: warm up the cache (errors go into the report, not thrown). */
   async preload(
     urls: readonly string[],
     options: LoadOptions = {},
@@ -472,7 +472,7 @@ export class AssetLibrary {
     return { ok, failed }
   }
 
-  /** Пачка с агрегатным прогрессом (взвешено по весам). */
+  /** A batch with aggregated progress (weighted by weights). */
   loadGroup<T = LoadedAsset>(entries: readonly { url: string; options?: LoadOptions }[]): LoadGroup<T> {
     const handles = entries.map(entry => this.load<T>(entry.url, entry.options ?? {}))
     let cancelled = false
@@ -506,7 +506,7 @@ export class AssetLibrary {
         }
         const ratio = weightSum > 0 ? weighted / weightSum : 0
         const detail =
-          `${doneCount}/${handles.length} готово · ` +
+          `${doneCount}/${handles.length} done · ` +
           (label === 'fetching' ? `${fmtBytes(loaded)}${total > 0 ? ` / ${fmtBytes(total)}` : ''}` : label)
         return {
           phase: label as AssetPhase,
@@ -514,7 +514,7 @@ export class AssetLibrary {
           total,
           phaseRatio: ratio,
           ratio,
-          url: entries.length === 1 ? entries[0].url : `${handles.length} ассетов`,
+          url: entries.length === 1 ? entries[0].url : `${handles.length} assets`,
           cached: false,
           detail,
         }
@@ -528,12 +528,12 @@ export class AssetLibrary {
     return group
   }
 
-  /** Синхронный доступ к кэшу (undefined — не загружен). */
+  /** Synchronous access to the cache (undefined — not loaded). */
   get<T = unknown>(url: string): T | undefined {
     return this.cache.get(url)?.asset as T | undefined
   }
 
-  /** Хэндл активной задачи (undefined — нет). */
+  /** Handle of an active job (undefined — none). */
   getHandle<T = unknown>(url: string): AssetHandle<T> | undefined {
     return this.jobs.get(url)?.handle as AssetHandle<T> | undefined
   }
@@ -554,17 +554,17 @@ export class AssetLibrary {
     }
   }
 
-  /** Выбросить ассет из кэша. */
+  /** Evict an asset from the cache. */
   dispose(url: string): boolean {
     return this.cache.delete(url)
   }
 
-  /** Полная очистка кэша. */
+  /** Clear the cache completely. */
   clear(): void {
     this.cache.clear()
   }
 
-  /** Подписка на события. */
+  /** Subscribe to events. */
   on(type: LibraryEvent['type'], listener: (event: LibraryEvent) => void): () => void {
     let set = this.listeners.get(type)
     if (set === undefined) {
@@ -575,30 +575,30 @@ export class AssetLibrary {
     return () => set.delete(listener)
   }
 
-  /** Свой формат (перекрывает встроенные по расширениям). */
+  /** Custom format (overrides the built-ins by extensions). */
   registerFormat(id: string, extensions: readonly string[], parse: ParserFn): void {
     this.formats.unshift({ id, extensions, parse })
   }
 
-  /** Реестр конфиг-парсеров (json/zml/…). */
+  /** Config parser registry (json/zml/...). */
   get configParsers(): { register: typeof registerConfigParser; of: (ext: string) => ConfigParser | undefined } {
     return { register: registerConfigParser, of: ext => configParserOf(ext) }
   }
 
-  // ─── Внутреннее ─────────────────────────────────────────────────────
+  // ─── Internals ─────────────────────────────────────────────────────
 
   private async resolveParser(url: string, options: LoadOptions, assembler: StreamAssembler): Promise<ParserFn> {
     if (options.parser !== undefined) {
       const byId = this.formats.find(format => format.id === options.parser)
       if (byId !== undefined) return byId.parse
-      throw new Error(`парсер «${options.parser}» не зарегистрирован`)
+      throw new Error(`parser "${options.parser}" is not registered`)
     }
     const extension = extensionOf(url)
     if (extension !== '') {
       const byExtension = this.formats.find(format => format.extensions.includes(extension))
       if (byExtension !== undefined) return byExtension.parse
     }
-    // Сниффинг магики: glb/fbx.
+    // Magic sniffing: glb/fbx.
     await assembler.waitFor(24)
     const head = assembler.slice(0, Math.min(24, assembler.watermark))
     if (looksLikeGlb(head)) return this.formats.find(f => f.id === 'glb')!.parse
@@ -613,7 +613,7 @@ export class AssetLibrary {
       try {
         listener(event)
       } catch {
-        // слушатель не должен ронять библиотеку
+        // a listener must not break the library
       }
     }
   }
@@ -625,7 +625,7 @@ export class AssetLibrary {
     while (total > this.cacheBytesLimit) {
       let victim: { key: string; entry: CacheEntry } | undefined
       for (const [key, entry] of this.cache) {
-        if (this.jobs.has(key)) continue // активная задача — не трогаем
+        if (this.jobs.has(key)) continue // an active job — do not touch
         if (victim === undefined || entry.lastAccess < victim.entry.lastAccess) victim = { key, entry }
       }
       if (victim === undefined) break
@@ -666,14 +666,14 @@ function aggregateRatio(phase: AssetPhase, phaseRatio: number, loaded: number, t
   }
 }
 
-/** Асимптотика при неизвестной длине (≈90% на 8 MB). */
+/** Asymptotics for an unknown length (≈90% at 8 MB). */
 function asymptotic(loaded: number): number {
   return Math.min(0.95, 1 - Math.exp(-loaded / (8 * 1024 * 1024)))
 }
 
 function cancelError(reason?: unknown): unknown {
   if (reason instanceof Error) return reason
-  const message = typeof reason === 'string' ? reason : 'загрузка отменена'
+  const message = typeof reason === 'string' ? reason : 'loading cancelled'
   return new DOMException(message, 'AbortError')
 }
 
@@ -695,5 +695,5 @@ function fmtBytes(n: number): string {
 }
 
 function fmtMs(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)} с` : `${Math.round(n)} мс`
+  return n >= 1000 ? `${(n / 1000).toFixed(1)} s` : `${Math.round(n)} ms`
 }

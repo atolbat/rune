@@ -1,79 +1,79 @@
 /**
- * resourceSessionGPU — стабильно-id сессия над GPUFacade + журнал v2.
+ * resourceSessionGPU — a stable-id session over GPUFacade + journal v2.
  *
- * WebGPU-близнец resourceSessionGL.ts. Те же три решения (Task 62):
- * стабильные id над фасадом, примитивные опсы, контент в журнале.
+ * The WebGPU twin of resourceSessionGL.ts. The same three decisions (Task 62):
+ * stable ids over the facade, primitive ops, content in the journal.
  *
- * Отличия от GL-сессии:
- *  • createTexture имеет параметр format ('rgba8unorm' | 'canvas' |
- *    'rgba16float' | 'rgba32float' — Task 67 HDR) — сохраняется в
- *    texture.create-опсе;
- *  • copyExternalImageToTexture — единственный upload-примитив: полная
- *    загрузка (dst 0,0 + копия покрывает всю текстуру) → texture.write,
- *    иначе → texture.update (sub-region, атласный packing);
+ * Differences from the GL session:
+ *  • createTexture takes a format parameter ('rgba8unorm' | 'canvas' |
+ *    'rgba16float' | 'rgba32float' — Task 67 HDR) — stored in the
+ *    texture.create op;
+ *  • copyExternalImageToTexture is the only upload primitive: a full
+ *    upload (dst 0,0 + the copy covers the whole texture) → texture.write,
+ *    otherwise → texture.update (sub-region, atlas packing);
  *  • copyExternalImageToTextureMip → texture.writeMip;
- *  • пайплайны ленивые (ensurePipeline — pass-through, WGSL живёт в
- *    WgpuCommand), vertex buffers keyed по Float32Array (pass-through) —
- *    производное состояние, журналом не владеется.
+ *  • pipelines are lazy (ensurePipeline — pass-through, WGSL lives in
+ *    WgpuCommand), vertex buffers are keyed by Float32Array (pass-through) —
+ *    derived state, not owned by the journal.
  *
- * bindTexture принимает textureId ИЛИ viewId (namespace ≥ 1M) —
- * транслируется в raw id текущей инкарнации устройства.
+ * bindTexture accepts a textureId OR a viewId (namespace ≥ 1M) —
+ * translated to the raw id of the current device incarnation.
  */
 
 import type { ResourceJournal, ResOp, RestoreReport, WorkingSet, EvictionReport, ResidencyStats, TextureFormat } from '@rune/core'
 import { selectResidentOps, selectLRUEvictions, estimateTextureBytes } from '@rune/core'
 import type { GPUFacade, GPUImageSource } from '@rune/webgpu'
 
-/** Стартовый id для namespace view'ов (паритет с realGPU: ≥ 1M). */
+/** Starting id for the view namespace (parity with realGPU: ≥ 1M). */
 const VIEW_ID_BASE = 1_000_000
 
 export interface ResourceSessionGPU {
-  /** Публичный фасад: тот же контракт GPUFacade, но texture/view/target id — стабильные. */
+  /** Public facade: the same GPUFacade contract, but texture/view/target ids are stable. */
   readonly facade: GPUFacade
-  /** Текущий стабильный textureId → raw id (диагностика/тесты). */
+  /** Current stable textureId → raw id (diagnostics/tests). */
   readonly mapping: ReadonlyMap<number, number>
-  /** Перевод любого стабильного id (texture/view/target) в raw id. */
+  /** Translate any stable id (texture/view/target) to a raw id. */
   rawId(stableId: number): number | undefined
-  /** Replay журнала на СВЕЖЕМ raw-фасаде этой сессии.
-   *  Task 65 soft reset: keep — восстановить только замыкание рабочего
-   *  множества; остальное живое — deferred (лениво через ensureResident). */
+  /** Replay the journal on a FRESH raw facade of this session.
+   *  Task 65 soft reset: keep — restore only the closure of the working
+   *  set; the rest stays deferred (lazily via ensureResident). */
   restore(keep?: WorkingSet): RestoreReport
-  /** Task 65: ленивый возврат одного ресурса (texture/view/target id)
-   *  после soft reset. Идемпотентно (резидентный → null). */
+  /** Task 65: lazy return of a single resource (texture/view/target id)
+   *  after a soft reset. Idempotent (resident → null). */
   ensureResident(resourceId: number): RestoreReport | null
-  /** Task 66: LRU-вытеснение резидентных текстур до бюджета (паритет
-   *  с GL-сессией: замыкание views/targets, журнал не меняется). */
+  /** Task 66: LRU eviction of resident textures down to a budget (parity
+   *  with the GL session: closure of views/targets, the journal is unchanged). */
   evictLRU(options?: { budgetBytes?: number; pinned?: WorkingSet }): EvictionReport
-  /** Task 66: оценка резидентной GPU-памяти + порядок LRU (диагностика). */
+  /** Task 66: resident GPU memory estimate + LRU order (diagnostics). */
   residencyStats(): ResidencyStats
 }
 
-/** Создать сессию: стабильные id + журналирование поверх raw GPUFacade. */
+/** Create a session: stable ids + journaling on top of a raw GPUFacade. */
 export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJournal): ResourceSessionGPU {
   const texMap = new Map<number, number>()
   const viewMap = new Map<number, number>()
   const targetMap = new Map<number, number>()
-  /** Стабильный textureId → размеры (для классификации полного upload'а). */
+  /** Stable textureId → dimensions (for classifying a full upload). */
   const texSizes = new Map<number, { w: number; h: number }>()
-  // Task 66: LRU-учёт (монотонный lastUse) + родители зависимых ресурсов
-  // (замыкание вытеснения) + mipLevels для оценки GPU-памяти.
+  // Task 66: LRU tracking (a monotonic lastUse) + parents of dependent
+  // resources (the eviction closure) + mipLevels for the GPU memory estimate.
   let useCounter = 0
   const lastUse = new Map<number, number>()
   const viewParent = new Map<number, number>()
   const targetParent = new Map<number, number>()
   const texMips = new Map<number, number>()
-  // Task 67: формат хранения (HDR 2×/4× байт на пиксель) — для оценки
-  // GPU-памяти в residency/evictLRU.
+  // Task 67: storage format (HDR 2×/4× bytes per pixel) — for the GPU
+  // memory estimate in residency/evictLRU.
   const texFormats = new Map<number, TextureFormat | undefined>()
   let nextTex = 1
   let nextView = VIEW_ID_BASE
   let nextTarget = 1
 
-  /** Отметить использование текстуры (свежесть LRU). */
+  /** Mark a texture as used (LRU freshness). */
   function touch(textureId: number): void {
     lastUse.set(textureId, ++useCounter)
   }
-  /** Touch по texture-ИЛИ-view id (view → родительская текстура). */
+  /** Touch by a texture-OR-view id (view → parent texture). */
   function touchTexOrView(texOrViewId: number): void {
     touch(texOrViewId >= VIEW_ID_BASE ? (viewParent.get(texOrViewId) ?? texOrViewId) : texOrViewId)
   }
@@ -88,22 +88,22 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
   const rawTex = (id: number): number => {
     const mapped = texMap.get(id)
     if (mapped === undefined) {
-      throw new Error(`resourceSession: неизвестный стабильный textureId=${id}. ` +
-        `Ресурс не создан в этой сессии (или restore() не выполнен после потери устройства).`)
+      throw new Error(`resourceSession: unknown stable textureId=${id}. ` +
+        `The resource was not created in this session (or restore() has not been run after device loss).`)
     }
     return mapped
   }
   const rawView = (id: number): number => {
     const mapped = viewMap.get(id)
     if (mapped === undefined) {
-      throw new Error(`resourceSession: неизвестный стабильный viewId=${id}.`)
+      throw new Error(`resourceSession: unknown stable viewId=${id}.`)
     }
     return mapped
   }
   const rawTarget = (id: number): number => {
     const mapped = targetMap.get(id)
     if (mapped === undefined) {
-      throw new Error(`resourceSession: неизвестный стабильный targetId=${id}.`)
+      throw new Error(`resourceSession: unknown stable targetId=${id}.`)
     }
     return mapped
   }
@@ -157,7 +157,7 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
     usePipeline: pipelineId => raw.usePipeline(pipelineId),
     bindUniforms: dynamicOffset => raw.bindUniforms(dynamicOffset),
     bindVertexBuffer: (slot, data, size) => raw.bindVertexBuffer(slot, data, size),
-    // M5 (Task 73): feed dual-bind — frame-op (per-frame dirty range), не журналируется.
+    // M5 (Task 73): feed dual-bind — a frame op (per-frame dirty range), not journaled.
     syncVertexBuffer: (data, byteLength) => raw.syncVertexBuffer(data, byteLength),
     bindTexture: textureOrViewId => {
       touchTexOrView(textureOrViewId)
@@ -184,16 +184,16 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
       }
       raw.bindTarget(targetId === 0 ? 0 : rawTarget(targetId), clear)
     },
-    // Task 80: readback — перевод стабильного id цели в raw-id (pass-through,
-    // чтение не журналируется).
+    // Task 80: readback — translate the stable target id to a raw id (pass-through,
+    // the read is not journaled).
     readTargetPixels: targetId => raw.readTargetPixels(targetId === 0 ? 0 : rawTarget(targetId)),
 
     deleteTexture: textureId => {
-      // Task 65: ресурс может быть ОТЛОЖЕН (soft reset не восстановил его) —
-      // тогда raw-вызова нет, но texture.destroy в журнале обязателен
-      // (убить декларацию → compact вычистит пару create→destroy).
-      // Task 66: вытесненный (evictLRU) — то же: raw нет, декларацию убивает
-      // только ЯВНОЕ удаление (вытеснение — не смерть ресурса).
+      // Task 65: the resource may be DEFERRED (a soft reset did not restore it) —
+      // then there is no raw call, but texture.destroy in the journal is mandatory
+      // (kill the declaration → compact will purge the create→destroy pair).
+      // Task 66: an evicted (evictLRU) resource — the same: no raw, only an
+      // EXPLICIT deletion kills the declaration (eviction is not the death of a resource).
       const mapped = texMap.get(textureId)
       if (mapped !== undefined) raw.deleteTexture(mapped)
       texMap.delete(textureId)
@@ -204,7 +204,7 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
       journal.record({ kind: 'texture.destroy', id: textureId })
     },
     deleteTarget: targetId => {
-      // Task 65: отложенная target — только декларация в журнале.
+      // Task 65: a deferred target — only the declaration in the journal.
       const mapped = targetMap.get(targetId)
       if (mapped !== undefined) raw.deleteTarget(mapped)
       targetMap.delete(targetId)
@@ -227,7 +227,7 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
       return id
     },
     deleteTextureView: viewId => {
-      // Task 65: отложенный view — только декларация в журнале.
+      // Task 65: a deferred view — only the declaration in the journal.
       const mapped = viewMap.get(viewId)
       if (mapped !== undefined) raw.deleteTextureView(mapped)
       viewMap.delete(viewId)
@@ -242,7 +242,7 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
     get timer() { return raw.timer },
   }
 
-  // ─── Task 65: применение одного опса без записи в журнал ──────────────────
+  // ─── Task 65: applying a single op without journaling ──────────────────────
   function applyOp(op: ResOp, acc: {
     opsReplayed: number; contentOps: number; skipped: number
     textureIds: number[]; viewIds: number[]; targetIds: number[]
@@ -320,8 +320,8 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
 
   function restore(keep?: WorkingSet): RestoreReport {
     seedCounters()
-    // Свежая инкарнация устройства: маппинги и LRU-учёт прежней — мусор
-    // (raw id мертвы; отложенные ресурсы НЕ резидентны). Паритет с GL-сессией.
+    // A fresh device incarnation: the mappings and LRU tracking of the old one are garbage
+    // (raw ids are dead; deferred resources are NOT resident). Parity with the GL session.
     texMap.clear()
     viewMap.clear()
     targetMap.clear()
@@ -363,8 +363,8 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
     return { ...acc }
   }
 
-  // ─── Task 66: LRU-вытеснение (pressure → evict) — паритет с GL-сессией ─────
-  /** Родители запиненных views/targets из ЖУРНАЛА (источник истины). */
+  // ─── Task 66: LRU eviction (pressure → evict) — parity with the GL session ─────
+  /** Parents of pinned views/targets from the JOURNAL (the source of truth). */
   function pinnedTextures(pinned?: WorkingSet): Set<number> {
     const pin = new Set<number>(pinned?.textureIds ?? [])
     if (pinned?.viewIds !== undefined || pinned?.targetIds !== undefined) {
@@ -376,13 +376,13 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
     return pin
   }
 
-  /** Записи LRU-учёта резидентных текстур. */
+  /** Entries of the LRU tracking of resident textures. */
   function residencyEntries(): { id: number; bytes: number; lastUse: number }[] {
     const entries: { id: number; bytes: number; lastUse: number }[] = []
     for (const id of texMap.keys()) {
       const size = texSizes.get(id)
-      // Task 67: оценка учитывает формат (rgba16float — 8, rgba32float — 16
-      // б/пиксель): HDR-текстура «весит» в вытеснении честно.
+      // Task 67: the estimate accounts for the format (rgba16float — 8, rgba32float — 16
+      // bytes/pixel): an HDR texture "weighs" honestly in eviction.
       const bytes = size !== undefined
         ? estimateTextureBytes(size.w, size.h, texMips.get(id) ?? 1, texFormats.get(id))
         : 0
@@ -409,9 +409,9 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
     const evictedViews: number[] = []
     const evictedTargets: number[] = []
     for (const texId of plan.evictIds) {
-      // Замыкание: резидентные views/targets тянутся за хранилищем текстуры
-      // (GPUTextureView живёт до destroy() родителя, но bind по мёртвому
-      // view-алиасу бессмысленен — убираем из Map и raw-фасада).
+      // Closure: resident views/targets follow the texture's storage
+      // (a GPUTextureView lives until the parent's destroy(), but binding via a dead
+      // view alias is pointless — remove it from the Map and the raw facade).
       for (const [viewId, parent] of viewParent) {
         if (parent === texId && viewMap.has(viewId)) {
           raw.deleteTextureView(viewMap.get(viewId)!)
@@ -428,8 +428,8 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
           evictedTargets.push(targetId)
         }
       }
-      // Raw-вызов БЕЗ записи в журнал: декларация+контент живы — ресурс
-      // вернётся через ensureResident (вытеснение — не уничтожение).
+      // A raw call WITHOUT a journal record: declaration+content stay alive — the
+      // resource will come back via ensureResident (eviction is not destruction).
       const mapped = texMap.get(texId)
       if (mapped !== undefined) raw.deleteTexture(mapped)
       texMap.delete(texId)
@@ -462,7 +462,7 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
   }
 }
 
-/** Имя типа источника (паритет с journalGpu v1 — те же kind-имена). */
+/** Source type name (parity with journalGpu v1 — the same kind names). */
 function describeGpuSourceKind(source: GPUImageSource): string {
   if (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) return 'ImageBitmap'
   if (typeof OffscreenCanvas !== 'undefined' && source instanceof OffscreenCanvas) return 'OffscreenCanvas'
@@ -476,8 +476,8 @@ function describeGpuSourceKind(source: GPUImageSource): string {
   return (source as { constructor?: { name?: string } }).constructor?.name ?? 'unknown'
 }
 
-/** Мёртвый источник: null/undefined, закрытый ImageBitmap (width=0),
- *  или bitmap-подобный объект с нулевыми числовыми размерами. */
+/** A dead source: null/undefined, a closed ImageBitmap (width=0),
+ *  or a bitmap-like object with zero numeric dimensions. */
 function gpuSourceAlive(source: unknown): boolean {
   if (source === null || source === undefined) return false
   const s = source as { width?: unknown; height?: unknown }

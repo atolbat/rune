@@ -1,15 +1,15 @@
-// Демо «model-viewer»: сцена с загрузчиком — три модели из three.js examples.
-//   Forest House — glTF + AVIF-текстуры + Draco (webgl_loader_gltf_avif)
-//   Samba Dancing — FBX, скелет, бинд-поза (webgl_loader_fbx)
+// "model-viewer" demo: a scene with a loader — three models from the three.js examples.
+//   Forest House — glTF + AVIF textures + Draco (webgl_loader_gltf_avif)
+//   Samba Dancing — FBX, skeleton, bind pose (webgl_loader_fbx)
 //   Nefertiti — glTF + object-space normal map (webgl_materials_normalmap_object_space)
-// Сценарий: кнопка «Загрузить и показать» → прогресс-бар (AssetLoader:
-// fetch → parse → decode) → сцена. Переключение моделей; загруженные
-// показываются мгновенно. Вращение — драгом (тач/мышь) + авто-спин.
-// Демо импортирует СОБРАННЫЕ бандлы: dist/rune.esm.js + dist/rune-loaders.esm.js.
+// Flow: a Load button → progress bar (AssetLoader: fetch → parse → decode) →
+// the scene. Model switching; loaded models show instantly. Rotation via
+// drag (touch/mouse) + auto-spin.
+// The demo imports the BUILT bundles: dist/rune.esm.js + dist/rune-loaders.esm.js.
 import { createRenderer } from '../../dist/rune.esm.js'
 import { AssetLoader } from '../../dist/rune-loaders.esm.js'
 
-/* ─── Модели ─────────────────────────────────────────────────────────────── */
+/* ─── Models ─────────────────────────────────────────────────────────────── */
 
 const MODELS = [
   {
@@ -22,7 +22,7 @@ const MODELS = [
   {
     id: 'samba',
     title: 'Samba Dancing',
-    sub: 'FBX · скелет · бинд-поза',
+    sub: 'FBX · skeleton · bind pose',
     url: 'assets/samba.fbx',
     bytes: 3_681_360,
   },
@@ -35,14 +35,14 @@ const MODELS = [
   },
 ]
 
-const MODE_NAMES = { auto: 'Авто (WebGPU → фолбэк WebGL2)', webgl2: 'WebGL2', webgpu: 'WebGPU' }
+const MODE_NAMES = { auto: 'Auto (WebGPU → WebGL2 fallback)', webgl2: 'WebGL2', webgpu: 'WebGPU' }
 const LIGHT_DIR = [0.5, 0.8, 0.6]
 
-/* ─── Шейдеры (dual-source: GLSL + WGSL — один спек, оба бэкенда) ────────── */
+/* ─── Shaders (dual-source: GLSL + WGSL — one spec, both backends) ──────── */
 
-// Текстурированный Lambert (Forest House): tex.rgb * (ambient + lambert).
-// alphaCutoff: MASK-материалы отбрасывают прозрачные фрагменты; BLEND —
-// рисуются с блендингом (pipeline), OPAQUE — cutoff 0 (никогда не сработает).
+// Textured Lambert (Forest House): tex.rgb * (ambient + lambert).
+// alphaCutoff: MASK materials discard transparent fragments; BLEND ones are
+// drawn with blending (pipeline), OPAQUE — cutoff 0 (never triggers).
 const TEXTURED_VERT = `#version 300 es
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
@@ -67,7 +67,7 @@ uniform float u_alphaCutoff;
 out vec4 o_color;
 void main() {
   vec3 n = normalize(v_normal);
-  if (!gl_FrontFacing) n = -n; // doubleSided материалы дома
+  if (!gl_FrontFacing) n = -n; // doubleSided materials of the house
   float lambert = max(dot(n, normalize(u_lightDir)), 0.0);
   vec4 tex = texture(u_tex, v_uv);
   if (tex.a < u_alphaCutoff) discard;
@@ -113,14 +113,14 @@ struct FSIn {
 @fragment
 fn fsMain(frag : FSIn) -> @location(0) vec4<f32> {
   var n = normalize(frag.worldNormal);
-  n = select(-n, n, frag.ff); // doubleSided материалы дома
+  n = select(-n, n, frag.ff); // doubleSided materials of the house
   let lambert = max(dot(n, normalize(params.u_lightDir.xyz)), 0.0);
   let tex = textureSample(texTexture, texSampler, frag.uv);
   if (tex.a < params.u_alphaCutoff) { discard; }
   return vec4<f32>(tex.rgb * (0.35 + 0.65 * lambert), tex.a);
 }`
 
-// Плоский Lambert (Samba): albedo * (ambient + lambert), текстур нет.
+// Flat Lambert (Samba): albedo * (ambient + lambert), no textures.
 const FLAT_VERT = `#version 300 es
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec3 normal;
@@ -175,9 +175,9 @@ fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(params.u_albedo.rgb * (0.3 + lambert * 0.7), 1.0);
 }`
 
-// Object-space normal map (Nefertiti): нормаль берётся ИЗ КАРТЫ НОРМАЛЕЙ
-// (RGB → объектное пространство), геометрические нормали не нужны — как в
-// исходном примере three.js (deleteAttribute('normal')).
+// Object-space normal map (Nefertiti): the normal comes FROM the normal map
+// (RGB → object space), geometric normals are not needed — as in the original
+// three.js example (deleteAttribute('normal')).
 const NORMALMAP_VERT = `#version 300 es
 layout(location = 0) in vec3 position;
 layout(location = 1) in vec2 uv;
@@ -200,7 +200,7 @@ out vec4 o_color;
 void main() {
   vec3 nObj = texture(u_normalMap, v_uv).xyz * 2.0 - 1.0;
   vec3 n = normalize(mat3(u_model) * nObj);
-  if (!gl_FrontFacing) n = -n; // doubleSided: бюст открыт с двух сторон
+  if (!gl_FrontFacing) n = -n; // doubleSided: the bust is open on both sides
   float lambert = max(dot(n, normalize(u_lightDir)), 0.0);
   vec3 base = texture(u_tex, v_uv).rgb;
   o_color = vec4(base * (0.22 + 0.78 * lambert), 1.0);
@@ -248,7 +248,7 @@ fn fsMain(frag : FSIn) -> @location(0) vec4<f32> {
   return vec4<f32>(base.rgb * (0.22 + 0.78 * lambert), 1.0);
 }`
 
-/* ─── Локальная математика mat4 (колоночно-мажорная, как @rune/math) ──────── */
+/* ─── Local mat4 math (column-major, like @rune/math) ────────────────────── */
 
 const M = () => new Float32Array(16)
 
@@ -319,7 +319,7 @@ function mat4RotationY(out, angle) {
 }
 
 function mat4LookAt(out, ex, ey, ez, cx, cy, cz) {
-  // z = normalize(eye − center) — конвенция камеры rune/@rune/math
+  // z = normalize(eye − center) — the rune/@rune/math camera convention
   let zx = ex - cx, zy = ey - cy, zz = ez - cz
   let len = Math.hypot(zx, zy, zz) || 1
   zx /= len; zy /= len; zz /= len
@@ -341,7 +341,7 @@ function mat4LookAt(out, ex, ey, ez, cx, cy, cz) {
   return out
 }
 
-/** ТRS-узел glTF → матрица (кватернион x,y,z,w; масштаб равномерный по осям). */
+/** glTF TRS node → matrix (quaternion x,y,z,w; per-axis scale). */
 function mat4FromTrs(out, translation, rotation, scale) {
   if (rotation === undefined || rotation === null) {
     mat4Identity(out)
@@ -371,9 +371,9 @@ function mat4FromTrs(out, translation, rotation, scale) {
   return out
 }
 
-/* ─── Геометрия: деиндексация и запекание нод ────────────────────────────── */
+/* ─── Geometry: deindexing and node baking ───────────────────────────────── */
 
-/** Раскрывает индексы в «суп вершин»: ленты rune рисуют drawArrays. */
+/** Expands indices into a "vertex soup": rune tapes draw via drawArrays. */
 function deindexed(positions, normals, uvs, indices) {
   if (indices === null || indices === undefined) {
     return { positions, normals, uvs }
@@ -400,7 +400,7 @@ function deindexed(positions, normals, uvs, indices) {
   return { positions: out, normals: outN, uvs: outU }
 }
 
-/** Запекает матрицу ноды в позиции/нормали (равномерный масштаб assumed). */
+/** Bakes the node matrix into positions/normals (uniform scale assumed). */
 function bakedByMatrix(positions, normals, matrix) {
   for (let i = 0; i < positions.length; i += 3) {
     const x = positions[i], y = positions[i + 1], z = positions[i + 2]
@@ -418,7 +418,7 @@ function bakedByMatrix(positions, normals, matrix) {
   }
 }
 
-/** Границы объединения всех мешей (по уже запечённым позициям). */
+/** Bounds of the union of all meshes (over already-baked positions). */
 function sceneBounds(meshes) {
   const min = [Infinity, Infinity, Infinity]
   const max = [-Infinity, -Infinity, -Infinity]
@@ -440,13 +440,14 @@ function sceneBounds(meshes) {
   return { min, max, center, radius }
 }
 
-/* ─── Draco-адаптер: контракт @rune/loaders (bytes, attributes) → геометрия ── */
+/* ─── Draco adapter: the @rune/loaders contract (bytes, attributes) → geometry */
 
-// forest_house.glb требует KHR_draco_mesh_compression. Декодер —
-// draco_wasm_wrapper.js + draco_decoder.wasm из three.js (локальные ассеты
-// демо — внешних CDN-зависимостей нет). Обёртка emscripten — классический
-// скрипт: грузим текстом и разворачиваем new Function (module-контекст её
-// не экспортирует), модуль инстанцируется один раз и кэшируется.
+// forest_house.glb requires KHR_draco_mesh_compression. The decoder is
+// draco_wasm_wrapper.js + draco_decoder.wasm from three.js (local demo
+// assets — no external CDN dependencies). The emscripten wrapper is a
+// classic script: we fetch it as text and unwrap it with new Function (the
+// module context does not export it); the module is instantiated once and
+// cached.
 let dracoModule = null
 
 async function loadDracoModule() {
@@ -472,7 +473,7 @@ async function loadDracoModule() {
   return dracoModule
 }
 
-/** Декодирует Draco-примитив по образцу three.js DRACOLoader (MIT). */
+/** Decodes a Draco primitive following the three.js DRACOLoader (MIT). */
 async function decodeDraco(bytes, attributes) {
   const draco = await loadDracoModule()
   const decoder = new draco.Decoder()
@@ -480,7 +481,7 @@ async function decodeDraco(bytes, attributes) {
     const array = new Int8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     const geometryType = decoder.GetEncodedGeometryType(array)
     if (geometryType !== draco.TRIANGULAR_MESH) {
-      throw new Error('demo: Draco — не триангулярный меш')
+      throw new Error('demo: Draco — not a triangular mesh')
     }
     const mesh = new draco.Mesh()
     const status = decoder.DecodeArrayToMesh(array, array.byteLength, mesh)
@@ -497,17 +498,17 @@ async function decodeDraco(bytes, attributes) {
       const ptr = draco._malloc(byteLength)
       decoder.GetAttributeDataArrayForAllPoints(mesh, attribute, draco.DT_FLOAT32, byteLength, ptr)
       const view = new Float32Array(draco.HEAPF32.buffer, ptr, numPoints * components)
-      const out = view.slice() // копия из WASM-heap — malloc/free ниже
+      const out = view.slice() // copy out of the WASM heap — malloc/free below
       draco._free(ptr)
       return out
     }
 
     const positions = readAttribute('POSITION', 3)
-    if (positions === null) throw new Error('demo: Draco-примитив без POSITION')
+    if (positions === null) throw new Error('demo: Draco primitive without POSITION')
     const normals = readAttribute('NORMAL', 3)
     const uvs = readAttribute('TEXCOORD_0', 2)
 
-    // Индексы: GetTrianglesUInt32Array → копия из heap
+    // Indices: GetTrianglesUInt32Array → a copy out of the heap
     const numIndices = mesh.num_faces() * 3
     const indexByteLength = numIndices * 4
     const indexPtr = draco._malloc(indexByteLength)
@@ -523,11 +524,11 @@ async function decodeDraco(bytes, attributes) {
   }
 }
 
-/* ─── Парсинг модели → подготовленные меши (бэкенд-независимые) ───────────── */
+/* ─── Model parsing → prepared meshes (backend-independent) ──────────────── */
 
 const loader = new AssetLoader({ dracoDecoder: decodeDraco })
 
-/** glTF/GLB: ноды → мировые матрицы → запекание → деиндексация + материалы. */
+/** glTF/GLB: nodes → world matrices → baking → deindexing + materials. */
 function prepareGltf(model) {
   const meshes = []
   const nodeMatrix = M()
@@ -536,7 +537,7 @@ function prepareGltf(model) {
     if (node === undefined) return
     mat4FromTrs(nodeMatrix, node.translation, node.rotation, node.scale)
     if (node.matrix !== undefined && node.matrix !== null) {
-      // Полная матрица ноды (колоночно-мажорный массив из glTF)
+      // Full node matrix (a column-major array from glTF)
       for (let i = 0; i < 16; i++) nodeMatrix[i] = node.matrix[i]
     }
     const world = parent === null ? nodeMatrix.slice() : mat4Multiply(M(), parent, nodeMatrix)
@@ -575,7 +576,7 @@ function prepareGltf(model) {
   return finishPrepared(meshes, model.stats)
 }
 
-/** FBX (Samba): меши уже в мировых координатах — только деиндексация + цвет. */
+/** FBX (Samba): meshes are already in world space — only deindexing + color. */
 function prepareFbx(model) {
   const meshes = []
   const SKIN_TONE = [0.72, 0.53, 0.42]
@@ -591,7 +592,7 @@ function prepareFbx(model) {
       albedo: mesh.name.includes('Joints') ? JOINT_TONE : SKIN_TONE,
       blend: false,
       alphaCutoff: 0,
-      cull: 'none', // бинд-поза Mixamo: подмышки/складки открыты с двух сторон
+      cull: 'none', // Mixamo bind pose: armpits/folds are open on both sides
       name: mesh.name,
     })
   }
@@ -609,36 +610,52 @@ function finishPrepared(meshes, stats) {
   return { meshes, bounds, stats: { ...stats, vertices, triangles } }
 }
 
-/* ─── Шелл и панель моделей ───────────────────────────────────────────────── */
+/* ─── Shell and the model picker ───────────────────────────────────────────────── */
 
 const shell = window.RuneDemoShell.mount({
+  layout: 'fullscreen',
   title: 'rune — model viewer',
-  desc: 'Три модели three.js examples: glTF+AVIF+Draco, FBX, normal map. Кнопка загрузки с прогрессом, переключение, вращение драгом.',
-  hint: 'Локально: <code>bun run demo</code> → /demo/model-viewer/ · Бандлы: <code>dist/rune.esm.js</code> + <code>dist/rune-loaders.esm.js</code>',
   defaults: { mode: 'auto' },
   onMode: (mode) => void boot(mode),
   onPause: () => {
     activeRenderer?.stop()
-    shell.log.event('Пауза')
+    shell.log.event('Paused')
   },
   onResume: () => {
     activeRenderer?.start()
-    shell.log.event('Продолжили')
+    shell.log.event('Resumed')
   },
 })
 
-// Панель поверх канваса: табы моделей + кнопка загрузки + прогресс.
-const panel = document.createElement('div')
-panel.className = 'mv-panel'
+// Bottom pill: the current model (or load progress); opens the model sheet.
+const pill = document.createElement('button')
+pill.type = 'button'
+pill.className = 'mv-pill'
+pill.hidden = true
+pill.addEventListener('click', () => setSheetOpen(true))
 
-const tabs = document.createElement('div')
-tabs.className = 'mv-tabs'
-panel.append(tabs)
+// Bottom sheet: model list + load button + progress + stats.
+const sheet = document.createElement('div')
+sheet.className = 'mv-sheet'
+const sheetHead = document.createElement('div')
+sheetHead.className = 'mv-head'
+const sheetTitle = document.createElement('span')
+sheetTitle.className = 'mv-title'
+sheetTitle.textContent = 'Models'
+const sheetClose = document.createElement('button')
+sheetClose.type = 'button'
+sheetClose.className = 'mv-close'
+sheetClose.textContent = '✕'
+sheetClose.setAttribute('aria-label', 'Close')
+sheetClose.addEventListener('click', () => setSheetOpen(false))
+sheetHead.append(sheetTitle, sheetClose)
+
+const rows = document.createElement('div')
+rows.className = 'mv-rows'
 
 const loadButton = document.createElement('button')
 loadButton.type = 'button'
 loadButton.className = 'mv-load'
-panel.append(loadButton)
 
 const progress = document.createElement('div')
 progress.className = 'mv-progress'
@@ -650,35 +667,49 @@ barTrack.append(bar)
 const status = document.createElement('span')
 status.className = 'mv-status'
 progress.append(barTrack, status)
-panel.append(progress)
 
 const statsLine = document.createElement('span')
 statsLine.className = 'mv-stats'
-panel.append(statsLine)
+
+sheet.append(sheetHead, rows, loadButton, progress, statsLine)
 
 const dragHint = document.createElement('span')
-dragHint.className = 'mv-hint-drag'
-dragHint.textContent = 'драг — вращение'
+dragHint.className = 'mv-hint mv-gone'
+dragHint.textContent = 'drag to rotate'
 
+let sheetOpen = false
 let currentModelId = MODELS[0].id
-const prepared = new Map() // id → подготовленные меши (бэкенд-независимые)
-const attached = new Map() // id → сцена на ТЕКУЩЕМ рендерере (сбрасывается в boot)
+const prepared = new Map() // id → prepared meshes (backend-independent)
+const attached = new Map() // id → scene on the CURRENT renderer (reset in boot)
 
-function renderTabs() {
-  tabs.replaceChildren()
+function setSheetOpen(open) {
+  sheetOpen = open
+  sheet.hidden = !open
+  pill.hidden = open
+  if (open) dragHint.classList.add('mv-gone')
+}
+
+function renderRows() {
+  rows.replaceChildren()
   for (const model of MODELS) {
-    const tab = document.createElement('button')
-    tab.type = 'button'
-    tab.className = 'mv-tab'
-    if (prepared.has(model.id)) tab.classList.add('mv-loaded')
-    tab.setAttribute('aria-pressed', String(model.id === currentModelId))
+    const row = document.createElement('button')
+    row.type = 'button'
+    row.className = 'mv-row' + (prepared.has(model.id) ? ' mv-loaded' : '')
+    row.setAttribute('aria-pressed', String(model.id === currentModelId))
+    const main = document.createElement('span')
+    main.className = 'mv-main'
     const title = document.createElement('b')
     title.textContent = model.title
     const sub = document.createElement('span')
+    sub.className = 'mv-sub'
     sub.textContent = model.sub
-    tab.append(title, sub)
-    tab.addEventListener('click', () => selectModel(model.id))
-    tabs.append(tab)
+    main.append(title, sub)
+    const size = document.createElement('span')
+    size.className = 'mv-size'
+    size.textContent = `${(model.bytes / 1024 / 1024).toFixed(1)} MB`
+    row.append(main, size)
+    row.addEventListener('click', () => selectModel(model.id))
+    rows.append(row)
   }
 }
 
@@ -686,6 +717,7 @@ function setProgress(ratio, detail) {
   progress.classList.add('mv-active')
   bar.style.width = `${Math.round(ratio * 100)}%`
   status.textContent = detail ?? ''
+  if (!sheetOpen) pill.textContent = `Loading… ${Math.round(ratio * 100)}%`
 }
 
 function hideProgress() {
@@ -693,18 +725,25 @@ function hideProgress() {
   bar.style.width = '0%'
 }
 
-function renderPanelState() {
+function renderPill() {
+  if (loadBusy) return // the pill shows load progress instead
+  const model = MODELS.find(m => m.id === currentModelId)
+  pill.textContent = model === undefined ? 'Models' : model.title
+}
+
+function renderSheetState() {
   const model = MODELS.find(m => m.id === currentModelId)
   const isPrepared = prepared.has(currentModelId)
   loadButton.textContent = isPrepared
-    ? `Показать «${model.title}»`
-    : `Загрузить и показать · ${(model.bytes / 1024 / 1024).toFixed(1)} МБ`
+    ? 'Show'
+    : `Load & show · ${(model.bytes / 1024 / 1024).toFixed(1)} MB`
   loadButton.disabled = loadBusy
   if (isPrepared && !loadBusy) hideProgress()
-  renderTabs()
+  renderRows()
+  renderPill()
 }
 
-/* ─── Загрузка модели (AssetLoader: fetch → parse → decode) ───────────────── */
+/* ─── Model loading (AssetLoader: fetch → parse → decode) ───────────────── */
 
 let loadBusy = false
 let loadSeq = 0
@@ -712,54 +751,55 @@ let loadSeq = 0
 async function loadModel(model) {
   const seq = ++loadSeq
   loadBusy = true
-  renderPanelState()
-  setProgress(0, 'в очереди')
-  shell.log.event(`Загрузка «${model.title}» (${(model.bytes / 1024 / 1024).toFixed(1)} МБ)…`)
+  renderSheetState()
+  setProgress(0, 'queued')
+  shell.log.event(`Loading “${model.title}” (${(model.bytes / 1024 / 1024).toFixed(1)} MB)…`)
   const startedAt = performance.now()
   try {
     const handle = loader.load(model.url, {
       onProgress: phase => {
         if (seq !== loadSeq) return
-        setProgress(phase.ratio, `${phaseDetailRu(phase)} · ${(phase.loaded / 1024).toFixed(0)} КБ`)
+        setProgress(phase.ratio, `${phaseDetail(phase)} · ${(phase.loaded / 1024).toFixed(0)} KB`)
       },
     })
-    // LoadHandle — thenable: await хэндла даёт распарсенный ассет
+    // LoadHandle is thenable: awaiting the handle yields the parsed asset
     const asset = await handle
     if (seq !== loadSeq) return
     const preparedModel = model.id === 'samba' ? prepareFbx(asset) : prepareGltf(asset)
     prepared.set(model.id, preparedModel)
     shell.log.event(
-      `«${model.title}» готова: ${preparedModel.stats.vertices.toLocaleString('ru-RU')} вершин, ` +
-      `${Math.round(preparedModel.stats.triangles).toLocaleString('ru-RU')} треугольников за ` +
-      `${((performance.now() - startedAt) / 1000).toFixed(1)} с`,
+      `“${model.title}” ready: ${preparedModel.stats.vertices.toLocaleString('en-US')} vertices, ` +
+      `${Math.round(preparedModel.stats.triangles).toLocaleString('en-US')} triangles in ` +
+      `${((performance.now() - startedAt) / 1000).toFixed(1)} s`,
     )
     await showModel(model.id)
+    setSheetOpen(false) // done — hide the UI, the scene takes over
   } catch (error) {
     if (seq !== loadSeq) return
-    shell.log.error(`Загрузка «${model.title}» не удалась: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`)
-    shell.setBadge('ошибка загрузки', 'err')
+    shell.log.error(`Failed to load “${model.title}”: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`)
+    shell.setBadge('load failed', 'err')
     hideProgress()
   } finally {
     loadBusy = false
-    renderPanelState()
+    renderSheetState()
   }
 }
 
-function phaseDetailRu(phase) {
+function phaseDetail(phase) {
   switch (phase.phase) {
-    case 'queued': return 'в очереди'
-    case 'fetching': return `скачивание (${Math.round(phase.ratio * 100)}%)`
-    case 'decoding': return `парсинг: ${phase.detail}`
-    case 'done': return 'готово'
+    case 'queued': return 'queued'
+    case 'fetching': return `downloading (${Math.round(phase.ratio * 100)}%)`
+    case 'decoding': return `parsing: ${phase.detail}`
+    case 'done': return 'done'
     default: return phase.phase
   }
 }
 
-/* ─── Сцена на текущем рендерере ──────────────────────────────────────────── */
+/* ─── Scene on the current renderer ──────────────────────────────────────────── */
 
 async function showModel(id) {
   currentModelId = id
-  renderPanelState()
+  renderSheetState()
   if (!prepared.has(id)) {
     statsLine.textContent = ''
     return
@@ -768,9 +808,13 @@ async function showModel(id) {
   if (!attached.has(id)) await attachScene(id)
   const scene = attached.get(id)
   if (scene !== undefined) {
-    statsLine.textContent = `${scene.stats.vertices.toLocaleString('ru-RU')} верш · ${Math.round(scene.stats.triangles).toLocaleString('ru-RU')} три · ${scene.meshes.length} меш.`
+    statsLine.textContent =
+      `${scene.stats.vertices.toLocaleString('en-US')} verts · ` +
+      `${Math.round(scene.stats.triangles).toLocaleString('en-US')} tris · ` +
+      `${scene.meshes.length} meshes`
   }
-  shell.log.event(`Сцена: «${MODELS.find(m => m.id === id).title}»`)
+  dragHint.classList.remove('mv-gone')
+  shell.log.event(`Scene: “${MODELS.find(m => m.id === id).title}”`)
 }
 
 function selectModel(id) {
@@ -778,10 +822,11 @@ function selectModel(id) {
   currentModelId = id
   if (prepared.has(id)) {
     void showModel(id)
+    setSheetOpen(false)
   } else {
-    renderPanelState()
-    statsLine.textContent = 'модель ещё не загружена — нажмите кнопку'
-    shell.log.event(`Выбрана «${MODELS.find(m => m.id === id).title}» (не загружена)`)
+    renderSheetState()
+    statsLine.textContent = 'not loaded yet — press Load'
+    shell.log.event(`Selected “${MODELS.find(m => m.id === id).title}” (not loaded)`)
   }
 }
 
@@ -790,12 +835,13 @@ loadButton.addEventListener('click', () => {
   const model = MODELS.find(m => m.id === currentModelId)
   if (prepared.has(currentModelId)) {
     void showModel(currentModelId)
+    setSheetOpen(false)
     return
   }
   void loadModel(model)
 })
 
-/** Компилирует команды и текстуры подготовленной модели на текущем рендерере. */
+/** Compiles the commands and textures of a prepared model on the current renderer. */
 async function attachScene(id) {
   const model = prepared.get(id)
   if (model === undefined || activeRenderer === null) return
@@ -804,7 +850,7 @@ async function attachScene(id) {
     const variant = mesh.normalBitmap !== null ? 'normalmap' : mesh.bitmap !== null ? 'textured' : 'flat'
     const bitmap = await resolveBitmap(mesh.bitmap)
     if (mesh.bitmap !== null && bitmap === null) {
-      shell.log.warn(`меш «${mesh.name}»: текстура не декодировалась — рисуем albedo`)
+      shell.log.warn(`mesh “${mesh.name}”: texture failed to decode — drawing albedo`)
     }
     const normalBitmap = mesh.normalBitmap !== null ? await resolveBitmap(mesh.normalBitmap) : null
     const attributes = {}
@@ -846,7 +892,7 @@ async function attachScene(id) {
       return FLAT_WGSL
     }
 
-    // Текстуры: битмапы glTF уже декодированы парсером (createImageBitmap)
+    // Textures: glTF bitmaps are already decoded by the parser (createImageBitmap)
     let glTexture = null
     if (variant === 'textured' && bitmap !== null) {
       glTexture = activeRenderer.texture(bitmap.width, bitmap.height)
@@ -880,12 +926,12 @@ async function attachScene(id) {
     const command = activeRenderer.command(spec)
     drawMeshes.push({ command, order: mesh.blend ? 1 : 0 })
   }
-  // Прозрачные меши — после opaque (дом: трава/листья/окна поверх)
+  // Transparent meshes after opaque ones (the house: grass/leaves/windows on top)
   drawMeshes.sort((a, b) => a.order - b.order)
   attached.set(id, { meshes: drawMeshes.map(m => m.command), stats: model.stats })
 }
 
-/** Битмап из GltfImage (promise) — null при неудаче декода. */
+/** Bitmap from a GltfImage (promise) — null if decoding fails. */
 async function resolveBitmap(image) {
   if (image === null || image === undefined) return null
   try {
@@ -895,7 +941,7 @@ async function resolveBitmap(image) {
   }
 }
 
-/* ─── Рендерер и цикл кадра ───────────────────────────────────────────────── */
+/* ─── Renderer and the frame loop ───────────────────────────────────────────────── */
 
 let activeRenderer = null
 let bootSeq = 0
@@ -911,7 +957,7 @@ const model = M()
 const mvp = M()
 let cachedAspect = 0
 
-// Вращение: авто-спин + драг (тач/мышь), pitch зажат.
+// Rotation: auto-spin + drag (touch/mouse), pitch is clamped.
 let yaw = 0.6
 let pitch = 0.18
 let dragging = false
@@ -943,7 +989,7 @@ function bindDrag(canvas) {
   canvas.addEventListener('pointercancel', stop)
 }
 
-/** Кадр: камера fixed, модель вращается (turntable). */
+/** Frame: a fixed camera, the model rotates (turntable). */
 function frameCallback(ctx, record) {
   if (ctx.aspect !== cachedAspect) {
     cachedAspect = ctx.aspect
@@ -952,7 +998,7 @@ function frameCallback(ctx, record) {
   mat4LookAt(view, 0, 0.55, 3.2, 0, 0, 0)
   mat4Multiply(viewProj, projection, view)
 
-  // авто-спин: пауза пока драгают и 1.5 с после
+  // auto-spin: paused while dragging and for 1.5 s after
   if (!dragging && performance.now() - lastInteraction > 1500) yaw += ctx.dt * 0.35
 
   mat4RotationX(rotX, pitch)
@@ -978,25 +1024,28 @@ async function boot(mode) {
   const seq = ++bootSeq
 
   if (activeRenderer !== null) {
-    try { activeRenderer.dispose() } catch { /* контекст мог умереть с канвасом */ }
+    try { activeRenderer.dispose() } catch { /* the context may have died with the canvas */ }
     activeRenderer = null
     attached.clear()
   }
-  shell.slot.replaceChildren(panel)
+  shell.slot.replaceChildren()
   const canvas = document.createElement('canvas')
   canvas.id = 'canvas'
-  shell.slot.append(canvas, dragHint)
+  shell.slot.append(canvas, pill, sheet, dragHint)
   bindDrag(canvas)
+  // the drag hint disappears at the first touch of the scene
+  canvas.addEventListener('pointerdown', () => dragHint.classList.add('mv-gone'), { once: true })
+  setTimeout(() => dragHint.classList.add('mv-gone'), 8000)
 
-  shell.log.event(`Запуск: режим «${MODE_NAMES[mode] ?? mode}»`)
+  shell.log.event(`Booting: “${MODE_NAMES[mode] ?? mode}”`)
 
   try {
     const renderer = createRenderer({
       canvas,
       backend: mode === 'auto' ? undefined : mode,
       clear: { color: [0.07, 0.08, 0.11, 1], depth: 1 },
-      // Каналы тихих ошибок валидации (GL_INVALID_* / WebGPU uncaptured):
-      // без них «чёрный канвас» не объясняет себя — стандарт демо требует лог
+      // Silent validation error channels (GL_INVALID_* / WebGPU uncaptured):
+      // without them a “black canvas” explains nothing — the demo standard requires a log
       onGlError: (message) => shell.log.warn(`GL: ${message}`),
       onGpuError: (message) => shell.log.warn(`GPU: ${message}`),
     })
@@ -1007,32 +1056,33 @@ async function boot(mode) {
     attached.clear()
     const backendName = renderer.backend === 'webgpu' ? 'WebGPU' : 'WebGL2'
     shell.setBadge(backendName, renderer.backend === 'webgpu' ? 'gpu' : 'gl')
-    shell.log.info(`Бэкенд: ${backendName}${renderer.backend === 'webgl2' && mode === 'auto' ? ' (фолбэк)' : ''}`)
+    shell.log.info(`Backend: ${backendName}${renderer.backend === 'webgl2' && mode === 'auto' ? ' (fallback)' : ''}`)
 
-    // Загруженные модели компилируются на новом рендерере по требованию
+    // Loaded models compile on the new renderer on demand
     if (prepared.has(currentModelId)) {
       await attachScene(currentModelId)
       if (seq !== bootSeq) return
-      renderPanelState()
+      renderSheetState()
     }
   } catch (error) {
     if (seq !== bootSeq) return
     const message = error instanceof Error ? error.message : String(error)
-    shell.setBadge(mode === 'webgpu' ? 'WebGPU недоступен' : 'ошибка запуска', 'err')
-    shell.log.error(`Запуск на «${mode}» не удался: ${message}`)
+    shell.setBadge(mode === 'webgpu' ? 'WebGPU unavailable' : 'startup failed', 'err')
+    shell.log.error(`Boot on “${mode}” failed: ${message}`)
     if (mode === 'webgpu') {
-      shell.log.info('Это не ошибка библиотеки — бэкенда нет в этом браузере. Переключите тумблер на «Авто» или WebGL2.')
+      shell.log.info('This is not a library error — the backend is missing in this browser. Switch the toggle to Auto or WebGL2.')
     }
     return
   }
 
-  shell.log.event('Визуализация запущена')
+  shell.log.event('Rendering started')
   const live = shell.slot.querySelector('canvas')
-  shell.log.info(`Канвас: ${live.clientWidth}×${live.clientHeight} css-px, DPR ${window.devicePixelRatio}`)
+  shell.log.info(`Canvas: ${live.clientWidth}×${live.clientHeight} css-px, DPR ${window.devicePixelRatio}`)
   shell.markReady()
 }
 
-shell.log.info(`WebGL2: ${typeof WebGL2RenderingContext !== 'undefined' ? 'есть в браузере' : 'отсутствует'}`)
-renderPanelState()
-statsLine.textContent = 'выберите модель и нажмите «Загрузить»'
+shell.log.info(`WebGL2: ${typeof WebGL2RenderingContext !== 'undefined' ? 'present in the browser' : 'missing'}`)
+setSheetOpen(true) // first visit: the sheet with the Load button is the entry point
+renderSheetState()
+statsLine.textContent = 'pick a model and press Load'
 await boot(shell.mode)

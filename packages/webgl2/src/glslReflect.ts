@@ -1,4 +1,4 @@
-// Рефлексия GLSL: атрибуты (location) и юниформы (имя → тип) из исходников.
+// GLSL reflection: attributes (location) and uniforms (name → type) from sources.
 
 export interface AttributeInfo {
   readonly name: string

@@ -1,21 +1,21 @@
 /**
- * pipes.ts — пользовательские стрим-трансформы: «трансформы и пайпы».
+ * pipes.ts — user stream transforms: "transforms and pipes".
  *
- * Форматные парсеры (GLB/OBJ/FBX) работают напрямую со StreamAssembler
- * (watermark-доступ), но для СВОИХ форматов пользователь компонует
- * стандартные ReadableStream-пайпы:
+ * Format parsers (GLB/OBJ/FBX) work directly with StreamAssembler
+ * (watermark access), but for CUSTOM formats the user composes
+ * standard ReadableStream pipes:
  *
  *   const text = await library.loadText(url, {
  *     pipe: bytesToText({ label: 'big.log' })   // Uint8Array → string
- *       .through(splitLines())                  // → строк-стрим
+ *       .through(splitLines())                  // → line stream
  *       .through(filter(line => !line.startsWith('#')))
  *       .through(collect())                     // → string[]
  *   })
  *
- * Все трансформы — обычные TransformStream, совместимы с pipeThrough.
+ * All transforms are plain TransformStreams, compatible with pipeThrough.
  */
 
-/** Тап-трансформ: видит каждый чанк, пропускает дальше. */
+/** Tap transform: sees every chunk, passes it on. */
 export function tap<T>(observer: (chunk: T) => void): TransformStream<T, T> {
   return new TransformStream<T, T>({
     transform(chunk, controller) {
@@ -25,7 +25,7 @@ export function tap<T>(observer: (chunk: T) => void): TransformStream<T, T> {
   })
 }
 
-/** Прогресс-тап для байтовых стримов: loaded += chunk.byteLength. */
+/** Progress tap for byte streams: loaded += chunk.byteLength. */
 export function tapBytes(onProgress: (loaded: number, chunkBytes: number) => void): TransformStream<Uint8Array, Uint8Array> {
   let loaded = 0
   return new TransformStream<Uint8Array, Uint8Array>({
@@ -37,7 +37,7 @@ export function tapBytes(onProgress: (loaded: number, chunkBytes: number) => voi
   })
 }
 
-/** Bytes → text (инкрементальный TextDecoder, корректные UTF-8 границы). */
+/** Bytes → text (incremental TextDecoder, correct UTF-8 boundaries). */
 export function bytesToText(): TransformStream<Uint8Array, string> {
   const decoder = new TextDecoder('utf-8')
   return new TransformStream<Uint8Array, string>({
@@ -52,7 +52,7 @@ export function bytesToText(): TransformStream<Uint8Array, string> {
   })
 }
 
-/** Text → строки (без \r; последняя строка без \n тоже придёт). */
+/** Text → lines (no \r; a last line without \n also arrives). */
 export function splitLines(): TransformStream<string, string> {
   let pending = ''
   return new TransformStream<string, string>({
@@ -73,7 +73,7 @@ export function splitLines(): TransformStream<string, string> {
   })
 }
 
-/** Фильтр чанков (строк/объектов). */
+/** Chunk filter (lines/objects). */
 export function filter<T>(predicate: (chunk: T) => boolean): TransformStream<T, T> {
   return new TransformStream<T, T>({
     transform(chunk, controller) {
@@ -82,7 +82,7 @@ export function filter<T>(predicate: (chunk: T) => boolean): TransformStream<T, 
   })
 }
 
-/** Map-трансформ чанков (синхронный). */
+/** Map transform of chunks (sync). */
 export function mapChunks<TIn, TOut>(fn: (chunk: TIn) => TOut): TransformStream<TIn, TOut> {
   return new TransformStream<TIn, TOut>({
     transform(chunk, controller) {
@@ -91,7 +91,7 @@ export function mapChunks<TIn, TOut>(fn: (chunk: TIn) => TOut): TransformStream<
   })
 }
 
-/** Собрать все чанки в массив (терминал пайпа; чанки проходят насквозь). */
+/** Collect all chunks into an array (pipe terminal; chunks pass through). */
 export function collect<T>(): TransformStream<T, T> & { result: Promise<T[]> } {
   const items: T[] = []
   let release!: (value: T[]) => void
@@ -110,7 +110,7 @@ export function collect<T>(): TransformStream<T, T> & { result: Promise<T[]> } {
   return Object.assign(stream, { result })
 }
 
-/** Bytes → единый Uint8Array (копия; для малых тел/конфигов). */
+/** Bytes → a single Uint8Array (copy; for small bodies/configs). */
 export function collectBytes(): TransformStream<Uint8Array, Uint8Array> & { result: Promise<Uint8Array> } {
   let parts: Uint8Array[] = []
   let total = 0
@@ -138,7 +138,7 @@ export function collectBytes(): TransformStream<Uint8Array, Uint8Array> & { resu
   return Object.assign(stream, { result })
 }
 
-/** Собрать байты в Blob (для createImageBitmap без StreamAssembler). */
+/** Collect bytes into a Blob (for createImageBitmap without StreamAssembler). */
 export function collectBlob(type?: string): TransformStream<Uint8Array, Uint8Array> & { result: Promise<Blob> } {
   const inner = collectBytes()
   const result = inner.result.then(bytes => new Blob([bytes as BlobPart], { type }))
@@ -146,12 +146,12 @@ export function collectBlob(type?: string): TransformStream<Uint8Array, Uint8Arr
 }
 
 /**
- * Связка «pipe»: читает источник через цепочку трансформов.
- * compose([a, b, c]) — конвейер a→b→c с единым ReadableStream на выходе.
+ * A "pipe" bundle: reads a source through a chain of transforms.
+ * compose([a, b, c]) — an a→b→c pipeline with a single ReadableStream output.
  */
 export function compose<_TIn, TOut>(transforms: readonly TransformStream<any, any>[]): ReadableStream<TOut> | null {
   if (transforms.length === 0) return null
-  // Композиция выполняется вызывающим кодом через pipeThrough — здесь
-  // только тип-хелпер контракт: первый вход TIn, последний выход TOut.
+  // Composition is performed by the caller via pipeThrough — here
+  // is only a type-helper contract: first input TIn, last output TOut.
   return null
 }

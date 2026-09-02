@@ -1,18 +1,18 @@
 /**
- * scene.ts — сцена: структурный слой поверх SceneViews (Task 81).
+ * scene.ts — the scene: a structural layer on top of SceneViews (Task 81).
  *
- * Иерархия — intrusive-списки детей (firstChild/nextSibling/prevSibling):
- * вставка/удаление O(1), слоты узлов СТАБИЛЬНЫ (переупорядочивания нет —
- * порядок обхода живёт в order[], а не в позициях массивов данных).
+ * The hierarchy is intrusive child lists (firstChild/nextSibling/prevSibling):
+ * insert/remove in O(1), node slots are STABLE (no reordering —
+ * traversal order lives in order[], not in data-array positions).
  *
- * pack() — перестройка order/subtreeEnd в preorder: один DFS со стеком +
- * реверс-агрегация концов поддеревьев. Инвариант после pack: родитель
- * всегда раньше ребёнка, поддерево — непрерывный диапазон рангов.
- * Структурные правки помечают layoutDirty; горячие проходы (updateWorld /
- * cull / collectInstances) автоматически до-pаковывают один раз за кадр.
+ * pack() — rebuilds order/subtreeEnd in preorder: one stack-based DFS +
+ * reverse aggregation of subtree ends. Invariant after pack: a parent
+ * always comes before its child, a subtree is a contiguous rank range.
+ * Structural edits mark layoutDirty; hot passes (updateWorld /
+ * cull / collectInstances) automatically re-pack once per frame.
  *
- * Раскладка памяти — та же, что у воркера (layout.ts): сцена в SAB
- * доступна воркеру без копий (T1/T2), локальная сцена — T0.
+ * Memory layout — the same as the worker's (layout.ts): a scene in a SAB
+ * is available to the worker without copies (T1/T2), a local scene is T0.
  */
 import type { Camera } from './camera.ts'
 import {
@@ -33,56 +33,56 @@ import type { CullStats, MutableCullStats } from './culling.ts'
 import { collectInstancesViews, instanceMatricesView, instancePoolBase } from './instances.ts'
 import { refitGroupBoundsForcedViews, refitGroupBoundsViews, updateWorldForcedViews, updateWorldViews } from './transforms.ts'
 
-/** Инициализация нового узла. */
+/** Initialization for a new node. */
 export interface SceneNodeInit {
   readonly position?: readonly [number, number, number]
-  /** Кватернион (x, y, z, w); нормализуется при записи. */
+  /** Quaternion (x, y, z, w); normalized on write. */
   readonly rotation?: readonly [number, number, number, number]
   readonly scale?: readonly [number, number, number]
-  /** Родитель (слот) или −1 для корня. */
+  /** Parent (slot) or −1 for root. */
   readonly parent?: number
-  /** Инстанс-группа (плотный id ≥ 0) или −1. */
+  /** Instance group (dense id ≥ 0) or −1. */
   readonly group?: number
-  /** Пользовательский слот (id команды/ассета) или −1. */
+  /** User slot (command/asset id) or −1. */
   readonly payload?: number
-  /** Локальная сфера охвата (cx, cy, cz, r). */
+  /** Local bounding sphere (cx, cy, cz, r). */
   readonly sphere?: readonly [number, number, number, number]
   readonly visible?: boolean
 }
 
-/** Результат отсечения камер. */
+/** Camera culling result. */
 export interface SceneCullResult {
   readonly cameraCount: number
   readonly stats: readonly CullStats[]
-  /** Буфер битсетов (для isVisibleRank / forEachVisible). */
+  /** Bitset buffer (for isVisibleRank / forEachVisible). */
   readonly bufferIndex: number
 }
 
-/** Сцена — структурные операции + горячие проходы. */
+/** Scene — structural operations + hot passes. */
 export interface Scene {
   readonly views: SceneViews
   readonly capacity: number
   readonly count: number
   readonly backing: 'local' | 'shared'
-  /** Порядок устарел после структурных правок. */
+  /** Order is stale after structural edits. */
   readonly layoutDirty: boolean
 
-  /** Создать узел; возвращает стабильный слот. */
+  /** Create a node; returns a stable slot. */
   create(init?: SceneNodeInit): number
-  /** Удалить узел (дети становятся корнями). Идемпотентно для мёртвых. */
+  /** Delete a node (children become roots). Idempotent for dead nodes. */
   dispose(slot: number): void
-  /** Смена родителя (−1 — сделать корнем). Циклы — throw. */
+  /** Change of parent (−1 — make it a root). Cycles — throw. */
   setParent(slot: number, parent: number): void
-  /** Родитель слота (−1 — корень/свободен). */
+  /** Parent of the slot (−1 — root/free). */
   parentOf(slot: number): number
-  /** Жив ли слот. */
+  /** Whether the slot is alive. */
   alive(slot: number): boolean
-  /** Поколение слота (растёт при каждом переиспользовании). */
+  /** Slot generation (grows on each reuse). */
   generation(slot: number): number
 
-  /** Локальный TRS (объект-сахар; для анимации — setLocalTR). */
+  /** Local TRS (object sugar; for animation use setLocalTR). */
   setLocal(slot: number, init: { position?: readonly [number, number, number]; rotation?: readonly [number, number, number, number]; scale?: readonly [number, number, number] }): void
-  /** Горячая запись полного TRS без аллокаций. */
+  /** Hot write of the full TRS without allocations. */
   setLocalTR(
     slot: number,
     px: number, py: number, pz: number,
@@ -94,32 +94,32 @@ export interface Scene {
   setPayload(slot: number, payload: number): void
   setVisible(slot: number, visible: boolean): void
 
-  /** Мировая матрица узла (view поверх world; не мутировать). */
+  /** World matrix of a node (a view over world; do not mutate). */
   worldMatrix(slot: number): Float32Array
 
-  /** Перестроить order/subtreeEnd (вызывается автоматически при надобности). */
+  /** Rebuild order/subtreeEnd (invoked automatically when needed). */
   pack(): void
 
-  /** Пересчёт миров. dirty=false — принудительно ВСЕ узлы (эталон/A-B
-   *  «до Task 85»: без грязевых штампов — каждый узел, каждый кадр).
-   *  Возвращает число пересчитанных узлов. */
+  /** Recompute worlds. dirty=false — force ALL nodes (reference/A-B
+   *  "before Task 85": without dirty stamps — every node, every frame).
+   *  Returns the number of recomputed nodes. */
   updateWorld(force?: boolean): number
-  /** Грязевой refit автограниц — только изменённые поддеревья (Task 85). */
+  /** Dirty refit of auto-bounds — only changed subtrees (Task 85). */
   refitGroupBounds(): number
-  /** Полный refit всех автограниц — эталон/бенчмарк (O(n) всегда). */
+  /** Full refit of all auto-bounds — reference/benchmark (always O(n)). */
   refitGroupBoundsForced(): number
-  /** Штамп H_CLOCK последнего изменения КОНТЕНТА группы (мир/состав —
-   *  все камеры). Пока не вырос И счётчики прежние — инстанс-буферы группы
-   *  валидны, аплоад можно пропустить (Task 85). */
+  /** H_CLOCK stamp of the last group CONTENT change (world/composition —
+   *  all cameras). While it has not grown AND the counters are unchanged — the
+   *  group instance buffers are valid, the upload can be skipped (Task 85). */
   groupWorldStamp(group: number): number
-  /** Штамп последнего ФЛИПА видимости узла группы ДЛЯ камеры cameraIndex
-   *  (Task 85): флип одной камеры не трогает буферы другой. */
+  /** Stamp of the last visibility FLIP of a group node FOR camera cameraIndex
+   *  (Task 85): one camera's flip does not touch the other camera's buffers. */
   groupFlipStamp(group: number, cameraIndex: number): number
 
-  /** Отсечение камерами; пишет плоскости и битсеты в буфер bufferIndex.
-   *  masks=false — отключить наследование масок плоскостей (A/B «до Task 85»:
-   *  результат идентичен, тестов ~×2.6 больше). out — переиспользуемые
-   *  записи статистики (ноль аллокаций на кадр). */
+  /** Cull by cameras; writes planes and bitsets into buffer bufferIndex.
+   *  masks=false — disable plane-mask inheritance (A/B "before Task 85":
+   *  identical result, ~×2.6 more tests). out — reusable stats
+   *  records (zero allocations per frame). */
   cull(cameras: readonly Camera[], opts?: {
     brute?: boolean
     bufferIndex?: number
@@ -127,39 +127,39 @@ export interface Scene {
     out?: readonly MutableCullStats[]
   }): SceneCullResult
 
-  /** Сбор инстансов всех групп для камеры (в буфер bufferIndex). */
+  /** Collect instances of all groups for a camera (into buffer bufferIndex). */
   collectInstances(cameraIndex: number, opts?: { bufferIndex?: number }): number
-  /** Сегмент матриц группы (view поверх пула камеры). */
+  /** Segment of a group's matrices (a view over the camera's pool). */
   instances(group: number, opts?: { cameraIndex?: number; bufferIndex?: number }): { matrices: Float32Array; count: number }
-  /** Task 87 — БЕЗ АЛЛОКАЦИЙ: счётчик/офсет/база пула группы как числа
-   *  (потребитель читает views.instPool напрямую — ни объектов, ни subarray). */
+  /** Task 87 — NO ALLOCATIONS: the group pool count/offset/base as numbers
+   *  (the consumer reads views.instPool directly — no objects, no subarray). */
   instanceCountOf(group: number, cameraIndex: number, bufferIndex?: number): number
   instanceOffsetOf(group: number, cameraIndex: number, bufferIndex?: number): number
   instancePoolBase(cameraIndex: number, bufferIndex?: number): number
 
-  /** Обход видимых слотов камеры (бит ∩ флаг узла). */
+  /** Iterate a camera's visible slots (bit ∩ node flag). */
   forEachVisible(cameraIndex: number, cb: (slot: number, rank: number) => void, opts?: { bufferIndex?: number }): void
-  /** Видимость ранга (без учёта флагов узла). */
+  /** Rank visibility (ignoring node flags). */
   isVisibleRank(cameraIndex: number, rank: number, opts?: { bufferIndex?: number }): boolean
 
-  /** Камера на узле: view = world⁻¹. */
+  /** Camera on a node: view = world⁻¹. */
   cameraFromNode(camera: Camera, slot: number): Camera
 }
 
-/** Опции создания сцены. */
+/** Scene creation options. */
 export type SceneOptions = SceneBufferOptions
 
-/** Создать сцену (локальную или разделяемую с воркером). */
+/** Create a scene (local or shared with a worker). */
 export function createScene(options: SceneOptions = {}): Scene {
   const buffer = createSceneBuffer(options)
   return createSceneFromBuffer(buffer)
 }
 
-/** Обернуть готовый буфер сцены (например, SAB, полученный из воркера). */
+/** Wrap a ready scene buffer (e.g. a SAB received from a worker). */
 export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
   const views = buildSceneViews(buffer)
   const freeList = freeListWord(views)
-  // Полный int-вью: freeHead/freeCount лежат за пределами H_WORDS.
+  // Full int view: freeHead/freeCount live beyond H_WORDS.
   const fullWords = new Int32Array(buffer)
   const shared = typeof SharedArrayBuffer !== 'undefined' && buffer instanceof SharedArrayBuffer
   let layoutDirty = true
@@ -171,7 +171,7 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
   function packInternal(): void {
     const { parent, firstChild, nextSibling, order, subtreeEnd, nodeFlags, headerI } = views
     const n = views.headerI[H_NODE_COUNT]
-    // Стек слотов: корни в порядке слотов (пушим в обратном — LIFO).
+    // Slot stack: roots in slot order (pushed in reverse — LIFO).
     let stack = packStack
     if (stack.length < n + 1) {
       stack = packStack = new Int32Array(Math.max(64, (n + 1) * 2))
@@ -189,8 +189,8 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
       order[rank] = slot
       subtreeEnd[slot] = rank + 1
       rank++
-      if (rank > n) break // защита от битой структуры
-      // Дети: пушим с головы списка — выйдут в обратном порядке вставки.
+      if (rank > n) break // guard against a broken structure
+      // Children: pushed from the list head — they come out in reverse insertion order.
       let c = firstChild[slot]
       while (c >= 0) {
         if (sp >= stack.length) {
@@ -202,7 +202,7 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
         c = nextSibling[c]
       }
     }
-    // Реверс-агрегация: конец поддерева родителя = конец последнего ребёнка.
+    // Reverse aggregation: a parent's subtree end = the last child's end.
     for (let r = rank - 1; r >= 0; r--) {
       const slot = order[r]
       const p = parent[slot]
@@ -215,7 +215,7 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
   function takeSlot(): number {
     const head = fullWords[freeList]
     if (!(head >= 0)) {
-      throw new Error(`scene: нет свободных слотов (capacity=${views.capacity})`)
+      throw new Error(`scene: no free slots (capacity=${views.capacity})`)
     }
     fullWords[freeList] = views.nextSibling[head]
     fullWords[freeList + 1] -= 1
@@ -270,12 +270,12 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
       const i3 = slot * 3
       const i4 = slot * 4
       const i16 = slot * 16
-      // Первичная грязь: мир обязан вычислиться хотя бы раз (родитель мог
-      // уже иметь трансформ).
+      // Initial dirt: the world must be computed at least once (the parent
+      // may already have a transform).
       const stamp = ++headerU[H_CLOCK]
       views.localStamp[slot] = stamp
       views.worldStamp[slot] = 0
-      // Дефолты: identity TRS, identity мир.
+      // Defaults: identity TRS, identity world.
       pos[i3] = 0; pos[i3 + 1] = 0; pos[i3 + 2] = 0
       quat[i4] = 0; quat[i4 + 1] = 0; quat[i4 + 2] = 0; quat[i4 + 3] = 1
       scale[i3] = 1; scale[i3 + 1] = 1; scale[i3 + 2] = 1
@@ -311,12 +311,12 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
       }
       const p = init.parent ?? -1
       if (p >= 0) {
-        if (p === slot) throw new Error('scene: родитель узла — сам узел')
-        if ((views.nodeFlags[p] & NF_ALIVE) === 0) throw new Error(`scene: родитель ${p} не жив`)
-        // Цикл: новый родитель не должен быть потомком slot.
+        if (p === slot) throw new Error('scene: node parent is the node itself')
+        if ((views.nodeFlags[p] & NF_ALIVE) === 0) throw new Error(`scene: parent ${p} is not alive`)
+        // Cycle: the new parent must not be a descendant of slot.
         let a = p
         while (a >= 0) {
-          if (a === slot) throw new Error('scene: setParent создал бы цикл')
+          if (a === slot) throw new Error('scene: setParent would create a cycle')
           a = views.parent[a]
         }
         attach(slot, p)
@@ -330,7 +330,7 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
     dispose(slot) {
       const { nodeFlags, generation, headerU } = views
       if ((nodeFlags[slot] & NF_ALIVE) === 0) return
-      // Дети становятся корнями (локаль сохраняется — мир пересчитается).
+      // Children become roots (locals preserved — the world will be recomputed).
       let c = views.firstChild[slot]
       while (c >= 0) {
         const next = views.nextSibling[c]
@@ -347,20 +347,20 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
     },
 
     setParent(slot, parentSlot) {
-      if ((views.nodeFlags[slot] & NF_ALIVE) === 0) throw new Error(`scene: узел ${slot} не жив`)
-      if (parentSlot === slot) throw new Error('scene: родитель узла — сам узел')
+      if ((views.nodeFlags[slot] & NF_ALIVE) === 0) throw new Error(`scene: node ${slot} is not alive`)
+      if (parentSlot === slot) throw new Error('scene: node parent is the node itself')
       if (parentSlot >= 0) {
-        if ((views.nodeFlags[parentSlot] & NF_ALIVE) === 0) throw new Error(`scene: родитель ${parentSlot} не жив`)
+        if ((views.nodeFlags[parentSlot] & NF_ALIVE) === 0) throw new Error(`scene: parent ${parentSlot} is not alive`)
         let a = parentSlot
         while (a >= 0) {
-          if (a === slot) throw new Error('scene: setParent создал бы цикл')
+          if (a === slot) throw new Error('scene: setParent would create a cycle')
           a = views.parent[a]
         }
       }
       detach(slot)
       if (parentSlot >= 0) attach(slot, parentSlot)
-      // Мир узла меняется (смена системы отсчёта) — потомки инвалидируются
-      // автоматически через worldStamp[parent] > worldStamp[child].
+      // The node's world changes (frame of reference changes) — descendants are
+      // invalidated automatically via worldStamp[parent] > worldStamp[child].
       views.localStamp[slot] = ++views.headerU[H_CLOCK]
       layoutDirty = true
     },
@@ -418,9 +418,9 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
       views.sphereL[i4 + 1] = cy
       views.sphereL[i4 + 2] = cz
       views.sphereL[i4 + 3] = r
-      // Мировая сфера пересчитывается в updateWorld — штамп обязателен
-      // (Task 85: без него правка сферы не применялась до постороннего
-      // изменения узла; найдено при переходе на грязевой refit).
+      // The world sphere is recomputed in updateWorld — a stamp is mandatory
+      // (Task 85: without it a sphere edit was not applied until an unrelated
+      // node change; found when moving to the dirty refit).
       views.localStamp[slot] = ++views.headerU[H_CLOCK]
     },
 
@@ -433,8 +433,8 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
     setVisible(slot, visible) {
       if (visible) views.nodeFlags[slot] |= NF_VISIBLE
       else views.nodeFlags[slot] &= ~NF_VISIBLE
-      // Task 85: смена флага меняет СОСТАВ инстанс-группы — штамп обязателен
-      // (иначе скип аплоада пропустит подмену матриц при равном счётчике).
+      // Task 85: a flag change changes the instance group COMPOSITION — a stamp
+      // is mandatory (otherwise the upload skip misses a matrix swap at equal counters).
       const g = views.group[slot]
       if (g >= 0 && g < views.groupMax) views.groupTouch[g] = ++views.headerU[H_CLOCK]
     },
@@ -475,8 +475,8 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
       const count = Math.min(cameras.length, views.cameraMax)
       for (let k = 0; k < count; k++) {
         const planes = cameras[k]!.planes
-        // planes у камеры ровно 24 флоата — прямой set без subarray- view
-        // (Task 87: срез на каждую камеру каждого кадра — скрытая аллокация)
+        // A camera's planes is exactly 24 floats — a direct set without a subarray
+        // view (Task 87: a slice per camera per frame is a hidden allocation)
         if (planes.length === 24) views.planes.set(planes, k * 24)
         else views.planes.set(planes.subarray(0, 24), k * 24)
       }
@@ -547,7 +547,7 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
     const current = views.headerI[H_GROUP_COUNT]
     if (group >= current) {
       if (group >= views.groupMax) {
-        throw new Error(`scene: группа ${group} вне groupMax=${views.groupMax}`)
+        throw new Error(`scene: group ${group} is out of groupMax=${views.groupMax}`)
       }
       views.headerI[H_GROUP_COUNT] = group + 1
     }
@@ -556,5 +556,5 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
   return scene
 }
 
-/** Скретч-стек pack(). */
+/** Scratch stack for pack(). */
 let packStack = new Int32Array(1024)

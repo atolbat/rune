@@ -1,24 +1,24 @@
 /**
- * core/types.ts — контракт слоя загрузки @rune/loaders.
+ * core/types.ts — the contract of the @rune/loaders loading layer.
  *
- * Дизайн-принципы (см. DESIGN.md §9.2 «Zero-main-thread путь ассета» #12):
- *  1. **Ноль зависимостей.** Пакет не зависит ни от @rune/core, ни от @rune/gl —
- *     он одинаково встраивается в голое ядро (воркер, headless) и в сценовый
- *     граф. Все платформенные вещи (fetch, createImageBitmap, inflate,
- *     резолвинг URL) — injectable с дефолтом «если есть в глобале».
- *  2. **Байты, не текст.** Парсеры едят Uint8Array/AsyncIterable<Uint8Array>.
- *     Строки — только там, где формат текстовый по своей природе (JSON, .obj).
- *  3. **Пайпы.** source → (stream) → transforms → parser. Парсеры с
- *     `streaming`-фабрикой едят чанки по мере скачивания — разбор перекрывает
- *     сеть. Буферные парсеры получают накопленный буфер.
- *  4. **Нейтральные данные.** Меш-форматы нормализуются в MeshDocument
- *     (formats/mesh.ts) — plain data без GPU-объектов. Рендер-слой сам решает,
- *     как его загнать в конвейер.
+ * Design principles (see DESIGN.md §9.2 "Zero-main-thread asset path" #12):
+ *  1. **Zero dependencies.** The package depends neither on @rune/core nor on
+ *     @rune/gl — it embeds equally into a bare core (worker, headless) and into
+ *     the scene graph. All platform things (fetch, createImageBitmap, inflate,
+ *     URL resolution) are injectable with a default of "use the global if present".
+ *  2. **Bytes, not text.** Parsers eat Uint8Array/AsyncIterable<Uint8Array>.
+ *     Strings — only where the format is textual by nature (JSON, .obj).
+ *  3. **Pipes.** source → (stream) → transforms → parser. Parsers with a
+ *     `streaming` factory eat chunks as they download — parsing overlaps the
+ *     network. Buffer parsers receive the accumulated buffer.
+ *  4. **Neutral data.** Mesh formats are normalized into a MeshDocument
+ *     (formats/mesh.ts) — plain data without GPU objects. The render layer
+ *     decides itself how to feed it into the pipeline.
  */
 
-// ─── источник байтов ─────────────────────────────────────────────────────────
+// ─── byte source ─────────────────────────────────────────────────────────
 
-/** Откуда брать байты. Всё, что угодно из «уже есть в руках» или «скачай». */
+/** Where to get bytes. Anything from "already in hand" or "download it". */
 export type LoadSource =
   | string
   | URL
@@ -31,22 +31,22 @@ export type LoadSource =
   | ReadableStream<Uint8Array>
   | AsyncIterable<Uint8Array>
 
-/** Нормализованный источник: либо готовые байты, либо поток, либо URL. */
+/** Normalized source: either ready bytes, a stream, or a URL. */
 export interface NormalizedSource {
-  /** URL для resolveExternal/логов; null для анонимных байтов. */
+  /** URL for resolveExternal/logs; null for anonymous bytes. */
   readonly url: string | null
-  /** Готовые байты (ArrayBuffer/Uint8Array) — fetch не нужен. */
+  /** Ready bytes (ArrayBuffer/Uint8Array) — no fetch needed. */
   readonly bytes?: Uint8Array
-  /** Поток (Response/Blob/ReadableStream/AsyncIterable) — качаем с прогрессом. */
+  /** Stream (Response/Blob/ReadableStream/AsyncIterable) — downloaded with progress. */
   readonly stream?: AsyncIterable<Uint8Array>
-  /** Content-Length, если источник его знает (Response). */
+  /** Content-Length if the source knows it (Response). */
   readonly totalBytes: number | null
-  /** Нужен ли fetch (string/URL/Request). */
+  /** Whether fetch is needed (string/URL/Request). */
   readonly fetchUrl: string | null
   readonly fetchRequest: Request | null
 }
 
-// ─── прогресс и фазы ─────────────────────────────────────────────────────────
+// ─── progress and phases ─────────────────────────────────────────────────────────
 
 export type LoadPhase =
   | 'queued'
@@ -57,58 +57,58 @@ export type LoadPhase =
   | 'cancelled'
   | 'failed'
 
-/** Снимок прогресса одного запроса. */
+/** Progress snapshot of a single request. */
 export interface LoadProgress {
   readonly phase: LoadPhase
   readonly receivedBytes: number
-  /** content-length / expectedBytes / Blob.size; null — неизвестно. */
+  /** content-length / expectedBytes / Blob.size; null — unknown. */
   readonly totalBytes: number | null
-  /** 0..1; null — неизвестно (нет длины и парсер не репортит). */
+  /** 0..1; null — unknown (no length and the parser does not report). */
   readonly fraction: number | null
 }
 
-// ─── контекст парсера ────────────────────────────────────────────────────────
+// ─── parser context ────────────────────────────────────────────────────────
 
-/** Что парсер получает от менеджера. */
+/** What the parser gets from the manager. */
 export interface ParseContext {
-  /** URL исходника (база для resolveExternal/resolveUrl) или null. */
+  /** Source URL (the base for resolveExternal/resolveUrl) or null. */
   readonly sourceUrl: string | null
-  /** Полная длина входа, если известна заранее. */
+  /** Full input length, if known in advance. */
   readonly byteLength: number | null
   /**
-   * Отмена. Горячие циклы обязаны звать checkpoint() / throwIfAborted() —
-   * иначе cancel() не остановит разбор большого файла.
+   * Cancellation. Hot loops must call checkpoint() / throwIfAborted() —
+   * otherwise cancel() will not stop parsing a large file.
    */
   readonly signal: AbortSignal
-  /** Прогресс разбора 0..1 (доля всей работы запроса, не только парсинга). */
+  /** Parse progress 0..1 (the fraction of the whole request's work, not just parsing). */
   reportProgress(fraction: number): void
   /**
-   * Загрузить внешний референс формата (.bin у glTF, .mtl у OBJ, texture).
-   * Идёт через LoadManager дочерней задачей: параллельно с остальными,
-   * приоритетом ниже родителя, отменяется вместе с родителем.
-   * Возвращает «сырые байты» — их разбор — дело вызывающего парсера.
+   * Load an external format reference (.bin for glTF, .mtl for OBJ, textures).
+   * Goes through LoadManager as a child task: in parallel with the others,
+   * at a priority below the parent, cancelled together with the parent.
+   * Returns "raw bytes" — parsing them is the calling parser's business.
    */
   resolveExternal(url: string): Promise<Uint8Array>
-  /** Разрешить относительный путь от sourceUrl. */
+  /** Resolve a relative path against sourceUrl. */
   resolveUrl(base: string | null, rel: string): string
-  /** Распаковка zlib (сжатые массивы FBX). null — платформа не умеет. */
+  /** zlib inflate (compressed FBX arrays). null — the platform cannot. */
   readonly inflate: ((bytes: Uint8Array) => Promise<Uint8Array>) | null
-  /** Идентификатор задачи — для логов/меты. */
+  /** Task identifier — for logs/meta. */
   readonly taskId: number
 }
 
-/** Вход буферного парсера. */
+/** Input of a buffer parser. */
 export interface ParseInput {
-  /** Полный буфер. View — не копия; парсеру нельзя его мутировать. */
+  /** The full buffer. The view is not a copy; the parser must not mutate it. */
   readonly bytes: Uint8Array
   readonly ctx: ParseContext
 }
 
-// ─── парсеры и трансформы ────────────────────────────────────────────────────
+// ─── parsers and transforms ────────────────────────────────────────────────────
 
 /**
- * Стриминговая сессия парсера: чанки прилетают по мере скачивания.
- * finish() вызывается один раз, когда поток иссяк.
+ * A parser's streaming session: chunks arrive as the download progresses.
+ * finish() is called once, when the stream is exhausted.
  */
 export interface StreamSink<T> {
   push(chunk: Uint8Array): void | Promise<void>
@@ -116,113 +116,113 @@ export interface StreamSink<T> {
 }
 
 /**
- * Парсер формата. T — тип ассета на выходе (MeshDocument, ImageBitmap, ...),
- * O — опции разбора (image: resize/premultiply; передаются из LoadOptions).
+ * A format parser. T is the output asset type (MeshDocument, ImageBitmap, ...),
+ * O is the parsing options (image: resize/premultiply; passed from LoadOptions).
  *
- * Буферные и стриминговые парсеры — один интерфейс: если есть `streaming`,
- * менеджер пайпит чанки в сессию (parse overlaps download), иначе копит
- * readAllBytes и зовёт parse(). Оба пути получают одинаковый ParseContext.
+ * Buffer and streaming parsers share one interface: if `streaming` is present,
+ * the manager pipes chunks into the session (parse overlaps download), otherwise
+ * it accumulates readAllBytes and calls parse(). Both paths get the same ParseContext.
  */
 export interface Parser<T, O = void> {
-  /** Короткое имя для реестра ('obj', 'gltf', 'image', ...). */
+  /** Short name for the registry ('obj', 'gltf', 'image', ...). */
   readonly kind: string
-  /** Разбор из полного буфера. Всегда поддерживается. */
+  /** Parsing from a full buffer. Always supported. */
   parse(input: ParseInput, options: O): T | Promise<T>
-  /** Фабрика стрим-сессии; отсутствие = формат требует полного буфера. */
+  /** Stream session factory; its absence = the format requires a full buffer. */
   readonly streaming?: (ctx: ParseContext, options: O) => StreamSink<T>
-  /** Расширения для detectKind по URL ('.obj'...). */
+  /** Extensions for detectKind by URL ('.obj'...). */
   readonly extensions?: readonly string[]
 }
 
-/** Трансформ чанков: AsyncIterable → AsyncIterable (gzip, дешифровка, ...). */
+/** Chunk transform: AsyncIterable → AsyncIterable (gzip, decryption, ...). */
 export interface StreamTransform {
   readonly name: string
   (chunks: AsyncIterable<Uint8Array>): AsyncIterable<Uint8Array>
 }
 
-// ─── приоритеты ──────────────────────────────────────────────────────────────
+// ─── priorities ──────────────────────────────────────────────────────────────
 
 /**
- * Числовой приоритет: больше = раньше. Полосы — фиксированные точки отсчёта,
- * между ними можно ставить свои (например high-10).
- * От запуска не отбираем (нет preemption), но cancel+reload — дёшево.
+ * Numeric priority: bigger = earlier. The bands are fixed reference points;
+ * you can place your own between them (e.g. high-10).
+ * We do not preempt a started task (no preemption), but cancel+reload is cheap.
  */
 export const Priority = {
-  /** Экран блокирован этим ассетом (сплэш, стартовая модель). */
+  /** The screen is blocked by this asset (splash, startup model). */
   critical: 1000,
-  /** Нужно в ближайший кадр. */
+  /** Needed within the next frame. */
   high: 100,
-  /** Обычная загрузка уровня. */
+  /** Ordinary level loading. */
   normal: 50,
-  /** Фон — догрузка деталей. */
+  /** Background — streaming in details. */
   low: 20,
-  /** Прогрев «на всякий случай», отдаётся последним. */
+  /** "Just in case" warm-up, served last. */
   prefetch: 0,
 } as const
 
 export type PriorityBand = keyof typeof Priority
 
-// ─── запрос и опции ──────────────────────────────────────────────────────────
+// ─── request and options ──────────────────────────────────────────────────────────
 
-/** Опции загрузки — «широкие настройки» общего лоадера. */
+/** Load options — the "broad settings" of the general-purpose loader. */
 export interface LoadOptions<T = unknown, O = unknown> {
-  /** Готовый парсер (приоритетнее kind). */
+  /** A ready parser (takes precedence over kind). */
   parser?: Parser<T, O>
-  /** Имя формата из реестра менеджера ('gltf' | 'obj' | ...). */
+  /** Format name from the manager's registry ('gltf' | 'obj' | ...). */
   kind?: string
-  /** Опции, которые уйдут в parser.parse(..., options). */
+  /** Options that will go into parser.parse(..., options). */
   parserOptions?: O
-  /** Приоритет. Default Priority.normal. */
+  /** Priority. Default Priority.normal. */
   priority?: number
-  /** Чанковые трансформы между сетью и парсером (gzip, decrypt). */
+  /** Chunk transforms between the network and the parser (gzip, decrypt). */
   transforms?: StreamTransform[]
-  /** Внешняя отмена (объединяется с handle.cancel()). */
+  /** External cancellation (combined with handle.cancel()). */
   signal?: AbortSignal
-  /** Прогресс-колбэк (вызывается не чаще ~50 мс + на фазовых переходах). */
+  /** Progress callback (called at most every ~50 ms + on phase transitions). */
   onProgress?: (progress: LoadProgress) => void
-  /** Таймаут на фазу fetch, мс. Default: без таймаута. */
+  /** Timeout for the fetch phase, ms. Default: no timeout. */
   timeoutMs?: number
-  /** Ретраи при сетевых ошибках/5xx/429. Default 0. */
+  /** Retries on network errors/5xx/429. Default 0. */
   retries?: number
-  /** Пауза перед ретраем, мс (или функция номера попытки). Default 0. */
+  /** Pause before a retry, ms (or a function of the attempt number). Default 0. */
   retryDelayMs?: number | ((attempt: number) => number)
-  /** Ожидаемый размер, если content-length не будет. Для прогресса и бюджета. */
+  /** Expected size if there is no content-length. For progress and the budget. */
   expectedBytes?: number
-  /** Произвольная мета (теги, id уровня...) — видна в stats/логах. */
+  /** Arbitrary meta (tags, level id...) — visible in stats/logs. */
   meta?: Record<string, unknown>
 }
 
-/** Хэндл активного запроса. */
+/** Handle of an active request. */
 export interface LoadHandle<T = unknown> {
   readonly id: number
   readonly url: string | null
-  /** Резолвится ассетом; реджектится LoadError (в т.ч. abort/timeout). */
+  /** Resolves with the asset; rejects with LoadError (incl. abort/timeout). */
   readonly ready: Promise<T>
-  /** Текущая фаза. */
+  /** Current phase. */
   readonly state: LoadPhase
-  /** Снимок прогресса. */
+  /** Progress snapshot. */
   readonly progress: LoadProgress
-  /** Отмена (идемпотентна). done — no-op. Реджектит ready AbortError'ом. */
+  /** Cancellation (idempotent). done — no-op. Rejects ready with an AbortError. */
   cancel(reason?: string): void
 }
 
-// ─── платформенные инъекции ──────────────────────────────────────────────────
+// ─── platform injections ──────────────────────────────────────────────────
 
-/** Декодер картинок: байты + опции → ImageBitmap-подобное. */
+/** Image decoder: bytes + options → an ImageBitmap-like object. */
 export type ImageDecode = (
   bytes: Uint8Array,
   mimeType: string | null,
   options: ImageParserOptions,
 ) => Promise<ImageBitmapLike>
 
-/** ImageBitmap или его замена в headless-окружении. */
+/** ImageBitmap or its replacement in a headless environment. */
 export interface ImageBitmapLike {
   readonly width: number
   readonly height: number
   close?(): void
 }
 
-/** Опции разбора изображения (пробрасываются в createImageBitmap). */
+/** Image parsing options (forwarded to createImageBitmap). */
 export interface ImageParserOptions {
   premultiplyAlpha?: 'none' | 'premultiply' | 'default'
   colorSpaceConversion?: 'none' | 'default'
@@ -232,13 +232,13 @@ export interface ImageParserOptions {
   resizeQuality?: 'pixelated' | 'low' | 'medium' | 'high'
 }
 
-/** Резолвер относительных путей. */
+/** Relative path resolver. */
 export type UrlResolver = (base: string | null, rel: string) => string
 
-/** Реестр парсеров по kind ('obj', 'gltf', ...). */
+/** Parser registry by kind ('obj', 'gltf', ...). */
 export type ParserRegistry = ReadonlyMap<string, Parser<any, any>>
 
-/** Платформенные возможности, дефолты берутся из глобалей, если есть. */
+/** Platform capabilities; defaults are taken from globals when present. */
 export interface PlatformCaps {
   fetchImpl: typeof fetch
   resolveUrl: UrlResolver

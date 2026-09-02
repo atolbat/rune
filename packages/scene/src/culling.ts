@@ -1,26 +1,26 @@
 /**
- * culling.ts — отсечение по фрустуму (Task 81).
+ * culling.ts — frustum culling (Task 81).
  *
- * Иерархический вариант пользуется главным следствием preorder-раскладки:
- * поддерево узла — НЕПРЕРЫВНЫЙ диапазон рангов [r, subtreeEnd[slot)),
- * поэтому:
- *   • тривиальный отказ  (сфера целиком вне)   — очистка диапазона слов
- *     битсета без обхода детей;
- *   • тривиальный приём  (сфера целиком внутри) — заливка диапазона единицами
- *     без единого теста детей;
- *   • пересечение — спуск только в детей (каждый ребёнок — снова диапазон).
+ * The hierarchical variant uses the main corollary of the preorder layout:
+ * a node's subtree is a CONTIGUOUS rank range [r, subtreeEnd[slot]),
+ * therefore:
+ *   • trivial reject  (the sphere is entirely outside) — clearing the bitset's
+ *     range of words without visiting the children;
+ *   • trivial accept  (the sphere is entirely inside) — filling the range with ones
+ *     without a single child test;
+ *   • intersection — descend into the children only (each child is again a range).
  *
- * Внутренний узел без границ (r ≤ 0, «неизвестный объём») никогда не
- * отсекается и не принимается тривиально — только спуск (безопасно всегда).
+ * An internal node without bounds (r ≤ 0, an "unknown volume") is never
+ * trivially rejected or accepted — descent only (always safe).
  *
- * Битсеты — в ранговом пространстве; потребитель джойнится через order[rank].
- * Brute-вариант (тест каждой сферы) — эталон корректности и basePath для
- * маленьких/плоских сцен: бенчмарк решает, что выгоднее.
+ * The bitsets are in rank space; the consumer joins through order[rank].
+ * The brute variant (testing every sphere) is the correctness reference and the
+ * baseline for small/flat scenes: the benchmark decides what is cheaper.
  */
 import type { SceneViews } from './layout.ts'
 import { H_NODE_COUNT, NF_VISIBLE } from './layout.ts'
 
-/** Внутренняя мутабельная статистика (out-запись — без аллокаций на кадр). */
+/** Internal mutable statistics (an out record — no per-frame allocations). */
 export interface MutableCullStats {
   tested: number
   visible: number
@@ -29,23 +29,23 @@ export interface MutableCullStats {
   planeTests: number
 }
 
-/** Статистика одного прохода отсечения. */
+/** Statistics of a single culling pass. */
 export interface CullStats {
-  /** Сфер протестировано. */
+  /** Spheres tested. */
   readonly tested: number
-  /** Рангов признано видимыми (биты установлены). */
+  /** Ranks deemed visible (bits set). */
   readonly visible: number
-  /** Поддеревьев отсечено целиком. */
+  /** Subtrees rejected wholesale. */
   readonly trivialRejects: number
-  /** Поддеревёв принято целиком. */
+  /** Subtrees accepted wholesale. */
   readonly trivialAccepts: number
-  /** Реальных тестов «сфера×плоскость» (Task 85: с масками их меньше tested×6). */
+  /** Real "sphere×plane" tests (Task 85: with masks there are fewer than tested×6). */
   readonly planeTests: number
 }
 
-/** Скретч-стек диапазонов (растёт геометрически, вне горячих вызовов).
- * Записи — ТРОЙКИ (rankStart, rankEnd, planeMask): Task 85 — маски
- * плоскостей наследуются вниз по охватывающим сферам. */
+/** Scratch stack of ranges (grows geometrically, outside hot calls).
+ * Entries are TRIPLES (rankStart, rankEnd, planeMask): Task 85 — plane
+ * masks are inherited down through the enclosing spheres. */
 let rangeStack = new Int32Array(8192)
 
 function pushRange(s: number, e: number, mask: number, sp: number): number {
@@ -60,7 +60,7 @@ function pushRange(s: number, e: number, mask: number, sp: number): number {
   return sp + 3
 }
 
-/** Заливка битсета в диапазоне рангов [s, e). */
+/** Fills a bitset over the rank range [s, e). */
 export function fillBits(bits: Uint32Array, base: number, s: number, e: number, on: boolean): void {
   if (e <= s) return
   const sWord = s >>> 5
@@ -72,20 +72,20 @@ export function fillBits(bits: Uint32Array, base: number, s: number, e: number, 
     else bits[base + sWord] &= ~mask
     return
   }
-  // Голова.
+  // Head.
   const sOff = s & 31
   if (sOff !== 0) {
-    const mask = ((1 << (32 - sOff)) - 1) << sOff // биты sOff..31
+    const mask = ((1 << (32 - sOff)) - 1) << sOff // bits sOff..31
     if (on) bits[base + sWord] |= mask
     else bits[base + sWord] &= ~mask
   } else {
     bits[base + sWord] = on ? 0xffffffff : 0
   }
-  // Полные слова между.
+  // Full words in between.
   for (let w = sWord + 1; w < eWord; w++) {
     bits[base + w] = on ? 0xffffffff : 0
   }
-  // Хвост.
+  // Tail.
   const eOff = e & 31
   if (eOff !== 0) {
     const mask = (1 << eOff) - 1
@@ -96,7 +96,7 @@ export function fillBits(bits: Uint32Array, base: number, s: number, e: number, 
   }
 }
 
-/** Популяция битсета (для статистики). */
+/** The bitset population (for statistics). */
 export function popcountBits(bits: Uint32Array, base: number, words: number): number {
   let count = 0
   for (let w = 0; w < words; w++) {
@@ -109,12 +109,12 @@ export function popcountBits(bits: Uint32Array, base: number, words: number): nu
   return count
 }
 
-/** База битсета камеры в буфере b. */
+/** The base of a camera's bitset in buffer b. */
 export function bitsBase(views: SceneViews, bufferIndex: number, cameraIndex: number): number {
   return (bufferIndex * views.cameraMax + cameraIndex) * views.bitsWords
 }
 
-/** Видимость ранга (хелпер для потребителей и тестов). */
+/** Visibility of a rank (a helper for consumers and tests). */
 export function isVisibleRank(
   views: SceneViews,
   bufferIndex: number,
@@ -126,17 +126,17 @@ export function isVisibleRank(
 }
 
 /**
- * Иерархическое отсечение камеры cameraIndex в буфер bufferIndex (0/1).
- * Требует свежие сферы (updateWorld + refitGroupBounds) и pack().
+ * Hierarchical culling of camera cameraIndex into buffer bufferIndex (0/1).
+ * Requires fresh spheres (updateWorld + refitGroupBounds) and pack().
  *
- * Task 85 — ПЛОСКОСТНЫЕ МАСКИ (Assarsson–Möller): маска = биты плоскостей,
- * которые узлу ещё надо тестировать. Плоскость ВЫБЫВАЕТ из маски детей,
- * только если ОХВАТЫВАЮЩАЯ сфера родителя целиком внутри неё — тогда весь
- * родительский поддерево внутри этой плоскости, детям она не нужна.
- * Узлы «неизвестного объёма» (r ≤ 0) маску не сужают (их сфера ничего не
- * говорит о детях) — маска детям наследуется как есть. На глубоких деревьях
- * это 6 → ~2 теста плоскостей на узел при том же битсете результата
- * (паритет с brute — тесты свойств в culling.test.ts).
+ * Task 85 — PLANE MASKS (Assarsson–Möller): the mask is the bits of the planes
+ * that the node still has to test. A plane DROPS OUT of the children's mask
+ * only if the parent's ENCLOSING sphere is entirely inside it — then the whole
+ * parent subtree is inside that plane, the children do not need it.
+ * Nodes of an "unknown volume" (r ≤ 0) do not narrow the mask (their sphere
+ * says nothing about the children) — the mask is inherited by the children
+ * as is. On deep trees this turns 6 → ~2 plane tests per node with the same
+ * result bitset (parity with brute — property tests in culling.test.ts).
  */
 export function cullViewsHierarchical(
   views: SceneViews,
@@ -150,7 +150,7 @@ export function cullViewsHierarchical(
   const base = bitsBase(views, bufferIndex, cameraIndex)
   const pb = cameraIndex * 24
 
-  // Корни леса: диапазоны поддеревьев + полная маска (наверху — все 6).
+  // Forest roots: subtree ranges + the full mask (at the top — all 6).
   let sp = 0
   function splitChildren(s: number, e: number, mask: number): void {
     let r2 = s + 1
@@ -187,9 +187,9 @@ export function cullViewsHierarchical(
     const o4 = slot * 4
     const cx = sphereW[o4], cy = sphereW[o4 + 1], cz = sphereW[o4 + 2]
     const r = sphereW[o4 + 3]
-    // Сфера охватывает поддерево: лист (сам и есть поддерево) либо r > 0
-    // (пользовательская или refit-граница). r ≤ 0 у внутреннего узла —
-    // «неизвестный объём»: спускаемся всегда, бит — по точке (как brute).
+    // The sphere encloses the subtree: a leaf (itself is the subtree) or r > 0
+    // (a user or refit bound). r ≤ 0 on an internal node —
+    // an "unknown volume": we always descend, the bit — by the point (like brute).
     const enclosing = leaf || r > 0
     tested++
 
@@ -199,7 +199,7 @@ export function cullViewsHierarchical(
     let m = mask
     while (m !== 0) {
       const pbIdx = m & -m
-      const i = 31 - Math.clz32(pbIdx) // индекс плоскости из бита
+      const i = 31 - Math.clz32(pbIdx) // the plane index from the bit
       m ^= pbIdx
       const o = pb + i * 4
       planeTests++
@@ -219,23 +219,23 @@ export function cullViewsHierarchical(
         fillBits(bits, base, s, e, false)
         trivialRejects++
       } else {
-        // Точка узла снаружи, но дети могут выступать в вид — только свой бит.
+        // The node's point is outside, but the children may protrude into view — its own bit only.
         bits[base + (s >>> 5)] &= ~(1 << (s & 31))
         splitChildren(s, e, mask)
       }
       continue
     }
     if (insideAll && enclosing) {
-      // Полностью внутри: дети тоже (охватывающая сфера) — заливка диапазона.
+      // Fully inside: the children too (an enclosing sphere) — fill the range.
       fillBits(bits, base, s, e, true)
       trivialAccepts++
       continue
     }
-    // Пересечение (или неизвестный объём): узел видим, спуск в детей.
-    // Маска детей: охватывающая сфера — только пересечённые плоскости;
-    // неизвестный объём — маска как есть (сужать нечем).
-    // masks=false — A/B-режим «до Task 85»: маска не сужается, узлы ниже
-    // тестируют все 6 плоскостей (результат идентичен — только дороже).
+    // Intersection (or an unknown volume): the node is visible, descend into the children.
+    // The children's mask: an enclosing sphere — only the intersected planes;
+    // an unknown volume — the mask as is (nothing to narrow with).
+    // masks=false — the A/B mode "before Task 85": the mask is not narrowed,
+    // nodes below test all 6 planes (the result is identical — only costlier).
     bits[base + (s >>> 5)] |= 1 << (s & 31)
     if (!leaf) splitChildren(s, e, masks && enclosing ? interMask : mask)
   }
@@ -252,8 +252,8 @@ export function cullViewsHierarchical(
 }
 
 /**
- * Brute-отсечение: тест каждой сферы независимо (эталон + плоские сцены).
- * Корректно без групповых границ — сфера узла не влияет на детей.
+ * Brute culling: every sphere tested independently (the reference + flat scenes).
+ * Correct without group bounds — a node's sphere does not affect the children.
  */
 export function cullViewsBrute(
   views: SceneViews,
@@ -304,9 +304,9 @@ export function cullViewsBrute(
 }
 
 /**
- * Пост-фильтр «узел скрыт»: бит видимости узла учитывает NF_VISIBLE.
- * Возвращает false, если бит стоит, но узел выключен (потребителям,
- * которым нужен точный итог без отдельной проверки флагов).
+ * The "node hidden" post-filter: a node's visibility bit takes NF_VISIBLE
+ * into account. Returns false if the bit is set but the node is turned off
+ * (for consumers that need the exact tally without a separate flag check).
  */
 export function rankNodeVisible(views: SceneViews, rank: number): boolean {
   const slot = views.order[rank]

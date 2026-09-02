@@ -1,14 +1,14 @@
 /**
- * formats/image.ts — картинки: байты → ImageBitmap (нативный декодер) и
- * Radiance HDR (.hdr, RGBE) → Float32-пиксели (порт парсера из ssr-common).
+ * formats/image.ts — images: bytes → ImageBitmap (a native decoder) and
+ * Radiance HDR (.hdr, RGBE) → Float32 pixels (a port of the ssr-common parser).
  *
- * ImageBitmap — «декодированные пиксели + opaque handle»: WebGPU
- * copyExternalImageToTexture / WebGL2 texImage2D принимают его напрямую.
- * Декодер — injectable: в браузере/воркере это createImageBitmap, в
- * headless-тестах — мок. Пакет НЕ тянет GPU-слой.
+ * ImageBitmap — "decoded pixels + an opaque handle": WebGPU
+ * copyExternalImageToTexture / WebGL2 texImage2D accept it directly.
+ * The decoder is injectable: in a browser/worker it is createImageBitmap,
+ * in headless tests — a mock. The package does NOT pull in a GPU layer.
  *
- * HDR: 32-bit_rle_rgbe (RLE- и flat-сканлайны), ряды флипаются в GL-порядок
- * (v=0 = нижний ряд). Чекпоинты отмены — на каждый сканлайн.
+ * HDR: 32-bit_rle_rgbe (RLE and flat scanlines), rows are flipped into the
+ * GL order (v=0 = the bottom row). Cancellation checkpoints — on every scanline.
  */
 
 import type {
@@ -27,11 +27,11 @@ import { sniffKind } from '../core/util.ts'
 export type DecodedImage = ImageBitmapLike
 
 export interface ImageParserFactoryOptions {
-  /** Декодер; null → парсер бросит UnsupportedError при использовании. */
+  /** The decoder; null → the parser will throw UnsupportedError when used. */
   decodeImage: ImageDecode | null
 }
 
-/** Парсер картинок с инжектируемым нативным декодером. */
+/** An image parser with an injectable native decoder. */
 export function createImageParser(options: ImageParserFactoryOptions): Parser<DecodedImage, ImageParserOptions> {
   return {
     kind: 'image',
@@ -39,7 +39,7 @@ export function createImageParser(options: ImageParserFactoryOptions): Parser<De
     async parse(input: ParseInput, decodeOptions: ImageParserOptions = {}): Promise<DecodedImage> {
       if (options.decodeImage === null) {
         throw new UnsupportedError(
-          'image: платформенный декодер недоступен (нет createImageBitmap) — передайте decodeImage в менеджер',
+          'image: platform decoder unavailable (no createImageBitmap) — pass decodeImage to the manager',
           input.ctx.sourceUrl,
         )
       }
@@ -54,11 +54,11 @@ export function createImageParser(options: ImageParserFactoryOptions): Parser<De
 export interface HdrImage {
   readonly width: number
   readonly height: number
-  /** RGB float, ряд 0 = НИЖНИЙ ряд (GL v=0), row-major. */
+  /** RGB float, row 0 = the BOTTOM row (GL v=0), row-major. */
   readonly rgb: Float32Array
 }
 
-/** Разбор .hdr (Radiance RGBE) из байтов. */
+/** Parse a .hdr (Radiance RGBE) from bytes. */
 export function parseHdrBytes(bytes: Uint8Array, ctx: ParseContext): HdrImage {
   const url = ctx.sourceUrl
   let pos = 0
@@ -71,17 +71,17 @@ export function parseHdrBytes(bytes: Uint8Array, ctx: ParseContext): HdrImage {
   }
   const magic = readLine()
   if (!magic.startsWith('#?RADIANCE') && !magic.startsWith('#?RGBE')) {
-    throw new ParseError('HDR: не Radiance-файл', 0, url)
+    throw new ParseError('HDR: not a Radiance file', 0, url)
   }
   let format = ''
   for (;;) {
-    if (pos >= bytes.length) throw new ParseError('HDR: внезапный конец заголовка', pos, url)
+    if (pos >= bytes.length) throw new ParseError('HDR: unexpected end of the header', pos, url)
     const line = readLine()
     if (line === '') break
     if (line.startsWith('FORMAT=')) format = line.slice(7).trim()
   }
   if (!format.includes('32-bit_rle_rgbe')) {
-    throw new ParseError(`HDR: формат ${format} не поддерживается (нужен 32-bit_rle_rgbe)`, pos, url)
+    throw new ParseError(`HDR: format ${format} is not supported (32-bit_rle_rgbe required)`, pos, url)
   }
   const resLine = readLine()
   const resParts = resLine.trim().split(/\s+/)
@@ -91,7 +91,7 @@ export function parseHdrBytes(bytes: Uint8Array, ctx: ParseContext): HdrImage {
     height = parseInt(resParts[1], 10)
     width = parseInt(resParts[3], 10)
   }
-  if (!width || !height) throw new ParseError(`HDR: битая строка разрешения "${resLine}"`, pos, url)
+  if (!width || !height) throw new ParseError(`HDR: corrupt resolution line "${resLine}"`, pos, url)
 
   const out = new Float32Array(width * height * 3)
   for (let y = 0; y < height; y++) {
@@ -102,9 +102,9 @@ export function parseHdrBytes(bytes: Uint8Array, ctx: ParseContext): HdrImage {
       bytes[pos + 1] === 2 &&
       bytes[pos + 2] * 256 + bytes[pos + 3] === width
     if (!isNewStyle) {
-      // flat-сканлайн: сырые RGBE-квадруплеты
+      // flat scanline: raw RGBE quadruplets
       for (let x = 0; x < width; x++) {
-        if (pos + 4 > bytes.length) throw new ParseError('HDR: обрезанный flat-сканлайн', pos, url)
+        if (pos + 4 > bytes.length) throw new ParseError('HDR: truncated flat scanline', pos, url)
         const r = bytes[pos], g = bytes[pos + 1], b = bytes[pos + 2], e = bytes[pos + 3]
         pos += 4
         const scale = e !== 0 ? Math.pow(2, e - 136) : 0
@@ -116,7 +116,7 @@ export function parseHdrBytes(bytes: Uint8Array, ctx: ParseContext): HdrImage {
       continue
     }
     pos += 4
-    // RLE-декодирование по каналам
+    // per-channel RLE decoding
     const ch: Uint8Array[] = [
       new Uint8Array(width), new Uint8Array(width),
       new Uint8Array(width), new Uint8Array(width),
@@ -142,7 +142,7 @@ export function parseHdrBytes(bytes: Uint8Array, ctx: ParseContext): HdrImage {
         }
       }
     }
-    if (!ok) throw new ParseError('HDR: обрезанные RLE-данные', pos, url)
+    if (!ok) throw new ParseError('HDR: truncated RLE data', pos, url)
     for (let x = 0; x < width; x++) {
       const e = ch[3][x]
       const scale = e !== 0 ? Math.pow(2, e - 136) : 0
@@ -152,7 +152,7 @@ export function parseHdrBytes(bytes: Uint8Array, ctx: ParseContext): HdrImage {
       out[o + 2] = ch[2][x] * scale
     }
   }
-  // файл: ряд 0 = верхний; GL: v=0 = нижний → флип
+  // the file: row 0 = top; GL: v=0 = bottom → flip
   const flipped = new Float32Array(out.length)
   for (let y = 0; y < height; y++) {
     const src = y * width * 3
@@ -162,7 +162,7 @@ export function parseHdrBytes(bytes: Uint8Array, ctx: ParseContext): HdrImage {
   return { width, height, rgb: flipped }
 }
 
-/** HDR-парсер для менеджера. */
+/** The HDR parser for the manager. */
 export const hdrParser: Parser<HdrImage> = {
   kind: 'hdr',
   extensions: ['.hdr', '.pic'],

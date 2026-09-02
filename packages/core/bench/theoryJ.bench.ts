@@ -2,12 +2,12 @@ import { createUploadQueue } from '../src/index.ts'
 import type { UploadJob } from '../src/index.ts'
 
 /**
- * Теория J: структура данных очереди стриминга.
- * Вариант 1: двоичная куча (push O(log n), pop O(log n)).
- * Вариант 2: сортировка-вставкой в массив (push O(n) memcpy, pop O(1)).
- * Вариант 3: FIFO без приоритетов (push O(1), pop O(1)) — базовая линия.
- * Гипотеза: куча выигрывает на перемешанных приоритетах при больших N;
- * при малых N (<64) различия в шуме.
+ * Theory J: streaming queue data structure.
+ * Variant 1: binary heap (push O(log n), pop O(log n)).
+ * Variant 2: sorted insert into an array (push O(n) memcpy, pop O(1)).
+ * Variant 3: FIFO without priorities (push O(1), pop O(1)) — baseline.
+ * Hypothesis: the heap wins on shuffled priorities at large N;
+ * at small N (<64) the differences are in the noise.
  */
 
 const N = 2000
@@ -70,14 +70,14 @@ function bestOf(repeats: number, run: () => number): number {
 }
 
 const jobs = makeJobs(42)
-benchHeap(jobs, FRAMES); benchSortedInsert(jobs, FRAMES); benchFifo(jobs, FRAMES) // прогрев
+benchHeap(jobs, FRAMES); benchSortedInsert(jobs, FRAMES); benchFifo(jobs, FRAMES) // warm-up
 
 const heapMs = bestOf(9, () => benchHeap(makeJobs(7), FRAMES))
 const sortedMs = bestOf(9, () => benchSortedInsert(makeJobs(7), FRAMES))
 const fifoMs = bestOf(9, () => benchFifo(makeJobs(7), FRAMES))
 
-console.log('── Теория J: очередь стриминга, 2000 задач × 50 кадров ──')
-console.log(`двоичная куча     : ${heapMs.toFixed(2)} мс`)
-console.log(`сортировка-вставка: ${sortedMs.toFixed(2)} мс`)
-console.log(`FIFO (без приоритетов): ${fifoMs.toFixed(2)} мс`)
-console.log(`куча быстрее сортировки в ${(sortedMs / heapMs).toFixed(1)} раза; надбавка за приоритеты против FIFO — ×${(heapMs / fifoMs).toFixed(2)}`)
+console.log('── Theory J: streaming queue, 2000 jobs × 50 frames ──')
+console.log(`binary heap      : ${heapMs.toFixed(2)} ms`)
+console.log(`sorted insert     : ${sortedMs.toFixed(2)} ms`)
+console.log(`FIFO (no priorities)  : ${fifoMs.toFixed(2)} ms`)
+console.log(`heap is faster than sorted insert by a factor of ${(sortedMs / heapMs).toFixed(1)}; priority premium over FIFO — ×${(heapMs / fifoMs).toFixed(2)}`)

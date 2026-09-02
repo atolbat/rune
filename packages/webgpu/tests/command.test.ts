@@ -19,7 +19,7 @@ struct Params {
 
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
 
-// depth: null — не клирим глубину (структурный тип clears требует поле).
+// depth: null — we do not clear depth (the structural clears type requires the field).
 const CLEAR = [{ color: [0.1, 0.1, 0.12, 1] as const, depth: null }]
 
 function makeSpec(): WgpuDrawSpec {
@@ -55,15 +55,15 @@ function tapeOf(command: ReturnType<typeof setup>['command'], props: any) {
 }
 
 describe('webgpu command + executor', () => {
-  it('компилирует: привязки по именам полей структуры', () => {
+  it('compiles: bindings by struct field names', () => {
     const { command } = setup()
     expect(command.bindings.map(b => b.name)).toEqual(['u_mvp', 'u_tint', 'u_alpha'])
     expect(command.bindings.map(b => b.shape)).toEqual(['m4', 'f4', 'f'])
     expect(command.slice.base).toBe(0)
-    expect(command.slice.size).toBe(256) // выровнено до dynamic-offset гранулярности
+    expect(command.slice.size).toBe(256) // aligned to the dynamic-offset granularity
   })
 
-  it('слоты в срезе следуют std140 (mvp 0..64, tint 64..80, alpha 80..84)', () => {
+  it('slots in the slice follow std140 (mvp 0..64, tint 64..80, alpha 80..84)', () => {
     const { command } = setup()
     const [mvp, tint, alpha] = command.bindings
     expect(mvp.slot.offset).toBe(0)
@@ -71,11 +71,12 @@ describe('webgpu command + executor', () => {
     expect(alpha.slot.offset).toBe(80)
   })
 
-  it('executor: кадр → пасс → загрузка UBO → пайплайн → слайс → draw → submit', () => {
+  it('executor: frame → pass → UBO upload → pipeline → slice → draw → submit', () => {
     const { command, calls, executor } = setup()
     executor.run(tapeOf(command, { mvp: IDENTITY, count: 3 }))
-    // Грязные слайсы арены загружаются в UBO ДО пасса (один аплоад на кадр;
-    // 84 = фактические байты юниформов, без набивки среза до 256)
+    // Dirty arena slices are uploaded into the UBO BEFORE the pass (one
+    // upload per frame; 84 = the actual uniform bytes, without padding the
+    // slice up to 256)
     expect(calls[0]).toBe('uploadUniforms(0,84)')
     expect(calls).toContain(`usePipeline(${command.pipelineId})`)
     expect(calls).toContain('bindUniforms(0)')
@@ -84,14 +85,14 @@ describe('webgpu command + executor', () => {
     expect(calls[calls.length - 1]).toBe('submit')
   })
 
-  it('второй кадр без изменений: вершинные буферы не пересоздаются', () => {
+  it('second frame without changes: vertex buffers are not recreated', () => {
     const { command, executor } = setup()
     executor.run(tapeOf(command, { mvp: IDENTITY, count: 3 }))
     executor.run(tapeOf(command, { mvp: IDENTITY, count: 3 }))
-    // идемпотентность — на уровне моков проверяется отсутствием дублей ensurePipeline
+    // idempotency — checked at the mock level by the absence of duplicate ensurePipeline
   })
 
-  it('пайплайн привязывается каждый draw, но компилируется один раз (лениво)', () => {
+  it('the pipeline is bound on every draw, but compiled once (lazily)', () => {
     const { command, calls, executor } = setup()
     executor.run(tapeOf(command, { mvp: IDENTITY, count: 3 }))
     const setPipelineCount = calls.filter(call => call.startsWith('usePipeline')).length
@@ -99,7 +100,7 @@ describe('webgpu command + executor', () => {
     expect(calls.filter(call => call.startsWith('draw(')).length).toBe(1)
   })
 
-  it('одинаковые спеки → один пайплайн; разные pipeline → разные', () => {
+  it('identical specs → one pipeline; different pipelines → different', () => {
     const arena = createSliceArena(8192)
     const ctx = createWgpuContext(arena)
     const a = compileWgslSpec(makeSpec(), ctx)

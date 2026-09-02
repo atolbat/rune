@@ -1,14 +1,14 @@
 /**
- * Реестр примитивов (Task 109): единый каталог @rune/prims — метаданные
- * параметров (UI строит слайдеры САМ по этой таблице) + генератор от
- * значений и множителя детализации. Единая точка правды для демо и
- * тестов: инварианты (winding/нормали/счёты) прогоняются ПО КАТАЛОГУ.
+ * Primitive registry (Task 109): the single @rune/prims catalog — parameter
+ * metadata (the UI builds the sliders ITSELF from this table) + a generator
+ * from values and a detail multiplier. A single source of truth for demos
+ * and tests: invariants (winding/normals/counts) are run ACROSS THE CATALOG.
  *
- * Параметры бывают:
- *   • числовые — слайдер min..max..step;
- *   • segment (integer) — сегментация: множится детализацией k
- *     (×0.5 Эконом … ×4 Ультра) с зажимом в [min, max];
- *   • bool — тумблер (openEnded у цилиндра/конуса).
+ * Parameters come in kinds:
+ *   • numeric — a min..max..step slider;
+ *   • segment (integer) — tessellation: multiplied by the detail k
+ *     (×0.5 Economy … ×4 Ultra) clamped into [min, max];
+ *   • bool — a toggle (openEnded on the cylinder/cone).
  */
 
 import type { Geometry } from './types.ts'
@@ -32,11 +32,11 @@ export interface ParamMeta {
   readonly max: number
   readonly step: number
   readonly def: number
-  /** Сегментный параметр: integer + множится детализацией k. */
+  /** A segment parameter: integer + multiplied by the detail k. */
   readonly segment?: boolean
-  /** Целочисленный (без множителя детализации). */
+  /** Integer (without the detail multiplier). */
   readonly integer?: boolean
-  /** Булев тумблер (min/max/step не используются). */
+  /** A boolean toggle (min/max/step are unused). */
   readonly bool?: boolean
 }
 
@@ -45,18 +45,18 @@ export interface ShapeMeta {
   readonly label: string
   readonly group: string
   readonly note: string
-  /** Сдвиг модели по Y (камера смотрит сюда). */
+  /** Model offset along Y (the camera looks here). */
   readonly offsetY?: number
-  /** Дистанция камеры по умолчанию. */
+  /** Default camera distance. */
   readonly dist?: number
   readonly params: readonly ParamMeta[]
-  /** Геометрия от значений параметров и множителя детализации k. */
+  /** Geometry from parameter values and the detail multiplier k. */
   readonly make: (values: Record<string, number>, k: number) => Geometry
-  /** Для адаптивных фигур: конфиг живого фида (демо). */
+  /** For adaptive shapes: the live feed config (demo). */
   readonly adaptive?: (values: Record<string, number>) => AdaptiveTerrainParams
 }
 
-/** Значение сегментного параметра с учётом детализации: base·k, зажим. */
+/** The segment parameter value accounting for detail: base·k, clamped. */
 export function segmentValue(base: number, k: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(base * k)))
 }
@@ -68,11 +68,11 @@ function terrainEntry(
 ): ShapeMeta {
   const preset = terrainPresets[presetKey]!
   return {
-    id, label: preset.label, group: 'Террейны', note, offsetY: -0.25, dist: 3.4,
+    id, label: preset.label, group: 'Terrains', note, offsetY: -0.25, dist: 3.4,
     params: [
-      { key: 'seed', label: 'Seed рельефа', min: 1, max: 999, step: 1, def: 7, integer: true },
-      { key: 'amp', label: 'Амплитуда', min: 0.4, max: 2.5, step: 0.1, def: preset.amplitude },
-      { key: 'segs', label: 'Сегментов', min: 16, max: 256, step: 8, def: 96, segment: true },
+      { key: 'seed', label: 'Relief seed', min: 1, max: 999, step: 1, def: 7, integer: true },
+      { key: 'amp', label: 'Amplitude', min: 0.4, max: 2.5, step: 0.1, def: preset.amplitude },
+      { key: 'segs', label: 'Segments', min: 16, max: 256, step: 8, def: 96, segment: true },
     ],
     make: (v, _k) => terrain(
       TERRAIN_SIZE,
@@ -88,14 +88,14 @@ function adaptiveEntry(
 ): ShapeMeta {
   const preset = adaptivePresets[presetKey]!
   return {
-    id, label: preset.label, group: 'Адаптивный рельеф', note, offsetY: -0.2, dist: 7.5,
+    id, label: preset.label, group: 'Adaptive relief', note, offsetY: -0.2, dist: 7.5,
     params: [
-      { key: 'seed', label: 'Seed рельефа', min: 1, max: 999, step: 1, def: 7, integer: true },
-      { key: 'amp', label: 'Амплитуда', min: 0.3, max: 2.5, step: 0.1, def: preset.amplitude },
-      { key: 'radius', label: 'Радиус построения', min: 8, max: 48, step: 4, def: 20, integer: true },
-      { key: 'tile', label: 'Размер тайла', min: 2, max: 8, step: 1, def: 4, integer: true },
-      { key: 'maxSeg', label: 'Макс. сегментов', min: 8, max: 64, step: 8, def: 24, segment: true },
-      { key: 'skirt', label: 'Юбки на стыках', min: 0, max: 1, step: 1, def: 1, bool: true },
+      { key: 'seed', label: 'Relief seed', min: 1, max: 999, step: 1, def: 7, integer: true },
+      { key: 'amp', label: 'Amplitude', min: 0.3, max: 2.5, step: 0.1, def: preset.amplitude },
+      { key: 'radius', label: 'Build radius', min: 8, max: 48, step: 4, def: 20, integer: true },
+      { key: 'tile', label: 'Tile size', min: 2, max: 8, step: 1, def: 4, integer: true },
+      { key: 'maxSeg', label: 'Max segments', min: 8, max: 64, step: 8, def: 24, segment: true },
+      { key: 'skirt', label: 'Skirts at seams', min: 0, max: 1, step: 1, def: 1, bool: true },
     ],
     make: (v, k) => {
       void k
@@ -119,18 +119,18 @@ function adaptiveEntry(
   }
 }
 
-/** Каталог примитивов (до обёртки детализации). */
+/** The primitive catalog (before the detail wrapper). */
 const RAW_SHAPES: readonly ShapeMeta[] = [
   {
-    id: 'box', label: 'Бокс', group: 'Базовые',
-    note: 'width×height×depth, СЕГМЕНТЫ НА КАЖДУЮ ГРАНЬ (как BoxGeometry three.js)',
+    id: 'box', label: 'Box', group: 'Basic',
+    note: 'width×height×depth, SEGMENTS PER FACE (like three.js BoxGeometry)',
     params: [
-      { key: 'width', label: 'Ширина X', min: 0.4, max: 2.5, step: 0.05, def: 1.4 },
-      { key: 'height', label: 'Высота Y', min: 0.4, max: 2.5, step: 0.05, def: 1.4 },
-      { key: 'depth', label: 'Глубина Z', min: 0.4, max: 2.5, step: 0.05, def: 1.4 },
-      { key: 'segX', label: 'Сегментов X', min: 1, max: 24, step: 1, def: 6, segment: true },
-      { key: 'segY', label: 'Сегментов Y', min: 1, max: 24, step: 1, def: 6, segment: true },
-      { key: 'segZ', label: 'Сегментов Z', min: 1, max: 24, step: 1, def: 6, segment: true },
+      { key: 'width', label: 'Width X', min: 0.4, max: 2.5, step: 0.05, def: 1.4 },
+      { key: 'height', label: 'Height Y', min: 0.4, max: 2.5, step: 0.05, def: 1.4 },
+      { key: 'depth', label: 'Depth Z', min: 0.4, max: 2.5, step: 0.05, def: 1.4 },
+      { key: 'segX', label: 'Segments X', min: 1, max: 24, step: 1, def: 6, segment: true },
+      { key: 'segY', label: 'Segments Y', min: 1, max: 24, step: 1, def: 6, segment: true },
+      { key: 'segZ', label: 'Segments Z', min: 1, max: 24, step: 1, def: 6, segment: true },
     ],
     make: v => box({
       width: v.width, height: v.height, depth: v.depth,
@@ -138,13 +138,13 @@ const RAW_SHAPES: readonly ShapeMeta[] = [
     }),
   },
   {
-    id: 'plane', label: 'Плоскость', group: 'Базовые',
-    note: 'Прямоугольник width×height с НЕЗАВИСИМЫМИ сегментами по осям, нормаль +Y',
+    id: 'plane', label: 'Plane', group: 'Basic',
+    note: 'A width×height rectangle with INDEPENDENT segments per axis, +Y normal',
     params: [
-      { key: 'width', label: 'Ширина X', min: 0.5, max: 4, step: 0.1, def: 2.2 },
-      { key: 'height', label: 'Глубина Z', min: 0.5, max: 4, step: 0.1, def: 1.6 },
-      { key: 'segX', label: 'Сегментов X', min: 1, max: 96, step: 1, def: 24, segment: true },
-      { key: 'segY', label: 'Сегментов Z', min: 1, max: 96, step: 1, def: 16, segment: true },
+      { key: 'width', label: 'Width X', min: 0.5, max: 4, step: 0.1, def: 2.2 },
+      { key: 'height', label: 'Depth Z', min: 0.5, max: 4, step: 0.1, def: 1.6 },
+      { key: 'segX', label: 'Segments X', min: 1, max: 96, step: 1, def: 24, segment: true },
+      { key: 'segY', label: 'Segments Z', min: 1, max: 96, step: 1, def: 16, segment: true },
     ],
     make: v => plane({
       width: v.width, height: v.height,
@@ -152,12 +152,12 @@ const RAW_SHAPES: readonly ShapeMeta[] = [
     }),
   },
   {
-    id: 'sphere', label: 'Сфера', group: 'Базовые',
-    note: 'UV-сфера: widthSegments × heightSegments (как SphereGeometry), полюса без дыр',
+    id: 'sphere', label: 'Sphere', group: 'Basic',
+    note: 'UV sphere: widthSegments × heightSegments (like SphereGeometry), poles without holes',
     params: [
-      { key: 'radius', label: 'Радиус', min: 0.5, max: 2, step: 0.05, def: 1 },
-      { key: 'segW', label: 'Сегментов (долгота)', min: 8, max: 256, step: 4, def: 48, segment: true },
-      { key: 'segH', label: 'Поясов (широта)', min: 4, max: 128, step: 2, def: 32, segment: true },
+      { key: 'radius', label: 'Radius', min: 0.5, max: 2, step: 0.05, def: 1 },
+      { key: 'segW', label: 'Segments (longitude)', min: 8, max: 256, step: 4, def: 48, segment: true },
+      { key: 'segH', label: 'Bands (latitude)', min: 4, max: 128, step: 2, def: 32, segment: true },
     ],
     make: v => sphere({
       radius: v.radius,
@@ -166,15 +166,15 @@ const RAW_SHAPES: readonly ShapeMeta[] = [
     }),
   },
   {
-    id: 'cylinder', label: 'Цилиндр', group: 'Базовые',
-    note: 'Усечённый конус с крышками; rTop=0 — конус; openEnded — без крышек',
+    id: 'cylinder', label: 'Cylinder', group: 'Basic',
+    note: 'A truncated cone with caps; rTop=0 — a cone; openEnded — without caps',
     params: [
-      { key: 'rTop', label: 'Радиус верха', min: 0, max: 1.2, step: 0.05, def: 0.7 },
-      { key: 'rBot', label: 'Радиус низа', min: 0.3, max: 1.2, step: 0.05, def: 0.9 },
-      { key: 'height', label: 'Высота', min: 0.6, max: 2.6, step: 0.1, def: 1.8 },
-      { key: 'segR', label: 'Сегментов (вокруг)', min: 3, max: 256, step: 1, def: 48, segment: true },
-      { key: 'segH', label: 'Поясов (высота)', min: 1, max: 32, step: 1, def: 1, segment: true },
-      { key: 'open', label: 'Без крышек (openEnded)', min: 0, max: 1, step: 1, def: 0, bool: true },
+      { key: 'rTop', label: 'Top radius', min: 0, max: 1.2, step: 0.05, def: 0.7 },
+      { key: 'rBot', label: 'Bottom radius', min: 0.3, max: 1.2, step: 0.05, def: 0.9 },
+      { key: 'height', label: 'Height', min: 0.6, max: 2.6, step: 0.1, def: 1.8 },
+      { key: 'segR', label: 'Segments (around)', min: 3, max: 256, step: 1, def: 48, segment: true },
+      { key: 'segH', label: 'Bands (height)', min: 1, max: 32, step: 1, def: 1, segment: true },
+      { key: 'open', label: 'No caps (openEnded)', min: 0, max: 1, step: 1, def: 0, bool: true },
     ],
     make: v => cylinder({
       radiusTop: v.rTop, radiusBottom: v.rBot, height: v.height,
@@ -183,14 +183,14 @@ const RAW_SHAPES: readonly ShapeMeta[] = [
     }),
   },
   {
-    id: 'cone', label: 'Конус', group: 'Базовые',
-    note: 'Апекс без вырожденных треугольников; openEnded — без основания',
+    id: 'cone', label: 'Cone', group: 'Basic',
+    note: 'An apex without degenerate triangles; openEnded — without the base',
     params: [
-      { key: 'radius', label: 'Радиус', min: 0.4, max: 1.2, step: 0.05, def: 0.9 },
-      { key: 'height', label: 'Высота', min: 0.8, max: 2.6, step: 0.1, def: 1.8 },
-      { key: 'segR', label: 'Сегментов (вокруг)', min: 3, max: 256, step: 1, def: 48, segment: true },
-      { key: 'segH', label: 'Поясов (высота)', min: 1, max: 32, step: 1, def: 1, segment: true },
-      { key: 'open', label: 'Без основания', min: 0, max: 1, step: 1, def: 0, bool: true },
+      { key: 'radius', label: 'Radius', min: 0.4, max: 1.2, step: 0.05, def: 0.9 },
+      { key: 'height', label: 'Height', min: 0.8, max: 2.6, step: 0.1, def: 1.8 },
+      { key: 'segR', label: 'Segments (around)', min: 3, max: 256, step: 1, def: 48, segment: true },
+      { key: 'segH', label: 'Bands (height)', min: 1, max: 32, step: 1, def: 1, segment: true },
+      { key: 'open', label: 'Without the base', min: 0, max: 1, step: 1, def: 0, bool: true },
     ],
     make: v => cone({
       radius: v.radius, height: v.height,
@@ -199,13 +199,13 @@ const RAW_SHAPES: readonly ShapeMeta[] = [
     }),
   },
   {
-    id: 'capsule', label: 'Капсула', group: 'Базовые',
-    note: 'Цилиндр + полусферы (height — цилиндрическая часть, как в three.js)',
+    id: 'capsule', label: 'Capsule', group: 'Basic',
+    note: 'Cylinder + hemispheres (height — the cylindrical part, as in three.js)',
     params: [
-      { key: 'radius', label: 'Радиус', min: 0.25, max: 0.9, step: 0.05, def: 0.55 },
-      { key: 'height', label: 'Длина тела', min: 0.4, max: 1.8, step: 0.05, def: 1.1 },
-      { key: 'segR', label: 'Сегментов (вокруг)', min: 3, max: 128, step: 1, def: 40, segment: true },
-      { key: 'segH', label: 'Поясов на полусферу', min: 2, max: 64, step: 1, def: 12, segment: true },
+      { key: 'radius', label: 'Radius', min: 0.25, max: 0.9, step: 0.05, def: 0.55 },
+      { key: 'height', label: 'Body length', min: 0.4, max: 1.8, step: 0.05, def: 1.1 },
+      { key: 'segR', label: 'Segments (around)', min: 3, max: 128, step: 1, def: 40, segment: true },
+      { key: 'segH', label: 'Bands per hemisphere', min: 2, max: 64, step: 1, def: 12, segment: true },
     ],
     make: v => capsule({
       radius: v.radius, height: v.height,
@@ -213,13 +213,13 @@ const RAW_SHAPES: readonly ShapeMeta[] = [
     }),
   },
   {
-    id: 'torus', label: 'Тор', group: 'Кривые',
-    note: 'Трубка tube вокруг кольца radius; radial — вокруг трубки, tubular — вокруг оси',
+    id: 'torus', label: 'Torus', group: 'Curves',
+    note: 'A tube of tube around a radius ring; radial — around the tube, tubular — around the axis',
     params: [
-      { key: 'radius', label: 'Радиус кольца', min: 0.6, max: 1.5, step: 0.05, def: 1 },
-      { key: 'tube', label: 'Радиус трубки', min: 0.12, max: 0.6, step: 0.02, def: 0.38 },
-      { key: 'segR', label: 'Сегментов трубки', min: 3, max: 96, step: 1, def: 28, segment: true },
-      { key: 'segT', label: 'Сегментов кольца', min: 8, max: 256, step: 4, def: 64, segment: true },
+      { key: 'radius', label: 'Ring radius', min: 0.6, max: 1.5, step: 0.05, def: 1 },
+      { key: 'tube', label: 'Tube radius', min: 0.12, max: 0.6, step: 0.02, def: 0.38 },
+      { key: 'segR', label: 'Tube segments', min: 3, max: 96, step: 1, def: 28, segment: true },
+      { key: 'segT', label: 'Ring segments', min: 8, max: 256, step: 4, def: 64, segment: true },
     ],
     make: v => torus({
       radius: v.radius, tube: v.tube,
@@ -227,16 +227,16 @@ const RAW_SHAPES: readonly ShapeMeta[] = [
     }),
   },
   {
-    id: 'knot', label: 'Узел (p,q)', group: 'Кривые',
-    note: 'Тороидальный узел: p витков × q захлёстов; меняйте p/q — узел перестраивается',
+    id: 'knot', label: 'Knot (p,q)', group: 'Curves',
+    note: 'A torus knot: p windings × q loops; change p/q — the knot reconfigures',
     dist: 4.6,
     params: [
-      { key: 'p', label: 'p (витки)', min: 1, max: 5, step: 1, def: 2, integer: true },
-      { key: 'q', label: 'q (захлёсты)', min: 2, max: 7, step: 1, def: 3, integer: true },
-      { key: 'tube', label: 'Радиус трубки', min: 0.08, max: 0.4, step: 0.02, def: 0.26 },
-      { key: 'scale', label: 'Масштаб', min: 0.25, max: 0.8, step: 0.05, def: 0.45 },
-      { key: 'segT', label: 'Сегментов кривой', min: 16, max: 640, step: 8, def: 220, segment: true },
-      { key: 'segR', label: 'Сегментов трубки', min: 3, max: 32, step: 1, def: 14, segment: true },
+      { key: 'p', label: 'p (windings)', min: 1, max: 5, step: 1, def: 2, integer: true },
+      { key: 'q', label: 'q (loops)', min: 2, max: 7, step: 1, def: 3, integer: true },
+      { key: 'tube', label: 'Tube radius', min: 0.08, max: 0.4, step: 0.02, def: 0.26 },
+      { key: 'scale', label: 'Scale', min: 0.25, max: 0.8, step: 0.05, def: 0.45 },
+      { key: 'segT', label: 'Curve segments', min: 16, max: 640, step: 8, def: 220, segment: true },
+      { key: 'segR', label: 'Tube segments', min: 3, max: 32, step: 1, def: 14, segment: true },
     ],
     make: v => torusKnot({
       p: Math.round(v.p ?? 2), q: Math.round(v.q ?? 3),
@@ -245,81 +245,82 @@ const RAW_SHAPES: readonly ShapeMeta[] = [
     }),
   },
   {
-    id: 'tetra', label: 'Тетраэдр', group: 'Платоновы',
-    note: '4 грани, плоское затенение; detail — сабдивизия с проекцией на сферу',
+    id: 'tetra', label: 'Tetrahedron', group: 'Platonic',
+    note: '4 faces, flat shading; detail — subdivision with projection onto the sphere',
     params: [
-      { key: 'radius', label: 'Радиус', min: 0.6, max: 1.6, step: 0.05, def: 1.1 },
-      { key: 'detail', label: 'Детализация (сабдивизия)', min: 0, max: 4, step: 1, def: 0, integer: true },
+      { key: 'radius', label: 'Radius', min: 0.6, max: 1.6, step: 0.05, def: 1.1 },
+      { key: 'detail', label: 'Detail (subdivision)', min: 0, max: 4, step: 1, def: 0, integer: true },
     ],
     make: v => tetrahedron({ radius: v.radius, detail: v.detail }),
   },
   {
-    id: 'octa', label: 'Октаэдр', group: 'Платоновы',
-    note: '8 граней; detail ≥ 1 — геодезическая сфера из октаэдра',
+    id: 'octa', label: 'Octahedron', group: 'Platonic',
+    note: '8 faces; detail ≥ 1 — a geodesic sphere from the octahedron',
     params: [
-      { key: 'radius', label: 'Радиус', min: 0.6, max: 1.6, step: 0.05, def: 1.1 },
-      { key: 'detail', label: 'Детализация (сабдивизия)', min: 0, max: 4, step: 1, def: 0, integer: true },
+      { key: 'radius', label: 'Radius', min: 0.6, max: 1.6, step: 0.05, def: 1.1 },
+      { key: 'detail', label: 'Detail (subdivision)', min: 0, max: 4, step: 1, def: 0, integer: true },
     ],
     make: v => octahedron({ radius: v.radius, detail: v.detail }),
   },
   {
-    id: 'icosa', label: 'Икосаэдр', group: 'Платоновы',
-    note: '20 граней; detail 1/2/3 — геодезические сферы 80/320/1280 граней',
+    id: 'icosa', label: 'Icosahedron', group: 'Platonic',
+    note: '20 faces; detail 1/2/3 — geodesic spheres with 80/320/1280 faces',
     params: [
-      { key: 'radius', label: 'Радиус', min: 0.6, max: 1.6, step: 0.05, def: 1.1 },
-      { key: 'detail', label: 'Детализация (сабдивизия)', min: 0, max: 4, step: 1, def: 0, integer: true },
+      { key: 'radius', label: 'Radius', min: 0.6, max: 1.6, step: 0.05, def: 1.1 },
+      { key: 'detail', label: 'Detail (subdivision)', min: 0, max: 4, step: 1, def: 0, integer: true },
     ],
     make: v => icosahedron({ radius: v.radius, detail: v.detail }),
   },
   {
-    id: 'dodeca', label: 'Додекаэдр', group: 'Платоновы',
-    note: '12 пятиугольных граней (двойственен икосаэдру); detail — сфера-додека',
+    id: 'dodeca', label: 'Dodecahedron', group: 'Platonic',
+    note: '12 pentagonal faces (dual to the icosahedron); detail — a sphere-dodeca',
     params: [
-      { key: 'radius', label: 'Радиус', min: 0.6, max: 1.6, step: 0.05, def: 1.1 },
-      { key: 'detail', label: 'Детализация (сабдивизия)', min: 0, max: 3, step: 1, def: 0, integer: true },
+      { key: 'radius', label: 'Radius', min: 0.6, max: 1.6, step: 0.05, def: 1.1 },
+      { key: 'detail', label: 'Detail (subdivision)', min: 0, max: 3, step: 1, def: 0, integer: true },
     ],
     make: v => dodecahedron({ radius: v.radius, detail: v.detail }),
   },
   {
-    id: 'disk', label: 'Диск', group: 'Прочие',
-    note: 'Круг в плоскости XZ, нормаль +Y (CircleGeometry)',
+    id: 'disk', label: 'Disk', group: 'Other',
+    note: 'A circle in the XZ plane, +Y normal (CircleGeometry)',
     params: [
-      { key: 'radius', label: 'Радиус', min: 0.5, max: 1.6, step: 0.05, def: 1.1 },
-      { key: 'segs', label: 'Сегментов', min: 3, max: 256, step: 1, def: 64, segment: true },
+      { key: 'radius', label: 'Radius', min: 0.5, max: 1.6, step: 0.05, def: 1.1 },
+      { key: 'segs', label: 'Segments', min: 3, max: 256, step: 1, def: 64, segment: true },
     ],
     make: v => disk({ radius: v.radius, segments: v.segs }),
   },
   {
-    id: 'ring', label: 'Кольцо', group: 'Прочие',
-    note: 'Annulus — плоская шайба (RingGeometry)',
+    id: 'ring', label: 'Ring', group: 'Other',
+    note: 'Annulus — a flat washer (RingGeometry)',
     params: [
-      { key: 'inner', label: 'Внутренний R', min: 0.2, max: 0.9, step: 0.05, def: 0.55 },
-      { key: 'outer', label: 'Внешний R', min: 0.8, max: 1.6, step: 0.05, def: 1.1 },
-      { key: 'segs', label: 'Сегментов', min: 3, max: 256, step: 1, def: 64, segment: true },
+      { key: 'inner', label: 'Inner R', min: 0.2, max: 0.9, step: 0.05, def: 0.55 },
+      { key: 'outer', label: 'Outer R', min: 0.8, max: 1.6, step: 0.05, def: 1.1 },
+      { key: 'segs', label: 'Segments', min: 3, max: 256, step: 1, def: 64, segment: true },
     ],
     make: v => ring({ innerRadius: v.inner, outerRadius: v.outer, segments: v.segs }),
   },
-  terrainEntry('t-hills', 'hills', 'Одна плоскость с heightmap (fBm): база адаптивного рельефа'),
-  terrainEntry('t-ridged', 'ridged', 'Ridged-мультимфрактал: острые гряды'),
-  terrainEntry('t-island', 'island', 'Холмы × радиальный спад: пляж → горы'),
-  terrainEntry('t-dunes', 'dunes', 'Анизотропные |sin|-гряды, ветровые пески'),
-  terrainEntry('t-canyon', 'canyon', 'Террасы-ступени: столовые плато'),
-  terrainEntry('t-volcano', 'volcano', 'Конус с кратером + шумовой обод'),
-  adaptiveEntry('a-hills', 'hills', 'Тайлы LOD вокруг камеры: ближние подробные, дальние грубые; юбки на стыках'),
-  adaptiveEntry('a-ridged', 'ridged', 'Хребты кольцами LOD — острые гряды гаснут вдали'),
-  adaptiveEntry('a-island', 'island', 'Остров в океане до тумана: видно, как даль глушится LOD-ом'),
-  adaptiveEntry('a-dunes', 'dunes', 'Дюны: стыки тайлов держат юбки при дисплейсе'),
-  adaptiveEntry('a-canyon', 'canyon', 'Каньон: плоские плато читаются на любом уровне LOD'),
+  terrainEntry('t-hills', 'hills', 'A single plane with a heightmap (fBm): the base of the adaptive relief'),
+  terrainEntry('t-ridged', 'ridged', 'Ridged multifractal: sharp ridges'),
+  terrainEntry('t-island', 'island', 'Hills × radial falloff: beach → mountains'),
+  terrainEntry('t-dunes', 'dunes', 'Anisotropic |sin| ridges, wind-blown sands'),
+  terrainEntry('t-canyon', 'canyon', 'Step terraces: table plateaus'),
+  terrainEntry('t-volcano', 'volcano', 'A cone with a crater + a noisy rim'),
+  adaptiveEntry('a-hills', 'hills', 'LOD tiles around the camera: near ones detailed, far ones coarse; skirts at seams'),
+  adaptiveEntry('a-ridged', 'ridged', 'Ridges in LOD rings — sharp ridges fade in the distance'),
+  adaptiveEntry('a-island', 'island', 'An island in an ocean up to the fog: you can see the distance being muted by LOD'),
+  adaptiveEntry('a-dunes', 'dunes', 'Dunes: tile seams keep their skirts under displacement'),
+  adaptiveEntry('a-canyon', 'canyon', 'Canyon: flat plateaus read at any LOD level'),
 ]
 
-/** Каталог примитивов для UI и тестов (после обёртки детализации). */
+/** The primitive catalog for UI and tests (after the detail wrapper). */
 export const SHAPES: readonly ShapeMeta[] = RAW_SHAPES.map(withDetail)
 
 /**
- * Обёртка ДЕТАЛИЗАЦИИ: сегментные параметры (segment: true) умножаются на k
- * с зажимом [min, max] ДО передачи в make — один механизм на весь каталог
- * (прежде каждый make должен был помнить о k — сфера ×2 молча игнорировала
- * множитель, поймано тестом «детализация меняет счёт»).
+ * The DETAIL wrapper: segment parameters (segment: true) are multiplied
+ * by k clamped into [min, max] BEFORE being passed to make — one mechanism
+ * for the whole catalog (previously every make had to remember k — the
+ * sphere ×2 silently ignored the multiplier, caught by the test "detail
+ * changes the count").
  */
 function withDetail(shape: ShapeMeta): ShapeMeta {
   const segParams = shape.params.filter(p => p.segment === true)
@@ -338,14 +339,14 @@ function withDetail(shape: ShapeMeta): ShapeMeta {
   }
 }
 
-// ─── Поиск и дефолты ─────────────────────────────────────────────────────────
+// ─── Lookup and defaults ─────────────────────────────────────────────────────────
 
-/** Найти фигуру по id (демо-хук). */
+/** Find a shape by id (demo hook). */
 export function shapeById(id: string): ShapeMeta | undefined {
   return SHAPES.find(s => s.id === id)
 }
 
-/** Дефолтные значения параметров фигуры. */
+/** Default parameter values of a shape. */
 export function defaultValues(shape: ShapeMeta): Record<string, number> {
   const values: Record<string, number> = {}
   for (const p of shape.params) values[p.key] = p.def

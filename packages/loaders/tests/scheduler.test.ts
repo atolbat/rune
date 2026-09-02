@@ -1,5 +1,5 @@
 /**
- * scheduler.test.ts — приоритеты, квоты, отмена, pause/resume.
+ * scheduler.test.ts — priorities, quotas, cancellation, pause/resume.
  */
 
 import { describe, expect, test } from 'bun:test'
@@ -19,11 +19,11 @@ function makeJob(seq: number, weight: number, log: number[], slow = false): Sche
 }
 
 describe('LoadScheduler', () => {
-  test('порядок по приоритету: меньше — раньше', async () => {
+  test('order by priority: lower — earlier', async () => {
     const order: number[] = []
     const scheduler = new LoadScheduler({ maxConcurrent: 1 })
     const blocker = makeJob(0, 1024, order, true)
-    scheduler.submit(blocker) // занял единственный слот
+    scheduler.submit(blocker) // occupied the only slot
     const a = makeJob(1, 1024, order)
     const b = makeJob(2, 1024, order)
     const c = makeJob(3, 1024, order)
@@ -37,22 +37,22 @@ describe('LoadScheduler', () => {
     expect(order).toEqual([blocker.id, b.id, c.id, a.id])
   })
 
-  test('квота байт: большой не стартует мимо блокированной головы', async () => {
+  test('byte quota: a big one does not start past the blocked head', async () => {
     const order: number[] = []
     const scheduler = new LoadScheduler({ maxConcurrent: 3, maxBytesInFlight: 10 })
     const big = makeJob(1, 100, order, true)
-    scheduler.submit(big) // первый стартует всегда (иначе квота = дедлок)
+    scheduler.submit(big) // the first always starts (otherwise quota = deadlock)
     await new Promise(resolve => setTimeout(resolve, 2))
     const small = makeJob(2, 1, order, true)
     scheduler.submit(small)
-    // Синхронно: big работает (в полёте 100 > квоты 10) — small заблокирован.
+    // Synchronously: big runs (100 in flight > quota 10) — small is blocked.
     expect(order).toEqual([big.id])
     scheduler.setBytesQuota(200)
     await new Promise(resolve => setTimeout(resolve, 20))
     expect(order.length).toBe(2)
   })
 
-  test('отмена queued: start не вызывается, колбэк получает причину', async () => {
+  test('cancelling queued: start is not called, the callback gets the reason', async () => {
     const started: number[] = []
     const scheduler = new LoadScheduler({ maxConcurrent: 1 })
     const blocking = makeJob(1, 1, started, true)
@@ -63,14 +63,14 @@ describe('LoadScheduler', () => {
       cancelledReason = reason
     }
     scheduler.submit(queued)
-    const cancelled = scheduler.cancel(queued, 'не нужен')
+    const cancelled = scheduler.cancel(queued, 'not needed')
     expect(cancelled).toBe(true)
     await new Promise(resolve => setTimeout(resolve, 20))
     expect(started).toEqual([blocking.id])
-    expect(cancelledReason).toBe('не нужен')
+    expect(cancelledReason).toBe('not needed')
   })
 
-  test('отмена running: abort-сигнал задачи', async () => {
+  test('cancelling running: the abort signal of the job', async () => {
     const scheduler = new LoadScheduler({ maxConcurrent: 1 })
     let aborted = false
     const job: SchedulerJob = {
@@ -94,7 +94,7 @@ describe('LoadScheduler', () => {
     expect(scheduler.stats().running).toBe(0)
   })
 
-  test('updateWeight уточняет квоту in-flight', async () => {
+  test('updateWeight refines the in-flight quota', async () => {
     const scheduler = new LoadScheduler({ maxConcurrent: 3, maxBytesInFlight: 100 })
     const order: number[] = []
     let weight = 5
@@ -112,7 +112,7 @@ describe('LoadScheduler', () => {
     }
     scheduler.submit(dynamic)
     await new Promise(resolve => setTimeout(resolve, 2))
-    // Вес вырос до 90 → следующий (11) упрётся: 90+11 > 100.
+    // The weight grew to 90 → the next one (11) will hit the wall: 90+11 > 100.
     const other = makeJob(2, 11, order, true)
     scheduler.submit(other)
     await new Promise(resolve => setTimeout(resolve, 2))

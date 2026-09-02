@@ -1,55 +1,55 @@
 /**
- * Batch — обобщённый батч поверх существующего command из @rune/gl.
+ * Batch — a generalized batch on top of the existing command from @rune/gl.
  *
- * Контракт (см. дизайн-раунд «Батч = command с instance полем»):
- *  - Батч — это НЕ отдельный API. Это command с per-instance атрибутами.
- *  - Юзер компилирует command с `instance: { mvp: mat4, uvOffset: vec2, ... }`,
- *    и в record() передаёт массив instances.
- *  - Рендерер делает ONE draw call (drawElementsInstanced / drawIndexedIndirect).
+ * Contract (see the design round "Batch = command with an instance field"):
+ *  - A batch is NOT a separate API. It is a command with per-instance attributes.
+ *  - The user compiles a command with `instance: { mvp: mat4, uvOffset: vec2, ... }`,
+ *    and passes an array of instances to record().
+ *  - The renderer makes ONE draw call (drawElementsInstanced / drawIndexedIndirect).
  *
- * В существующем @rune/gl DrawSpec не имеет `instance` поля напрямую. Этот
- * модуль — helper, который динамически строит instance-атрибут из массива
- * instances и кладёт его в `attributes` (с divisor=1).
+ * In the existing @rune/gl, DrawSpec has no `instance` field directly. This
+ * module is a helper that dynamically builds an instance attribute from an
+ * array of instances and puts it into `attributes` (with divisor=1).
  *
- * Подход:
- *  1. Юзер описывает command через batchCommand(spec) — расширяет spec.
- *  2. Юзер вызывает batchRecord(cmd, instances, recorder) — собирает instance
- *     данные в interleaved buffer, передаёт через attributes.
- *  3. Record попадает в существующий DrawSpec-pipeline без изменений.
+ * Approach:
+ *  1. The user describes a command via batchCommand(spec) — it extends the spec.
+ *  2. The user calls batchRecord(cmd, instances, recorder) — packs the instance
+ *     data into an interleaved buffer and passes it via attributes.
+ *  3. The record goes into the existing DrawSpec pipeline unchanged.
  *
- * Это не идеально (нет настоящего divisor=1 в ядре), но работоспособно и не
- * ломает существующее. Когда ядро получит нативный instance-параметр, этот
- * helper можно будет упростить.
+ * This is not perfect (there is no real divisor=1 in the core), but it works
+ * and does not break the existing code. Once the core gets a native instance
+ * parameter, this helper can be simplified.
  */
 
 import type { AnyRecorder } from '@rune/gl'
 
-/** Декларация per-instance атрибута. */
+/** Declaration of a per-instance attribute. */
 export interface InstanceAttribute {
   readonly type: 'mat4' | 'vec4' | 'vec3' | 'vec2' | 'float' | 'int'
 }
 
-/** Расширенный DrawSpec с поддержкой per-instance атрибутов. */
+/** Extended DrawSpec with support for per-instance attributes. */
 export interface BatchSpec {
   readonly shader: { glsl?: { vertex: string; fragment: string }; wgsl?: string }
   readonly attributes: Record<string, { data: Float32Array | Uint16Array; size: number }>
-  /** Per-instance атрибуты. Для каждого: type → определяет size и divisor. */
+  /** Per-instance attributes. For each one: type → determines size and divisor. */
   readonly instance?: Record<string, InstanceAttribute>
   readonly uniforms?: Record<string, unknown>
   readonly textures?: Record<string, unknown>
   readonly pipeline?: { depth?: { test?: string; write?: boolean }; raster?: { cull?: string } }
-  /** Число вершин на инстанс (например, 6 для квада). */
+  /** Number of vertices per instance (e.g. 6 for a quad). */
   readonly count: number
 }
 
 export interface BatchCommand {
-  /** Идентификатор (для обратной совместимости с CompiledCommand). */
+  /** Identifier (for backwards compatibility with CompiledCommand). */
   readonly id: number
-  /** Записать батч: принимает instances, разворачивает в один draw call. */
+  /** Record the batch: accepts instances, expands into a single draw call. */
   recordInstances(instances: readonly Record<string, unknown>[], recorder: AnyRecorder): void
 }
 
-/** Размерность типа per-instance атрибута в компонентах (mat4 = 16, vec2 = 2, etc). */
+/** Dimensionality of a per-instance attribute type in components (mat4 = 16, vec2 = 2, etc). */
 function typeSize(t: InstanceAttribute['type']): number {
   switch (t) {
     case 'mat4': return 16
@@ -64,10 +64,10 @@ function typeSize(t: InstanceAttribute['type']): number {
 let batchIdCounter = 1
 
 /**
- * Создаёт BatchCommand из spec.
+ * Creates a BatchCommand from a spec.
  *
- * Возвращает объект с методом recordInstances, который юзер вызывает в
- * frame-callback'е:
+ * Returns an object with a recordInstances method that the user calls in
+ * a frame callback:
  *
  *   const cmd = batchCommand(spec)
  *   renderer.frame((ctx, record) => {
@@ -77,15 +77,15 @@ let batchIdCounter = 1
  *     cmd.recordInstances(instances, record)
  *   })
  *
- * ВАЖНО: spec должен иметь пустые `attributes` для instance данных — они
- * будут динамически сгенерированы в recordInstances. Юзер описывает только
- * общие (per-vertex) attributes (position, uv), и `instance` — per-instance.
+ * IMPORTANT: the spec must have empty `attributes` for instance data — they
+ * will be generated dynamically in recordInstances. The user describes only
+ * the shared (per-vertex) attributes (position, uv), and `instance` — per-instance.
  */
 export function batchCommand(spec: BatchSpec): BatchCommand {
   if (spec.instance === undefined) {
-    throw new Error('batchCommand: spec.instance is required — это и есть смысл батча')
+    throw new Error('batchCommand: spec.instance is required — that is the whole point of a batch')
   }
-  // Вычисляем stride — суммарный размер одного инстанса в компонентах
+  // Compute the stride — the total size of one instance in components
   const instanceAttrs = Object.entries(spec.instance)
   const totalComponents = instanceAttrs.reduce((sum, [, attr]) => sum + typeSize(attr.type), 0)
   const id = batchIdCounter++
@@ -94,7 +94,7 @@ export function batchCommand(spec: BatchSpec): BatchCommand {
     id,
     recordInstances(instances, _recorder) {
       if (instances.length === 0) return
-      // Interleaved buffer: один Float32Array на все инстансы
+      // Interleaved buffer: one Float32Array for all instances
       const buffer = new Float32Array(instances.length * totalComponents)
       let offset = 0
       for (const inst of instances) {
@@ -107,25 +107,25 @@ export function batchCommand(spec: BatchSpec): BatchCommand {
           offset += typeSize(attr.type)
         }
       }
-      // Передаём как обычный command: instance-данные идут в attributes
-      // под именем `instance_data` (юзер должен объявить этот атрибут в
-      // шейдере и привязать divisor=1 в pipeline, либо использовать как
-      // uniform array — зависит от бэкенда).
+      // Pass it as a regular command: instance data goes into attributes
+      // under the name `instance_data` (the user must declare this attribute
+      // in the shader and bind divisor=1 in the pipeline, or use it as a
+      // uniform array — depending on the backend).
       //
-      // Это временное решение. Когда ядро получит нативную поддержку
-      // instance-атрибутов, можно будет напрямую прокидывать массив.
+      // This is a temporary solution. When the core gets native support for
+      // instance attributes, the array can be passed directly.
       const mergedAttributes = {
         ...spec.attributes,
-        // instance data как uniform array — самое портабельное решение
-        // для WebGL2 без расширений ANGLE_instanced_arrays.
-        // Для WebGPU можно через storage buffer, но это требует больше
-        // инфраструктуры.
+        // instance data as a uniform array — the most portable solution
+        // for WebGL2 without the ANGLE_instanced_arrays extension.
+        // For WebGPU a storage buffer could be used, but that requires more
+        // infrastructure.
       }
       const props = {
         uniforms: {
           ...spec.uniforms,
-          // Передаём instance-данные как uniform array (если шейдер ожидает).
-          // Имя фиксировано: u_instance_data. Юзер обязан объявить в шейдере.
+          // Pass instance data as a uniform array (if the shader expects it).
+          // The name is fixed: u_instance_data. The user must declare it in the shader.
           u_instance_data: buffer,
           u_instance_count: instances.length,
         },
@@ -134,20 +134,20 @@ export function batchCommand(spec: BatchSpec): BatchCommand {
         pipeline: spec.pipeline,
         count: spec.count,
       }
-      // recorder — это функция из @rune/gl, ожидает (command, props)
-      // но мы создаём batch не как CompiledCommand, а как обёртку.
-      // Поэтому просто вызываем переданный recorder с фейковым command.
+      // recorder is a function from @rune/gl, it expects (command, props)
+      // but we create the batch not as a CompiledCommand, but as a wrapper.
+      // So we simply call the passed recorder with a fake command.
       //
-      // РЕАЛЬНО: этот модуль не знает о CompiledCommand — он делегирует
-      // в существующий renderer.command() через инъекцию (см. createBatchHelper).
-      // Для текущей реализации — заглушка: кладём в _batchProps для outer loop.
+      // IN REALITY: this module knows nothing about CompiledCommand — it
+      // delegates to the existing renderer.command() via injection (see createBatchHelper).
+      // For the current implementation — a stub: we put it into _batchProps for the outer loop.
       lastRecordedProps = props
       lastInstanceCount = instances.length
     },
   }
 }
 
-/** Последние записанные пропсы — для тестов и отладки. */
+/** The last recorded props — for tests and debugging. */
 let lastRecordedProps: unknown = null
 let lastInstanceCount: number = 0
 export function _getLastBatchProps(): { props: unknown; count: number } {
@@ -169,5 +169,5 @@ function writeValue(buf: Float32Array, offset: number, value: unknown, _type: In
     for (let i = 0; i < arr.length; i++) buf[offset + i] = arr[i]
     return
   }
-  throw new TypeError(`batchCommand: не удалось записать значение типа ${typeof value}`)
+  throw new TypeError(`batchCommand: failed to write a value of type ${typeof value}`)
 }

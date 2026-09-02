@@ -4,7 +4,7 @@ import { createTapeWriter, writerView, OpCode } from '@rune/core'
 import { compileDrawSpec, createCompileContext, createExecutor } from '../src/index.ts'
 import { createRecordingGL } from '../src/index.ts'
 
-/** Компилятор + исполнитель WebGL2 на рекордере: полный tape-путь. */
+/** The WebGL2 compiler + executor on the recorder: the full tape path. */
 
 const VERT = `#version 300 es
 layout(location = 0) in vec3 position;
@@ -23,8 +23,8 @@ function fakeFrame() {
   return { time: 0, dt: 0.016, aspect: 1.5, size: [800, 600] as const }
 }
 
-describe('webgl2 tape-путь', () => {
-  it('кадр: clear → программа → юниформы по имени → draw', () => {
+describe('webgl2 tape path', () => {
+  it('frame: clear → program → uniforms by name → draw', () => {
     const { gl, calls } = createRecordingGL()
     const arena = createUniformArena(4096)
     const ctx = createCompileContext(arena, 'codegen')
@@ -52,7 +52,7 @@ describe('webgl2 tape-путь', () => {
     expect(drawAt).toBeGreaterThan(Math.max(mvpAt, tintAt))
   })
 
-  it('value-compare: чистый второй кадр не грузит юниформы заново', () => {
+  it('value-compare: a clean second frame does not re-upload uniforms', () => {
     const { gl, calls } = createRecordingGL()
     const arena = createUniformArena(4096)
     const ctx = createCompileContext(arena, 'codegen')
@@ -75,10 +75,10 @@ describe('webgl2 tape-путь', () => {
     frame()
     const afterFirst = calls.filter(call => call.startsWith('uniform')).length
     frame()
-    expect(calls.filter(call => call.startsWith('uniform')).length).toBe(afterFirst) // без роста
+    expect(calls.filter(call => call.startsWith('uniform')).length).toBe(afterFirst) // no growth
   })
 
-  it('текстуры: bindTexture + uniform1i юнита перед draw', () => {
+  it('textures: bindTexture + uniform1i of the unit before draw', () => {
     const { gl, calls } = createRecordingGL()
     const arena = createUniformArena(4096)
     const ctx = createCompileContext(arena, 'codegen')

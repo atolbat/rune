@@ -1,19 +1,19 @@
 /**
- * Общий тип геометрии @rune/prims: параллельные атрибуты, triangle soup
- * (без индекса — count = вершин; совместимо с renderer.command attributes).
+ * Common geometry type of @rune/prims: parallel attributes, triangle soup
+ * (no index — count = vertices; compatible with renderer.command attributes).
  *
- * Конвенции пакета:
- *   • обход треугольников CCW при взгляде снаружи (front face);
- *   • нормали — единичные, длины 1 ± 1e-5 (аналитические или центральные
- *     разности — НЕ усреднение по граням, кроме плоско-затенённых тел);
- *   • UV — [0,1]² для параметрических поверхностей; у terrain v = НОРМА-
- *     ЛИЗОВАННАЯ ВЫСОТА (шейдер красит по высоте: вода → песок → трава →
- *     скалы → снег);
- *   • у quad (клип-пространство) и cube свои исторические интерфейсы —
- *     структурно совместимы с Geometry.
+ * Package conventions:
+ *   • CCW triangle winding when viewed from outside (front face);
+ *   • normals are unit-length, 1 ± 1e-5 (analytical or central differences —
+ *     NOT face averaging, except for flat-shaded solids);
+ *   • UV — [0,1]² for parametric surfaces; for terrain v = NORMALIZED
+ *     HEIGHT (the shader colors by height: water → sand → grass → rocks →
+ *     snow);
+ *   • quad (clip space) and cube have their own legacy interfaces —
+ *     structurally compatible with Geometry.
  */
 
-/** Атрибутный набор triangle-soup геометрии. */
+/** Attribute set of triangle-soup geometry. */
 export interface Geometry {
   readonly positions: Float32Array
   readonly normals: Float32Array
@@ -21,17 +21,17 @@ export interface Geometry {
   readonly vertexCount: number
 }
 
-/** Число треугольников (triangle soup: вершины/3). */
+/** Number of triangles (triangle soup: vertices/3). */
 export function triangles(g: Geometry): number {
   return g.vertexCount / 3
 }
 
-/** Примерный объём атрибутов, байт (демо-инфо «сколько весит»). */
+/** Approximate attribute size in bytes (demo info: "how much it weighs"). */
 export function geometryBytes(g: Geometry): number {
   return g.positions.byteLength + g.normals.byteLength + g.uvs.byteLength
 }
 
-/** Нормализация вектора на месте (возвращает длину ДО нормализации). */
+/** In-place vector normalization (returns the length BEFORE normalization). */
 export function normalizeInPlace(v: Float32Array | number[], at: number): number {
   const x = v[at] as number
   const y = v[at + 1] as number

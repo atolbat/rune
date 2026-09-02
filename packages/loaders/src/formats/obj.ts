@@ -1,28 +1,28 @@
 /**
  * formats/obj.ts — Wavefront OBJ (+ MTL) → MeshDocument.
  *
- * Скорость: ни одной построчной строки в горячем пути. Сканер ходит по
- * байтам, числа — parseFastFloat (без аллокаций), ключевые слова — матчятся
- * побайтово; строки создаются только для имён (o/g/usemtl/mtllib) и MTL.
- * Вершины «v» копятся в growable-массивах; лица варятся (weld) в merged-
- * буфер, ключ карты — ЧИСЛО (t<<21|n), строковых ключей нет.
+ * Speed: not a single per-line string in the hot path. The scanner walks over
+ * bytes, numbers — parseFastFloat (no allocations), keywords are matched
+ * byte-by-byte; strings are created only for names (o/g/usemtl/mtllib) and MTL.
+ * "v" vertices accumulate in growable arrays; faces are welded into a merged
+ * buffer, the map key is a NUMBER (t<<21|n), there are no string keys.
  *
- * Быстрый путь: если ни одно лицо не сослалось на vt/vn и потоков нет —
- * индексы указывают прямо в исходные позиции, карты сварки не создаём.
- * Появление vt/vn/слэша «апгрейдит» состояние: позиции копируются в merged
- * тождественным мапом (ранние индексы остаются валидными).
+ * Fast path: if no face referenced vt/vn and there are no streams —
+ * indices point directly into the source positions, no weld map is created.
+ * The appearance of vt/vn/a slash "upgrades" the state: positions are copied into merged
+ * with an identity map (early indices stay valid).
  *
- * Стриминг: ObjStreamSink ест чанки по мере скачивания и обрабатывает
- * целые строки; незавершённый хвост переносится в следующий чанк. Разбор
- * геометрии реально перекрывает сеть.
+ * Streaming: ObjStreamSink eats chunks as they download and processes
+ * whole lines; an unfinished tail is carried over into the next chunk. Geometry
+ * parsing genuinely overlaps the network.
  *
- * OBJ-семантика: отрицательные индексы — от конца; «f a/b/c ...» →
- * веерная триангуляция; usemtl/o/g — границы submesh'ей; несколько mtllib —
- * грузятся последовательно через ctx.resolveExternal (обычно один).
+ * OBJ semantics: negative indices — from the end; "f a/b/c ..." →
+ * fan triangulation; usemtl/o/g — submesh boundaries; several mtllibs are
+ * loaded sequentially via ctx.resolveExternal (usually one).
  *
- * MTL → приближённый PBR: roughness из Ns (1 - Ns/1000, clamp 0.05..1),
- * alpha из d/Tr, Kd → baseColor, Ke → emissive, map_Kd → baseColorTexture,
- * bump/norm → normalTexture. MTL не PBR-формат — конверсия честно-lossy.
+ * MTL → approximate PBR: roughness from Ns (1 - Ns/1000, clamp 0.05..1),
+ * alpha from d/Tr, Kd → baseColor, Ke → emissive, map_Kd → baseColorTexture,
+ * bump/norm → normalTexture. MTL is not a PBR format — the conversion is honestly lossy.
  */
 
 import type { ParseContext, ParseInput, Parser, StreamSink } from '../core/types.ts'
@@ -40,13 +40,13 @@ import { meshStatsOf } from './mesh.ts'
 
 export interface ObjParserOptions {
   /**
-   * Грузить .mtl из mtllib через ctx.resolveExternal (default true).
-   * false — материалы останутся именами без параметров.
+   * Load .mtl from mtllib via ctx.resolveExternal (default true).
+   * false — materials remain names without parameters.
    */
   loadMtl?: boolean
 }
 
-// ─── growable-массивы ────────────────────────────────────────────────────────
+// ─── growable arrays ────────────────────────────────────────────────────────
 
 class GrowableF32 {
   private arr: Float32Array
@@ -113,7 +113,7 @@ class GrowableU32 {
   }
 }
 
-// ─── состояние разбора ───────────────────────────────────────────────────────
+// ─── parse state ───────────────────────────────────────────────────────
 
 interface SubMeshRun {
   material: number
@@ -123,36 +123,36 @@ interface SubMeshRun {
 }
 
 interface ObjState {
-  /** Позиции из «v» — исходный поток. */
+  /** Positions from "v" — the source stream. */
   srcPositions: GrowableF32
   srcNormals: GrowableF32
   srcUvs: GrowableF32
-  /** Merged-поток (создаётся лениво при первом слэше/vt/vn). */
+  /** Merged stream (created lazily on the first slash/vt/vn). */
   outPositions: GrowableF32
   outNormals: GrowableF32
   outUvs: GrowableF32
   indices: GrowableU32
   hasNormals: boolean
   hasUvs: boolean
-  /** true = merged-поток активен. */
+  /** true = the merged stream is active. */
   welded: boolean
-  /** Сколько индексов записано fast-путём (до сварки). */
+  /** How many indices were written the fast way (before welding). */
   fastCount: number
-  /** p → (t<<21|n) → merged-индекс. */
+  /** p → (t<<21|n) → merged index. */
   weld: Map<number, Map<number, number>>
   runs: SubMeshRun[]
   currentMaterial: number
   currentGroup: string | null
   runStart: number
   mtllibs: string[]
-  /** usemtl-имя → локальный индекс (до загрузки MTL). */
+  /** usemtl name → local index (before loading MTL). */
   materialNames: Map<string, number>
   warnings: string[]
   totalBytes: number
   ctx: ParseContext
 }
 
-const UV_SHIFT = 21 // t,n < 2M записей каждого потока — за глаза для OBJ
+const UV_SHIFT = 21 // t,n < 2M records per stream — more than enough for OBJ
 
 function createState(ctx: ParseContext, totalBytes: number): ObjState {
   return {
@@ -180,12 +180,12 @@ function createState(ctx: ParseContext, totalBytes: number): ObjState {
   }
 }
 
-// ─── разбор строк ────────────────────────────────────────────────────────────
+// ─── line parsing ────────────────────────────────────────────────────────────
 
 const isSpace = (c: number): boolean => c === 32 || c === 9 || c === 13
 const isTokenEnd = (c: number): boolean => c === -1 || c === 32 || c === 9 || c === 13
 
-/** Обработать одну строку OBJ [start, end). */
+/** Process one OBJ line [start, end). */
 function processLine(bytes: Uint8Array, start: number, end: number, state: ObjState): void {
   let i = start
   while (i < end && isSpace(bytes[i])) i++
@@ -227,10 +227,10 @@ function processLine(bytes: Uint8Array, start: number, end: number, state: ObjSt
   }
   if (c === 108 /* l */ || c === 112 /* p */) {
     if (state.warnings.length < 16) {
-      state.warnings.push(`OBJ: ${c === 108 ? 'l (lines)' : 'p (points)'} не поддержаны — пропущено`)
+      state.warnings.push(`OBJ: ${c === 108 ? 'l (lines)' : 'p (points)'} not supported — skipped`)
     }
   }
-  // 's' (smoothing) и прочее — игнор
+  // 's' (smoothing) and the rest — ignored
 }
 
 function matchKeyword(bytes: Uint8Array, i: number, end: number, keyword: string): boolean {
@@ -241,7 +241,7 @@ function matchKeyword(bytes: Uint8Array, i: number, end: number, keyword: string
   return isTokenEnd(i + keyword.length < end ? bytes[i + keyword.length] : -1)
 }
 
-/** Считать до expect float'ов; недостающие — нулями. */
+/** Read up to expect floats; missing ones become zeros. */
 function pushNumbers(bytes: Uint8Array, start: number, end: number, out: GrowableF32, expect: number): void {
   let i = start
   let count = 0
@@ -258,7 +258,7 @@ function pushNumbers(bytes: Uint8Array, start: number, end: number, out: Growabl
   }
 }
 
-/** Разбор «f p/t/n p/t/n ...» → веерная триангуляция + weld. */
+/** Parse "f p/t/n p/t/n ..." → fan triangulation + weld. */
 function processFace(bytes: Uint8Array, start: number, end: number, state: ObjState): void {
   const posCount = state.srcPositions.length / 3
   const uvCount = state.srcUvs.length / 2
@@ -304,11 +304,11 @@ function processFace(bytes: Uint8Array, start: number, end: number, state: ObjSt
     if (p < 0) p = posCount + p
     else p -= 1
     if (p < 0 || p >= posCount) {
-      if (state.warnings.length < 16) state.warnings.push('OBJ: индекс позиции вне диапазона — угол пропущен')
+      if (state.warnings.length < 16) state.warnings.push('OBJ: position index out of range — corner skipped')
       cornerIndex++
       continue
     }
-    // 0 = «ссылки нет»; валидный индекс 0 неотличим — потому флаги hasT/hasN
+    // 0 = "no reference"; a valid index 0 is indistinguishable — hence the hasT/hasN flags
     if (hasT) {
       t = t < 0 ? uvCount + t : t - 1
       if (t < 0 || t >= uvCount) { t = 0; hasT = false }
@@ -318,9 +318,9 @@ function processFace(bytes: Uint8Array, start: number, end: number, state: ObjSt
       if (n < 0 || n >= normCount) { n = 0; hasN = false }
     }
 
-    // апгрейд на merged-поток при первом слэше/наличии потоков
+    // upgrade to the merged stream on the first slash/presence of streams
     if (!state.welded && (sawSlash || state.hasNormals || state.hasUvs)) {
-      // identity-копия нужна только если fast-индексы уже записаны
+      // an identity copy is needed only if fast indices have already been written
       upgradeToWeld(state, state.fastCount > 0)
     }
     const merged = state.welded ? weldCorner(state, p, hasT ? t : -1, hasN ? n : -1) : p
@@ -340,11 +340,11 @@ function processFace(bytes: Uint8Array, start: number, end: number, state: ObjSt
 }
 
 /**
- * Перевести состояние в merged-режим.
- * copyIdentity=true: до апгрейда fast-путём записаны индексы p → чтобы они
- * остались валидными, все src-позиции копируются в out-поток с ключом
- * (p, отсутствует, отсутствует) → тот же индекс. copyIdentity=false (слэшей
- * с самого начала): копируем лениво — out пустой до первой сварки.
+ * Switch the state into merged mode.
+ * copyIdentity=true: before the upgrade, indices p were written the fast way → so that they
+ * remain valid, all src positions are copied into the out stream with the key
+ * (p, missing, missing) → the same index. copyIdentity=false (slashes
+ * from the very beginning): copy lazily — out stays empty until the first weld.
  */
 function upgradeToWeld(state: ObjState, copyIdentity: boolean): void {
   state.welded = true
@@ -363,19 +363,19 @@ function upgradeToWeld(state: ObjState, copyIdentity: boolean): void {
       inner = new Map()
       state.weld.set(p, inner)
     }
-    // identity: t=-1, n=-1 → ключ (0<<21)|0 = 0
+    // identity: t=-1, n=-1 → key (0<<21)|0 = 0
     inner.set(0, p)
   }
 }
 
-/** Сварить угол (p,t,n) → merged-индекс. t/n = -1 значит «ссылки нет». */
+/** Weld a corner (p,t,n) → a merged index. t/n = -1 means "no reference". */
 function weldCorner(state: ObjState, p: number, t: number, n: number): number {
   let inner = state.weld.get(p)
   if (inner === undefined) {
     inner = new Map()
     state.weld.set(p, inner)
   }
-  // ключ: 0 = отсутствует, валидный индекс i → i+1 (чтобы 0 не коллизил)
+  // key: 0 = missing, valid index i → i+1 (so that 0 does not collide)
   const key = ((t + 1) << UV_SHIFT) | (n + 1)
   const existing = inner.get(key)
   if (existing !== undefined) return existing
@@ -454,7 +454,7 @@ export interface MtlMaterial {
   norm: string | null
 }
 
-/** Разбор .mtl из байтов (маленький текстовый файл — строковый разбор ок). */
+/** Parse .mtl from bytes (a small text file — string parsing is fine). */
 export function parseMtlBytes(bytes: Uint8Array): MtlMaterial[] {
   const out: MtlMaterial[] = []
   let current: MtlMaterial | null = null
@@ -503,7 +503,7 @@ export function parseMtlBytes(bytes: Uint8Array): MtlMaterial[] {
       case 'map_d': if (current !== null) current.mapD = firstToken(rest); break
       case 'map_bump': case 'bump': if (current !== null) current.mapBump = firstToken(rest); break
       case 'norm': case 'normal_map': if (current !== null) current.norm = firstToken(rest); break
-      default: break // расширения экспортёров — молча пропускаем
+      default: break // exporter extensions — skipped silently
     }
   }
   return out
@@ -523,9 +523,9 @@ function parseTriple(rest: string): [number, number, number] {
   ]
 }
 
-// ─── сборка документа ────────────────────────────────────────────────────────
+// ─── document assembly ────────────────────────────────────────────────────────
 
-/** MTL → MaterialData[] + images; uri резолвятся от URL исходного obj. */
+/** MTL → MaterialData[] + images; uris are resolved against the source obj URL. */
 function mtlToMaterials(
   mtl: readonly MtlMaterial[],
   ctx: ParseContext,
@@ -577,12 +577,12 @@ function mtlToMaterials(
   return materials
 }
 
-/** Финализация состояния → MeshDocument (+ MTL, если удалось). */
+/** Finalize the state → MeshDocument (+ MTL, if it succeeded). */
 async function finalizeObj(state: ObjState, opts: ObjParserOptions): Promise<MeshDocument> {
   closeRun(state)
   throwIfAborted(state.ctx.signal, 'obj finalize')
 
-  // выровнять длины merged-потоков (vt/vn, объявленные ПОСЛЕ первых лиц)
+  // align the lengths of merged streams (vt/vn declared AFTER the first faces)
   const vertexCount = (state.welded ? state.outPositions.length : state.srcPositions.length) / 3
   while (state.hasUvs && state.outUvs.length < vertexCount * 2) state.outUvs.push2(0, 0)
   while (state.hasNormals && state.outNormals.length < vertexCount * 3) state.outNormals.push3(0, 0, 0)
@@ -592,15 +592,15 @@ async function finalizeObj(state: ObjState, opts: ObjParserOptions): Promise<Mes
   const uvs = state.hasUvs ? state.outUvs.trimmed() : null
   const indices = state.indices.trimmed()
 
-  // MTL: грузим все объявленные библиотеки
+  // MTL: load all declared libraries
   const materials: MaterialData[] = []
   const images: ImageAsset[] = []
   const mtlLoaded: string[] = []
   if ((opts.loadMtl ?? true) && state.mtllibs.length > 0) {
-    // обратный мап: локальный индекс usemtl → имя
+    // reverse map: local usemtl index → name
     const indexToName = new Map<number, string>()
     for (const [name, idx] of state.materialNames) indexToName.set(idx, name)
-    // имя → индекс в объединённом списке материалов
+    // name → index in the combined material list
     const nameToFinal = new Map<string, number>()
     for (const lib of state.mtllibs) {
       try {
@@ -614,11 +614,11 @@ async function finalizeObj(state: ObjState, opts: ObjParserOptions): Promise<Mes
         materials.push(...converted)
       } catch (err) {
         if (state.warnings.length < 16) {
-          state.warnings.push(`OBJ: mtllib "${lib}" не загрузился: ${String((err as Error)?.message ?? err)}`)
+          state.warnings.push(`OBJ: mtllib "${lib}" failed to load: ${String((err as Error)?.message ?? err)}`)
         }
       }
     }
-    // ремап run.material по именам
+    // remap run.material by names
     for (const run of state.runs) {
       if (run.material >= 0) {
         const name = indexToName.get(run.material)
@@ -669,9 +669,9 @@ async function finalizeObj(state: ObjState, opts: ObjParserOptions): Promise<Mes
   return doc
 }
 
-// ─── стрим-синк ──────────────────────────────────────────────────────────────
+// ─── stream sink ──────────────────────────────────────────────────────────────
 
-/** Чанки → целые строки → processLine; хвост переносится. */
+/** Chunks → whole lines → processLine; the tail is carried over. */
 class ObjStreamSink implements StreamSink<MeshDocument> {
   private pending: Uint8Array | null = null
   private processedBytes = 0
@@ -704,7 +704,7 @@ class ObjStreamSink implements StreamSink<MeshDocument> {
   }
 
   async finish(): Promise<MeshDocument> {
-    if (this.finished) throw new Error('obj: finish() уже вызван')
+    if (this.finished) throw new Error('obj: finish() already called')
     this.finished = true
     if (this.pending !== null) {
       processLine(this.pending, 0, this.pending.length, this.state)
@@ -740,7 +740,7 @@ export const objParser: Parser<MeshDocument, ObjParserOptions> = {
   },
 }
 
-/** Разбор OBJ из готовых байтов (вне менеджера). */
+/** Parse OBJ from ready bytes (outside the manager). */
 export async function parseObj(
   bytes: Uint8Array,
   ctx: ParseContext,

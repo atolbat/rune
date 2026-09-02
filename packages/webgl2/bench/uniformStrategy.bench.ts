@@ -3,20 +3,20 @@ import type { UniformArena, UniformSlot } from '@rune/core'
 import { createCountingGL } from '../src/index.ts'
 
 /**
- * Теория B: загрузка юниформов — per-call (gl.uniform* на каждый грязный слот)
- * против coalesced (слияние грязных диапазонов → bufferSubData + bindBufferRange).
- * Гипотеза: coalesced меньше вызовов при плотной арене, per-call дешевле при
- * редких грязных слотах. Порог Documentируется, победитель — дефолт.
+ * Theory B: uniform loading — per-call (gl.uniform* for every dirty slot)
+ * versus coalesced (merging dirty ranges → bufferSubData + bindBufferRange).
+ * Hypothesis: coalesced makes fewer calls on a dense arena, per-call is cheaper
+ * with sparse dirty slots. The threshold is documented, the winner becomes the default.
  */
 
-const TOTAL = 100      // vec4-юниформов в арене
-const DIRTY = [4, 20, 50, 100] // сценариев грязных за кадр
+const TOTAL = 100      // vec4 uniforms in the arena
+const DIRTY = [4, 20, 50, 100] // dirty-per-frame scenarios
 
 function prepare(): { arena: UniformArena; slots: UniformSlot[] } {
   const arena = createUniformArena()
   const slots: UniformSlot[] = []
   for (let i = 0; i < TOTAL; i++) slots.push(arena.alloc('vec4'))
-  for (const slot of slots) arena.writeVec4(slot, 1, 2, 3, 4) // стартовое заполнение
+  for (const slot of slots) arena.writeVec4(slot, 1, 2, 3, 4) // initial fill
   arena.clearDirty()
   return { arena, slots }
 }
@@ -45,8 +45,8 @@ function runCoalesced(arena: UniformArena, slots: UniformSlot[], dirty: number, 
 }
 
 const gl = createCountingGL()
-console.log('── Теория B: per-call против coalesced (100 vec4-юниформов) ──')
-console.log('грязных | per-call вызовов | coalesced вызовов | per-call мс | coalesced мс')
+console.log('── Theory B: per-call versus coalesced (100 vec4 uniforms) ──')
+console.log('dirty | per-call calls | coalesced calls | per-call ms | coalesced ms')
 
 for (const dirty of DIRTY) {
   const a = prepare()

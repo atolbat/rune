@@ -4,11 +4,12 @@ import { createUniformArena, createTapeWriter, signal } from '@rune/core'
 import type { TapeWriter } from '@rune/core'
 
 /**
- * Теория G: доставка кадров из воркера — полная арена против грязных диапазонов.
- * Гипотеза: в стационарном кадре меняется малая доля слотов (дизайн: кадр стоит
- * O(изменений)); dirty-доставка должна срезать и копирование, и объём transfer.
- * Сравниваем: copy 100% арены против копирования только грязного + учёт
- * пост-обработки (merge на главном мире).
+ * Theory G: frame delivery from a worker — the full arena versus dirty ranges.
+ * Hypothesis: in a steady-state frame only a small fraction of the slots changes
+ * (design: a frame costs O(changes)); dirty delivery should cut both the
+ * copying and the transfer volume.
+ * We compare: copying 100% of the arena versus copying only the dirty part +
+ * accounting for post-processing (the merge on the main world).
  */
 
 const VERT = `#version 300 es
@@ -91,11 +92,11 @@ function bestOf(repeats: number, run: () => number): number {
 
 const world = makeWorld()
 recordFrame(world, COMMANDS)
-world.stub.ship(world.writer, 'full') // прогрев значений
+world.stub.ship(world.writer, 'full') // warm up the values
 
 function measureShip(mode: 'full' | 'dirty'): number {
   return bestOf(30, () => {
-    recordFrame(world, DIRTY_PER_FRAME) // свежие случайные → грязные слоты
+    recordFrame(world, DIRTY_PER_FRAME) // fresh random values → dirty slots
     return mode === 'full' ? shipFull(world) : shipDirty(world)
   })
 }
@@ -103,11 +104,11 @@ function measureShip(mode: 'full' | 'dirty'): number {
 const fullMs = measureShip('full')
 const dirtyMs = measureShip('dirty')
 const fullBytes = world.stub.arena.usedBytes
-recordFrame(world, DIRTY_PER_FRAME) // для честного подсчёта грязных байт
+recordFrame(world, DIRTY_PER_FRAME) // for an honest count of the dirty bytes
 const dirtyRanges = world.stub.arena.dirtyRanges()
 const dirtyBytes = dirtyRanges.reduce((sum, range) => sum + (range.to - range.from), 0)
 
-console.log('── Теория G: доставка кадра из воркера (200 команд × 9 юниформов) ──')
-console.log(`полная арена : ${fullMs.toFixed(4)} мс, ${(fullBytes / 1024).toFixed(1)} КБ на кадр`)
-console.log(`только грязное: ${dirtyMs.toFixed(4)} мс, ${(dirtyBytes / 1024).toFixed(2)} КБ на кадр (${dirtyRanges.length} диапазона)`)
-console.log(`dirty-доставка дешевле в ${(fullMs / dirtyMs).toFixed(1)} раза по CPU, ${(fullBytes / dirtyBytes).toFixed(0)} раз по байтам`)
+console.log('── Theory G: frame delivery from a worker (200 commands × 9 uniforms) ──')
+console.log(`full arena  : ${fullMs.toFixed(4)} ms, ${(fullBytes / 1024).toFixed(1)} KB per frame`)
+console.log(`dirty only  : ${dirtyMs.toFixed(4)} ms, ${(dirtyBytes / 1024).toFixed(2)} KB per frame (${dirtyRanges.length} ranges)`)
+console.log(`dirty delivery is ${(fullMs / dirtyMs).toFixed(1)}x cheaper in CPU, ${(fullBytes / dirtyBytes).toFixed(0)}x in bytes`)

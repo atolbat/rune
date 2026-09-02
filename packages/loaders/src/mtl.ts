@@ -1,26 +1,26 @@
 /**
- * MTL loader — материалы Wavefront .mtl.
+ * MTL loader — Wavefront .mtl materials.
  *
  * ══════════════════════════════════════════════════════════════════════════
- * КОНТРАКТ:
+ * CONTRACT:
  *
- *   parseMtl(bytes)        — из тела ответа
- *   parseMtlText(text)     — из готовой строки
+ *   parseMtl(bytes)        — from the response body
+ *   parseMtlText(text)     — from a ready string
  *
- *   ВЫХОД: MtlModel — { kind: 'mtl', materials, get(name), stats }.
- *     Материал: diffuse/ambient/specular (RGB), shininess (Ns),
- *     opacity (d; Tr = 1 - d), illum, текстуры map_Kd/map_Ks/map_d/
- *     map_Bump (bump/map_bump/map_norm). Имена дедуплицируются
- *     пробелами → '-' (как делают экспортеры).
+ *   OUTPUT: MtlModel — { kind: 'mtl', materials, get(name), stats }.
+ *     Material: diffuse/ambient/specular (RGB), shininess (Ns),
+ *     opacity (d; Tr = 1 - d), illum, textures map_Kd/map_Ks/map_d/
+ *     map_Bump (bump/map_bump/map_norm). Names are deduplicated:
+ *     spaces → '-' (as exporters do).
  *
- * Текстуры НЕ грузятся здесь: map-поля — пути/имена; за байтами
- * к ImageBitmap — @rune/loaders image (или AssetLoader по URI).
- * Парсер текстовый (MTL-файлы малы — стриминг не нужен).
+ * Textures are NOT loaded here: map fields are paths/names; for the
+ * bytes to ImageBitmap — @rune/loaders image (or AssetLoader by URI).
+ * The parser is text-based (MTL files are small — streaming is not needed).
  */
 
 import { clamp, nowMs } from './bytes.ts'
 
-/** Материал MTL. */
+/** MTL material. */
 export interface MtlMaterial {
   readonly name: string
   readonly diffuse: readonly number[]
@@ -35,23 +35,23 @@ export interface MtlMaterial {
   readonly mapBump: string | null
 }
 
-/** Статистика MTL. */
+/** MTL statistics. */
 export interface MtlStats {
   readonly materials: number
   readonly withMapKd: number
   readonly parseMs: number
 }
 
-/** Полностью декодированный MTL. */
+/** Fully decoded MTL. */
 export interface MtlModel {
   readonly kind: 'mtl'
   readonly materials: readonly MtlMaterial[]
-  /** Поиск материала по имени (материалам OBJ usemtl). */
+  /** Find a material by name (for OBJ usemtl materials). */
   readonly get: (name: string) => MtlMaterial | undefined
   readonly stats: MtlStats
 }
 
-/** Дефолтный материал (значения three.js MeshPhongMaterial). */
+/** Default material (three.js MeshPhongMaterial values). */
 function defaultMaterial(): Mutable<MtlMaterial> {
   return {
     name: '',
@@ -70,7 +70,7 @@ function defaultMaterial(): Mutable<MtlMaterial> {
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] }
 
-/** Парсинг .mtl из строки. */
+/** Parse .mtl from a string. */
 export function parseMtlText(text: string): MtlModel {
   const startedAt = nowMs()
   const materials: MtlMaterial[] = []
@@ -107,7 +107,7 @@ export function parseMtlText(text: string): MtlModel {
         if (current !== null) current.opacity = clamp(parseFloat(rest) || 1, 0, 1)
         break
       case 'tr':
-        // Tr — прозрачность (обратна opacity)
+        // Tr — transparency (inverse of opacity)
         if (current !== null) current.opacity = clamp(1 - (parseFloat(rest) || 0), 0, 1)
         break
       case 'illum':
@@ -144,15 +144,15 @@ export function parseMtlText(text: string): MtlModel {
   }
 }
 
-/** Парсинг .mtl из байтов ответа (UTF-8). */
+/** Parse .mtl from response bytes (UTF-8). */
 export function parseMtl(input: string | Uint8Array): MtlModel {
   const bytes = typeof input === 'string' ? new TextEncoder().encode(input) : input
   return parseMtlText(new TextDecoder('utf-8').decode(bytes))
 }
 
-// ─── Вспомогательные ─────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────
 
-/** «0.1 0.2 0.3» → [0.1, 0.2, 0.3] (с защитой от NaN). */
+/** "0.1 0.2 0.3" → [0.1, 0.2, 0.3] (with NaN protection). */
 function parseVec3(text: string): number[] {
   const parts = text.split(/\s+/).map(parseFloat)
   return [
@@ -163,8 +163,8 @@ function parseVec3(text: string): number[] {
 }
 
 /**
- * Путь текстуры из «map_kd -s 1 1 1 -o 0 0 0 texture.png»:
- * берём последний не-опционный токен (как three.js).
+ * The texture path from "map_kd -s 1 1 1 -o 0 0 0 texture.png":
+ * take the last non-option token (like three.js).
  */
 function extractMapPath(text: string): string | null {
   const tokens = text.split(/\s+/).filter((t) => t !== '')
@@ -178,12 +178,12 @@ function extractMapPath(text: string): string | null {
   return tokens[tokens.length - 1] ?? null
 }
 
-// ─── Мост Task 88 (AssetLibrary ждёт эти имена) ─────────────────────────────
+// ─── Task 88 bridge (AssetLibrary expects these names) ─────────────────────────────
 
-/** Библиотека материалов MTL (имя слоя AssetLibrary). */
+/** MTL material library (AssetLibrary layer name). */
 export type MtlLibrary = MtlModel
 
-/** MTL из байтов (алиас parseMtl — байтовый контракт). */
+/** MTL from bytes (alias of parseMtl — the byte contract). */
 export function parseMtlBytes(bytes: Uint8Array): MtlLibrary {
   return parseMtl(bytes)
 }

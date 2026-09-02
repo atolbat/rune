@@ -2,8 +2,8 @@ import { describe, expect, it } from 'bun:test'
 import { createTapeWriter, writerView } from '../src/tape/index.ts'
 import { OpCode } from '../src/tape/opcodes.ts'
 
-describe('ленты', () => {
-  it('emit → view: колонки согласованы', () => {
+describe('tapes', () => {
+  it('emit → view: columns agree', () => {
     const writer = createTapeWriter(4)
     writer.emit(OpCode.BeginPass, 0, 0, 0, 0)
     writer.emit(OpCode.Draw, 7, 0, 36, 1)
@@ -17,14 +17,14 @@ describe('ленты', () => {
     expect(view.d[1]).toBe(1)
   })
 
-  it('reset очищает ленту без аллокаций', () => {
+  it('reset clears the tape without allocations', () => {
     const writer = createTapeWriter(4)
     writer.emit(OpCode.Draw, 1, 0, 3, 1)
     writer.reset()
     expect(writerView(writer).count).toBe(0)
   })
 
-  it('рост колонок вдвое без потери данных', () => {
+  it('columns double without data loss', () => {
     const writer = createTapeWriter(2)
     for (let at = 0; at < 10; at++) writer.emit(OpCode.Draw, at, 0, 3, 1)
     const view = writerView(writer)

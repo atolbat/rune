@@ -1,112 +1,112 @@
-// Task 102 (§8-5/§8-6, DESIGN §5.5 + §9.7): present.ts — рантайм present-путей.
+// Task 102 (§8-5/§8-6, DESIGN §5.5 + §9.7): present.ts — runtime present paths.
 //
-// РОДОСЛОВНАЯ. Бенч-раунд 4 (demo/bench-present.html + dist/bench-present.json)
-// измерил 12 GL + 2 WebGPU пути показа кадра; DESIGN §5.5 требовал перенести их
-// из бенч-артефакта в рантайм как PathRegistry — PathState (healthy/degraded/
-// disabled) был «единственным действительно новым» в плане. Срез Task 97
-// (fanout.ts) закрыл только фан-аут; этот модуль — полная машина:
+// LINEAGE. Bench round 4 (demo/bench-present.html + dist/bench-present.json)
+// measured 12 GL + 2 WebGPU frame present paths; DESIGN §5.5 required moving them
+// from the bench artifact into the runtime as PathRegistry — PathState (healthy/degraded/
+// disabled) was "the only genuinely new" thing in the plan. The Task 97 slice
+// (fanout.ts) covered only fan-out; this module is the full machine:
 //
-//   Decay          — окно frame-time с перцентилями p50/p95 и ratio = p95/p50
-//                    (§7-уточнение 1: адаптивный порог деградации Контракта 1;
-//                    абсолютный maxMs остаётся потолком на стороне приложения);
-//   PathRegistry   — реестр путей {requires, run, rank, pressureMax} +
-//                    select(caps, pressure, filter): лучший healthy-путь;
+//   Decay          — a frame-time window with p50/p95 percentiles and ratio = p95/p50
+//                    (§7-clarification 1: the adaptive degradation threshold of Contract 1;
+//                    the absolute maxMs remains a ceiling on the application side);
+//   PathRegistry   — a registry of paths {requires, run, rank, pressureMax} +
+//                    select(caps, pressure, filter): the best healthy path;
 //   PathState      — healthy → degraded (ratio ≥ 1.2) → disabled (ratio ≥ 1.5)
-//                    по Decay-статистике; unavailable — по caps на select;
-//                    disabled — не приговор: испытательный срок (Task 105) —
-//                    прошедшее ожидание (5 с → ×2 за каждый рецидив, потолок
-//                    60 с) возвращает пути свежее окно и healthy (флаппер
-//                    гасится лестницей; ручной disable — навсегда; сэмплы
-//                    пишутся и отключённому — статистика последнего рубежа
-//                    живая, не замороженная).
+//                    from Decay statistics; unavailable — from caps at select;
+//                    disabled is not a final verdict: the probation period (Task 105) —
+//                    elapsed waiting (5 s → ×2 per relapse, capped
+//                    at 60 s) returns a fresh window and healthy to the path (the flapper
+//                    is dampened by the ladder; manual disable — forever; samples
+//                    are written even to a disabled path — the last-resort statistics
+//                    stay live, not frozen).
 //
-// Task 106 (третий раунд полевого журнала Mali):
-//   • ГИСТЕРЕЗИС ДАВЛЕНИЯ: ползунок, дрожащий вокруг pressureMax 0.6, метал
-//     селекцию multibmp4 ↔ draw2d и пересоздавал зрителей 5 раз за 4 с
-//     (смена режима канвасов 2d ↔ bitmaprenderer). Теперь путь отсекается
-//     при pressure > pressureMax, а возвращается только при
-//     pressure ≤ pressureMax − pressureHysteresis (0.15) — полоса
-//     «придержать решение» гасит дребезг границы; applyPressure() —
-//     авторитетный источник событий «отсечён/возвращён» для журнала;
-//   • АБСОЛЮТНАЯ МЕДЛЕННОСТЬ: ratio слеп к равномерно-медленному пути
-//     (полевой кадр: multi4 p50 70.2 / p95 70.2 · ratio 1.00 — «healthy» при
-//     16 fps, потому что путь ЗАРОДИЛСЯ в джанке и чистой базы в окне нет).
-//     Теперь p50 ≥ absoluteMaxMs (50 мс) на minSamples кадрах — отключение с
-//     причиной «абсолютная медленность»: путь стабильно не проходит бюджет
-//     кадра, даже если «ровный». Смешанные окна (p50 чистый) абсолют не
-//     трогает — их ловит ratio; испытательный срок лечит и этот вердикт.
+// Task 106 (third round of the Mali field journal):
+//   • PRESSURE HYSTERESIS: a slider jittering around pressureMax 0.6 thrashed
+//     the multibmp4 ↔ draw2d selection and recreated the viewers 5 times in 4 s
+//     (switching canvas modes 2d ↔ bitmaprenderer). Now a path is cut off
+//     at pressure > pressureMax and returns only at
+//     pressure ≤ pressureMax − pressureHysteresis (0.15) — the "hold the
+//     decision" band kills boundary chatter; applyPressure() is the
+//     authoritative source of "cut off/returned" events for the journal;
+//   • ABSOLUTE SLOWNESS: ratio is blind to a uniformly slow path
+//     (a field frame: multi4 p50 70.2 / p95 70.2 · ratio 1.00 — "healthy" at
+//     16 fps, because the path was BORN in jank and there is no clean baseline in the window).
+//     Now p50 ≥ absoluteMaxMs (50 ms) over minSamples frames — disabling with
+//     the reason "absolute slowness": the path consistently fails the frame
+//     budget, even if "smooth". Mixed windows (clean p50) are not touched by the absolute —
+//     ratio catches those; the probation period cures this verdict too.
 //
-// КАНОНИЧЕСКИЕ РЕГИСТРАЦИИ (createPresentRegistry, §9.7): ранги откалиброваны
-// bench-present.json (SwiftShader): blit 0.026 мс submit / 59.8 wall fps,
+// CANONICAL REGISTRATIONS (createPresentRegistry, §9.7): ranks are calibrated
+// with bench-present.json (SwiftShader): blit 0.026 ms submit / 59.8 wall fps,
 // quadcopy 0.032/56.3, direct 0.061/22.5, bitmap 0.239/22.9 (≈ direct!),
-// quadpass 0.074/17.4, draw2d 0.146/13.4, multi4 0.179/12. Пример §9.7:
-// «на Mali preserve p95/p50 = 3.0 ≫ 1.5 → preserve disabled, выбор уходит в
-// quadpass или direct» — ровно это исполняет report() + select().
+// quadpass 0.074/17.4, draw2d 0.146/13.4, multi4 0.179/12. The §9.7 example:
+// "on Mali preserve p95/p50 = 3.0 ≫ 1.5 → preserve disabled, the choice goes to
+// quadpass or direct" — exactly that is executed by report() + select().
 //
-// ГИГИЕНА (Контракт 5): путь без run НЕ выбирается (это «знание реестра» —
-// рендерер/приложение подставляет реализацию через add(), §9.8: 2 обязательных
-// поля requires+run); requires-строки сверяются с caps.path() === 'supported'
-// (ключи сред зондит probeEnvironmentPaths(), Task 102).
+// HYGIENE (Contract 5): a path without run is NOT selected (that is "registry
+// knowledge" — the renderer/application plugs the implementation in via add(), §9.8: 2 mandatory
+// fields requires+run); requires strings are checked against caps.path() === 'supported'
+// (environment keys are probed by probeEnvironmentPaths(), Task 102).
 
 import type { Caps } from '@rune/core'
 import type { AnyCanvas } from './canvasHelpers.ts'
 
-// ─── Константы деградации (Контракт 1, §7-уточнение 1) ───────────────────────
+// ─── Degradation constants (Contract 1, §7-clarification 1) ───────────────────────
 
-/** Порог отключения: degradationRatio = p95/p50 ≥ 1.5 → disabled. */
+/** Disable threshold: degradationRatio = p95/p50 ≥ 1.5 → disabled. */
 export const DEGRADATION_RATIO = 1.5
-/** Порог предупреждения: ratio ≥ 1.2 → degraded (путь ещё выбираем последним). */
+/** Warn threshold: ratio ≥ 1.2 → degraded (the path is still selected last). */
 export const DEGRADE_WARN_RATIO = 1.2
-/** Окно статистики, кадров (≈2 с при 60 fps). */
+/** Statistics window, frames (≈2 s at 60 fps). */
 export const DEGRADATION_WINDOW = 120
-/** Минимум сэмплов до переходов состояния (ранняя статистика шумная). */
+/** Minimum samples before state transitions (early statistics are noisy). */
 export const DEGRADATION_MIN_SAMPLES = 30
 /**
- * Испытательный срок (Task 105, полевой фидбек Mali): через столько мс в
- * disabled путь получает повторную пробу — Decay сбрасывается, статус →
- * healthy, селекция может вернуться к нему. Причина «отсеклись при тех же
- * настройках» (ждал до ручного reset()): временный джанк/термал убивал путь
- * НАВСЕГДА, хотя среда давно нормализовалась. Ручной disable() — исключение:
- * решение оператора авто-восстановлением не оспаривается.
+ * Probation period (Task 105, Mali field feedback): after this many ms a
+ * disabled path gets a re-probe — Decay is reset, status →
+ * healthy, selection may return to it. The reason "cut off under the same
+ * settings" (waited for a manual reset()): temporary jank/thermals killed the path
+ * FOREVER, even though the environment had long since normalized. Manual disable() is the exception:
+ * the operator's decision is not challenged by auto-recovery.
  */
 export const DEGRADATION_RECOVERY_MS = 5000
-/** Каждое повторное отключение умножает ожидание (анти-флаппер): 5 → 10 → 20 → 40 с… */
+/** Every repeated disable multiplies the wait (anti-flapper): 5 → 10 → 20 → 40 s… */
 export const DEGRADATION_RECOVERY_BACKOFF = 2
-/** Потолок лестницы ожидания (60 с). */
+/** Cap of the waiting ladder (60 s). */
 export const DEGRADATION_RECOVERY_MAX_MS = 60000
-/** Шумовой порог, мс — ДВЕ стороны: p95 ниже его не может джанкнуть кадр
- * ни на 120 Гц, и СПАЙК (p95 − p50) ниже его — тоже (Task 104: мобильный
- * замер Mali — живой путь p50 6 / p95 7.4 мс давал «ratio 1.23» на джиттере
- * планировщика, ничтожном по бюджету кадра). Оба случая — ratio 1. */
+/** Noise floor, ms — TWO sides: a p95 below it cannot junk a frame
+ * even at 120 Hz, and a SPIKE (p95 − p50) below it — neither (Task 104: a mobile
+ * Mali measurement — a live path with p50 6 / p95 7.4 ms gave "ratio 1.23" on scheduler
+ * jitter, negligible for the frame budget). Both cases — ratio 1. */
 export const DEGRADATION_NOISE_FLOOR_MS = 2
 /**
- * Гистерезис возврата из-под давления (Task 106, полевой журнал Mali):
- * отсечение — при pressure > pressureMax, возврат в выбор — только при
- * pressure ≤ pressureMax − ГИСТЕРЕЗИС. Ползунок, дрожащий вокруг границы
- * (0.6 ↔ 0.7), прежде метал селекцию и пересоздавал зрителей-канвасы
- * 5 раз за 4 секунды; теперь в полосе [max − hyst, max] путь держит
- * прежнее решение. 0 — прежняя мгновенная семантика.
+ * Hysteresis of returning from under pressure (Task 106, Mali field journal):
+ * cutting off — at pressure > pressureMax, returning to the selection — only at
+ * pressure ≤ pressureMax − HYSTERESIS. A slider jittering around the boundary
+ * (0.6 ↔ 0.7) previously thrashed the selection and recreated the viewer canvases
+ * 5 times in 4 seconds; now in the band [max − hyst, max] the path keeps
+ * its previous decision. 0 — the previous instant semantics.
  */
 export const PRESSURE_HYSTERESIS = 0.15
 /**
- * Абсолютный потолок p50, мс (Task 106): путь, у которого МЕДИАНА кадра
- * стабильно выше этого порога, отключается «абсолютной медленностью» —
- * ratio-детектор слеп к равномерно-медленному пути (p95/p50 = 1.00 при
- * p50 70 мс — полевой кадр multi4, 16 fps «healthy»). Смешанные окна
- * (чистый p50 + джанковый p95) абсолют не трогает — их ловит ratio.
- * Infinity — выключить вердикт.
+ * Absolute p50 ceiling, ms (Task 106): a path whose frame MEDIAN is
+ * consistently above this threshold is disabled with "absolute slowness" —
+ * the ratio detector is blind to a uniformly slow path (p95/p50 = 1.00 at
+ * p50 70 ms — a field multi4 frame, 16 fps "healthy"). Mixed windows
+ * (clean p50 + janky p95) are not touched by the absolute — ratio catches those.
+ * Infinity — disable the verdict.
  */
 export const DEGRADATION_ABSOLUTE_MS = 50
 
-// ─── Decay — окно frame-time с перцентилями ──────────────────────────────────
+// ─── Decay — a frame-time window with percentiles ──────────────────────────────
 
 export interface DecayStats {
   readonly count: number
   readonly p50: number
   readonly p95: number
-  /** p95/p50; p50=0 (квантование таймера) → знаменатель 1 мс; p95 или спайк
-   * (p95 − p50) ниже шумового порога → 1 (джанк невозможен, ratio — шум
-   * измерений, а не сигнал пути). */
+  /** p95/p50; p50=0 (timer quantization) → denominator of 1 ms; p95 or a spike
+   * (p95 − p50) below the noise floor → 1 (jank is impossible, the ratio is
+   * measurement noise, not a path signal). */
   readonly ratio: number
 }
 
@@ -117,21 +117,21 @@ export interface DecayWindow {
 }
 
 /**
- * Скользящее окно времени кадра (nearest-rank перцентили). ratio ловит
- * деградацию ОТНОСИТЕЛЬНО vsync-насыщения (§4 addendum): путь со стабильными
- * 12 мс не деградировал, путь с p50 0.2 / p95 0.6 — деградировал, хотя оба
- * далеки от абсолютного потолка. Три предохранителя от ложных срабатываний:
- *   1. p95 < noiseFloorMs (default 2 мс) → ratio 1: спайк ниже порога не
- *      съедает значимую долю кадрового бюджета ни на 60, ни на 120 Гц —
- *      такие «ratio» измеряют таймер, а не путь (опыт Task 102: SwiftShader
- *      draw2d p50 0.1/p95 0.5 мс → «ratio 5» без какого-либо джанка);
- *   2. p95 − p50 < noiseFloorMs → ratio 1 (Task 104): ДЕЛЬТА спайка важнее
- *      абсолюта — путь с p50 6 / p95 7.4 мс не джанкнет ни одного кадра,
- *      «ratio 1.23» на нём — джиттер планировщика/таймера, а не деградация
- *      (замер на Mali: каскад отключал живые пути именно по этому шуму);
- *   3. p50 = 0 (таймер среды квантован) → знаменатель 1 мс.
- * Приложения, ищущие деградацию на более высоких частотах, понижают порог
- * через createDecayWindow(size, noiseFloorMs) / PathRegistryOptions.
+ * A sliding frame-time window (nearest-rank percentiles). ratio catches
+ * degradation RELATIVE to vsync saturation (§4 addendum): a path with stable
+ * 12 ms has not degraded, a path with p50 0.2 / p95 0.6 — has degraded, though both
+ * are far from the absolute ceiling. Three safeguards against false positives:
+ *   1. p95 < noiseFloorMs (default 2 ms) → ratio 1: a spike below the threshold
+ *      does not eat a significant share of the frame budget at either 60 or 120 Hz —
+ *      such "ratios" measure the timer, not the path (Task 102 experience: SwiftShader
+ *      draw2d p50 0.1/p95 0.5 ms → "ratio 5" without any jank);
+ *   2. p95 − p50 < noiseFloorMs → ratio 1 (Task 104): the spike DELTA matters
+ *      more than the absolute — a path with p50 6 / p95 7.4 ms will not junk a single frame,
+ *      "ratio 1.23" on it is scheduler/timer jitter, not degradation
+ *      (a Mali measurement: the cascade disabled live paths precisely on this noise);
+ *   3. p50 = 0 (the environment's timer is quantized) → denominator of 1 ms.
+ * Applications looking for degradation at higher frequencies lower the threshold
+ * via createDecayWindow(size, noiseFloorMs) / PathRegistryOptions.
  */
 export function createDecayWindow(size = DEGRADATION_WINDOW, noiseFloorMs = DEGRADATION_NOISE_FLOOR_MS): DecayWindow {
   const samples: number[] = []
@@ -151,7 +151,7 @@ export function createDecayWindow(size = DEGRADATION_WINDOW, noiseFloorMs = DEGR
       const p50 = at(0.5)
       const p95 = at(0.95)
       if (p95 < noiseFloorMs) return { count: n, p50, p95, ratio: 1 }
-      if (p95 - p50 < noiseFloorMs) return { count: n, p50, p95, ratio: 1 } // дельта-спайка — шум
+      if (p95 - p50 < noiseFloorMs) return { count: n, p50, p95, ratio: 1 } // spike delta — noise
       const denominator = p50 > 0 ? p50 : 1
       const ratio = p95 > 0 ? p95 / denominator : 1
       return { count: n, p50, p95, ratio }
@@ -159,46 +159,46 @@ export function createDecayWindow(size = DEGRADATION_WINDOW, noiseFloorMs = DEGR
   }
 }
 
-// ─── Спецификация пути и контекст показа ─────────────────────────────────────
+// ─── Path specification and present context ─────────────────────────────────────
 
-/** Чем исполняется показ; источник-канвас + зрители (+ инъекции для GL/WebGPU-путей). */
+/** How presenting is executed; source canvas + viewers (+ injections for GL/WebGPU paths). */
 export interface PresentContext {
-  /** Канвас-источник кадра (канвас рендерера / OffscreenCanvas). */
+  /** The frame's source canvas (the renderer's canvas / OffscreenCanvas). */
   readonly source: AnyCanvas
-  /** Канвасы-зрители (для кросс-канвасных путей). */
+  /** Viewer canvases (for cross-canvas paths). */
   readonly targets: readonly AnyCanvas[]
-  /** GL-контекст источника — для GL-внутренних путей (blit/quad…). */
+  /** The source's GL context — for GL-internal paths (blit/quad…). */
   readonly gl?: WebGL2RenderingContext | null
-  /** WebGPU-устройство + контекст webgpu-канваса — для wgpu-copy. */
+  /** WebGPU device + webgpu canvas context — for wgpu-copy. */
   readonly gpu?: PresentGpu | null
-  /** Время (с), если пути нужна анимация. */
+  /** Time (s), if the path needs animation. */
   readonly time?: number
 }
 
-/** Минимальный WebGPU-хвост PresentContext (реальные device/context подходят). */
+/** The minimal WebGPU tail of PresentContext (real device/context fit). */
 export interface PresentGpu {
   readonly device: GPUDevice
   readonly context: GPUCanvasContext
 }
 
-/** Показ одного кадра. Асинхронные пути (createImageBitmap) возвращают Promise. */
+/** Present one frame. Async paths (createImageBitmap) return a Promise. */
 export type PresentRun = (ctx: PresentContext) => void | Promise<void>
 
-/** Требования пути: ключ caps.path (или список — все обязательны) либо предикат. */
+/** Path requirements: a caps.path key (or a list — all mandatory) or a predicate. */
 export type PresentRequires = string | readonly string[] | ((caps: Caps) => boolean)
 
 export interface PresentPathSpec {
-  /** Требования среды/бэкенда; undefined — всегда доступен. */
+  /** Environment/backend requirements; undefined — always available. */
   readonly requires?: PresentRequires
-  /** Реализация показа; без run путь не выбирается (знание реестра, §9.8). */
+  /** Present implementation; without run the path is not selected (registry knowledge, §9.8). */
   readonly run?: PresentRun
-  /** Предпочтение: меньше ранг — выбирается раньше. Default — порядок add(). */
+  /** Preference: lower rank — selected earlier. Default — the order of add(). */
   readonly rank?: number
-  /** Путь допустим только при pressure ≤ pressureMax (0..1; default 1). */
+  /** The path is allowed only at pressure ≤ pressureMax (0..1; default 1). */
   readonly pressureMax?: number
-  /** Семья путей для UI/отчётов: 'GL' | 'Canvas2D' | 'Bitmap' | 'WebGPU' | … */
+  /** Path family for UI/reports: 'GL' | 'Canvas2D' | 'Bitmap' | 'WebGPU' | … */
   readonly group?: string
-  /** Капризы пути (S1/S2/S3 из §9.7) + бенч-цифры — человекочитаемо. */
+  /** The path's quirks (S1/S2/S3 from §9.7) + bench numbers — human-readable. */
   readonly note?: string
 }
 
@@ -206,19 +206,19 @@ export interface PresentPathSpec {
 
 export type PresentPathStatus = 'healthy' | 'degraded' | 'disabled' | 'unavailable'
 
-/** Снимок состояния пути (UI, debug, e2e). */
+/** A path state snapshot (UI, debug, e2e). */
 export interface PresentPathState {
   readonly name: string
   readonly status: PresentPathStatus
-  /** Почему не healthy: 'requirements: …' | 'degradation: …' | 'manual' | … */
+  /** Why not healthy: 'requirements: …' | 'degradation: …' | 'manual' | … */
   readonly reason: string | null
   readonly rank: number
   readonly group: string
   readonly note: string | null
   readonly pressureMax: number
-  /** Путь придержан гистерезисом давления (последний select/applyPressure
-   * резал его по pressureMax и давление ещё не спало до возвратной границы) —
-   * честный источник для UI-бейджа «отсечён давлением» (Task 106). */
+  /** The path is held back by the pressure hysteresis (the last select/applyPressure
+   * cut it on pressureMax and the pressure has not yet subsided to the return boundary) —
+   * an honest source for the "cut by pressure" UI badge (Task 106). */
   readonly pressureCut: boolean
   readonly hasRun: boolean
   readonly p50: number
@@ -227,7 +227,7 @@ export interface PresentPathState {
   readonly samples: number
 }
 
-/** Результат select(). */
+/** The result of select(). */
 export interface PathSelection {
   readonly name: string
   readonly run: PresentRun
@@ -235,27 +235,27 @@ export interface PathSelection {
 }
 
 export interface SelectOptions {
-  /** Структурный фильтр приложения: false → путь пропущен (сценарий не его). */
+  /** The application's structural filter: false → the path is skipped (not its scenario). */
   readonly filter?: (name: string) => boolean
-  /** Разрешить выбор путей без run (по умолчанию они пропускаются). */
+  /** Allow selecting paths without run (they are skipped by default). */
   readonly includeRunless?: boolean
-  /** Последний рубеж (Task 104): healthy/degraded исчерпаны → вернуть ЛУЧШИЙ
-   * disabled-путь вместо null — показ важнее качества (карточка честно
-   * показывает статус disabled; unavailable и pressure-гейт НЕ обходятся —
-   * недоступное не заработает, а дорогое под давлением включать нельзя). */
+  /** Last resort (Task 104): healthy/degraded exhausted → return the BEST
+   * disabled path instead of null — presenting matters more than quality (the card honestly
+   * shows the disabled status; unavailable and the pressure gate are NOT bypassed —
+   * the unavailable will not start working, and the expensive must not be enabled under pressure). */
   readonly lastResort?: boolean
-  /** Операторское перекрытие (форс): гейт давления НЕ применяется к выбору
-   * (явный выбор оператора важнее политики приложения — Task 105), но
-   * гистерезисные флаги продолжают обновляться по реальному pressure,
-   * чтобы после снятия форсажа состояние не было сюрпризом (Task 106). */
+  /** Operator override (force): the pressure gate is NOT applied to the selection
+   * (the operator's explicit choice outweighs the application's policy — Task 105), but
+   * the hysteresis flags keep updating from the real pressure,
+   * so that after the force is lifted the state is not a surprise (Task 106). */
   readonly ignorePressure?: boolean
 }
 
-/** Событие гистерезисного гейта давления (applyPressure, Task 106). */
+/** An event of the hysteresis pressure gate (applyPressure, Task 106). */
 export interface PressureGateTransition {
   readonly name: string
-  /** cut — путь придержан (pressure > pressureMax);
-   *  returned — возвращён в выбор (давление спало до возвратной границы). */
+  /** cut — the path is held back (pressure > pressureMax);
+   *  returned — returned to the selection (the pressure subsided to the return boundary). */
   readonly to: 'cut' | 'returned'
 }
 
@@ -264,66 +264,66 @@ export interface PathRegistryOptions {
   readonly minSamples?: number
   readonly warnRatio?: number
   readonly disableRatio?: number
-  /** Шумовой порог Decay, мс (см. createDecayWindow). */
+  /** Decay noise floor, ms (see createDecayWindow). */
   readonly noiseFloorMs?: number
   /**
-   * Испытательный срок отключённого пути, мс (default 5000). Срабатывает
-   * в select() — селекция и есть сердце машины: пока её зовут каждый кадр,
-   * отключённые пути ре-армятся сами. Infinity — прежняя семантика «отключён
-   * навсегда до reset()»; 0 — мгновенная проба на каждом select (флаппер —
-   * на совести вызвавшего).
+   * The disabled path's probation period, ms (default 5000). Fires
+   * in select() — selection is the heart of the machine: as long as it is called every frame,
+   * disabled paths re-arm themselves. Infinity — the previous "disabled
+   * forever until reset()" semantics; 0 — an instant probe on every select (the flapper is
+   * the caller's responsibility).
    */
   readonly recoveryMs?: number
-  /** Множитель ожидания на каждое повторное отключение (default 2). */
+  /** The wait multiplier per repeated disable (default 2). */
   readonly recoveryBackoff?: number
-  /** Потолок лестницы ожидания, мс (default 60 000). */
+  /** The waiting ladder cap, ms (default 60 000). */
   readonly recoveryMaxMs?: number
-  /** Гистерезис возврата из-под давления (default 0.15; 0 — мгновенный
-   * возврат, прежняя семантика). См. PRESSURE_HYSTERESIS. */
+  /** Hysteresis of returning from under pressure (default 0.15; 0 — instant
+   * return, the previous semantics). See PRESSURE_HYSTERESIS. */
   readonly pressureHysteresis?: number
-  /** Абсолютный потолок p50, мс (default 50; Infinity — выключить вердикт
-   * «абсолютная медленность»). См. DEGRADATION_ABSOLUTE_MS. */
+  /** Absolute p50 ceiling, ms (default 50; Infinity — disable the
+   * "absolute slowness" verdict). See DEGRADATION_ABSOLUTE_MS. */
   readonly absoluteMaxMs?: number
-  /** Часы для лестницы восстановления (тесты); default performance.now(). */
+  /** Clock for the recovery ladder (tests); default performance.now(). */
   readonly now?: () => number
-  /** Телеметрия переходов статуса (лог/UI/метрика): вызывается ТОЛЬКО при
-   * изменении статуса пути — с полным снимком статистики на момент перехода
-   * (p50/p95/ratio/сэмплы/причина). Идеальная точка для журнала деградации. */
+  /** Status transition telemetry (log/UI/metrics): called ONLY when
+   * a path's status changes — with a full statistics snapshot at the moment of the transition
+   * (p50/p95/ratio/samples/reason). The perfect place for a degradation journal. */
   readonly onTransition?: (transition: PathTransition) => void
 }
 
-/** Переход статуса пути (для onTransition-телеметрии). */
+/** A path status transition (for onTransition telemetry). */
 export interface PathTransition {
   readonly name: string
   readonly from: PresentPathStatus
   readonly to: PresentPathStatus
-  /** Снимок на момент ПОСЛЕ перехода (reason объясняет «почему»). */
+  /** A snapshot at the moment AFTER the transition (reason explains "why"). */
   readonly state: PresentPathState
 }
 
 export interface PathRegistry {
-  /** Зарегистрировать/заменить путь (замена сбрасывает состояние). §9.8: ≤6 строк. */
+  /** Register/replace a path (replacement resets the state). §9.8: ≤6 lines. */
   add(name: string, spec: PresentPathSpec): void
   remove(name: string): void
-  /** Лучший healthy-путь (degraded — когда healthy нет; disabled/unavailable — никогда).
-   *  Заодно — сердце восстановления: каждый вызов ре-армит отключённые пути,
-   *  прошедших испытательный срок (recoveryMs), и обновляет гистерезисные
-   *  флаги давления по переданному pressure. */
+  /** The best healthy path (degraded — when there are no healthy ones; disabled/unavailable — never).
+   *  Also — the heart of recovery: every call re-arms disabled paths
+   *  that have served their probation period (recoveryMs) and updates the hysteresis
+   *  pressure flags from the passed pressure. */
   select(caps: Caps, pressure?: number, options?: SelectOptions): PathSelection | null
-  /** Авторитетный гейт давления (Task 106): обновить флаги давления всех
-   *  путей с гистерезисом и вернуть переходы (кто отсечён/возвращён) —
-   * для журнала/UI; select() с тем же pressure — idempotent. */
+  /** The authoritative pressure gate (Task 106): update the pressure flags of all
+   *  paths with hysteresis and return the transitions (who is cut off/returned) —
+   *  for the journal/UI; select() with the same pressure — idempotent. */
   applyPressure(pressure: number): readonly PressureGateTransition[]
-  /** Покормить Decay пути реальным временем показа, мс (пишется и disabled —
-   *  живая статистика последнего рубежа; вердикт — до срока/reset). */
+  /** Feed the path's Decay with the real present time, ms (written even to disabled —
+   *  live last-resort statistics; the verdict — until the period/reset). */
   report(name: string, frameMs: number): void
-  /** Ручное отключение (перекрытие решением оператора): без причины — навсегда,
-   *  с причиной — подлежит испытательному сроку. */
+  /** Manual disable (an operator-decision override): without a reason — forever,
+   *  with a reason — subject to the probation period. */
   disable(name: string, reason?: string): void
-  /** Ре-арм: сброс Decay + статуса + лестницы испытательных сроков (все пути или один). */
+  /** Re-arm: reset Decay + status + the probation ladder (all paths or one). */
   reset(name?: string): void
   status(name: string): PresentPathState
-  /** Все пути по рангу. */
+  /** All paths by rank. */
   snapshot(): readonly PresentPathState[]
   readonly names: readonly string[]
 }
@@ -335,14 +335,14 @@ interface Entry {
   status: PresentPathStatus
   reason: string | null
   decay: DecayWindow
-  /** Момент (now()) перевода в disabled; null — ручное отключение навсегда. */
+  /** The moment (now()) of moving to disabled; null — a manual disable forever. */
   disabledAt: number | null
-  /** Текущее ожидание до испытательного срока (растёт с повторами). */
+  /** The current wait until the probation period (grows with repeats). */
   cooldownMs: number
-  /** Сколько испытательных сроков путь уже получал (лестница ожидания). */
+  /** How many probation periods the path has already had (the waiting ladder). */
   probations: number
-  /** Путь придержан давлением с гистерезисом (Task 106): true, пока
-   *  давление не спадёт до pressureMax − pressureHysteresis. */
+  /** The path is held back by pressure with hysteresis (Task 106): true while
+   *  the pressure has not subsided to pressureMax − pressureHysteresis. */
   pressureCut: boolean
 }
 
@@ -350,7 +350,7 @@ function requirementsCheck(spec: PresentPathSpec, caps: Caps): { ok: boolean; re
   const requires = spec.requires
   if (requires === undefined) return { ok: true }
   if (typeof requires === 'function') {
-    return requires(caps) ? { ok: true } : { ok: false, reason: 'предикат requires вернул false' }
+    return requires(caps) ? { ok: true } : { ok: false, reason: 'requires predicate returned false' }
   }
   const keys = typeof requires === 'string' ? [requires] : requires
   const failed = keys.filter(key => caps.path(key) !== 'supported')
@@ -359,11 +359,11 @@ function requirementsCheck(spec: PresentPathSpec, caps: Caps): { ok: boolean; re
     : { ok: false, reason: `caps.path(${failed.join(', ')}) ≠ 'supported'` }
 }
 
-/** 2d-контекст цели (HTMLCanvasElement | OffscreenCanvas — оба умеют drawImage). */
+/** The target's 2d context (HTMLCanvasElement | OffscreenCanvas — both can drawImage). */
 function ctx2dOf(canvas: AnyCanvas): CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D {
   const ctx = (canvas as HTMLCanvasElement).getContext('2d') as CanvasRenderingContext2D | null
   if (ctx === null) {
-    throw new Error("rune: present — getContext('2d') на цели вернул null (тип контекста цели уже занят). Используйте свежий канвас.")
+    throw new Error("rune: present — getContext('2d') on the target returned null (the target's context type is already taken). Use a fresh canvas.")
   }
   return ctx
 }
@@ -371,7 +371,7 @@ function ctx2dOf(canvas: AnyCanvas): CanvasRenderingContext2D | OffscreenCanvasR
 function bitmapCtxOf(canvas: AnyCanvas): ImageBitmapRenderingContext {
   const ctx = (canvas as HTMLCanvasElement).getContext('bitmaprenderer') as ImageBitmapRenderingContext | null
   if (ctx === null) {
-    throw new Error("rune: present — getContext('bitmaprenderer') на цели вернул null (тип контекста цели уже занят). Используйте mode '2d'-пути.")
+    throw new Error("rune: present — getContext('bitmaprenderer') on the target returned null (the target's context type is already taken). Use a '2d'-mode path.")
   }
   return ctx
 }
@@ -379,14 +379,14 @@ function bitmapCtxOf(canvas: AnyCanvas): ImageBitmapRenderingContext {
 function firstTarget(ctx: PresentContext): AnyCanvas {
   const target = ctx.targets[0]
   if (target === undefined) {
-    throw new Error('rune: present — PresentContext.targets пуст (нужен хотя бы один зритель)')
+    throw new Error('rune: present — PresentContext.targets is empty (at least one viewer is required)')
   }
   return target
 }
 
 function oneTarget(ctx: PresentContext): AnyCanvas {
   if (ctx.targets.length > 1) {
-    throw new Error(`rune: present — ровно один зритель (получено ${ctx.targets.length}): transferFromImageBitmap потребляет ImageBitmap. Для N зрителей — multibmp4/draw-пути.`)
+    throw new Error(`rune: present — exactly one viewer (got ${ctx.targets.length}): transferFromImageBitmap consumes the ImageBitmap. For N viewers — multibmp4/draw paths.`)
   }
   return firstTarget(ctx)
 }
@@ -395,7 +395,7 @@ function drawTo2d(source: CanvasImageSource & { readonly width: number; readonly
   ctx2dOf(target).drawImage(source, 0, 0, target.width, target.height)
 }
 
-// ─── Реестр ───────────────────────────────────────────────────────────────────
+// ─── Registry ───────────────────────────────────────────────────────────────────
 
 export function createPathRegistry(options: PathRegistryOptions = {}): PathRegistry {
   const windowSize = options.window ?? DEGRADATION_WINDOW
@@ -414,22 +414,22 @@ export function createPathRegistry(options: PathRegistryOptions = {}): PathRegis
   const entries = new Map<string, Entry>()
   let nextDefaultRank = 1000
 
-  /** Гистерезисный гейт давления (Task 106): состояние — часть пути
-   * (sticky-флаг), решение меняется только за границей полосы.
-   * Возвращает переход, если решение сменилось (null — нет). */
+  /** The hysteresis pressure gate (Task 106): state is part of the path
+   * (a sticky flag), the decision changes only outside the band.
+   * Returns a transition if the decision changed (null — none). */
   const pressureGate = (entry: Entry, pressure: number): PressureGateTransition | null => {
     const max = entry.spec.pressureMax ?? 1
     const before = entry.pressureCut
     if (pressure > max) entry.pressureCut = true
     else if (pressure <= max - pressureHysteresis) entry.pressureCut = false
-    // в полосе (max − hyst, max] решение держится прежним — дребезг границы
-    // больше не переключает селекцию туда-обратно (полевой журнал Mali)
+    // in the band (max − hyst, max] the decision stays the same — boundary chatter
+    // no longer flips the selection back and forth (Mali field journal)
     return before === entry.pressureCut
       ? null
       : { name: entry.name, to: entry.pressureCut ? 'cut' : 'returned' }
   }
 
-  /** Лестница ожидания: база × backoff^испытаний, с потолком. Infinity — навсегда. */
+  /** The waiting ladder: base × backoff^probations, with a cap. Infinity — forever. */
   const armCooldown = (entry: Entry): void => {
     if (!Number.isFinite(recoveryMs)) {
       entry.cooldownMs = Number.POSITIVE_INFINITY
@@ -457,8 +457,8 @@ export function createPathRegistry(options: PathRegistryOptions = {}): PathRegis
     }
   }
 
-  /** Смена статуса с телеметрией: повторная установка того же статуса только
-   * обновляет reason (например, свежий ratio у degraded) — переход не событие. */
+  /** A status change with telemetry: re-setting the same status only
+   * updates the reason (e.g. a fresh ratio for degraded) — a non-transition is not an event. */
   const setStatus = (entry: Entry, to: PresentPathStatus, reason: string | null): void => {
     const from = entry.status
     entry.reason = reason
@@ -471,7 +471,7 @@ export function createPathRegistry(options: PathRegistryOptions = {}): PathRegis
 
   return {
     add(name, spec) {
-      if (name.length === 0) throw new Error('rune: present — имя пути пустое')
+      if (name.length === 0) throw new Error('rune: present — path name is empty')
       const rank = spec.rank ?? nextDefaultRank
       if (spec.rank === undefined) nextDefaultRank++
       entries.set(name, {
@@ -491,11 +491,11 @@ export function createPathRegistry(options: PathRegistryOptions = {}): PathRegis
       entries.delete(name)
     },
     select(caps, pressure = 0, options) {
-      // −1) Испытательный срок (Task 105): degradation-отключение — не приговор.
-      // Прошедшему ожидание пути — свежее окно и healthy: среда могла
-      // нормализоваться (джанк ушёл, термал отпустил, вкладка одна). Ре-деградация
-      // вернёт disabled с удвоенным ожиданием — флаппер гасится лестницей.
-      // Ручное отключение (disabledAt === null) не оживает никогда.
+      // −1) Probation period (Task 105): a degradation disable is not a final verdict.
+      // A path that has waited out gets a fresh window and healthy: the environment may
+      // have normalized (the jank is gone, the thermals released, one tab). Re-degradation
+      // returns disabled with a doubled wait — the flapper is dampened by the ladder.
+      // A manual disable (disabledAt === null) never comes back to life.
       for (const entry of entries.values()) {
         if (entry.status !== 'disabled' || entry.disabledAt === null) continue
         if (now() - entry.disabledAt < entry.cooldownMs) continue
@@ -503,12 +503,12 @@ export function createPathRegistry(options: PathRegistryOptions = {}): PathRegis
         entry.probations++
         entry.disabledAt = null
         entry.decay.reset()
-        setStatus(entry, 'healthy', `испытательный срок №${entry.probations}: повторная проба после ${(waitedMs / 1000).toFixed(waitedMs % 1000 === 0 ? 0 : 1)} с отключения (авто-восстановление)`)
+        setStatus(entry, 'healthy', `probation period #${entry.probations}: re-probe after ${(waitedMs / 1000).toFixed(waitedMs % 1000 === 0 ? 0 : 1)} s of being disabled (auto-recovery)`)
       }
-      // 0) Доступность ВСЕХ путей перевычисляется по текущему caps: путь,
-      // помеченный unavailable на прошлом select, оживает после
-      // invalidate()/re-probe — и наоборот. Снимок snapshot() остаётся
-      // честным для путей ниже точки выбора.
+      // 0) The availability of ALL paths is recomputed from the current caps: a path
+      // marked unavailable at the previous select comes back to life after
+      // invalidate()/re-probe — and vice versa. The snapshot() remains
+      // honest for paths below the selection point.
       for (const entry of entries.values()) {
         const check = requirementsCheck(entry.spec, caps)
         if (!check.ok) {
@@ -519,14 +519,14 @@ export function createPathRegistry(options: PathRegistryOptions = {}): PathRegis
       }
       const eligible = (entry: Entry): boolean =>
         entry.spec.run !== undefined || options?.includeRunless === true
-      // Гейт давления — гистерезисный sticky-флаг (обновляется выше по
-      // реальному pressure всегда, даже под ignorePressure); ignorePressure
-      // (форс оператора) обходит только ПРИМЕНЕНИЕ гейта к выбору.
+      // The pressure gate is a hysteresis sticky flag (updated above from
+      // the real pressure always, even under ignorePressure); ignorePressure
+      // (the operator's force) bypasses only APPLYING the gate to the selection.
       for (const entry of entries.values()) pressureGate(entry, pressure)
       const passes = (entry: Entry): boolean =>
         options?.filter?.(entry.name) !== false && (options?.ignorePressure === true || !entry.pressureCut)
-      // 1) Два прохода выбора: сначала healthy, затем degraded (последний
-      // шанс). disabled/unavailable не выбираются никогда.
+      // 1) Two selection passes: first healthy, then degraded (the last
+      // chance). disabled/unavailable are never selected.
       for (const allowDegraded of [false, true]) {
         for (const entry of sorted()) {
           if (entry.status === 'disabled' || entry.status === 'unavailable') continue
@@ -535,10 +535,10 @@ export function createPathRegistry(options: PathRegistryOptions = {}): PathRegis
           return { name: entry.name, run: entry.spec.run!, state: asState(entry) }
         }
       }
-      // 2) Последний рубеж (Task 104): живых нет — лучший disabled вместо null.
-      // unavailable не оживает от повторного выбора, а pressure-гейт — политика
-      // приложения, её не обходим. Статус в state честный: потребитель сам
-      // решает, светить «последний рубеж» или останавливаться.
+      // 2) Last resort (Task 104): no live paths — the best disabled instead of null.
+      // unavailable does not come back to life from repeated selection, and the pressure gate is the
+      // application's policy, we do not bypass it. The status in state is honest: the consumer
+      // decides whether to show "last resort" or stop.
       if (options?.lastResort === true) {
         for (const entry of sorted()) {
           if (entry.status !== 'disabled') continue
@@ -549,8 +549,8 @@ export function createPathRegistry(options: PathRegistryOptions = {}): PathRegis
       return null
     },
     applyPressure(pressure) {
-      // Авторитетный источник событий давления для журнала/UI: та же машина,
-      // что и в select() — повторный вызов с тем же pressure ничего не меняет.
+      // The authoritative source of pressure events for the journal/UI: the same machine
+      // as in select() — a repeated call with the same pressure changes nothing.
       const transitions: PressureGateTransition[] = []
       for (const entry of entries.values()) {
         const transition = pressureGate(entry, pressure)
@@ -560,46 +560,46 @@ export function createPathRegistry(options: PathRegistryOptions = {}): PathRegis
     },
     report(name, frameMs) {
       const entry = entries.get(name)
-      if (entry === undefined) throw new Error(`rune: present.report — путь «${name}» не зарегистрирован`)
-      // Сэмпл пишется ДАЖЕ отключённому: путь последнего рубежа исполняется
-      // каждый кадр — его карточка обязана показывать ЖИВОЕ время, а не снимок
-      // момента отключения (полевой фидбек: «p95 35 мс» у пути, идущего 0.2 мс).
-      // Вердикт при этом sticky: статус меняют только испытательный срок/reset.
+      if (entry === undefined) throw new Error(`rune: present.report — path "${name}" is not registered`)
+      // A sample is written EVEN to a disabled path: the last-resort path runs
+      // every frame — its card must show LIVE time, not a snapshot
+      // of the disable moment (field feedback: "p95 35 ms" for a path running at 0.2 ms).
+      // The verdict stays sticky: only the probation period/reset change the status.
       entry.decay.push(frameMs)
       if (entry.status === 'disabled') return
       const stats = entry.decay.stats()
       if (stats.count >= minSamples && stats.ratio >= disableRatio) {
         armCooldown(entry)
         entry.disabledAt = now()
-        setStatus(entry, 'disabled', `degradation: p95/p50 = ${stats.ratio.toFixed(2)} ≥ ${disableRatio} (${stats.count} кадров)`)
+        setStatus(entry, 'disabled', `degradation: p95/p50 = ${stats.ratio.toFixed(2)} ≥ ${disableRatio} (${stats.count} frames)`)
         return
       }
-      // Абсолютная медленность (Task 106): ratio слеп к равномерно-медленному
-      // пути (p95/p50 = 1.00 при p50 70 мс — путь родился в джанке, чистой
-      // базы в окне нет). МЕДИАНА вне бюджета — вердикт независимо от ratio;
-      // смешанные окна (чистый p50) сюда не попадают — их ловит ratio выше.
+      // Absolute slowness (Task 106): ratio is blind to a uniformly slow
+      // path (p95/p50 = 1.00 at p50 70 ms — the path was born in jank, there is no clean
+      // baseline in the window). A MEDIAN outside the budget — a verdict regardless of ratio;
+      // mixed windows (clean p50) do not get here — ratio above catches them.
       if (stats.count >= minSamples && stats.p50 >= absoluteMaxMs) {
         armCooldown(entry)
         entry.disabledAt = now()
-        setStatus(entry, 'disabled', `абсолютная медленность: p50 ${stats.p50.toFixed(1)} мс ≥ ${absoluteMaxMs} мс (${stats.count} кадров) — стабильно вне бюджета кадра`)
+        setStatus(entry, 'disabled', `absolute slowness: p50 ${stats.p50.toFixed(1)} ms ≥ ${absoluteMaxMs} ms (${stats.count} frames) — consistently outside the frame budget`)
         return
       }
       if (stats.count >= minSamples && stats.ratio >= warnRatio) {
-        setStatus(entry, 'degraded', `degradation: p95/p50 = ${stats.ratio.toFixed(2)} ≥ ${warnRatio} (предупреждение)`)
+        setStatus(entry, 'degraded', `degradation: p95/p50 = ${stats.ratio.toFixed(2)} ≥ ${warnRatio} (warning)`)
         return
       }
-      // Полное чистое окно после испытательного срока — лестница ожидания
-      // начинается заново: устойчивое здоровье = чистая репутация.
+      // A full clean window after the probation period — the waiting ladder
+      // starts over: sustained health = a clean record.
       if (entry.probations > 0 && stats.count >= windowSize) entry.probations = 0
       setStatus(entry, 'healthy', null)
     },
     disable(name, reason = 'manual') {
       const entry = entries.get(name)
-      if (entry === undefined) throw new Error(`rune: present.disable — путь «${name}» не зарегистрирован`)
-      // Ручное отключение (вызов без причины) — навсегда: оператор знает лучше.
-      // Отключение С причиной (ошибка исполнения, решение рендерера) — временный
-      // вердикт: путь получит испытательный срок по общей лестнице — ошибка
-      // могла быть транзитной (давление памяти на мобильном прошло).
+      if (entry === undefined) throw new Error(`rune: present.disable — path "${name}" is not registered`)
+      // A manual disable (a call without a reason) — forever: the operator knows better.
+      // A disable WITH a reason (an execution error, a renderer decision) — a temporary
+      // verdict: the path will get a probation period on the common ladder — the error
+      // may have been transient (memory pressure on mobile has passed).
       entry.disabledAt = reason === 'manual' ? null : now()
       armCooldown(entry)
       setStatus(entry, 'disabled', reason)
@@ -616,7 +616,7 @@ export function createPathRegistry(options: PathRegistryOptions = {}): PathRegis
     },
     status(name) {
       const entry = entries.get(name)
-      if (entry === undefined) throw new Error(`rune: present.status — путь «${name}» не зарегистрирован`)
+      if (entry === undefined) throw new Error(`rune: present.status — path "${name}" is not registered`)
       return asState(entry)
     },
     snapshot() {
@@ -628,21 +628,21 @@ export function createPathRegistry(options: PathRegistryOptions = {}): PathRegis
   }
 }
 
-// ─── Канонические регистрации (§9.7: 12 GL + 2 WebGPU + деградационные ступени) ─
+// ─── Canonical registrations (§9.7: 12 GL + 2 WebGPU + degradation steps) ─
 
 /**
- * Реестр канонических present-путей (§9.7). Ранги — бенч SwiftShader
- * (bench-present.json): меньше ранг — дешевле/предпочтительнее.
+ * A registry of canonical present paths (§9.7). Ranks — the SwiftShader bench
+ * (bench-present.json): lower rank — cheaper/preferred.
  *
- * GL-внутренние пути (blit/quadcopy/quadpass/uvremap) регистрируются БЕЗ run:
- * их исполнение живёт в рендерере (поверхность/цель) — приложение подставляет
- * свою реализацию через `paths.add(name, { requires, run })` (§9.8, ≤6 строк),
- * сохраняя ранги/состояния реестра. Кросс-канвасные пути исполняются здесь.
+ * GL-internal paths (blit/quadcopy/quadpass/uvremap) are registered WITHOUT run:
+ * their execution lives in the renderer (surface/target) — the application plugs in
+ * its own implementation via `paths.add(name, { requires, run })` (§9.8, ≤6 lines),
+ * keeping the registry's ranks/states. Cross-canvas paths are executed here.
  */
 export function createPresentRegistry(options?: PathRegistryOptions): PathRegistry {
   const registry = createPathRegistry(options)
 
-  // Промежуточный ½-канвас для draw2d-half — ленивый, на замыкании реестра.
+  // The intermediate ½-canvas for draw2d-half — lazy, on the registry's closure.
   let halfBuffer: { canvas: HTMLCanvasElement | OffscreenCanvas; w: number; h: number } | null = null
   const halfCanvas = (w: number, h: number): HTMLCanvasElement | OffscreenCanvas => {
     if (halfBuffer === null || halfBuffer.w !== w || halfBuffer.h !== h) {
@@ -660,21 +660,21 @@ export function createPresentRegistry(options?: PathRegistryOptions): PathRegist
     requires: 'canvas-direct',
     rank: 10,
     group: 'GL',
-    run: () => { /* источник сам видимый канвас — рендер уже показан (S3: premultiplied) */ },
-    note: 'рендер прямо в видимый канвас, ноль копий (бенч: 0.061 мс submit / 22.5 fps). S3: premultiplied-гигиена контекста',
+    run: () => { /* the source is itself a visible canvas — the render is already shown (S3: premultiplied) */ },
+    note: 'render straight into the visible canvas, zero copies (bench: 0.061 ms submit / 22.5 fps). S3: context premultiplied hygiene',
   })
   registry.add('wgpu-direct', {
     requires: 'WebGPU',
     rank: 15,
     group: 'WebGPU',
-    run: () => { /* пасс пишет прямо в текстуру webgpu-канваса */ },
-    note: 'WebGPU: пасс прямо в текстуру канваса. S1: configure(alphaMode)',
+    run: () => { /* the pass writes straight into the webgpu canvas texture */ },
+    note: 'WebGPU: a pass straight into the canvas texture. S1: configure(alphaMode)',
   })
   registry.add('blit', {
     requires: 'blit',
     rank: 20,
     group: 'GL',
-    note: 'gl.blitFramebuffer без шейдера — самый дешёвый (бенч: 0.026 мс / 59.8 fps). S1: ANGLE BGRA-mismatch. Исполнение — рендерер, подставьте run через add()',
+    note: 'gl.blitFramebuffer without a shader — the cheapest (bench: 0.026 ms / 59.8 fps). S1: ANGLE BGRA-mismatch. Execution — the renderer, plug in run via add()',
   })
   registry.add('wgpu-copy', {
     requires: 'WebGPU.copyExternalImage',
@@ -683,7 +683,7 @@ export function createPresentRegistry(options?: PathRegistryOptions): PathRegist
     run: ctx => {
       const gpu = ctx.gpu
       if (gpu === null || gpu === undefined) {
-        throw new Error('rune: present wgpu-copy — PresentContext.gpu не задан (WebGPU device + контекст webgpu-канваса)')
+        throw new Error('rune: present wgpu-copy — PresentContext.gpu is not set (WebGPU device + webgpu canvas context)')
       }
       gpu.device.queue.copyExternalImageToTexture(
         { source: ctx.source },
@@ -691,25 +691,25 @@ export function createPresentRegistry(options?: PathRegistryOptions): PathRegist
         [ctx.source.width, ctx.source.height],
       )
     },
-    note: 'queue.copyExternalImageToTexture: внешний кадр (GL-канвас) → текстура webgpu-канваса. S1: flipY/premultiplied',
+    note: 'queue.copyExternalImageToTexture: an external frame (GL canvas) → webgpu canvas texture. S1: flipY/premultiplied',
   })
   registry.add('quadcopy', {
     requires: 'canvas-direct',
     rank: 30,
     group: 'GL',
-    note: 'копия сэмпл-шейдером текстура→текстура (бенч: 0.032 мс / 56.3 fps). S2: copy-шейдер. Исполнение — рендерер, подставьте run через add()',
+    note: 'a texture→texture copy with a sampling shader (bench: 0.032 ms / 56.3 fps). S2: copy shader. Execution — the renderer, plug in run via add()',
   })
   registry.add('quadpass', {
     requires: 'canvas-direct',
     rank: 40,
     group: 'GL',
-    note: 'сцена в FBO-текстуру + квад-проход на канвас — путь rune (бенч: 0.074 мс / 17.4 fps). S2: pass vert-шейдер. Исполнение — рендерер, подставьте run через add()',
+    note: 'the scene into an FBO texture + a quad pass onto the canvas — the rune path (bench: 0.074 ms / 17.4 fps). S2: pass vert shader. Execution — the renderer, plug in run via add()',
   })
   registry.add('uvremap', {
     requires: 'canvas-direct',
     rank: 45,
     group: 'GL',
-    note: 'квад с UV-ремапом (атлас-вью). S2: UV-remap шейдер. Исполнение — рендерер, подставьте run через add()',
+    note: 'a quad with UV remapping (an atlas view). S2: UV-remap shader. Execution — the renderer, plug in run via add()',
   })
   registry.add('bitmap', {
     requires: ['OffscreenCanvas', 'transferToImageBitmap', 'bitmaprenderer'],
@@ -719,7 +719,7 @@ export function createPresentRegistry(options?: PathRegistryOptions): PathRegist
       const target = oneTarget(ctx)
       bitmapCtxOf(target).transferFromImageBitmap((ctx.source as OffscreenCanvas).transferToImageBitmap())
     },
-    note: 'transferToImageBitmap → bitmaprenderer, ноль CPU-копии (бенч: 22.9 fps ≈ direct 22.5!). S1: источник OffscreenCanvas, ровно 1 зритель',
+    note: 'transferToImageBitmap → bitmaprenderer, zero CPU copy (bench: 22.9 fps ≈ direct 22.5!). S1: source is an OffscreenCanvas, exactly 1 viewer',
   })
   registry.add('asyncbmp', {
     requires: ['createImageBitmap', 'bitmaprenderer'],
@@ -731,10 +731,10 @@ export function createPresentRegistry(options?: PathRegistryOptions): PathRegist
       try {
         bitmapCtxOf(target).transferFromImageBitmap(bitmap)
       } finally {
-        bitmap.close() // перенесённый битмап уже закрыт (no-op); при сбое переноса — не течём
+        bitmap.close() // the transferred bitmap is already closed (no-op); on a transfer failure — no leak
       }
     },
-    note: 'await createImageBitmap → bitmaprenderer (бенч: 15.9 fps). S1: асинхронность, ровно 1 зритель',
+    note: 'await createImageBitmap → bitmaprenderer (bench: 15.9 fps). S1: asynchrony, exactly 1 viewer',
   })
   registry.add('multibmp4', {
     requires: ['createImageBitmap', 'bitmaprenderer'],
@@ -748,12 +748,12 @@ export function createPresentRegistry(options?: PathRegistryOptions): PathRegist
           bitmapCtxOf(ctx.targets[i]!).transferFromImageBitmap(bitmaps[i]!)
         }
       } finally {
-        // перенесённые битмапы уже закрыты (close на закрытом — no-op);
-        // НЕ перенесённые (сбой на середине) закрываем руками — без утечки
+        // the transferred bitmaps are already closed (close on a closed one — no-op);
+        // the NOT transferred ones (a failure mid-way) we close by hand — no leak
         for (const bitmap of bitmaps) bitmap.close()
       }
     },
-    note: 'N × createImageBitmap параллельно → N bitmaprenderer (бенч multibmp4: 15.5 fps). S1: N битмапов; pressureMax 0.6 — дорогой при давлении',
+    note: 'N × createImageBitmap in parallel → N bitmaprenderers (multibmp4 bench: 15.5 fps). S1: N bitmaps; pressureMax 0.6 — expensive under pressure',
   })
   registry.add('draw2d', {
     requires: 'Canvas2D',
@@ -762,7 +762,7 @@ export function createPresentRegistry(options?: PathRegistryOptions): PathRegist
     run: ctx => {
       drawTo2d(ctx.source, firstTarget(ctx))
     },
-    note: 'drawImage источник → первый зритель (бенч: 13.4 fps). S1+S3: Canvas2D-ветка, alpha-канал',
+    note: 'drawImage source → first viewer (bench: 13.4 fps). S1+S3: Canvas2D branch, alpha channel',
   })
   registry.add('multi4', {
     requires: 'Canvas2D',
@@ -772,7 +772,7 @@ export function createPresentRegistry(options?: PathRegistryOptions): PathRegist
     run: ctx => {
       for (const target of ctx.targets) drawTo2d(ctx.source, target)
     },
-    note: 'drawImage × N зрителей (бенч multi4: 12 fps — −4 fps за 4 копии). S1: N 2d-контекстов; pressureMax 0.6',
+    note: 'drawImage × N viewers (multi4 bench: 12 fps — −4 fps for 4 copies). S1: N 2d contexts; pressureMax 0.6',
   })
   registry.add('preserve', {
     requires: ['preserve', 'Canvas2D'],
@@ -781,16 +781,16 @@ export function createPresentRegistry(options?: PathRegistryOptions): PathRegist
     run: ctx => {
       drawTo2d(ctx.source, firstTarget(ctx))
     },
-    note: 'скрытый GL-канвас с preserveDrawingBuffer:true → drawImage (бенч: 13.6 fps; Mali: p95/p50 = 3.0 → disabled). S3: premultiplied-tax; источник обязан быть создан с preserve',
+    note: 'a hidden GL canvas with preserveDrawingBuffer:true → drawImage (bench: 13.6 fps; Mali: p95/p50 = 3.0 → disabled). S3: premultiplied tax; the source must be created with preserve',
   })
   registry.add('draw2d-half', {
     requires: 'Canvas2D',
     rank: 90,
     group: 'Canvas2D',
     run: ctx => {
-      // Деградационная ступень: полный кадр → промежуточный ½ → цель.
-      // Первая копия пишет четверть пикселей, вторая читает четверть —
-      // дешевле полного draw2d на гонимых мобильных композиторах.
+      // A degradation step: full frame → intermediate ½ → target.
+      // The first copy writes a quarter of the pixels, the second reads a quarter —
+      // cheaper than full draw2d on throttled mobile compositors.
       const target = firstTarget(ctx)
       const w = Math.max(1, ctx.source.width >> 1)
       const h = Math.max(1, ctx.source.height >> 1)
@@ -798,7 +798,7 @@ export function createPresentRegistry(options?: PathRegistryOptions): PathRegist
       ctx2dOf(half).drawImage(ctx.source as CanvasImageSource, 0, 0, w, h)
       drawTo2d(half, target)
     },
-    note: 'деградационная ступень draw2d: кадр через промежуточный ½-канвас (четверть пикселей). S1: два drawImage',
+    note: 'a draw2d degradation step: the frame via an intermediate ½-canvas (a quarter of the pixels). S1: two drawImages',
   })
   registry.add('scaled-half', {
     requires: ['createImageBitmap', 'createImageBitmap.resize'],
@@ -815,7 +815,7 @@ export function createPresentRegistry(options?: PathRegistryOptions): PathRegist
         bitmap.close()
       }
     },
-    note: 'деградационная ступень bitmap: createImageBitmap с resize ½ → drawImage. S1: resize-опции',
+    note: 'a bitmap degradation step: createImageBitmap with ½ resize → drawImage. S1: resize options',
   })
 
   return registry

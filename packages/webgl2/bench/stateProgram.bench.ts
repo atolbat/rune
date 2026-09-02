@@ -16,9 +16,9 @@ import {
 import type { TapeView } from '@rune/core'
 
 /**
- * Теория A: state-программы — интерпретатор против codegen.
- * Гипотеза: codegen (инлайн-сравнения, без switch-диспетчера) быстрее
- * интерпретатора на кадре из тысяч draw. Победитель станет дефолтом.
+ * Theory A: state programs — interpreter versus codegen.
+ * Hypothesis: codegen (inline comparisons, no switch dispatcher) is faster
+ * than the interpreter on a frame of thousands of draws. The winner becomes the default.
  */
 
 const VERT = `#version 300 es
@@ -97,7 +97,7 @@ function bestOf(repeats: number, run: () => void): number {
 const interpretMs = measure('interpret', 9)
 const codegenMs = measure('codegen', 9)
 
-console.log('── Теория A: state-программы, кадр из 1000 draw ──')
-console.log(`интерпретатор : ${interpretMs.toFixed(3)} мс`)
-console.log(`codegen       : ${codegenMs.toFixed(3)} мс`)
-console.log(`codegen быстрее в ${(interpretMs / codegenMs).toFixed(2)} раза`)
+console.log('── Theory A: state programs, frame of 1000 draws ──')
+console.log(`interpreter   : ${interpretMs.toFixed(3)} ms`)
+console.log(`codegen       : ${codegenMs.toFixed(3)} ms`)
+console.log(`codegen is ${(interpretMs / codegenMs).toFixed(2)}x faster`)

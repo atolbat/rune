@@ -10,7 +10,7 @@ function fakeCanvas(): HTMLCanvasElement {
 }
 
 const LAYOUT = { position: 'float32x3', radius: 'float32' } as const
-const STRIDE = 16 // байты записи
+const STRIDE = 16 // record bytes
 
 const VERT = `#version 300 es
 layout(location=0) in vec3 inPos;
@@ -45,7 +45,7 @@ describe('rendererFeed WebGL2 (dual-bind)', () => {
     return { renderer, calls: recording.calls }
   }
 
-  it('канал: T1/T2 SAB по умолчанию, count-сигнал, createBuffer один раз', () => {
+  it('channel: T1/T2 SAB by default, the count signal, createBuffer once', () => {
     const { renderer, calls } = setup()
     const feed = renderer.feed({ layout: LAYOUT, capacity: 8 })
     expect(feed.channel).not.toBeNull()
@@ -53,24 +53,24 @@ describe('rendererFeed WebGL2 (dual-bind)', () => {
     expect(feed.capacity).toBe(8)
     expect(feed.count.value).toBe(0)
 
-    // GPU-хранилище выделено сразу (capacity*stride байт = 128 = 32 float).
+    // The GPU storage is allocated immediately (capacity*stride bytes = 128 = 32 floats).
     expect(calls).toContain('createBuffer(32)')
 
-    // Воркер пишет 3 записи, публикует.
+    // The worker writes 3 records, publishes.
     const batch = feed.channel!.push(3)
     batch.setVec3('position', 0, 1, 2, 3)
     batch.setVec3('position', 1, 4, 5, 6)
     batch.setFloat('radius', 1, 0.5)
     feed.channel!.publish()
 
-    // Кадр: грязный диапазон [0,3) — ОДИН bufferSubData.
+    // Frame: the dirty range [0,3) — ONE bufferSubData.
     renderer.step(16)
     expect(feed.count.value).toBe(3)
     expect(calls).toContain(`updateBuffer(1,12,0)`) // 12 float, byteOffset 0
     const updates = calls.filter(c => c.startsWith('updateBuffer')).length
-    expect(updates).toBe(1) // один вызов на кадр
+    expect(updates).toBe(1) // one call per frame
 
-    // Второй кадр: +2 записи → грязный диапазон [3,5), byteOffset 48.
+    // Second frame: +2 records → the dirty range [3,5), byteOffset 48.
     const more = feed.channel!.push(2)
     more.setVec3('position', 0, 9, 9, 9)
     feed.channel!.publish()
@@ -78,13 +78,13 @@ describe('rendererFeed WebGL2 (dual-bind)', () => {
     expect(feed.count.value).toBe(5)
     expect(calls).toContain(`updateBuffer(1,8,48)`) // 8 float, byteOffset 3*16
 
-    // Без новых записей — аплоада нет.
+    // No new records — no upload.
     renderer.step(48)
     expect(calls.filter(c => c.startsWith('updateBuffer')).length).toBe(2)
     renderer.dispose()
   })
 
-  it('vertex-путь: attribute() даёт stride/offset/bufferId, executor биндит интерливинг', () => {
+  it('vertex path: attribute() gives stride/offset/bufferId, the executor binds the interleaving', () => {
     const { renderer, calls } = setup()
     const feed = renderer.feed({ layout: LAYOUT, capacity: 8 })
     const command = renderer.command({
@@ -103,21 +103,21 @@ describe('rendererFeed WebGL2 (dual-bind)', () => {
     renderer.frame((_ctx, record) => record(command))
     renderer.step(16)
 
-    // executor: внешний буфер фида с stride@offset (интерливинг записи 16 байт).
-    expect(calls).toContain(`bindVertexBuffer(1,0,3,16@0)`)     // position: 3 компоненты @ 0
-    expect(calls).toContain(`bindVertexBuffer(1,1,1,16@12)`)    // radius: 1 компонента @ 12
-    // Свои буферы под feed-атрибуты НЕ создаются (внешний bufferId).
+    // executor: the feed's external buffer with stride@offset (a 16-byte record interleaving).
+    expect(calls).toContain(`bindVertexBuffer(1,0,3,16@0)`)     // position: 3 components @ 0
+    expect(calls).toContain(`bindVertexBuffer(1,1,1,16@12)`)    // radius: 1 component @ 12
+    // No own buffers are created for feed attributes (an external bufferId).
     expect(calls.filter(c => c.startsWith('createBuffer')).length).toBe(1)
     renderer.dispose()
   })
 
-  it('T3 (msg): applyChunks → зеркало → sync одним bufferSubData, recycle', () => {
+  it('T3 (msg): applyChunks → mirror → sync with a single bufferSubData, recycle', () => {
     const { renderer, calls } = setup()
-    // Рендер-мир — читатель ping-pong; писатель имитируется createMsgFeedWriter.
+    // The render world is the ping-pong reader; the writer is simulated by createMsgFeedWriter.
     const feed = renderer.feed({ layout: LAYOUT, capacity: 8, mode: 'msg' })
-    expect(feed.channel).toBeNull() // писатель живёт «в воркере»
+    expect(feed.channel).toBeNull() // the writer lives "in the worker"
 
-    // «Воркер»: пишет и шлёт чанки.
+    // "Worker": writes and sends chunks.
     const writer = createMsgFeedWriter(1, { layout: LAYOUT, capacity: 8 })
     writer.feed.push(2).setVec3('position', 0, 7, 7, 7)
     writer.feed.publish()
@@ -127,35 +127,35 @@ describe('rendererFeed WebGL2 (dual-bind)', () => {
     expect(feed.count.value).toBe(2)
     expect(calls).toContain(`updateBuffer(1,8,0)`)
 
-    // Ping-pong: вернуть буферы писателю.
+    // Ping-pong: return the buffers to the writer.
     const recycled = feed.takeRecycled()
     expect(recycled.length).toBe(1)
     writer.reclaim(recycled)
     renderer.dispose()
   })
 
-  it('transport-привязка: renderer.feed(client.feed(id)) — внешний SAB-view', () => {
+  it('transport binding: renderer.feed(client.feed(id)) — an external SAB-view', () => {
     const { renderer, calls } = setup()
     const transport = createTransport({ mode: 'sab', names: ['game.hp'] })
-    // Хост-транспорт создаёт фид; рендерер биндится к view читателя.
+    // The host transport creates the feed; the renderer binds to the reader's view.
     const hostFeed = transport.host.createFeed({ layout: LAYOUT, capacity: 8 })
     const view = transport.client.feed(1)
     expect(view).not.toBeNull()
     const feed = renderer.feed(view!)
-    expect(feed.channel).toBeNull() // писатель — host транспорта
+    expect(feed.channel).toBeNull() // the writer is the transport's host
     expect(feed.stride).toBe(STRIDE)
 
-    // Запись через host-канал (SAB) видна рендереру без единого сообщения.
+    // A write through the host channel (SAB) is visible to the renderer without a single message.
     hostFeed.push(2).setVec3('position', 0, 5, 5, 5)
     hostFeed.push(0)
     hostFeed.publish()
     renderer.step(16)
     expect(feed.count.value).toBe(2)
-    expect(calls).toContain('updateBuffer(1,8,0)') // грязный диапазон одним вызовом
+    expect(calls).toContain('updateBuffer(1,8,0)') // the dirty range with one call
     renderer.dispose()
   })
 
-  it('renderer.transport: проброс клиента + авто-семпл на границе кадра', () => {
+  it('renderer.transport: passing the client through + auto-sample at the frame boundary', () => {
     const recording = createRecordingGL()
     const transport = createTransport({ mode: 'sab', names: ['game.hp'] })
     const renderer = createWebGL2Renderer({
@@ -172,9 +172,9 @@ describe('rendererFeed WebGL2 (dual-bind)', () => {
     let hpSeen = -1
     renderer.transport!.shared('game.hp').subscribe(v => { hpSeen = v })
     transport.host.write('game.hp', 77)
-    expect(hpSeen).toBe(-1) // до границы кадра — тишина
+    expect(hpSeen).toBe(-1) // before the frame boundary — silence
     renderer.step(16)
-    expect(hpSeen).toBe(77) // sampleAll на эпохе — уведомление
+    expect(hpSeen).toBe(77) // sampleAll on the epoch — notification
     renderer.dispose()
   })
 })
@@ -192,7 +192,7 @@ describe('rendererFeed WebGPU (dual-bind)', () => {
     return { renderer, calls: recording.calls }
   }
 
-  it('sync: writeBuffer одним вызовом на кадр, count-сигнал', async () => {
+  it('sync: writeBuffer with a single call per frame, the count signal', async () => {
     const { renderer, calls } = await setup()
     const feed = renderer.feed({ layout: LAYOUT, capacity: 8 })
     expect(feed.channel).not.toBeNull()
@@ -201,18 +201,18 @@ describe('rendererFeed WebGPU (dual-bind)', () => {
     feed.channel!.publish()
     renderer.step(16)
     expect(feed.count.value).toBe(3)
-    // data.length = 8*4 float; byteLength = 3 записи * 16 байт = 48.
+    // data.length = 8*4 floats; byteLength = 3 records * 16 bytes = 48.
     expect(calls).toContain('syncVertexBuffer(32,48)')
     expect(calls.filter(c => c.startsWith('syncVertexBuffer')).length).toBe(1)
 
     feed.channel!.push(2).setFloat('radius', 0, 9)
     feed.channel!.publish()
     renderer.step(32)
-    expect(calls).toContain('syncVertexBuffer(32,80)') // [0, 5 записей * 16)
+    expect(calls).toContain('syncVertexBuffer(32,80)') // [0, 5 records * 16)
     renderer.dispose()
   })
 
-  it('vertex-путь: пайплайн с rich-слотами (stride@offset), биндинг общего view', async () => {
+  it('vertex path: a pipeline with rich slots (stride@offset), binding the shared view', async () => {
     const { renderer, calls } = await setup()
     const feed = renderer.feed({ layout: LAYOUT, capacity: 8 })
     const command = renderer.command({
@@ -229,16 +229,16 @@ describe('rendererFeed WebGPU (dual-bind)', () => {
     renderer.frame((_ctx, record) => record(command))
     renderer.step(16)
 
-    // Пайплайн: интерливинг-слоты [3/16@0 x 1/16@12].
+    // Pipeline: interleaving slots [3/16@0 x 1/16@12].
     expect(calls.some(c => c.includes('3/16@0x1/16@12'))).toBe(true)
-    // Общий view биндится на оба слота (данные — стабильный mirror).
+    // The shared view is bound to both slots (the data is a stable mirror).
     expect(calls).toContain('bindVertexBuffer(0,32,3)')
     expect(calls).toContain('bindVertexBuffer(1,32,1)')
     void command
     renderer.dispose()
   })
 
-  it('renderer.transport: проброс клиента + авто-семпл на границе кадра', async () => {
+  it('renderer.transport: passing the client through + auto-sample at the frame boundary', async () => {
     const recording = createRecordingGPU()
     const transport = createTransport({ mode: 'sab', names: ['game.hp'] })
     const renderer = await createWebGpuRenderer({

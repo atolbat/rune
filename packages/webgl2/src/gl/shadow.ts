@@ -1,8 +1,8 @@
 import type { BlendFactor, CullFace, DepthFunc, FrontFace } from './facade.ts'
 
-/** Минимальная структурная цель state-действий: методы сырого состояния +
- *  useProgram. Удовлетворяется и полным легаси-фасадом, и расширенным
- *  рекордером recordingGL (stateProgram.ts использует тот же тип). */
+/** The minimal structural target of state actions: raw-state methods +
+ *  useProgram. Satisfied both by the full legacy facade and by the extended
+ *  recordingGL recorder (stateProgram.ts uses the same type). */
 export interface StateProgramGL {
   enableDepthTest(): void
   disableDepthTest(): void
@@ -18,7 +18,7 @@ export interface StateProgramGL {
   useProgram(programId: number): void
 }
 
-/** Теневая копия GL-состояния: источник истины для минимального diff. */
+/** Shadow copy of the GL state: the source of truth for the minimal diff. */
 export interface GLShadow {
   depthTest: 0 | 1
   depthMask: 0 | 1
@@ -32,7 +32,7 @@ export interface GLShadow {
   program: number
 }
 
-/** Создаёт теневое состояние «ничего не установлено». */
+/** Creates a "nothing is set" shadow state. */
 export function createGLShadow(): GLShadow {
   return {
     depthTest: 0, depthMask: 0, depthFunc: '',
@@ -42,7 +42,7 @@ export function createGLShadow(): GLShadow {
   }
 }
 
-/** Одно состояние пайплайна как действие над фасадом. */
+/** One pipeline state as an action over the facade. */
 export type StateAction =
   | { readonly call: 'depthTest'; readonly on: boolean }
   | { readonly call: 'depthMask'; readonly on: boolean }
@@ -54,7 +54,7 @@ export type StateAction =
   | { readonly call: 'frontFace'; readonly order: FrontFace }
   | { readonly call: 'program'; readonly id: number }
 
-/** Применяет действие с diff относительно тени (интерпретатор). */
+/** Applies an action with a diff against the shadow (interpreter). */
 export function applyAction(action: StateAction, shadow: GLShadow, gl: StateProgramGL): void {
   switch (action.call) {
     case 'depthTest':
@@ -115,7 +115,7 @@ export function applyAction(action: StateAction, shadow: GLShadow, gl: StateProg
   }
 }
 
-/** Применяет список действий подряд (интерпретатор). */
+/** Applies a list of actions in a row (interpreter). */
 export function applyActions(actions: readonly StateAction[], shadow: GLShadow, gl: StateProgramGL): void {
   for (let i = 0; i < actions.length; i++) applyAction(actions[i], shadow, gl)
 }

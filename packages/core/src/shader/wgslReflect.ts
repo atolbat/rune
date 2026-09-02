@@ -1,6 +1,6 @@
 import type { UniformType } from '../uniforms/layout.ts'
 
-/** Юниформ из WGSL: имя поля структуры, тип, group и binding блока. */
+/** Uniform from WGSL: struct field name, type, block group and binding. */
 export interface WgslUniformInfo {
   readonly name: string
   readonly type: UniformType
@@ -8,7 +8,7 @@ export interface WgslUniformInfo {
   readonly binding: number
 }
 
-/** Текстура или сэмплер из WGSL. */
+/** Texture or sampler from WGSL. */
 export interface WgslTextureInfo {
   readonly name: string
   readonly type: UniformType
@@ -16,20 +16,20 @@ export interface WgslTextureInfo {
   readonly binding: number
 }
 
-/** Атрибут вершинного входа: имя и @location. */
+/** Vertex input attribute: name and @location. */
 export interface WgslAttributeInfo {
   readonly name: string
   readonly location: number
 }
 
-/** Точки входа, найденные в исходнике. */
+/** Entry points found in the source. */
 export interface WgslEntryPoints {
   readonly vertex: string | null
   readonly fragment: string | null
   readonly compute: string | null
 }
 
-/** Результат рефлексии WGSL-исходника. */
+/** Reflection result of a WGSL source. */
 export interface WgslReflection {
   readonly uniforms: readonly WgslUniformInfo[]
   readonly textures: readonly WgslTextureInfo[]
@@ -37,11 +37,11 @@ export interface WgslReflection {
   readonly entries: WgslEntryPoints
 }
 
-/** Кэш рефлексий WGSL: исходник шейдера — ключ, парсинг однократен. */
+/** WGSL reflection cache: shader source is the key, parsing happens once. */
 const reflectionCache = new Map<string, WgslReflection>()
 const CACHE_LIMIT = 512
 
-/** Рефлексирует WGSL: структуры, var-привязки, @location входы, точки входа (с кэшем). */
+/** Reflects WGSL: structs, var bindings, @location inputs, entry points (with cache). */
 export function reflectWgsl(source: string): WgslReflection {
   const cached = reflectionCache.get(source)
   if (cached !== undefined) return cached
@@ -96,7 +96,7 @@ function matchField(text: string): StructField | null {
   return { name: match[1], type }
 }
 
-/** Маппит имя типа WGSL на тип Uniform ABI (null — не юниформное поле). */
+/** Maps a WGSL type name to a Uniform ABI type (null — not a uniform field). */
 function wgslTypeToAbi(wgslType: string): UniformType | null {
   const mapped = WGSL_TYPE_MAP[wgslType]
   return mapped ?? null
@@ -181,7 +181,7 @@ function collectAttributes(source: string): WgslAttributeInfo[] {
 }
 
 function matchVertexFn(source: string): string | null {
-  // параметры содержат скобки в @location(n); матчит лениво до `) ->` или `) {`
+  // params contain parentheses in @location(n); matches lazily up to `) ->` or `) {`
   const match = /@vertex\s+fn\s+\w+\s*\(([\s\S]*?)\)\s*(?:->|\{)/.exec(source)
   return match === null ? null : match[1]
 }

@@ -1,30 +1,30 @@
 import { isUniformType } from '../uniforms/layout.ts'
 import type { UniformType } from '../uniforms/layout.ts'
 
-/** Юниформ из рефлексии: имя, тип, длина массива. */
+/** Uniform from reflection: name, type, array length. */
 export interface UniformInfo {
   readonly name: string
   readonly type: UniformType
   readonly arrayLength: number
 }
 
-/** Атрибут вершинного шейдера: имя и location (−1 — не задан в source). */
+/** Vertex shader attribute: name and location (−1 — not specified in source). */
 export interface AttributeInfo {
   readonly name: string
   readonly location: number
 }
 
-/** Результат рефлексии пары исходников GLSL 300 es. */
+/** Reflection result of a GLSL 300 es source pair. */
 export interface GlslReflection {
   readonly uniforms: readonly UniformInfo[]
   readonly attributes: readonly AttributeInfo[]
 }
 
-/** Кэш рефлексий: исходники повторяются от команды к команде — парсим один раз. */
+/** Reflection cache: sources repeat from command to command — parse once. */
 const reflectionCache = new Map<string, GlslReflection>()
 const CACHE_LIMIT = 512
 
-/** Рефлексирует пару шейдеров: union юниформов + атрибуты вершины (с кэшем). */
+/** Reflects a shader pair: uniform union + vertex attributes (with cache). */
 export function reflectGlsl(vertexSource: string, fragmentSource: string): GlslReflection {
   const key = `${vertexSource}\u0000${fragmentSource}`
   const cached = reflectionCache.get(key)

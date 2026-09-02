@@ -1,11 +1,11 @@
-// Рефлексия WGSL: юниформы из struct группы 0, атрибуты вершины, текстуры.
+// WGSL reflection: uniforms from the group-0 struct, vertex attributes, textures.
 
 export interface WgslUniformInfo {
   readonly name: string
-  /** Смещение в байтах внутри struct (std140-подобная раскладка). */
+  /** Offset in bytes within the struct (std140-like layout). */
   readonly offset: number
   readonly size: number
-  /** Исходный WGSL-тип поля (диагностика привязок). */
+  /** The field's original WGSL type (binding diagnostics). */
   readonly type?: string
 }
 
@@ -27,7 +27,7 @@ export interface WgslReflection {
   readonly uniformBytes: number
 }
 
-/** std140-выравнивание WGSL-типов (упрощённое: mat4/vec4/vec3/vec2/f32). */
+/** std140 alignment of WGSL types (simplified: mat4/vec4/vec3/vec2/f32). */
 function alignOf(type: string): number {
   if (type.startsWith('mat4x4')) return 16
   if (type.startsWith('vec4')) return 16
@@ -54,7 +54,7 @@ export function reflectWgsl(wgsl: string): WgslReflection {
 }
 
 function scanUniforms(wgsl: string): WgslUniformInfo[] {
-  // var<uniform> params : Params; → найти struct Params { ... }
+  // var<uniform> params : Params; → find struct Params { ... }
   const varMatch = /@group\(0\)\s*@binding\(0\)\s*var<uniform>\s+(\w+)\s*:\s*(\w+)/.exec(wgsl)
   if (varMatch === null) return []
   const structName = varMatch[2]
@@ -75,11 +75,11 @@ function scanUniforms(wgsl: string): WgslUniformInfo[] {
 
 function scanAttributes(wgsl: string): WgslAttributeInfo[] {
   const found: WgslAttributeInfo[] = []
-  // Только параметры вершинной точки входа: выходы VSOut не считаются.
-  // Скобка параметров закрывается перед '->' (скобки @location не считаются)
+  // Only the vertex entry point's parameters: VSOut outputs are not counted.
+  // The parameter parenthesis closes before '->' (the @location parens are not counted)
   const vertexFn = /@vertex\s+fn\s+\w+\s*\(([\s\S]*?)\)\s*->/.exec(wgsl)
   if (vertexFn === null) return []
-  // M5 (Task 73): скаляр f32 — тоже атрибут (feed-поля типа radius: float32).
+  // M5 (Task 73): a scalar f32 is also an attribute (feed fields like radius: float32).
   const re = /@location\((\d+)\)\s*(\w+)\s*:\s*(?:(vec2|vec3|vec4)<f32>|f32)/g
   for (const match of vertexFn[1].matchAll(re)) {
     const size = match[3] === undefined ? 1 : vecSize(match[3])

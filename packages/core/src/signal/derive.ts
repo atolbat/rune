@@ -1,16 +1,16 @@
-// Производный сигнал: пересчитывается, когда версии зависимостей ушли вперёд.
-// Семантика подписки — PUSH: при изменении зависимости производный со
-// подписчиками пересчитывается сразу (вне batch — немедленно, внутри —
-// на границе кадра через schedule). Без подписчиков пересчёт ЛЕНИВЫЙ:
-// первая же читка .value увидит новый stamp и пересчитает (глава досье
-// «реактивность без eager-шторма»).
+// Derived signal: recomputes when dependency versions have moved forward.
+// Subscription semantics are PUSH: when a dependency changes, a derived with
+// subscribers recomputes immediately (outside a batch — right away, inside —
+// at the frame boundary via schedule). Without subscribers recomputation is
+// LAZY: the first read of .value sees the new stamp and recomputes (the
+// dossier chapter "reactivity without an eager storm").
 //
-// Чистота проверяется ПОЭЛЕМЕНТНЫМ сравнением версий зависимостей, а не
-// суммой: сумма коллидирует, когда производный сам является зависимостью
-// другой производной (версия-сумма может УБЫТЬ при смене набора зависимостей
-// и скомпенсировать рост соседа — ложное «чисто»). Публичная version —
-// монотонная ревизия пересчётов: внешний наблюдатель (live-команда,
-// вложенный derive) видит строго возрастающий счётчик.
+// Cleanliness is checked by ELEMENT-WISE comparison of dependency versions,
+// not a sum: a sum collides when a derived is itself a dependency of another
+// derived (the version-sum may DECREASE when the dependency set changes and
+// compensate a neighbor's growth — a false "clean"). The public version is a
+// monotonic revision of recomputes: an external observer (live command,
+// nested derive) sees a strictly increasing counter.
 
 import { popCollector, pushCollector, reportRead } from './tracking.ts'
 import type { SignalCell } from './signal.ts'
@@ -32,7 +32,7 @@ export function derive<T>(compute: () => T): DerivedSignal<T> {
   const subscribers = new Set<(value: T) => void>()
   let unsubscribes: Unsubscribe[] = []
 
-  /** Пересчитать, собрав зависимости через стек трекинга. */
+  /** Recompute, collecting dependencies via the tracking stack. */
   function collect(): T {
     deps = []
     pushCollector(deps)
@@ -41,13 +41,13 @@ export function derive<T>(compute: () => T): DerivedSignal<T> {
     return next
   }
 
-  /** Снимок версий зависимостей — поэлементная база dirty-проверки. */
+  /** Snapshot of dependency versions — the element-wise dirty-check base. */
   function snapshotVersions(): void {
     depVersions = []
     for (const dep of deps) depVersions.push((dep as SignalCell<unknown>).version)
   }
 
-  /** Любая зависимость ушла вперёд — пересчёт (без сумм: коллизий нет). */
+  /** Any dependency moved forward — recompute (no sums: no collisions). */
   function dirty(): boolean {
     for (let at = 0; at < deps.length; at++) {
       if ((deps[at] as SignalCell<unknown>).version !== depVersions[at]) return true
@@ -55,12 +55,12 @@ export function derive<T>(compute: () => T): DerivedSignal<T> {
     return false
   }
 
-  /** Подписаться на каждую текущую зависимость (после collect). */
+  /** Subscribe to each current dependency (after collect). */
   function rebind(): void {
     for (const unsubscribe of unsubscribes) unsubscribe()
     unsubscribes = deps.map(dep =>
       dep.subscribe(() => {
-        // Push-путь включён только при наличии подписчиков; иначе лениво.
+        // The push path is only enabled when subscribers exist; otherwise lazy.
         if (subscribers.size > 0) revalidate()
       }),
     )
@@ -74,8 +74,8 @@ export function derive<T>(compute: () => T): DerivedSignal<T> {
     revision++
     rebind()
     if (cached !== previous && subscribers.size > 0) {
-      // Снимок подписчиков: колбэк может отписаться или (через derive-цепочку)
-      // переподписать зависимости — итерируем копию (см. signal.ts).
+      // Subscriber snapshot: a callback may unsubscribe or (through a derive
+      // chain) rebind dependencies — iterate over a copy (see signal.ts).
       for (const fn of [...subscribers]) fn(cached)
     }
     return true

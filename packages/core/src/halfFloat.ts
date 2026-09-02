@@ -1,17 +1,17 @@
 /**
- * Полу-плавающие (float16, binary16 IEEE 754) — кодек битов (Task 112).
+ * Half-floats (float16, binary16 IEEE 754) — a bit codec (Task 112).
  *
- * Зачем в ядре: WebGL2 требует HALF_FLOAT-ДАННЫЕ для загрузок в 16F-текстуры
- * (пара (RGBA, HALF_FLOAT) — ES 3.0 Table 3.2), WebGPU пишет rgba16float
- * теми же битами через writeTexture. Демо FFT-океана несло свою копию
- * конвертера — теперь это библиотечная утилита (паттерн «полезное из FFT —
- * в ядро»,.Task 112).
+ * Why in core: WebGL2 requires HALF_FLOAT DATA for uploads into 16F textures
+ * (the (RGBA, HALF_FLOAT) pair — ES 3.0 Table 3.2), WebGPU writes rgba16float
+ * with the same bits via writeTexture. The FFT-ocean demo carried its own copy of
+ * the converter — now it is a library utility (the "useful bits of FFT —
+ * into core" pattern, Task 112).
  *
- * Алгоритм — канонический round-to-nearest-even битовый конвертер;
- * корректно обрабатывает нули (±0), денормалы, бесконечности и NaN.
+ * The algorithm — a canonical round-to-nearest-even bit converter;
+ * it correctly handles zeros (±0), denormals, infinities and NaN.
  */
 
-/** Float32 → биты half-float (uint16). */
+/** Float32 → half-float bits (uint16). */
 export function floatToHalfBits(value: number): number {
   const f32 = new Float32Array(1)
   const i32 = new Int32Array(f32.buffer)
@@ -22,16 +22,16 @@ export function floatToHalfBits(value: number): number {
   let m = (x >> 12) & 0x07ff
   const e = (x >> 23) & 0xff
 
-  if (e < 103) return bits // |x| < 2^-14 → ±0 (денормал при e=103)
+  if (e < 103) return bits // |x| < 2^-14 → ±0 (denormal at e=103)
   if (e > 142) {
-    // Переполнение → ±inf; Inf/NaN (e=255) — честная IEEE-семантика:
-    // Inf остаётся Inf (мантисса 0), NaN сохраняет мантиссу (≠0 → NaN).
-    // (Отличие от копии демо: там NaN молча становился +inf — для
-    // библиотечного кодека это чиним; данных NaN в спектрах океана нет.)
+    // Overflow → ±inf; Inf/NaN (e=255) — honest IEEE semantics:
+    // Inf stays Inf (mantissa 0), NaN keeps the mantissa (≠0 → NaN).
+    // (Difference from the demo copy: there NaN silently became +inf — for
+    // a library codec we fix this; there are no NaN in ocean spectra.)
     if (e === 0xff) {
-      // Inf (мантисса f32 = 0) остаётся Inf; NaN (мантисса ≠ 0) — NaN:
-      // верхние 10 бит мантиссы f32 → мантисса half; если верх нулевой
-      // (NaN живёт только в младших битах) — тихий NaN-бит 0x0200.
+      // Inf (f32 mantissa = 0) stays Inf; NaN (mantissa ≠ 0) — NaN:
+      // the top 10 bits of the f32 mantissa → the half mantissa; if the top is zero
+      // (NaN lives only in the low bits) — the quiet NaN bit 0x0200.
       const fullMantissa = x & 0x007fffff
       if (fullMantissa !== 0) {
         const top = (x >> 13) & 0x03ff
@@ -45,7 +45,7 @@ export function floatToHalfBits(value: number): number {
     return bits
   }
   if (e < 113) {
-    // денормал half: неявная единица мантиссы + сдвиг
+    // half denormal: implicit mantissa unit + shift
     m |= 0x0800
     bits |= (m >> (114 - e)) + ((m >> (113 - e)) & 1)
     return bits
@@ -55,7 +55,7 @@ export function floatToHalfBits(value: number): number {
   return bits
 }
 
-/** Биты half-float (uint16) → Float32. */
+/** Half-float bits (uint16) → Float32. */
 export function halfBitsToFloat(bits: number): number {
   const s = (bits & 0x8000) >> 15
   const e = (bits & 0x7c00) >> 10
@@ -63,7 +63,7 @@ export function halfBitsToFloat(bits: number): number {
 
   let out: number
   if (e === 0) {
-    out = m === 0 ? 0 : Math.pow(2, -24) * m // ноль или денормал
+    out = m === 0 ? 0 : Math.pow(2, -24) * m // zero or denormal
   } else if (e === 0x1f) {
     out = m === 0 ? Infinity : NaN
   } else {
@@ -72,7 +72,7 @@ export function halfBitsToFloat(bits: number): number {
   return s === 1 ? -out : out
 }
 
-/** Массив Float32 → биты half-float (поканально, длина сохраняется). */
+/** Float32 array → half-float bits (per channel, length preserved). */
 export function float32ToHalf16(values: Float32Array): Uint16Array {
   const out = new Uint16Array(values.length)
   for (let i = 0; i < values.length; i++) {
@@ -81,7 +81,7 @@ export function float32ToHalf16(values: Float32Array): Uint16Array {
   return out
 }
 
-/** Биты half-float → массив Float32 (длина сохраняется). */
+/** Half-float bits → Float32 array (length preserved). */
 export function half16ToFloat32(bits: Uint16Array): Float32Array {
   const out = new Float32Array(bits.length)
   for (let i = 0; i < bits.length; i++) {

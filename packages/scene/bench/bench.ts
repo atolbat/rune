@@ -1,19 +1,19 @@
 /**
- * bench.ts — бенчмарки @rune/scene (Task 81).
+ * bench.ts — @rune/scene benchmarks (Task 81).
  *
- * Отвечает на вопросы проекта (юзер: «нужны бенчмарки, сам проверяй,
- * что имеет смысл»):
- *   1. Грязевые штампы против полного пересчёта — при какой доле анимации
- *      выигрыш исчезает?
- *   2. Иерархический culling против brute — при каком «проценте видимости»
- *      иерархия окупается (и когда вредна)?
- *   3. Сколько стоит компакция инстансов на кадр?
- *   4. Воркер: при каком размере сцены вынос конвейера в поток окупает
- *      синхронизацию (break-even)?
- *   5. Цена pack() после структурных правок.
+ * Answers the project's questions (the user: "we need benchmarks,
+ * check yourself what makes sense"):
+ *   1. Dirt stamps vs a full recompute — at what share of animation
+ *      does the gain disappear?
+ *   2. Hierarchical culling vs brute — at what "visibility percentage"
+ *      does the hierarchy pay off (and when is it harmful)?
+ *   3. What does instance compaction cost per frame?
+ *   4. The worker: at what scene size does moving the pipeline into a
+ *      thread pay for the synchronization (break-even)?
+ *   5. The price of pack() after structural edits.
  *
- * Запуск: cd rune && bun packages/scene/bench/bench.ts [section…]
- * Секции: transforms, cull, instances, pack, worker, all (default).
+ * Run: cd rune && bun packages/scene/bench/bench.ts [section…]
+ * Sections: transforms, cull, instances, pack, worker, all (default).
  */
 import { Worker } from 'node:worker_threads'
 import {
@@ -28,7 +28,7 @@ import {
 } from '../src/index.ts'
 import type { Scene } from '../src/index.ts'
 
-// ─── Хвост измерений ────────────────────────────────────────────────────────
+// ─── Measurement plumbing ────────────────────────────────────────────────────────
 
 interface Sample {
   readonly name: string
@@ -38,7 +38,7 @@ interface Sample {
 }
 
 function bench(name: string, runs: number, fn: () => void): Sample {
-  // Прогрев JIT.
+  // JIT warmup.
   for (let i = 0; i < Math.max(3, Math.floor(runs / 10)); i++) fn()
   const times: number[] = []
   for (let i = 0; i < runs; i++) {
@@ -69,17 +69,17 @@ async function benchAsync(name: string, runs: number, fn: () => Promise<void>): 
 
 function print(samples: readonly Sample[]): void {
   const nameW = Math.max(...samples.map((s) => s.name.length), 20)
-  console.log(`  ${'бенчмарк'.padEnd(nameW)}  ${'медиана'.padStart(10)}  ${'p95'.padStart(10)}  ${'прогонов'.padStart(8)}`)
+  console.log(`  ${'benchmark'.padEnd(nameW)}  ${'median'.padStart(10)}  ${'p95'.padStart(10)}  ${'runs'.padStart(8)}`)
   for (const s of samples) {
     console.log(`  ${s.name.padEnd(nameW)}  ${s.medianMs.toFixed(4).padStart(10)}  ${s.p95Ms.toFixed(4).padStart(10)}  ${String(s.runs).padStart(8)}`)
   }
 }
 
-// ─── Генераторы сцен ────────────────────────────────────────────────────────
+// ─── Scene generators ────────────────────────────────────────────────────────
 
-/** Кластерное поле: clusters корней, в каждом — subtreeSize листьев
- *  (глубина 2: корень → дети-листья). Пространственная когерентность —
- *  кластеры сеткой, листья внутри радиуса кластера. */
+/** A clustered field: clusterCount roots, each with subtreeSize leaves
+ *  (depth 2: root → leaf children). Spatial coherence —
+ *  clusters on a grid, leaves within the cluster's radius. */
 function buildClusterField(
   totalNodes: number,
   clusterSize: number,
@@ -103,7 +103,7 @@ function buildClusterField(
     const cz = Math.floor(c / side) * 60
     const root = scene.create({
       position: [cx, 0, cz],
-      sphere: [0, 0, 0, 26], // охват кластера
+      sphere: [0, 0, 0, 26], // the cluster's extent
     })
     for (let k = 0; k < clusterSize; k++) {
       const a = rand() * Math.PI * 2
@@ -119,12 +119,12 @@ function buildClusterField(
   return { scene, clusterCount }
 }
 
-/** Камера с целевым «процентом видимости» (подбором дистанции). */
+/** A camera with a target "visibility percentage" (by distance fitting). */
 function cameraFor(scene: Scene, targetVisible: number, clusterCount: number, side: number): { cam: ReturnType<typeof createCamera>; actual: number } {
   const cam = createCamera()
   const centerX = (side - 1) * 30
   const centerZ = centerX
-  // Подбираем дистанцию бинарным поиском по фактической видимости brute.
+  // We fit the distance with a binary search over the actual brute visibility.
   let lo = 50
   let hi = 4000
   let best = cam
@@ -134,7 +134,7 @@ function cameraFor(scene: Scene, targetVisible: number, clusterCount: number, si
     cam.setPerspective(Math.PI / 3, 1, 1, 8000)
     cam.setViewLookAt(centerX, 400, dist, centerX, 0, centerZ, 0, 1, 0)
     writeCameraPlanes(scene.views, 0, cam.planes)
-    // Быстрый подсчёт по факту (brute — эталон видимости).
+    // A quick on-the-spot count (brute — the visibility reference).
     const stats = cullViewsBrute(scene.views, 0, 0)
     const fraction = stats.visible / scene.count
     if (Math.abs(fraction - targetVisible) < 0.02) {
@@ -148,10 +148,10 @@ function cameraFor(scene: Scene, targetVisible: number, clusterCount: number, si
   return { cam: best, actual: bestActual }
 }
 
-// ─── Секция 1: трансформы ───────────────────────────────────────────────────
+// ─── Section 1: transforms ───────────────────────────────────────────────────
 
 function sectionTransforms(): void {
-  console.log('\n━━━ Трансформы: грязь против полного пересчёта ━━━')
+  console.log('\n━━━ Transforms: dirt vs a full recompute ━━━')
   const samples: Sample[] = []
   for (const total of [1_000, 10_000, 100_000]) {
     const { scene } = buildClusterField(total, 9)
@@ -163,7 +163,7 @@ function sectionTransforms(): void {
     for (const animFrac of [0, 0.01, 0.1, 1]) {
       const animCount = Math.floor(n * animFrac)
       samples.push(bench(
-        `dirty  ${String(total).padStart(7)} узлов, аним ${String(Math.round(animFrac * 100)).padStart(3)}%`,
+        `dirty  ${String(total).padStart(7)} nodes, anim ${String(Math.round(animFrac * 100)).padStart(3)}%`,
         30,
         () => {
           for (let i = 0; i < animCount; i++) {
@@ -175,17 +175,17 @@ function sectionTransforms(): void {
         },
       ))
     }
-    samples.push(bench(`forced ${String(total).padStart(7)} узлов (100%)`, 20, () => {
+    samples.push(bench(`forced ${String(total).padStart(7)} nodes (100%)`, 20, () => {
       updateWorldForcedViews(scene.views)
     }))
   }
   print(samples)
 }
 
-// ─── Секция 2: отсечение ────────────────────────────────────────────────────
+// ─── Section 2: culling ────────────────────────────────────────────────────
 
 function sectionCull(): void {
-  console.log('\n━━━ Отсечение: иерархия против brute ━━━')
+  console.log('\n━━━ Culling: hierarchy vs brute ━━━')
   const samples: Sample[] = []
   for (const total of [10_000, 100_000, 1_000_000]) {
     const clusterSize = total >= 1_000_000 ? 99 : 9
@@ -196,10 +196,10 @@ function sectionCull(): void {
     for (const target of [0.1, 0.5, 0.9]) {
       const { cam, actual } = cameraFor(scene, target, clusterCount, side)
       writeCameraPlanes(scene.views, 0, cam.planes)
-      const brute = bench(`brute  ${String(total).padStart(7)} вид ${String(Math.round(actual * 100)).padStart(3)}%`, 30, () => {
+      const brute = bench(`brute  ${String(total).padStart(7)} vis ${String(Math.round(actual * 100)).padStart(3)}%`, 30, () => {
         cullViewsBrute(scene.views, 0, 0)
       })
-      const hier = bench(`иерарх ${String(total).padStart(7)} вид ${String(Math.round(actual * 100)).padStart(3)}%`, 30, () => {
+      const hier = bench(`hier   ${String(total).padStart(7)} vis ${String(Math.round(actual * 100)).padStart(3)}%`, 30, () => {
         cullViewsHierarchical(scene.views, 0, 0)
       })
       samples.push(brute, hier)
@@ -208,10 +208,10 @@ function sectionCull(): void {
   print(samples)
 }
 
-// ─── Секция 3: инстансы ─────────────────────────────────────────────────────
+// ─── Section 3: instances ─────────────────────────────────────────────────────
 
 function sectionInstances(): void {
-  console.log('\n━━━ Компакция инстансов (группа 0) ━━━')
+  console.log('\n━━━ Instance compaction (group 0) ━━━')
   const samples: Sample[] = []
   for (const total of [10_000, 100_000]) {
     const { scene, clusterCount } = buildClusterField(total, 9)
@@ -220,25 +220,25 @@ function sectionInstances(): void {
     const side = Math.ceil(Math.sqrt(clusterCount))
     const { cam } = cameraFor(scene, 0.5, clusterCount, side)
     scene.cull([cam])
-    samples.push(bench(`collect ${String(total).padStart(7)} узлов (~50% вид)`, 30, () => {
+    samples.push(bench(`collect ${String(total).padStart(7)} nodes (~50% vis)`, 30, () => {
       scene.collectInstances(0)
     }))
   }
   print(samples)
 }
 
-// ─── Секция 4: pack ─────────────────────────────────────────────────────────
+// ─── Section 4: pack ─────────────────────────────────────────────────────────
 
 function sectionPack(): void {
-  console.log('\n━━━ Перестройка порядка (pack) после структурных правок ━━━')
+  console.log('\n━━━ Order rebuild (pack) after structural edits ━━━')
   const samples: Sample[] = []
   for (const total of [10_000, 100_000]) {
     const { scene } = buildClusterField(total, 9)
     scene.pack()
-    // Имитация структурной правки: отсоединить/присоединить один узел.
+    // Simulating a structural edit: detach/attach one node.
     const someNode = scene.views.order[5]
     const parent = scene.parentOf(someNode)
-    samples.push(bench(`pack   ${String(total).padStart(7)} узлов`, 30, () => {
+    samples.push(bench(`pack   ${String(total).padStart(7)} nodes`, 30, () => {
       scene.setParent(someNode, parent)
       scene.pack()
     }))
@@ -246,10 +246,10 @@ function sectionPack(): void {
   print(samples)
 }
 
-// ─── Секция 5: воркер ───────────────────────────────────────────────────────
+// ─── Section 5: worker ───────────────────────────────────────────────────────
 
 async function sectionWorker(): Promise<void> {
-  console.log('\n━━━ Воркер: локальный конвейер против выноса в поток ━━━')
+  console.log('\n━━━ Worker: the local pipeline vs moving it into a thread ━━━')
   const worker = new Worker(new URL('../tests/sceneWorkerEntry.ts', import.meta.url))
   const samples: Sample[] = []
   try {
@@ -257,7 +257,7 @@ async function sectionWorker(): Promise<void> {
       const clusterSize = total >= 1_000_000 ? 99 : 9
       const clusterCount = Math.floor(total / (clusterSize + 1))
       const side = Math.ceil(Math.sqrt(clusterCount))
-      // SAB-сцена той же генерацией, что и локальная.
+      // A SAB scene with the same generation as the local one.
       const sabScene = createScene({
         capacity: clusterCount * (clusterSize + 1) + 16,
         cameraMax: 1,
@@ -289,12 +289,12 @@ async function sectionWorker(): Promise<void> {
       const centerX = (side - 1) * 30
       cam.setViewLookAt(centerX, 400, 3000, centerX, 0, centerX, 0, 1, 0)
 
-      // Локальный конвейер (T0).
-      const local = bench(`local  ${String(total).padStart(7)} (main-время)`, 15, () => {
+      // The local pipeline (T0).
+      const local = bench(`local  ${String(total).padStart(7)} (main time)`, 15, () => {
         runScenePipeline(sabScene.views, 0)
       })
 
-      // Воркер: главный поток платит только publish + take.
+      // The worker: the main thread pays only publish + take.
       const bridge = createSceneWorkerBridge({
         scene: sabScene,
         worker: {
@@ -305,23 +305,23 @@ async function sectionWorker(): Promise<void> {
       await bridge.ready
       bridge.publish([cam])
       await bridge.waitFresh(10_000)
-      // 1) Чистая цена publish+take для main (микросекунды, без ожидания).
-      const mainCost = await benchAsync(`worker ${String(total).padStart(7)} (main-цена p+t)`, 30, async () => {
+      // 1) The pure price of publish+take for main (microseconds, no waiting).
+      const mainCost = await benchAsync(`worker ${String(total).padStart(7)} (main cost p+t)`, 30, async () => {
         bridge.publish([cam])
         bridge.take()
       })
-      // 2) Полная латентность publish→fresh (пробуждение+конвейер+опрос).
+      // 2) The full publish→fresh latency (wakeup+pipeline+polling).
       const latency = await benchAsync(`worker ${String(total).padStart(7)} (publish→fresh)`, 15, async () => {
         bridge.publish([cam])
         await bridge.waitFresh(10_000)
       })
-      // 3) Оверлап: main параллельно работает 3 мс — успел ли воркер.
+      // 3) Overlap: main works for 3 ms in parallel — did the worker make it.
       let freshHits = 0
       const overlapRuns = 20
       for (let i = 0; i < overlapRuns; i++) {
         bridge.publish([cam])
         const t0 = performance.now()
-        // Синтетическая main-работа ~3 мс (компиляция занятого цикла).
+        // Synthetic main work of ~3 ms (compiling a busy loop).
         let acc = 0
         while (performance.now() - t0 < 3) acc += Math.sqrt(i + 1)
         const snap = bridge.take()
@@ -329,7 +329,7 @@ async function sectionWorker(): Promise<void> {
         void acc
       }
       samples.push(local, mainCost, latency)
-      console.log(`  overlap ${String(total).padStart(7)}: свежий снимок за 3 мс main-работы — ${freshHits}/${overlapRuns} (${Math.round(100 * freshHits / overlapRuns)}%)`)
+      console.log(`  overlap ${String(total).padStart(7)}: a fresh snapshot within 3 ms of main work — ${freshHits}/${overlapRuns} (${Math.round(100 * freshHits / overlapRuns)}%)`)
       await bridge.dispose()
     }
   } finally {
@@ -348,4 +348,4 @@ if (want('cull')) sectionCull()
 if (want('instances')) sectionInstances()
 if (want('pack')) sectionPack()
 if (want('worker')) await sectionWorker()
-console.log('\n(медиана/p95 в мс; bun ' + Bun.version + ')')
+console.log('\n(median/p95 in ms; bun ' + Bun.version + ')')

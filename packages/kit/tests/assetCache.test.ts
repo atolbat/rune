@@ -4,12 +4,12 @@ import { createAssetCache } from '../src/assetCache.ts'
 test('acquire — single load', async () => {
   const cache = createAssetCache<string>({ maxBytes: 1024 })
   const h = cache.acquire('a', async () => 'value-a')
-  expect(h.value).toBeUndefined() // ещё не загружен
+  expect(h.value).toBeUndefined() // not loaded yet
   const v = await h.ready
   expect(v).toBe('value-a')
   expect(h.value).toBe('value-a')
   h.release()
-  expect(cache.size).toBe(1) // остаётся в кэше (TTL ещё не истёк)
+  expect(cache.size).toBe(1) // stays in the cache (TTL not yet expired)
 })
 
 test('acquire — dedup parallel calls', async () => {
@@ -19,7 +19,7 @@ test('acquire — dedup parallel calls', async () => {
   const h1 = cache.acquire('a', loader)
   const h2 = cache.acquire('a', loader)
   await Promise.all([h1.ready, h2.ready])
-  expect(loadCount).toBe(1) // не должно запускать loader дважды
+  expect(loadCount).toBe(1) // must not run the loader twice
   h1.release()
   h2.release()
 })
@@ -30,8 +30,8 @@ test('refcount — multiple acquire/release', async () => {
   const h2 = cache.acquire('a', async () => 'v')
   await h1.ready
   const stats1 = cache.stats()
-  expect(stats1.refcounted).toBe(1) // один entry, refcount=2
-  h1.release() // refcount 2→1, ещё активен
+  expect(stats1.refcounted).toBe(1) // one entry, refcount=2
+  h1.release() // refcount 2→1, still active
   const stats2 = cache.stats()
   expect(stats2.refcounted).toBe(1)
   expect(stats2.idle).toBe(0)
@@ -48,7 +48,7 @@ test('TTL — entry evicted after ttlFrames', async () => {
   h.release()
   expect(cache.size).toBe(1)
   cache.tick() // frame 1, idle age = 1
-  expect(cache.size).toBe(1) // ещё живёт
+  expect(cache.size).toBe(1) // still alive
   cache.tick() // frame 2, idle age = 2 — evict
   expect(cache.size).toBe(0)
 })
@@ -86,11 +86,11 @@ test('scope — child cache, bulk release on dispose', async () => {
   const h1 = level.acquire('grass', async () => 'grass-bmp')
   const h2 = level.acquire('stone', async () => 'stone-bmp')
   await Promise.all([h1.ready, h2.ready])
-  // parent cache держит entries
+  // the parent cache holds the entries
   expect(cache.size).toBe(2)
   level.dispose() // bulk release
-  // entries стали idle, но не эвикчены сразу (TTL ещё не истёк)
-  // → всё ещё в кэше, но refcount=0
+  // the entries became idle, but are not evicted immediately (TTL not yet expired)
+  // → still in the cache, but refcount=0
   expect(cache.stats().idle).toBe(2)
 })
 
@@ -100,15 +100,15 @@ test('churn window — pauses eviction on thrash', async () => {
     baseTtlFrames: 1,
     churnWindowMs: 100,
     churnThreshold: 3,
-    now: () => 0, // статичное время — churn не затухает
+    now: () => 0, // frozen time — churn does not decay
   })
-  // 4 быстрых acquire+release — churn должен сработать
+  // 4 quick acquire+release — churn should trigger
   for (let i = 0; i < 4; i++) {
     const h = cache.acquire(`item-${i}`, async () => `v-${i}`)
     await h.ready
     h.release()
   }
-  // tick не должен эвиктить — churn pause
+  // tick must not evict — churn pause
   cache.tick()
-  expect(cache.size).toBe(4) // все живы
+  expect(cache.size).toBe(4) // all alive
 })

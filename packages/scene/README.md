@@ -1,30 +1,30 @@
 # @rune/scene
 
-Максимально плоский data-oriented сценовый граф для rune: камеры,
-фрустум-отсечение, инстанс-пакеты, РЕНДЕРАБЛЫ (Task 86: абстрактная
-сущность «что рисовать» — рецепт меша + материал + пасс + политика,
-сводимая к мешу резолвером) и вынос кадрового конвейера в воркер —
-поверх ОДНОЙ раскладки памяти, общей для main и воркера.
+A maximally flat data-oriented scene graph for rune: cameras,
+frustum culling, instance packs, RENDERABLES (Task 86: an abstract
+"what to draw" entity — a mesh recipe + material + pass + policy,
+reduced to a mesh by the resolver) and moving the per-frame pipeline into
+a worker — on top of ONE memory layout shared by main and the worker.
 
-## Дизайн в одном абзаце
+## Design in one paragraph
 
-Ни одного JS-объекта на узел в горячих путях: всё — плоские типизированные
-массивы по слотам (SoA). Порядок обхода — preorder (`order[]`), поэтому
-родитель всегда раньше ребёнка (один проход трансформов без рекурсии), а
-поддерево — непрерывный диапазон рангов (`subtreeEnd[]`) — иерархический
-culling режет/принимает поддеревья заливкой слов битсета. Грязь — u32-штампы
-монотонных часов: покоящийся кадр ничего не пересчитывает. Сцена живёт либо в
-ArrayBuffer (T0), либо в SharedArrayBuffer (T1/T2 — воркер) — горячие циклы
-одни и те же (инвариант транспортов ядра, §7.2).
+Not a single JS object per node in hot paths: everything is flat typed
+arrays by slot (SoA). The traversal order is preorder (`order[]`), so
+a parent always comes before its child (one transform pass without recursion),
+and a subtree is a contiguous rank range (`subtreeEnd[]`) — hierarchical
+culling rejects/accepts subtrees by filling bitset words. Dirt is u32 stamps
+of a monotonic clock: a resting frame recomputes nothing. The scene lives
+either in ArrayBuffer (T0) or in SharedArrayBuffer (T1/T2 — worker) — the
+hot loops are one and the same (a core transport invariant, §7.2).
 
-## Быстрый старт
+## Quick start
 
 ```ts
 import { createScene, createCamera, recommendSceneStrategy } from '@rune/scene'
 
 const scene = createScene({ capacity: 100_000, groupMax: 4, maxInstances: 50_000 })
 
-// Строим поле инстансов: кластер → 9 листьев группы 0.
+// Build the instance field: a cluster → 9 leaves of group 0.
 for (let c = 0; c < 10_000; c++) {
   const root = scene.create({ position: [c % 100 * 60, 0, Math.floor(c / 100) * 60], sphere: [0, 0, 0, 26] })
   for (let k = 0; k < 9; k++) {
@@ -36,22 +36,22 @@ const cam = createCamera()
 cam.setPerspective(Math.PI / 3, aspect, 0.1, 1000)
 cam.setViewLookAt(eyeX, eyeY, eyeZ, 0, 0, 0, 0, 1, 0)
 
-// Кадр (T0, весь конвейер в main):
-scene.updateWorld()            // грязевые штампы — покой бесплатен
-scene.refitGroupBounds()       // авто-границы внутренних узлов
-scene.cull([cam])              // битсет видимости (иерархический)
-scene.collectInstances(0)      // матрицы видимых инстансов группы 0
+// A frame (T0, the whole pipeline in main):
+scene.updateWorld()            // dirt stamps — rest is free
+scene.refitGroupBounds()       // auto bounds of internal nodes
+scene.cull([cam])              // visibility bitset (hierarchical)
+scene.collectInstances(0)      // matrices of the visible instances of group 0
 const { matrices, count } = scene.instances(0)
-// matrices: Float32Array(count*16) — готовый instance-атрибут
-// (4 колонки vec4, stride 64 байта, divisor 1 — rendererFeed/batchCommand).
+// matrices: Float32Array(count*16) — a ready instance attribute
+// (4 vec4 columns, stride 64 bytes, divisor 1 — rendererFeed/batchCommand).
 
 scene.forEachVisible(0, (slot) => {
   const myObject = myTable[scene.views.payload[slot]]
-  // рисуем myObject с scene.worldMatrix(slot)
+  // draw myObject with scene.worldMatrix(slot)
 })
 ```
 
-## Воркер (T1/T2)
+## Worker (T1/T2)
 
 ```ts
 // main.ts
@@ -60,58 +60,59 @@ const worker = new Worker(new URL('./scene.worker.ts', import.meta.url))
 const bridge = createSceneWorkerBridge({ scene, worker: myPortAdapter(worker) })
 await bridge.ready
 
-// Кадр: опубликовали ввод → main свободен → взяли согласованный снимок.
-bridge.publish([cam])          // ~микросекунды
-// …рендер предыдущего снимка, GPU-сабмиты…
-const snap = bridge.take()     // bits + instances (копии, без tearing)
+// Frame: publish the input → main is free → take the consistent snapshot.
+bridge.publish([cam])          // ~microseconds
+// …render the previous snapshot, GPU submits…
+const snap = bridge.take()     // bits + instances (copies, no tearing)
 ```
 
 ```ts
-// scene.worker.ts (воркер)
+// scene.worker.ts (worker)
 import { runSceneWorker } from '@rune/scene'
 self.onmessage = (e) => { if (e.data.type === 'scene-init') {
   postMessage({ type: 'scene-ready' })
-  runSceneWorker(e.data.sab)   // блокирующий цикл на Atomics.wait
+  runSceneWorker(e.data.sab)   // a blocking loop on Atomics.wait
 } }
 ```
 
-Протокол честности кадра: main пишет только до `inputEpoch++`; воркер читает
-только после пробуждения; main читает битсеты/пулы только после `outputEpoch`.
-Битсеты и инстанс-пулы двойные (`epoch & 1`) — tearing исключён; `take()`
-никогда не блокирует (несвежий кадр → снимок предыдущей эпохи, латентность +1
-кадр).
+Frame fairness protocol: main writes only up to `inputEpoch++`; the worker
+reads only after waking; main reads the bitsets/pools only after `outputEpoch`.
+The bitsets and instance pools are double-buffered (`epoch & 1`) — tearing is
+excluded; `take()` never blocks (a stale frame → the previous epoch's
+snapshot, +1 frame of latency).
 
-## Измеренные цифры (bench.ts, bun 1.3.14, контейнер 4 ядра)
+## Measured numbers (bench.ts, bun 1.3.14, a 4-core container)
 
-| Что | Результат |
+| What | Result |
 |---|---|
-| updateWorld, покой (0% анимации) | 0.5 мс на 100k узлов (5 нс/узел) |
-| updateWorld, полная анимация | 16.4 мс на 100k (160 нс/аним. узел) |
-| cull иерархический vs brute | 2× на 100k, 4.5× на 1M узлов |
-| cull 1M узлов | 2.0–2.6 мс (иерархический) |
-| компакция инстансов | 0.8 мс / 10k видимых, 1.3 мс / 100k |
-| pack (структурная правка) | 0.07 мс / 10k, 0.77 мс / 100k |
-| мост publish+take | ≈1 мкс (медиана) |
-| воркер: латентность publish→fresh | 1.3–2 мс (≤100k), ~12 мс (1M) |
-| воркер: оверлап за 3 мс main-работы | 90% свежих кадров (≤100k), 0% (1M) |
+| updateWorld, rest (0% animation) | 0.5 ms per 100k nodes (5 ns/node) |
+| updateWorld, full animation | 16.4 ms per 100k (160 ns/animated node) |
+| hierarchical cull vs brute | 2× at 100k, 4.5× at 1M nodes |
+| cull of 1M nodes | 2.0–2.6 ms (hierarchical) |
+| instance compaction | 0.8 ms / 10k visible, 1.3 ms / 100k |
+| pack (a structural edit) | 0.07 ms / 10k, 0.77 ms / 100k |
+| publish+take bridge | ≈1 µs (median) |
+| worker: publish→fresh latency | 1.3–2 ms (≤100k), ~12 ms (1M) |
+| worker: overlap over 3 ms of main work | 90% fresh frames (≤100k), 0% (1M) |
 
-**Честный вывод:** воркер — не про латентность (конвейер в потоке ≈2.5×
-медленнее + пробуждение), а про освобождение main-времени. Порог —
-`recommendSceneStrategy()`: конвейер ≥1 мс И воркер успевает в бюджет кадра.
-На покоящихся сценах до ~200k узлов локальный конвейер дешевле синхронизации.
+**Honest conclusion:** the worker is not about latency (the in-thread pipeline
+is ≈2.5× slower + wakeup), it is about freeing main time. The threshold is
+`recommendSceneStrategy()`: a pipeline ≥1 ms AND the worker fits the frame
+budget. On resting scenes up to ~200k nodes the local pipeline is cheaper
+than synchronization.
 
-## Контракт границ
+## Boundary contract
 
-* Локальная сфера узла (`setSphereLocal`) обязана охватывать геометрию узла;
-  у ВНУТРЕННЕГО узла сфера обязана охватывать поддерево (или оставьте r≤0 —
-  refit посчитает сам, снизу вверх, каждый кадр).
-* Внутренний узел без границ (r≤0) никогда не отсекается/принимается
-  тривиально — только спуск: безопасность по построению.
-* Бит видимости узла = тест его СОБСТВЕННОЙ сферы (побитовый паритет с brute
-  на корректных границах — property-тест на 40 случайных сценах).
-* GPU-driven culling (compute + indirect) НЕ заявлен: у движка нет этих путей
-  исполнения (Контракт 5). Дизайн оставляет шов: битсеты/пул — те же буферы,
-  что потреблял бы compute-проход.
+* A node's local sphere (`setSphereLocal`) must enclose the node's geometry;
+  for an INTERNAL node the sphere must enclose the subtree (or leave r≤0 —
+  refit will compute it itself, bottom-up, every frame).
+* An internal node without bounds (r≤0) is never trivially rejected/accepted
+  — descent only: safety by construction.
+* A node's visibility bit = the test of its OWN sphere (bitwise parity with
+  brute on correct bounds — a property test over 40 random scenes).
+* GPU-driven culling (compute + indirect) is NOT claimed: the engine does not
+  have these execution paths (Contract 5). The design leaves a seam: the
+  bitsets/pool are the same buffers a compute pass would consume.
 
 ## API
 
@@ -124,4 +125,4 @@ self.onmessage = (e) => { if (e.data.type === 'scene-init') {
 `collectGroupMatrices` · `extractFrustumPlanes` / `classifySphere` ·
 `updateWorldViews` / `updateWorldForcedViews` / `refitGroupBoundsViews`.
 
-Смотрите `src/*.ts` — каждый файл открывается манифестом своего контракта.
+See `src/*.ts` — every file opens with the manifest of its contract.

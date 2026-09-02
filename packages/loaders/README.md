@@ -1,117 +1,118 @@
-# @rune/loaders — интерфейс лоадеров
+# @rune/loaders — loader interface
 
-Ассеты: источник → планировщик → формат → кэш. Ноль GPU-кода: результаты —
-типизированные массивы и `ImageBitmap`, которые одинаково принимает
-WebGL2 (`texImage2DFromSource`) и WebGPU (`copyExternalImageToTexture`).
+Assets: source → scheduler → format → cache. Zero GPU code: the results are
+typed arrays and `ImageBitmap`, which both WebGL2 (`texImage2DFromSource`)
+and WebGPU (`copyExternalImageToTexture`) accept.
 
-## Слои и имена
+## Layers and names
 
-| Слой | Файл | Класс/функция |
+| Layer | File | Class/function |
 |---|---|---|
-| Планировщик | `scheduler.ts` | `LoadScheduler` |
-| Источник | `source.ts` | `openByteSource`, `StreamAssembler` |
+| Scheduler | `scheduler.ts` | `LoadScheduler` |
+| Source | `source.ts` | `openByteSource`, `StreamAssembler` |
 | GLB/glTF | `gltf.ts` | `parseGlb`, `parseGltfJson`, `looksLikeGlb` |
 | OBJ | `obj.ts` | `parseObj`, `parseObjStream`, `ObjStreamParser` |
 | MTL | `mtl.ts` | `parseMtl`, `parseMtlBytes` |
 | FBX | `fbx.ts` | `parseFbx`, `looksLikeFbxBinary`, `looksLikeFbxAscii` |
-| Картинки | `image.ts` | `parseImage`, `sniffMime` |
-| Конфиги | `config.ts` | `parseZml`, `parseIni`, `parseConfig`, `registerConfigParser` |
-| Пайпы | `pipes.ts` | `tap`, `bytesToText`, `splitLines`, `collect`… |
-| Библиотека | `library.ts` | `AssetLibrary` |
-| Легаси v0 | `compat.ts` | `loadImage`, `loadJSON`, `loadArrayBuffer` |
+| Images | `image.ts` | `parseImage`, `sniffMime` |
+| Configs | `config.ts` | `parseZml`, `parseIni`, `parseConfig`, `registerConfigParser` |
+| Pipes | `pipes.ts` | `tap`, `bytesToText`, `splitLines`, `collect`… |
+| Library | `library.ts` | `AssetLibrary` |
+| Legacy v0 | `compat.ts` | `loadImage`, `loadJSON`, `loadArrayBuffer` |
 
-## Главный вход — AssetLibrary
+## Main entry — AssetLibrary
 
 ```ts
 const library = new AssetLibrary({
   scheduler: new LoadScheduler({ maxConcurrent: 2, maxBytesInFlight: 16 << 20 }),
   defaults: { retries: 1, connectTimeoutMs: 25_000 },
-  cacheBytesLimit: 64 << 20, // LRU-вытеснение
+  cacheBytesLimit: 64 << 20, // LRU eviction
 })
 
-// Загрузка одного ассета. Вход: url (строка). Выход: AssetHandle<T> —
-// thenable (await даёт T) + progress/cancel/setPriority.
+// Load a single asset. Input: url (string). Output: AssetHandle<T> —
+// thenable (await gives T) + progress/cancel/setPriority.
 const handle = library.load<GltfModel>(url, {
-  priority: 0,                    // меньше = раньше (default 5)
-  parser: 'glb',                  // форсировать; иначе авто (расширение/магика)
-  onProgress: p => uiBar(p.ratio),// снимок прогресса (см. AssetProgress)
-  transform: [normalize],         // пост-парсинг цепочка (asset, meta) => asset
+  priority: 0,                    // lower = earlier (default 5)
+  parser: 'glb',                  // force; otherwise auto (extension/magic)
+  onProgress: p => uiBar(p.ratio),// progress snapshot (see AssetProgress)
+  transform: [normalize],         // post-parse chain (asset, meta) => asset
   signal, retries, weightBytes, noCache,
 })
 const model: GltfModel = await handle
-handle.cancel('причина')          // bool: queued мгновенно, fetching — abort
-handle.setPriority(1)             // bool: только пока queued
+handle.cancel('reason')          // bool: queued instantly, fetching — abort
+handle.setPriority(1)             // bool: only while queued
 
-// Прелоад без результата (прогрев кэша).
+// Preload without a result (cache warm-up).
 const report = await library.preload([urlA, urlB], { parser: 'glb' })
 report.ok   // AssetHandle[]
 report.fail // { url, error }[]
 
-// Группой: агрегатный взвешенный прогресс + общая отмена.
+// As a group: aggregate weighted progress + shared cancellation.
 const group = library.loadGroup([urlA, urlB])
-group.progress.ratio  // 0..1 по сумме весов
+group.progress.ratio  // 0..1 by sum of weights
 const all = await group.promise
 
-// Свои форматы: имя парсера → функция.
+// Custom formats: parser name → function.
 library.registerFormat('scene-config', ['.zml', '.cfg'], async ctx => {
-  await ctx.assembler.completion        // дождаться тела
+  await ctx.assembler.completion        // wait for the body
   return parseZml(ctx.assembler.fullView())
 })
-// Теперь library.load(url, { parser: 'scene-config' }) — как любой встроенный.
+// Now library.load(url, { parser: 'scene-config' }) — like any built-in.
 
 library.stats()    // LibraryStats: cacheBytes, cacheHits, downloads…
-library.clear()    // сброс кэша
-library.on(e => …) // события: progress | done | error | cancelled | evicted
+library.clear()    // cache reset
+library.on(e => …) // events: progress | done | error | cancelled | evicted
 ```
 
-## Вход/выход парсеров — таблица
+## Parser input/output — table
 
-| Парсер (имя) | Вход | Выход |
+| Parser (name) | Input | Output |
 |---|---|---|
-| `parseGlb` | `StreamAssembler` (GLB-стрим) + `GltfParseOptions` | `Promise<GltfModel>` |
-| `parseGltfJson` | `jsonText: string` + `GltfExternalSource` (внешние .bin/имаги) | `Promise<GltfModel>` |
+| `parseGlb` | `StreamAssembler` (GLB stream) + `GltfParseOptions` | `Promise<GltfModel>` |
+| `parseGltfJson` | `jsonText: string` + `GltfExternalSource` (external .bin/images) | `Promise<GltfModel>` |
 | `parseObj` / `parseObjStream` | `Uint8Array` / `StreamAssembler` | `ObjModel` / `Promise<ObjModel>` |
-| `parseMtl` / `parseMtlBytes` | текст MTL / `Uint8Array` | `MtlLibrary` (имя → `MtlMaterial`) |
-| `parseFbx` | `Uint8Array` (бинарный FBX 7.x) | `Promise<FbxModel>` |
-| `parseImage` | `StreamAssembler` + опции | `Promise<ImageAsset>` (`ImageBitmap`) |
-| `parseZml` / `parseIni` | текст/байты | деревья `ZmlNode` / запись `Record<string, unknown>` |
-| `sniffMime` | `Uint8Array` (магика) | mime-строка (вкл. `image/avif` по ftyp-box) |
+| `parseMtl` / `parseMtlBytes` | MTL text / `Uint8Array` | `MtlLibrary` (name → `MtlMaterial`) |
+| `parseFbx` | `Uint8Array` (binary FBX 7.x) | `Promise<FbxModel>` |
+| `parseImage` | `StreamAssembler` + options | `Promise<ImageAsset>` (`ImageBitmap`) |
+| `parseZml` / `parseIni` | text/bytes | `ZmlNode` trees / `Record<string, unknown>` entry |
+| `sniffMime` | `Uint8Array` (magic) | mime string (incl. `image/avif` by ftyp-box) |
 
-Все парсеры принимают **байтовый стриминг**, а не готовый буфер целиком
-(хотя готовый тоже можно):
+All parsers accept **byte streaming**, not a ready-made whole buffer
+(though a complete buffer works too):
 - `parseGlb(assembler: StreamAssembler, opts?) → Promise<GltfModel>` —
-  JSON-чанк разбирается до конца тела, геометрия — по готовности диапазонов
-  BIN-чанка, имаги (PNG/WebP/**AVIF**) декодируются в `ImageBitmap` по мере
-  прихода своих байт (`premultiplyAlpha:'none'` — детерминированный
-  straight-alpha для MASK/BLEND); источник имаги резолвится и из расширений
-  `EXT_texture_webp`/`EXT_texture_avif` (урок forest_house.glb).
-  Интерливинговые float-аксессоры (byteStride) деинтерливятся
-  fast-path'ом (Float32Array.set-строки вместо DataView-перебора).
+  the JSON chunk is parsed once the body has fully arrived, geometry as
+  BIN-chunk ranges become ready, images (PNG/WebP/**AVIF**) are decoded
+  into `ImageBitmap` as their bytes arrive (`premultiplyAlpha:'none'` —
+  deterministic straight-alpha for MASK/BLEND); the image source is also
+  resolved from the `EXT_texture_webp`/`EXT_texture_avif` extensions
+  (forest_house.glb lesson). Interleaved float accessors (byteStride) are
+  de-interleaved via a fast path (Float32Array.set rows instead of
+  DataView iteration).
 - `parseGltfJson(jsonText, external: GltfExternalSource, opts?) → Promise<GltfModel>` —
-  `.gltf` с внешними буферами/имагами (`external.loadExternal(uri)`).
-- `parseObj(bytes: Uint8Array, opts?) → ObjModel` — разовый;
-  `parseObjStream(assembler, opts?) → Promise<ObjModel>` — стриминговый
-  (построчный, поразрядный разбор чисел; углы граней — Int32Array-пул
-  без объектных аллокаций).
-- `parseMtlBytes(bytes) → MtlLibrary` — Wavefront MTL: блоки `newmtl`,
-  `Kd/Ka/Ks`, `Ns`, `d/Tr`, `map_Kd/map_Ks/bump` (опции `-s/-o` отбрасываются).
-  Потребитель резолвит `map_Kd` через `new URL(path, mtlUrl)`.
-- `parseFbx(bytes: Uint8Array, opts?) → Promise<FbxModel>` — бинарный FBX 7.x,
-  zlib-массивы через `DecompressionStream('deflate')` (ПАРАЛЛЕЛЬНО,
-  Promise.all), выровненные 'd'/'i' — zero-copy типизированные виды;
-  меши + иерархия нод (Lcl Translation/Rotation/Scaling) + материалы
+  `.gltf` with external buffers/images (`external.loadExternal(uri)`).
+- `parseObj(bytes: Uint8Array, opts?) → ObjModel` — one-shot;
+  `parseObjStream(assembler, opts?) → Promise<ObjModel>` — streaming
+  (line-by-line, digit-by-digit number parsing; face corners use an
+  Int32Array pool without object allocations).
+- `parseMtlBytes(bytes) → MtlLibrary` — Wavefront MTL: `newmtl` blocks,
+  `Kd/Ka/Ks`, `Ns`, `d/Tr`, `map_Kd/map_Ks/bump` (`-s/-o` options are
+  discarded). The consumer resolves `map_Kd` via `new URL(path, mtlUrl)`.
+- `parseFbx(bytes: Uint8Array, opts?) → Promise<FbxModel>` — binary FBX 7.x,
+  zlib arrays via `DecompressionStream('deflate')` (in PARALLEL,
+  Promise.all), aligned 'd'/'i' — zero-copy typed views;
+  meshes + node hierarchy (Lcl Translation/Rotation/Scaling) + materials
   (DiffuseColor).
-  `opts.skipHeavyNodes` (default **true**): поддеревья, которых НЕТ в
-  статическом выходе — анимации (`AnimationStack/Layer/CurveNode/Curve`),
-  скины (`Deformer`), `NodeAttribute`, позы, встроенные медиа — скипаются
-  целиком (прыжок на абсолютный endOffset): Samba Dancing.fbx — до 3×
-  быстрее; `false` — полный обход (диагностика).
+  `opts.skipHeavyNodes` (default **true**): subtrees that are NOT in the
+  static output — animations (`AnimationStack/Layer/CurveNode/Curve`),
+  skins (`Deformer`), `NodeAttribute`, poses, embedded media — are skipped
+  entirely (jump to the absolute endOffset): Samba Dancing.fbx — up to 3×
+  faster; `false` — full traversal (diagnostics).
 - `parseImage(assembler, opts?) → Promise<ImageAsset>` — PNG/JPEG/WebP/GIF/AVIF.
 
-### Draco (KHR_draco_mesh_compression) — инъекция декодера
+### Draco (KHR_draco_mesh_compression) — decoder injection
 
-Движок НЕ тянет wasm-декодер: передайте его в опциях — где угодно
-(напрямую в `GltfParseOptions.dracoDecoder` или в `new AssetLibrary({ dracoDecoder })`):
+The engine does NOT bundle a wasm decoder: pass it in the options — anywhere
+(directly in `GltfParseOptions.dracoDecoder` or in `new AssetLibrary({ dracoDecoder })`):
 
 ```ts
 const library = new AssetLibrary({
@@ -119,35 +120,36 @@ const library = new AssetLibrary({
 })
 ```
 
-Контракт `DracoGeometryDecoder`: вход — байты сжатого `bufferView` и карта
-`{ POSITION: id, NORMAL: id, TEXCOORD_0: id }` (uniqueId из расширения),
-выход — `{ positions, normals, uvs, indices }` (типизированные массивы).
-Без декодера Draco-файл падает честной ошибкой. Пример обвязки над
-CDN `draco_wasm_wrapper.js` + `draco_decoder.wasm` — `packages/demo/src/models-demo.ts`.
+The `DracoGeometryDecoder` contract: input — compressed `bufferView` bytes and
+the `{ POSITION: id, NORMAL: id, TEXCOORD_0: id }` map (uniqueId from the
+extension), output — `{ positions, normals, uvs, indices }` (typed arrays).
+Without a decoder, a Draco file fails with an honest error. An example
+wrapper over the CDN `draco_wasm_wrapper.js` + `draco_decoder.wasm` —
+`packages/demo/src/models-demo.ts`.
 
-`StreamAssembler` (вход стриминговых парсеров) собирает fetch-стрим в
-буфер с watermark-доступом: `waitFor(minBytes)`, `onRange(cb)`,
-`slice(from, len)`, `fullView()`, `completion` — парсер читает готовые
-диапазоны, не дожидаясь всего тела.
+`StreamAssembler` (the input of streaming parsers) assembles the fetch stream
+into a buffer with watermark access: `waitFor(minBytes)`, `onRange(cb)`,
+`slice(from, len)`, `fullView()`, `completion` — the parser reads ready
+ranges without waiting for the whole body.
 
-## Форма результата
+## Result shape
 
-`GltfModel`: `meshes` (примитивы с `positions/normals/uvs: Float32Array`,
+`GltfModel`: `meshes` (primitives with `positions/normals/uvs: Float32Array`,
 `indices: Uint16Array|Uint32Array|null`, `bounds`), `materials`
-(baseColorFactor, факторы PBR, индексы текстур-имагей, doubleSided,
+(baseColorFactor, PBR factors, texture image indices, doubleSided,
 **alphaMode/alphaCutoff**, **unlit** — KHR_materials_unlit),
-`images` (`bytes` + ленивый `bitmap: Promise<ImageBitmap>` + sampler),
+`images` (`bytes` + lazy `bitmap: Promise<ImageBitmap>` + sampler),
 `nodes` (TRS/matrix + children + mesh), `sceneRoots`, `stats`, `json`
-(сырой glTF-JSON для экзотики). `ObjModel` — плоские развёрнутые массивы
-(`positions/normals/uvs` на угол треугольника) + `groups` (диапазоны
-вершин с материалами usemtl) + `mtllib`. `MtlLibrary` — `materials`
+(raw glTF-JSON for exotic cases). `ObjModel` — flat expanded arrays
+(`positions/normals/uvs` per triangle corner) + `groups` (vertex ranges
+with usemtl materials) + `mtllib`. `MtlLibrary` — `materials`
 (`diffuse/ambient/specular/shininess/opacity/mapKd…`) + `get(name)`.
-`FbxModel` — `meshes` + `nodes` (TRS, иерархия) + `materials`
+`FbxModel` — `meshes` + `nodes` (TRS, hierarchy) + `materials`
 (diffuse) + `roots`.
 
-## Контракт
+## Contract
 
-- Никакого GPU и DOM-канвасов: результат переживёт смену бэкенда.
-- Отмена сквозная: `AbortSignal` → fetch abort → парсер stop.
-- Прогресс иммутабелен (`AssetProgress`: phase, loaded/total, ratio, detail).
-- Кэш по нормализованному URL; параллельные `load` одного URL дедупятся.
+- No GPU or DOM canvases: the result survives a backend switch.
+- Cancellation is end-to-end: `AbortSignal` → fetch abort → parser stop.
+- Progress is immutable (`AssetProgress`: phase, loaded/total, ratio, detail).
+- Cache keyed by normalized URL; parallel `load`s of the same URL are deduplicated.

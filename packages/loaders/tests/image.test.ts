@@ -1,4 +1,4 @@
-/** Сниффинг формата изображений по магике — AVIF (урок forest_house.glb). */
+/** Image format sniffing by magic — AVIF (the forest_house.glb lesson). */
 
 import { describe, expect, it } from 'bun:test'
 import { sniffMime } from '../src/image.ts'
@@ -7,31 +7,31 @@ import { readFileSync } from 'node:fs'
 const hex = (s: string): Uint8Array => new Uint8Array((s.match(/../g) ?? []).map(b => parseInt(b, 16)))
 
 describe('sniffMime', () => {
-  it('JPEG/PNG/WebP/GIF — прежние сигнатуры', () => {
-    // JPEG/GIF-сниффер требует 12 байт (реальные файлы длиннее магики)
+  it('JPEG/PNG/WebP/GIF — the previous signatures', () => {
+    // the JPEG/GIF sniffer requires 12 bytes (real files are longer than the magic)
     expect(sniffMime(hex('ffd8ffe000104a4649460000'))).toBe('image/jpeg')
     expect(sniffMime(hex('89504e470d0a1a0a00000000'))).toBe('image/png')
     expect(sniffMime(hex('524946462400000057454250'))).toBe('image/webp')
     expect(sniffMime(hex('4749463839610d0a01003b00'))).toBe('image/gif')
   })
 
-  it('AVIF: ftyp-box с major brand avif/avis/mif1', () => {
-    // Реальная магика из forest_house.glb (EXT_texture_avif, bufferView 0):
+  it('AVIF: ftyp box with major brand avif/avis/mif1', () => {
+    // Real magic from forest_house.glb (EXT_texture_avif, bufferView 0):
     // 00 00 00 1c 'ftyp' 'avif'
     expect(sniffMime(hex('0000001c6674797061766966'))).toBe('image/avif')
-    // Последовательность AVIS
+    // The AVIS sequence
     expect(sniffMime(hex('0000001c6674797061766973'))).toBe('image/avif')
-    // HEIF-контейнер (mif1) — AVIF-файлы Blender/glTF-Transform
+    // HEIF container (mif1) — AVIF files of Blender/glTF-Transform
     expect(sniffMime(hex('00000018667479706d696631'))).toBe('image/avif')
   })
 
-  it('не-AVIF ftyp (mp4 и прочие BMFF) не детектятся как avif', () => {
+  it('non-AVIF ftyp (mp4 and other BMFF) is not detected as avif', () => {
     expect(sniffMime(hex('00000018667479706d703432'))).toBe('application/octet-stream')
     expect(sniffMime(hex('0000001c6674797068656963'))).toBe('application/octet-stream') // heic
   })
 
-  it('реальный forest_house.glb: image/avif детектится из первого bufferView', () => {
-    // Файл ассета не обязателен для CI — синтетика выше покрывает контракт.
+  it('real forest_house.glb: image/avif is detected from the first bufferView', () => {
+    // The asset file is not required for CI — the synthetics above cover the contract.
     try {
       const real = new Uint8Array(
         readFileSync('/home/z/my-project/scripts/models-demo/assets/forest_house.glb'),
@@ -41,7 +41,7 @@ describe('sniffMime', () => {
       const binStart = binPos + 8
       expect(sniffMime(real.subarray(binStart, binStart + 12))).toBe('image/avif')
     } catch {
-      // ассет отсутствует в чистом окружении — пропускаем
+      // the asset is missing in a clean environment — skipping
     }
   })
 })

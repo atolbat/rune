@@ -1,8 +1,8 @@
 /**
- * Настоящий фасад WebGPU: adapter/device, контекст канваса, UBO с dynamic
- * offsets, ленивые пайплайны (дескрипторы выводятся из атрибутов команды —
- * урок инцидента «тёмный канвас»), writeTexture-тайлы с origin, bind-группа
- * текстур (group 1). Тихие ошибки валидации уходят в onGpuError.
+ * The real WebGPU facade: adapter/device, canvas context, UBO with dynamic
+ * offsets, lazy pipelines (descriptors are derived from command attributes —
+ * a lesson of the "dark canvas" incident), writeTexture tiles with origin,
+ * the texture bind group (group 1). Silent validation errors go to onGpuError.
  */
 
 import type { GPUFacade, GPUImageSource, GpuTimerHandle, GpuAttrSlot } from './facade.ts'
@@ -12,14 +12,14 @@ import type { GpuTimer } from '@rune/core'
 import { GPU_FORMATS } from './formats.ts'
 import type { TextureFormat, TextureFormatId } from '@rune/core'
 
-/** Канвас любого типа (HTML или Offscreen). Избегаем циклической зависимости
- *  на @rune/gl, поэтому тип локальный, структурно совместимый. */
+/** A canvas of any type (HTML or Offscreen). We avoid a circular dependency
+ *  on @rune/gl, so the type is local and structurally compatible. */
 type AnyCanvas = HTMLCanvasElement | OffscreenCanvas
 
-/** Task 69: вариант sampleType текстурного биндинга (group 1). 'float' —
- *  фильтруемые текстуры (LINEAR); 'unfilterable-float' — rgba32float без
- *  feature 'float32-filterable' (NEAREST, сэмпл только через
- *  textureSampleLevel). */
+/** Task 69: the sampleType variant of the texture binding (group 1).
+ *  'float' — filterable textures (LINEAR); 'unfilterable-float' —
+ *  rgba32float without feature 'float32-filterable' (NEAREST, sampling
+ *  only via textureSampleLevel). */
 type TextureSampleVariant = 'float' | 'unfilterable-float'
 
 export async function createRealGPU(
@@ -27,46 +27,47 @@ export async function createRealGPU(
   onGpuError?: (message: string) => void,
 ): Promise<GPUFacade> {
   const adapter = await navigator.gpu.requestAdapter()
-  if (adapter === null) throw new Error('rune: WebGPU-адаптер недоступен')
-  // Запросить timestamp-query feature ЕСЛИ adapter её поддерживает.
-  // Это даёт device.createQuerySet({ type: 'timestamp' }) и pass.writeTimestamp.
-  // На адаптерах без feature — device создаётся без неё, GpuTimer не подключается.
+  if (adapter === null) throw new Error('rune: WebGPU adapter unavailable')
+  // Request the timestamp-query feature IF the adapter supports it.
+  // This enables device.createQuerySet({ type: 'timestamp' }) and pass.writeTimestamp.
+  // On adapters without the feature — the device is created without it, GpuTimer is not wired.
   const requiredFeatures: GPUFeatureName[] = []
   if (adapter.features.has('timestamp-query' as GPUFeatureName)) {
     requiredFeatures.push('timestamp-query' as GPUFeatureName)
   }
-  // Task 69: 'float32-filterable' — линейная фильтрация rgba32float.
-  // Запрашиваем, ЕСЛИ адаптер умеет (как timestamp-query): на таких устройствах
-  // rgba32float остаётся LINEAR + sampleType 'float' — поведение не меняется.
-  // На устройствах без feature фасад деградирует корректно: sampler → nearest,
-  // bind-group/pipeline layout → sampleType 'unfilterable-float' + sampler
-  // 'non-filtering' (см. bindTexture/ensurePipeline). Раньше bind-group
-  // создавался с sampleType 'float' на любой текстуре → валидационная ошибка
-  // «None of the supported sample types (UnfilterableFloat) … match the
-  // expected sample types (Float)» при первом сэмплинге rgba32float.
+  // Task 69: 'float32-filterable' — linear filtering of rgba32float.
+  // Requested IF the adapter can (like timestamp-query): on such devices
+  // rgba32float stays LINEAR + sampleType 'float' — behavior unchanged.
+  // On devices without the feature the facade degrades correctly: sampler →
+  // nearest, bind-group/pipeline layout → sampleType 'unfilterable-float' +
+  // sampler 'non-filtering' (see bindTexture/ensurePipeline). Previously the
+  // bind-group was created with sampleType 'float' for any texture → a
+  // validation error "None of the supported sample types (UnfilterableFloat)
+  // ... match the expected sample types (Float)" on first rgba32float
+  // sampling.
   if (adapter.features.has('float32-filterable' as GPUFeatureName)) {
     requiredFeatures.push('float32-filterable' as GPUFeatureName)
   }
-  // ─── WebGPU baseline: anisotropic filtering нативно, без requiredLimits ────
-  // Task 54: по WebGPU spec (ver. 2026-08-20, MDN GPUSupportedLimits)
-  // maxAnisotropy НЕ входит в специфицированный список свойств
-  // GPUSupportedLimits — ни adapter.limits, ни device.limits. Это часть
-  // базовой спецификации: GPUSamplerDescriptor.maxAnisotropy клампится
-  // платформой к своему нативному максимуму (обычно 16). Не требуется
-  // ни requiredFeatures, ни requiredLimits — анисотропная фильтрация
-  // доступна на всех WebGPU-устройствах (платформа clamp'ит к 1 если
-  // оборудование не поддерживает, что эквивалентно bilinear).
+  // ─── WebGPU baseline: anisotropic filtering natively, no requiredLimits ────
+  // Task 54: per the WebGPU spec (ver. 2026-08-20, MDN GPUSupportedLimits)
+  // maxAnisotropy is NOT part of the specified list of GPUSupportedLimits
+  // properties — neither adapter.limits nor device.limits. It is part of
+  // the base specification: GPUSamplerDescriptor.maxAnisotropy is clamped
+  // by the platform to its native maximum (usually 16). Neither
+  // requiredFeatures nor requiredLimits is needed — anisotropic filtering
+  // is available on all WebGPU devices (the platform clamps to 1 if the
+  // hardware does not support it, which is equivalent to bilinear).
   //
-  // realGPU.createTexture передаёт maxAnisotropy через GPUSamplerDescriptor
-  // и платформа клампит. caps.has('anisotropic')=true (см. probeGPUCaps) —
-  // согласовано с реальным применением sampler'а.
+  // realGPU.createTexture passes maxAnisotropy via GPUSamplerDescriptor
+  // and the platform clamps. caps.has('anisotropic')=true (see
+  // probeGPUCaps) — consistent with the sampler's actual usage.
   let device: GPUDevice
   try {
     device = await adapter.requestDevice({ requiredFeatures })
   } catch {
-    // requestDevice может упасть на валидации features или при отсутствии
-    // устройства. Fallback — без requiredFeatures (timestamp-query не
-    // запрошен, gpuMs будет null — честно, не фейковый 0).
+    // requestDevice can fail on feature validation or when the device is
+    // absent. Fallback — without requiredFeatures (timestamp-query not
+    // requested, gpuMs will be null — honest, not a fake 0).
     device = await adapter.requestDevice()
   }
   device.addEventListener('uncapturederror', event => {
@@ -74,23 +75,25 @@ export async function createRealGPU(
   })
 
   const context = canvas.getContext('webgpu') as GPUCanvasContext | null
-  if (context === null) throw new Error('rune: webgpu-контекст канваса недоступен')
+  if (context === null) throw new Error('rune: webgpu canvas context unavailable')
   const gpuContext: GPUCanvasContext = context
   const format = navigator.gpu.getPreferredCanvasFormat()
 
   const textures = new Map<number, { texture: GPUTexture; sampler: GPUSampler; view: GPUTextureView; format: GPUTextureFormat; filterable: boolean }>()
   const textureViews = new Map<number, { textureId: number; view: GPUTextureView }>()
-  // Task 69: пайплайн кэшируется СПЕКОЙ + ВАРИАНТАМИ по sampleType текстурного
-  // биндинга. Вариант 'float' (sampler 'filtering' + texture 'float') — дефолт;
-  // 'unfilterable-float' (sampler 'non-filtering' + texture 'unfilterable-float')
-  // лениво создаётся в bindTexture при первом бинде rgba32float без feature
-  // 'float32-filterable'. Layout пайплайна и bind-group обязаны совпадать по
-  // sampleType — иначе setBindGroup-валидация падает.
+  // Task 69: the pipeline is cached by SPEC + VARIANTS of the texture
+  // binding's sampleType. The 'float' variant (sampler 'filtering' +
+  // texture 'float') is the default; 'unfilterable-float' (sampler
+  // 'non-filtering' + texture 'unfilterable-float') is created lazily in
+  // bindTexture on the first bind of rgba32float without the
+  // 'float32-filterable' feature. The pipeline layout and bind group must
+  // match in sampleType — otherwise setBindGroup validation fails.
   const pipelines = new Map<number, PipelineRecord>()
-  // Vertex buffers: keyed по Float32Array (обычно одна команда = один спек =
-  // одна data). Если пользователь дропнул ссылку на data — GPUBuffer утечёт,
-  // но за весь срок сессии рендерера. dispose() чистит всё. FR не применён:
-  // привязка к lifetime команды спецификации, а не user-facing handle.
+  // Vertex buffers: keyed by Float32Array (usually one command = one spec =
+  // one data). If the user dropped the reference to data — the GPUBuffer
+  // leaks, but only for the whole renderer session. dispose() cleans
+  // everything. FR not applied: tied to the spec command's lifetime, not a
+  // user-facing handle.
   const vertexBuffers = new Map<Float32Array, GPUBuffer>()
   const textureBindGroups = new Map<string, GPUBindGroup>()
   const targets = new Map<number, {
@@ -98,14 +101,14 @@ export async function createRealGPU(
     depthView: GPUTextureView | null
     depthTexture: GPUTexture | null
     color: readonly number[]
-    /** Task 80 (readback): размер и текстура цели — copyTextureToBuffer. */
+    /** Task 80 (readback): target size and texture — copyTextureToBuffer. */
     width: number
     height: number
     textureId: number
   }>()
   let nextTextureId = 1
   let nextTargetId = 1
-  let nextTextureViewId = 1_000_000 // отделяем namespace от textureId (1, 2, 3...)
+  let nextTextureViewId = 1_000_000 // separate the namespace from textureId (1, 2, 3...)
   let width = 0
   let height = 0
   let depthTexture: GPUTexture | null = null
@@ -118,15 +121,16 @@ export async function createRealGPU(
   let currentPipeline: GPURenderPipeline | null = null
   let currentPipelineId = -1
   let currentTarget = 0
-  /** Мульти-текстуры (модель Nefertiti base+normal): текстуры команды
-   *  накапливаются bindTexture'ом, bind-группа фиксируется в draw(). */
+  /** Multi-textures (Nefertiti model base+normal): command textures
+   *  accumulate via bindTexture, the bind group is fixed in draw(). */
   const pendingTextureIds: number[] = []
   let timerHandle: GpuTimerHandle | null = null
-  // Создаём timer ЕСЛИ device имеет 'timestamp-query' feature.
-  // createGpuGpuTimer возвращает {timer, handle} или null (если feature нет).
-  // handle подключается к этому фасаду через timerHandle — onBeginPass /
-  // onEndPass / onSubmit вызываются в bindTarget/endPass/submit. timer
-  // отдаётся через gpu.timer getter — renderer.ts подключит к statsCollector.
+  // Create the timer IF the device has the 'timestamp-query' feature.
+  // createGpuGpuTimer returns {timer, handle} or null (if no feature).
+  // The handle is wired into this facade via timerHandle — onBeginPass /
+  // onEndPass / onSubmit are called in bindTarget/endPass/submit. The timer
+  // is exposed via the gpu.timer getter — renderer.ts will wire it to
+  // statsCollector.
   const timerBundle = createGpuGpuTimer(device)
   const gpuTimer: GpuTimer | null = timerBundle === null ? null : timerBundle.timer
   if (timerBundle !== null) {
@@ -151,11 +155,11 @@ export async function createRealGPU(
     depthView = depthTexture.createView()
   }
 
-  /** Канонический id → нативная GPUTextureFormat (Task 110, реставрация). */
+  /** Canonical id → native GPUTextureFormat (Task 110, restoration). */
   function resolveGpuFormat(id: TextureFormatId): string {
     const info = GPU_FORMATS[id]
     if (info === undefined) {
-      throw new TypeError(`WebGPU не поддерживает формат '${id}' (GL-only или вне каталога)`)
+      throw new TypeError(`WebGPU does not support format '${id}' (GL-only or out of catalog)`)
     }
     return info.gpu
   }
@@ -167,14 +171,16 @@ export async function createRealGPU(
     options?: { mipLevels?: number; maxAnisotropy?: number },
   ): number {
     const mipLevels = options?.mipLevels ?? 1
-    // Task 67 HDR: 'rgba16float'/'rgba32float' — core-форматы WebGPU
-    // (renderable, для rgba16float — и filterable). rgba32float НЕ
-    // фильтруется линейно без feature 'float32-filterable' — sampler
-    // деградирует до 'nearest' (валидно для любого формата), а bind-group
-    // и пайплайн получают sampleType 'unfilterable-float' (Task 69) — иначе
-    // bind-group validation error при первом сэмплинге.
-    // Task 110 (реставрация): полный каталог форматов — TextureFormatId
-    // разрешается через GPU_FORMATS (formats.ts); 'canvas' — формат канваса.
+    // Task 67 HDR: 'rgba16float'/'rgba32float' — core WebGPU formats
+    // (renderable, and for rgba16float — filterable too). rgba32float is
+    // NOT linearly filtered without feature 'float32-filterable' — the
+    // sampler degrades to 'nearest' (valid for any format), and the
+    // bind group and pipeline get sampleType 'unfilterable-float'
+    // (Task 69) — otherwise a bind-group validation error on first
+    // sampling.
+    // Task 110 (restoration): the full format catalog — TextureFormatId
+    // is resolved via GPU_FORMATS (formats.ts); 'canvas' — the canvas
+    // format.
     const gpuFormat: GPUTextureFormat =
       textureFormat === 'canvas'
         ? format
@@ -184,44 +190,45 @@ export async function createRealGPU(
     const texture = device.createTexture({
       size: [w, h],
       format: gpuFormat,
-      // Task 80 (readback): COPY_SRC — copyTextureToBuffer для readTargetPixels
-      // (surface.read()); паритет с GL-фасадом (readPixels читает FBO всегда).
+      // Task 80 (readback): COPY_SRC — copyTextureToBuffer for readTargetPixels
+      // (surface.read()); parity with the GL facade (readPixels always reads the FBO).
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
-      // mipLevelCount: по умолчанию 1. При >1 создаёт mip-chain (imm storage).
-      // Sampler с mipmapFilter='linear' выбирает mip по distance — аналог
-      // LINEAR_MIPMAP_LINEAR в WebGL2.
+      // mipLevelCount: 1 by default. With >1 it creates a mip-chain (imm storage).
+      // A sampler with mipmapFilter='linear' picks the mip by distance — the
+      // analogue of LINEAR_MIPMAP_LINEAR in WebGL2.
       mipLevelCount: mipLevels,
     })
     // Anisotropic filtering — WebGPU GPUSamplerDescriptor.maxAnisotropy.
-    // WebGPU поддерживает нативно (без feature-request, без requiredLimits).
-    // Платформа сама клампит maxAnisotropy к своему нативному максимуму (обычно
-    // 16 на desktop, может быть 1 на некоторых mobile GPU — эффект bilinear).
-    // По умолчанию 1 = disabled. caps.has('anisotropic')=true всегда на WebGPU
-    // (см. probeGPUCaps — Task 54: это часть базовой спецификации).
-    // Применяется только при mipLevels>1 — на non-mip бесполезна.
+    // WebGPU supports it natively (no feature-request, no requiredLimits).
+    // The platform itself clamps maxAnisotropy to its native maximum (usually
+    // 16 on desktop, may be 1 on some mobile GPUs — bilinear effect).
+    // Default 1 = disabled. caps.has('anisotropic')=true always on WebGPU
+    // (see probeGPUCaps — Task 54: it is part of the base specification).
+    // Applied only with mipLevels>1 — useless for non-mip.
     let appliedAniso = 1
     if (mipLevels > 1) {
-      const requested = options?.maxAnisotropy ?? 16 // default 16 — nативный WebGPU max
-      // WebGPU требует степень двойки для maxAnisotropy (1, 2, 4, 8, 16).
-      // Clamp к [1, 16] (нативный WebGPU максимум по спецификации; платформа
-      // дополнительно clamp'ит к своему реальному максимуму при createSampler).
-      // Если платформа не поддерживает anisotropic — clamp к 1, эффект bilinear.
-      const limit = 16 // nативный WebGPU max; device.limits.maxAnisotropy НЕ существует
+      const requested = options?.maxAnisotropy ?? 16 // default 16 — the native WebGPU max
+      // WebGPU requires a power of two for maxAnisotropy (1, 2, 4, 8, 16).
+      // Clamp to [1, 16] (the native WebGPU maximum per specification; the
+      // platform additionally clamps to its real maximum in createSampler).
+      // If the platform does not support anisotropic — clamp to 1, bilinear effect.
+      const limit = 16 // native WebGPU max; device.limits.maxAnisotropy does NOT exist
       const clamped = Math.max(1, Math.min(requested, limit))
       appliedAniso = clamped
     }
     const sampler = device.createSampler({
       magFilter: filterable ? 'linear' : 'nearest',
       minFilter: filterable ? 'linear' : 'nearest',
-      // mipmapFilter='linear' если есть mip-chain. Иначе 'nearest' (по умолчанию
-      // в WebGPU — sampling с mipmapFilter='nearest' игнорирует mip-chain,
-      // всегда сэмплит level 0 — это и нужно для текстур без mips).
+      // mipmapFilter='linear' if there is a mip-chain. Otherwise 'nearest'
+      // (by default in WebGPU — sampling with mipmapFilter='nearest' ignores
+      // the mip-chain, always samples level 0 — which is what textures
+      // without mips need).
       mipmapFilter: mipLevels > 1 && filterable ? 'linear' : 'nearest',
       addressModeU: 'clamp-to-edge',
       addressModeV: 'clamp-to-edge',
-      // maxAnisotropy: применяется при mipmapFilter='linear'. WebGPU сам
-      // валидирует: maxAnisotropy должен быть ∈ {1, 2, 4, 8, 16} и ≤
-      // device.limits.maxAnisotropy. На mobile=1 — эффект нейтральный.
+      // maxAnisotropy: applied with mipmapFilter='linear'. WebGPU itself
+      // validates: maxAnisotropy must be ∈ {1, 2, 4, 8, 16} and ≤
+      // device.limits.maxAnisotropy. On mobile=1 — neutral effect.
       ...(appliedAniso > 1 ? { maxAnisotropy: appliedAniso } : {}),
     })
     const id = nextTextureId++
@@ -232,9 +239,9 @@ export async function createRealGPU(
   function texSubImage2D(textureId: number, x: number, y: number, w: number, h: number, bytes: Uint8Array): void {
     const record = textures.get(textureId)
     if (record === undefined) return
-    // Task 67 HDR: bytesPerRow зависит от формата (rgba16float — 8 б/пиксель,
-    // rgba32float — 16). Данные готовит вызывающий: длина bytes обязана быть
-    // w*h*bytesPerPixel формата.
+    // Task 67 HDR: bytesPerRow depends on the format (rgba16float — 8 B/pixel,
+    // rgba32float — 16). The caller prepares the data: the bytes length must
+    // be w*h*bytesPerPixel of the format.
     const bytesPerPixel = record.format === 'rgba16float' ? 8 : record.format === 'rgba32float' ? 16 : 4
     device.queue.writeTexture(
       { texture: record.texture, origin: { x, y, z: 0 } },
@@ -256,15 +263,15 @@ export async function createRealGPU(
     const record = textures.get(textureId)
     if (record === undefined) return
     // WebGPU ExternalImageCopy — source: ImageBitmap | HTMLcanvasElement | HTMLVideoElement | VideoFrame | OffscreenCanvas
-    // destination.origin = куда в текстуре писать (mip 0 по умолчанию).
-    // copySize = размер копируемого региона. ДОЛЖЕН быть ≤ source.width/height,
-    // иначе validation error "Copy rect is out of bounds of external image".
+    // destination.origin = where in the texture to write (mip 0 by default).
+    // copySize = the size of the copied region. MUST be ≤ source.width/height,
+    // otherwise validation error "Copy rect is out of bounds of external image".
     //
-    // flipY (default false) — если true, источник переворачивается по Y
-    // ПЕРЕД копированием. WebGPU поддерживает нативно через
-    // GPUCopyExternalImageSourceInfo.flipY. Это и есть паритет с WebGL2
-    // UNPACK_FLIP_Y_WEBGL: flipY=true на обоих бэкендах даёт идентичный
-    // результат — пиксели source row 0 попадают в texture row H-1.
+    // flipY (default false) — if true, the source is flipped along Y
+    // BEFORE copying. WebGPU supports it natively via
+    // GPUCopyExternalImageSourceInfo.flipY. This is exactly the parity with
+    // WebGL2 UNPACK_FLIP_Y_WEBGL: flipY=true on both backends gives an
+    // identical result — source row 0 pixels land in texture row H-1.
     device.queue.copyExternalImageToTexture(
       { source: source as GPUCopyExternalImageSource, flipY: flipY === true },
       { texture: record.texture, mipLevel: 0, origin: { x: dstX, y: dstY, z: 0 } },
@@ -284,10 +291,10 @@ export async function createRealGPU(
   ): void {
     const record = textures.get(textureId)
     if (record === undefined) return
-    // WebGPU copyExternalImageToTexture с destination.mipLevel=level.
-    // Source должен иметь размер N/(2^level). WebGPU сам проверит —
-    // при несоответствии будет validation error (асинхронно в onGpuError).
-    // flipY — см. copyExternalImageToTexture выше (GPUCopyExternalImageSourceInfo.flipY).
+    // WebGPU copyExternalImageToTexture with destination.mipLevel=level.
+    // The source must have size N/(2^level). WebGPU will check it itself —
+    // on mismatch there will be a validation error (asynchronously in onGpuError).
+    // flipY — see copyExternalImageToTexture above (GPUCopyExternalImageSourceInfo.flipY).
     device.queue.copyExternalImageToTexture(
       { source: source as GPUCopyExternalImageSource, flipY: flipY === true },
       { texture: record.texture, mipLevel, origin: { x: dstX, y: dstY, z: 0 } },
@@ -300,10 +307,11 @@ export async function createRealGPU(
     try {
       device.queue.writeBuffer(ubo!, offset, data as Uint8Array<ArrayBuffer>)
     } catch (error) {
-      // Task 75: синхронные ошибки валидации writeBuffer (например, размер
-      // больше буфера) НЕ должны ронять демо «Uncaught OperationError» —
-      // уходят в канал onGpuError, кадр деградирует, но живёт.
-      onGpuError?.(`writeBuffer(uniforms, ${data.length} байт @${offset}) отклонён: ${errorMessage(error)}`)
+      // Task 75: synchronous writeBuffer validation errors (e.g. size
+      // larger than the buffer) must NOT crash the demo with an
+      // "Uncaught OperationError" — they go to the onGpuError channel, the
+      // frame degrades but lives.
+      onGpuError?.(`writeBuffer(uniforms, ${data.length} bytes @${offset}) rejected: ${errorMessage(error)}`)
     }
   }
 
@@ -326,7 +334,7 @@ export async function createRealGPU(
     if (ubo !== null) ubo.destroy()
     ubo = next
     uboSize = size
-    currentPipeline = null // перезапайплайнить layout-зависимые кэши
+    currentPipeline = null // rebuild layout-dependent pipeline caches
     pipelines.clear()
   }
 
@@ -336,24 +344,25 @@ export async function createRealGPU(
       wgsl,
       attrs,
       hasTextures,
-      // Мульти-текстуры: layout group 1 строится по числу texture_2d-деклараций
-      // в WGSL (1 — старый однотекстурный контракт, 2+ — base+normal map и т.п.)
+      // Multi-textures: layout group 1 is built by the number of texture_2d
+      // declarations in WGSL (1 — the old single-texture contract, 2+ —
+      // base+normal map etc.)
       textureCount: hasTextures ? countGroup1TextureBindings(wgsl) : 0,
       desc: desc ?? {},
       variants: new Map<TextureSampleVariant, GPURenderPipeline>(),
     }
     pipelines.set(pipelineId, record)
-    // Дефолтный вариант 'float' — фильтруемые текстуры (все, кроме rgba32float
-    // на устройствах без 'float32-filterable').
+    // The default 'float' variant — filterable textures (all except
+    // rgba32float on devices without 'float32-filterable').
     record.variants.set('float', buildPipeline(record, 'float'))
   }
 
-  /** Task 69: собрать пайплайн под конкретный sampleType текстурного биндинга.
-   *  'float' → sampler 'filtering' + texture 'float' (LINEAR-фильтрация);
+  /** Task 69: build a pipeline for a specific texture binding sampleType.
+   *  'float' → sampler 'filtering' + texture 'float' (LINEAR filtering);
    *  'unfilterable-float' → sampler 'non-filtering' + texture
-   *  'unfilterable-float' (NEAREST; единственный легальный способ сэмплинга
-   *  rgba32float без feature 'float32-filterable'). WGSL обязан использовать
-   *  textureSampleLevel (textureSample требует filterable-текстуру). */
+   *  'unfilterable-float' (NEAREST; the only legal way to sample
+   *  rgba32float without feature 'float32-filterable'). WGSL must use
+   *  textureSampleLevel (textureSample requires a filterable texture). */
   function buildPipeline(
     record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; textureCount: number; desc: GpuPipelineDesc },
     variant: TextureSampleVariant,
@@ -362,12 +371,13 @@ export async function createRealGPU(
     const attrs = record.attrs
     const desc = record.desc
     const module = device.createShaderModule({ code: wgsl })
-    // getCompilationInfo — best-effort диагностика: на SwiftShader/падении
-    // GPU-процесса промис может reject'нуться («Instance dropped error») —
-    // это НЕ ошибка движка, глотаем чтобы не получить unhandled rejection.
+    // getCompilationInfo — best-effort diagnostics: on SwiftShader / a
+    // GPU-process crash the promise may reject ("Instance dropped error") —
+    // this is NOT an engine error, we swallow it to avoid an unhandled
+    // rejection.
     void module.getCompilationInfo().then(info => {
       for (const message of info.messages) {
-        if (message.type === 'error') onGpuError?.(`WGSL: ${message.message} (строка ${message.lineNum})`)
+        if (message.type === 'error') onGpuError?.(`WGSL: ${message.message} (line ${message.lineNum})`)
       }
     }).catch(() => {})
     const group0 = device.createBindGroupLayout({
@@ -379,9 +389,9 @@ export async function createRealGPU(
     })
     const layouts: GPUBindGroupLayout[] = [group0]
     if (record.hasTextures) {
-      // Мульти-текстуры: bindings 1..N по числу texture_2d в WGSL (N=1 —
-      // прежний однотекстурный layout, бэквард-совместимо). Все текстуры
-      // команды делят один сэмплер (binding 0).
+      // Multi-textures: bindings 1..N by the number of texture_2d in WGSL
+      // (N=1 — the previous single-texture layout, backward compatible).
+      // All textures of the command share one sampler (binding 0).
       const textureEntries: { binding: number; visibility: number; texture: { sampleType: TextureSampleVariant } }[] = []
       for (let slot = 1; slot <= Math.max(1, record.textureCount); slot++) {
         textureEntries.push({
@@ -396,11 +406,12 @@ export async function createRealGPU(
           ...textureEntries,
         ],
       }))
-      // Проактивная диагностика (Task 69): textureSample в WGSL несовместим с
-      // вариантом 'unfilterable-float' — пайплайн не соберётся. Говорим честно,
-      // как чинить (textureSampleLevel валиден для ОБЕИХ вариантов).
+      // Proactive diagnostics (Task 69): textureSample in WGSL is
+      // incompatible with the 'unfilterable-float' variant — the pipeline
+      // will not build. We say honestly how to fix it (textureSampleLevel
+      // is valid for BOTH variants).
       if (variant === 'unfilterable-float' && /\btextureSample\s*\(/.test(wgsl)) {
-        onGpuError?.('rgba32float без feature float32-filterable: WGSL вызывает textureSample — он требует filterable-текстуру (sampleType float). Для unfilterable-float допустим textureSampleLevel(t, s, uv, level) — он валиден и для фильтруемых текстур (level 0 = базовый мип).')
+        onGpuError?.('rgba32float without feature float32-filterable: WGSL calls textureSample — it requires a filterable texture (sampleType float). For unfilterable-float, textureSampleLevel(t, s, uv, level) is allowed — it is valid for filterable textures too (level 0 = base mip).')
       }
     }
     return device.createRenderPipeline({
@@ -408,13 +419,13 @@ export async function createRealGPU(
       vertex: {
         module,
         entryPoint: 'vsMain',
-        // M5 (Task 73): tight-числа — своя раскладка (size*4); интерливинг
-        // фида — объект {size, stride, offset}: arrayStride=запись,
-        // attribute offset=поле. Несколько полей одного фида — несколько
-        // слотов, указывающих на общий буфер (биндинг — bindVertexBuffer).
-        // Task 75: slot.step='instance' → stepMode 'instance' — запись фида
-        // читается один раз на ИНСТАНС (квады-звёзды: углы разворачиваются
-        // из @builtin(vertex_index) в шейдере, count=6, instances=feed.count).
+        // M5 (Task 73): tight numbers — their own layout (size*4); feed
+        // interleaving — an object {size, stride, offset}: arrayStride=record,
+        // attribute offset=field. Several fields of one feed — several
+        // slots pointing at a shared buffer (binding — bindVertexBuffer).
+        // Task 75: slot.step='instance' → stepMode 'instance' — a feed record
+        // is read once per INSTANCE (quad-stars: corners are expanded from
+        // @builtin(vertex_index) in the shader, count=6, instances=feed.count).
         buffers: attrs.map((slot, i) =>
           typeof slot === 'number'
             ? { arrayStride: slot * 4, attributes: [{ shaderLocation: i, offset: 0, format: vertexFormat(slot) }] }
@@ -428,9 +439,9 @@ export async function createRealGPU(
       fragment: {
         module,
         entryPoint: 'fsMain',
-        // Task 75: blend из GpuPipelineDesc (премультиплицированный вывод
-        // шейдера: аддитив = one/one, альфа = one/one-minus-src-alpha).
-        // Словарь BlendFactor фасада совпадает с GPUBlendFactor один-в-один.
+        // Task 75: blend from GpuPipelineDesc (premultiplied shader
+        // output: additive = one/one, alpha = one/one-minus-src-alpha).
+        // The facade's BlendFactor dictionary matches GPUBlendFactor one-to-one.
         targets: [{
           format,
           blend: desc.blend === undefined || desc.blend === false ? undefined : {
@@ -439,10 +450,11 @@ export async function createRealGPU(
           },
         }],
       },
-      // Task 75: depth из дескриптора. Канвас-пасс ВСЕГДА несёт depth24plus-
-      // attachment → пайплайн обязан объявлять совместимый depthStencil; для
-      // «выключенной» глубины это write:false + compare:'always' (сохраняем
-      // формат, чтобы не плодить вторую ветку пассов без глубины).
+      // Task 75: depth from the descriptor. The canvas pass ALWAYS carries
+      // a depth24plus attachment → the pipeline must declare a compatible
+      // depthStencil; for "disabled" depth it is write:false +
+      // compare:'always' (we keep the format to avoid spawning a second
+      // branch of depth-less passes).
       primitive: {
         topology: desc.primitive === 'triangle-strip' ? 'triangle-strip' : 'triangle-list',
         cullMode: desc.raster?.cull === 'back' || desc.raster?.cull === 'front' ? desc.raster.cull : 'none',
@@ -456,7 +468,7 @@ export async function createRealGPU(
     })
   }
 
-  /** DepthFunc фасада → GPUCompareFunction. */
+  /** Facade DepthFunc → GPUCompareFunction. */
   function depthCompareOf(test: string | undefined): GPUCompareFunction {
     switch (test) {
       case 'never': return 'never'
@@ -481,15 +493,15 @@ export async function createRealGPU(
     const record = pipelines.get(pipelineId)
     if (record === undefined) return
     currentPipelineId = pipelineId
-    // Новая команда — накапливаемые текстуры сбрасываются (бинд-группа
-    // строится в draw() по набору текущей команды)
+    // New command — accumulated textures are reset (the bind group is
+    // built in draw() from the current command's set)
     pendingTextureIds.length = 0
-    // Дефолтный вариант 'float'; bindTexture переключит на
-    // 'unfilterable-float', если биндится rgba32float без feature.
+    // The default 'float' variant; bindTexture will switch to
+    // 'unfilterable-float' if an rgba32float without the feature is bound.
     setPipelineVariant(record, 'float')
   }
 
-  /** Установить вариант пайплайна (лениво создаётся при первом обращении). */
+  /** Set the pipeline variant (created lazily on first use). */
   function setPipelineVariant(
     record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; textureCount: number; desc: GpuPipelineDesc; variants: Map<TextureSampleVariant, GPURenderPipeline> },
     variant: TextureSampleVariant,
@@ -518,10 +530,11 @@ export async function createRealGPU(
     pass?.setVertexBuffer(slot, buffer)
   }
 
-  /** M5 (Task 73): динамический вершинный буфер фида — writeBuffer одним
-   *  вызовом на кадр с грязным диапазоном [0, byteLength). Ключ — стабильная
-   *  Float32Array рендерера фида (SAB-view / зеркало T3). Биндинг — позже,
-   *  через bindVertexBuffer (тот же keyed-кэш, без повторной записи). */
+  /** M5 (Task 73): the feed's dynamic vertex buffer — writeBuffer in a
+   *  single call per frame with the dirty range [0, byteLength). The key
+   *  is the feed renderer's stable Float32Array (SAB view / T3 mirror).
+   *  Binding — later, via bindVertexBuffer (the same keyed cache, no
+   *  repeated write). */
   function syncVertexBuffer(data: Float32Array, byteLength: number): void {
     let buffer = vertexBuffers.get(data)
     if (buffer === undefined) {
@@ -532,27 +545,27 @@ export async function createRealGPU(
     guardedWriteVertex(buffer, data, byteLength)
   }
 
-  /** Task 75: защищённая запись вершинного буфера. Три рубежа:
-   *  (1) clamp byteLength до размера GPU-буфера (data.byteLength может
-   *      расти/расходиться с ключом кэша при стрессе);
-   *  (2) копия SAB-view в обычный ArrayBuffer (WebGPU запрещает shared
-   *      memory в writeBuffer — фиды T1/T2);
-   *  (3) try/catch вокруг writeBuffer — синхронная ошибка валидации
-   *      («Number of bytes to write is too large», некратность 4 и пр.)
-   *      уходит в onGpuError, кадр ПРОДОЛЖАЕТСЯ, демо не падает.
-   *  ⚠️ Формы вызова: TypedArray → dataOffset/size в ЭЛЕМЕНТАХ; ArrayBuffer →
-   *  в БАЙТАХ (спека GPUQueue.writeBuffer). */
+  /** Task 75: guarded vertex buffer write. Three lines of defense:
+   *  (1) clamp byteLength to the GPU buffer size (data.byteLength may
+   *      grow/diverge from the cache key under stress);
+   *  (2) copy the SAB view into a plain ArrayBuffer (WebGPU forbids shared
+   *      memory in writeBuffer — T1/T2 feeds);
+   *  (3) try/catch around writeBuffer — a synchronous validation error
+   *      ("Number of bytes to write is too large", non-multiple of 4 etc.)
+   *      goes to onGpuError, the frame CONTINUES, the demo does not crash.
+   *  ⚠️ Call forms: TypedArray → dataOffset/size in ELEMENTS; ArrayBuffer →
+   *  in BYTES (GPUQueue.writeBuffer spec). */
   function guardedWriteVertex(buffer: GPUBuffer, data: Float32Array, byteLength: number): void {
-    // (1) clamp: записываем не больше размера GPU-буфера.
+    // (1) clamp: write no more than the GPU buffer size.
     const capped = Math.min(byteLength, buffer.size)
     if (capped !== byteLength) {
-      onGpuError?.(`writeBuffer(vertex) clamp: ${byteLength} → ${capped} байт (размер буфера ${buffer.size})`)
+      onGpuError?.(`writeBuffer(vertex) clamp: ${byteLength} → ${capped} bytes (buffer size ${buffer.size})`)
     }
     if (capped <= 0) return
     try {
       const isSabView = typeof SharedArrayBuffer !== 'undefined' && data.buffer instanceof SharedArrayBuffer
       if (isSabView) {
-        // capped — часть диапазона записи (кратно 4); копия в обычный буфер.
+        // capped — part of the write range (multiple of 4); copy into a plain buffer.
         const copy = new Uint8Array(new ArrayBuffer(capped))
         copy.set(new Uint8Array(data.buffer, data.byteOffset, capped))
         device.queue.writeBuffer(buffer, 0, copy)
@@ -562,33 +575,36 @@ export async function createRealGPU(
         device.queue.writeBuffer(buffer, 0, data as Float32Array<ArrayBuffer>)
         return
       }
-      // ArrayBuffer-форма: смещение и размер — в БАЙТАХ.
+      // ArrayBuffer form: offset and size — in BYTES.
       device.queue.writeBuffer(buffer, 0, data.buffer as ArrayBuffer, data.byteOffset, capped)
     } catch (error) {
-      onGpuError?.(`writeBuffer(vertex, ${capped} байт) отклонён: ${errorMessage(error)}`)
+      onGpuError?.(`writeBuffer(vertex, ${capped} bytes) rejected: ${errorMessage(error)}`)
     }
   }
 
   function bindTexture(textureOrViewId: number): void {
-    // Мульти-текстуры: биндинги НАКАПЛИВАЮТСЯ до draw() — bind-группа
-    // собирается по всем текстурам команды (layout: sampler@0 + tex@1..N).
-    // Однотекстурные команды: прежнее поведение, но setBindGroup
-    // переносится в draw() (для лент порядок «bindTexture до draw» тот же).
+    // Multi-textures: bindings ACCUMULATE until draw() — the bind group
+    // is assembled from all the command's textures (layout: sampler@0 +
+    // tex@1..N).
+    // Single-texture commands: previous behavior, but setBindGroup is
+    // moved into draw() (for tapes the "bindTexture before draw" order
+    // is the same).
     //
-    // textureOrViewId: либо textureId (1..1M) → default view, либо viewId
-    // (1M+) → sub-mip-range view из textureViews Map.
-    // Если id ∈ textureViews → берём sub-view (созданный через
-    // createTextureView). Иначе — default-view из textures Map.
+    // textureOrViewId: either a textureId (1..1M) → default view, or a
+    // viewId (1M+) → sub-mip-range view from the textureViews Map.
+    // If id ∈ textureViews → take the sub-view (created via
+    // createTextureView). Otherwise — the default view from the textures Map.
     //
-    // Task 69: sampleType bind-group-Layout выводится из ФИЛЬТРУЕМОСТИ
-    // текстуры: rgba32float без feature 'float32-filterable' →
-    // 'unfilterable-float' + sampler 'non-filtering' (сэмплер у такой
-    // текстуры уже nearest). Захардкоженный 'float' давал валидационную
-    // ошибку CreateBindGroup: «None of the supported sample types
-    // (UnfilterableFloat) of [Texture rgba32float] match the expected
-    // sample types (Float)». Layout пайплайна синхронно переключается на
-    // соответствующий вариант (setPipelineVariant) — иначе несовместимость
-    // пайплайн/bind-group всплыла бы на draw.
+    // Task 69: the bind-group layout sampleType is derived from the
+    // texture's FILTERABILITY: rgba32float without feature
+    // 'float32-filterable' → 'unfilterable-float' + sampler
+    // 'non-filtering' (such a texture's sampler is already nearest).
+    // The hardcoded 'float' produced a CreateBindGroup validation error:
+    // "None of the supported sample types (UnfilterableFloat) of [Texture
+    // rgba32float] match the expected sample types (Float)". The pipeline
+    // layout is synchronously switched to the matching variant
+    // (setPipelineVariant) — otherwise the pipeline/bind-group
+    // incompatibility would surface at draw.
     const record = pipelineOfTexture()
     const resolved = resolveTexture(textureOrViewId)
     if (resolved === undefined) return
@@ -598,12 +614,12 @@ export async function createRealGPU(
     if (pendingTextureIds.length < 32) pendingTextureIds.push(textureOrViewId)
   }
 
-  /** Текущий пайплайн-рекорд (для варианта и счётчика текстур). */
+  /** The current pipeline record (for variant and texture count). */
   function pipelineOfTexture(): PipelineRecord | undefined {
     return currentPipelineId >= 0 ? pipelines.get(currentPipelineId) : undefined
   }
 
-  /** Текстура/саб-вью по id: view + sampler + фильтруемость. */
+  /** Texture/sub-view by id: view + sampler + filterability. */
   function resolveTexture(textureOrViewId: number): { view: GPUTextureView; sampler: GPUSampler; filterable: boolean } | undefined {
     const subView = textureViews.get(textureOrViewId)
     if (subView !== undefined) {
@@ -616,9 +632,9 @@ export async function createRealGPU(
     return { view: record.view, sampler: record.sampler, filterable: record.filterable }
   }
 
-  /** Мульти-текстурная bind-группа: sampler@0 + tex@1..N по всем
-   *  накопленным текстурам (недостающие слоты — повтор последней).
-   *  Кэш по составу (id-строка + вариант) — смена набора = новая группа. */
+  /** Multi-texture bind group: sampler@0 + tex@1..N from all accumulated
+   *  textures (missing slots — repeat of the last one). Cached by
+   *  composition (id string + variant) — a set change = a new group. */
   function flushTextureBindGroup(): void {
     if (pendingTextureIds.length === 0) return
     if (pass === null) {
@@ -664,7 +680,7 @@ export async function createRealGPU(
   }
 
   function beginPass(_clearIndex: number): void {
-    // Канвас-пасс = bindTarget(0, clear): единый путь переключения целей
+    // Canvas pass = bindTarget(0, clear): the single target-switching path
     bindTarget(0, true)
   }
 
@@ -676,7 +692,7 @@ export async function createRealGPU(
     color: readonly [number, number, number, number],
   ): number {
     const record = textures.get(textureId)
-    if (record === undefined) throw new Error(`rune: createTarget — текстура ${textureId} не найдена`)
+    if (record === undefined) throw new Error(`rune: createTarget — texture ${textureId} not found`)
     let targetDepthView: GPUTextureView | null = null
     let targetDepthTexture: GPUTexture | null = null
     if (depth) {
@@ -695,7 +711,7 @@ export async function createRealGPU(
   function bindTarget(targetId: number, clear: boolean): void {
     if (targetId === currentTarget && pass !== null && !clear) return
     if (pass !== null) {
-      // END-stamp ПЕРЕД pass.end(): writeTimestamp(querySet, END_INDEX)
+      // END stamp BEFORE pass.end(): writeTimestamp(querySet, END_INDEX)
       if (timerHandle !== null) timerHandle.onEndPass(pass)
       pass.end()
       pass = null
@@ -731,10 +747,10 @@ export async function createRealGPU(
       colorAttachments: [{ view: colorView, clearValue, loadOp, storeOp: 'store' }],
       depthStencilAttachment: depthAttachment,
     })
-    // BEGIN-stamp ПОСЛЕ beginRenderPass: writeTimestamp(querySet, BEGIN_INDEX)
+    // BEGIN stamp AFTER beginRenderPass: writeTimestamp(querySet, BEGIN_INDEX)
     if (timerHandle !== null) timerHandle.onBeginPass(pass)
-    // Новый пасс — пайплайн и его вариант выставляются заново (usePipeline);
-    // сброс id исключает свап варианта по устаревшему пайплайну в bindTexture.
+    // New pass — the pipeline and its variant are set anew (usePipeline);
+    // resetting the id prevents a variant swap on a stale pipeline in bindTexture.
     currentPipelineId = -1
     currentPipeline = null
   }
@@ -752,40 +768,40 @@ export async function createRealGPU(
 
   function submit(): void {
     if (encoder === null) return
-    // onSubmit ПЕРЕД encoder.finish(): resolveQuerySet(BEGIN..END →
-    // resolveBuffer) + copyBuffer(resolveBuffer → readBuffer для mapAsync).
+    // onSubmit BEFORE encoder.finish(): resolveQuerySet(BEGIN..END →
+    // resolveBuffer) + copyBuffer(resolveBuffer → readBuffer for mapAsync).
     if (timerHandle !== null) timerHandle.onSubmit(encoder)
     device.queue.submit([encoder.finish()])
     encoder = null
   }
 
   // ─── Task 80: readback (copyTextureToBuffer + mapAsync) ──────────────
-  // Контракт: RGBA8, строки СВЕРХУ ВНИЗ (texture row 0 = верх), tight-раскладка
-  // (без 256-байтового выравнивания bytesPerRow), каналы RGBA — BGRA-канвасные
-  // форматы свиззлируются. Полный паритет с GL-фасадом (readPixels + flip):
-  // data[0..3] — верхний-левый пиксель на ОБОИХ бэкендах.
+  // Contract: RGBA8, rows TOP-DOWN (texture row 0 = top), tight layout
+  // (no 256-byte bytesPerRow alignment), RGBA channels — BGRA canvas
+  // formats are swizzled. Full parity with the GL facade (readPixels +
+  // flip): data[0..3] — the top-left pixel on BOTH backends.
 
   function readTargetPixels(targetId: number): Promise<Uint8Array> {
     return new Promise<Uint8Array>((resolve, reject) => {
       if (targetId === 0) {
-        reject(new Error('rune: readTargetPixels(0) — канвас не читается (presented-текстура живёт один кадр). Читайте ПОВЕРХНОСТЬ: renderer.surface(...) → capture/проходы → surface.read()'))
+        reject(new Error('rune: readTargetPixels(0) — the canvas cannot be read (a presented texture lives one frame). Read the SURFACE: renderer.surface(...) → capture/passes → surface.read()'))
         return
       }
       const target = targets.get(targetId)
       if (target === undefined) {
-        reject(new Error(`rune: readTargetPixels — цель ${targetId} не найдена (удалена или не создана)`))
+        reject(new Error(`rune: readTargetPixels — target ${targetId} not found (deleted or never created)`))
         return
       }
       const record = textures.get(target.textureId)
       if (record === undefined) {
-        reject(new Error(`rune: readTargetPixels — текстура ${target.textureId} цели ${targetId} не найдена`))
+        reject(new Error(`rune: readTargetPixels — texture ${target.textureId} of target ${targetId} not found`))
         return
       }
       try {
         const w = target.width
         const h = target.height
-        // Открытый пасс на этой цели нельзя читать — закрываем; копия
-        // дописывается в ТЕ ЖЕ командный буфер (порядок сохранён), затем submit.
+        // An open pass on this target cannot be read — we close it; the
+        // copy is appended to the SAME command buffer (order preserved), then submit.
         if (pass !== null) {
           if (timerHandle !== null) timerHandle.onEndPass(pass)
           pass.end()
@@ -793,7 +809,7 @@ export async function createRealGPU(
         }
         encoder ??= device.createCommandEncoder()
         const rowBytes = w * 4
-        const bytesPerRow = Math.ceil(rowBytes / 256) * 256 // WebGPU-выравнивание
+        const bytesPerRow = Math.ceil(rowBytes / 256) * 256 // WebGPU alignment
         const buffer = device.createBuffer({
           size: bytesPerRow * h,
           usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
@@ -803,7 +819,7 @@ export async function createRealGPU(
           { buffer, bytesPerRow, rowsPerImage: h },
           [w, h, 1],
         )
-        // Свиззл BGRA→RGBA нужен для канвасных форматов (bgra8unorm на большинстве платформ).
+        // The BGRA→RGBA swizzle is needed for canvas formats (bgra8unorm on most platforms).
         const swizzle = record.format === 'bgra8unorm' || record.format === 'bgra8unorm-srgb'
         submit()
         void buffer.mapAsync(GPUMapMode.READ).then(
@@ -829,14 +845,14 @@ export async function createRealGPU(
               buffer.destroy()
               resolve(out)
             } catch (e) {
-              try { buffer.destroy() } catch { /* уже мёртв */ }
+              try { buffer.destroy() } catch { /* already dead */ }
               reject(e instanceof Error ? e : new Error(String(e)))
             }
           },
           (e: unknown) => {
-            // mapAsync отвергнут: device lost / уничтожен буфер — честный reject.
-            try { buffer.destroy() } catch { /* уже мёртв */ }
-            reject(e instanceof Error ? e : new Error(`readTargetPixels: mapAsync отвергнут (${String(e)})`))
+            // mapAsync rejected: device lost / buffer destroyed — honest reject.
+            try { buffer.destroy() } catch { /* already dead */ }
+            reject(e instanceof Error ? e : new Error(`readTargetPixels: mapAsync rejected (${String(e)})`))
           },
         )
       } catch (e) {
@@ -845,21 +861,21 @@ export async function createRealGPU(
     })
   }
 
-  // ─── Disposal: явное освобождение GPU-ресурса ────────────────────────
-  // Идемпотентность: повторный delete того же id — no-op (записи уже нет в Map).
+  // ─── Disposal: explicit release of GPU resources ────────────────────────
+  // Idempotency: deleting the same id again — no-op (the record is already gone from the Map).
 
   function deleteTexture(textureId: number): void {
     const record = textures.get(textureId)
     if (record === undefined) return
-    // Инвалидация bind-групп (в т.ч. мульти-текстурных составов), где
-    // участвует эта текстура: при следующем draw() группа будет пересоздана.
+    // Invalidate bind groups (including multi-texture compositions) that
+    // involve this texture: on the next draw() the group will be recreated.
     for (const key of textureBindGroups.keys()) {
       const parts = key.split(':')
       if (parts.length > 2 && parts[2].split(',').includes(String(textureId))) {
         textureBindGroups.delete(key)
       }
     }
-    // Удалить все sub-views этой текстуры (созданные через createTextureView)
+    // Delete all sub-views of this texture (created via createTextureView)
     for (const [viewId, sv] of textureViews) {
       if (sv.textureId === textureId) {
         invalidateTextureViewBindGroups(viewId)
@@ -867,11 +883,11 @@ export async function createRealGPU(
       }
     }
     record.texture.destroy()
-    // GPUSampler не имеет destroy() — GC сам уберёт
+    // GPUSampler has no destroy() — GC will clean it up
     textures.delete(textureId)
   }
 
-  /** Выкидывает из кэша все составы, содержащие саб-вью (viewId). */
+  /** Evicts from the cache all compositions containing the sub-view (viewId). */
   function invalidateTextureViewBindGroups(viewId: number): void {
     for (const key of textureBindGroups.keys()) {
       const parts = key.split(':')
@@ -887,10 +903,10 @@ export async function createRealGPU(
   ): number {
     const record = textures.get(textureId)
     if (record === undefined) {
-      // Текстура не найдена — WebGPU сам бы бросил, мы молча вернём 0.
-      // Caller должен проверить через textureId ∈ textures, но мы не
-      // экспонируем Map. Лучше бросать внятную ошибку.
-      throw new Error(`rune: createTextureView — текстура ${textureId} не найдена`)
+      // Texture not found — WebGPU itself would throw; we would silently
+      // return 0. The caller should check textureId ∈ textures, but we do
+      // not expose the Map. Better to throw a clear error.
+      throw new Error(`rune: createTextureView — texture ${textureId} not found`)
     }
     const view = record.texture.createView({
       baseMipLevel: options?.baseMipLevel ?? 0,
@@ -908,9 +924,9 @@ export async function createRealGPU(
   function deleteTextureView(viewId: number): void {
     const sv = textureViews.get(viewId)
     if (sv === undefined) return
-    // GPUTextureView не имеет destroy() — освобождается при destroy()
-    // родительской текстуры (device.destroy() неявно). Но мы убираем
-    // из Map чтобы bindTexture больше не находил этот view.
+    // GPUTextureView has no destroy() — it is freed when the parent
+    // texture is destroyed (implicitly by device.destroy()). But we remove
+    // it from the Map so bindTexture no longer finds this view.
     invalidateTextureViewBindGroups(viewId)
     textureViews.delete(viewId)
   }
@@ -933,18 +949,18 @@ export async function createRealGPU(
   function dispose(): void {
     if (facadeDisposed) return
     facadeDisposed = true
-    // 0. Снять timer hooks — writeTimestamp после dispose всё равно бессмыслен
+    // 0. Remove timer hooks — writeTimestamp after dispose is pointless anyway
     timerHandle = null
-    // 1. Уничтожить все текстуры фасада (color + sampler не нуждается в destroy)
+    // 1. Destroy all facade textures (color + sampler needs no destroy)
     for (const record of textures.values()) {
       record.texture.destroy()
     }
     textures.clear()
     textureBindGroups.clear()
-    // 1b. Sub-views очищаем — GPUTextureView освобождается через
-    // device.destroy() неявно, как и родительские текстуры.
+    // 1b. Clear the sub-views — GPUTextureView is freed implicitly via
+    // device.destroy(), like the parent textures.
     textureViews.clear()
-    // 2. Уничтожить depth-текстуры canvas-аттачмента и target-ов
+    // 2. Destroy the depth textures of the canvas attachment and targets
     depthTexture?.destroy()
     depthTexture = null
     depthView = null
@@ -957,26 +973,28 @@ export async function createRealGPU(
     ubo = null
     uboSize = 0
     uboGroup = null
-    // 4. Vertex buffers — keyed по Float32Array
+    // 4. Vertex buffers — keyed by Float32Array
     for (const buf of vertexBuffers.values()) {
       buf.destroy()
     }
     vertexBuffers.clear()
-    // 5. Pipelines: GPURenderPipeline не имеет destroy() — device.destroy()
-    //    освободит их неявно. Чистим Map чтобы не тащить ссылки.
+    // 5. Pipelines: GPURenderPipeline has no destroy() — device.destroy()
+    //    will free them implicitly. Clear the Map to avoid dragging references.
     pipelines.clear()
-    // 6. Активный pass/encoder — обнуляем (device.destroy() сделает submit
-    //    бросающим, но мы не дойдём — никто не вызовет submit после dispose).
+    // 6. The active pass/encoder — reset it (device.destroy() will make
+    //    submit throw, but we will not get there — nobody will call submit
+    //    after dispose).
     encoder = null
     pass = null
     currentPipeline = null
     currentTarget = 0
-    // 7. Финал: device.destroy() — детерминированно освобождает ВСЮ GPU-память
-    //    устройства (текстуры/буферы/пайплайны/семплеры/texture-views), даже
-    //    не уничтоженную явно. Браузер после этого закроет canvas-контекст.
-    //    Это и есть паритет с WebGL2 loseContext + явное освобождение.
-    //    QuerySet, resolveBuffer, readBuffer от GpuTimer — тоже освободятся
-    //    device.destroy() (они созданы через этот device).
+    // 7. Final: device.destroy() — deterministically frees ALL GPU memory
+    //    of the device (textures/buffers/pipelines/samplers/texture-views),
+    //    even what was not destroyed explicitly. After this the browser
+    //    will close the canvas context. This is exactly the parity with
+    //    WebGL2 loseContext + explicit release. QuerySet, resolveBuffer,
+    //    readBuffer of GpuTimer — will also be freed by device.destroy()
+    //    (they were created through this device).
     device.destroy()
   }
 
@@ -1014,25 +1032,25 @@ export async function createRealGPU(
   }
 }
 
-/** Сообщение ошибки одной строкой (для канала onGpuError). */
+/** The error message as a single line (for the onGpuError channel). */
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** Рекорд пайплайна: WGSL + дескриптор + ленивые варианты по sampleType. */
+/** Pipeline record: WGSL + descriptor + lazy variants by sampleType. */
 interface PipelineRecord {
   readonly wgsl: string
   readonly attrs: readonly GpuAttrSlot[]
   readonly hasTextures: boolean
-  /** Мульти-текстуры: число texture_2d-деклараций в group 1 WGSL. */
+  /** Multi-textures: the number of texture_2d declarations in group 1 of WGSL. */
   readonly textureCount: number
   readonly desc: GpuPipelineDesc
   readonly variants: Map<TextureSampleVariant, GPURenderPipeline>
 }
 
-/** Число texture_2d-биндингов группы 1 в WGSL — размер мульти-текстурного
- *  layout'а (sampler@0 + tex@1..N). Однотекстурные шейдеры дают 1 — прежний
- *  контракт v1; base+normal map — 2. */
+/** The number of group-1 texture_2d bindings in WGSL — the size of the
+ *  multi-texture layout (sampler@0 + tex@1..N). Single-texture shaders
+ *  give 1 — the previous v1 contract; base+normal map — 2. */
 export function countGroup1TextureBindings(wgsl: string): number {
   let count = 0
   for (const _match of wgsl.matchAll(/@group\(1\)[^\n;]*var\s+\w+\s*:\s*texture_2d/g)) count++

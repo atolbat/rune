@@ -2,24 +2,24 @@ import { describe, expect, test } from 'bun:test'
 import { fullscreenTriangle, fullscreenQuad } from '../src/fullscreen.ts'
 
 describe('fullscreen', () => {
-  test('треугольник: 3 вершины, вершины за пределами клип-плоскости', () => {
+  test('triangle: 3 vertices, vertices beyond the clip planes', () => {
     const t = fullscreenTriangle()
     expect(t).toBeInstanceOf(Float32Array)
     expect(t.length).toBe(6)
     expect(Array.from(t)).toEqual([-1, -1, 3, -1, -1, 3])
-    // Квад [-1,1]² целиком внутри — покрытию посвящён отдельный тест ниже.
+    // The quad [-1,1]² is fully inside — coverage has a dedicated test below.
   })
 
-  test('квад: 4 вершины triangle-strip — порядок как в GPGPU-демо', () => {
+  test('quad: 4 vertices triangle-strip — order as in the GPGPU demo', () => {
     const q = fullscreenQuad()
     expect(q).toBeInstanceOf(Float32Array)
     expect(q.length).toBe(8)
     expect(Array.from(q)).toEqual([-1, -1, -1, 1, 1, -1, 1, 1])
   })
 
-  test('треугольник покрывает весь квад [-1,1]² (знаки векторных произведений)', () => {
-    // Грубая проверка растеризацией на сетке 33×33: каждая точка квада
-    // покрыта треугольником (по знакам векторных произведений).
+  test('triangle covers the entire quad [-1,1]² (cross-product signs)', () => {
+    // A rough rasterization check on a 33×33 grid: every point of the quad
+    // is covered by the triangle (by cross-product signs).
     const t = fullscreenTriangle()
     const inside = (x: number, y: number): boolean => {
       const ax = t[2] - t[0], ay = t[3] - t[1]

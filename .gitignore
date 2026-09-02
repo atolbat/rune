@@ -5,6 +5,6 @@ bun.lockb
 .env
 .env.*
 coverage/
-# тяжёлые бинарные фикстуры (Mixamo и т.п.) не входят в библиотеку
+# heavy binary fixtures (Mixamo etc.) are not part of the library
 packages/*/demo/assets/
 .shots/

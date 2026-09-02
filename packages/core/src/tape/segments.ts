@@ -1,12 +1,12 @@
-// Сегментный кэш: записанные операции команды живут до её инвалидации.
-// Чистый кадр = реплей кэша без повторного вычисления (без математики и
-// вызовов юниформ-функций) — сердце производительности live-команд.
+// Segment cache: a command's recorded operations live until its invalidation.
+// A clean frame = cache replay without recomputation (no math and no
+// uniform function calls) — the performance heart of live commands.
 
 export interface Segment {
-  /** Операции [op, a, b, c, d] × count. */
+  /** Operations [op, a, b, c, d] × count. */
   readonly rows: Int32Array
   readonly count: number
-  /** Эпоха последней записи — диагностика возраста. */
+  /** Epoch of the last write — age diagnostics. */
   writtenAt: number
 }
 
@@ -16,11 +16,11 @@ export interface SegmentStore {
   invalidate(commandId: number): void
   readonly hits: number
   readonly misses: number
-  /** Вытеснено сегментов сверх capacity (LRU) — диагностика «кэш мал». */
+  /** Segments evicted over capacity (LRU) — "cache is small" diagnostics. */
   readonly evictions: number
 }
 
-/** LRU-кэш сегментов: порядок Map = недавность (конец — самый свежий). */
+/** LRU segment cache: Map order = recency (the end is the freshest). */
 export function createSegmentStore(capacity: number): SegmentStore {
   const segments = new Map<number, Segment>()
   let hits = 0
@@ -35,7 +35,7 @@ export function createSegmentStore(capacity: number): SegmentStore {
       return undefined
     }
     hits++
-    // LRU: свежим становится конец Map — delete+set двигает позицию.
+    // LRU: the end of the Map becomes the fresh one — delete+set moves the position.
     segments.delete(commandId)
     segments.set(commandId, found)
     return found
@@ -51,7 +51,7 @@ export function createSegmentStore(capacity: number): SegmentStore {
     segments.delete(commandId)
   }
 
-  /** Вытеснение сверх capacity (capacity < 1 — без лимита: вытеснение выключено). */
+  /** Eviction over capacity (capacity < 1 — no limit: eviction is disabled). */
   function evict(): void {
     if (capacity < 1) return
     while (segments.size > capacity) {

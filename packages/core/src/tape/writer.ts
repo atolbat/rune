@@ -1,4 +1,4 @@
-// Писатель ленты: пять SoA-колонок (op + 4 слота_payload), рост ×2.
+// Tape writer: five SoA columns (op + 4 payload slots), ×2 growth.
 
 export interface WriterColumns {
   readonly op: Int32Array
@@ -11,7 +11,7 @@ export interface WriterColumns {
 export interface TapeWriter {
   reset(): void
   emit(op: number, a: number, b: number, c: number, d: number): void
-  /** Bulk-дозапись плотных строк [op,a,b,c,d]×count (кэш-реплей сегмента). */
+  /** Bulk append of dense rows [op,a,b,c,d]×count (segment cache replay). */
   emitPacked(rows: Int32Array, count: number): void
   readonly count: number
   readonly columns: WriterColumns
@@ -43,8 +43,8 @@ export function createTapeWriter(initialOps: number): TapeWriter {
   function emitPacked(rows: Int32Array, packed: number): void {
     if (packed === 0) return
     while (count + packed > capacity) grow()
-    // Колоночная запись: последовательные записи в каждую колонку
-    // (лучшая локальность, чем перестрелка между пятью массивами).
+    // Columnar write: sequential writes into each column
+    // (better locality than ping-ponging between five arrays).
     const base = count
     for (let at = 0; at < packed; at++) op[base + at] = rows[at * 5]
     for (let at = 0; at < packed; at++) a[base + at] = rows[at * 5 + 1]

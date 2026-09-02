@@ -1,48 +1,48 @@
 /**
- * TextureView — sub-region текстуры.
+ * TextureView — a texture sub-region.
  *
- * Контракт (см. дизайн-раунд «TextureView как первоклассник»):
- *  - WebGPU: нативный GPUTextureView с origin/size — GPU работает с sub-view
- *    как с полноценной текстурой. uvOffset=[0,0], uvScale=[1,1].
- *  - WebGL2: UV-rect эмуляция. textureId = тот же, что у родителя. uvOffset/uvScale
- *    реальны, шейдер должен применять: `uv_final = uv * u_uvScale + u_uvOffset`.
+ * Contract (see the design round "TextureView as a first-class citizen"):
+ *  - WebGPU: a native GPUTextureView with origin/size — the GPU works with the sub-view
+ *    as with a full-fledged texture. uvOffset=[0,0], uvScale=[1,1].
+ *  - WebGL2: UV-rect emulation. textureId = the same as the parent's. uvOffset/uvScale
+ *    are real, the shader must apply: `uv_final = uv * u_uvScale + u_uvOffset`.
  *
- * На обоих бэкендах пользователь видит одно и то же: { textureId, uvOffset, uvScale }.
+ * On both backends the user sees the same thing: { textureId, uvOffset, uvScale }.
  *
- * Здесь — **обёртка** над существующим Texture из @rune/gl. Не ломает его API.
- * Юзер может использовать Texture напрямую (без view) или создать view для
- * sub-region. View — легковесный объект (без отдельного GPU-ресурса на WebGL2).
+ * This is a **wrapper** over the existing Texture from @rune/gl. It does not break its API.
+ * The user can use Texture directly (without a view) or create a view for a
+ * sub-region. A View is a lightweight object (no separate GPU resource on WebGL2).
  */
 
 export interface TextureViewDescriptor {
-  /** Origin в пикселях (top-left). */
+  /** Origin in pixels (top-left). */
   readonly origin?: { readonly x: number; readonly y: number; readonly z?: number }
-  /** Размер региона. */
+  /** Region size. */
   readonly size?: { readonly width: number; readonly height: number; readonly depthOrArrayLayers?: number }
-  /** Сколько мип-уровней захватить. Default 1. */
+  /** How many mip levels to capture. Default 1. */
   readonly mipLevelCount?: number
 }
 
 export interface TextureView {
-  /** ID для использования в command system. На WebGPU это ID нативного sub-view;
-   *  на WebGL2 — тот же ID, что у родителя. */
+  /** ID for use in the command system. On WebGPU it is the native sub-view ID;
+   *  on WebGL2 — the same ID as the parent's. */
   readonly textureId: number
-  /** UV-смещение региона в нормализованных координатах [u0, v0]. */
+  /** Region UV offset in normalized coordinates [u0, v0]. */
   readonly uvOffset: readonly [number, number]
-  /** UV-масштаб региона в нормализованных координатах [u1-u0, v1-v0]. */
+  /** Region UV scale in normalized coordinates [u1-u0, v1-v0]. */
   readonly uvScale: readonly [number, number]
-  /** Размер региона в пикселях. */
+  /** Region size in pixels. */
   readonly width: number
   readonly height: number
-  /** Диагностический тег (dispose-состояние). Необязательное поле объявлено
-   *  в интерфейсе, чтобы литерал объекта в createTextureView проходил
-   *  excess-property-проверку (Task 71: tsc → 0). */
+  /** Diagnostic tag (dispose state). The optional field is declared
+   *  in the interface so that the object literal in createTextureView passes
+   *  the excess-property check (Task 71: tsc → 0). */
   readonly [Symbol.toStringTag]?: string
-  /** Освободить view. На WebGL2 — no-op; на WebGPU — delete view. Идемпотентно. */
+  /** Release the view. On WebGL2 — a no-op; on WebGPU — delete view. Idempotent. */
   dispose(): void
 }
 
-/** Минимальный интерфейс Texture-родителя для создания view. */
+/** Minimal parent Texture interface for creating a view. */
 export interface ViewableTexture {
   readonly textureId: number
   readonly width: number
@@ -50,18 +50,18 @@ export interface ViewableTexture {
 }
 
 /**
- * Создаёт TextureView — sub-region текстуры.
+ * Creates a TextureView — a texture sub-region.
  *
- * На WebGL2 это чисто CPU-объект: textureId наследуется от родителя, а
- * uvOffset/uvScale вычисляются из origin/size. Шейдер должен поддержать
+ * On WebGL2 this is a pure CPU object: textureId is inherited from the parent, and
+ * uvOffset/uvScale are computed from origin/size. The shader must support
  * `u_uvOffset`/`u_uvScale` uniforms.
  *
- * На WebGPU здесь могла бы быть нативная реализация через gpu.createView(),
- * но в текущей версии @rune/webgpu GPUFacade не экспонирует sub-views —
- * поэтому WebGPU-путь использует ту же UV-rect эмуляцию (функционально
- * идентично, просто не использует нативную возможность WebGPU).
+ * On WebGPU there could be a native implementation via gpu.createView(),
+ * but in the current version of @rune/webgpu GPUFacade does not expose sub-views —
+ * so the WebGPU path uses the same UV-rect emulation (functionally
+ * identical, just without using WebGPU's native capability).
  *
- * Когда GPUFacade получит createView(), здесь можно добавить ветку.
+ * Once GPUFacade gets createView(), a branch can be added here.
  */
 export function createTextureView(parent: ViewableTexture, descriptor: TextureViewDescriptor = {}): TextureView {
   const origin = descriptor.origin ?? { x: 0, y: 0 }
@@ -69,19 +69,19 @@ export function createTextureView(parent: ViewableTexture, descriptor: TextureVi
   const w = Math.max(1, size.width)
   const h = Math.max(1, size.height)
 
-  // Проверки границ
+  // Bounds checks
   if (origin.x < 0 || origin.y < 0 || origin.x + w > parent.width || origin.y + h > parent.height) {
     throw new RangeError(
-      `TextureView: регион (${origin.x},${origin.y}+${w}x${h}) не вписывается в текстуру ${parent.width}x${parent.height}`,
+      `TextureView: region (${origin.x},${origin.y}+${w}x${h}) does not fit into texture ${parent.width}x${parent.height}`,
     )
   }
 
-  // UV-rect в нормализованных координатах. V (Y) отсчитывается от верха
-  // текстуры (image-space, как в @rune/prims/quad.ts: v=0 = верхняя строка,
-  // v растёт вниз). Это совпадает с раскладкой данных на обоих бэкендах:
-  // WebGL2 (с flipY=false по умолчанию — см. realGL.texImage2DFromSource)
-  // и WebGPU (native top-left origin). Без этого условия region-based
-  // sub-views будут указывать не на тот участок атласа.
+  // UV-rect in normalized coordinates. V (Y) is counted from the top
+  // of the texture (image-space, as in @rune/prims/quad.ts: v=0 = the top row,
+  // v grows downward). This matches the data layout on both backends:
+  // WebGL2 (with flipY=false by default — see realGL.texImage2DFromSource)
+  // and WebGPU (native top-left origin). Without this condition, region-based
+  // sub-views would point at the wrong part of the atlas.
   const u0 = origin.x / parent.width
   const v0 = origin.y / parent.height
   const u1 = (origin.x + w) / parent.width
@@ -89,14 +89,14 @@ export function createTextureView(parent: ViewableTexture, descriptor: TextureVi
 
   let disposed = false
   return {
-    textureId: parent.textureId, // на WebGL2 — тот же; на WebGPU (если бы был sub-view) — иной
+    textureId: parent.textureId, // on WebGL2 — the same; on WebGPU (if it were a sub-view) — different
     uvOffset: [u0, v0],
     uvScale: [u1 - u0, v1 - v0],
     width: w,
     height: h,
     dispose() {
-      // Текущая реализация не владеет отдельным GPU-ресурсом — no-op.
-      // Когда появится нативный WebGPU sub-view — здесь deleteView.
+      // The current implementation owns no separate GPU resource — a no-op.
+      // Once a native WebGPU sub-view appears — deleteView goes here.
       disposed = true
     },
     get [Symbol.toStringTag]() { return disposed ? 'TextureView(disposed)' : 'TextureView' },

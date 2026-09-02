@@ -3,10 +3,10 @@ import { createWebGpuRenderer } from '../src/index.ts'
 import { createRecordingGPU } from '@rune/webgpu'
 
 /**
- * Surface + pass — WebGPU-путь на рекордер-фасаде: переключение целей
- * внутри энкодера (пасс на поверхность → пасс на канвас), формат
- * поверхностей — canvas (совместимость пайплайнов), генерация вершинной
- * стадии для фрагмента пользователя.
+ * Surface + pass — the WebGPU path on the recorder facade: target switching
+ * inside the encoder (a pass to the surface → a pass to the canvas), the
+ * surface format is canvas (pipeline compatibility), generation of the
+ * vertex stage for the user's fragment.
  */
 
 const SCENE_WGSL = `struct Params {
@@ -24,7 +24,7 @@ fn fsMain() -> @location(0) vec4<f32> {
   return vec4<f32>(0.4, 0.6, 0.9, 1.0);
 }`
 
-/** Фрагмент показа: сэмплер + текстура (бывший image()). */
+/** Present fragment: sampler + texture (the former image()). */
 const PRESENT_WGSL = `@group(1) @binding(0) var u_srcSampler : sampler;
 @group(1) @binding(1) var u_src : texture_2d<f32>;
 
@@ -33,7 +33,7 @@ fn fsMain(@location(0) uv : vec2<f32>) -> @location(0) vec4<f32> {
   return textureSample(u_src, u_srcSampler, uv);
 }`
 
-/** Фрагмент генератора с билтинами (бывший frag()). */
+/** Generator fragment with builtins (the former frag()). */
 const GEN_WGSL = `struct Params {
   u_time : f32,
   u_resolution : vec2<f32>,
@@ -65,7 +65,7 @@ async function setup() {
 }
 
 describe('surface/pass — WebGPU', () => {
-  it('полная цепочка: сцена в поверхность → показ на канвас, порядок пассов верен', async () => {
+  it('the full chain: scene into a surface → present to the canvas, pass order is correct', async () => {
     const { renderer, calls } = await setup()
     const scene = renderer.command({
       shader: { wgsl: SCENE_WGSL },
@@ -82,12 +82,12 @@ describe('surface/pass — WebGPU', () => {
     })
     renderer.step(16)
 
-    // Поверхность: текстура формата канваса + цель с глубиной
+    // The surface: a canvas-format texture + a target with depth
     expect(calls).toContain('createTexture(256,256,canvas)')
     expect(calls).toContain('createTarget(1,256,256,depth)')
 
-    // Порядок: beginPass(канвас) → bindTarget(поверхность) → draw сцены →
-    // bindTarget(канвас) → draw прохода → endPass → submit
+    // Order: beginPass(canvas) → bindTarget(surface) → scene draw →
+    // bindTarget(canvas) → pass draw → endPass → submit
     const beginAt = calls.indexOf('beginPass(0)')
     const intoSurfaceAt = calls.indexOf('bindTarget(1,1)')
     const sceneDrawAt = calls.findIndex(call => call.startsWith('draw(3,1)'))
@@ -104,7 +104,7 @@ describe('surface/pass — WebGPU', () => {
     renderer.stop()
   })
 
-  it('проход в поверхность (frag-случай): пайплайн [2x2], билтин-юниформы в слайсе', async () => {
+  it('a pass into a surface (frag case): pipeline [2x2], builtin uniforms in the slice', async () => {
     const { renderer, calls } = await setup()
     const surface = renderer.surface({ width: 128, height: 128 })
     const gen = surface.pass(GEN_WGSL)
@@ -112,13 +112,13 @@ describe('surface/pass — WebGPU', () => {
     renderer.step(100)
 
     expect(calls).toContain('bindTarget(1,0)')
-    // Пайплайн прохода: два vec2-атрибута квада, без текстур
+    // The pass pipeline: two vec2 attributes of the quad, no textures
     expect(calls.some(call => /^ensurePipeline\(1, \[2x2\]\)$/.test(call))).toBe(true)
     expect(calls).toContain('draw(6,1)')
     renderer.stop()
   })
 
-  it('вход прохода — текстура поверхности: bindTexture ДО draw, один вход', async () => {
+  it('the pass input is the surface texture: bindTexture BEFORE draw, one input', async () => {
     const { renderer, calls } = await setup()
     const surface = renderer.surface({ width: 64, height: 64 })
     const present = renderer.pass(PRESENT_WGSL, { inputs: { u_src: surface.texture } })
@@ -133,17 +133,17 @@ describe('surface/pass — WebGPU', () => {
     renderer.stop()
   })
 
-  it('второй вход в WebGPU-проходе — внятная ошибка v1', async () => {
+  it('a second input in a WebGPU pass — a clear v1 error', async () => {
     const { renderer } = await setup()
     const a = renderer.surface({ width: 32, height: 32 })
     const b = renderer.surface({ width: 32, height: 32 })
     expect(() => renderer.pass(PRESENT_WGSL, {
       inputs: { u_a: a.texture, u_b: b.texture },
-    })).toThrow(/один текстурный вход/)
+    })).toThrow(/a single texture input/)
     renderer.stop()
   })
 
-  it('второй кадр: цепочка снова проходит поверхность — цели не слипаются', async () => {
+  it('second frame: the chain goes through the surface again — targets do not stick together', async () => {
     const { renderer, calls } = await setup()
     const scene = renderer.command({
       shader: { wgsl: SCENE_WGSL },
@@ -159,7 +159,7 @@ describe('surface/pass — WebGPU', () => {
     })
     renderer.step(16)
     renderer.step(32)
-    // Два полных цикла «в поверхность и обратно»
+    // Two full cycles of "into the surface and back"
     expect(calls.filter(call => call === 'bindTarget(1,1)').length).toBe(2)
     expect(calls.filter(call => call === 'bindTarget(0,0)').length).toBe(2)
     expect(calls.filter(call => call === 'beginPass(0)').length).toBe(2)

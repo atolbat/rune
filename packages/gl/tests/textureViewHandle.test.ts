@@ -5,18 +5,18 @@ import { createRecordingGL } from '@rune/webgl2'
 import { createJournal } from '@rune/core'
 
 /**
- * Task 58: TextureView public handle — `texture.createView()` на обоих бэкендах.
+ * Task 58: TextureView public handle — `texture.createView()` on both backends.
  *
- * Контракт:
+ * Contract:
  *  - Texture.createView({ baseMipLevel?, mipLevelCount? }) → TextureView
- *  - TextureView.viewId ≥ 1_000_000 (disjoint namespace с textureId < 1M)
- *  - TextureView.dispose() → deleteTextureView(viewId) на facade. Идемпотентно.
- *  - Texture.dispose() → cascade dispose всех sub-views (для симметрии API).
+ *  - TextureView.viewId ≥ 1_000_000 (disjoint namespace with textureId < 1M)
+ *  - TextureView.dispose() → deleteTextureView(viewId) on the facade. Idempotent.
+ *  - Texture.dispose() → cascade dispose of all sub-views (for API symmetry).
  *
- * Паритет WebGPU ↔ WebGL2:
- *  - WebGPU: нативный GPUTextureView с baseMipLevel/mipLevelCount.
- *  - WebGL2 (Task 56): эмуляция через TEXTURE_BASE_LEVEL/MAX_LEVEL при bind.
- *  - В обоих случаях bindTexture(viewId) работает одинаково.
+ * WebGPU ↔ WebGL2 parity:
+ *  - WebGPU: a native GPUTextureView with baseMipLevel/mipLevelCount.
+ *  - WebGL2 (Task 56): emulation via TEXTURE_BASE_LEVEL/MAX_LEVEL on bind.
+ *  - In both cases bindTexture(viewId) works the same way.
  */
 
 function fakeCanvas(): HTMLCanvasElement {
@@ -24,7 +24,7 @@ function fakeCanvas(): HTMLCanvasElement {
 }
 
 describe('Task 58 — Texture.createView() public handle', () => {
-  it('createView без опций → TextureView с viewId ≥ 1_000_000', () => {
+  it('createView without options → a TextureView with viewId ≥ 1_000_000', () => {
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
       canvas: fakeCanvas(),
@@ -44,7 +44,7 @@ describe('Task 58 — Texture.createView() public handle', () => {
     renderer.stop()
   })
 
-  it('createView с baseMipLevel=4 → view.baseMipLevel=4', () => {
+  it('createView with baseMipLevel=4 → view.baseMipLevel=4', () => {
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
       canvas: fakeCanvas(),
@@ -57,14 +57,14 @@ describe('Task 58 — Texture.createView() public handle', () => {
     const view = tex.createView({ baseMipLevel: 4 })
 
     expect(view.baseMipLevel).toBe(4)
-    // RecordingFacade записала вызов createTextureView
+    // The RecordingFacade recorded the createTextureView call
     const viewCall = recording.calls.find(c => c.startsWith('createTextureView'))
     expect(viewCall).toBeDefined()
     expect(viewCall).toContain('mip=4')
     renderer.stop()
   })
 
-  it('createView с baseMipLevel+mipLevelCount → оба записаны', () => {
+  it('createView with baseMipLevel+mipLevelCount → both recorded', () => {
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
       canvas: fakeCanvas(),
@@ -83,7 +83,7 @@ describe('Task 58 — Texture.createView() public handle', () => {
     renderer.stop()
   })
 
-  it('createView возвращает разные viewId для разных вызовов', () => {
+  it('createView returns different viewIds for different calls', () => {
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
       canvas: fakeCanvas(),
@@ -101,7 +101,7 @@ describe('Task 58 — Texture.createView() public handle', () => {
     renderer.stop()
   })
 
-  it('TextureView.dispose() → deleteTextureView на facade', () => {
+  it('TextureView.dispose() → deleteTextureView on the facade', () => {
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
       canvas: fakeCanvas(),
@@ -121,7 +121,7 @@ describe('Task 58 — Texture.createView() public handle', () => {
     renderer.stop()
   })
 
-  it('TextureView.dispose() идемпотентно — повторный вызов no-op', () => {
+  it('TextureView.dispose() is idempotent — a repeated call is a no-op', () => {
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
       canvas: fakeCanvas(),
@@ -134,16 +134,16 @@ describe('Task 58 — Texture.createView() public handle', () => {
     const view = tex.createView({ baseMipLevel: 4 })
 
     view.dispose()
-    view.dispose() // повторный — no-op
-    view.dispose() // третий — no-op
+    view.dispose() // repeated — no-op
+    view.dispose() // third — no-op
 
-    // Только один deleteTextureView в журнале вызовов
+    // Only one deleteTextureView in the call log
     const deleteCalls = recording.calls.filter(c => c.startsWith('deleteTextureView'))
     expect(deleteCalls.length).toBe(1)
     renderer.stop()
   })
 
-  it('Texture.dispose() → cascade dispose всех sub-views', () => {
+  it('Texture.dispose() → cascade dispose of all sub-views', () => {
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
       canvas: fakeCanvas(),
@@ -157,27 +157,27 @@ describe('Task 58 — Texture.createView() public handle', () => {
     const v2 = tex.createView({ baseMipLevel: 4 })
     const v3 = tex.createView({ baseMipLevel: 8 })
 
-    // dispose parent texture → должны освободиться и все views
+    // dispose the parent texture → all views must be released too
     tex.dispose()
 
-    // Три deleteTextureView (для v1, v2, v3) + один deleteTexture.
-    // ВАЖНО: фильтр с exact prefix — 'deleteTexture' ловит и 'deleteTextureView'.
+    // Three deleteTextureView calls (for v1, v2, v3) + one deleteTexture.
+    // IMPORTANT: the exact-prefix filter — 'deleteTexture' also catches 'deleteTextureView'.
     const deleteViewCalls = recording.calls.filter(c => c.startsWith('deleteTextureView(')).length
     expect(deleteViewCalls).toBe(3)
     const deleteTexCalls = recording.calls.filter(c => c.startsWith('deleteTexture(')).length
     expect(deleteTexCalls).toBe(1)
 
-    // И сами view handles — помечены как disposed (повторный dispose → no-op)
+    // And the view handles themselves — marked as disposed (a repeated dispose → no-op)
     expect(() => v1.dispose()).not.toThrow()
     expect(() => v2.dispose()).not.toThrow()
     expect(() => v3.dispose()).not.toThrow()
-    // Количество deleteTextureView не выросло после повторных dispose
+    // The deleteTextureView count did not grow after the repeated dispose calls
     const deleteViewCallsAfter = recording.calls.filter(c => c.startsWith('deleteTextureView(')).length
     expect(deleteViewCallsAfter).toBe(3)
     renderer.stop()
   })
 
-  it('createView после dispose parent texture → facade бросает или no-op (но handle не создаётся)', () => {
+  it('createView after disposing the parent texture → the facade throws or no-ops (but the handle is not created)', () => {
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
       canvas: fakeCanvas(),
@@ -189,14 +189,14 @@ describe('Task 58 — Texture.createView() public handle', () => {
     const tex = renderer.texture(256, 256, { mipLevels: 9 })
     tex.dispose()
 
-    // Recording facade не бросает (она no-op для невалидного textureId),
-    // но реальный realGL бросил бы. На recording — возвращается фейковый viewId.
-    // Главное — handle не ломает API, даже если parent умер.
+    // The recording facade does not throw (it is a no-op for an invalid textureId),
+    // but the real realGL would throw. On recording — a fake viewId is returned.
+    // The main point — the handle does not break the API, even if the parent is dead.
     expect(() => tex.createView({ baseMipLevel: 1 })).not.toThrow()
     renderer.stop()
   })
 
-  it('Journal-интеграция: createView пишет createTextureView опс при включённом journal', () => {
+  it('Journal integration: createView writes a createTextureView op when the journal is enabled', () => {
     const journal = createJournal()
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
@@ -212,7 +212,7 @@ describe('Task 58 — Texture.createView() public handle', () => {
     view.dispose()
 
     const ops = journal.entries()
-    // createTexture (от texture()), createTextureView, destroyTextureView (от view.dispose())
+    // createTexture (from texture()), createTextureView, destroyTextureView (from view.dispose())
     const createTexOps = ops.filter(op => op.kind === 'createTexture')
     const createViewOps = ops.filter(op => op.kind === 'createTextureView')
     const destroyViewOps = ops.filter(op => op.kind === 'destroyTextureView')

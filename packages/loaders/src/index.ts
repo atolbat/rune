@@ -1,69 +1,69 @@
 /**
- * @rune/loaders — HTTP + decode утилиты и потоковые парсеры ассетов.
+ * @rune/loaders — HTTP + decode utilities and streaming asset parsers.
  *
- * Контракт (см. архитектурный раунд «Валидированный дизайн — слои»):
- *  - Лоадеры возвращают **декодированный** ассет (ImageBitmap / объект / ArrayBuffer).
- *  - Лоадеры НЕ знают про GPU, текстуры, кэш, рендерер.
- *  - Любая интеграция с GPU — в @rune/kit или в пользовательском коде.
+ * Contract (see the architecture round "Validated design — layers"):
+ *  - Loaders return a **decoded** asset (ImageBitmap / object / ArrayBuffer).
+ *  - Loaders do NOT know about the GPU, textures, cache, renderer.
+ *  - Any GPU integration lives in @rune/kit or in user code.
  *
- * Это разделение критично: `Texture` primitive в @rune/gl принимает ImageBitmap
- * (уже загруженный), а `loadImage` здесь знает только про fetch + createImageBitmap.
- * Если их смешать — получим God-object, который лезет в сеть из GPU-примитива.
+ * This separation is critical: the `Texture` primitive in @rune/gl accepts an ImageBitmap
+ * (already loaded), while `loadImage` here knows only about fetch + createImageBitmap.
+ * Mixing them would produce a God-object that reaches into the network from a GPU primitive.
  *
  * ══════════════════════════════════════════════════════════════════════════
- * СОСТАВ ПАКЕТА:
+ * PACKAGE COMPOSITION:
  *
- *  Простые утилиты (одна функция = один запрос):
+ *  Simple utilities (one function = one request):
  *    loadImage / loadJSON / loadArrayBuffer
  *
- *  Потоковая инфраструктура (стриминг + приоритеты):
+ *  Streaming infrastructure (streaming + priorities):
  *    Assembler, FetchScheduler, fetchStreaming, inflateDeflate
  *
- *  Парсеры форматов (все — чистый decode, без GPU):
- *    parseGlb / parseGltfJson  — GLB 2.0 и .gltf (PBR, alphaMode, webp/avif)
- *    parseObj                   — OBJ (стриминг, группы, MTL-ссылка)
- *    parseMtl / parseMtlText    — MTL материалы
- *    parseFBX                   — FBX 7.x (скелет, скин, клипы анимаций)
- *    parseImage / sniffImageMime — изображение → ImageBitmap по magic-байтам
- *    parseConfig / parseZml / parseIni — конфиги (json/zml/ini/txt)
+ *  Format parsers (all of them pure decode, no GPU):
+ *    parseGlb / parseGltfJson  — GLB 2.0 and .gltf (PBR, alphaMode, webp/avif)
+ *    parseObj                   — OBJ (streaming, groups, MTL reference)
+ *    parseMtl / parseMtlText    — MTL materials
+ *    parseFBX                   — FBX 7.x (skeleton, skin, animation clips)
+ *    parseImage / sniffImageMime — image → ImageBitmap by magic bytes
+ *    parseConfig / parseZml / parseIni — configs (json/zml/ini/txt)
  *
- *  Фасад (реестр форматов + кэш + дедупликация + прогресс):
+ *  Facade (format registry + cache + deduplication + progress):
  *    AssetLoader, LoadHandle, defaultFormats, registerConfigParser
  */
 
-// ─── Простые утилиты (fetch + decode одной функцией) ─────────────────────────
+// ─── Simple utilities (fetch + decode in one function) ─────────────────────────
 
-/** Опции загрузки изображения. */
+/** Image load options. */
 export interface LoadImageOptions {
-  /** Запросить определённый ImageBitmapOptions (например, resizeWidth/Height). */
+  /** Request specific ImageBitmapOptions (e.g., resizeWidth/Height). */
   readonly imageBitmapOptions?: ImageBitmapOptions
-  /** Таймаут на fetch в миллисекундах. По умолчанию — без таймаута. */
+  /** fetch timeout in milliseconds. Default — no timeout. */
   readonly timeoutMs?: number
-  /** AbortSignal из вызывающего кода — для отмены. */
+  /** AbortSignal from the calling code — for cancellation. */
   readonly signal?: AbortSignal
 }
 
 /**
- * Загружает изображение по URL и декодирует в ImageBitmap.
+ * Loads an image by URL and decodes it into an ImageBitmap.
  *
- * Возвращает ImageBitmap — нативный браузерный декодированный растр, который
- * GPU-примитив может принять напрямую (WebGPU: copyExternalImageToTexture,
- * WebGL2: texImage2D overload). Никакой GPU-работы здесь не происходит.
+ * Returns an ImageBitmap — the browser's native decoded raster, which
+ * a GPU primitive can accept directly (WebGPU: copyExternalImageToTexture,
+ * WebGL2: texImage2D overload). No GPU work happens here.
  *
- * @throws TypeError если ответ не ok или content-type не изображение.
- * @throws AbortError если таймаут или signal отменён.
+ * @throws TypeError if the response is not ok or content-type is not an image.
+ * @throws AbortError on timeout or if the signal is cancelled.
  */
 export async function loadImage(url: string, options: LoadImageOptions = {}): Promise<ImageBitmap> {
   const blob = await fetchBlob(url, { timeoutMs: options.timeoutMs, signal: options.signal })
-  // Браузер сам определяет декодер по MIME-типу. ImageBitmap — это
-  // «декодированные пиксели + opaque handle» — идеально для GPU.
+  // The browser itself picks the decoder by MIME type. An ImageBitmap is
+  // "decoded pixels + an opaque handle" — perfect for the GPU.
   return createImageBitmap(blob, options.imageBitmapOptions ?? {})
 }
 
 /**
- * Загружает JSON по URL. Для атлас-метаданных (frames), конфигов, GLB-manifest'ов.
+ * Loads JSON by URL. For atlas metadata (frames), configs, GLB manifests.
  *
- * @throws SyntaxError если ответ не валидный JSON.
+ * @throws SyntaxError if the response is not valid JSON.
  */
 export async function loadJSON<T = unknown>(url: string, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<T> {
   const blob = await fetchBlob(url, options)
@@ -71,21 +71,21 @@ export async function loadJSON<T = unknown>(url: string, options: { timeoutMs?: 
   try {
     return JSON.parse(text) as T
   } catch (err) {
-    throw new SyntaxError(`loadJSON: ${url} — невалидный JSON: ${(err as Error).message}`, { cause: err })
+    throw new SyntaxError(`loadJSON: ${url} — invalid JSON: ${(err as Error).message}`, { cause: err })
   }
 }
 
 /**
- * Загружает ArrayBuffer (для GLB, бинарных данных, сырых пикселей).
+ * Loads an ArrayBuffer (for GLB, binary data, raw pixels).
  *
- * @throws TypeError если ответ не ok.
+ * @throws TypeError if the response is not ok.
  */
 export async function loadArrayBuffer(url: string, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<ArrayBuffer> {
   const blob = await fetchBlob(url, options)
   return blob.arrayBuffer()
 }
 
-// ─── Реэкспорт потоковой инфраструктуры ──────────────────────────────────────
+// ─── Re-export of the streaming infrastructure ──────────────────────────────────────
 
 export {
   Assembler,
@@ -104,7 +104,7 @@ export {
   type StreamingResponse,
 } from './assembler.ts'
 
-// ─── Реэкспорт парсеров форматов ─────────────────────────────────────────────
+// ─── Re-export of format parsers ─────────────────────────────────────────────
 
 export {
   parseGlb,
@@ -157,7 +157,7 @@ export {
   type ConfigValue,
 } from './config.ts'
 
-// ─── Реэкспорт фасада загрузки ───────────────────────────────────────────────
+// ─── Re-export of the loading facade ───────────────────────────────────────────────
 
 export {
   AssetLoader,
@@ -180,14 +180,14 @@ export {
   type TransformHook,
 } from './registry.ts'
 
-// ─── Реэкспорт байтовых утилит ───────────────────────────────────────────────
+// ─── Re-export of byte utilities ───────────────────────────────────────────────
 
 export { asciiDecode, align4, clamp, isWhitespace, nowMs, parseDecimal, CHAR } from './bytes.ts'
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 async function fetchBlob(url: string, options: { timeoutMs?: number; signal?: AbortSignal }): Promise<Blob> {
-  // Композитный signal: внешний + наш timeout
+  // Composite signal: external + our timeout
   const controller = new AbortController()
   const externalAbort = options.signal?.addEventListener('abort', () => controller.abort()) ?? (() => {})
 
@@ -209,7 +209,7 @@ async function fetchBlob(url: string, options: { timeoutMs?: number; signal?: Ab
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// Слой Task 88+ (AssetLibrary / планировщик / типы ассетов)
+// Task 88+ layer (AssetLibrary / scheduler / asset types)
 // ══════════════════════════════════════════════════════════════════════════
 
 export {
@@ -229,7 +229,7 @@ export type {
   LibraryStats,
 } from './types.ts'
 
-// LoadManager (Task 88): приоритеты/отмена/прогресс/бюджеты/группы enough(N)
+// LoadManager (Task 88): priorities/cancel/progress/budgets/groups enough(N)
 export { createLoadManager } from './core/manager.ts'
 export type { LoadManagerOptions } from './core/manager.ts'
 export { LoadError, ParseError, UnsupportedError, abortError, throwIfAborted } from './core/errors.ts'

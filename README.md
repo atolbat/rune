@@ -2,123 +2,123 @@
 
 [![ci](https://github.com/atolbat/rune/actions/workflows/ci.yml/badge.svg)](https://github.com/atolbat/rune/actions/workflows/ci.yml)
 
-Единый рендерер WebGL2 / WebGPU. Декларативные команды в духе regl,
-реактивность на сигналах, ленты (tape) как валюта кадра. Чистая TypeScript-библиотека:
-ноль runtime-зависимостей, DOM-free ядро, tests-first разработка.
+A unified WebGL2 / WebGPU renderer. regl-style declarative commands,
+signal-based reactivity, tapes as the currency of a frame. A pure TypeScript library:
+zero runtime dependencies, a DOM-free core, tests-first development.
 
-## Пакеты
+## Packages
 
-| Пакет | Содержание |
+| Package | Contents |
 |--------|------------|
-| `@rune/core` | Сигналы (версии/dirty), эпохи, ленты SoA, сегментный кэш live, std140-арена юниформов (value-compare, fround), AIMD-стриминг (куча приоритетов, окно байтов 2/16 МиБ, demand-бёрст), transient-пул, LayoutGuard. DOM-free по построению |
-| `@rune/math` | Колонко-мажорные mat4 (WebGL-конвенция): out-первый стиль, ноль аллокаций на горячем пути |
-| `@rune/prims` | Процедурные примитивы: cube с UV и полным размахом граней (6 регрессионных тестов), полноэкранный quad, каталог SHAPES для UI, адаптивный/квадтри-террейн |
-| `@rune/webgl2` | Бэкенд WebGL2: GLSL-рефлексия, компилятор DrawSpec, executor лент (юниформы по имени, state-кэш, BindTarget), realGL (FBO-цели с depth-рендербуфером) + recordingGL |
-| `@rune/webgpu` | Бэкенд WebGPU: WGSL-рефлексия, slice-арена 256-align, компилятор, executor (dynamic offsets, аплоады до пасса), realGPU (writeTexture origin, ленивые пайплайны, пассы на поверхности) + recordingGPU |
-| `@rune/gl` | Мета-пакет: `createRenderer` / `createWebGpuRenderer` (авто-цикл, DPR, LayoutGuard, idle-слот стриминга), `surface()`/`pass()`, `show()` / `showOnWebGpu()` / `showAny()` / `showOn()` |
-| `@rune/scene` | Плоский data-oriented сценовый граф: камеры, фрустум-отсечение, инстанс-группы, вынос конвейера в воркер поверх SharedArrayBuffer |
-| `@rune/tape` | Запись лент в воркерах без GPU и проигрывание на владельце: stub-ленты, доставка кадров, кросс-мировой replay |
-| `@rune/loaders` | Потоковые парсеры ассетов без GPU-кода: GLB/glTF, OBJ, MTL, FBX (бинарный и ASCII), картинки, конфиги; планировщик загрузки с AIMD-дисциплиной, `AssetLibrary` с LRU-кэшем |
-| `@rune/kit` | Высокоуровневые утилиты поверх `@rune/gl`: AssetCache с refcount/TTL/churn-window, композитинг-гигиена канваса |
-| `@rune/debug` | Инструменты отладки (этап M8 дорожной карты) |
+| `@rune/core` | Signals (versions/dirty), epochs, SoA tapes, live segment cache, std140 uniform arena (value-compare, fround), AIMD streaming (priority heap, 2/16 MiB byte window, demand bursts), transient pool, LayoutGuard. DOM-free by construction |
+| `@rune/math` | Column-major mat4 (WebGL convention): out-first style, zero allocations on the hot path |
+| `@rune/prims` | Procedural primitives: cube with UV and full face range (6 regression tests), fullscreen quad, SHAPES catalog for UI, adaptive/quadtree terrain |
+| `@rune/webgl2` | WebGL2 backend: GLSL reflection, DrawSpec compiler, tape executor (uniforms by name, state cache, BindTarget), realGL (FBO targets with a depth renderbuffer) + recordingGL |
+| `@rune/webgpu` | WebGPU backend: WGSL reflection, 256-aligned slice arena, compiler, executor (dynamic offsets, pre-pass uploads), realGPU (writeTexture origin, lazy pipelines, passes onto surfaces) + recordingGPU |
+| `@rune/gl` | Meta-package: `createRenderer` / `createWebGpuRenderer` (auto loop, DPR, LayoutGuard, idle streaming slot), `surface()`/`pass()`, `show()` / `showOnWebGpu()` / `showAny()` / `showOn()` |
+| `@rune/scene` | Flat data-oriented scene graph: cameras, frustum culling, instance groups, pipeline moved into a worker over a SharedArrayBuffer |
+| `@rune/tape` | Recording tapes in workers without a GPU and playing them back on the owner: stub tapes, frame delivery, cross-world replay |
+| `@rune/loaders` | Streaming asset parsers without GPU code: GLB/glTF, OBJ, MTL, FBX (binary and ASCII), images, configs; loading scheduler with AIMD discipline, `AssetLibrary` with an LRU cache |
+| `@rune/kit` | High-level utilities on top of `@rune/gl`: AssetCache with refcount/TTL/churn-window, canvas compositing hygiene |
+| `@rune/debug` | Debugging tools (roadmap stage M8) |
 
-## Установка
+## Installation
 
 ```bash
 bun add @rune/gl
 ```
 
-Библиотека распространяется в исходниках TypeScript (`exports` указывает на
-`src/index.ts`) — бандлер или `bun` исполняют её напрямую, шаг сборки не нужен.
+The library ships as TypeScript sources (`exports` points to
+`src/index.ts`) — a bundler or `bun` runs it directly, no build step required.
 
-## Быстрый старт
+## Quick start
 
-Проход «N входов → фрагментный шейдер → цель» — единая структура *surface + pass*,
-пишется в ту же ленту (opcode BindTarget) и работает в любом рендер-пассе:
+The "N inputs → fragment shader → target" pass — a single *surface + pass* structure,
+recorded into the same tape (opcode BindTarget) and working in any render pass:
 
 ```ts
 import { createRenderer } from '@rune/gl'
 
-const renderer = await createRenderer(canvas)   // авто-выбор бэкенда
+const renderer = await createRenderer(canvas)   // auto backend selection
 const scene = renderer.surface({ width: 800, height: 600, depth: true })
 const present = renderer.pass(FRAG, { inputs: { u_src: scene.texture } })
 
 renderer.frame((ctx, record) => {
-  record(scene.capture(drawCube), { mvp, model })  // сцена → поверхность
-  record(present)                                  // поверхность → канвас
+  record(scene.capture(drawCube), { mvp, model })  // scene → surface
+  record(present)                                  // surface → canvas
 })
 ```
 
-- **Генерация**: `surface.pass(FRAG)` — без входов, в поверхность; билтин-юниформы
-  `u_time` / `u_resolution` / `u_texel` подставляются по объявлению.
-- **Показ**: `renderer.pass(FRAG, { inputs: { u_src: texture } })` — на канвас.
-- **Постпроцессинг**: `capture()` + цепочка pass'ов; каждая поверхность — и цель, и вход
-  (pingpong из двух surface работает).
-- Пользователь пишет только фрагментную стадию (GLSL `in vec2 v_uv` / WGSL
-  `fsMain(@location(0) uv)`) — вершинную генерирует рантайм (quad из `@rune/prims`).
-- v1 WebGPU: один текстурный вход на проход (bind-группа group 1).
+- **Generation**: `surface.pass(FRAG)` — no inputs, into a surface; the built-in uniforms
+  `u_time` / `u_resolution` / `u_texel` are wired up as declared.
+- **Display**: `renderer.pass(FRAG, { inputs: { u_src: texture } })` — onto the canvas.
+- **Post-processing**: `capture()` + a chain of passes; every surface is both a target and an input
+  (pingpong over two surfaces works).
+- The user writes only the fragment stage (GLSL `in vec2 v_uv` / WGSL
+  `fsMain(@location(0) uv)`) — the vertex stage is generated by the runtime (a quad from `@rune/prims`).
+- v1 WebGPU: a single texture input per pass (bind group group 1).
 
-## Разработка
+## Development
 
 ```bash
-bun install        # зависимости (workspace-симлинки чинит postinstall)
-bun run lint       # ESLint (js.recommended + ts-eslint.recommended) — только packages/*/src
-bun run typecheck  # строгие типы, 0 ошибок
-bun run build      # сборка бандлов в dist/ (см. ниже)
-bun test           # полный набор юнит/интеграционных тестов
+bun install        # dependencies (postinstall fixes workspace symlinks)
+bun run lint       # ESLint (js.recommended + ts-eslint.recommended) — packages/*/src only
+bun run typecheck  # strict types, 0 errors
+bun run build      # builds the bundles into dist/ (see below)
+bun test           # the full unit/integration test suite
 ```
 
-Требуется Bun ≥ 1.1. CI (`​.github/workflows/ci.yml`) на каждый push в `dev`/`main`
-и на PR прогоняет: lint → typecheck → build → test, затем headless-смок демо
-в Chromium (SwiftShader). Артефакт `dist/` выкладывается на каждый пуш.
+Bun ≥ 1.1 is required. CI (`​.github/workflows/ci.yml`) runs on every push to `dev`/`main`
+and on PRs: lint → typecheck → build → test, then a headless demo smoke check
+in Chromium (SwiftShader). The `dist/` artifact is published on every push.
 
-Разработка ведётся в ветке `dev`; `main` обновляется только вручную.
+Development happens on the `dev` branch; `main` is updated only manually.
 
-Тяжёлые бинарные фикстуры (например, Mixamo FBX в `@rune/loaders`) в репозиторий
-не входят: соответствующие тесты включаются автоматически, если положить файл
-по пути, указанному в тесте.
+Heavy binary fixtures (e.g. Mixamo FBX in `@rune/loaders`) are not kept in the
+repository: the corresponding tests turn on automatically once the file is placed
+at the path named in the test.
 
-## Сборка
+## Build
 
-`bun run build` производит самодостаточные ESM-бандлы в `dist/`:
+`bun run build` produces self-contained ESM bundles in `dist/`:
 
-| Артефакт | Содержание |
+| Artifact | Contents |
 |----------|------------|
-| `rune.esm.js` | Мета-пакет `@rune/gl` целиком (core/math/prims/webgl2/webgpu) |
-| `rune.esm.min.js` | Минифицированная копия с sourcemap |
-| `rune-loaders.esm.js` | `@rune/loaders` (GLB/glTF, OBJ, FBX — без GPU-кода) |
+| `rune.esm.js` | The entire `@rune/gl` meta-package (core/math/prims/webgl2/webgpu) |
+| `rune.esm.min.js` | Minified copy with a sourcemap |
+| `rune-loaders.esm.js` | `@rune/loaders` (GLB/glTF, OBJ, FBX — without GPU code) |
 
-Типы отдельно не собираются: библиотека распространяется в исходниках TS —
-bun и бандлеры берут типы прямо из `src` через `exports`.
+Types are not built separately: the library ships as TS sources —
+bun and bundlers pick the types straight from `src` via `exports`.
 
-## Демо
+## Demos
 
-Каждое демо лежит в своей папке внутри `demo/`, ссылается на собранный бандл
-`dist/rune.esm.js` и следует стандарту: мобильная вёрстка, тумблер бэкендов
-Авто/WebGL2/WebGPU, лог-панель с кнопкой «Копировать». Список, ссылки и
-сам стандарт — [demo/README.md](demo/README.md).
+Each demo lives in its own folder inside `demo/`, references the built bundle
+`dist/rune.esm.js` and follows the standard: mobile layout, an Auto/WebGL2/WebGPU
+backend toggle, a log panel with a "Copy" button. The list, links and
+the standard itself are in [demo/README.md](demo/README.md).
 
-Онлайн (GitHub Pages, деплой из ветки `dev`): https://atolbat.github.io/rune/demo/
+Online (GitHub Pages, deployed from the `dev` branch): https://atolbat.github.io/rune/demo/
 
 ```bash
-bun run demo        # сборка + статический сервер на http://localhost:8080/demo/
-bun run demo:smoke  # headless-проверка стандарта демо (Playwright + SwiftShader):
-                    # бейдж, живая анимация, пауза, тумблер, лог, мобильный viewport
+bun run demo        # build + static server at http://localhost:8080/demo/
+bun run demo:smoke  # headless demo-standard check (Playwright + SwiftShader):
+                    # badge, live animation, pause, toggle, log, mobile viewport
 ```
 
-## Дизайн-досье
+## Design dossier
 
-Проектная документация живёт в [`docs/DESIGN.md`](docs/DESIGN.md) — addendum к
-досье v1.0: сверка каталога оптимизаций, Контракт 4 (tier-лестница адаптера),
-бенч-калибровка Mali-G57 MC2.
+The project documentation lives in [`docs/DESIGN.md`](docs/DESIGN.md) — an addendum to
+the v1.0 dossier: an audit of the optimizations catalog, Contract 4 (the adapter's tier ladder),
+Mali-G57 MC2 bench calibration.
 
-## Стиль кода
+## Code style
 
-Мельчайшие внутренние функции; имена несут контракт; один скрытый класс на
-сущность; ноль аллокаций на горячем пути кадра. Каждый этап: теория →
-бенчмарк → победитель в дефолт. Юнит-тест порядка вызовов на рекордере
-обязателен для tape-путей.
+The smallest possible internal functions; names carry the contract; one hidden class per
+entity; zero allocations on the frame's hot path. Every stage: theory →
+benchmark → the winner becomes the default. A unit test of the call order on the
+recorder is mandatory for tape paths.
 
-## Лицензия
+## License
 
 [MIT](LICENSE)

@@ -3,13 +3,13 @@ import { pushCollector, popCollector } from './tracking.ts'
 import { schedule } from './batch.ts'
 import { detachAll } from './shared.ts'
 
-/** Запускает эффект; возвращает остановку. Внутри batch — один перевыпуск. */
+/** Runs an effect; returns the stop function. Inside a batch — one rerun. */
 export function effect(run: () => void): Unsubscribe {
   const cell = new EffectCell(run)
   return () => cell.dispose()
 }
 
-/** Эффект: перевычисляется при изменении зависимостей. */
+/** Effect: recomputes when dependencies change. */
 class EffectCell {
   private readonly run: () => void
   private subscriptions: Unsubscribe[] = []
@@ -34,8 +34,8 @@ class EffectCell {
   }
 
   private trackRun(collected: ReadableSignal<any>[]): void {
-    // Тот же стек трекинга, что у derive: signal.value при чтении
-    // регистрирует ячейку в активном сборщике (reportRead → push).
+    // The same tracking stack as in derive: signal.value on read
+    // registers the cell in the active collector (reportRead → push).
     pushCollector(collected as unknown[])
     try {
       this.run()

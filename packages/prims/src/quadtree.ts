@@ -1,77 +1,79 @@
 /**
- * Quadtree LOD — тайловая сетка с адаптивным разрешением «до горизонта»
- * (Task 113; репорт пользователя: «один квад… создай структуру типа
- * квадтри, чтобы много мелких квадов формировали океан до горизонта
- * (или лимита расстояния)»).
+ * Quadtree LOD — a tile grid with adaptive resolution "to the horizon"
+ * (Task 113; user report: "one quad… create a quadtree-like structure so
+ * that many small quads form an ocean to the horizon (or a distance
+ * limit)").
  *
- * РЕШЕНИЕ: эта прима ЗАМЕНЯЕТ плановую terrain-приму досье §10.2 —
- * универсальная система «квад-дерево вокруг наблюдателя» покрывает и
- * океан (дисплейс-текстура FFT), и высотки (карта высот): одна и та же
- * геометрия тайлов, один и тот же критерий расщепления.
+ * SOLUTION: this primitive REPLACES the planned terrain primitive of
+ * dossier §10.2 — a universal "quadtree around the observer" system covers
+ * both the ocean (an FFT displacement texture) and heightfields (a height
+ * map): the same tile geometry, the same splitting criterion.
  *
- * Проектировка по индустриальным образцам (исследование Task 113):
- *  • Crest Ocean System (SIGGRAPH 2017/2019, wave-harmonic) — «поверхность
- *    составлена из концентрических колец геометрия-тайлов, каждое кольцо —
- *    степень двойки»; квадтри вокруг наблюдателя даёт ту же структуру;
- *  • Geometry Clipmaps (GPU Gems 2, гл. 2) — статичная геометрия, адаптация
- *    положением/масштабом, а не перестройкой буферов;
- *  • GPU Gems 2, гл. 18 (Pacific Fighters) — вершина-читает-текстуру.
+ * Design modeled on industry examples (Task 113 research):
+ *  • Crest Ocean System (SIGGRAPH 2017/2019, wave-harmonic) — "the surface
+ *    is composed of concentric rings of geometry tiles, each ring a
+ *    power of two"; a quadtree around the observer gives the same structure;
+ *  • Geometry Clipmaps (GPU Gems 2, ch. 2) — static geometry, adaptation
+ *    by position/scale, not by rebuilding buffers;
+ *  • GPU Gems 2, ch. 18 (Pacific Fighters) — vertex-reads-texture.
  *
- * ОПТИМИЗАЦИЯ (ключевая идея): НИ ОДИН вершинный/индексный буфер не
- * перестраивается в кадре. Единичный тайл-меш статичен; за кадр CPU
- * только выбирает видимые тайлы (сотни узлов, микросекунды) и пакует их
- * в инстанс-буфер [cx, cz, size, level]×N → ОДИН instanced draw на весь
- * океан. Расширение мировой позиции — в вершинном шейдере.
+ * OPTIMIZATION (the key idea): NOT A SINGLE vertex/index buffer is rebuilt
+ * in a frame. The unit tile mesh is static; per frame the CPU only picks
+ * the visible tiles (hundreds of nodes, microseconds) and packs them into
+ * the instance buffer [cx, cz, size, level]×N → ONE instanced draw for the
+ * whole ocean. World-position expansion — in the vertex shader.
  *
- * Трещины между уровнями (T-junction) закрываются «юбкой» (skirt) —
- * вертикальной стенкой по периметру тайла (кессонный приём Cesium и
- * ландшафтных рендереров): проще и робастнее морфинга Crest'а, +6% вершин.
+ * Cracks between levels (T-junction) are closed by a "skirt" — a vertical
+ * wall along the tile perimeter (the caisson technique of Cesium and
+ * landscape renderers): simpler and more robust than Crest's morphing,
+ * +6% vertices.
  *
- * Чистые данные без GL-зависимостей — генерируется и в воркере.
+ * Pure data without GL dependencies — generated in a worker too.
  */
 
-/** Выбранные тайлы selectQuadtreeTiles (камера-центрированный вариант). */
+/** Tiles selected by selectQuadtreeTiles (camera-centered variant). */
 export interface QuadtreeTilesSelection {
-  /** Упакованные инстансы: [cx, cz, size, level] × count (stride 4). */
+  /** Packed instances: [cx, cz, size, level] × count (stride 4). */
   readonly instances: Float32Array
-  /** Число тайлов (instances.length === 4·count). */
+  /** Number of tiles (instances.length === 4·count). */
   count: number
-  /** Минимальный/максимальный уровень выбранных тайлов (для статистики). */
+  /** Minimum/maximum level of the selected tiles (for statistics). */
   minLevel: number
   maxLevel: number
-  /** Ёмкость instances (в числах float; не путать с count). */
+  /** Capacity of instances (in floats; not to be confused with count). */
   readonly capacity: number
 }
 
 export interface QuadtreeSelectOptions {
-  /** Центр квадтри по X (позиция наблюдателя, лучше снапнутая — см. ниже). */
+  /** Quadtree center X (the observer's position, preferably snapped — see below). */
   readonly centerX: number
-  /** Центр квадтри по Z. */
+  /** Quadtree center Z. */
   readonly centerZ: number
-  /** Размер КОРНЕВОГО квада (край мира; степень двойки). */
+  /** Size of the ROOT quad (the world's edge; a power of two). */
   readonly rootSize: number
-  /** Число уровней: 1 = только корень; уровень L-1 — самые мелкие тайлы
+  /** Number of levels: 1 = root only; level L-1 — the smallest tiles
    *  (size = rootSize / 2^(levels-1)). */
   readonly levels: number
-  /** Делить узел, пока size > splitFactor · dist(центр узла, центр).
-   *  Меньше — плотнее у камеры (каждая ячейка ≈ splitFactor/N радиан). */
+  /** Split a node while size > splitFactor · dist(node center, center).
+   *  Smaller — denser near the camera (each cell ≈ splitFactor/N radians). */
   readonly splitFactor?: number
-  /** Предохранитель на число тайлов (default 4096). */
+  /** A safety limit on the number of tiles (default 4096). */
   readonly maxTiles?: number
-  /** Фрустум-куллинг: 6 нормированных плоскостей (a,b,c,d)×6 — 24 float,
-   *  «внутри» = a·x+b·y+c·z+d ≥ 0. Без поля — рисуем все тайлы. */
+  /** Frustum culling: 6 normalized planes (a,b,c,d)×6 — 24 floats,
+   *  "inside" = a·x+b·y+c·z+d ≥ 0. Without the field — draw all tiles. */
   readonly frustum?: Float32Array
-  /** Вертикальный полуразмер тайлов для куллинга (волны/юбка/высоты). */
+  /** Vertical half-extent of tiles for culling (waves/skirt/heights). */
   readonly yRadius?: number
-  /** Повторно используемая выборка (ёмкость вырастает при нехватке). */
+  /** A reusable selection (capacity grows when insufficient). */
   readonly out?: QuadtreeTilesSelection
 }
 
 /**
- * Выборка тайлов квадтри вокруг центра: рекурсия от корня, расщепление по
- * дистанции, отсечение фрустумом (консервативная сфера). Стабильность:
- * передавайте центр, снапнутый к сетке 2·(rootSize/2^levels) — тогда
- * тесселяция меняется только при пересечении границ, без «плавания».
+ * Selection of quadtree tiles around a center: recursion from the root,
+ * splitting by distance, frustum culling (a conservative sphere).
+ * Stability: pass a center snapped to the 2·(rootSize/2^levels) grid —
+ * then the tessellation changes only when crossing boundaries, without
+ * "drifting".
  */
 export function selectQuadtreeTiles(options: QuadtreeSelectOptions): QuadtreeTilesSelection {
   const {
@@ -86,16 +88,16 @@ export function selectQuadtreeTiles(options: QuadtreeSelectOptions): QuadtreeTil
   const yRadius = options.yRadius ?? 0
 
   if (!Number.isFinite(rootSize) || rootSize <= 0) {
-    throw new Error(`quadtree: rootSize должен быть > 0, получено ${rootSize}`)
+    throw new Error(`quadtree: rootSize must be > 0, got ${rootSize}`)
   }
   if (!Number.isInteger(levels) || levels < 1 || levels > 24) {
-    throw new Error(`quadtree: levels — целое 1..24, получено ${levels}`)
+    throw new Error(`quadtree: levels must be an integer 1..24, got ${levels}`)
   }
   if (!Number.isFinite(splitFactor) || splitFactor <= 0) {
-    throw new Error(`quadtree: splitFactor должен быть > 0, получено ${splitFactor}`)
+    throw new Error(`quadtree: splitFactor must be > 0, got ${splitFactor}`)
   }
   if (frustum !== undefined && frustum.length !== 24) {
-    throw new Error(`quadtree: frustum — 24 float (6 плоскостей), получено ${frustum.length}`)
+    throw new Error(`quadtree: frustum must be 24 floats (6 planes), got ${frustum.length}`)
   }
 
   const out = options.out ?? {
@@ -109,9 +111,9 @@ export function selectQuadtreeTiles(options: QuadtreeSelectOptions): QuadtreeTil
   out.minLevel = levels - 1
   out.maxLevel = 0
 
-  // Явный стек узлов (без рекурсии): [cx, cz, size, level]×depth-bounded.
-  // Каждый посещённый узел либо попадает в выборку, либо делится на 4 —
-  // всего посещается ≤ (4/3)·maxTiles узлов.
+  // An explicit node stack (no recursion): [cx, cz, size, level]×depth-bounded.
+  // Every visited node either lands in the selection or splits into 4 —
+  // in total ≤ (4/3)·maxTiles nodes are visited.
   const stack: number[] = [centerX, centerZ, rootSize, 0]
   let minLevelSeen = levels - 1
   let maxLevelSeen = 0
@@ -122,17 +124,17 @@ export function selectQuadtreeTiles(options: QuadtreeSelectOptions): QuadtreeTil
     const cz = stack.pop() as number
     const cx = stack.pop() as number
 
-    // Фрустум: консервативная сфера (центр y=0, радиус = полудиагональ + y).
+    // Frustum: a conservative sphere (center y=0, radius = half-diagonal + y).
     if (frustum !== undefined && quadtreeSphereOutside(frustum, cx, cz, size, yRadius)) {
       continue
     }
 
-    // Расщепление: тайл держит постоянный УГЛОВОЙ размер ~splitFactor/N —
-    // критерий Crest/GPU-Gems (screen-space error через дистанцию).
+    // Splitting: a tile keeps a constant ANGULAR size ~splitFactor/N —
+    // the Crest/GPU-Gems criterion (screen-space error via distance).
     const dx = cx - centerX
     const dz = cz - centerZ
     const dist = Math.sqrt(dx * dx + dz * dz)
-    const halfSide = size * 0.5 // ближайшая точка тайла к центру
+    const halfSide = size * 0.5 // the tile's closest point to the center
     if (level + 1 < levels && size > splitFactor * Math.max(dist - halfSide, 0) && out.count + 4 <= maxTiles) {
       const q = size * 0.25
       stack.push(cx - q, cz - q, size * 0.5, level + 1)
@@ -141,12 +143,14 @@ export function selectQuadtreeTiles(options: QuadtreeSelectOptions): QuadtreeTil
       stack.push(cx + q, cz + q, size * 0.5, level + 1)
       continue
     }
-    // ЖЁСТКИЙ кап: инстанс-буфер живёт ровно maxTiles записей (стек-хвост
-    // отбрасывается — в реальных сценах счёт ≪ капа, это предохранитель).
+    // A HARD cap: the instance buffer holds exactly maxTiles records (the
+    // stack tail is discarded — in real scenes the count ≪ the cap, this is
+    // a safety limit).
     if (out.count >= maxTiles) break
 
     if (out.count * 4 + 4 > out.instances.length) {
-      // Ленивый рост ёмкости (обычный кадр — без роста: буфер уже тёплый).
+      // Lazy capacity growth (a typical frame — no growth: the buffer is
+      // already warm).
       const grown = new Float32Array(out.instances.length * 2)
       grown.set(out.instances)
       const mutable = out as { instances: Float32Array; capacity: number }
@@ -168,7 +172,7 @@ export function selectQuadtreeTiles(options: QuadtreeSelectOptions): QuadtreeTil
   return out
 }
 
-/** Сфера тайла целиком вне одной из плоскостей → отсечь. */
+/** The tile's sphere fully outside one of the planes → cull. */
 function quadtreeSphereOutside(
   planes: Float32Array,
   cx: number,
@@ -176,7 +180,7 @@ function quadtreeSphereOutside(
   size: number,
   yRadius: number,
 ): boolean {
-  // Радиус по XZ: полудиагональ квадрата; по Y — yRadius (сфера).
+  // Radius over XZ: the square's half-diagonal; over Y — yRadius (a sphere).
   const r = Math.sqrt(0.5 * size * 0.5 * size * 2 + yRadius * yRadius)
   for (let p = 0; p < 6; p++) {
     const o = p * 4
@@ -186,48 +190,50 @@ function quadtreeSphereOutside(
   return false
 }
 
-/** Геометрия единичного тайла: сетка [0..1]² + юбка по периметру. */
+/** Unit tile geometry: a [0..1]² grid + a skirt around the perimeter. */
 export interface QuadtreeTileMesh {
-  /** Позиции: stride 3 — (u, v, skirt), u/v ∈ [0..1], юбка повторяет UV
-   *  кромки с skirt=1 (стенка уходит ВНИЗ в шейдере: y -= skirt·depth). */
+  /** Positions: stride 3 — (u, v, skirt), u/v ∈ [0..1], the skirt repeats
+   *  the edge UVs with skirt=1 (the wall goes DOWN in the shader:
+   *  y -= skirt·depth). */
   readonly positions: Float32Array
-  /** UV = (u, v) — те же координаты сети (stride 2). */
+  /** UV = (u, v) — the same grid coordinates (stride 2). */
   readonly uvs: Float32Array
-  /** Треугольники: сетка + юбка (4·segments стенок). */
+  /** Triangles: grid + skirt (4·segments walls). */
   readonly indices: Uint32Array
-  /** Уникальные рёбра СЕТКИ (без юбки) — wireframe/LOD-инспекция. */
+  /** Unique GRID edges (without the skirt) — wireframe/LOD inspection. */
   readonly edgeIndices: Uint32Array
   readonly vertexCount: number
-  /** Число вершин юбки (для статистики). */
+  /** Number of skirt vertices (for statistics). */
   readonly skirtVertexCount: number
   readonly segments: number
 }
 
 export interface QuadtreeTileMeshOptions {
-  /** Ячеек по стороне (default 32; вершины (N+1)²). */
+  /** Cells per side (default 32; (N+1)² vertices). */
   readonly segments?: number
-  /** Юбка-стенка по периметру (default true). */
+  /** A skirt wall around the perimeter (default true). */
   readonly skirt?: boolean
 }
 
 /**
- * Единичный тайл [0..1]² — СТАТИЧНАЯ геометрия для instanced-рендера:
- * мировая позиция = instance.xy + (uv − 0.5)·instance.size (шейдер).
+ * A unit tile [0..1]² — STATIC geometry for instanced rendering:
+ * world position = instance.xy + (uv − 0.5)·instance.size (shader).
  *
- * Юбка: дублированные кромочные вершины (те же u/v, skirt=1) + вертикальные
- * стенки-квады; закрывает T-трещины между соседями разных уровней.
- * Индексы рёбер (wireframe) юбку НЕ включают — структура LOD читается чисто.
+ * Skirt: duplicated edge vertices (the same u/v, skirt=1) + vertical wall
+ * quads; closes T-cracks between neighbors of different levels.
+ * Edge indices (wireframe) do NOT include the skirt — the LOD structure
+ * reads cleanly.
  */
 export function quadtreeTileMesh(options: QuadtreeTileMeshOptions = {}): QuadtreeTileMesh {
   const segments = options.segments ?? 32
   const withSkirt = options.skirt ?? true
   if (!Number.isInteger(segments) || segments < 1 || segments > 256) {
-    throw new Error(`quadtreeTileMesh: segments — целое 1..256, получено ${segments}`)
+    throw new Error(`quadtreeTileMesh: segments must be an integer 1..256, got ${segments}`)
   }
 
   const cols = segments + 1
   const gridCount = cols * cols
-  // Юбка: 4 кромки × (segments+1) вершин (углы дублируются — простота).
+  // Skirt: 4 edges × (segments+1) vertices (corners are duplicated — simplicity).
   const skirtCount = withSkirt ? 4 * cols : 0
   const vertexCount = gridCount + skirtCount
 
@@ -248,11 +254,11 @@ export function quadtreeTileMesh(options: QuadtreeTileMeshOptions = {}): Quadtre
     }
   }
 
-  // Юбка: индекс вершины кромки → дубль со skirt=1.
+  // Skirt: edge vertex index → a duplicate with skirt=1.
   const skirtIndexOf = new Int32Array(gridCount).fill(-1)
   if (withSkirt) {
     let s = gridCount
-    // верхняя (v=0) и нижняя (v=1) кромки
+    // top (v=0) and bottom (v=1) edges
     for (let x = 0; x < cols; x++) {
       const top = x
       const bottom = segments * cols + x
@@ -271,8 +277,9 @@ export function quadtreeTileMesh(options: QuadtreeTileMeshOptions = {}): Quadtre
       uvs[s * 2 + 1] = positions[bottom * 3 + 1]
       s++
     }
-    // левая (u=0) и правая (u=1) кромки (углы уже есть — дублируем и их:
-    // стенки смежных кромок перекрываются в углах, это безвредно)
+    // left (u=0) and right (u=1) edges (the corners already exist — we
+    // duplicate them too: the walls of adjacent edges overlap at the
+    // corners, which is harmless)
     for (let z = 0; z < cols; z++) {
       const left = z * cols
       const right = z * cols + segments
@@ -293,7 +300,7 @@ export function quadtreeTileMesh(options: QuadtreeTileMeshOptions = {}): Quadtre
     }
   }
 
-  // Треугольники сетки — CCW сверху (та же ориентация, что prims/grid).
+  // Grid triangles — CCW from above (the same orientation as prims/grid).
   const triCount = segments * segments * 2 + (withSkirt ? segments * 8 : 0)
   const indices = new Uint32Array(triCount * 3)
   let t = 0
@@ -312,12 +319,13 @@ export function quadtreeTileMesh(options: QuadtreeTileMeshOptions = {}): Quadtre
     }
   }
 
-  // Стенки юбки: квад (кромка-вершина, её юбка-дубль, следующая пара).
+  // Skirt walls: a quad (edge vertex, its skirt duplicate, the next pair).
   if (withSkirt) {
     const wall = (a: number, b: number): void => {
-      // a → b вдоль кромки; sa/sb — юбки a/b. Два треугольника, любая
-      // ориентация (стенка вертикальная, видна с обеих сторон — обычно
-      // рендерится с cull off или ориентация чередуется; океан не каллится).
+      // a → b along the edge; sa/sb — the skirts of a/b. Two triangles, any
+      // orientation (the wall is vertical, visible from both sides — usually
+      // rendered with cull off or the orientation alternates; the ocean is
+      // not culled).
       const sa = skirtIndexOf[a]
       const sb = skirtIndexOf[b]
       if (sa < 0 || sb < 0) return
@@ -329,16 +337,17 @@ export function quadtreeTileMesh(options: QuadtreeTileMeshOptions = {}): Quadtre
       indices[t++] = a
     }
     for (let x = 0; x < segments; x++) {
-      wall(x, x + 1) // верхняя кромка
-      wall(segments * cols + x, segments * cols + x + 1) // нижняя
+      wall(x, x + 1) // top edge
+      wall(segments * cols + x, segments * cols + x + 1) // bottom
     }
     for (let z = 0; z < segments; z++) {
-      wall(z * cols, (z + 1) * cols) // левая
-      wall(z * cols + segments, (z + 1) * cols + segments) // правая
+      wall(z * cols, (z + 1) * cols) // left
+      wall(z * cols + segments, (z + 1) * cols + segments) // right
     }
   }
 
-  // Рёбра сетки (unique, с диагоналями — как у prims/grid): юбку не включаем.
+  // Grid edges (unique, with diagonals — as in prims/grid): the skirt is
+  // not included.
   const edgeSet = new Set<number>()
   const edges: number[] = []
   const addEdge = (a: number, b: number): void => {
@@ -373,45 +382,46 @@ export function quadtreeTileMesh(options: QuadtreeTileMeshOptions = {}): Quadtre
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Пара «ОКЕАН-ТОЧНАЯ» API (Task 113 → библиотека, Task 115): мировая фикс-сетка
-// корней, отсечение по направлению взгляда, ноль аллокаций на кадр, юбки
-// побитово-непрерывного дисплейса. Перенесено 1:1 из валидированного демо
-// FFT-океана (кваддрево до 10 км, 300K+ трис, UI-агрессивность LOD).
+// The "OCEAN-EXACT" API pair (Task 113 → library, Task 115): a world fixed
+// grid of roots, culling by view direction, zero allocations per frame,
+// skirts of bit-continuous displacement. Ported 1:1 from the validated FFT
+// ocean demo (a quadtree up to 10 km, 300K+ tris, UI LOD aggressiveness).
 // ════════════════════════════════════════════════════════════════════════════
 
-/** Ячеек в стороне патча по умолчанию (вершин 33×33 внутри + кольцо юбки). */
+/** Default patch cells per side (33×33 vertices inside + the skirt ring). */
 export const PATCH_CELLS = 32
-/** Вершины патча: (PATCH_CELLS+3)² — внутренний грид + юбка. */
+/** Patch vertices: (PATCH_CELLS+3)² — the inner grid + the skirt. */
 export const PATCH_VERTEX_COUNT = (PATCH_CELLS + 3) * (PATCH_CELLS + 3)
-/** Треугольников на лист: весь грид 35×35 ячеек (интерьер + стены юбки). */
+/** Triangles per leaf: the whole 35×35-cell grid (interior + skirt walls). */
 export const PATCH_TRIANGLE_COUNT = (PATCH_CELLS + 2) * (PATCH_CELLS + 2) * 2
-/** Рёбер каркаса: только внутренний грид (юбку не рисуем — чище вид). */
+/** Wireframe edges: only the inner grid (the skirt is not drawn — a cleaner look). */
 export const PATCH_WIRE_EDGE_COUNT = PATCH_CELLS * (PATCH_CELLS + 1) * 2
 
-/** Корневой тайл кваддрева по умолчанию, м (фикс-сетка мира). */
+/** Default quadtree root tile, m (the world fixed grid). */
 export const ROOT_SIZE = 4096
-/** Дальность покрытия по умолчанию, м. */
+/** Default coverage distance, m. */
 export const HORIZON_DISTANCE = 10000
-/** Потолок листьев по умолчанию (ёмкость буфера инстансов). */
+/** Default leaf cap (the instance buffer capacity). */
 export const MAX_INSTANCES = 2048
 
-/** LOD-параметры из агрессивности (единая настройка: спад + ближний лимит). */
+/** LOD parameters from aggressiveness (one setting: falloff + near limit). */
 export interface LodParams {
-  /** Узел дробится, пока dist < size·K. Меньше K ⇒ агрессивнее упрощение. */
+  /** A node splits while dist < size·K. Smaller K ⇒ more aggressive simplification. */
   K: number
-  /** Жёсткий потолок глубины (лимит детализации вблизи). */
+  /** A hard depth cap (the near-field detail limit). */
   maxDepth: number
-  /** Минимальный лист, м. */
+  /** Minimum leaf, m. */
   minLeafSize: number
 }
 
 /**
- * Агрессивность → LOD-параметры (репорт юзера: «агрессивно изначально,
- * с настройкой — и детализацию ближайших квадов (лимит), и скорость спада»):
- *  - A ∈ [1..3], по умолчанию 2 (агрессивно);
- *  - K = 4.5/A — скорость спада детализации с расстоянием;
- *  - minLeafSize 64/128/256 м по ступеням A — жёсткий лимит ближней
- *    детализации («не до бесконечности»).
+ * Aggressiveness → LOD parameters (user report: "aggressive by default,
+ * with a setting for both the detail of the nearest quads (a limit) and
+ * the falloff speed"):
+ *  - A ∈ [1..3], default 2 (aggressive);
+ *  - K = 4.5/A — the speed of detail falloff with distance;
+ *  - minLeafSize 64/128/256 m by A steps — a hard near-field detail limit
+ *    ("not to infinity").
  */
 export function lodParams(aggressiveness: number): LodParams {
   const a = Math.max(1, Math.min(3, aggressiveness))
@@ -422,12 +432,13 @@ export function lodParams(aggressiveness: number): LodParams {
 }
 
 /**
- * Патч-грид кваддрева: (segments+3)² вершин (x, z, skirt) — локальные
- * координаты в ЯЧЕЙКАХ [0..segments]; у кольца юбки позиция ПРИТЯНУТА к
- * кромке (та же (x,z) ⇒ тот же мировой XZ ⇒ тот же uv ⇒ побитово тот же
- * дисплейс кромки — трещин на T-стыках нет), флаг skirt=1 (стенка уходит
- * вниз в шейдере). Индексы: треугольники всего грида + рёбра внутренника
- * (wireframe без юбки — видна чистая структура LOD).
+ * The quadtree patch grid: (segments+3)² vertices (x, z, skirt) — local
+ * coordinates in CELLS [0..segments]; the skirt ring's position is SNAPPED
+ * to the edge (the same (x,z) ⇒ the same world XZ ⇒ the same uv ⇒ a
+ * bit-identical edge displacement — no cracks at T-junctions), the skirt=1
+ * flag (the wall goes down in the shader). Indices: the whole grid's
+ * triangles + the inner part's edges (wireframe without the skirt — a
+ * clean LOD structure is visible).
  */
 export interface QuadtreePatch {
   /** (x, z, skirt)×N, stride 3. */
@@ -437,16 +448,16 @@ export interface QuadtreePatch {
   readonly segments: number
 }
 
-/** Индекс вершины в гриде −1..segments+1. */
+/** Vertex index in the grid −1..segments+1. */
 function patchCellIndex(gx: number, gy: number, segments: number): number {
   return (gy + 1) * (segments + 3) + (gx + 1)
 }
 
 export function quadtreePatch(segments = PATCH_CELLS): QuadtreePatch {
   if (!Number.isInteger(segments) || segments < 1 || segments > 253) {
-    throw new Error(`quadtreePatch: segments — целое 1..253, получено ${segments}`)
+    throw new Error(`quadtreePatch: segments must be an integer 1..253, got ${segments}`)
   }
-  const side = segments + 3 // грид от −1 до segments+1 включительно
+  const side = segments + 3 // the grid from −1 to segments+1 inclusive
   const verts = new Float32Array(side * side * 3)
   let v = 0
   for (let gy = -1; gy <= segments + 1; gy++) {
@@ -458,8 +469,9 @@ export function quadtreePatch(segments = PATCH_CELLS): QuadtreePatch {
     }
   }
 
-  // Треугольники: весь грид (side−1)² ячеек — интерьер + стены юбки; угловые
-  // ячейки вырождаются в нулевую площадь (безвредно, зато индексация единая).
+  // Triangles: the whole grid (side−1)² cells — interior + skirt walls; the
+  // corner cells degenerate into zero area (harmless, but the indexing is
+  // uniform).
   const tris = new Uint16Array((side - 1) * (side - 1) * 6)
   let t = 0
   for (let gy = -1; gy < segments + 1; gy++) {
@@ -477,7 +489,7 @@ export function quadtreePatch(segments = PATCH_CELLS): QuadtreePatch {
     }
   }
 
-  // Каркас: линии внутреннего грида (segments+1)² (без юбки).
+  // Wireframe: lines of the inner grid (segments+1)² (without the skirt).
   const wireCount = segments * (segments + 1) * 2
   const edges = new Uint16Array(wireCount * 2)
   let e = 0
@@ -497,55 +509,59 @@ export function quadtreePatch(segments = PATCH_CELLS): QuadtreePatch {
   return { vertices: verts, triangleIndices: tris, edgeIndices: edges, segments }
 }
 
-/** Результат селекции листьев. Свежий лёгкий объект на вызов (~100 байт —
- *  никакой алгоритмической аллокации); instanceData — РАЗДЕЛЯЕМЫЙ
- *  пре-аллоцированный буфер: его содержимое валидно ДО СЛЕДУЮЩЕГО вызова
- *  selectQuadtreeLeaves (загружайте в GPU в том же кадре). Два результата
- *  можно держать одновременно (числа честные); буферы — один и тот же. */
+/** The leaf selection result. A fresh lightweight object per call
+ *  (~100 bytes — no algorithmic allocation); instanceData is a SHARED
+ *  pre-allocated buffer: its content is valid UNTIL THE NEXT
+ *  selectQuadtreeLeaves call (upload it to the GPU in the same frame). Two
+ *  results can be held simultaneously (the numbers are honest); the
+ *  buffers are the same one. */
 export interface QuadtreeLeavesSelection {
-  /** Число листьев = число инстансов патча. */
+  /** Number of leaves = number of patch instances. */
   leafCount: number
-  /** (originX, originZ, size, 0) × leafCount — данные буфера инстансов. */
+  /** (originX, originZ, size, 0) × leafCount — instance buffer data. */
   instanceData: Float32Array
-  /** Треугольников всего (с юбками). */
+  /** Total triangles (with skirts). */
   triangles: number
   minLeafSize: number
   maxLeafSize: number
-  /** Параметры LOD этого прохода (для HUD). */
+  /** LOD parameters of this pass (for the HUD). */
   lod: LodParams
 }
 
 export interface QuadtreeLeavesOptions {
-  /** LOD-агрессивность 1..3 (default 2 — «агрессивно изначально»). */
+  /** LOD aggressiveness 1..3 (default 2 — "aggressive by default"). */
   readonly aggressiveness?: number
-  /** Размер корневого тайла фикс-сетки мира, м (default 4096). */
+  /** Root tile size of the world fixed grid, m (default 4096). */
   readonly rootSize?: number
-  /** Радиус покрытия от камеры, м (default 10000). */
+  /** Coverage radius from the camera, m (default 10000). */
   readonly horizon?: number
-  /** Потолок листьев = ёмкость инстанс-буфера (default 2048). */
+  /** Leaf cap = the instance buffer capacity (default 2048). */
   readonly maxInstances?: number
-  /** Горизонтальное направление взгляда (нормировать не обязательно):
-   *  листья вне сектора «65° + угловой радиус листа» отсекаются. Ноль/NaN
-   *  — отсечение выключено (вид строго вниз). */
+  /** Horizontal view direction (no need to normalize):
+   *  leaves outside the "65° + leaf angular radius" sector are culled.
+   *  Zero/NaN — culling disabled (looking straight down). */
   readonly forward?: { readonly x: number; readonly z: number }
 }
 
-// Пре-аллоцированное состояние модуля: стек обхода + инстансы + результат.
-// Стек: (originX, originZ, depth); DFS ⇒ глубина ≤ 3·maxDepth+4 (с запасом).
+// Pre-allocated module state: traversal stack + instances + result.
+// Stack: (originX, originZ, depth); DFS ⇒ depth ≤ 3·maxDepth+4 (with a
+// margin).
 const LEAF_STACK_CAP = 320
 const leafStack = new Float64Array(LEAF_STACK_CAP * 3)
 let leafInstances = new Float32Array(MAX_INSTANCES * 4)
 let leafCapacity = MAX_INSTANCES
 
 /**
- * Набор листьев кваддрева для текущего кадра — СИСТЕМА ОКЕАНА (валидирована
- * демо FFT-океана, Task 113):
- *  - корни — тайлы ФИКС-СЕТКИ мира rootSize (вершины не «плывут» при
- *    движении камеры — меняется только набор листьев);
- *  - дробление: 3D-дистанция до ближайшей точки узла (с высотой камеры) <
- *    size·K и depth < maxDepth (жёсткий лимит ближней детализации);
- *  - отсечение по направлению взгляда (сектор 65° + угловой радиус листа);
- *  - НОЛЬ аллокаций на кадр (стек, инстансы и результат — пре-аллоцированы).
+ * The set of quadtree leaves for the current frame — the OCEAN SYSTEM
+ * (validated by the FFT ocean demo, Task 113):
+ *  - roots are rootSize tiles of the world FIXED GRID (vertices do not
+ *    "drift" as the camera moves — only the set of leaves changes);
+ *  - subdivision: 3D distance to the node's nearest point (with camera
+ *    height) < size·K and depth < maxDepth (a hard near-field detail
+ *    limit);
+ *  - culling by view direction (a 65° sector + the leaf's angular radius);
+ *  - ZERO allocations per frame (the stack, instances and result are
+ *    pre-allocated).
  */
 export function selectQuadtreeLeaves(
   camX: number,
@@ -557,7 +573,7 @@ export function selectQuadtreeLeaves(
   const horizon = options.horizon ?? HORIZON_DISTANCE
   const maxInstances = Math.max(16, options.maxInstances ?? MAX_INSTANCES)
   if (maxInstances > leafCapacity) {
-    // Ленивый рост ёмкости ОДИН раз (обычный кадр — без аллокаций).
+    // Lazy capacity growth ONCE (a typical frame — no allocations).
     leafInstances = new Float32Array(maxInstances * 4)
     leafCapacity = maxInstances
   }
@@ -583,12 +599,13 @@ export function selectQuadtreeLeaves(
     for (let rx = r0; rx <= r1; rx++) {
       const ox = rx * rootSize
       const oz = rz * rootSize
-      // XZ-дистанция до ближайшей точки корня (быстрый отсев).
+      // XZ distance to the root's nearest point (a quick reject).
       const dxr = Math.max(Math.abs(camX - (ox + rootSize / 2)) - rootSize / 2, 0)
       const dzr = Math.max(Math.abs(camZ - (oz + rootSize / 2)) - rootSize / 2, 0)
       if (dxr * dxr + dzr * dzr > h2) continue
 
-      // DFS по поддереву корня (явный стек — без рекурсии и аллокаций).
+      // DFS over the root's subtree (an explicit stack — no recursion or
+      // allocations).
       let sp = 0
       leafStack[sp * 3] = ox
       leafStack[sp * 3 + 1] = oz
@@ -602,15 +619,16 @@ export function selectQuadtreeLeaves(
         const size = rootSize / (1 << depth)
         const half = size / 2
 
-        // 3D-дистанция до ближайшей точки квадрата (с высотой камеры).
+        // 3D distance to the square's nearest point (with camera height).
         const dx = Math.max(Math.abs(camX - (x + half)) - half, 0)
         const dz = Math.max(Math.abs(camZ - (z + half)) - half, 0)
         const distSq = dx * dx + dz * dz + camY * camY
         const need = size * needBase
 
         if (hasForward && distSq > camY * camY) {
-          // Отсечение по направлению взгляда: угол от forward до центра листа
-          // минус угловой радиус листа должен влезать в сектор обзора.
+          // Culling by view direction: the angle from forward to the leaf
+          // center minus the leaf's angular radius must fit into the view
+          // sector.
           const cx = x + half - camX
           const cz = z + half - camZ
           const len = Math.sqrt(cx * cx + cz * cz)
@@ -636,8 +654,9 @@ export function selectQuadtreeLeaves(
           sp += 4
         } else {
           if (leafCount >= maxInstances) {
-            // ЖЁСТКИЙ кап (урок Task 115: эмиссия без капа переполняла
-            // контракт при малых maxInstances — хвост DFS молча писал мимо).
+            // A HARD cap (Task 115 lesson: emission without a cap
+            // overflowed the contract with small maxInstances — the DFS
+            // tail silently wrote out of bounds).
             break
           }
           const o = leafCount * 4
@@ -654,9 +673,10 @@ export function selectQuadtreeLeaves(
     }
   }
 
-  // ⚠️ Свежий объект-результат: держать ДВЕ выборки одновременно — легально
-  // (урок Task 115: синглтон алиасил выборки, тесты/сравнение молча врали).
-  // Буфер инстансов — общий (ноль больших аллокаций на кадр).
+  // ⚠️ A fresh result object: holding TWO selections simultaneously is
+  // legal (Task 115 lesson: a singleton aliased the selections,
+  // tests/comparisons silently lied).
+  // The instance buffer is shared (zero large allocations per frame).
   return {
     leafCount,
     instanceData: leafInstances,
@@ -668,17 +688,17 @@ export function selectQuadtreeLeaves(
 }
 
 /**
- * Глубина юбки, м: перекрывает перепад высот рельефа на стыке LOD.
- * Формула валидирована океаном (дисплейс-амплитуда растёт с «разрешением»
- * листа относительно периода карты высот).
+ * Skirt depth, m: covers the relief height difference at an LOD seam.
+ * The formula is validated by the ocean (the displacement amplitude grows
+ * with the leaf's "resolution" relative to the height map period).
  */
 export function skirtDepthFor(leafSize: number, periodSize: number): number {
   return Math.max(8, Math.min(300, (periodSize / leafSize) * 12))
 }
 
-// Горизонтальный forward из view-матрицы (колоночно-мажорной): направление
-// взгляда = −третья строка ротационной части. Возвращается СИНГЛТОН — без
-// аллокаций; нулевой вектор (вид строго вниз) отключает отсечение.
+// Horizontal forward from the view matrix (column-major): the view
+// direction = −the third row of the rotational part. Returns a SINGLETON —
+// no allocations; a zero vector (looking straight down) disables culling.
 const forwardScratch = { x: 0, z: 0 }
 export function viewForwardXZ(view: Float32Array): { x: number; z: number } {
   const x = -view[2]

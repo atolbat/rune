@@ -27,8 +27,8 @@ fn fsMain() -> @location(0) vec4<f32> {
   return params.u_tint;
 }`
 
-describe('wgsl-рефлексия', () => {
-  it('юниформы: смещения std140-стиля', () => {
+describe('wgsl reflection', () => {
+  it('uniforms: std140-style offsets', () => {
     const r = reflectWgsl(WGSL)
     const mvp = r.uniforms.find(u => u.name === 'u_mvp')
     const tint = r.uniforms.find(u => u.name === 'u_tint')
@@ -37,27 +37,27 @@ describe('wgsl-рефлексия', () => {
     expect(r.uniformBytes).toBe(80)
   })
 
-  it('атрибуты — только параметры @vertex (не выходы VSOut)', () => {
+  it('attributes — only @vertex parameters (not VSOut outputs)', () => {
     const r = reflectWgsl(WGSL)
     expect(r.attributes.map(a => a.name)).toEqual(['inPos', 'inUv'])
     expect(r.attributes[0].size).toBe(3)
   })
 
-  it('текстуры группы 1: sampler + texture_2d', () => {
+  it('group-1 textures: sampler + texture_2d', () => {
     const r = reflectWgsl(WGSL)
     expect(r.textures.map(t => t.name).sort()).toEqual(['texSampler', 'texTexture'])
   })
 })
 
-describe('slice-арена', () => {
-  it('слоты 256-выровнены, курсор растёт кратно 256', () => {
+describe('slice arena', () => {
+  it('slots are 256-aligned, the cursor grows in multiples of 256', () => {
     const arena = createSliceArena(4096)
     expect(arena.alloc(80)).toBe(0)
     expect(arena.alloc(16)).toBe(256)
-    expect(arena.alloc(300)).toBe(512) // 300 → два блока 256+64 → следующий 512
+    expect(arena.alloc(300)).toBe(512) // 300 → two blocks 256+64 → next 512
   })
 
-  it('reset возвращает курсор', () => {
+  it('reset returns the cursor', () => {
     const arena = createSliceArena(4096)
     arena.alloc(80)
     arena.alloc(80)
@@ -66,8 +66,8 @@ describe('slice-арена', () => {
   })
 })
 
-describe('компилятор + исполнитель (рекордер)', () => {
-  it('кадр: upload до пасса, dynamic offset передан, draw с count', () => {
+describe('compiler + executor (recorder)', () => {
+  it('frame: upload before the pass, dynamic offset passed, draw with count', () => {
     const { gpu, calls } = createRecordingGPU()
     const arena = createSliceArena(1 << 12)
     const ctx = createWgpuContext(arena)

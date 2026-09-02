@@ -1,22 +1,23 @@
 /**
- * Полноэкранный квад: 2 треугольника в клип-пространстве, обвод CCW
- * (переживает cull 'back' в обоих бэкендах).
+ * Fullscreen quad: 2 triangles in clip space, CCW winding (survives cull
+ * 'back' in both backends).
  *
- * UV — в КООРДИНАТАХ ИЗОБРАЖЕНИЯ: v=0 — верхняя строка, v растёт вниз.
- * Это совпадает с раскладкой загружаемых данных (texSubImage2D/writeTexture
- * пишут первую строку в v=0) и с origin текстур WebGPU. NDC y=+1 — верх
- * цели в обоих бэкендах, поэтому квад с такими UV показывает картинки
- * вертикально честно без UNPACK_FLIP_Y и без веток «а тут переверни».
+ * UV — in IMAGE COORDINATES: v=0 is the top row, v grows downward.
+ * This matches the layout of uploaded data (texSubImage2D/writeTexture
+ * write the first row at v=0) and the WebGPU texture origin. NDC y=+1 is
+ * the top of the target in both backends, so a quad with these UVs shows
+ * images vertically true without UNPACK_FLIP_Y and without "flip it here"
+ * branches.
  */
 
-/** Геометрия квада: 2D-позиции и параллельные UV. */
+/** Quad geometry: 2D positions and parallel UVs. */
 export interface QuadGeometry {
   readonly positions: Float32Array
   readonly uvs: Float32Array
   readonly vertexCount: number
 }
 
-/** Углы: [x, y, u, v] — полный размах клип-пространства, UV image-space. */
+/** Corners: [x, y, u, v] — full clip-space extent, image-space UV. */
 const CORNERS: ReadonlyArray<readonly [number, number, number, number]> = [
   [-1, -1, 0, 1],
   [1, -1, 1, 1],
@@ -26,7 +27,7 @@ const CORNERS: ReadonlyArray<readonly [number, number, number, number]> = [
 
 const ORDER = [0, 1, 2, 0, 2, 3]
 
-/** Полноэкранный квад: 6 вершин, покрывает [-1,1]². */
+/** Fullscreen quad: 6 vertices, covers [-1,1]². */
 export function quad(): QuadGeometry {
   const positions = new Float32Array(ORDER.length * 2)
   const uvs = new Float32Array(ORDER.length * 2)

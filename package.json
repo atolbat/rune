@@ -2,7 +2,7 @@
   "name": "rune",
   "version": "0.1.0",
   "private": true,
-  "description": "Единый рендерер WebGL2/WebGPU: декларативные команды regl, реактивность на сигналах, ленты как валюта кадра",
+  "description": "A unified WebGL2/WebGPU renderer: regl-style declarative commands, signal-based reactivity, tapes as the currency of a frame",
   "license": "MIT",
   "type": "module",
   "workspaces": [

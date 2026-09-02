@@ -4,10 +4,10 @@ import { createTapeWriter, serializeTape, parseTape, OpCode } from '@rune/core'
 import type { TapeView } from '@rune/core'
 
 /**
- * Теория E (архив, обновлён под фасад v2): dynamic-offsets — единственный путь
- * нового GPUFacade (bindUniformSlice), победивший в исходном сравнении
- * (×1.7–2.7, createBindGroup 0 против N). Бенч сохраняет измерение стоимости
- * пути: кадр из 1000 draw через executor.
+ * Theory E (archive, updated for facade v2): dynamic-offsets — the only path of the
+ * new GPUFacade (bindUniformSlice), the winner of the original comparison
+ * (×1.7–2.7, createBindGroup 0 versus N). The bench keeps the measurement of the
+ * path's cost: a frame of 1000 draws through the executor.
  */
 
 const WGSL = `
@@ -63,5 +63,5 @@ function bestOf(repeats: number, run: () => void): number {
 }
 
 const ms = measure(9)
-console.log('── Теория E (архив, фасад v2): dynamic-offsets, кадр из 1000 draw ──')
-console.log(`время кадра: ${ms.toFixed(3)} мс`)
+console.log('── Theory E (archive, facade v2): dynamic-offsets, frame of 1000 draws ──')
+console.log(`frame time: ${ms.toFixed(3)} ms`)

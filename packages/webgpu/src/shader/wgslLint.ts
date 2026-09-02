@@ -1,16 +1,16 @@
 /**
- * Лёгкий статический линтер WGSL: ловит пропущенные ';' в телах функций —
- * класс ошибки, который Tint репортит только на устройстве.
- * (Инцидент: «expected ';' for variable declaration (строка 21)».)
+ * A lightweight static WGSL linter: catches missing ';' in function bodies —
+ * a class of error that Tint reports only on device.
+ * (Incident: "expected ';' for variable declaration (line 21)".)
  */
 
-/** Проблема линтера: строка и описание. */
+/** Linter problem: line and description. */
 export interface WgslLintProblem {
   readonly line: number
   readonly text: string
 }
 
-/** Проверяет WGSL: каждая строка-оператор должна заканчиваться корректно. */
+/** Checks WGSL: every statement line must end correctly. */
 export function lintWgsl(source: string): WgslLintProblem[] {
   const problems: WgslLintProblem[] = []
   const lines = source.split('\n')
@@ -25,25 +25,25 @@ function lintLine(raw: string, line: number): WgslLintProblem | null {
   const text = raw.trim()
   if (isSkippable(text)) return null
   if (endsWithTerminator(text)) return null
-  return { line, text: `нет ';' в конце оператора: "${text}"` }
+  return { line, text: `no ';' at end of statement: "${text}"` }
 }
 
 function isSkippable(text: string): boolean {
   if (text === '' || text.startsWith('//')) return true
-  if (text.startsWith('@')) return true // атрибут
+  if (text.startsWith('@')) return true // attribute
   if (text.startsWith('fn ') || text.startsWith('struct ')) return true
-  if (text.startsWith(')')) return true // закрытие сигнатуры функции
-  if (text.startsWith('}')) return true // закрытие блока
+  if (text.startsWith(')')) return true // closing a function signature
+  if (text.startsWith('}')) return true // closing a block
   return false
 }
 
 function endsWithTerminator(text: string): boolean {
   return (
-    text.endsWith(';') || // оператор
-    text.endsWith('{') || // открытие блока
-    text.endsWith('}') || // закрытие блока
-    text.endsWith(',') || // член структуры / параметр
-    text.endsWith('(') || // перенос вызова
-    text.endsWith('->') // сигнатура без типа
+    text.endsWith(';') || // statement
+    text.endsWith('{') || // opening a block
+    text.endsWith('}') || // closing a block
+    text.endsWith(',') || // struct member / parameter
+    text.endsWith('(') || // call continuation
+    text.endsWith('->') // signature without type
   )
 }

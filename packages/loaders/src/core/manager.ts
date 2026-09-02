@@ -1,24 +1,25 @@
 /**
- * core/manager.ts — LoadManager: общий лоадер с «широкими настройками».
+ * core/manager.ts — LoadManager: a general-purpose loader with "broad settings".
  *
- * Что умеет:
- *  - приоритетная очередь (числовые Priority + anti-starvation aging);
- *  - лимит параллелизма по числу задач И по байтам в полёте (maxInflightBytes);
- *  - прогресс (content-length/expectedBytes + от парсера), троттлинг 50 мс;
- *  - отмена: handle.cancel() / внешний AbortSignal / группа / dispose,
- *    с каскадом на дочерние resolveExternal-задачи;
- *  - ретраи (сеть/5xx/429/timeout) с backoff; попытка учитывается ПОСЛЕ
- *    первой (retries=0 → ни одного ретрая);
- *  - группы: enough(N) — «достаточно N из M, остальное в фоне» + демоут
- *    приоритета остатка, waitAll/settleAll, агрегированный прогресс;
- *  - resolveExternal: glTF .bin / OBJ .mtl / текстуры грузятся дочерними
- *    задачами ПАРАЛЛЕЛЬНО родителю и остальному трафику.
+ * What it can do:
+ *  - priority queue (numeric Priority + anti-starvation aging);
+ *  - concurrency limit by task count AND by bytes in flight (maxInflightBytes);
+ *  - progress (content-length/expectedBytes + from the parser), 50 ms throttling;
+ *  - cancellation: handle.cancel() / external AbortSignal / group / dispose,
+ *    cascading onto child resolveExternal tasks;
+ *  - retries (network/5xx/429/timeout) with backoff; an attempt is counted
+ *    AFTER the first one (retries=0 → no retries at all);
+ *  - groups: enough(N) — "N out of M is enough, the rest in the background"
+ *    + demoting the remainder's priority, waitAll/settleAll, aggregated progress;
+ *  - resolveExternal: glTF .bin / OBJ .mtl / textures are loaded by child
+ *    tasks IN PARALLEL with the parent and the other traffic.
  *
- * Семантика слота параллелизма: слот (и байтовый резерв) держит только
- * сетевая фаза. Когда поток скачан (или байты были готовы сразу), слот
- * освобождается ДО parse()/finish() — parse, внутри которого
- * resolveExternal, не держит слот и не создаёт дедлок при concurrency=1.
- * Ретрай сетевой фазы пересоздаёт и стриминговый sink (свежая сессия).
+ * Concurrency slot semantics: only the network phase holds a slot (and the
+ * byte reservation). Once the stream is downloaded (or the bytes were ready
+ * immediately), the slot is released BEFORE parse()/finish() — parse, inside
+ * which resolveExternal runs, does not hold the slot and creates no deadlock
+ * at concurrency=1. A network-phase retry also recreates the streaming sink
+ * (a fresh session).
  */
 
 import type {
@@ -43,29 +44,29 @@ import { streamToAsyncIterable, readAllBytes, composeTransforms } from './pipe.t
 import { bytesParser } from '../formats/config.ts'
 import { createParserRegistry, sniffKind } from '../registry.ts'
 
-// ─── публичные типы ──────────────────────────────────────────────────────────
+// ─── public types ──────────────────────────────────────────────────────────
 
 export interface LoadManagerOptions {
   fetchImpl?: typeof fetch
   resolveUrl?: UrlResolver
-  /** zlib-inflate для FBX; null запрещает. Default: DecompressionStream. */
+  /** zlib-inflate for FBX; null forbids it. Default: DecompressionStream. */
   inflate?: ((bytes: Uint8Array) => Promise<Uint8Array>) | null
-  /** Декодер картинок для builtin image-парсера. Default: createImageBitmap. */
+  /** Image decoder for the builtin image parser. Default: createImageBitmap. */
   decodeImage?: ImageDecode | null
-  /** Параллельные сетевые задачи. Default 6. */
+  /** Parallel network tasks. Default 6. */
   concurrency?: number
-  /** Бюджет байтов «в полёте» (резерв по content-length/expected). Default ∞. */
+  /** "In flight" byte budget (reserved by content-length/expected). Default ∞. */
   maxInflightBytes?: number
-  /** Дефолтный timeoutMs фазы fetch. Default: нет. */
+  /** Default timeoutMs of the fetch phase. Default: none. */
   defaultTimeoutMs?: number
-  /** Дефолтные ретраи. Default 0. */
+  /** Default retries. Default 0. */
   defaultRetries?: number
   /**
-   * Anti-starvation: приоритет ожидания растёт на эту величину в секунду.
-   * Prefetch(0) догонит normal(50) за 500 с при 0.1. Default 0.1; 0 — выкл.
+   * Anti-starvation: waiting priority grows by this amount per second.
+   * Prefetch(0) catches up with normal(50) in 500 s at 0.1. Default 0.1; 0 — off.
    */
   agingPerSecond?: number
-  /** Реестр парсеров по kind. Default — builtin (registry.ts). */
+  /** Parser registry by kind. Default — builtin (registry.ts). */
   parsers?: ParserRegistry
   now?: () => number
 }
@@ -76,9 +77,9 @@ export interface LoadManagerStats {
   done: number
   failed: number
   cancelled: number
-  /** Зарезервированные байты активных сетевых фаз. */
+  /** Reserved bytes of active network phases. */
   inflightBytes: number
-  /** Всего скачано байтов за жизнь менеджера. */
+  /** Total bytes downloaded over the manager's lifetime. */
   bytesReceived: number
   tasks: number
 }
@@ -91,16 +92,16 @@ export interface GroupProgress {
   readonly active: number
   readonly queued: number
   readonly receivedBytes: number
-  /** Сумма известных totalBytes; null, если хоть один неизвестен. */
+  /** Sum of the known totalBytes; null if at least one is unknown. */
   readonly totalBytes: number | null
-  /** Байт-взвешенная доля (fallback на счёт при нулевых весах). */
+  /** Byte-weighted fraction (falls back to a count at zero weights). */
   readonly fraction: number
 }
 
 export interface EnoughOptions {
   /**
-   * Куда демоутить ещё не стартовавшие остатки, когда кворум достигнут.
-   * Default Priority.prefetch; null — не демоутить.
+   * Where to demote not-yet-started remainders once the quorum is reached.
+   * Default Priority.prefetch; null — do not demote.
    */
   demoteRemainingTo?: number | null
 }
@@ -113,43 +114,43 @@ export interface SettledResult {
 
 export interface LoadGroup {
   readonly name: string
-  /** Добавить задачу в группу (defaultPriority группы, если не задано). */
+  /** Add a task to the group (the group's defaultPriority if not given). */
   add<S, O = unknown>(source: LoadSource, options?: LoadOptions<S, O>): LoadHandle<S>
-  /** Резолвится, когда готово ≥count ассетов; остаток демоутится в фон. */
+  /** Resolves when ≥count assets are ready; the remainder is demoted to the background. */
   enough(count: number, options?: EnoughOptions): Promise<unknown[]>
-  /** Всё или AggregateError со всеми ошибками. */
+  /** Everything or an AggregateError with all errors. */
   waitAll(): Promise<unknown[]>
-  /** Всё с ошибками по-месту (без throw). */
+  /** Everything with errors in place (no throw). */
   settleAll(): Promise<SettledResult[]>
-  /** Агрегированный прогресс группы. */
+  /** Aggregated group progress. */
   readonly progress: GroupProgress
   cancelAll(): void
-  /** Поменять приоритет ещё не стартовавших задач группы. */
+  /** Change the priority of the group's not-yet-started tasks. */
   setPriority(priority: number): void
   readonly handles: readonly LoadHandle<unknown>[]
 }
 
 export interface LoadManager {
-  /** Загрузить один ассет. kind/parser/sniff выбирают парсер. */
+  /** Load a single asset. kind/parser/sniff pick the parser. */
   load<T, O = unknown>(source: LoadSource, options?: LoadOptions<T, O>): LoadHandle<T>
-  /** Сырые байты по URL (сахар + путь для resolveExternal). */
+  /** Raw bytes by URL (sugar + the path for resolveExternal). */
   loadBytes(url: string, options?: LoadOptions<Uint8Array, void>): LoadHandle<Uint8Array>
-  /** Группа задач: прогресс, кворум enough(N), отмена. */
+  /** A task group: progress, enough(N) quorum, cancellation. */
   group(name?: string, options?: { defaultPriority?: number }): LoadGroup
-  /** Зарегистрировать/переопределить парсер по kind. */
+  /** Register/override a parser by kind. */
   registerParser(kind: string, parser: Parser<any, any>): void
   setConcurrency(n: number): void
-  /** Дождаться пустой очереди и активных задач. */
+  /** Wait for an empty queue and no active tasks. */
   drain(): Promise<void>
   stats(): LoadManagerStats
-  /** Убрать терминальные задачи из stats (хэндлы после prune — только ready). */
+  /** Remove terminal tasks from stats (after prune, handles only have ready). */
   pruneTerminal(): void
-  /** Отменить всё и закрыть менеджер. */
+  /** Cancel everything and close the manager. */
   dispose(): void
   readonly disposed: boolean
 }
 
-// ─── реализация ──────────────────────────────────────────────────────────────
+// ─── implementation ──────────────────────────────────────────────────────────────
 
 const PROGRESS_EMIT_INTERVAL_MS = 50
 const DEFAULT_RESERVE_BYTES = 2 * 1024 * 1024
@@ -191,7 +192,7 @@ interface Task {
   lastEmitPhase: LoadPhase
 }
 
-/** Итог fetch-фазы: байты | уже отрезолвлено стриминговым парсером. */
+/** Fetch-phase outcome: bytes | already resolved by a streaming parser. */
 type FetchOutcome = Uint8Array | { readonly streamed: true }
 
 interface GroupImpl {
@@ -222,7 +223,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
         decodeImage: caps.decodeImage,
       }),
   )
-  // bytes нужен всегда (resolveExternal); пользователь может переопределить
+  // bytes is always needed (resolveExternal); the user may override it
   if (!parsers.has('bytes')) parsers.set('bytes', bytesParser)
 
   const tasks = new Map<number, Task>()
@@ -236,7 +237,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
   let disposed = false
   const drainWaiters = new Set<() => void>()
 
-  // ── куча приоритетов ──
+  // ── priority heap ──
   function effPriority(task: Task): number {
     const ageSec = (now() - task.enqueuedAt) / 1000
     return task.priority + agingPerSecond * Math.max(0, ageSec)
@@ -286,7 +287,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
     arr[b] = tmp
   }
 
-  // ── резервы байтов ──
+  // ── byte reservations ──
   function reserveFor(task: Task): void {
     if (task.reservedBytes === 0) {
       task.reservedBytes = task.totalBytes ?? task.expectedBytes ?? DEFAULT_RESERVE_BYTES
@@ -307,7 +308,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
     }
   }
 
-  // ── планировщик ──
+  // ── scheduler ──
   function pump(): void {
     if (disposed) return
     const deferred: Task[] = []
@@ -317,8 +318,8 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
       if (task.state !== 'queued') continue
       const needsNetwork = task.source.bytes === undefined
       if (needsNetwork) {
-        // гипотетический резерв (без захвата!): отложенная задача не должна
-        // держать байты, иначе бюджет дедлокится
+        // hypothetical reservation (no acquisition!): a deferred task must not
+        // hold bytes, otherwise the budget deadlocks
         const est =
           task.reservedBytes > 0
             ? task.reservedBytes
@@ -352,7 +353,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
     })
   }
 
-  // ── жизненный цикл ──
+  // ── life cycle ──
   async function runTask(task: Task): Promise<void> {
     try {
       let outcome: FetchOutcome
@@ -362,7 +363,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
         outcome = await fetchPhase(task)
       }
       if (task.controller.signal.aborted) throw abortError('cancelled')
-      if ('streamed' in outcome) return // sink уже отрезолвил задачу
+      if ('streamed' in outcome) return // the sink already resolved the task
       const value = await parsePhase(task, outcome)
       finishTask(task, value, undefined)
     } catch (err) {
@@ -394,10 +395,10 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
     for (const notify of task.group.enoughNotifiers) notify()
   }
 
-  /** Сетевая фаза: fetch с ретраями, буферизация ИЛИ стриминговый sink. */
+  /** Network phase: fetch with retries, buffering OR a streaming sink. */
   async function fetchPhase(task: Task): Promise<FetchOutcome> {
-    // источник уже поток (Response/Blob/ReadableStream/AsyncIterable):
-    // fetch не нужен, повторить чтение нельзя — ретраев нет
+    // the source is already a stream (Response/Blob/ReadableStream/AsyncIterable):
+    // no fetch needed, reading cannot be repeated — no retries
     if (task.source.stream !== undefined) {
       setPhase(task, task.transforms.length > 0 ? 'transforming' : 'fetching')
       return await consumeStream(task, task.source.stream)
@@ -443,13 +444,13 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
               await delayRetry(task)
               continue
             }
-            throw new LoadError('timeout', `fetch timeout после ${task.timeoutMs}мс`, {
+            throw new LoadError('timeout', `fetch timeout after ${task.timeoutMs}ms`, {
               url: task.url,
             })
           }
           throw err
         }
-        // ретраим только сетевые сбросы; 4xx/parse — сразу ошибка
+        // retry only network failures; 4xx/parse — an immediate error
         if (canRetry(task) && isRetryableError(err)) {
           await delayRetry(task)
           continue
@@ -466,18 +467,18 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
     }
   }
 
-  /** Пить поток: буферным парсерам — readAllBytes, стриминговым — sink. */
+  /** Consume the stream: readAllBytes for buffer parsers, a sink for streaming ones. */
   async function consumeStream(task: Task, chunks: AsyncIterable<Uint8Array>): Promise<FetchOutcome> {
     const sinkFactory = task.parser.streaming
     if (sinkFactory === undefined) {
-      // буферный путь: копим всё; слот держится до конца чтения
+      // buffer path: accumulate everything; the slot is held until reading ends
       const bytes = await readAllBytes(chunks, {
         onChunk: received => onChunkReceived(task, received - task.receivedBytes, received),
       })
       releaseSlot(task)
       return bytes
     }
-    // стриминговый путь: сеть → transforms → sink, разбор параллелен сети
+    // streaming path: network → transforms → sink, parsing runs in parallel with the network
     let stream: AsyncIterable<Uint8Array> = chunks
     const transform = composeTransforms(...task.transforms)
     if (transform !== null) stream = transform(stream)
@@ -496,7 +497,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
     return { streamed: true }
   }
 
-  /** retries=0 → ни одного ретрая; attempt растёт ПОСЛЕ каждой попытки. */
+  /** retries=0 → no retries at all; attempt grows AFTER each try. */
   function canRetry(task: Task): boolean {
     return task.attempt < task.retries
   }
@@ -531,7 +532,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
     return value
   }
 
-  /** parse не держит слот: setPhase('parsing') не резервирует байты. */
+  /** parse does not hold a slot: setPhase('parsing') reserves no bytes. */
   function setPhase(task: Task, phase: LoadPhase): void {
     if (task.state === phase) return
     task.state = phase
@@ -609,7 +610,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
     }
   }
 
-  // ── создание задач ──
+  // ── task creation ──
   interface CreateTaskArgs {
     source: NormalizedSource
     parser: Parser<any, any>
@@ -633,7 +634,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
       resolveRaw = res
       rejectRaw = rej
     })
-    // никто не обязан await'ить каждый хэндл — гасим unhandledrejection
+    // nobody is obliged to await every handle — silence unhandledrejection
     promise.catch(() => {})
     const task: Task = {
       id,
@@ -671,7 +672,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
       lastEmitPhase: 'queued',
     }
     tasks.set(id, task)
-    // внешний сигнал может отменить задачу ещё в очереди
+    // an external signal may cancel a task while it is still queued
     const external = args.externalSignal
     if (external !== null) {
       if (external.aborted) cancelTask(task, describeAbortReason(external))
@@ -701,12 +702,12 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
     pump()
   }
 
-  // ── выбор парсера ──
+  // ── parser selection ──
   function pickParser(normalized: NormalizedSource, opts: LoadOptions<unknown, unknown> | undefined): Parser<any, any> {
     if (opts?.parser !== undefined) return opts.parser
     if (opts?.kind !== undefined) {
       const p = parsers.get(opts.kind)
-      if (p === undefined) throw new LoadError('source', `нет парсера для kind="${opts.kind}"`)
+      if (p === undefined) throw new LoadError('source', `no parser for kind="${opts.kind}"`)
       return p
     }
     const url = normalized.url ?? normalized.fetchUrl
@@ -717,7 +718,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
         if (p !== undefined) return p
       }
     }
-    throw new LoadError('source', 'не удалось выбрать парсер: укажите kind или parser')
+    throw new LoadError('source', 'failed to pick a parser: specify kind or parser')
   }
 
   function createTaskFromOptions<T, O>(
@@ -731,7 +732,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
       normalized = normalizeSource(source)
       parser = pickParser(normalized, opts as LoadOptions<unknown, unknown> | undefined)
     } catch (err) {
-      // синхронные ошибки выбора источника/парсера → асинхронная ошибка задачи
+      // synchronous source/parser selection errors → an asynchronous task error
       normalized = { url: null, totalBytes: 0, fetchUrl: null, fetchRequest: null, bytes: new Uint8Array(0) }
       parser = makeFailingParser(err as Error)
     }
@@ -765,7 +766,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
   // ── drain / stats ──
   function checkDrain(): void {
     if (drainWaiters.size === 0) return
-    // отменённые задачи могут оставаться в куче — считаем по факту состояний
+    // cancelled tasks may remain in the heap — count by actual states
     if (countStates().queued > 0 || activeCount > 0) return
     const waiters = [...drainWaiters]
     drainWaiters.clear()
@@ -788,7 +789,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
     return { queued, active, done, failed, cancelled }
   }
 
-  // ── группы ──
+  // ── groups ──
   function makeGroup(name: string, defaultPriority: number): LoadGroup {
     const impl: GroupImpl = {
       name,
@@ -867,7 +868,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
               reject(
                 new AggregateError(
                   impl.tasks.filter(t => t.state !== 'done').map(t => t.settledError),
-                  `enough(${count}): кворум недостижим (готово ${doneTasks.length} из ${impl.tasks.length})`,
+                  `enough(${count}): quorum unreachable (done ${doneTasks.length} of ${impl.tasks.length})`,
                 ),
               )
             }
@@ -889,7 +890,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
           }),
         )
         if (errors.length > 0) {
-          throw new AggregateError(errors, `group "${name}": упало ${errors.length} из ${impl.tasks.length}`)
+          throw new AggregateError(errors, `group "${name}": ${errors.length} of ${impl.tasks.length} failed`)
         }
         return values
       },
@@ -935,7 +936,7 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
     }
   }
 
-  // ── публичный API ──
+  // ── public API ──
   const manager: LoadManager = {
     load<T, O>(source: LoadSource, opts?: LoadOptions<T, O>): LoadHandle<T> {
       if (disposed) throw new LoadError('source', 'manager disposed')
@@ -997,13 +998,13 @@ export function createLoadManager(options: LoadManagerOptions = {}): LoadManager
   return manager
 }
 
-// ─── хелперы ─────────────────────────────────────────────────────────────────
+// ─── helpers ─────────────────────────────────────────────────────────────────
 
 function isRetryableStatus(status: number): boolean {
   return status >= 500 || status === 429
 }
 
-/** Какие ошибки стоит ретраить на уровне catch: сетевые сбросы fetch. */
+/** Which errors are worth retrying at the catch level: fetch network failures. */
 function isRetryableError(err: unknown): boolean {
   if (err instanceof TypeError) return true
   if (err instanceof LoadError) return err.code === 'network'

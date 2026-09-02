@@ -1,68 +1,68 @@
 /**
- * Тесты GPUFacade — новые контракты (M4-addendum-2):
- *  - createTexture с mipLevels → запись с mipLevels=N
- *  - copyExternalImageToTextureMip → запись с mip=N
- *  - gpu.adapter — публичный геттер (null в recordingGPU)
- *  - gpu.preferredFormat — публичный геттер ('bgra8unorm' по умолчанию)
+ * GPUFacade tests — new contracts (M4-addendum-2):
+ *  - createTexture with mipLevels → record with mipLevels=N
+ *  - copyExternalImageToTextureMip → record with mip=N
+ *  - gpu.adapter — public getter (null in recordingGPU)
+ *  - gpu.preferredFormat — public getter ('bgra8unorm' by default)
  */
 
 import { describe, expect, it } from 'bun:test'
 import { createRecordingGPU } from '../src/recordingGPU.ts'
 
 describe('GPUFacade mip-chain', () => {
-  it('createTexture без options → запись без mipLevels', () => {
+  it('createTexture without options → record without mipLevels', () => {
     const { gpu, calls } = createRecordingGPU()
     gpu.createTexture(128, 128)
     expect(calls[0]).toBe('createTexture(128,128)')
   })
 
-  it('createTexture с format=canvas → запись с canvas-suffix', () => {
+  it('createTexture with format=canvas → record with canvas suffix', () => {
     const { gpu, calls } = createRecordingGPU()
     gpu.createTexture(800, 600, 'canvas')
     expect(calls[0]).toBe('createTexture(800,600,canvas)')
   })
 
-  it('createTexture с mipLevels=9 → запись с mipLevels=9', () => {
+  it('createTexture with mipLevels=9 → record with mipLevels=9', () => {
     const { gpu, calls } = createRecordingGPU()
     gpu.createTexture(256, 256, 'rgba8unorm', { mipLevels: 9 })
     expect(calls[0]).toBe('createTexture(256,256,mipLevels=9)')
   })
 
-  it('createTexture с canvas format и mipLevels=7 → запись с обоими суффиксами', () => {
+  it('createTexture with canvas format and mipLevels=7 → record with both suffixes', () => {
     const { gpu, calls } = createRecordingGPU()
     gpu.createTexture(64, 64, 'canvas', { mipLevels: 7 })
     expect(calls[0]).toBe('createTexture(64,64,canvas,mipLevels=7)')
   })
 
-  it('createTexture с mipLevels=1 → запись без mipLevels-суффикса', () => {
+  it('createTexture with mipLevels=1 → record without the mipLevels suffix', () => {
     const { gpu, calls } = createRecordingGPU()
     gpu.createTexture(64, 64, 'rgba8unorm', { mipLevels: 1 })
     expect(calls[0]).toBe('createTexture(64,64)')
   })
 
-  it('createTexture с maxAnisotropy=8 → запись с aniso=8', () => {
+  it('createTexture with maxAnisotropy=8 → record with aniso=8', () => {
     const { gpu, calls } = createRecordingGPU()
     gpu.createTexture(256, 256, 'rgba8unorm', { mipLevels: 4, maxAnisotropy: 8 })
     expect(calls[0]).toBe('createTexture(256,256,mipLevels=4,aniso=8)')
   })
 
-  it('createTexture с maxAnisotropy без mipLevels → aniso= без mip (бессмысленно, но валидно)', () => {
+  it('createTexture with maxAnisotropy without mipLevels → aniso= without mips (pointless but valid)', () => {
     const { gpu, calls } = createRecordingGPU()
     gpu.createTexture(64, 64, 'rgba8unorm', { maxAnisotropy: 4 })
     expect(calls[0]).toBe('createTexture(64,64,aniso=4)')
   })
 
-  it('createTexture с mipLevels + maxAnisotropy + canvas format → все суффиксы', () => {
+  it('createTexture with mipLevels + maxAnisotropy + canvas format → all suffixes', () => {
     const { gpu, calls } = createRecordingGPU()
     gpu.createTexture(256, 256, 'canvas', { mipLevels: 9, maxAnisotropy: 16 })
     expect(calls[0]).toBe('createTexture(256,256,canvas,mipLevels=9,aniso=16)')
   })
 
-  it('copyExternalImageToTexture — запись с kind, dst origin и copy size', () => {
+  it('copyExternalImageToTexture — record with kind, dst origin and copy size', () => {
     const { gpu, calls } = createRecordingGPU()
     const src = { width: 128, height: 128 } as unknown as ImageBitmap
     gpu.createTexture(128, 128)
-    // Полная загрузка: dstX=0, dstY=0, copySize=source size
+    // Full upload: dstX=0, dstY=0, copySize=source size
     gpu.copyExternalImageToTexture(1, src, 0, 0, 128, 128)
     expect(calls[1]).toContain('copyExternalImageToTexture(1')
     expect(calls[1]).toContain('@0,0')
@@ -79,11 +79,11 @@ describe('GPUFacade mip-chain', () => {
     expect(calls[1]).toContain('64x64')
   })
 
-  it('copyExternalImageToTextureMip — запись с mipLevel=N и origin', () => {
+  it('copyExternalImageToTextureMip — record with mipLevel=N and origin', () => {
     const { gpu, calls } = createRecordingGPU()
     const src = { width: 8, height: 8 } as unknown as ImageBitmap
     gpu.createTexture(256, 256, 'rgba8unorm', { mipLevels: 9 })
-    // Загружаем mip level=5 (размер 256/(2^5) = 8). dstX=0, dstY=0, copySize=8×8
+    // Upload mip level=5 (size 256/(2^5) = 8). dstX=0, dstY=0, copySize=8×8
     gpu.copyExternalImageToTextureMip(1, 5, src, 0, 0, 8, 8)
     expect(calls[1]).toContain('copyExternalImageToTextureMip')
     expect(calls[1]).toContain('mip=5')
@@ -91,7 +91,7 @@ describe('GPUFacade mip-chain', () => {
     expect(calls[1]).toContain('8x8')
   })
 
-  it('copyExternalImageToTexture — без flipY опции → нет flipY-суффикса', () => {
+  it('copyExternalImageToTexture — without the flipY option → no flipY suffix', () => {
     const { gpu, calls } = createRecordingGPU()
     const src = { width: 64, height: 64, close: () => {} } as unknown as ImageBitmap
     gpu.createTexture(64, 64)
@@ -99,7 +99,7 @@ describe('GPUFacade mip-chain', () => {
     expect(calls[1]).toBe('copyExternalImageToTexture(1,ImageBitmap,@0,0,64x64)')
   })
 
-  it('copyExternalImageToTexture — flipY=false → нет flipY-суффикса', () => {
+  it('copyExternalImageToTexture — flipY=false → no flipY suffix', () => {
     const { gpu, calls } = createRecordingGPU()
     const src = { width: 64, height: 64, close: () => {} } as unknown as ImageBitmap
     gpu.createTexture(64, 64)
@@ -107,7 +107,7 @@ describe('GPUFacade mip-chain', () => {
     expect(calls[1]).toBe('copyExternalImageToTexture(1,ImageBitmap,@0,0,64x64)')
   })
 
-  it('copyExternalImageToTexture — flipY=true → есть flipY-суффикс', () => {
+  it('copyExternalImageToTexture — flipY=true → flipY suffix present', () => {
     const { gpu, calls } = createRecordingGPU()
     const src = { width: 64, height: 64, close: () => {} } as unknown as ImageBitmap
     gpu.createTexture(64, 64)
@@ -115,7 +115,7 @@ describe('GPUFacade mip-chain', () => {
     expect(calls[1]).toBe('copyExternalImageToTexture(1,ImageBitmap,@0,0,64x64,flipY)')
   })
 
-  it('copyExternalImageToTextureMip — flipY=true → есть flipY-суффикс', () => {
+  it('copyExternalImageToTextureMip — flipY=true → flipY suffix present', () => {
     const { gpu, calls } = createRecordingGPU()
     const src = { width: 8, height: 8, close: () => {} } as unknown as ImageBitmap
     gpu.createTexture(256, 256, 'rgba8unorm', { mipLevels: 9 })
@@ -135,7 +135,7 @@ describe('GPUFacade public adapter/preferredFormat', () => {
     expect(gpu.preferredFormat).toBe('bgra8unorm')
   })
 
-  it('recordingGPU.preferredFormat стабилен при повторных чтениях', () => {
+  it('recordingGPU.preferredFormat is stable across repeated reads', () => {
     const { gpu } = createRecordingGPU()
     const f1 = gpu.preferredFormat
     const f2 = gpu.preferredFormat
@@ -144,17 +144,17 @@ describe('GPUFacade public adapter/preferredFormat', () => {
 })
 
 describe('GPUFacade dispose', () => {
-  it('dispose — запись в calls', () => {
+  it('dispose — recorded in calls', () => {
     const { gpu, calls } = createRecordingGPU()
     gpu.dispose()
     expect(calls[calls.length - 1]).toBe('dispose')
   })
 
-  it('dispose — повторный вызов также записывается (recording логирует все вызовы)', () => {
-    // realGPU использует facadeDisposed-флаг, чтобы второй dispose был no-op.
-    // recordingGPU — mock, логирует каждый вызов без состояния.
-    // Этот тест фиксирует поведение recording-фасада (для отладки лент):
-    // каждый dispose = одна строка в calls.
+  it('dispose — a repeated call is also recorded (recording logs all calls)', () => {
+    // realGPU uses a facadeDisposed flag so the second dispose is a no-op.
+    // recordingGPU is a mock, logging every call without state.
+    // This test fixes the recording facade's behavior (for tape debugging):
+    // every dispose = one line in calls.
     const { gpu, calls } = createRecordingGPU()
     gpu.dispose()
     gpu.dispose()
@@ -162,18 +162,19 @@ describe('GPUFacade dispose', () => {
     expect(disposeCalls.length).toBe(2)
   })
 
-  it('dispose — после него createTexture можно вызвать (recording не блокирует)', () => {
-    // realGPU после dispose() формально остаётся в подписанной форме (returns
-    // объект с теми же методами), но device.destroy() делает любой GPU-вызов
-    // бросающим. recordingGPU — mock, не эмулирует это. Тест фиксирует
-    // что recording-фасад не падает на post-dispose createTexture.
+  it('dispose — createTexture can be called after it (recording does not block)', () => {
+    // After dispose() realGPU formally stays in a signed form (returns an
+    // object with the same methods), but device.destroy() makes any GPU
+    // call throw. recordingGPU is a mock, it does not emulate this. The
+    // test fixes that the recording facade does not crash on a post-dispose
+    // createTexture.
     const { gpu, calls } = createRecordingGPU()
     gpu.dispose()
     gpu.createTexture(64, 64)
     expect(calls[calls.length - 1]).toBe('createTexture(64,64)')
   })
 
-  it('dispose — корректное место в последовательности (после draw)', () => {
+  it('dispose — correct place in the sequence (after draw)', () => {
     const { gpu, calls } = createRecordingGPU()
     gpu.createTexture(128, 128)
     gpu.beginPass(0)
@@ -188,13 +189,13 @@ describe('GPUFacade dispose', () => {
 })
 
 describe('GPUFacade installTimer + timer getter', () => {
-  it('installTimer(null) — запись installTimer(null)', () => {
+  it('installTimer(null) — record installTimer(null)', () => {
     const { gpu, calls } = createRecordingGPU()
     gpu.installTimer(null)
     expect(calls[calls.length - 1]).toBe('installTimer(null)')
   })
 
-  it('installTimer(handle) — запись installTimer(handle)', () => {
+  it('installTimer(handle) — record installTimer(handle)', () => {
     const { gpu, calls } = createRecordingGPU()
     const handle = {
       onBeginPass: () => {},
@@ -205,18 +206,18 @@ describe('GPUFacade installTimer + timer getter', () => {
     expect(calls[calls.length - 1]).toBe('installTimer(handle)')
   })
 
-  it('installTimer возвращает null — recording не хранит предыдущий handle', () => {
+  it('installTimer returns null — recording does not store the previous handle', () => {
     const { gpu } = createRecordingGPU()
     const prev = gpu.installTimer(null)
     expect(prev).toBeNull()
   })
 
-  it('gpu.timer — recording возвращает null (нет device, нет timer)', () => {
+  it('gpu.timer — recording returns null (no device, no timer)', () => {
     const { gpu } = createRecordingGPU()
     expect(gpu.timer).toBeNull()
   })
 
-  it('gpu.timer стабилен при повторных чтениях (recording всегда null)', () => {
+  it('gpu.timer is stable across repeated reads (recording is always null)', () => {
     const { gpu } = createRecordingGPU()
     expect(gpu.timer).toBeNull()
     expect(gpu.timer).toBeNull()
@@ -224,7 +225,7 @@ describe('GPUFacade installTimer + timer getter', () => {
 })
 
 describe('GPUFacade createTextureView + deleteTextureView', () => {
-  it('createTextureView без options — запись без mip-суффикса', () => {
+  it('createTextureView without options — record without the mip suffix', () => {
     const { gpu, calls } = createRecordingGPU()
     gpu.createTexture(256, 256)
     const viewId = gpu.createTextureView(1)
@@ -232,28 +233,28 @@ describe('GPUFacade createTextureView + deleteTextureView', () => {
     expect(viewId).toBeGreaterThanOrEqual(1_000_000)
   })
 
-  it('createTextureView с baseMipLevel — запись с mip=N суффиксом', () => {
+  it('createTextureView with baseMipLevel — record with the mip=N suffix', () => {
     const { gpu, calls } = createRecordingGPU()
     gpu.createTexture(256, 256)
     gpu.createTextureView(1, { baseMipLevel: 2 })
     expect(calls[1]).toBe('createTextureView(1,mip=2)')
   })
 
-  it('createTextureView с baseMipLevel+mipLevelCount — запись с mip=N+M суффиксом', () => {
+  it('createTextureView with baseMipLevel+mipLevelCount — record with the mip=N+M suffix', () => {
     const { gpu, calls } = createRecordingGPU()
     gpu.createTexture(256, 256)
     gpu.createTextureView(1, { baseMipLevel: 2, mipLevelCount: 3 })
     expect(calls[1]).toBe('createTextureView(1,mip=2+3)')
   })
 
-  it('createTextureView только с mipLevelCount — запись без base, но с +count', () => {
+  it('createTextureView with only mipLevelCount — record without base, but with +count', () => {
     const { gpu, calls } = createRecordingGPU()
     gpu.createTexture(256, 256)
     gpu.createTextureView(1, { mipLevelCount: 4 })
     expect(calls[1]).toBe('createTextureView(1,mip=0+4)')
   })
 
-  it('createTextureView возвращает разные viewId для разных вызовов', () => {
+  it('createTextureView returns different viewIds for different calls', () => {
     const { gpu } = createRecordingGPU()
     gpu.createTexture(256, 256)
     const v1 = gpu.createTextureView(1)
@@ -262,7 +263,7 @@ describe('GPUFacade createTextureView + deleteTextureView', () => {
     expect(v2).toBeGreaterThan(v1)
   })
 
-  it('deleteTextureView(viewId) — запись', () => {
+  it('deleteTextureView(viewId) — recorded', () => {
     const { gpu, calls } = createRecordingGPU()
     gpu.createTexture(256, 256)
     const viewId = gpu.createTextureView(1)
@@ -270,11 +271,11 @@ describe('GPUFacade createTextureView + deleteTextureView', () => {
     expect(calls[calls.length - 1]).toBe(`deleteTextureView(${viewId})`)
   })
 
-  it('createTextureView возвращает viewId ≥ 1_000_000 (отдельный namespace)', () => {
+  it('createTextureView returns a viewId ≥ 1_000_000 (a separate namespace)', () => {
     const { gpu } = createRecordingGPU()
     gpu.createTexture(64, 64)
     gpu.createTexture(64, 64)
-    // textureId 1, 2 — ниже 1M
+    // textureId 1, 2 — below 1M
     const viewId = gpu.createTextureView(1)
     expect(viewId).toBeGreaterThanOrEqual(1_000_000)
   })

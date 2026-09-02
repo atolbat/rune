@@ -1,14 +1,14 @@
 /**
- * scripts/build.mjs — сборка библиотеки rune (запускать через bun).
+ * scripts/build.mjs — builds the rune library (run with bun).
  *
- * Артефакты:
- *   dist/rune.esm.js          — самодостаточный ESM-бандл мета-пакета @rune/gl
- *                               (внутри core/math/prims/webgl2/webgpu) — для демо и CDN.
- *   dist/rune.esm.min.js      — минифицированная копия.
- *   dist/rune-loaders.esm.js  — самодостаточный @rune/loaders (GLB/glTF/OBJ/FBX).
+ * Artifacts:
+ *   dist/rune.esm.js          — a self-contained ESM bundle of the @rune/gl meta-package
+ *                               (core/math/prims/webgl2/webgpu inside) — for demos and CDN.
+ *   dist/rune.esm.min.js      — the minified copy.
+ *   dist/rune-loaders.esm.js  — a self-contained @rune/loaders (GLB/glTF/OBJ/FBX).
  *
- * Типы при этом не нужны: библиотека распространяется в исходниках TS,
- * bun/бандлеры берут типы прямо из src (exports → src/index.ts).
+ * Types are not needed here: the library ships as TS sources,
+ * bun/bundlers take the types straight from src (exports → src/index.ts).
  */
 import { mkdirSync, rmSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'

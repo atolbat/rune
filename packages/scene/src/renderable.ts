@@ -1,40 +1,40 @@
 /**
- * renderable.ts — Task 86: абстрактная сущность «ЧТО рисовать».
+ * renderable.ts — Task 86: the abstract "WHAT to draw" entity.
  *
- * «Инстанс-группа» (slot.group) — это ГРАНУЛЯРНОСТЬ КОМПАКЦИИ видимых
- * матриц, внутренняя деталь конвейера (один draw-instanced на пакет).
- * Пользователю сцены нужно другое: декларативное описание РЕНДЕРАБЛА —
- * «эти узлы рисуются ТАКИМ мешем, ТАКИМ материалом, в ТАКОМ пассе».
+ * The "instance group" (slot.group) is the COMPACTION GRANULARITY of visible
+ * matrices, an internal pipeline detail (one draw-instanced per pack).
+ * The scene's user needs something else: a declarative description of a RENDERABLE —
+ * "these nodes are drawn with SUCH a mesh, SUCH a material, in SUCH a pass".
  *
- * Renderable — таблица таких описаний БЕЗ каких-либо GPU-знаний:
- *   • MeshRecipe — ленивый источник геометрии («приведение к мешу» —
- *     resolveMesh() вызывает загрузчик ОДИН раз и кэширует результат;
- *     рецепт может быть LOD-набором — конвенция на стороне резолвера);
- *   • MaterialRecipe — цвет/эмиссив/прозрачность как ДАННЫЕ (не состояние
- *     рендерера): презентационный слой печёт их в инстанс-стрим или
- *     юниформы — как сочтёт нужным;
- *   • RenderableDesc — связка (mesh, material, pass, policy, layer):
- *       pass   —Opaque небо-заливка НЕ рисуется как объект; 'opaque' |
- *               'mirror' | 'transparent' | 'overlay' (порядок пассов кадра);
- *       policy — 'instanced' (пакет узлов → один instanced draw) |
- *               'unique' (меш сам по себе: террейн, вода, зеркальный квад);
- *       layer  — стабильный биас сортировки внутри пасса (гарантированный
- *               порядок для равных глубин).
+ * Renderable — a table of such descriptions WITHOUT any GPU knowledge:
+ *   • MeshRecipe — a lazy geometry source ("reduction to a mesh" —
+ *     resolveMesh() calls the loader ONCE and caches the result;
+ *     a recipe may be an LOD set — a convention on the resolver's side);
+ *   • MaterialRecipe — color/emissive/alpha as DATA (not renderer
+ *     state): the presentation layer bakes them into an instance stream or
+ *     uniforms — as it sees fit;
+ *   • RenderableDesc — the bundle (mesh, material, pass, policy, layer):
+ *       pass   —Opaque sky fill is NOT drawn as an object; 'opaque' |
+ *               'mirror' | 'transparent' | 'overlay' (the frame's pass order);
+ *       policy — 'instanced' (a pack of nodes → one instanced draw) |
+ *               'unique' (the mesh on its own: terrain, water, the mirror quad);
+ *       layer  — a stable sorting bias within a pass (a guaranteed
+ *               order for equal depths).
  *
- * Сценарии, которые покрывает ОДНА абстракция: лес/камни/здания
- * (instanced+opaque), кристаллы (instanced+transparent, сортировка
- * экземпляров), террейн (unique+opaque), вода (unique+transparent),
- * зеркало (unique+mirror), будущие LOD-наборы и импосторы (рецепт меша
- * решает, что вернуть по дистанции/размеру на экране).
+ * Scenarios covered by ONE abstraction: forest/rocks/buildings
+ * (instanced+opaque), crystals (instanced+transparent, sorting of
+ * instances), terrain (unique+opaque), water (unique+transparent),
+ * the mirror (unique+mirror), future LOD sets and impostors (the mesh recipe
+ * decides what to return by distance/on-screen size).
  *
- * Реестр — мейн-тред метаданные (воркеру не нужны): SoA-буферы сцены
- * остаются единственным «транспортным контрактом» T0/T1/T2.
+ * The registry is main-thread metadata (the worker does not need it): the
+ * scene's SoA buffers remain the only "transport contract" of T0/T1/T2.
  */
 
-/** Пасс кадра. Порядок = порядок композиции кадра презентационным слоем. */
+/** A frame pass. The order = the order the presentation layer composites the frame. */
 export type RenderPassTag = 'opaque' | 'sky' | 'mirror' | 'transparent' | 'overlay'
 
-/** Численный порядок пассов (сортировочный ключ, см. @rune/gl frameSort). */
+/** The numeric order of the passes (a sort key, see @rune/gl frameSort). */
 export const RENDER_PASS_ORDER: Readonly<Record<RenderPassTag, number>> = {
   opaque: 0,
   sky: 1,
@@ -43,27 +43,27 @@ export const RENDER_PASS_ORDER: Readonly<Record<RenderPassTag, number>> = {
   overlay: 4,
 }
 
-/** Как пакет узлов рендерабла превращается в draw-вызовы. */
+/** How a renderable's pack of nodes turns into draw calls. */
 export type PackPolicy = 'instanced' | 'unique'
 
-/** Ленивый источник геометрии. Загрузчик вызывается один раз. */
+/** A lazy geometry source. The loader is called once. */
 export interface MeshRecipe {
   readonly id: number
-  /** Загружает геометрию (тип — на стороне презентации, сцена не знает). */
+  /** Loads the geometry (the type is on the presentation side, the scene does not know it). */
   readonly load: () => unknown
 }
 
-/** Материал как данные: параметры шейдера без состояния GPU. */
+/** The material as data: shader parameters without GPU state. */
 export interface MaterialRecipe {
   readonly id: number
   readonly base: readonly [number, number, number]
-  /** Доля эмиссива (0 — чистое освещение, 1 — «само светится»). */
+  /** The emissive fraction (0 — pure lighting, 1 — "glows by itself"). */
   readonly emissive: number
-  /** Альфа: 1 — непрозрачный (пасс opaque), <1 — прозрачный. */
+  /** Alpha: 1 — opaque (the opaque pass), <1 — transparent. */
   readonly alpha: number
 }
 
-/** Декларация рендерабла — «что и как рисовать для пакета узлов». */
+/** A renderable declaration — "what and how to draw for a pack of nodes". */
 export interface RenderableDesc {
   readonly id: number
   readonly mesh: number
@@ -73,30 +73,30 @@ export interface RenderableDesc {
   readonly layer: number
 }
 
-/** Разрешённый (кэшированный) рецепт меша. */
+/** A resolved (cached) mesh recipe. */
 export interface ResolvedMesh {
   readonly meshId: number
-  /** Результат load() — геометрия (типизация на стороне презентации). */
+  /** The result of load() — the geometry (typing is on the presentation side). */
   readonly geometry: unknown
 }
 
 export interface RenderableRegistry {
-  /** Зарегистрировать источник геометрии; возвращает id рецепта. */
+  /** Register a geometry source; returns the recipe id. */
   addMesh(load: () => unknown): number
-  /** Зарегистрировать материал; возвращает id. */
+  /** Register a material; returns the id. */
   addMaterial(material: Omit<MaterialRecipe, 'id'>): number
-  /** Зарегистрировать рендерабл. id назначается реестром (плотный). */
+  /** Register a renderable. The id is assigned by the registry (dense). */
   add(desc: Omit<RenderableDesc, 'id'>): number
-  /** Описание рендерабла (undefined — незарегистрированный id). */
+  /** The renderable's description (undefined — an unregistered id). */
   get(id: number): RenderableDesc | undefined
   mesh(id: number): MeshRecipe | undefined
   material(id: number): MaterialRecipe | undefined
-  /** «Приведение к мешу»: загрузить и закэшировать геометрию рецепта. */
+  /** "Reduction to a mesh": load and cache the recipe's geometry. */
   resolveMesh(meshId: number): ResolvedMesh | undefined
   readonly count: number
 }
 
-/** Создать реестр рендераблов (метаданные, GPU не касается). */
+/** Create a renderables registry (metadata, does not touch the GPU). */
 export function createRenderableRegistry(): RenderableRegistry {
   const meshes: MeshRecipe[] = []
   const materials: MaterialRecipe[] = []
@@ -115,8 +115,8 @@ export function createRenderableRegistry(): RenderableRegistry {
       return id
     },
     add(desc) {
-      if (meshes[desc.mesh] === undefined) throw new Error(`scene: рецепт меша ${desc.mesh} не зарегистрирован`)
-      if (materials[desc.material] === undefined) throw new Error(`scene: материал ${desc.material} не зарегистрирован`)
+      if (meshes[desc.mesh] === undefined) throw new Error(`scene: mesh ${desc.mesh} is not registered`)
+      if (materials[desc.material] === undefined) throw new Error(`scene: material ${desc.material} is not registered`)
       const id = descs.length
       descs.push({ id, ...desc })
       return id

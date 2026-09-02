@@ -1,24 +1,24 @@
 /**
- * fullscreen.ts — полноэкранные вершины для GPGPU-проходов и пост-эффектов.
+ * fullscreen.ts — fullscreen vertices for GPGPU passes and post-effects.
  *
- * Два представления одной цели:
- *  - fullscreenTriangle(): 3 вершины, triangle-list. Вершина выходит за
- *    клип-пространство, GPU клипует сам: один треугольник вместо двух —
- *    на один вызов меньше вершинного шейдера на границе, нет диагонального
- *    шва интерполяции. Идиома WebGPU; в WebGL2 работает так же.
- *  - fullscreenQuad(): 4 вершины, triangle-strip — каноническая форма
- *    GPGPU-демо (jbouny/fft-ocean, david.li/waves рисуют именно так).
+ * Two representations of the same target:
+ *  - fullscreenTriangle(): 3 vertices, triangle-list. A vertex extends
+ *    beyond clip space, the GPU clips it itself: one triangle instead of
+ *    two — one fewer vertex-shader invocation at the edge, no diagonal
+ *    interpolation seam. A WebGPU idiom; works the same in WebGL2.
+ *  - fullscreenQuad(): 4 vertices, triangle-strip — the canonical form of
+ *    GPGPU demos (jbouny/fft-ocean, david.li/waves draw exactly this way).
  *
- * UV вычисляются в шейдере как pos·0.5+0.5 — для сим-проходов, читающих
- * текстуры по центрам текселей (textureLoad/NEAREST), этого достаточно.
+ * UV is computed in the shader as pos·0.5+0.5 — sufficient for sim passes
+ * that read textures at texel centers (textureLoad/NEAREST).
  */
 
-/** Полноэкранный треугольник (triangle-list): [-1,-1] [3,-1] [-1,3]. */
+/** Fullscreen triangle (triangle-list): [-1,-1] [3,-1] [-1,3]. */
 export function fullscreenTriangle(): Float32Array {
   return new Float32Array([-1.0, -1.0, 3.0, -1.0, -1.0, 3.0])
 }
 
-/** Полноэкранный квад (triangle-strip): [-1,-1] [-1,1] [1,-1] [1,1]. */
+/** Fullscreen quad (triangle-strip): [-1,-1] [-1,1] [1,-1] [1,1]. */
 export function fullscreenQuad(): Float32Array {
   return new Float32Array([-1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 1.0, 1.0])
 }

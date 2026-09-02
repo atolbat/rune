@@ -1,4 +1,4 @@
-// Рекордер-фасад GPU: порядок вызовов кадра строками (защита tape-путей).
+// GPU recorder facade: the frame's call order as strings (protects tape paths).
 
 import type { GPUFacade, GPUImageSource } from './facade.ts'
 
@@ -21,7 +21,7 @@ export function createRecordingGPU(): RecordingGPU {
     createTexture: (width, height, format, options) => {
       const mipLevels = options?.mipLevels ?? 1
       const aniso = options?.maxAnisotropy
-      // Task 67: HDR-форматы пишем в запись; rgba8unorm — дефолт, опускаем.
+      // Task 67: HDR formats are written to the record; rgba8unorm is the default, omitted.
       const fmtSuffix = format !== undefined && format !== 'rgba8unorm' ? `,${format}` : ''
       const parts: string[] = []
       if (mipLevels > 1) parts.push(`mipLevels=${mipLevels}`)
@@ -44,8 +44,8 @@ export function createRecordingGPU(): RecordingGPU {
     },
     uploadUniforms: (offset, data) => calls.push(`uploadUniforms(${offset},${data.byteLength})`),
     ensurePipeline: (pipelineId, _wgsl, attrs, hasTextures, pipeline) => {
-      // M5: числа — tight (3x3x2); интерливинг фида — size/stride@offset.
-      // Task 75: instance-step суффикс + blend/depth маркеры дескриптора.
+      // M5: numbers — tight (3x3x2); feed interleaving — size/stride@offset.
+      // Task 75: instance-step suffix + blend/depth descriptor markers.
       const desc = attrs.map(a => {
         if (typeof a === 'number') return `${a}`
         const inst = a.step === 'instance' ? '!i' : ''
@@ -72,12 +72,13 @@ export function createRecordingGPU(): RecordingGPU {
       calls.push('endPass')
     },
     submit: () => calls.push('submit'),
-    // Task 80: readback — записываем вызов; рекордер не имеет GPU — пустой
-    // массив (паритет формы с realGPU-контрактом). Контракт targetId 0
-    // (канвас не читается) зеркалим: честный reject как в realGPU.
+    // Task 80: readback — record the call; the recorder has no GPU — an
+    // empty array (shape parity with the realGPU contract). The targetId 0
+    // contract (the canvas is not readable) is mirrored: honest reject as
+    // in realGPU.
     readTargetPixels: targetId => {
       if (targetId === 0) {
-        return Promise.reject(new Error('rune: readTargetPixels(0) — канвас не читается (presented-текстура живёт один кадр). Читайте ПОВЕРХНОСТЬ: renderer.surface(...) → capture/проходы → surface.read()'))
+        return Promise.reject(new Error('rune: readTargetPixels(0) — the canvas cannot be read (a presented texture lives one frame). Read the SURFACE: renderer.surface(...) → capture/passes → surface.read()'))
       }
       calls.push(`readTargetPixels(${targetId})`)
       return Promise.resolve(new Uint8Array(0))
@@ -87,7 +88,7 @@ export function createRecordingGPU(): RecordingGPU {
       return nextTargetId++
     },
     bindTarget: (targetId, clear) => {
-      // Тот же skip-контракт, что и realGPU: цель та же, пасс открыт, без очистки
+      // The same skip contract as realGPU: same target, pass open, no clear
       if (targetId === currentTarget && passOpen && !clear) return
       currentTarget = targetId
       passOpen = true
@@ -102,7 +103,7 @@ export function createRecordingGPU(): RecordingGPU {
         ? `,mip=${base}${count !== undefined ? `+${count}` : ''}`
         : ''
       calls.push(`createTextureView(${textureId}${optSuffix})`)
-      // Возвращаем фейковый viewId из диапазона sub-views (≥1M)
+      // Return a fake viewId from the sub-view range (≥1M)
       nextTextureViewId++
       return nextTextureViewId
     },
@@ -111,25 +112,25 @@ export function createRecordingGPU(): RecordingGPU {
     installTimer: handle => {
       const handleName = handle === null ? 'null' : 'handle'
       calls.push(`installTimer(${handleName})`)
-      // recording не хранит handle — возвращаем null (предыдущего нет)
+      // recording does not store the handle — return null (there is no previous one)
       return null
     },
     get adapter() { return null },
     get device() { return null },
     get preferredFormat() { return 'bgra8unorm' as GPUTextureFormat },
-    get timer() { return null }, // recording-фасад: нет device, нет timer
+    get timer() { return null }, // recording facade: no device, no timer
   }
 
   return { gpu, calls }
 }
 
-/** Имя типа источника для записи в строку вызова. */
+/** Source type name to record in the call string. */
 function describeGpuSource(source: GPUImageSource): string {
   if (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) return 'ImageBitmap'
   if (typeof OffscreenCanvas !== 'undefined' && source instanceof OffscreenCanvas) return 'OffscreenCanvas'
   if (typeof HTMLCanvasElement !== 'undefined' && source instanceof HTMLCanvasElement) return 'HTMLCanvasElement'
   if (typeof HTMLVideoElement !== 'undefined' && source instanceof HTMLVideoElement) return 'HTMLVideoElement'
-  // Duck-typing для headless-окружений без глобальных типов
+  // Duck-typing for headless environments without global types
   if (typeof source === 'object' && source !== null) {
     if ('getContext' in source) return 'OffscreenCanvas'
     if ('close' in source && 'width' in source) return 'ImageBitmap'
@@ -137,8 +138,8 @@ function describeGpuSource(source: GPUImageSource): string {
   return (source as { constructor: { name: string } }).constructor?.name ?? 'unknown'
 }
 
-/** Счётный фасад GPU: нулевая работа, только инкременты — бенчмарки
- *  пути кадра (теория E) без стоимости записи строк. */
+/** Counting GPU facade: zero work, only increments — benchmarks of the
+ *  frame path (theory E) without the cost of recording strings. */
 export function createCountingGPU(): GPUFacade & { totalCalls: number } {
   let totalCalls = 0
   const bump = (): void => { totalCalls++ }

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { signal, derive } from '../src/index.ts'
 
 describe('derive', () => {
-  it('вычисляет один раз и кэширует до инвалидации', () => {
+  it('computes once and caches until invalidated', () => {
     const base = signal(2)
     let computations = 0
     const doubled = derive(() => {
@@ -19,7 +19,7 @@ describe('derive', () => {
     expect(computations).toBe(2)
   })
 
-  it('без подписчиков не пересчитывает eagerly', () => {
+  it('does not recompute eagerly without subscribers', () => {
     const base = signal(1)
     let computations = 0
     derive(() => {
@@ -29,10 +29,10 @@ describe('derive', () => {
 
     base.value = 2
     base.value = 3
-    expect(computations).toBe(1) // только конструктор
+    expect(computations).toBe(1) // constructor only
   })
 
-  it('строит цепочки производных', () => {
+  it('builds chains of derivations', () => {
     const a = signal(1)
     const b = derive(() => a.value + 1)
     const c = derive(() => b.value * 10)
@@ -42,7 +42,7 @@ describe('derive', () => {
     expect(c.value).toBe(30)
   })
 
-  it('подписчик производного получает свежее значение', () => {
+  it('a derivation subscriber receives a fresh value', () => {
     const base = signal(1)
     const doubled = derive(() => base.value * 2)
     const observed: number[] = []
@@ -52,7 +52,7 @@ describe('derive', () => {
     expect(observed).toEqual([8])
   })
 
-  it('версия растёт при каждом реальном пересчёте', () => {
+  it('version grows on every real recomputation', () => {
     const base = signal(1)
     const derived = derive(() => base.value + 1)
     const initial = derived.version
@@ -61,10 +61,10 @@ describe('derive', () => {
     expect(derived.version).toBeGreaterThan(initial)
   })
 
-  it('регрессия сумм-версий: убывание версии внутреннего не «гасит» внешнего', () => {
-    // Сумма версий зависимостей могла ВОЗВРАЩАТЬСЯ при смене набора
-    // зависимостей (b ушёл, useB вырос) — внешний derive видел «чисто»
-    // и отдавал протухшее значение. Поэлементное сравнение этого не позволяет.
+  it('version-sum regression: a decrease in the inner version does not "mask" the outer one', () => {
+    // The sum of dependency versions could DECREASE when the set of
+    // dependencies changed (b left, useB grew) — the outer derive saw "clean"
+    // and returned a stale value. Element-wise comparison prevents this.
     const a = signal(1)
     const b = signal(100)
     const c = signal(1000)
@@ -76,12 +76,12 @@ describe('derive', () => {
     b.value = 200
     expect(outer.value).toBe(1201) // 1 + 200 + 1000
 
-    useB.value = false // inner теряет b: его старая версия-сумма возвращалась к прежней
+    useB.value = false // inner loses b: its old version-sum returned to the previous value
     expect(inner.value).toBe(1)
-    expect(outer.value).toBe(1001) // протухший ответ старого кода: 1201
+    expect(outer.value).toBe(1001) // the old code's stale answer: 1201
   })
 
-  it('version — монотонная ревизия: не убывает при смене набора зависимостей', () => {
+  it('version — a monotonic revision: does not decrease when the dependency set changes', () => {
     const a = signal(1)
     const b = signal(100)
     const useB = signal(true)
@@ -89,7 +89,7 @@ describe('derive', () => {
     const v1 = inner.version
     b.value = 200
     const v2 = inner.version
-    useB.value = false // b покидает зависимости — ревизия всё равно растёт
+    useB.value = false // b leaves the dependency set — the revision still grows
     const v3 = inner.version
     expect(v2).toBeGreaterThan(v1)
     expect(v3).toBeGreaterThan(v2)

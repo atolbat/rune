@@ -1,53 +1,53 @@
-// Slice-арена: слоты по 256 байт (dynamic-offset выравнивание WebGPU).
+// Slice arena: 256-byte slots (WebGPU dynamic-offset alignment).
 //
-// Две совместимые поверхности:
-//  - число-выравнивание (активные компиляторы): alloc(sizeBytes) → база
-//    среза (256-выровнена, курсор шагает округлённым размером);
-//  - срезы-указатели (легаси/диагностика): allocSlice(size) → {base,bytes}
-//    (база выровнена, курсор шагает ТОЛЬКО фактическим размером),
-//    slotAt/writeVec4/dirtyRanges — байтовые слоты со слиянием в загрузки.
+// Two compatible surfaces:
+//  - number-aligned (active compilers): alloc(sizeBytes) → slice base
+//    (256-aligned, the cursor steps by the rounded size);
+//  - slice handles (legacy/diagnostics): allocSlice(size) → {base,bytes}
+//    (the base is aligned, the cursor steps ONLY by the actual size),
+//    slotAt/writeVec4/dirtyRanges — byte slots with merging into uploads.
 
 export interface SliceHandle {
-  /** База среза (256-выровнена). */
+  /** Slice base (256-aligned). */
   readonly base: number
-  /** Фактический размер среза в байтах (без набивки). */
+  /** Actual slice size in bytes (without padding). */
   readonly bytes: number
 }
 
 export interface SliceSlot {
-  /** Абсолютное смещение слота в буфере арены (байты). */
+  /** Absolute slot offset in the arena buffer (bytes). */
   readonly offset: number
-  /** Размер слота в байтах. */
+  /** Slot size in bytes. */
   readonly size: number
 }
 
-/** Байтовый диапазон загрузки (соседние записи сливаются). */
+/** Byte upload range (adjacent records are merged). */
 export interface SliceRange {
   readonly from: number
   readonly to: number
 }
 
 export interface SliceArena {
-  /** Байтовый буфер арены. */
+  /** Byte buffer of the arena. */
   readonly bytes: Uint8Array
-  /** Float-вид поверх того же буфера (запись юниформов). */
+  /** Float view over the same buffer (writing uniforms). */
   readonly floats: Float32Array
-  /** Выделить слот (256-выровнен); выбрасывает при переполнении. */
+  /** Allocate a slot (256-aligned); throws on overflow. */
   alloc(sizeBytes: number): number
-  /** Выделить срез-указатель: база выровнена, курсор — только фактический размер. */
+  /** Allocate a slice handle: the base is aligned, the cursor — only by the actual size. */
   allocSlice(sizeBytes: number): SliceHandle
-  /** Слот внутри среза: абсолютное байтовое смещение. */
+  /** Slot inside a slice: absolute byte offset. */
   slotAt(slice: SliceHandle, offset: number, size: number): SliceSlot
-  /** Записать vec4 в слот со value-compare; изменение → грязный диапазон. */
+  /** Write a vec4 into a slot with value-compare; a change → dirty range. */
   writeVec4(slot: SliceSlot, x: number, y: number, z: number, w: number): void
-  /** Грязные диапазоны: соседние с зазором < 256 сливаются в одну загрузку. */
+  /** Dirty ranges: adjacent ones with a gap < 256 are merged into one upload. */
   dirtyRanges(): SliceRange[]
-  /** Сброс грязных диапазонов (после загрузки). */
+  /** Reset dirty ranges (after upload). */
   clearDirty(): void
-  /** Сброс курсора (начало кадра/жизни контекста). */
+  /** Reset the cursor (frame/context lifetime start). */
   reset(): void
   used(): number
-  /** Занятость в байтах. */
+  /** Usage in bytes. */
   readonly usedBytes: number
 }
 
@@ -62,7 +62,7 @@ export function createSliceArena(capacityBytes: number): SliceArena {
   function alloc(sizeBytes: number): number {
     const size = Math.max(ALIGN, Math.ceil(sizeBytes / ALIGN) * ALIGN)
     if (cursor + size > capacityBytes) {
-      throw new Error(`rune: slice-арена переполнена (${capacityBytes} Б)`)
+      throw new Error(`rune: slice arena overflowed (${capacityBytes} B)`)
     }
     const offset = cursor
     cursor += size
@@ -70,11 +70,11 @@ export function createSliceArena(capacityBytes: number): SliceArena {
   }
 
   function allocSlice(sizeBytes: number): SliceHandle {
-    // База выравнивается вверх, курсор шагает только фактическим размером:
-    // плотная упаковка данных при сохранении выравнивания баз.
+    // The base is aligned up, the cursor steps only by the actual size:
+    // dense data packing while keeping base alignment.
     const base = Math.ceil(cursor / ALIGN) * ALIGN
     if (base + sizeBytes > capacityBytes) {
-      throw new Error(`rune: slice-арена переполнена (${capacityBytes} Б)`)
+      throw new Error(`rune: slice arena overflowed (${capacityBytes} B)`)
     }
     cursor = base + sizeBytes
     return { base, bytes: sizeBytes }
@@ -97,7 +97,7 @@ export function createSliceArena(capacityBytes: number): SliceArena {
 
   function markDirty(from: number, to: number): void {
     for (const range of dirty) {
-      if (from >= range.from && to <= range.to) return // уже покрыто
+      if (from >= range.from && to <= range.to) return // already covered
     }
     dirty.push({ from, to })
   }
@@ -108,9 +108,9 @@ export function createSliceArena(capacityBytes: number): SliceArena {
     const merged: Array<{ from: number; to: number }> = []
     for (const range of sorted) {
       const last = merged[merged.length - 1]
-      // Соседние записи с зазором меньше выравнивания — одна загрузка
-      // (запись 16 Б на границах соседних срезов не должна давать
-      // две загрузки с 240 Б мусора между ними).
+      // Adjacent records with a gap smaller than the alignment — one upload
+      // (a 16 B write at the borders of adjacent slices must not produce
+      // two uploads with 240 B of garbage between them).
       if (last !== undefined && range.from - last.to < ALIGN) {
         if (range.to > last.to) last.to = range.to
       } else {

@@ -7,11 +7,11 @@ export type BlendFactor =
 export type PrimitiveKind = 'triangles' | 'triangle-strip' | 'lines' | 'points'
 
 /**
- * Минимальный набор GL-вызовов rune (WebGL2).
- * Юниформы — по имени активной программы: фасад сам кэширует locations.
+ * The minimal set of rune GL calls (WebGL2).
+ * Uniforms — by name of the active program: the facade itself caches locations.
  */
 export interface GLFacade {
-  /** Ленивая компиляция: маппит registry-id на реальную программу. */
+  /** Lazy compilation: maps a registry id to a real program. */
   ensureProgram(programId: number, vertexSource: string, fragmentSource: string): void
   enableDepthTest(): void
   disableDepthTest(): void
@@ -30,17 +30,17 @@ export interface GLFacade {
   uniform3f(name: string, x: number, y: number, z: number): void
   uniform4f(name: string, x: number, y: number, z: number, w: number): void
   uniformMatrix4fv(name: string, matrix: Float32Array): void
-  /** Создаёт вершинный буфер из данных; возвращает id. */
+  /** Creates a vertex buffer from data; returns an id. */
   createVertexBuffer(data: Float32Array): number
-  /** Биндит атрибут: буфер + vertexAttribPointer(location, size). */
+  /** Binds an attribute: buffer + vertexAttribPointer(location, size). */
   bindAttribute(location: number, bufferId: number, size: number): void
-  /** Выставляет вьюпорт в пикселях backing store (ресайз). */
+  /** Sets the viewport in backing-store pixels (resize). */
   setViewport(width: number, height: number): void
-  /** Создаёт пустую RGBA8 текстуру заданного размера; возвращает id. */
+  /** Creates an empty RGBA8 texture of the given size; returns an id. */
   createTexture(width: number, height: number): number
-  /** Загружает тайл в текстуру (стриминг). */
+  /** Uploads a tile into the texture (streaming). */
   texSubImage2D(textureId: number, x: number, y: number, width: number, height: number, bytes: Uint8Array): void
-  /** Привязывает текстуру к юниту; sampler uniform задаётся по имени активной программы. */
+  /** Binds a texture to a unit; the sampler uniform is set by name of the active program. */
   bindTexture(textureId: number, unit: number, samplerName: string): void
   bufferSubData(offset: number, bytes: Uint8Array): void
   bindBufferRange(offset: number, size: number): void
@@ -48,7 +48,7 @@ export interface GLFacade {
   drawArrays(mode: PrimitiveKind, first: number, count: number, instances: number): void
 }
 
-/** Рекордер: пишет имена вызовов — точные последовательности в тестах. */
+/** Recorder: writes call names — exact sequences in tests. */
 export function createRecordingGL(): { gl: GLFacade; calls: string[] } {
   const calls: string[] = []
   return { gl: recordEveryCall(calls), calls }
@@ -57,7 +57,7 @@ export function createRecordingGL(): { gl: GLFacade; calls: string[] } {
 function recordEveryCall(calls: string[]): GLFacade {
   let nextBuffer = 0
   return {
-    ensureProgram: () => {}, // компиляция — подготовка, не кадр
+    ensureProgram: () => {}, // compilation is preparation, not a frame
     enableDepthTest: () => calls.push('enableDepthTest'),
     disableDepthTest: () => calls.push('disableDepthTest'),
     depthMask: on => calls.push(`depthMask(${on})`),
@@ -88,11 +88,11 @@ function recordEveryCall(calls: string[]): GLFacade {
   }
 }
 
-/** Счётный фасад для бенчмарков: нулевая работа, только инкременты. */
+/** Counting facade for benchmarks: zero work, only increments. */
 /**
- * Счётный фасад текущего поколения (root facade.ts): нулевая работа,
- * только инкременты. Плюс сырая state-поверхность легаси-фасада —
- * state-программы (stateProgram.ts) работают поверх того же счётчика.
+ * Counting facade of the current generation (root facade.ts): zero work,
+ * only increments. Plus the raw state surface of the legacy facade —
+ * state programs (stateProgram.ts) run on top of the same counter.
  */
 export function createCountingGL(): CountingGLFacade {
   let totalCalls = 0
@@ -100,7 +100,7 @@ export function createCountingGL(): CountingGLFacade {
   let nextId = 0
   const alloc = (): number => nextId++
   return {
-    // Текущая поверхность (root GLFacade) — путь executor'а.
+    // Current surface (root GLFacade) — the executor's path.
     createProgram: alloc,
     useProgram: bump,
     createBuffer: alloc,
@@ -127,8 +127,8 @@ export function createCountingGL(): CountingGLFacade {
     deleteTarget: bump,
     deleteProgram: bump,
     deleteBuffer: bump,
-    // Легаси state-поверхность (state-программы, M2).
-    ensureProgram: () => {}, // подготовка не считается кадром
+    // Legacy state surface (state programs, M2).
+    ensureProgram: () => {}, // preparation does not count as a frame
     enableDepthTest: bump, disableDepthTest: bump, depthMask: bump, depthFunc: bump,
     enableBlend: bump, disableBlend: bump, blendFunc: bump,
     enableCull: bump, disableCull: bump, cullFace: bump, frontFace: bump,
@@ -140,9 +140,9 @@ export function createCountingGL(): CountingGLFacade {
   }
 }
 
-/** Счётный фасад: текущая поверхность + легаси state + totalCalls. */
+/** Counting facade: current surface + legacy state + totalCalls. */
 export interface CountingGLFacade {
-  // Root GLFacade (текущее поколение)
+  // Root GLFacade (current generation)
   createProgram(vertex: string, fragment: string): number
   useProgram(programId: number): void
   createBuffer(data: Float32Array): number
@@ -173,7 +173,7 @@ export interface CountingGLFacade {
   deleteTarget(targetId: number): void
   deleteProgram(programId: number): void
   deleteBuffer(bufferId: number): void
-  // Легаси state-поверхность
+  // Legacy state surface
   ensureProgram(programId: number, vertexSource: string, fragmentSource: string): void
   enableDepthTest(): void
   disableDepthTest(): void

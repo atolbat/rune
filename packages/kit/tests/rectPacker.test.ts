@@ -7,7 +7,7 @@ test('shelf packer — packs uniform tiles', () => {
   const slots = packer.pack(items)
   expect(slots).not.toBeNull()
   expect(slots!.length).toBe(16)
-  // 4x4 grid влезает ровно
+  // a 4x4 grid fits exactly
   expect(slots!.every(s => s.x >= 0 && s.y >= 0 && s.x < 256 && s.y < 256)).toBe(true)
 })
 
@@ -26,7 +26,7 @@ test('shelf packer — padding adds gap', () => {
   expect(slots).not.toBeNull()
   const a = slots!.find(s => s.id === 'a')!
   const b = slots!.find(s => s.id === 'b')!
-  // между a и b должен быть отступ (2 padding + сам padding)
+  // there must be a gap between a and b (2 padding + the padding itself)
   expect(b.x).toBeGreaterThan(a.x)
   expect(b.x - (a.x + a.w)).toBeGreaterThanOrEqual(2)
 })
@@ -43,7 +43,7 @@ test('maxrects packer — packs mixed sizes', () => {
   const slots = packer.pack(items)
   expect(slots).not.toBeNull()
   expect(slots!.length).toBe(5)
-  // Все слоты в пределах атласа
+  // All slots within the atlas bounds
   expect(slots!.every(s => s.x >= 0 && s.y >= 0 && s.x + s.w <= 256 && s.y + s.h <= 256)).toBe(true)
 })
 
@@ -54,7 +54,7 @@ test('maxrects packer — no overlap', () => {
   }))
   const slots = packer.pack(items)
   expect(slots).not.toBeNull()
-  // Проверяем, что никакие два слота не пересекаются
+  // Check that no two slots overlap
   for (let i = 0; i < slots!.length; i++) {
     for (let j = i + 1; j < slots!.length; j++) {
       const a = slots![i]
@@ -78,7 +78,7 @@ test('maxrects — null when not enough space', () => {
   const packer = createRectPacker(64, 64, { algorithm: 'maxrects' })
   const slots = packer.pack([
     { id: 'a', w: 48, h: 48 },
-    { id: 'b', w: 48, h: 48 }, // не влезет после первого
+    { id: 'b', w: 48, h: 48 }, // won't fit after the first one
   ])
   expect(slots).toBeNull()
 })

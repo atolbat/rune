@@ -3,8 +3,8 @@ import { resolveBackend, shaderCoverage } from '../src/autoBackend.ts'
 import type { AutoDrawSpec, BackendDecision } from '../src/autoBackend.ts'
 
 /**
- * resolveBackend — чистая функция. Hardware подаётся фактами. Все сценарии
- * из дизайна (§9.12): dual / WGSL-only / GLSL-only / конфликт / strict / invalid.
+ * resolveBackend — a pure function. Hardware is supplied as facts. All scenarios
+ * from the design (§9.12): dual / WGSL-only / GLSL-only / conflict / strict / invalid.
  */
 
 const DUAL_SPEC: AutoDrawSpec = {
@@ -44,8 +44,8 @@ function d(d: BackendDecision): unknown {
   }
 }
 
-describe('resolveBackend — чистый выбор бэкенда', () => {
-  it('1. dual-source спеки, оба бэкенда доступны → WebGPU (первый в order)', () => {
+describe('resolveBackend — pure backend choice', () => {
+  it('1. dual-source specs, both backends available → WebGPU (first in order)', () => {
     const r = resolveBackend({ specs: [DUAL_SPEC], hardware: HARDWARE_BOTH })
     expect(r.chosen).toBe('webgpu')
     expect(r.verdicts.webgpu.available).toBe(true)
@@ -55,16 +55,16 @@ describe('resolveBackend — чистый выбор бэкенда', () => {
     expect(r.message).toContain('WebGPU')
   })
 
-  it('2. WGSL-only спек, WebGPU недоступен → конфликт (chosen null), actionable message', () => {
+  it('2. WGSL-only spec, WebGPU unavailable → conflict (chosen null), actionable message', () => {
     const r = resolveBackend({ specs: [WGSL_ONLY], hardware: HARDWARE_GL_ONLY })
     expect(r.chosen).toBeNull()
-    expect(r.verdicts.webgpu.rejected).toContain('нет адаптера')
-    // webgl2 требует GLSL; у WGSL_ONLY его нет — rejected упоминает GLSL
+    expect(r.verdicts.webgpu.rejected).toContain('no adapter')
+    // webgl2 requires GLSL; WGSL_ONLY does not have it — rejected mentions GLSL
     expect(r.verdicts.webgl2.rejected).toContain('GLSL')
-    expect(r.message).toContain('Конфликт')
+    expect(r.message).toContain('Conflict')
   })
 
-  it('3. GLSL-only спек, WebGPU доступен → тихий фолбэк на WebGL2 (forcedBy shader)', () => {
+  it('3. GLSL-only spec, WebGPU available → silent fallback to WebGL2 (forcedBy shader)', () => {
     const r = resolveBackend({ specs: [GLSL_ONLY], hardware: HARDWARE_BOTH })
     expect(r.chosen).toBe('webgl2')
     expect(r.verdicts.webgpu.available).toBe(true)
@@ -74,54 +74,54 @@ describe('resolveBackend — чистый выбор бэкенда', () => {
     expect(r.message).toContain('WebGL2')
   })
 
-  it('4. GLSL-only спек, WebGL2 недоступен → конфликт', () => {
+  it('4. GLSL-only spec, WebGL2 unavailable → conflict', () => {
     const r = resolveBackend({ specs: [GLSL_ONLY], hardware: HARDWARE_GPU_ONLY })
     expect(r.chosen).toBeNull()
-    expect(r.verdicts.webgl2.rejected).toContain('нет адаптера')
+    expect(r.verdicts.webgl2.rejected).toContain('no adapter')
     expect(r.verdicts.webgpu.covers).toBe(false)
   })
 
-  it('5. mixed: WGSL-only И GLSL-only спеки → конфликт (оба отсеяны)', () => {
+  it('5. mixed: WGSL-only AND GLSL-only specs → conflict (both filtered out)', () => {
     const r = resolveBackend({ specs: [WGSL_ONLY, GLSL_ONLY], hardware: HARDWARE_BOTH })
     expect(r.chosen).toBeNull()
-    expect(r.verdicts.webgpu.covers).toBe(false)  // GLSL-only не покрыт
-    expect(r.verdicts.webgl2.covers).toBe(false) // WGSL-only не покрыт
-    expect(r.message).toContain('Конфликт')
+    expect(r.verdicts.webgpu.covers).toBe(false)  // GLSL-only is not covered
+    expect(r.verdicts.webgl2.covers).toBe(false) // WGSL-only is not covered
+    expect(r.message).toContain('Conflict')
   })
 
-  it('6. strict order=["webgl2"] → WebGL2 всегда, даже если WebGPU лучше', () => {
+  it('6. strict order=["webgl2"] → WebGL2 always, even if WebGPU is better', () => {
     const r = resolveBackend({ order: ['webgl2'], specs: [DUAL_SPEC], hardware: HARDWARE_BOTH })
     expect(r.chosen).toBe('webgl2')
     expect(r.order).toEqual(['webgl2'])
-    expect(r.message).toContain('Принудительный')
+    expect(r.message).toContain('Forced')
   })
 
-  it('7. strict order=["webgpu"], недоступен → null с инструкцией смягчить', () => {
+  it('7. strict order=["webgpu"], unavailable → null with an instruction to soften', () => {
     const r = resolveBackend({ order: ['webgpu'], specs: [DUAL_SPEC], hardware: HARDWARE_GL_ONLY })
     expect(r.chosen).toBeNull()
-    expect(r.message).toContain('недоступен')
-    expect(r.message).toContain('Смягчите')
+    expect(r.message).toContain('unavailable')
+    expect(r.message).toContain('Soften')
   })
 
-  it('8. invalid spec (нет ни glsl ни wgsl) → null с actionable сообщением', () => {
+  it('8. invalid spec (neither glsl nor wgsl) → null with an actionable message', () => {
     const r = resolveBackend({ specs: [INVALID_SPEC], hardware: HARDWARE_BOTH })
     expect(r.chosen).toBeNull()
-    expect(r.message).toContain('Невалидный спек')
+    expect(r.message).toContain('Invalid spec')
     expect(r.message).toContain('"broken"')
   })
 
-  it('9. hardware NONE → null, оба отсеяны по available', () => {
+  it('9. hardware NONE → null, both filtered out by available', () => {
     const r = resolveBackend({ specs: [DUAL_SPEC], hardware: HARDWARE_NONE })
     expect(r.chosen).toBeNull()
     expect(r.verdicts.webgpu.available).toBe(false)
     expect(r.verdicts.webgl2.available).toBe(false)
   })
 
-  it('10. coverage из specs без id — fallback "<без id>" в сообщении', () => {
+  it('10. coverage of specs without id — fallback "<no id>" in the message', () => {
     const spec: AutoDrawSpec = { shader: { wgsl: '...' }, count: 3 }
     const r = resolveBackend({ specs: [spec], hardware: HARDWARE_GL_ONLY })
     expect(r.chosen).toBeNull()
-    expect(r.message).toContain('<без id>')
+    expect(r.message).toContain('<no id>')
   })
 })
 
@@ -146,7 +146,7 @@ describe('shaderCoverage — per-spec predicate', () => {
     expect(c.hasGlsl).toBe(false)
     expect(c.hasWgsl).toBe(false)
   })
-  it('пустые строки → false (защита от placeholder)', () => {
+  it('empty strings → false (placeholder guard)', () => {
     const c = shaderCoverage({ shader: { glsl: { vertex: '', fragment: '' } }, count: 3 })
     expect(c.hasGlsl).toBe(false)
   })

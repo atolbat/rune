@@ -1,8 +1,8 @@
-// @rune/prims — процедурные примитивы (Task 106→109): параметризованные
-// генераторы (позиции/нормали/UV, один буфер на атрибут) + каталог SHAPES
-// для UI + адаптивный/квадтри-террейн. Восстановлен из /tmp-дерева.
+// @rune/prims — procedural primitives (Task 106→109): parameterized
+// generators (positions/normals/UVs, one buffer per attribute) + the SHAPES
+// catalog for UI + adaptive/quadtree terrain. Restored from the /tmp tree.
 
-// базовые тела
+// basic solids
 export { cube, box } from './cube.ts'
 export type { CubeGeometry, BoxParams } from './cube.ts'
 export { quad } from './quad.ts'
@@ -17,23 +17,23 @@ export { capsule } from './capsule.ts'
 export type { CapsuleParams } from './capsule.ts'
 export { torus, torusKnot } from './torus.ts'
 export type { TorusParams, TorusKnotParams } from './torus.ts'
-// superellipsoid удалён из публичного API (Task 109, тест «суперэллипсоиды удалены»)
+// superellipsoid removed from the public API (Task 109, test "superellipsoids removed")
 
-// платоновы тела
+// platonic solids
 export { tetrahedron, octahedron, icosahedron, dodecahedron } from './platonic.ts'
 export type { PolyhedronParams } from './platonic.ts'
 
-// диски/кольца/сетка
+// disks/rings/grid
 export { disk, ring } from './disk.ts'
 export type { DiskParams, RingParams } from './disk.ts'
 export { grid } from './grid.ts'
 export type { GridGeometry, GridOptions } from './grid.ts'
 
-// каталог примитивов (Task 109): единая точка правды для демо и тестов
+// primitives catalog (Task 109): single source of truth for demos and tests
 export { SHAPES, segmentValue, shapeById, defaultValues } from './registry.ts'
 export type { ParamMeta, ShapeMeta } from './registry.ts'
 
-// террейн: статический + адаптивный + квадтри-патчи
+// terrain: static + adaptive + quadtree patches
 export { terrain, heightHills, heightRidged, heightIsland, heightDunes, heightCanyon } from './terrain.ts'
 export type { TerrainHeightFn, TerrainOptions } from './terrain.ts'
 export { createAdaptiveTerrain, worldHills, worldRidged, worldDunes, worldCanyon, worldIsland, adaptivePresets } from './adaptive.ts'
@@ -43,11 +43,11 @@ export type { TerrainQuadtreeParams, TerrainQuadtree, TerrainQuadtreePreset } fr
 export { selectQuadtreeTiles, quadtreeTileMesh, PATCH_CELLS, PATCH_VERTEX_COUNT } from './quadtree.ts'
 export type { QuadtreeTilesSelection, QuadtreeSelectOptions, QuadtreeTileMesh, QuadtreeTileMeshOptions } from './quadtree.ts'
 
-// шум и утилиты
+// noise and utilities
 export { hash2i, valueNoise2D, fbm2D, ridged2D } from './noise.ts'
 export { createPrimitiveFeed } from './feed.ts'
 export type { PrimitiveFeedParams, PrimitiveFeed } from './feed.ts'
 
-// общие типы
+// shared types
 export type { Geometry } from './types.ts'
 export { triangles, geometryBytes } from './types.ts'

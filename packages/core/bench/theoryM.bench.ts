@@ -1,8 +1,8 @@
 import { createTransientPool } from '../src/pool/transientPool.ts'
 
-// Теория M (идея №2 раннего каталога): transient-пул против аллокаций
-// в кадровом колбэке. Профиль: 100 объектов на кадр — 7 матриц (f32×16)
-// + 2 «больших» массива (f32×1024, свет/тени), 60 кадров.
+// Theory M (idea #2 of the early catalog): transient pool vs allocations
+// in the frame callback. Profile: 100 objects per frame — 7 matrices (f32×16)
+// + 2 "big" arrays (f32×1024, light/shadows), 60 frames.
 
 const FRAMES = 60
 const OBJECTS = 100
@@ -11,10 +11,10 @@ const WARMUP_FRAMES = 10
 function frameAlloc(): void {
   for (let object = 0; object < OBJECTS; object++) {
     for (let m = 0; m < 7; m++) {
-      const scratch = new Float32Array(16) // модель/нормаль/мвп/…
+      const scratch = new Float32Array(16) // model/normal/mvp/…
       scratch[0] = object
     }
-    const big = new Float32Array(1024) // свет, тени, кластеры
+    const big = new Float32Array(1024) // light, shadows, clusters
     big[0] = object
   }
 }
@@ -31,7 +31,7 @@ function framePooled(pool: ReturnType<typeof createTransientPool>): void {
 }
 
 function measure(label: string, frame: () => void): number {
-  for (let i = 0; i < WARMUP_FRAMES; i++) frame() // прогрев: JIT + пул выходит на режим
+  for (let i = 0; i < WARMUP_FRAMES; i++) frame() // warm-up: JIT + the pool reaches steady state
   const started = performance.now()
   for (let i = 0; i < FRAMES; i++) frame()
   return (performance.now() - started) / FRAMES
@@ -48,11 +48,11 @@ const poolMs = measure('pool', poolFrame)
 const stats = pool.stats()
 
 const engine = typeof Bun !== 'undefined' ? 'bun/JSC' : `node/${process.version} (V8)`
-console.log('── Теория M: transient-пул против аллокаций в кадре ──')
-console.log(`движок            : ${engine}`)
-console.log(`профиль           : ${OBJECTS} объектов × (7×f32[16] + f32[1024]), ${FRAMES} кадров`)
-console.log(`аллокации в кадре : ${allocMs.toFixed(3)} мс/кадр`)
-console.log(`пул               : ${poolMs.toFixed(3)} мс/кадр`)
-console.log(`создано массивов  : ${stats.created} (аллокаций avoided: ${FRAMES * OBJECTS * 8 - stats.created})`)
-console.log(`удержано памяти   : ${(stats.bytes / 1024).toFixed(0)} КБ (стабильно, не растёт)`)
-console.log(`ускорение         : ×${(allocMs / poolMs).toFixed(2)}`)
+console.log('── Theory M: transient pool vs allocations in the frame ──')
+console.log(`engine            : ${engine}`)
+console.log(`profile           : ${OBJECTS} objects × (7×f32[16] + f32[1024]), ${FRAMES} frames`)
+console.log(`allocations/frame : ${allocMs.toFixed(3)} ms/frame`)
+console.log(`pool              : ${poolMs.toFixed(3)} ms/frame`)
+console.log(`arrays created    : ${stats.created} (allocations avoided: ${FRAMES * OBJECTS * 8 - stats.created})`)
+console.log(`memory retained   : ${(stats.bytes / 1024).toFixed(0)} KB (stable, not growing)`)
+console.log(`speedup           : ×${(allocMs / poolMs).toFixed(2)}`)

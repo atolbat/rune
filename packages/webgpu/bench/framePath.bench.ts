@@ -4,9 +4,9 @@ import { createTapeWriter, serializeTape, parseTape, writerView, OpCode } from '
 import type { TapeView } from '@rune/core'
 
 /**
- * Теория I: путь кадра на WebGPU — прямые вызовы фасада (как в демо-3)
- * против tape-пути (лента → executor). Гипотеза: лента добавляет копейку
- * записи на команду, но executor выигрывает на батчинге загрузок UBO.
+ * Theory I: the WebGPU frame path — direct facade calls (as in demo-3)
+ * versus the tape path (tape → executor). Hypothesis: the tape adds a penny of
+ * recording per command, but the executor wins on batching UBO uploads.
  */
 
 const WGSL = `
@@ -45,7 +45,7 @@ function makeSpec(): WgpuDrawSpec {
   }
 }
 
-/** Путь A: прямые вызовы фасада для КАЖДОЙ команды (честно: та же работа). */
+/** Path A: direct facade calls for EVERY command (honestly: the same work). */
 function measureDirect(gpu: GPUFacade, repeats: number): number {
   const arena = createSliceArena(1 << 16)
   const ctx = createWgpuContext(arena)
@@ -67,7 +67,7 @@ function measureDirect(gpu: GPUFacade, repeats: number): number {
   })
 }
 
-/** Путь B: лента → executor (единая архитектура). */
+/** Path B: tape → executor (a unified architecture). */
 function measureTape(gpu: GPUFacade, repeats: number): number {
   const arena = createSliceArena(1 << 16)
   const ctx = createWgpuContext(arena)
@@ -97,14 +97,14 @@ function bestOf(repeats: number, run: () => void): number {
 }
 
 const { gpu } = createRecordingGPU()
-for (let i = 0; i < 30; i++) { measureDirect(gpu, 1); measureTape(gpu, 1) } // прогрев
+for (let i = 0; i < 30; i++) { measureDirect(gpu, 1); measureTape(gpu, 1) } // warm-up
 
 const directMs = measureDirect(gpu, 15)
 const tapeMs = measureTape(gpu, 15)
 
-console.log('── Теория I: путь кадра WebGPU (100 команд, мок-фасад) ──')
-console.log(`прямой путь  : ${directMs.toFixed(4)} мс/кадр`)
-console.log(`tape-путь    : ${tapeMs.toFixed(4)} мс/кадр`)
-console.log(`разница      : ×${(directMs / tapeMs).toFixed(2)} ${directMs < tapeMs ? '(прямой быстрее)' : '(tape быстрее)'}`)
-console.log('вывод: tape-путь добавляет стоимость записи ленты, но даёт воркеры/детерминизм/rewind')
-console.log(`цена лент: +${((tapeMs - directMs) * 1000).toFixed(1)} мкс на ${DRAWS} команд (${((tapeMs - directMs) / DRAWS * 1000).toFixed(2)} мкс/команда)`)
+console.log('── Theory I: the WebGPU frame path (100 commands, mock facade) ──')
+console.log(`direct path   : ${directMs.toFixed(4)} ms/frame`)
+console.log(`tape path     : ${tapeMs.toFixed(4)} ms/frame`)
+console.log(`difference    : ×${(directMs / tapeMs).toFixed(2)} ${directMs < tapeMs ? '(direct is faster)' : '(tape is faster)'}`)
+console.log('conclusion: the tape path adds the cost of tape recording, but gives workers/determinism/rewind')
+console.log(`tape cost: +${((tapeMs - directMs) * 1000).toFixed(1)} µs for ${DRAWS} commands (${((tapeMs - directMs) / DRAWS * 1000).toFixed(2)} µs/command)`)

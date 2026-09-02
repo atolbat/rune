@@ -3,7 +3,7 @@ import { compileStateProgram, createRecordingGL, createGLShadow } from '../src/i
 import type { PipelineDesc } from '../src/index.ts'
 
 describe('state program', () => {
-  it('интерпретатор: применяет только отличия от тени', () => {
+  it('interpreter: applies only the differences from the shadow', () => {
     const { gl, calls } = createRecordingGL()
     const shadow = createGLShadow()
     const apply = compileStateProgram(
@@ -20,11 +20,11 @@ describe('state program', () => {
     ])
 
     calls.length = 0
-    apply(gl, shadow) // состояние уже совпадает — ни одного вызова
+    apply(gl, shadow) // the state already matches — not a single call
     expect(calls).toEqual([])
   })
 
-  it('codegen: поведение идентично интерпретатору', () => {
+  it('codegen: behavior identical to the interpreter', () => {
     const pipeline: PipelineDesc = {
       depth: { test: 'less', write: true },
       blend: { src: 'src-alpha', dst: 'one-minus-src-alpha' },
@@ -47,7 +47,7 @@ describe('state program', () => {
     codegen(b.gl, shadowB)
     expect(a.calls).toEqual(b.calls)
 
-    a.calls.length = 0 // состояние применено: повторный diff должен быть пуст
+    a.calls.length = 0 // the state is applied: a repeated diff must be empty
     b.calls.length = 0
     interpret(a.gl, shadowA)
     codegen(b.gl, shadowB)
@@ -55,7 +55,7 @@ describe('state program', () => {
     expect(b.calls).toEqual([])
   })
 
-  it('depth: false — ни depth-вызовов', () => {
+  it('depth: false — no depth calls', () => {
     const { gl, calls } = createRecordingGL()
     const apply = compileStateProgram({ depth: false }, 0, 'interpret')
     apply(gl, createGLShadow())

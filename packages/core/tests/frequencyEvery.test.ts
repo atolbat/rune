@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'bun:test'
 import { createFrequencyArena, createUniformSet, signal, OpCode, createTapeWriter, createSegmentStore, createLiveCommand, buildFrame } from '../src/index.ts'
 
-describe('frequencyArena (идея №3 досье)', () => {
-  it('frame- и draw-зоны независимы: dirty изолированы', () => {
+describe('frequencyArena (dossier idea #3)', () => {
+  it('frame- and draw-zones are independent: dirty flags are isolated', () => {
     const arena = createFrequencyArena()
     const camera = createUniformSet('camera', { u_viewProj: 'mat4' }, { frequency: 'frame' })
     camera.attach(type => arena.alloc(type, 'frame'))
@@ -11,12 +11,12 @@ describe('frequencyArena (идея №3 досье)', () => {
 
     expect(camera.offsets.u_viewProj).toBeDefined()
     expect(materials.offsets.u_tint).toBeDefined()
-    // Смещения в РАЗНЫХ аренах — обе от нуля допустимы
+    // Offsets in DIFFERENT arenas — both starting from zero are valid
     expect(arena.frame.usedBytes).toBe(64)
     expect(arena.draw.usedBytes).toBe(16)
   })
 
-  it('frame-данные грузятся один раз; draw-данные — при изменениях', () => {
+  it('frame data is uploaded once; draw data — on changes', () => {
     const arena = createFrequencyArena()
     const cam = createUniformSet('camera', { u_time: 'float' }, { frequency: 'frame' })
     cam.attach(t => arena.alloc(t, 'frame'))
@@ -33,30 +33,30 @@ describe('frequencyArena (идея №3 досье)', () => {
       zone.writeFloat({ index: 0, offset, size: 4, kind: 'f32' } as never, value)
     }
 
-    // Кадр 1: обе зоны грязные
+    // Frame 1: both zones are dirty
     cam.write(writeInto('frame'))
     mat.write(writeInto('draw'))
     expect(arena.frameRanges().length).toBe(1)
     expect(arena.drawRanges().length).toBe(1)
     arena.clearDirty()
 
-    // Кадр 2: НИЧЕГО не изменилось — загрузок нет
+    // Frame 2: NOTHING changed — no uploads
     cam.write(writeInto('frame'))
     mat.write(writeInto('draw'))
-    expect(arena.frameRanges().length).toBe(0) // value-compare: те же значения
+    expect(arena.frameRanges().length).toBe(0) // value-compare: the same values
     expect(arena.drawRanges().length).toBe(0)
 
-    // Кадр 3: сменилось время — только frame-зона грязная
+    // Frame 3: the time changed — only the frame zone is dirty
     t.value = 2
     cam.write(writeInto('frame'))
     mat.write(writeInto('draw'))
     expect(arena.frameRanges().length).toBe(1)
-    expect(arena.drawRanges().length).toBe(0) // draw-зона чиста — НЕ грузится
+    expect(arena.drawRanges().length).toBe(0) // the draw zone is clean — NOT uploaded
   })
 })
 
-describe('live().every(n) (идея №1 досье)', () => {
-  it('команда с every(2) эмитится через кадр', () => {
+describe('live().every(n) (dossier idea #1)', () => {
+  it('a command with every(2) is emitted every other frame', () => {
     const store = createSegmentStore(8)
     let recordings = 0
     const dep = signal(0)
@@ -67,20 +67,20 @@ describe('live().every(n) (идея №1 досье)', () => {
     ).every(2)
 
     const out = createTapeWriter(16)
-    // Кадры 1-4: эмит то есть, то нет
+    // Frames 1-4: the emit alternates on and off
     const counts: number[] = []
     for (let frame = 0; frame < 4; frame++) {
       out.reset()
       buildFrame([live], out)
       counts.push(out.count)
     }
-    // every(2): половина кадров без эмита
+    // every(2): half of the frames have no emit
     expect(counts.filter(c => c === 1).length).toBe(2)
     expect(counts.filter(c => c === 0).length).toBe(2)
-    expect(recordings).toBeLessThanOrEqual(2) // перезаписи только в активные кадры
+    expect(recordings).toBeLessThanOrEqual(2) // rewrites only on active frames
   })
 
-  it('every(1) — обычное поведение (каждый кадр)', () => {
+  it('every(1) — the normal behavior (every frame)', () => {
     const store = createSegmentStore(8)
     const dep = signal(0)
     const live = createLiveCommand(store, w => w.emit(OpCode.Draw, 1, 6, 1, 0), [dep]).every(1)

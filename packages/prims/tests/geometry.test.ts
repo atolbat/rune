@@ -1,17 +1,18 @@
 /**
- * Инварианты всех генераторов @rune/prims (Task 107→109):
- *   • согласованность массивов (позиции/нормали/UV — по vertexCount);
- *   • нормали ЕДИНИЧНЫЕ;
- *   • ВЫРОЖДЕННЫЕ треугольники запрещены;
- *   • WINDING ПО ПОЗИЦИЯМ (Task 108): cross(b−a, c−a) · средняя атрибутная
- *     нормаль > 0 — вывернутые половины квадов ловятся здесь;
- *   • точные счёты под options-API (Task 109): box с сегментами на грань,
- *     plane прямоугольный, конус с heightSegments>1 (вырожденное кольцо —
- *     только крайний ряд), платоновы с detail-сабдивизией.
+ * Invariants of all @rune/prims generators (Task 107→109):
+ *   • array consistency (positions/normals/UVs — per vertexCount);
+ *   • normals are UNIT;
+ *   • DEGENERATE triangles are forbidden;
+ *   • WINDING BY POSITIONS (Task 108): cross(b−a, c−a) · the average attribute
+ *     normal > 0 — inside-out halves of quads are caught here;
+ *   • exact counts for the options-API (Task 109): box with segments per face,
+ *     plane rectangular, cone with heightSegments>1 (degenerate ring —
+ *     only the extreme row), platonic solids with detail subdivision.
  *
- * Каталог SHAPES прогоняется ЦЕЛИКОМ (реестр = точка правды): у террейнов
- * вместо winding-харнесса — «грани вверх» (гладкие нормали на обрывах
- * законно расходятся с гранью — вопрос шейдинга, не обхода).
+ * The SHAPES catalog is run in FULL (the registry is the point of truth):
+ * for terrains, instead of a winding harness — "faces up" (smooth normals
+ * on cliffs legitimately diverge from the face — a shading question, not
+ * a winding one).
  */
 
 import { describe, test, expect } from 'bun:test'
@@ -39,7 +40,7 @@ function expectUnitNormals(g: Geometry): void {
   }
 }
 
-/** Выпуклое тело: нормаль каждого треугольника смотрит от начала координат. */
+/** Convex body: the normal of every triangle points away from the origin. */
 function expectOutward(g: Geometry): void {
   for (let t = 0; t < g.vertexCount / 3; t++) {
     const cx = (g.positions[t * 9]! + g.positions[t * 9 + 3]! + g.positions[t * 9 + 6]!) / 3
@@ -52,7 +53,7 @@ function expectOutward(g: Geometry): void {
   }
 }
 
-/** Ненулевая площадь каждого треугольника (вырожденные запрещены). */
+/** Non-zero area of every triangle (degenerate ones are forbidden). */
 function expectNoDegenerate(g: Geometry): void {
   for (let t = 0; t < g.vertexCount / 3; t++) {
     const ax = g.positions[t * 9]!, ay = g.positions[t * 9 + 1]!, az = g.positions[t * 9 + 2]!
@@ -68,9 +69,9 @@ function expectNoDegenerate(g: Geometry): void {
 }
 
 /**
- * WINDING ПО ПОЗИЦИЯМ (Task 108): геометрическая нормаль грани
- * cross(b−a, c−a) обязана смотреть в ту же сторону, что средняя
- * АТРИБУТНАЯ нормаль вершин треугольника.
+ * WINDING BY POSITIONS (Task 108): the geometric normal of the face
+ * cross(b−a, c−a) must point the same way as the average
+ * ATTRIBUTE normal of the triangle's vertices.
  */
 function expectWindingMatchesNormals(g: Geometry): void {
   for (let t = 0; t < g.vertexCount / 3; t++) {
@@ -88,7 +89,7 @@ function expectWindingMatchesNormals(g: Geometry): void {
   }
 }
 
-/** Грань смотрит ВВЕРХ: Y-компонента cross(b−a, c−a) > 0. */
+/** The face points UP: the Y component of cross(b−a, c−a) > 0. */
 function expectFaceUp(g: Geometry): void {
   for (let t = 0; t < g.vertexCount / 3; t++) {
     const o = t * 9
@@ -99,30 +100,30 @@ function expectFaceUp(g: Geometry): void {
   }
 }
 
-// ─── Каталог (реестр — точка правды) ─────────────────────────────────────────
+// ─── Catalog (registry — the point of truth) ─────────────────────────────────────────
 
-describe('prims — каталог SHAPES (Task 109)', () => {
-  test('в каталоге нет суперэллипсоидов, группы на месте', () => {
+describe('prims — SHAPES catalog (Task 109)', () => {
+  test('no superellipsoids in the catalog, groups are in place', () => {
     const groups = new Set(SHAPES.map(s => s.group))
-    expect(groups.has('Базовые')).toBe(true)
-    expect(groups.has('Платоновы')).toBe(true)
-    expect(groups.has('Адаптивный рельеф')).toBe(true)
+    expect(groups.has('Basic')).toBe(true)
+    expect(groups.has('Platonic')).toBe(true)
+    expect(groups.has('Adaptive relief')).toBe(true)
     expect(SHAPES.some(s => s.id.startsWith('squircle') || s.id.startsWith('super'))).toBe(false)
     expect(SHAPES.length).toBeGreaterThanOrEqual(24)
   })
 
-  test('каждая фигура: инварианты каталога (террейны/адаптив — только k=1: сегменты не меняют инварианты, но время построения)', () => {
+  test('every shape: catalog invariants (terrains/adaptive — only k=1: segments change the build time, not the invariants)', () => {
     for (const shape of SHAPES) {
-      const heavy = shape.group === 'Террейны' || shape.group === 'Адаптивный рельеф'
+      const heavy = shape.group === 'Terrains' || shape.group === 'Adaptive relief'
       const factors = heavy ? [1] : [0.5, 1, 2]
       for (const k of factors) {
         const g = shape.make(defaultValues(shape), k)
         expectConsistent(g)
         expectUnitNormals(g)
         expectNoDegenerate(g)
-        if (shape.group === 'Террейны') {
+        if (shape.group === 'Terrains') {
           expectFaceUp(g)
-        } else if (shape.group !== 'Адаптивный рельеф') {
+        } else if (shape.group !== 'Adaptive relief') {
           expectWindingMatchesNormals(g)
         }
         for (let i = 0; i < g.vertexCount * 3; i++) {
@@ -132,21 +133,21 @@ describe('prims — каталог SHAPES (Task 109)', () => {
     }
   })
 
-  test('детализация ×2 меняет счёт у СЕГМЕНТНЫХ фигур (икосаэдр/додекаэдр — через detail? нет: через сегменты)', () => {
-    // Платоновы НЕ сегментные (detail — отдельный параметр): детализация
-    // их не меняет; меняют — параметрические. Проверяем контраст.
+  test('detail ×2 changes the count for SEGMENTED shapes (icosahedron/dodecahedron — via detail? no: via segments)', () => {
+    // The platonic solids are NOT segmented (detail is a separate parameter):
+    // detail does not change them; parametric shapes do. We check the contrast.
     const icosa = SHAPES.find(s => s.id === 'icosa')!
     const v1 = icosa.make(defaultValues(icosa), 1).vertexCount
     const v2 = icosa.make(defaultValues(icosa), 2).vertexCount
-    expect(v1).toBe(v2) // detail=0 — сабдивизии нет
+    expect(v1).toBe(v2) // detail=0 — no subdivision
     const sphereShape = SHAPES.find(s => s.id === 'sphere')!
     const s1 = sphereShape.make(defaultValues(sphereShape), 1).vertexCount
     const s2 = sphereShape.make(defaultValues(sphereShape), 2).vertexCount
     expect(s2).toBeGreaterThan(s1 * 3)
   })
 
-  test('адаптивные записи: make() строит статику, adaptive() даёт конфиг фида', () => {
-    const adaptive = SHAPES.filter(s => s.group === 'Адаптивный рельеф')
+  test('adaptive entries: make() builds the static geometry, adaptive() returns the feed config', () => {
+    const adaptive = SHAPES.filter(s => s.group === 'Adaptive relief')
     expect(adaptive.length).toBeGreaterThanOrEqual(4)
     for (const shape of adaptive) {
       expect(shape.adaptive).toBeDefined()
@@ -159,32 +160,32 @@ describe('prims — каталог SHAPES (Task 109)', () => {
     }
   })
 
-  test('segmentValue: множитель с зажимом', () => {
+  test('segmentValue: multiplier with clamping', () => {
     expect(segmentValue(48, 1, 8, 256)).toBe(48)
     expect(segmentValue(48, 0.5, 8, 256)).toBe(24)
     expect(segmentValue(48, 4, 8, 256)).toBe(192)
-    expect(segmentValue(300, 4, 8, 256)).toBe(256) // зажим сверху
-    expect(segmentValue(20, 0.1, 8, 256)).toBe(8) // зажим снизу
+    expect(segmentValue(300, 4, 8, 256)).toBe(256) // clamped from above
+    expect(segmentValue(20, 0.1, 8, 256)).toBe(8) // clamped from below
   })
 })
 
-// ─── Бокс (Task 109: сегменты на грань) ─────────────────────────────────────
+// ─── Box (Task 109: segments per face) ─────────────────────────────────────
 
-describe('prims — бокс/куб', () => {
-  test('1×1×1 без сегментов = 36 вершин (куб-совместимость)', () => {
+describe('prims — box/cube', () => {
+  test('1×1×1 without segments = 36 vertices (cube compatibility)', () => {
     const g = box()
     expect(g.vertexCount).toBe(36)
     expectConsistent(g)
     expectWindingMatchesNormals(g)
     expectOutward(g)
     expect(cube(1).vertexCount).toBe(36)
-    // cube(half) — бокс 2h×2h×2h: та же геометрия
+    // cube(half) — a 2h×2h×2h box: the same geometry
     const c = cube(1.25)
     expect(c.vertexCount).toBe(36)
     expect(Math.max(...c.positions)).toBeCloseTo(1.25, 5)
   })
 
-  test('НЕкуб: разные размеры по осям — bbox точный', () => {
+  test('non-cube: different sizes per axis — exact bbox', () => {
     const g = box({ width: 2, height: 3, depth: 4 })
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity
     for (let i = 0; i < g.vertexCount; i++) {
@@ -197,7 +198,7 @@ describe('prims — бокс/куб', () => {
     expect(maxZ - minZ).toBeCloseTo(4, 5)
   })
 
-  test('СЕГМЕНТЫ НА ГРАНЬ: счёт 2·(ws·hs + ws·ds + hs·ds)·2·3', () => {
+  test('SEGMENTS PER FACE: count 2·(ws·hs + ws·ds + hs·ds)·2·3', () => {
     const g = box({ widthSegments: 2, heightSegments: 3, depthSegments: 4 })
     const expected = 4 * (2 * 3 + 2 * 4 + 3 * 4) * 3
     expect(g.vertexCount).toBe(expected)
@@ -205,7 +206,7 @@ describe('prims — бокс/куб', () => {
     expectNoDegenerate(g)
     expectWindingMatchesNormals(g)
     expectOutward(g)
-    // UV каждой грани покрывает [0,1]²
+    // each face's UVs cover [0,1]²
     let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity
     for (let i = 0; i < g.vertexCount; i++) {
       uMin = Math.min(uMin, g.uvs[i * 2]!); uMax = Math.max(uMax, g.uvs[i * 2]!)
@@ -218,16 +219,16 @@ describe('prims — бокс/куб', () => {
   })
 })
 
-// ─── Плоскость (Task 109: прямоугольник + независимые сегменты) ─────────────
+// ─── Plane (Task 109: rectangle + independent segments) ─────────────
 
-describe('prims — плоскость', () => {
-  test('прямоугольник width×height, независимые сегменты, CCW сверху', () => {
+describe('prims — plane', () => {
+  test('a width×height rectangle, independent segments, CCW from above', () => {
     const g = plane({ width: 2, height: 3, widthSegments: 2, heightSegments: 5 })
     expect(g.vertexCount).toBe(2 * 5 * 6)
     expectConsistent(g)
     expectFaceUp(g)
     expectUnitNormals(g)
-    // все нормали +Y
+    // all normals are +Y
     for (let i = 0; i < g.vertexCount; i++) {
       expect(g.normals[i * 3]!).toBeCloseTo(0, 5)
       expect(g.normals[i * 3 + 1]!).toBeCloseTo(1, 5)
@@ -240,21 +241,21 @@ describe('prims — плоскость', () => {
     }
     expect(maxX - minX).toBeCloseTo(2, 5)
     expect(maxZ - minZ).toBeCloseTo(3, 5)
-    // UV сетка: u = i/cellsX по X
+    // UV grid: u = i/cellsX along X
     expect(g.uvs[0]!).toBeCloseTo(0, 5)
-    expect(g.uvs[2]!).toBeCloseTo(0, 5) // первая вершина второго треугольника
+    expect(g.uvs[2]!).toBeCloseTo(0, 5) // the first vertex of the second triangle
   })
 
-  test('дефолт — единичный квадрат 6 вершин', () => {
+  test('default — a unit square of 6 vertices', () => {
     const g = plane()
     expect(g.vertexCount).toBe(6)
   })
 })
 
-// ─── Сфера ──────────────────────────────────────────────────────────────────
+// ─── Sphere ─────────────────────────────────────────────────────────────────
 
-describe('prims — сфера (options-API)', () => {
-  test('все вершины на радиусе, нормали = позиции/R, CCW снаружи, полюса', () => {
+describe('prims — sphere (options-API)', () => {
+  test('all vertices at the radius, normals = positions/R, CCW outside, poles', () => {
     const R = 1.7
     const g = sphere({ radius: R, widthSegments: 24, heightSegments: 16 })
     expectConsistent(g)
@@ -265,7 +266,7 @@ describe('prims — сфера (options-API)', () => {
       expect(d).toBeCloseTo(R, 5)
       expect(g.positions[i * 3]! / R).toBeCloseTo(g.normals[i * 3]!, 5)
     }
-    // счёт: 6·radial·(bands−1) — полный набор поясов с полюсными веерами
+    // count: 6·radial·(bands−1) — the full set of bands with polar fans
     expect(g.vertexCount).toBe(6 * 24 * (16 - 1))
     let mn = Infinity, mx = -Infinity
     for (let i = 0; i < g.vertexCount; i++) {
@@ -277,53 +278,53 @@ describe('prims — сфера (options-API)', () => {
   })
 })
 
-// ─── Цилиндр/конус (options-API + openEnded + heightSegments) ───────────────
+// ─── Cylinder/cone (options-API + openEnded + heightSegments) ───────────────
 
-describe('prims — цилиндр/конус', () => {
-  test('счёты: полный / openEnded / конус с heightSegments>1', () => {
-    // полный цилиндр: бок 2·hSeg·radial + 2 крышки
+describe('prims — cylinder/cone', () => {
+  test('counts: full / openEnded / cone with heightSegments>1', () => {
+    // full cylinder: side 2·hSeg·radial + 2 caps
     const full = cylinder({ radialSegments: 8, heightSegments: 2 })
     expect(full.vertexCount).toBe((8 * 2 * 2 + 8 * 2) * 3)
-    // открытый: только бок
+    // open: side only
     const open = cylinder({ radialSegments: 8, heightSegments: 2, openEnded: true })
     expect(open.vertexCount).toBe(8 * 2 * 2 * 3)
-    // КОНУС с heightSegments=2: вырожденное кольцо — только ПОСЛЕДНИЙ ряд
-    // (баг-ловушка Task 109: прежде счёт считал ВСЕ ряды вырожденными)
+    // A CONE with heightSegments=2: the degenerate ring — only the LAST row
+    // (Task 109 bug trap: previously the count treated ALL rows as degenerate)
     const cone2 = cylinder({ radiusTop: 0, radialSegments: 8, heightSegments: 2, openEnded: true })
     expect(cone2.vertexCount).toBe(8 * (2 * 2 - 1) * 3)
     expectConsistent(cone2)
     expectNoDegenerate(cone2)
     expectWindingMatchesNormals(cone2)
-    // обратный конус (radiusBottom=0): вырожден ПЕРВЫЙ ряд
+    // inverted cone (radiusBottom=0): the FIRST row is degenerate
     const inv = cylinder({ radiusTop: 1, radiusBottom: 0, radialSegments: 8, heightSegments: 2, openEnded: true })
     expect(inv.vertexCount).toBe(8 * (2 * 2 - 1) * 3)
     expectNoDegenerate(inv)
-    // cone() — обёртка
+    // cone() — a wrapper
     const c = cone({ radius: 1, height: 2, radialSegments: 8 })
     expect(c.vertexCount).toBe((8 * 1 + 8) * 3)
   })
 
-  test('нормали боковой наклонены по профилю (конус смотрит в стороны)', () => {
+  test('side normals are inclined along the profile (the cone looks sideways)', () => {
     const g = cone({ radius: 1, height: 2, radialSegments: 16, openEnded: true })
     let sumNy = 0
     for (let i = 0; i < g.vertexCount; i++) sumNy += g.normals[i * 3 + 1]!
     const avgNy = sumNy / g.vertexCount
-    expect(avgNy).toBeGreaterThan(0.1) // наклон наружу, не вертикально
-    expect(avgNy).toBeLessThan(0.9) // и не вверх — именно наклон
+    expect(avgNy).toBeGreaterThan(0.1) // inclined outward, not vertical
+    expect(avgNy).toBeLessThan(0.9) // and not up — specifically inclined
     expectWindingMatchesNormals(g)
   })
 })
 
-// ─── Капсула ────────────────────────────────────────────────────────────────
+// ─── Capsule ────────────────────────────────────────────────────────────────
 
-describe('prims — капсула', () => {
-  test('счёт 2·radial·(ringCount−2), полюса честные', () => {
+describe('prims — capsule', () => {
+  test('count 2·radial·(ringCount−2), honest poles', () => {
     const g = capsule({ radius: 0.6, height: 1.2, radialSegments: 12, capSegments: 3 })
     expect(g.vertexCount).toBe(2 * 12 * (3 * 2 + 1 - 2) * 3)
     expectConsistent(g)
     expectWindingMatchesNormals(g)
     expectNoDegenerate(g)
-    // полюса: maxY = half + r, minY = −half − r
+    // poles: maxY = half + r, minY = −half − r
     let mn = Infinity, mx = -Infinity
     for (let i = 0; i < g.vertexCount; i++) {
       mn = Math.min(mn, g.positions[i * 3 + 1]!)
@@ -334,10 +335,10 @@ describe('prims — капсула', () => {
   })
 })
 
-// ─── Тор и узел ─────────────────────────────────────────────────────────────
+// ─── Torus and knot ─────────────────────────────────────────────────────────
 
-describe('prims — тор/узел (options-API)', () => {
-  test('тор: точки на трубке радиуса tube вокруг кольца radius', () => {
+describe('prims — torus/knot (options-API)', () => {
+  test('torus: points on the tube of radius tube around the ring radius', () => {
     const R = 1.1, r = 0.32
     const g = torus({ radius: R, tube: r, tubularSegments: 24, radialSegments: 12 })
     expect(g.vertexCount).toBe(24 * 12 * 6)
@@ -345,13 +346,13 @@ describe('prims — тор/узел (options-API)', () => {
     expectWindingMatchesNormals(g)
     for (let i = 0; i < g.vertexCount; i++) {
       const x = g.positions[i * 3]!, y = g.positions[i * 3 + 1]!, z = g.positions[i * 3 + 2]!
-      // расстояние до окружности R в плоскости XZ
+      // distance to the circle R in the XZ plane
       const d = Math.hypot(Math.hypot(x, z) - R, y)
       expect(d).toBeCloseTo(r, 4)
     }
   })
 
-  test('узел: детерминизм + p/q из options', () => {
+  test('knot: determinism + p/q from options', () => {
     const a = torusKnot({ p: 3, q: 4, tube: 0.2, tubularSegments: 96, radialSegments: 6 })
     const b = torusKnot({ p: 3, q: 4, tube: 0.2, tubularSegments: 96, radialSegments: 6 })
     expect(a.vertexCount).toBe(96 * 6 * 6)
@@ -364,21 +365,21 @@ describe('prims — тор/узел (options-API)', () => {
   })
 })
 
-// ─── Платоновы: detail-сабдивизия (Task 109) ────────────────────────────────
+// ─── Platonic solids: detail subdivision (Task 109) ────────────────────────
 
-describe('prims — платоновы тела с detail', () => {
-  test('detail меняет разрешение: счёты (d+1)² на грань-треугольник', () => {
+describe('prims — platonic solids with detail', () => {
+  test('detail changes the resolution: counts (d+1)² per face triangle', () => {
     expect(tetrahedron({ detail: 0 }).vertexCount).toBe(4 * 3)
     expect(tetrahedron({ detail: 2 }).vertexCount).toBe(4 * 9 * 3)
     expect(octahedron({ detail: 1 }).vertexCount).toBe(8 * 4 * 3)
     expect(icosahedron({ detail: 1 }).vertexCount).toBe(20 * 4 * 3)
     expect(icosahedron({ detail: 2 }).vertexCount).toBe(20 * 9 * 3) // (d+1)² = 9
-    // додекаэдр: 12 пятиугольников × 3 веерных тр-ка
+    // dodecahedron: 12 pentagons × 3 fan triangles
     expect(dodecahedron({ detail: 0 }).vertexCount).toBe(12 * 3 * 3)
     expect(dodecahedron({ detail: 1 }).vertexCount).toBe(12 * 3 * 4 * 3)
   })
 
-  test('detail ≥ 1: ВСЕ вершины на сфере радиуса (геодезическая проекция)', () => {
+  test('detail ≥ 1: ALL vertices on the sphere of the given radius (geodesic projection)', () => {
     for (const g of [
       tetrahedron({ radius: 1.3, detail: 1 }),
       octahedron({ radius: 1.3, detail: 2 }),
@@ -396,10 +397,10 @@ describe('prims — платоновы тела с detail', () => {
     }
   })
 
-  test('detail = 0: додекаэдр — честные ПЛОСКИЕ пятиугольники (копланарность)', () => {
+  test('detail = 0: dodecahedron — honest FLAT pentagons (coplanarity)', () => {
     const g = dodecahedron({ radius: 1 })
     expectConsistent(g)
-    // каждая тройка треугольников грани копланарна: одинаковая нормаль
+    // every triple of face triangles is coplanar: the same normal
     for (let f = 0; f < 12; f++) {
       const base = f * 3 * 9
       const nx = g.normals[base]!, ny = g.normals[base + 1]!, nz = g.normals[base + 2]!
@@ -411,10 +412,10 @@ describe('prims — платоновы тела с detail', () => {
     }
   })
 
-  test('UV непрерывны внутри грани при detail (барицентрическая интерполяция)', () => {
+  test('UVs are continuous within a face with detail (barycentric interpolation)', () => {
     const g = dodecahedron({ detail: 1 })
-    // внутри одной грани точка решётки входит в несколько подтреугольников —
-    // проверяем: крайние UV покрывают [0,1] и нет NaN
+    // within a single face a lattice point belongs to several subtriangles —
+    // we check: the extreme UVs cover [0,1] and there are no NaNs
     let uMin = Infinity, uMax = -Infinity
     for (let i = 0; i < g.vertexCount; i++) {
       const u = g.uvs[i * 2]!, v = g.uvs[i * 2 + 1]!
@@ -427,10 +428,10 @@ describe('prims — платоновы тела с detail', () => {
   })
 })
 
-// ─── Диск/кольцо (options-API) ──────────────────────────────────────────────
+// ─── Disk/ring (options-API) ──────────────────────────────────────────────
 
-describe('prims — диск/кольцо', () => {
-  test('диск: веер CCW сверху, счёт = segments·3', () => {
+describe('prims — disk/ring', () => {
+  test('disk: a CCW fan from above, count = segments·3', () => {
     const g = disk({ radius: 1.2, segments: 16 })
     expect(g.vertexCount).toBe(16 * 3)
     expectConsistent(g)
@@ -438,7 +439,7 @@ describe('prims — диск/кольцо', () => {
     expectNoDegenerate(g)
   })
 
-  test('кольцо: ленты, счёт = segments·6', () => {
+  test('ring: strips, count = segments·6', () => {
     const g = ring({ innerRadius: 0.4, outerRadius: 0.9, segments: 12 })
     expect(g.vertexCount).toBe(12 * 6)
     expectConsistent(g)
@@ -447,10 +448,10 @@ describe('prims — диск/кольцо', () => {
   })
 })
 
-// ─── Суперэллипсоид удалён (Task 109) ───────────────────────────────────────
+// ─── Superellipsoid removed (Task 109) ───────────────────────────────────
 
-describe('prims — суперэллипсоиды удалены', () => {
-  test('в публичном API нет superellipsoid', async () => {
+describe('prims — superellipsoids removed', () => {
+  test('no superellipsoid in the public API', async () => {
     const mod = await import('../src/index.ts')
     expect('superellipsoid' in mod).toBe(false)
   })

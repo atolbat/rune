@@ -2,16 +2,16 @@ import { describe, expect, it } from 'bun:test'
 import { createSliceArena, createPipelineCache, structuralKey } from '../src/index.ts'
 
 describe('slice arena', () => {
-  it('выделяет срезы с выравниванием 256', () => {
+  it('allocates slices with 256 alignment', () => {
     const arena = createSliceArena(4096)
     const first = arena.allocSlice(48)
     const second = arena.allocSlice(48)
     expect(first.base).toBe(0)
     expect(second.base).toBe(256)
-    expect(arena.usedBytes).toBe(304) // 256 + 48: указатель без набивки
+    expect(arena.usedBytes).toBe(304) // 256 + 48: the pointer without padding
   })
 
-  it('слоты внутри среза смещаются от базы', () => {
+  it('slots inside a slice are offset from the base', () => {
     const arena = createSliceArena(4096)
     const slice = arena.allocSlice(256)
     const slot = arena.slotAt(slice, 16, 16)
@@ -20,7 +20,7 @@ describe('slice arena', () => {
     expect(slotInSecond.offset).toBe(272)
   })
 
-  it('запись делает диапазон грязным; повтор той же записи — нет', () => {
+  it('a write makes the range dirty; repeating the same write does not', () => {
     const arena = createSliceArena(4096)
     const slice = arena.allocSlice(256)
     const slot = arena.slotAt(slice, 0, 16)
@@ -31,19 +31,19 @@ describe('slice arena', () => {
     expect(arena.dirtyRanges().length).toBe(0)
   })
 
-  it('соседние срезы сливаются в один диапазон загрузки', () => {
+  it('adjacent slices are merged into one upload range', () => {
     const arena = createSliceArena(8192)
     const a = arena.slotAt(arena.allocSlice(256), 0, 16)
     const b = arena.slotAt(arena.allocSlice(256), 0, 16)
     arena.writeVec4(a, 1, 1, 1, 1)
     arena.writeVec4(b, 2, 2, 2, 2)
     const ranges = arena.dirtyRanges()
-    expect(ranges.length).toBe(1)          // зазор 240 ≤ гранулярности → слито
+    expect(ranges.length).toBe(1)          // a 240 gap ≤ granularity → merged
     expect(ranges[0].from).toBe(0)
-    expect(ranges[0].to).toBe(272)         // аплоад покрывает только записанные байты
+    expect(ranges[0].to).toBe(272)         // the upload covers only the written bytes
   })
 
-  it('бросает при переполнении', () => {
+  it('throws on overflow', () => {
     const arena = createSliceArena(256)
     arena.allocSlice(256)
     expect(() => arena.allocSlice(256)).toThrow()
@@ -51,7 +51,7 @@ describe('slice arena', () => {
 })
 
 describe('pipeline cache', () => {
-  it('одинаковые дескрипторы → один id; разные → разные', () => {
+  it('identical descriptors → one id; different → different', () => {
     const cache = createPipelineCache()
     const base = { depth: { test: 'less' as const, write: true } }
     const first = cache.idOf(base, 1)
@@ -64,7 +64,7 @@ describe('pipeline cache', () => {
     expect(cache.size).toBe(3)
   })
 
-  it('структурный ключ стабилен и различает все поля', () => {
+  it('the structural key is stable and distinguishes all fields', () => {
     const a = structuralKey({ depth: { test: 'less' }, blend: false }, 7)
     const b = structuralKey({ depth: { test: 'less' }, blend: false }, 7)
     const c = structuralKey({ depth: { test: 'less' }, blend: { src: 'one' as const, dst: 'zero' as const } }, 7)

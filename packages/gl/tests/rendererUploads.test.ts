@@ -2,9 +2,9 @@ import { describe, expect, it } from 'bun:test'
 import { createRenderer } from '../src/index.ts'
 import { createRecordingGL } from '@rune/webgl2'
 
-/** Интеграция стриминга: uploads.drain() в idle-слоте каждого кадра. */
-describe('renderer.uploads (idle-слот стриминга)', () => {
-  it('задачи исполняются в idle-слоте: приоритет выше — раньше; выбывающая закрывает кадр', async () => {
+/** Streaming integration: uploads.drain() in the idle slot of each frame. */
+describe('renderer.uploads (streaming idle slot)', () => {
+  it('tasks are executed in the idle slot: higher priority — earlier; an evicted task closes the frame', async () => {
     const { gl } = createRecordingGL()
     const renderer = createRenderer({
       canvas: fakeCanvas(),
@@ -12,7 +12,7 @@ describe('renderer.uploads (idle-слот стриминга)', () => {
       createGL: () => gl,
       observeResize: false,
       now: () => 0,
-      requestFrame: () => () => {}, // headless: без rAF (bun её не даёт)
+      requestFrame: () => () => {}, // headless: no rAF (bun does not provide it)
       uploads: { initialBytes: 100 },
     })
     await renderer.start()
@@ -23,36 +23,36 @@ describe('renderer.uploads (idle-слот стриминга)', () => {
     renderer.uploads.push({ bytes: 40, priority: 2, run: () => executed.push(2) })
     expect(renderer.uploads.pending).toBe(3)
 
-    // Окно 100: две задачи по 40; третья не влезает в остаток (20) и
-    // исполняется как выбывающая, ЗАКРЫВАЯ кадр (урок M6).
+    // Window of 100: two tasks of 40; the third does not fit into the remainder (20) and
+    // is executed as an evicted task, CLOSING the frame (lesson M6).
     renderer.step(16)
-    expect(executed).toEqual([3, 2, 1]) // max-heap: приоритет выше — раньше
+    expect(executed).toEqual([3, 2, 1]) // max-heap: higher priority — earlier
     expect(renderer.uploads.pending).toBe(0)
 
-    // Выбывающая задача = спрос: окно растёт (AIMD additive increase).
+    // An evicted task = demand: the window grows (AIMD additive increase).
     expect(renderer.uploads.window).toBeGreaterThan(100)
 
-    // Следующий кадр без работы: окно мягко распускается (×7/8).
+    // Next frame without work: the window gently relaxes (×7/8).
     const before = renderer.uploads.window
     renderer.step(32)
     expect(renderer.uploads.window).toBe(Math.max(64 * 1024, Math.floor(before * 7 / 8)))
   })
 
-  it('AIMD-окно доступно снаружи (диагностика)', async () => {
+  it('the AIMD window is available from the outside (diagnostics)', async () => {
     const { gl } = createRecordingGL()
     const renderer = createRenderer({
       canvas: fakeCanvas(),
       createGL: () => gl,
       observeResize: false,
       now: () => 0,
-      requestFrame: () => () => {}, // headless: без rAF
+      requestFrame: () => () => {}, // headless: no rAF
       uploads: { initialBytes: 80, minBytes: 80 },
     })
     await renderer.start()
     expect(renderer.uploads.window).toBe(80)
     renderer.uploads.push({ bytes: 80, priority: 1, run: () => {} })
     renderer.step(16)
-    // Полное использование окна → рост на 1/8 (80 → 90)
+    // Full window utilization → growth by 1/8 (80 → 90)
     expect(renderer.uploads.window).toBe(90)
   })
 })

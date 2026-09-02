@@ -1,7 +1,7 @@
 /**
- * Компилятор DrawSpec → CompiledCommand. Юниформы расходятся по слотам
- * арены (value-compare там), атрибуты и программа — лениво в executor.
- * Спецификация декларативна: шейдер, пайплайн, атрибуты, юниформы, текстуры.
+ * DrawSpec → CompiledCommand compiler. Uniforms are spread across arena
+ * slots (value-compare happens there); attributes and the program are lazy in the executor.
+ * The specification is declarative: shader, pipeline, attributes, uniforms, textures.
  */
 
 import type { UniformArena, UniformSlot } from '@rune/core'
@@ -10,20 +10,20 @@ import { OpCode } from '@rune/core'
 import { reflectGlsl } from './glslReflect.ts'
 import type { GlslReflection, UniformInfo } from './glslReflect.ts'
 
-/** Стратегия загрузки юниформов (восстановленная версия: per-call по имени). */
+/** Uniform upload strategy (restored version: per-call by name). */
 export type UniformStrategy = 'auto' | 'per-call' | 'coalesced'
 
-/** Значение юниформа: скаляр, массив чисел или типизированный массив. */
+/** Uniform value: a scalar, an array of numbers, or a typed array. */
 export type UniformValue = number | readonly number[] | Float32Array
 
-/** Динамическое значение: число | (props, ctx) => число | сигнал. */
+/** Dynamic value: number | (props, ctx) => number | signal. */
 export type Dynamic<T> = T | ((props: unknown, frameCtx: unknown) => T) | ReadableSignal<T>
 
-/** Привязка команды: имя uniform-а + слот в арене (диагностика/портативность). */
+/** Command binding: uniform name + arena slot (diagnostics/portability). */
 export interface CommandBinding {
   readonly name: string
   readonly type: string
-  /** Слот в буфере арены (байтовые смещения). */
+  /** Slot in the arena buffer (byte offsets). */
   readonly slot: { readonly offset: number; readonly size: number }
 }
 
@@ -31,21 +31,21 @@ export interface TextureHandle {
   readonly textureId: number
 }
 
-/** Атрибут команды: данные + размер + опциональный интерливинг фида (M5).
- *  stride/offset — байты записи/поля для feed dual-bind (vertex-путь);
- *  bufferId — внешний GPU-буфер рендерера фида (executor не создаёт свой);
- *  instance (Task 75) — атрибут читается один раз на ИНСТАНС
- *  (квады-звёзды: одна запись фида = один инстанс, углы квада — из
- *  gl_VertexID в шейдере). */
+/** Command attribute: data + size + optional feed interleaving (M5).
+ *  stride/offset — record/field bytes for feed dual-bind (the vertex path);
+ *  bufferId — the feed renderer's external GPU buffer (the executor does not create its own);
+ *  instance (Task 75) — the attribute is read once per INSTANCE
+ *  (star quads: one feed record = one instance, the quad corners come from
+ *  gl_VertexID in the shader). */
 export interface DrawAttribute {
   readonly data: Float32Array
   readonly size: number
   readonly stride?: number
   readonly offset?: number
   readonly bufferId?: number
-  /** Инстанс-шаг (Task 75): true — запись читается один раз на инстанс
-   *  (квады-звёзды из фида). Синоним: step='instance' (формат привязки
-   *  RendererFeed.attribute(field, step) — единый словарь с WebGPU). */
+  /** Instance step (Task 75): true — the record is read once per instance
+   *  (star quads from the feed). Synonym: step='instance' (the binding format
+   *  RendererFeed.attribute(field, step) — a single vocabulary shared with WebGPU). */
   readonly instance?: boolean
   readonly step?: 'vertex' | 'instance'
 }
@@ -53,11 +53,11 @@ export interface DrawAttribute {
 export interface DrawSpec {
   readonly shader: { readonly glsl: { readonly vertex: string; readonly fragment: string } }
   readonly pipeline?: {
-    /** Task 75: false — глубина выключена целиком (бленднутые спрайты).
-     *  Паритет с GpuPipelineDesc/PipelineDesc (stateProgram). */
+    /** Task 75: false — depth is disabled entirely (blended sprites).
+     *  Parity with GpuPipelineDesc/PipelineDesc (stateProgram). */
     readonly depth?: { readonly test?: 'less' | 'lequal' | 'always'; readonly write?: boolean } | false
-    /** Task 75: блендинг (BlendFactor-строки фасада). Премультиплицированный
-     *  вывод шейдера: аддитив = {src:'one', dst:'one'}, прозрачность =
+    /** Task 75: blending (facade BlendFactor strings). Premultiplied
+     *  shader output: additive = {src:'one', dst:'one'}, transparency =
      *  {src:'one', dst:'one-minus-src-alpha'}. */
     readonly blend?: { readonly src: string; readonly dst: string } | false
     readonly raster?: { readonly cull?: 'none' | 'back' | 'front' }
@@ -72,13 +72,13 @@ export interface DrawSpec {
 export interface CompiledCommand {
   readonly id: number
   record(props: unknown, frameCtx: { time: number; dt: number; aspect: number }, writer: TapeWriter): void
-  /** Кэш props последнего кадра (текстуры и диагностика). */
+  /** Props cache of the last frame (textures and diagnostics). */
   lastProps: unknown
-  /** Имена uniform-привязок + слоты (портативность: layout идентичен между мирами). */
+  /** Uniform binding names + slots (portability: the layout is identical across worlds). */
   readonly bindings: readonly CommandBinding[]
-  /** Ленивая GL-программа: id назначается executor'ом при первом draw. */
+  /** Lazy GL program: the id is assigned by the executor on the first draw. */
   programId?: number
-  /** Ленивые вершинные буферы атрибутов (по location). */
+  /** Lazy vertex buffers of attributes (per location). */
   bufferIds?: number[]
 }
 
@@ -86,7 +86,7 @@ export interface GLCompileContext {
   readonly arena: UniformArena
   readonly commands: CompiledCommand[]
   readonly mode: 'interpret' | 'codegen'
-  /** Кэш рефлексий по исходнику (теория F: сотни команд с общим шейдером — один разбор). */
+  /** Reflection cache keyed by source (theory F: hundreds of commands sharing a shader — one parse). */
   readonly programs: Map<string, GlslReflection>
 }
 
@@ -110,7 +110,7 @@ interface CompiledState {
   readonly depthTest: 'less' | 'lequal' | 'always'
   readonly depthWrite: boolean
   readonly cull: 'none' | 'back' | 'front'
-  /** Task 75: блендинг пайплайна (null — выкл). */
+  /** Task 75: pipeline blending (null — off). */
   readonly blend: { readonly src: string; readonly dst: string } | null
 }
 
@@ -123,12 +123,12 @@ export function compileDrawSpec(spec: DrawSpec, ctx: GLCompileContext): Compiled
     location: attr.location,
     size: spec.attributes?.[attr.name]?.size ?? attr.size,
     data: spec.attributes?.[attr.name]?.data ?? empty(attr.size),
-    // M5 (Task 73): feed dual-bind — интерливинг + внешний буфер рендерера фида.
+    // M5 (Task 73): feed dual-bind — interleaving + the feed renderer's external buffer.
     stride: spec.attributes?.[attr.name]?.stride,
     offset: spec.attributes?.[attr.name]?.offset,
     bufferId: spec.attributes?.[attr.name]?.bufferId,
-    // Task 75: инстанс-шаг атрибута (квады-звёзды из фида) — оба словаря:
-    // instance:boolean (GL-стиль) и step:'instance' (словарь фида/WebGPU).
+    // Task 75: the attribute's instance step (star quads from the feed) — both vocabularies:
+    // instance:boolean (GL style) and step:'instance' (the feed/WebGPU vocabulary).
     instance: (spec.attributes?.[attr.name] as { instance?: boolean; step?: string } | undefined)?.instance
       ?? (spec.attributes?.[attr.name] as { step?: string } | undefined)?.step === 'instance',
   }))
@@ -161,8 +161,8 @@ export function compileDrawSpec(spec: DrawSpec, ctx: GLCompileContext): Compiled
     bindings,
   } as never as CompiledCommand & { state: CompiledState; fields: UniformField[]; samplers: SamplerField[]; attributes: typeof attributes; glsl: DrawSpec['shader']['glsl'] }
 
-  // Плоские данные команды читает executor (мимо ленты — MVP-компромисс
-  // из оригинала: лента несёт порядок, компилированные данные — по id)
+  // The command's flat data is read by the executor (bypassing the tape — an MVP compromise
+  // from the original: the tape carries the order, compiled data is looked up by id)
   const rich = command as never as {
     state: CompiledState; fields: UniformField[]; samplers: SamplerField[]
     attributes: typeof attributes; glsl: DrawSpec['shader']['glsl']
@@ -192,7 +192,7 @@ function readState(spec: DrawSpec): CompiledState {
   const depth = spec.pipeline?.depth
   const raster = spec.pipeline?.raster
   const blend = spec.pipeline?.blend
-  // Task 75: depth === false → тест выключен + запись запрещена
+  // Task 75: depth === false → test disabled + write forbidden
   // (setDepthMode('always', false) → gl.disable(DEPTH_TEST)).
   const depthOff = depth === false
   return {
@@ -203,7 +203,7 @@ function readState(spec: DrawSpec): CompiledState {
   }
 }
 
-/** Значение юниформа: функция (props, ctx) | сигнал (peek) | массив | число. */
+/** Uniform value: function (props, ctx) | signal (peek) | array | number. */
 function resolve(declared: unknown, props: unknown, frameCtx: { time: number; dt: number; aspect: number }): unknown {
   if (declared === undefined) return undefined
   if (typeof declared === 'function') return (declared as (p: unknown, c: unknown) => unknown)(props, frameCtx)
@@ -213,13 +213,13 @@ function resolve(declared: unknown, props: unknown, frameCtx: { time: number; dt
   return declared
 }
 
-/** Числовое поле: статическое число, функция или сигнал. */
+/** Numeric field: a static number, a function, or a signal. */
 function resolveNumber(declared: Dynamic<number>, props: unknown, frameCtx: unknown): number {
   const value = resolve(declared, props, frameCtx as { time: number; dt: number; aspect: number })
   return typeof value === 'number' ? value : 0
 }
 
-/** Рефлексия с кэшем контекста: один исходник — один разбор (теория F). */
+/** Reflection with a context cache: one source — one parse (theory F). */
 function reflectCached(spec: DrawSpec, ctx: GLCompileContext): GlslReflection {
   const key = `${spec.shader.glsl.vertex}\u0000${spec.shader.glsl.fragment}`
   const known = ctx.programs.get(key)

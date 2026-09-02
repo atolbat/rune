@@ -1,34 +1,34 @@
 /**
- * Цилиндр / конус / усечённый конус: боковая поверхность (радиус может
- * плавно меняться по высоте) + опциональные крышки (Task 109: openEnded —
- * как CylinderGeometry в three.js). Нормали боковой — аналитические с
- * учётом наклона профиля (не радиальные!) — на конусе смотрят в стороны
- * от оси, как положено.
+ * Cylinder / cone / truncated cone: lateral surface (the radius can vary
+ * smoothly along the height) + optional caps (Task 109: openEnded —
+ * like CylinderGeometry in three.js). Lateral normals are analytical,
+ * accounting for the profile slope (not radial!) — on a cone they point
+ * away from the axis, as they should.
  *
- * radiusTop = 0 — конус (верхнее кольцо вырождается в вершину; треугольники
- * с двумя совпадающими точками отбрасываются — апекс эмитится один раз на
- * сегмент с корректным UV).
+ * radiusTop = 0 — a cone (the top ring degenerates into an apex; triangles
+ * with two coincident points are discarded — the apex is emitted once per
+ * segment with a correct UV).
  *
- * БАГ Task 108 («бочка зубчатая»): вторая половина каждого бокового квада
- * шла (P00, P11, P10) — cross(B−A, C−A) смотрел ВНУТРЬ. Фикс: (P00, P10, P11).
+ * Task 108 BUG ("jagged barrel"): the second half of each lateral quad
+ * went (P00, P11, P10) — cross(B−A, C−A) pointed INWARD. Fix: (P00, P10, P11).
  *
- * Массивы — точный prealloc: счёт треугольников известен заранее.
+ * Arrays are an exact prealloc: the triangle count is known in advance.
  */
 
 import type { Geometry } from './types.ts'
 
 export interface CylinderParams {
-  /** Радиус верхнего кольца (default 1); 0 — конус. */
+  /** Radius of the top ring (default 1); 0 — a cone. */
   readonly radiusTop?: number
-  /** Радиус нижнего кольца (default 1). */
+  /** Radius of the bottom ring (default 1). */
   readonly radiusBottom?: number
-  /** Высота по Y (default 2). */
+  /** Height along Y (default 2). */
   readonly height?: number
-  /** Сегментов вокруг оси (default 48). */
+  /** Segments around the axis (default 48). */
   readonly radialSegments?: number
-  /** Поясов по высоте (default 1). */
+  /** Bands along the height (default 1). */
   readonly heightSegments?: number
-  /** Без крышек (default false — с крышками). */
+  /** Without caps (default false — with caps). */
   readonly openEnded?: boolean
 }
 
@@ -41,10 +41,10 @@ export function cylinder(params: CylinderParams = {}): Geometry {
   const caps = params.openEnded !== true
   const apex = rTop <= 1e-9
   const bottomApex = rBottom <= 1e-9
-  // Точный счёт: бок + верхняя крышка + нижняя крышка.
-  // Вырожденные кольца: r0=0 — только ПЕРВЫЙ ряд (первая половина квада
-  // вырождена), r1=0 — только ПОСЛЕДНИЙ (вторая). Оба нуля — вырожденный
-  // вход, бок пуст.
+  // Exact count: side + top cap + bottom cap.
+  // Degenerate rings: r0=0 — only the FIRST row (the first half-quad is
+  // degenerate), r1=0 — only the LAST (the second). Both zero — degenerate
+  // input, an empty side.
   const sideTris = apex && bottomApex
     ? 0
     : radial * (2 * hSegs - (apex ? 1 : 0) - (bottomApex ? 1 : 0))
@@ -54,7 +54,7 @@ export function cylinder(params: CylinderParams = {}): Geometry {
   const normals = new Float32Array(vertexCount * 3)
   const uvs = new Float32Array(vertexCount * 2)
   let v = 0
-  // Наклон профиля: dr/dy → нормаль боковой наклонена
+  // Profile slope: dr/dy → the side normal is tilted
   const dr = (rBottom - rTop) / height
   const slopeLen = Math.hypot(1, dr)
   const nySide = dr / slopeLen
@@ -74,10 +74,10 @@ export function cylinder(params: CylinderParams = {}): Geometry {
     uvs[v * 2 + 1] = vv
     v++
   }
-  // Боковая: кольца по высоте; вырожденное кольцо (радиус 0) схлопывается
-  // в апекс: эмитится ОДИН треугольник на сегмент. Условия — ПО РЯДУ
-  // (r0/r1 ряда), а не глобальные: при heightSegments>1 нулевой радиус
-  // только в крайнем ряду
+  // Side: rings along the height; a degenerate ring (radius 0) collapses
+  // into an apex: ONE triangle is emitted per segment. The conditions are
+  // PER ROW (the row's r0/r1), not global: with heightSegments>1 the zero
+  // radius is only in the extreme row
   for (let j = 0; j < hSegs; j++) {
     const v0 = j / hSegs
     const v1 = (j + 1) / hSegs
@@ -92,8 +92,8 @@ export function cylinder(params: CylinderParams = {}): Geometry {
       const u1 = (i + 1) / radial
       const c0 = Math.cos(a0), s0 = Math.sin(a0)
       const c1 = Math.cos(a1), s1 = Math.sin(a1)
-      // CCW снаружи: обе половины квада (P00→P11→P01) и (P00→P10→P11);
-      // половина с нулевым кольцом ряда вырождена — пропускаем
+      // CCW from outside: both half-quads (P00→P11→P01) and (P00→P10→P11);
+      // the half with the row's zero ring is degenerate — skipped
       if (r0 > 1e-9) {
         emit(r0 * c0, y0, r0 * s0, c0 * nrSide, nySide, s0 * nrSide, u0, v0)
         emit(r1 * c1, y1, r1 * s1, c1 * nrSide, nySide, s1 * nrSide, u1, v1)
@@ -110,7 +110,7 @@ export function cylinder(params: CylinderParams = {}): Geometry {
     const yTop = height / 2
     const yBot = -height / 2
     if (!apex) {
-      // Верхняя крышка (+Y): веер, CCW при взгляде сверху
+      // Top cap (+Y): a fan, CCW viewed from above
       for (let i = 0; i < radial; i++) {
         const a0 = (i / radial) * Math.PI * 2
         const a1 = ((i + 1) / radial) * Math.PI * 2
@@ -120,7 +120,7 @@ export function cylinder(params: CylinderParams = {}): Geometry {
       }
     }
     if (!bottomApex) {
-      // Нижняя крышка (−Y): обратный обход
+      // Bottom cap (−Y): reversed winding
       for (let i = 0; i < radial; i++) {
         const a0 = (i / radial) * Math.PI * 2
         const a1 = ((i + 1) / radial) * Math.PI * 2
@@ -134,19 +134,19 @@ export function cylinder(params: CylinderParams = {}): Geometry {
 }
 
 export interface ConeParams {
-  /** Радиус основания (default 1). */
+  /** Base radius (default 1). */
   readonly radius?: number
-  /** Высота по Y (default 2). */
+  /** Height along Y (default 2). */
   readonly height?: number
-  /** Сегментов вокруг оси (default 48). */
+  /** Segments around the axis (default 48). */
   readonly radialSegments?: number
-  /** Поясов по высоте (default 1). */
+  /** Bands along the height (default 1). */
   readonly heightSegments?: number
-  /** Без основания (default false). */
+  /** Without the base (default false). */
   readonly openEnded?: boolean
 }
 
-/** Конус: cylinder с radiusTop = 0. */
+/** Cone: cylinder with radiusTop = 0. */
 export function cone(params: ConeParams = {}): Geometry {
   return cylinder({
     radiusTop: 0,

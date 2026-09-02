@@ -1,77 +1,77 @@
 /**
- * withJournalGpu — декоратор GPUFacade: пишет create/destroy-опсы в Journal.
+ * withJournalGpu — a GPUFacade decorator: writes create/destroy ops to the Journal.
  *
- * Контракт §9.5 P3 (тот же, что и для WebGL2): журнал делает switchBackend =
- * device-loss recovery = worker migration одним механизмом replay.
+ * Contract §9.5 P3 (the same as for WebGL2): the journal makes switchBackend =
+ * device-loss recovery = worker migration one replay mechanism.
  *
- * Это WebGPU-близнец journalGl.ts. Принципы те же:
- *   • Долгоживущие create/destroy-опсы журналируются автоматически.
- *   • Frame-опсы (usePipeline, bindUniforms, bindVertexBuffer, bindTexture,
+ * This is the WebGPU twin of journalGl.ts. The principles are the same:
+ *   • Long-lived create/destroy ops are journaled automatically.
+ *   • Frame ops (usePipeline, bindUniforms, bindVertexBuffer, bindTexture,
  *     beginPass, draw, endPass, submit, bindTarget, uploadUniforms,
- *     texSubImage2D, copyExternalImageToTextureMip) — НЕ журналируются
- *     (это per-frame, идут в Tape, не в Journal).
- *   • Источник copyExternalImageToTexture не сериализуется (ImageBitmap может
- *     быть закрыт, HTMLVideoElement — DOM-зависим). Журнал хранит только
- *     kind+flipY; при replay пользователь предоставляет источник через
+ *     texSubImage2D, copyExternalImageToTextureMip) — NOT journaled
+ *     (these are per-frame, they go to the Tape, not the Journal).
+ *   • The copyExternalImageToTexture source is not serialized (an ImageBitmap may
+ *     be closed, HTMLVideoElement is DOM-dependent). The journal stores only
+ *     kind+flipY; on replay the user provides the source via
  *     sourceFor(kind).
  *
- * Чем WebGPU-журнал ОТЛИЧАЕТСЯ от WebGL2-журнала:
- *   1. createTexture — у GPUFacade есть параметр format ('rgba8unorm' | 'canvas').
- *      Журнал хранит format в DeclOp (см. journal.ts — Task 57). При replay
- *      на новом WebGPU-фасаде format передаётся как есть. При cross-backend
- *      replay (WebGPU → WebGL2) format молча игнорируется (WebGL2 всегда RGBA8).
- *   2. createProgram/createBuffer — у GPUFacade их НЕТ. Пайплайны ( WGSL
- *      шейдеры) — ленивые: создаются при первом draw через ensurePipeline.
- *      WGSL-источник хранится в WgpuCommand (compiled), поэтому для device-loss
- *      recovery достаточно replay-нуть только текстуры/цели/views — пайплайны
- *      пересоздадутся автоматически при первом draw на новом device.
- *   3. copyExternalImageToTexture — это WebGPU-аналог texImage2DFromSource
- *      (полная загрузка в mip 0). Записывается как { kind:'texImage2DFromSource',
- *      textureId, sourceKind, flipY }. sub-region (atlas packing) и
- *      mip-загрузка (copyExternalImageToTextureMip) — frame-опсы, не журналируются.
+ * How the WebGPU journal DIFFERS from the WebGL2 journal:
+ *   1. createTexture — GPUFacade has a format parameter ('rgba8unorm' | 'canvas').
+ *      The journal stores format in the DeclOp (see journal.ts — Task 57). On replay
+ *      on a new WebGPU facade format is passed as is. On cross-backend
+ *      replay (WebGPU → WebGL2) format is silently ignored (WebGL2 is always RGBA8).
+ *   2. createProgram/createBuffer — GPUFacade does NOT have them. Pipelines ( WGSL
+ *      shaders) are lazy: created on the first draw via ensurePipeline.
+ *      The WGSL source is stored in WgpuCommand (compiled), so for device-loss
+ *      recovery it is enough to replay only textures/targets/views — pipelines
+ *      will be recreated automatically on the first draw on the new device.
+ *   3. copyExternalImageToTexture — the WebGPU analog of texImage2DFromSource
+ *      (a full upload into mip 0). Recorded as { kind:'texImage2DFromSource',
+ *      textureId, sourceKind, flipY }. sub-region (atlas packing) and
+ *      mip upload (copyExternalImageToTextureMip) — frame ops, not journaled.
  *
- * Replay на новом фасаде: replayJournalOnGpu(journal, targetGpu, sourceFor?)
- *   — см. ниже. Все create-опсы выполняются в порядке записи; destroy-опсы
- *   no-op на новом фасаде (ресурсов ещё нет).
+ * Replay on a new facade: replayJournalOnGpu(journal, targetGpu, sourceFor?)
+ *   — see below. All create ops are executed in record order; destroy ops are
+ *   a no-op on a new facade (the resources do not exist yet).
  */
 
 import type { Journal, DeclOp, ClearColor } from '@rune/core'
 import type { GPUFacade, GPUImageSource } from '@rune/webgpu'
 import { externalImageSize } from '@rune/webgpu'
 
-/** Декорирует GPUFacade так, что create/destroy-опсы пишутся в Journal. */
+/** Decorates GPUFacade so that create/destroy ops are written to the Journal. */
 export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
-  // Task 61: размеры созданных текстур — для эвристики «полной загрузки».
-  // copyExternalImageToTexture журналируется как texImage2DFromSource ТОЛЬКО
-  // если копия покрывает ВСЮ текстуру (dstX=dstY=0 и copyWidth/copyHeight
-  // совпадают с размерами из createTexture). Раньше проверялись только
-  // dstX/dstY — sub-region копия в (0,0) (например, первый тайл атласа или
-  // uploadSubImage в левый верхний угол) ошибочно журналировалась как
-  // полная загрузка, и replay заливал бы текстуру обрезанным источником.
+  // Task 61: sizes of created textures — for the "full upload" heuristic.
+  // copyExternalImageToTexture is journaled as texImage2DFromSource ONLY
+  // if the copy covers the WHOLE texture (dstX=dstY=0 and copyWidth/copyHeight
+  // match the sizes from createTexture). Previously only
+  // dstX/dstY were checked — a sub-region copy at (0,0) (e.g. the first atlas tile or
+  // uploadSubImage into the top-left corner) was erroneously journaled as a
+  // full upload, and replay would have filled the texture with a cropped source.
   const texSizes = new Map<number, { w: number; h: number }>()
   return {
     configure: (w, h) => gpu.configure(w, h),
     resize: (w, h) => gpu.resize(w, h),
     createTexture: (width, height, format, options) => {
       const id = gpu.createTexture(width, height, format, options)
-      // Task 57: format сохранён в опсе — при replay на WebGPU передаётся как
-      // есть. При cross-backend replay на WebGL2 — игнорируется (там всегда RGBA8).
+      // Task 57: format is saved in the op — on replay on WebGPU it is passed as
+      // is. On cross-backend replay on WebGL2 — ignored (it is always RGBA8 there).
       texSizes.set(id, { w: width, h: height })
       journal.record({ kind: 'createTexture', id, width, height, format, options })
       return id
     },
     texSubImage2D: (textureId, x, y, w, h, bytes) =>
       gpu.texSubImage2D(textureId, x, y, w, h, bytes),
-    // copyExternalImageToTexture — атомарная полная загрузка в mip 0 (аналог
-    // texImage2DFromSource в WebGL2). Журналируем как долгоживущую декларацию:
-    // при replay на новом бэкенде через sourceFor(kind) пользователь
-    // предоставляет источник и мы вызываем copyExternalImageToTexture(textureId,
+    // copyExternalImageToTexture — an atomic full upload into mip 0 (the analog
+    // of texImage2DFromSource in WebGL2). Journaled as a long-lived declaration:
+    // on replay on a new backend via sourceFor(kind) the user
+    // provides the source and we call copyExternalImageToTexture(textureId,
     // source, 0, 0, sw, sh, flipY) — full-texture upload.
     copyExternalImageToTexture: (textureId, source, dstX, dstY, copyWidth, copyHeight, flipY) => {
       gpu.copyExternalImageToTexture(textureId, source, dstX, dstY, copyWidth, copyHeight, flipY)
-      // Журналируем только ПОЛНУЮ загрузку текстуры: dstX=dstY=0 И копия
-      // покрывает весь размер из createTexture (Task 61 — size-aware).
-      // Sub-region upload (atlas packing) — frame-опс, идёт в Tape, не в Journal.
+      // We journal only a FULL texture upload: dstX=dstY=0 AND the copy
+      // covers the whole size from createTexture (Task 61 — size-aware).
+      // Sub-region upload (atlas packing) — a frame op, goes to the Tape, not the Journal.
       const size = texSizes.get(textureId)
       const isFullTexture = size !== undefined
         && dstX === 0 && dstY === 0
@@ -85,23 +85,23 @@ export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
         })
       }
     },
-    // Frame-опсы (progressive mip upload): copyExternalImageToTextureMip —
-    // progressive mip streaming, frame-опс. Не журналируется (контракт §9.5 P3:
-    // frame-опсы в Tape). Pass-through без journal.record().
+    // Frame ops (progressive mip upload): copyExternalImageToTextureMip —
+    // progressive mip streaming, a frame op. Not journaled (contract §9.5 P3:
+    // frame ops go to the Tape). Pass-through without journal.record().
     copyExternalImageToTextureMip: (textureId, mipLevel, source, dstX, dstY, copyWidth, copyHeight, flipY) =>
       gpu.copyExternalImageToTextureMip(textureId, mipLevel, source, dstX, dstY, copyWidth, copyHeight, flipY),
-    // Frame-опсы: uploadUniforms — writeBuffer в UBO, per-frame.
+    // Frame ops: uploadUniforms — writeBuffer into the UBO, per-frame.
     uploadUniforms: (offset, data) => gpu.uploadUniforms(offset, data),
-    // ensurePipeline — ленивая компиляция WGSL → GPURenderPipeline. Не журн-
-    // алируется: WGSL-источник хранится в WgpuCommand (compiled), поэтому для
-    // device-loss recovery достаточно replay-нуть только текстуры/цели/views —
-    // пайплайны пересоздадутся автоматически при первом draw на новом device.
+    // ensurePipeline — lazy compilation of WGSL → GPURenderPipeline. Not
+    // journaled: the WGSL source is stored in WgpuCommand (compiled), so for
+    // device-loss recovery it is enough to replay only textures/targets/views —
+    // pipelines will be recreated automatically on the first draw on the new device.
     ensurePipeline: (pipelineId, wgsl, attrSizes, hasTextures) =>
       gpu.ensurePipeline(pipelineId, wgsl, attrSizes, hasTextures),
     usePipeline: pipelineId => gpu.usePipeline(pipelineId),
     bindUniforms: dynamicOffset => gpu.bindUniforms(dynamicOffset),
     bindVertexBuffer: (slot, data, size) => gpu.bindVertexBuffer(slot, data, size),
-    // M5 (Task 73): feed dual-bind — frame-op (per-frame dirty range), не журналируется.
+    // M5 (Task 73): feed dual-bind — a frame op (per-frame dirty range), not journaled.
     syncVertexBuffer: (data, byteLength) => gpu.syncVertexBuffer(data, byteLength),
     bindTexture: textureOrViewId => gpu.bindTexture(textureOrViewId),
     beginPass: clearIndex => gpu.beginPass(clearIndex),
@@ -114,11 +114,11 @@ export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
       return id
     },
     bindTarget: (targetId, clear) => gpu.bindTarget(targetId, clear),
-    // Task 80: readback — ЧТЕНИЕ, не декларация: не журналируется
-    // (frame-опс по духу §9.5 P3; replay не нужен).
+    // Task 80: readback — a READ, not a declaration: not journaled
+    // (a frame op in the spirit of §9.5 P3; no replay needed).
     readTargetPixels: targetId => gpu.readTargetPixels(targetId),
-    // destroy-опсы: пишем в журнал, чтобы Journal.compact() мог спаривать
-    // create+destroy. Replay на новом фасаде — destroy no-op (см. applyGpuOp).
+    // destroy ops: written to the journal so that Journal.compact() can pair
+    // create+destroy. On replay on a new facade — destroy is a no-op (see applyGpuOp).
     deleteTexture: textureId => {
       gpu.deleteTexture(textureId)
       texSizes.delete(textureId)
@@ -129,12 +129,12 @@ export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
       journal.record({ kind: 'destroyTarget', id: targetId })
     },
     // Sub-mip views (Task 56): createTextureView/destroyTextureView —
-    // долгоживущие декларации (как createTexture). Журналируем для device-loss
-    // recovery: при replay на новом backend'е вид воссоздаётся через
+    // long-lived declarations (like createTexture). Journaled for device-loss
+    // recovery: on replay on a new backend the view is recreated via
     // target.createTextureView(textureId, { baseMipLevel, mipLevelCount }).
-    // ВАЖНО: textureId в записи — это id на ТЕКУЩЕМ backend'е. При replay
-    // caller должен замапить его на новый id (через registerIdMap или
-    // подобный механизм) — applyGpuOp ниже делегирует это вызывающему коду.
+    // IMPORTANT: textureId in the record is the id on the CURRENT backend. On replay
+    // the caller must map it to the new id (via registerIdMap or
+    // a similar mechanism) — applyGpuOp below delegates this to the calling code.
     createTextureView: (textureId, options) => {
       const viewId = gpu.createTextureView(textureId, options)
       journal.record({
@@ -152,8 +152,8 @@ export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
     },
     dispose: () => gpu.dispose(),
     installTimer: handle => gpu.installTimer(handle),
-    // Public getters — делегируем на underlying facade. Journal не вмешивается
-    // в caps/timer (они устроены над adapter/device, не над create/destroy).
+    // Public getters — delegated to the underlying facade. The Journal does not interfere
+    // with caps/timer (they sit above adapter/device, not above create/destroy).
     get adapter() { return gpu.adapter },
     get device() { return gpu.device },
     get preferredFormat() { return gpu.preferredFormat },
@@ -162,24 +162,24 @@ export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
 }
 
 /**
- * Replay журнала на целевом GPUFacade — для device-loss recovery.
+ * Replay the journal onto a target GPUFacade — for device-loss recovery.
  *
- * sourceFor — callback для copyExternalImageToTexture (WebGPU-аналог
- * texImage2DFromSource): возвращает источник по kind ('ImageBitmap',
- * 'HTMLCanvasElement', и т.д.). Если callback не передан или вернул null —
- * опс пропускается (текстура остаётся пустой, sampler вернёт нули).
+ * sourceFor — a callback for copyExternalImageToTexture (the WebGPU analog
+ * of texImage2DFromSource): returns the source by kind ('ImageBitmap',
+ * 'HTMLCanvasElement', etc.). If the callback is not passed or returns null —
+ * the op is skipped (the texture remains empty, the sampler will return zeros).
  *
- * Идемпотентность: повторный replay создаст ДУБЛИКАТЫ ресурсов (realGPU всегда
- * выдаёт новый id — nextTextureId++). Правильное использование — на СВЕЖЕМ
- * backend'е (после device.destroy() и пересоздания adapter/device).
+ * Idempotence: a repeated replay will create DUPLICATES of resources (realGPU always
+ * issues a new id — nextTextureId++). The correct usage is on a FRESH
+ * backend (after device.destroy() and recreating adapter/device).
  *
- * cross-backend replay: если журнал записан на WebGL2, а target — WebGPU
- * (или наоборот), некоторые опсы будут несовместимы:
- *   • createProgram/createBuffer (WebGL2-only) — applyGpuOp их игнорирует
- *     (default case) — на WebGPU нет программ как отдельных ресурсов.
- *   • texImage2DFromSource на WebGPU — copyExternalImageToTexture с dstX=0,
- *     dstY=0, copySize=externalImageSize(source). Это full-texture upload,
- *     sub-region не эмулируется.
+ * cross-backend replay: if the journal was recorded on WebGL2 and the target is WebGPU
+ * (or vice versa), some ops will be incompatible:
+ *   • createProgram/createBuffer (WebGL2-only) — applyGpuOp ignores them
+ *     (default case) — WebGPU has no programs as separate resources.
+ *   • texImage2DFromSource on WebGPU — copyExternalImageToTexture with dstX=0,
+ *     dstY=0, copySize=externalImageSize(source). This is a full-texture upload,
+ *     sub-region is not emulated.
  */
 export function replayJournalOnGpu(
   journal: Journal,
@@ -189,13 +189,13 @@ export function replayJournalOnGpu(
   journal.replay(op => applyGpuOp(op, target, sourceFor))
 }
 
-/** Применить один DeclOp к целевому GPUFacade. */
+/** Apply one DeclOp to the target GPUFacade. */
 function applyGpuOp(op: DeclOp, gpu: GPUFacade, sourceFor?: (kind: string) => GPUImageSource | null): void {
   switch (op.kind) {
     case 'createTexture':
-      // Игнорируем возвращаемый id: на новом фасаде id будет другим.
-      // Порядок важен: texture 1 → createTexture 1, texture 2 → createTexture 2,
-      // mapping id'шников на стороне пользователя (через registerIdMap).
+      // The returned id is ignored: on a new facade the id will be different.
+      // Order matters: texture 1 → createTexture 1, texture 2 → createTexture 2,
+      // id mapping is on the user's side (via registerIdMap).
       gpu.createTexture(op.width, op.height, op.format, op.options)
       break
     case 'createTarget':
@@ -203,52 +203,52 @@ function applyGpuOp(op: DeclOp, gpu: GPUFacade, sourceFor?: (kind: string) => GP
       break
     case 'texImage2DFromSource': {
       const source = sourceFor?.(op.sourceKind) ?? null
-      if (source === null) break // нет источника — пропускаем (текстура остаётся пустой)
+      if (source === null) break // no source — skip (the texture remains empty)
       // WebGPU: copyExternalImageToTexture — full-texture upload (dstX=dstY=0).
-      // copySize = размер источника (externalImageSize синхронно читает .width/
-      // .height/.videoWidth/.displayWidth из source).
+      // copySize = the source size (externalImageSize synchronously reads .width/
+      // .height/.videoWidth/.displayWidth from the source).
       const [sw, sh] = externalImageSize(source)
       gpu.copyExternalImageToTexture(op.textureId, source, 0, 0, sw, sh, op.flipY)
       break
     }
-    // Sub-mip views (Task 56): при replay создаём view на новом backend'е.
-    // ВАЖНО: op.textureId — это id на исходном backend'е. На новом backend'е
-    // textureId будет ДРУГИМ. Caller должен замапить id'шники перед replay
-    // (это ответственность пользовательского кода, т.к. только он знает
-    // соответствие старых и новых id'шников).
+    // Sub-mip views (Task 56): on replay we create the view on the new backend.
+    // IMPORTANT: op.textureId is the id on the source backend. On the new backend
+    // textureId will be DIFFERENT. The caller must map the ids before replay
+    // (this is the user code's responsibility, since only it knows
+    // the correspondence of old and new ids).
     //
-    // В этой реализации мы передаём op.textureId напрямую — это безопасно
-    // только если textureId на новом backend'е совпадает с исходным (например,
-    // при replay в порядке всех createTexture, id'шники генерируются в том же
-    // порядке и совпадают). Иначе caller должен конвертировать id'шники в
-    // journal.entries() перед вызовом replayJournalOnGpu.
+    // In this implementation we pass op.textureId directly — this is safe
+    // only if textureId on the new backend matches the original (e.g.
+    // when replaying in the order of all createTexture, ids are generated in the same
+    // order and match). Otherwise the caller must convert the ids in
+    // journal.entries() before calling replayJournalOnGpu.
     case 'createTextureView':
       gpu.createTextureView(op.textureId, {
         baseMipLevel: op.baseMipLevel,
         mipLevelCount: op.mipLevelCount,
       })
       break
-    // destroy-опсы на новом фасаде — no-op (ресурсов ещё нет).
-    // На том же фасаде (сверка идемпотентности) — ответственность лежит на
-    // фасаде: игнорировать или бросать.
-    // createProgram/createBuffer (WebGL2-only DeclOp variants) — игнорируем
-    // на WebGPU: там нет отдельных программ/буферов как ресурсов (пайплайны
-    // ленивые, vertex buffers — keyed по Float32Array в bindVertexBuffer).
+    // destroy ops on a new facade — no-op (the resources do not exist yet).
+    // On the same facade (idempotence check) — the responsibility lies with the
+    // facade: ignore or throw.
+    // createProgram/createBuffer (WebGL2-only DeclOp variants) — ignored
+    // on WebGPU: there are no separate programs/buffers as resources (pipelines
+    // are lazy, vertex buffers — keyed by Float32Array in bindVertexBuffer).
     default:
       break
   }
 }
 
-/** Имя типа источника для записи в журнал. Паритет с describeSourceKind в
- *  journalGl.ts — те же kind-имена, чтобы sourceFor-callback был переиспользуем
- *  между WebGL2 и WebGPU replay'ями. */
+/** Source type name for the journal record. Parity with describeSourceKind in
+ *  journalGl.ts — the same kind names, so that the sourceFor callback is reusable
+ *  across WebGL2 and WebGPU replays. */
 function describeGpuSourceKind(source: GPUImageSource): string {
   if (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) return 'ImageBitmap'
   if (typeof OffscreenCanvas !== 'undefined' && source instanceof OffscreenCanvas) return 'OffscreenCanvas'
   if (typeof HTMLCanvasElement !== 'undefined' && source instanceof HTMLCanvasElement) return 'HTMLCanvasElement'
   if (typeof HTMLVideoElement !== 'undefined' && source instanceof HTMLVideoElement) return 'HTMLVideoElement'
-  // VideoFrame — WebCodecs API (только в защищённых контекстах). Duck-typing
-  // для headless-окружений без глобальных типов.
+  // VideoFrame — WebCodecs API (only in secure contexts). Duck-typing
+  // for headless environments without global types.
   if (typeof source === 'object' && source !== null) {
     if ('displayWidth' in source && 'codedWidth' in source) return 'VideoFrame'
     if ('getContext' in source) return 'OffscreenCanvas'

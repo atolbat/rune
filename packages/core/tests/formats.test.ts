@@ -1,9 +1,9 @@
-// Task 112: канонический каталог форматов текстур (@rune/core formats.ts).
+// Task 112: canonical texture format catalog (@rune/core formats.ts).
 //
-// Проверки сверены с первоисточниками:
-//  - ES 3.0.6 Table 3.2/3.13 (PDF-извлечение), WebGL-расширения;
-//  - W3C WebGPU TR §26 (plain/depth/packed таблицы);
-//  - gl3.h — enum-значения.
+// The checks were verified against the primary sources:
+//  - ES 3.0.6 Table 3.2/3.13 (PDF extraction), WebGL extensions;
+//  - W3C WebGPU TR §26 (plain/depth/packed tables);
+//  - gl3.h — enum values.
 
 import { describe, test, expect } from 'bun:test'
 import {
@@ -18,9 +18,9 @@ import {
   pickTextureFormat,
 } from '../src/formats.ts'
 
-describe('Task 112 — каталог форматов: метаданные', () => {
-  test('каталог полный: несжатые + depth/stencil + bc/etc2/eac/astc', () => {
-    // Ключевые представители каждого класса
+describe('Task 112 — format catalog: metadata', () => {
+  test('the catalog is complete: uncompressed + depth/stencil + bc/etc2/eac/astc', () => {
+    // Key representatives of each class
     for (const id of [
       'r8unorm', 'rg8unorm', 'rgba8unorm', 'rgba8unorm-srgb', 'bgra8unorm',
       'rgba16float', 'rgba32float', 'r32float', 'rg11b10ufloat', 'rgb9e5ufloat',
@@ -32,14 +32,14 @@ describe('Task 112 — каталог форматов: метаданные', (
     ]) {
       expect(TEXTURE_FORMATS[id as keyof typeof TEXTURE_FORMATS]).toBeDefined()
     }
-    // ASTC: все 14 размеров × 2 варианта = 28
+    // ASTC: all 14 sizes × 2 variants = 28
     const astcCount = TEXTURE_FORMAT_IDS.filter(f => f.startsWith('astc-')).length
     expect(astcCount).toBe(28)
-    // Каталог ~110 форматов
+    // The catalog has ~110 formats
     expect(TEXTURE_FORMAT_IDS.length).toBeGreaterThan(100)
   })
 
-  test('байты на тексель: несжатые (спека)', () => {
+  test('bytes per texel: uncompressed (per the spec)', () => {
     expect(TEXTURE_FORMATS.r8unorm.texelBytes).toBe(1)
     expect(TEXTURE_FORMATS.rg8unorm.texelBytes).toBe(2)
     expect(TEXTURE_FORMATS.rgba8unorm.texelBytes).toBe(4)
@@ -50,7 +50,7 @@ describe('Task 112 — каталог форматов: метаданные', (
     expect(TEXTURE_FORMATS.rgb9e5ufloat.texelBytes).toBe(4)
   })
 
-  test('сжатые блоки: BC/ETC2/EAC 4×4, ASTC размерный, 16 байт ASTC', () => {
+  test('compressed blocks: BC/ETC2/EAC 4×4, ASTC block-sized, 16 bytes for ASTC', () => {
     const bc1 = TEXTURE_FORMATS['bc1-rgba-unorm']!
     expect(bc1.blockWidth).toBe(4)
     expect(bc1.blockHeight).toBe(4)
@@ -63,11 +63,11 @@ describe('Task 112 — каталог форматов: метаданные', (
     expect(astc.blockWidth).toBe(12)
     expect(astc.blockHeight).toBe(12)
     expect(astc.blockBytes).toBe(16)
-    // texelBytes сжатых — 0 (только блоки)
+    // texelBytes of compressed formats is 0 (blocks only)
     expect(bc1.texelBytes).toBe(0)
   })
 
-  test('srgb-флаг', () => {
+  test('srgb flag', () => {
     expect(TEXTURE_FORMATS['rgba8unorm-srgb'].srgb).toBe(true)
     expect(TEXTURE_FORMATS.rgba8unorm.srgb).toBe(false)
     expect(TEXTURE_FORMATS['bc3-rgba-unorm-srgb'].srgb).toBe(true)
@@ -84,21 +84,21 @@ describe('Task 112 — каталог форматов: метаданные', (
   })
 })
 
-describe('Task 112 — нормализация и запросы', () => {
-  test('легаси-алиасы Task 67 → канонические id', () => {
+describe('Task 112 — normalization and queries', () => {
+  test('legacy aliases of Task 67 → canonical ids', () => {
     expect(normalizeTextureFormat('rgba8')).toBe('rgba8unorm')
     expect(normalizeTextureFormat('rgba16f')).toBe('rgba16float')
     expect(normalizeTextureFormat('rgba32f')).toBe('rgba32float')
   })
 
-  test('канонические и canvas проходят; мусор — undefined', () => {
+  test('canonical ids and canvas pass; garbage → undefined', () => {
     expect(normalizeTextureFormat('rgba16float')).toBe('rgba16float')
     expect(normalizeTextureFormat('canvas')).toBe('canvas')
     expect(normalizeTextureFormat('rgba99float')).toBeUndefined()
     expect(normalizeTextureFormat('')).toBeUndefined()
   })
 
-  test('textureFormatInfo: canvas ≡ 4-байтовый unorm; мусор — undefined', () => {
+  test('textureFormatInfo: canvas ≡ 4-byte unorm; garbage → undefined', () => {
     expect(textureFormatInfo('canvas')!.texelBytes).toBe(4)
     expect(textureFormatInfo('rgba32float')!.texelBytes).toBe(16)
     expect(textureFormatInfo('nope' as never)).toBeUndefined()
@@ -115,26 +115,26 @@ describe('Task 112 — нормализация и запросы', () => {
     expect(textureFormatFamily('rgba8unorm')).toBe('uncompressed')
   })
 
-  test('textureDataSize: несжатые точно; сжатые по блокам (ceil)', () => {
+  test('textureDataSize: exact for uncompressed; per-block for compressed (ceil)', () => {
     expect(textureDataSize('rgba8unorm', 64, 64)).toBe(64 * 64 * 4)
     expect(textureDataSize('rgba16float', 32, 32)).toBe(32 * 32 * 8)
-    // BC1 4×4 блоки по 8 байт: 64×64 → 16×16 блоков × 8 = 2048
+    // BC1 4×4 blocks of 8 bytes: 64×64 → 16×16 blocks × 8 = 2048
     expect(textureDataSize('bc1-rgba-unorm', 64, 64)).toBe(16 * 16 * 8)
-    // Некратное: 65×65 → 17×17 блоков
+    // Non-multiple: 65×65 → 17×17 blocks
     expect(textureDataSize('bc1-rgba-unorm', 65, 65)).toBe(17 * 17 * 8)
-    // ASTC 8×8: 64×64 → 8×8 блоков × 16 байт
+    // ASTC 8×8: 64×64 → 8×8 blocks × 16 bytes
     expect(textureDataSize('astc-8x8-unorm', 64, 64)).toBe(8 * 8 * 16)
   })
 
-  test('textureFormatBytesPerPixel: сжатые — среднее по блоку', () => {
+  test('textureFormatBytesPerPixel: compressed — block average', () => {
     expect(textureFormatBytesPerPixel('rgba8unorm')).toBe(4)
     expect(textureFormatBytesPerPixel('rgba16float')).toBe(8)
     expect(textureFormatBytesPerPixel(undefined)).toBe(4)
-    // bc1: 8 байт / 16 текселей = 0.5
+    // bc1: 8 bytes / 16 texels = 0.5
     expect(textureFormatBytesPerPixel('bc1-rgba-unorm')).toBeCloseTo(0.5, 10)
   })
 
-  test('pickTextureFormat — семейная Negotiation (первый доступный)', () => {
+  test('pickTextureFormat — family-based negotiation (the first available)', () => {
     const none = (): boolean => false
     expect(pickTextureFormat(['astc-8x8-unorm', 'bc7-rgba-unorm'], none)).toBeUndefined()
     const onlyBc = (f: string): boolean => f.startsWith('bc')

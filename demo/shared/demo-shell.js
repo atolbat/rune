@@ -1,37 +1,44 @@
 /*
- * demo/shared/demo-shell.js — общий каркас ВСЕХ демо rune (стандарт демо).
+ * demo/shared/demo-shell.js — shared shell for every rune demo (the demo standard).
  *
- * Даёт каждому демо:
- *   1. мобильную вёрстку (канвас на всю ширину, тач-цели >= 44px);
- *   2. тумблер бэкендов Авто / WebGL2 / WebGPU (сегментированный контрол);
- *   3. лог-панель «ошибки и события» с кнопкой «Копировать»: перехватывает
- *      console.error/warn, window.onerror, unhandledrejection, отказ WebGPU
- *      (#reason от showAny) и падение загрузки самого демо-модуля (watchdog).
+ * It gives each demo:
+ *   1. a mobile-first layout (the canvas spans the full width, touch targets >= 44px);
+ *   2. an Auto / WebGL2 / WebGPU backend toggle (segmented control);
+ *   3. an "errors & events" log panel with a Copy button: it intercepts
+ *      console.error/warn, window.onerror, unhandledrejection, WebGPU refusal
+ *      (#reason from showAny) and demo-module load failures (watchdog).
  *
- * Сценарий отказоустойчивости: скрипт классический (не module) — работает
- * даже там, где ES-модули не грузятся (file://). Если демо-модуль не вызвал
- * markReady() за 6 с, лог сам объясняет вероятную причину (нет бандла,
- * открыто через file://, Pages не задеплоен).
+ * Layouts (mount option `layout`):
+ *   'page'       — documentation-style page: header, stage, toolbar, log (default);
+ *   'fullscreen' — immersive viewer: the stage fills the whole viewport and all
+ *                  controls hide behind a compact menu button (FAB) — built
+ *                  mobile-first, maximally compact.
  *
- * Подключение:
+ * Failure resilience: this script is classic (not a module) — it keeps working
+ * where ES modules fail to load (file://). If the demo module has not called
+ * markReady() within 6 s, the log explains the likely cause (missing bundle,
+ * opened via file://, Pages not deployed).
+ *
+ * Wiring:
  *   <link rel="stylesheet" href="../shared/demo-shell.css">
  *   <div id="app"></div>
  *   <script src="../shared/demo-shell.js"></script>
  *   <script type="module" src="./main.js"></script>
  *
- * API (см. mount ниже): shell.slot, shell.setBadge(text, kind),
- * shell.markReady(), shell.log.{info,event,warn,error}, shell.mode,
- * опции mount: { title, desc, hint, defaults:{mode}, onMode, onPause, onResume }.
+ * API (see mount below): shell.slot, shell.setBadge(text, kind), shell.markReady(),
+ * shell.log.{info,event,warn,error}, shell.mode; mount options:
+ * { layout, title, desc, hint, defaults:{mode}, onMode, onPause, onResume }.
  */
 (function () {
   'use strict'
 
-  var SHELL_VERSION = '1.0.0'
+  var SHELL_VERSION = '1.1.0'
   var MAX_ENTRIES = 400
   var READY_TIMEOUT_MS = 6000
 
   function mount(options) {
     var opts = {
+      layout: 'page',
       title: 'rune demo',
       desc: '',
       hint: '',
@@ -47,48 +54,75 @@
     }
 
     var app = document.getElementById('app')
-    if (app === null) throw new Error('RuneDemoShell: в HTML нет <div id="app">')
+    if (app === null) throw new Error('RuneDemoShell: <div id="app"> is missing in the HTML')
 
-    app.innerHTML =
-      '<header class="rd-head">' +
-      '  <h1 class="rd-title"></h1>' +
-      '  <p class="rd-desc"></p>' +
-      '</header>' +
+    var fullscreen = opts.layout === 'fullscreen'
+    if (fullscreen) document.body.classList.add('rd-fs')
+
+    var SEG =
+      '<div class="rd-seg" role="radiogroup" aria-label="Backend">' +
+      '  <input type="radio" name="rd-mode" id="mode-auto" value="auto">' +
+      '  <label for="mode-auto">Auto</label>' +
+      '  <input type="radio" name="rd-mode" id="mode-webgl2" value="webgl2">' +
+      '  <label for="mode-webgl2">WebGL2</label>' +
+      '  <input type="radio" name="rd-mode" id="mode-webgpu" value="webgpu">' +
+      '  <label for="mode-webgpu">WebGPU</label>' +
+      '</div>'
+
+    var ACTIONS =
+      '<div class="rd-actions">' +
+      '  <button type="button" class="rd-btn" id="pause">Pause</button>' +
+      '  <button type="button" class="rd-btn" id="resume">Resume</button>' +
+      '</div>'
+
+    var LOG =
+      '<section class="rd-log' + (fullscreen ? ' rd-collapsed' : '') + '" id="rd-log">' +
+      '  <div class="rd-log-bar">' +
+      '    <button type="button" class="rd-btn" id="log-toggle" aria-expanded="' + String(!fullscreen) + '">Log <span class="rd-count" id="log-count">0</span></button>' +
+      (fullscreen ? '' : '<span class="rd-log-title">errors & events</span>') +
+      '    <div class="rd-actions">' +
+      '      <button type="button" class="rd-btn" id="log-copy">Copy</button>' +
+      '      <button type="button" class="rd-btn" id="log-clear">Clear</button>' +
+      '    </div>' +
+      '  </div>' +
+      '  <ol class="rd-log-list" id="log-list"></ol>' +
+      '</section>'
+
+    var STAGE =
       '<section class="rd-stage" id="rd-stage">' +
       '  <div class="rd-slot" id="rd-slot"></div>' +
       '  <span class="rd-badge" id="backend">\u2026</span>' +
       '  <pre class="rd-reason" id="reason"></pre>' +
-      '</section>' +
-      '<section class="rd-toolbar">' +
-      '  <div class="rd-seg" role="radiogroup" aria-label="Бэкенд">' +
-      '    <input type="radio" name="rd-mode" id="mode-auto" value="auto">' +
-      '    <label for="mode-auto">Авто</label>' +
-      '    <input type="radio" name="rd-mode" id="mode-webgl2" value="webgl2">' +
-      '    <label for="mode-webgl2">WebGL2</label>' +
-      '    <input type="radio" name="rd-mode" id="mode-webgpu" value="webgpu">' +
-      '    <label for="mode-webgpu">WebGPU</label>' +
-      '  </div>' +
-      '  <div class="rd-actions">' +
-      '    <button type="button" class="rd-btn" id="pause">Пауза</button>' +
-      '    <button type="button" class="rd-btn" id="resume">Продолжить</button>' +
-      '  </div>' +
-      '</section>' +
-      '<section class="rd-log" id="rd-log">' +
-      '  <div class="rd-log-bar">' +
-      '    <button type="button" class="rd-btn" id="log-toggle" aria-expanded="true">Лог <span class="rd-count" id="log-count">0</span></button>' +
-      '    <span class="rd-log-title">ошибки и события</span>' +
-      '    <div class="rd-actions">' +
-      '      <button type="button" class="rd-btn" id="log-copy">Копировать</button>' +
-      '      <button type="button" class="rd-btn" id="log-clear">Очистить</button>' +
-      '    </div>' +
-      '  </div>' +
-      '  <ol class="rd-log-list" id="log-list"></ol>' +
-      '</section>' +
-      '<p class="rd-hint"></p>'
+      '</section>'
 
-    app.querySelector('.rd-title').textContent = opts.title
-    app.querySelector('.rd-desc').textContent = opts.desc
-    app.querySelector('.rd-hint').innerHTML = opts.hint
+    app.innerHTML = fullscreen
+      ? STAGE +
+        '<button type="button" class="rd-fab" id="rd-fab" aria-label="Menu" aria-expanded="false" aria-controls="rd-sheet">\u2630</button>' +
+        '<div class="rd-sheet" id="rd-sheet" hidden>' +
+        '  <div class="rd-sheet-head"><span class="rd-sheet-title"></span></div>' +
+        SEG +
+        ACTIONS +
+        LOG +
+        '</div>'
+      : '<header class="rd-head">' +
+        '  <h1 class="rd-title"></h1>' +
+        '  <p class="rd-desc"></p>' +
+        '</header>' +
+        STAGE +
+        '<section class="rd-toolbar">' +
+        SEG +
+        ACTIONS +
+        '</section>' +
+        LOG +
+        '<p class="rd-hint"></p>'
+
+    if (fullscreen) {
+      app.querySelector('.rd-sheet-title').textContent = opts.title
+    } else {
+      app.querySelector('.rd-title').textContent = opts.title
+      app.querySelector('.rd-desc').textContent = opts.desc
+      app.querySelector('.rd-hint').innerHTML = opts.hint
+    }
 
     var slot = app.querySelector('#rd-slot')
     var badge = app.querySelector('#backend')
@@ -97,8 +131,10 @@
     var logList = app.querySelector('#log-list')
     var logCount = app.querySelector('#log-count')
     var logToggle = app.querySelector('#log-toggle')
+    var fab = app.querySelector('#rd-fab')
+    var sheet = app.querySelector('#rd-sheet')
 
-    /* ---------- лог ---------- */
+    /* ---------- log ---------- */
 
     var entries = [] // { time, level, msg }
     var unread = 0
@@ -134,13 +170,13 @@
       logCount.textContent = String(entries.length)
       logCount.classList.toggle('rd-count--err', errorCount > 0)
       logToggle.textContent = ''
-      logToggle.append('Лог ', logCount)
+      logToggle.append('Log ', logCount)
       if (collapsed && unread > 0) logToggle.append(' (+' + unread + ')')
     }
 
     function push(level, msg) {
       var text = String(msg)
-      if (text.length > 2000) text = text.slice(0, 2000) + ' …[обрезано]'
+      if (text.length > 2000) text = text.slice(0, 2000) + ' \u2026[truncated]'
       var entry = { time: timestamp(), level: level, msg: text }
       entries.push(entry)
       if (entries.length > MAX_ENTRIES) {
@@ -161,7 +197,7 @@
       error: function (msg) { push('error', msg) },
     }
 
-    /* перехват консоли (оригиналы вызываются дальше — devtools не страдают) */
+    /* console interception (originals still fire — devtools keep working) */
     var nativeError = console.error.bind(console)
     var nativeWarn = console.warn.bind(console)
     console.error = function () {
@@ -187,7 +223,7 @@
       return parts.join(' ')
     }
 
-    /* глобальные ошибки страницы */
+    /* page-level global errors */
     window.addEventListener('error', function (event) {
       var where = event.filename !== undefined ? ' (' + event.filename.split('/').pop() + ':' + event.lineno + ')' : ''
       push('error', 'window.onerror: ' + event.message + where)
@@ -196,14 +232,14 @@
       push('error', 'unhandledrejection: ' + formatValue(event.reason))
     })
 
-    /* отказ WebGPU из showAny: библиотека пишет в #reason — дублируем в лог */
+    /* WebGPU refusal from showAny: the library writes into #reason — mirror it into the log */
     var reasonObserver = new MutationObserver(function () {
       var text = (reason.textContent || '').trim()
       if (text !== '') push('warn', text.replace(/\s+/g, ' '))
     })
     reasonObserver.observe(reason, { childList: true, characterData: true, subtree: true })
 
-    /* ---------- панель лога: свернуть/развернуть, копировать, очистить ---------- */
+    /* ---------- log panel: collapse/expand, copy, clear ---------- */
 
     function setCollapsed(state) {
       collapsed = state
@@ -246,22 +282,22 @@
 
     function copyText(text, button) {
       var done = function (via) {
-        log.event('Лог скопирован в буфер (' + via + ', ' + entries.length + ' записей)')
+        log.event('Log copied to clipboard (' + via + ', ' + entries.length + ' entries)')
         if (button) {
           var original = button.textContent
-          button.textContent = 'Скопировано'
+          button.textContent = 'Copied'
           setTimeout(function () { button.textContent = original }, 1500)
         }
       }
       var fail = function (error) {
-        log.error('Не удалось скопировать лог: ' + formatValue(error))
+        log.error('Failed to copy log: ' + formatValue(error))
       }
       if (navigator.clipboard !== undefined && window.isSecureContext) {
         navigator.clipboard.writeText(text).then(function () { done('clipboard API') }, function (error) {
           legacyCopy(text) ? done('textarea fallback') : fail(error)
         })
       } else {
-        legacyCopy(text) ? done('textarea fallback') : fail(new Error('clipboard недоступен (нужен https или localhost)'))
+        legacyCopy(text) ? done('textarea fallback') : fail(new Error('clipboard unavailable (https or localhost required)'))
       }
     }
 
@@ -281,7 +317,7 @@
       }
     }
 
-    /* ---------- тумблер бэкендов ---------- */
+    /* ---------- backend toggle ---------- */
 
     function currentMode() {
       var checked = app.querySelector('input[name="rd-mode"]:checked')
@@ -294,45 +330,64 @@
       }
     })
 
-    /* ---------- пауза / продолжить ---------- */
+    /* ---------- pause / resume ---------- */
 
     app.querySelector('#pause').addEventListener('click', function () { opts.onPause !== null && opts.onPause() })
     app.querySelector('#resume').addEventListener('click', function () { opts.onResume !== null && opts.onResume() })
 
-    /* ---------- бейдж ---------- */
+    /* ---------- fullscreen: FAB + sheet (compact, hidden by default) ---------- */
+
+    function setSheetOpen(open) {
+      sheet.hidden = !open
+      fab.setAttribute('aria-expanded', String(open))
+    }
+
+    if (fullscreen) {
+      fab.addEventListener('click', function () { setSheetOpen(sheet.hidden) })
+      /* tap anywhere outside the sheet (e.g. on the scene) closes it */
+      document.addEventListener('pointerdown', function (event) {
+        if (sheet.hidden) return
+        var target = event.target
+        if (target instanceof Node && (sheet.contains(target) || fab.contains(target))) return
+        setSheetOpen(false)
+      })
+    }
+
+    /* ---------- badge ---------- */
 
     function setBadge(text, kind) {
       badge.textContent = text
       badge.className = 'rd-badge' + (kind !== undefined ? ' rd-badge--' + kind : '')
     }
 
-    /* ---------- watchdog: демо-модуль не инициализировался ---------- */
+    /* ---------- watchdog: the demo module never initialized ---------- */
 
     var ready = false
     function markReady() {
       if (ready) return
       ready = true
-      push('event', 'Демо инициализировалось (shell ' + SHELL_VERSION + ')')
+      push('event', 'Demo initialized (shell ' + SHELL_VERSION + ')')
       updateCounter()
     }
 
     if (location.protocol === 'file:') {
-      log.warn('Страница открыта через file:// — ES-модули и fetch при этом не работают. Запустите локально: bun run demo → http://localhost:8080/demo/ или откройте GitHub Pages-ссылку из demo/README.md.')
-      setBadge('file:// не поддерживается', 'err')
+      log.warn('The page is opened via file:// — ES modules and fetch do not work this way. Run locally: bun run demo \u2192 http://localhost:8080/demo/ or open the GitHub Pages link from demo/README.md.')
+      setBadge('file:// not supported', 'err')
     }
-    log.event('Shell ' + SHELL_VERSION + ' запущен')
+    log.event('Shell ' + SHELL_VERSION + ' started')
     log.info('URL: ' + location.href)
     log.info('Viewport: ' + window.innerWidth + 'x' + window.innerHeight + ', DPR ' + window.devicePixelRatio)
 
     setTimeout(function () {
       if (ready) return
-      push('error', 'Демо-модуль не инициализировался за ' + READY_TIMEOUT_MS / 1000 + ' с. Вероятные причины:')
-      push('info', '1) не собран бандл — выполните bun run build (или bun run demo); 2) страница открыта через file:// — нужен сервер; 3) на GitHub Pages — проверьте, что workflow pages прошёл и dist/ задеплоен; 4) ошибка в main.js — см. ERROR-записи выше.')
-      setBadge('демо не запустилось', 'err')
+      push('error', 'The demo module did not initialize within ' + READY_TIMEOUT_MS / 1000 + ' s. Likely causes:')
+      push('info', '1) the bundle is not built — run bun run build (or bun run demo); 2) the page is opened via file:// — a server is required; 3) on GitHub Pages — check that the pages workflow ran and dist/ is deployed; 4) an error in main.js — see the ERROR entries above.')
+      setBadge('demo failed to start', 'err')
       setCollapsed(false)
+      if (fullscreen) setSheetOpen(true)
     }, READY_TIMEOUT_MS)
 
-    /* ---------- публичный API ---------- */
+    /* ---------- public API ---------- */
 
     var initialMode = opts.defaults.mode
     var defaultRadio = app.querySelector('input[name="rd-mode"][value="' + initialMode + '"]')

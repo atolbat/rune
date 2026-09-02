@@ -1,21 +1,21 @@
 /**
- * tests/helpers.ts — общие утилиты тестов @rune/loaders:
- *  - ParseContext-стаб (external-файлы, inflate, отмена);
- *  - fakeFetch с маршрутизацией, задержками, стримами и логом старта;
- *  - билдеры тестовых бинарников: GLB, FBX (u32/u64, zlib), HDR RGBE.
+ * tests/helpers.ts — shared utilities of the @rune/loaders tests:
+ *  - a ParseContext stub (external files, inflate, cancel);
+ *  - fakeFetch with routing, delays, streams and a start log;
+ *  - builders of test binaries: GLB, FBX (u32/u64, zlib), HDR RGBE.
  */
 
 import { inflateSync, deflateSync } from 'node:zlib'
 import type { ParseContext, StreamSink } from '../src/core/types.ts'
 import { defaultResolveUrl } from '../src/core/util.ts'
 
-// ─── ParseContext-стаб ───────────────────────────────────────────────────────
+// ─── ParseContext stub ───────────────────────────────────────────────────────
 
 export interface CtxOptions {
   sourceUrl?: string | null
-  /** Относительный путь → байты (для resolveExternal). */
+  /** Relative path → bytes (for resolveExternal). */
   external?: Record<string, Uint8Array>
-  /** Выбрасывать при resolveExternal этих путях. */
+  /** Throw on resolveExternal of these paths. */
   externalFail?: string[]
   signal?: AbortSignal
 }
@@ -49,7 +49,7 @@ export function makeContext(options: CtxOptions = {}): ParseContext {
   }
 }
 
-/** Контекст с уже отменённым сигналом. */
+/** A context with an already cancelled signal. */
 export function makeAbortedContext(): ParseContext {
   const ctx = makeContext()
   const controller = new AbortController()
@@ -64,7 +64,7 @@ export interface Route {
   body?: Uint8Array | string
   headers?: Record<string, string>
   delayMs?: number
-  /** Сколько раз этот маршрут отвечает успехом ДО первой ошибки/серии. */
+  /** How many times this route responds with success BEFORE the first error/streak. */
   failFirst?: number
 }
 
@@ -94,7 +94,7 @@ export function fakeFetch(routes: Record<string, Route>, log?: FetchLog): typeof
     if (signal?.aborted) {
       throw abortLike()
     }
-    // успех до failFirst раз, дальше — 500 (если failFirst задан)
+    // success up to failFirst times, then — 500 (if failFirst is set)
     if (route.failFirst !== undefined) {
       const n = (failCounters.get(url) ?? 0) + 1
       failCounters.set(url, n)
@@ -132,7 +132,7 @@ function abortLike(): Error {
   return err
 }
 
-/** Response с телом-стримом, отдающим чанки с паузами. */
+/** A Response with a stream body that yields chunks with pauses. */
 export function streamResponse(chunks: readonly number[][], chunkDelayMs = 5): Response {
   const body = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -146,7 +146,7 @@ export function streamResponse(chunks: readonly number[][], chunkDelayMs = 5): R
   return new Response(body, { status: 200 })
 }
 
-// ─── билдер GLB ──────────────────────────────────────────────────────────────
+// ─── GLB builder ──────────────────────────────────────────────────────────────
 
 export function buildGlb(json: unknown, bin: Uint8Array): Uint8Array {
   const jsonBytes = new TextEncoder().encode(JSON.stringify(json))
@@ -161,13 +161,13 @@ export function buildGlb(json: unknown, bin: Uint8Array): Uint8Array {
   dv.setUint32(4, 2, true)
   dv.setUint32(8, total, true)
   let pos = 12
-  dv.setUint32(pos, jsonBytes.length, true) // длина данных БЕЗ паддинга
+  dv.setUint32(pos, jsonBytes.length, true) // data length WITHOUT padding
   dv.setUint32(pos + 4, 0x4e4f534a, true)
   pos += 8
   out.set(jsonBytes, pos)
   pos += jsonBytes.length + jsonPad
   if (hasBin) {
-    dv.setUint32(pos, bin.length, true) // длина данных БЕЗ паддинга
+    dv.setUint32(pos, bin.length, true) // data length WITHOUT padding
     dv.setUint32(pos + 4, 0x004e4942, true)
     pos += 8
     out.set(bin, pos)
@@ -196,7 +196,7 @@ export function u32le(values: readonly number[]): Uint8Array {
   return out
 }
 
-// ─── билдер FBX ──────────────────────────────────────────────────────────────
+// ─── FBX builder ──────────────────────────────────────────────────────────────
 
 export type FbxPropInput =
   | { type: 'D' | 'F' | 'I' | 'L' | 'C'; value: number | bigint | boolean }
@@ -272,18 +272,18 @@ function fbxPropBytes(prop: FbxPropInput): Uint8Array {
       return out
     }
     default:
-      throw new Error(`fbxPropBytes: неизвестный тип ${(prop as { type: string }).type}`)
+      throw new Error(`fbxPropBytes: unknown type ${(prop as { type: string }).type}`)
   }
 }
 
-/** Спец-нода FBX: children === null → лист (без NULL-записи). */
+/** A special FBX node: children === null → a leaf (no NULL record). */
 export interface FbxNodeSpec {
   name: string
   props: readonly FbxPropInput[]
   children: readonly FbxNodeSpec[] | null
 }
 
-/** Спецификация FBX-ноды (endOffset проставит buildFbx layout-проходом). */
+/** An FBX node specification (endOffset is set by the buildFbx layout pass). */
 export function fbxNode(
   name: string,
   props: readonly FbxPropInput[],
@@ -321,7 +321,7 @@ function layout(node: FbxNodeSpec, cursor: number, headerSize: number, nullLen: 
     let childCursor = cursor + headerSize + node.name.length + propsLength(node.props)
     laid.laidChildren = node.children.map(child => {
       const laidChild = layout(child, childCursor, headerSize, nullLen)
-      childCursor = laidChild.endOffset // NULL-запись — ОДНА после всех детей
+      childCursor = laidChild.endOffset // ONE NULL record after all children
       return laidChild
     })
   }
@@ -361,12 +361,12 @@ function serialize(laid: LaidOutNode, out: Uint8Array, u64: boolean): void {
   }
 }
 
-/** Собрать FBX-файл: заголовок + версия + топ-ноды + NULL. */
+/** Build an FBX file: header + version + top nodes + NULL. */
 export function buildFbx(version: number, topNodes: readonly FbxNodeSpec[]): Uint8Array {
   const u64 = version >= 7500
   const headerSize = u64 ? 25 : 13
   const nullLen = u64 ? 25 : 13
-  // топ-ноды идут подряд; ОДНА NULL-запись — в самом конце файла
+  // top nodes go one after another; ONE NULL record — at the very end of the file
   let cursor = 27
   const laid = topNodes.map(node => {
     const l = layout(node, cursor, headerSize, nullLen)
@@ -382,9 +382,9 @@ export function buildFbx(version: number, topNodes: readonly FbxNodeSpec[]): Uin
   return out
 }
 
-// ─── билдер HDR (Radiance RGBE) ──────────────────────────────────────────────
+// ─── HDR builder (Radiance RGBE) ──────────────────────────────────────────────
 
-/** HDR-файл с RLE-сканлайнами (new-style). rows — снизу вверх по GL? нет: как в файле (сверху вниз). */
+/** An HDR file with RLE scanlines (new-style). rows — bottom-up as in GL? no: as in the file (top-down). */
 export type Rgbe = readonly [number, number, number, number]
 
 export function buildHdrRle(rows: readonly (readonly Rgbe[])[]): Uint8Array {
@@ -395,13 +395,13 @@ export function buildHdrRle(rows: readonly (readonly Rgbe[])[]): Uint8Array {
   )
   const body: number[] = []
   for (const row of rows) {
-    // new-style заголовок сканлайна: 2, 2, widthHi, widthLo
+    // new-style scanline header: 2, 2, widthHi, widthLo
     body.push(2, 2, (width >> 8) & 0xff, width & 0xff)
     for (let c = 0; c < 4; c++) {
-      // RLE: повтор value count раз (count = 128 + repeat)
+      // RLE: repeat value count times (count = 128 + repeat)
       const values: number[] = []
       for (const pixel of row) values.push(pixel[c])
-      // единственный ран со всеми значениями (literal)
+      // a single run with all values (literal)
       body.push(values.length)
       body.push(...values)
     }
@@ -412,7 +412,7 @@ export function buildHdrRle(rows: readonly (readonly Rgbe[])[]): Uint8Array {
   return out
 }
 
-/** HDR-файл с flat-сканлайнами (без RLE). */
+/** An HDR file with flat scanlines (no RLE). */
 export function buildHdrFlat(rows: readonly (readonly Rgbe[])[]): Uint8Array {
   const width = rows[0].length
   const height = rows.length
@@ -429,9 +429,9 @@ export function buildHdrFlat(rows: readonly (readonly Rgbe[])[]): Uint8Array {
   return out
 }
 
-// ─── прочее ──────────────────────────────────────────────────────────────────
+// ─── misc ──────────────────────────────────────────────────────────────────
 
-/** Тестовый стриминговый парсер: считает чанки, отдаёт счётчик. */
+/** A test streaming parser: counts chunks, returns the counter. */
 export function makeCountingStreamParser(): {
   parser: import('../src/core/types.ts').Parser<{ pushes: number; bytes: number; parsed: boolean }>
   pushes: () => number

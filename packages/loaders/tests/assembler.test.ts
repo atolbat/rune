@@ -2,7 +2,7 @@ import { test, expect } from 'bun:test'
 import { Assembler, FetchScheduler, fetchStreaming, isAbortError, type SchedulerJob } from '../src/assembler.ts'
 
 
-/** Поток из чанков с управляемой подачей. */
+/** A stream of chunks with controlled feeding. */
 function chunkedStream(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
     start(controller) {
@@ -16,7 +16,7 @@ function encoder(): TextEncoder {
   return new TextEncoder()
 }
 
-test('Assembler: watermark растёт по чанкам, fullView после конца', async () => {
+test('Assembler: watermark grows by chunks, fullView after the end', async () => {
   const enc = encoder()
   const assembler = new Assembler(chunkedStream([enc.encode('hello '), enc.encode('world')]))
   await assembler.completion
@@ -25,7 +25,7 @@ test('Assembler: watermark растёт по чанкам, fullView после �
   expect(new TextDecoder().decode(assembler.fullView())).toBe('hello world')
 })
 
-test('Assembler: waitFor ждёт накопления байт', async () => {
+test('Assembler: waitFor waits for bytes to accumulate', async () => {
   let releaseChunks!: (chunks: Uint8Array[]) => void
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -37,10 +37,10 @@ test('Assembler: waitFor ждёт накопления байт', async () => {
     },
   })
   const assembler = new Assembler(stream)
-  await assembler.waitFor(3) // первый чанк потреблён pump-ом
+  await assembler.waitFor(3) // the first chunk was consumed by the pump
   const waiting = assembler.waitFor(7)
   releaseChunks([new Uint8Array([4, 5, 6, 7])])
-  await waiting // не должно зависнуть
+  await waiting // must not hang
   expect(assembler.watermark).toBe(7)
 })
 
@@ -60,7 +60,7 @@ test('Assembler: slice/prefixView/rangeReady/onRange', async () => {
   unsubscribe()
 })
 
-test('Assembler: полная подача с total — zero-copy инвариант (виды остаются валидны)', async () => {
+test('Assembler: full feed with total — zero-copy invariant (views stay valid)', async () => {
   const total = new Uint8Array(1000)
   for (let i = 0; i < total.length; i++) total[i] = i % 256
   const assembler = new Assembler(chunkedStream([total]), { total: total.length })
@@ -70,7 +70,7 @@ test('Assembler: полная подача с total — zero-copy инвариа
   expect(view[999]).toBe(999 % 256)
 })
 
-test('Assembler: abort фейлит и отменяет чтение', async () => {
+test('Assembler: abort fails and cancels reading', async () => {
   const controller = new AbortController()
   let cancelled = false
   const stream = new ReadableStream<Uint8Array>({
@@ -84,13 +84,13 @@ test('Assembler: abort фейлит и отменяет чтение', async () 
   const assembler = new Assembler(stream, { signal: controller.signal })
   controller.abort()
   await expect(assembler.completion).rejects.toBeInstanceOf(DOMException)
-  // cancel() потока — асинхронный: даём микрозадачу сработать
+  // cancel() of the stream is asynchronous: give a microtask a chance to run
   await new Promise((resolve) => setTimeout(resolve, 0))
   expect(cancelled).toBe(true)
   expect(assembler.isDone).toBe(true)
 })
 
-test('FetchScheduler: приоритет и порядок', async () => {
+test('FetchScheduler: priority and order', async () => {
   const scheduler = new FetchScheduler({ maxConcurrent: 1 })
   const order: string[] = []
   const job = (name: string, priority: number): SchedulerJob => ({
@@ -103,14 +103,14 @@ test('FetchScheduler: приоритет и порядок', async () => {
     },
   })
   scheduler.submit(job('b', 5))
-  scheduler.submit(job('a', 1)) // меньший приоритет — раньше из ОЧЕРЕДИ
+  scheduler.submit(job('a', 1)) // lower priority — earlier from the QUEUE
   scheduler.submit(job('c', 5))
   await new Promise<void>((resolve) => scheduler.onDrain(() => resolve()))
-  // b уже стартовала до подачи a — порядок старта: b, затем очередь по приоритету
+  // b already started before a was submitted — start order: b, then the queue by priority
   expect(order).toEqual(['b', 'a', 'c'])
 })
 
-test('FetchScheduler: отмена из очереди вызывает onCancelledBeforeStart', async () => {
+test('FetchScheduler: cancellation from the queue calls onCancelledBeforeStart', async () => {
   const scheduler = new FetchScheduler({ maxConcurrent: 1 })
   let cancelled = ''
   const gate = Promise.withResolvers<void>()
@@ -133,13 +133,13 @@ test('FetchScheduler: отмена из очереди вызывает onCancel
   }
   scheduler.submit(running)
   scheduler.submit(queued)
-  expect(scheduler.cancel(queued, 'не нужен')).toBe(true)
+  expect(scheduler.cancel(queued, 'not needed')).toBe(true)
   gate.resolve()
   await new Promise<void>((resolve) => scheduler.onDrain(() => resolve()))
-  expect(cancelled).toBe('не нужен')
+  expect(cancelled).toBe('not needed')
 })
 
-test('FetchScheduler: бюджет байт не пускает вторую тяжёлую задачу', async () => {
+test('FetchScheduler: the byte budget does not admit a second heavy job', async () => {
   const scheduler = new FetchScheduler({ maxConcurrent: 8, maxBytesInFlight: 100 })
   const events: string[] = []
   const gate = Promise.withResolvers<void>()
@@ -155,17 +155,17 @@ test('FetchScheduler: бюджет байт не пускает вторую т�
     },
   })
   scheduler.submit(make(1, 90))
-  scheduler.submit(make(2, 90)) // 90+90 > 100 — ждёт
+  scheduler.submit(make(2, 90)) // 90+90 > 100 — waits
   await new Promise((resolve) => setTimeout(resolve, 10))
-  // вторая не стартовала: бюджет байт заблокировал её
+  // the second did not start: the byte budget blocked it
   expect(events).toEqual(['start:1'])
   gate.resolve()
   await new Promise<void>((resolve) => scheduler.onDrain(() => resolve()))
-  // вторая пошла только после завершения первой
+  // the second went only after the first finished
   expect(events).toEqual(['start:1', 'end:1', 'start:2', 'end:2'])
 })
 
-test('fetchStreaming: тело + content-length', async () => {
+test('fetchStreaming: body + content-length', async () => {
   const enc = encoder()
   const body = enc.encode('asset-bytes')
   const fetchImpl = (async () =>
@@ -179,7 +179,7 @@ test('fetchStreaming: тело + content-length', async () => {
   expect(result.assembler.fullView()).toEqual(body)
 })
 
-test('fetchStreaming: 5xx с ретраем, затем успех', async () => {
+test('fetchStreaming: 5xx with a retry, then success', async () => {
   let calls = 0
   const fetchImpl = (async () => {
     calls++
@@ -192,12 +192,12 @@ test('fetchStreaming: 5xx с ретраем, затем успех', async () =>
   expect(result.assembler.watermark).toBe(3)
 })
 
-test('fetchStreaming: 404 без ретрая — TypeError', async () => {
+test('fetchStreaming: 404 without a retry — TypeError', async () => {
   const fetchImpl = (async () => new Response('nope', { status: 404 })) as unknown as typeof fetch
   expect(fetchStreaming('https://example.com/404', { fetchImpl })).rejects.toThrow('HTTP 404')
 })
 
-test('isAbortError: DOMException(AbortError) — да, Error — нет', () => {
+test('isAbortError: DOMException(AbortError) — yes, Error — no', () => {
   expect(isAbortError(new DOMException('x', 'AbortError'))).toBe(true)
   expect(isAbortError(new DOMException('x', 'TimeoutError'))).toBe(true)
   expect(isAbortError(new Error('x'))).toBe(false)

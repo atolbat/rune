@@ -5,24 +5,24 @@ import { ParseError } from '../src/core/errors.ts'
 
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s)
 
-test('jsonParser — объект и массив', () => {
+test('jsonParser — object and array', () => {
   const ctx = makeContext()
   expect(jsonParser.parse({ bytes: enc('{"a":[1,2]}'), ctx }, undefined)).toEqual({ a: [1, 2] })
   expect(jsonParser.parse({ bytes: enc('[1]'), ctx }, undefined)).toEqual([1])
 })
 
-test('jsonParser — синтаксическая ошибка → ParseError', () => {
+test('jsonParser — syntax error → ParseError', () => {
   const ctx = makeContext()
   expect(() => jsonParser.parse({ bytes: enc('{oops}'), ctx }, undefined)).toThrow(ParseError)
 })
 
-test('textParser — декод UTF-8 с BOM', () => {
+test('textParser — UTF-8 decode with BOM', () => {
   const ctx = makeContext()
-  const bytes = new Uint8Array([0xef, 0xbb, 0xbf, ...enc('привет')])
-  expect(textParser.parse({ bytes, ctx }, undefined)).toBe('привет')
+  const bytes = new Uint8Array([0xef, 0xbb, 0xbf, ...enc('hello')])
+  expect(textParser.parse({ bytes, ctx }, undefined)).toBe('hello')
 })
 
-test('bytesParser — тождество (тот же view)', () => {
+test('bytesParser — identity (the same view)', () => {
   const ctx = makeContext()
   const bytes = enc('raw')
   const out = bytesParser.parse({ bytes, ctx }, undefined)
@@ -31,7 +31,7 @@ test('bytesParser — тождество (тот же view)', () => {
 
 // ─── ZML ─────────────────────────────────────────────────────────────────────
 
-test('zml — вложенность, атрибуты, текст', () => {
+test('zml — nesting, attributes, text', () => {
   const xml = enc(`<root a="1" b='two'>
   <child x="y">text</child>
   <child>2</child>
@@ -48,7 +48,7 @@ test('zml — вложенность, атрибуты, текст', () => {
   expect(node.children[2].children.length).toBe(0)
 })
 
-test('zml — declaration, комментарии, CDATA', () => {
+test('zml — declaration, comments, CDATA', () => {
   const xml = enc(`<?xml version="1.0"?>
 <!-- top comment -->
 <doc><!-- inner --><v><![CDATA[<raw&stuff>]]></v></doc>`)
@@ -57,25 +57,25 @@ test('zml — declaration, комментарии, CDATA', () => {
   expect(node.children[0].text).toBe('<raw&stuff>')
 })
 
-test('zml — entity-подстановки', () => {
+test('zml — entity substitutions', () => {
   const node = parseZmlBytes(enc(`<a v="&amp;&lt;">A&#65;&#x42;</a>`))
   expect(node.attrs.v).toBe('&<')
   expect(node.text).toBe('AAB')
 })
 
-test('zml — незакрытый тег → ParseError', () => {
+test('zml — unclosed tag → ParseError', () => {
   expect(() => parseZmlBytes(enc('<a><b></a>'))).toThrow(ParseError)
 })
 
-test('zml — закрывающий не совпал → ParseError', () => {
+test('zml — closing tag mismatch → ParseError', () => {
   expect(() => parseZmlBytes(enc('<a></b>'))).toThrow(ParseError)
 })
 
-test('zml — мусор после корня → ParseError', () => {
+test('zml — garbage after the root → ParseError', () => {
   expect(() => parseZmlBytes(enc('<a/> trailing'))).toThrow(ParseError)
 })
 
-test('zmlToObject — повторы в массив, лист-текст, #text', () => {
+test('zmlToObject — repeats into an array, leaf text, #text', () => {
   const node = parseZmlBytes(enc(`<cfg size="2"><item>a</item><item>b</item><deep k="v">9</deep></cfg>`))
   const obj = zmlToObject(node) as Record<string, unknown>
   expect(obj['size']).toBe('2')
@@ -85,7 +85,7 @@ test('zmlToObject — повторы в массив, лист-текст, #text
   expect(deep['#text']).toBe('9')
 })
 
-test('zmlParser — через Parser-интерфейс с url в ошибках', () => {
+test('zmlParser — via the Parser interface with url in errors', () => {
   const ctx = makeContext({ sourceUrl: 'http://t/cfg.zml' })
   const node = zmlParser.parse({ bytes: enc('<x/>'), ctx }, undefined) as import('../src/formats/config.ts').ZmlNode
   expect(node.name).toBe('x')

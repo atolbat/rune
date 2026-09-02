@@ -1,25 +1,25 @@
 /**
- * Приоритетная очередь задач на двоичной куче.
- * Извлечение — O(log n); изменение приоритета не поддерживается (MVP).
+ * Priority task queue on a binary heap.
+ * Extraction is O(log n); changing priority is not supported (MVP).
  */
 
-/** Задача стриминга: байты, приоритет (меньше = раньше) и работа. */
+/** Streaming task: bytes, priority (lower = earlier) and the work. */
 export interface UploadJob {
   readonly bytes: number
   readonly priority: number
   run(): void
 }
 
-/** Очередь задач с приоритетом. */
+/** Priority task queue. */
 export interface UploadQueue {
   readonly size: number
   push(job: UploadJob): void
-  /** Забирает минимальную по приоритету задачу. */
+  /** Takes the task with the minimal priority. */
   pop(): UploadJob | null
   clear(): void
 }
 
-/** Создаёт приоритетную очередь на двоичной куче. */
+/** Creates a priority queue on a binary heap. */
 export function createUploadQueue(): UploadQueue {
   const heap: UploadJob[] = []
   return {

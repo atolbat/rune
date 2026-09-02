@@ -1,6 +1,6 @@
 import type { Subscriber, Unsubscribe } from './types.ts'
 
-/** Добавляет подписчика в список, создавая его при первом подписавшемся. */
+/** Appends a subscriber to the list, creating it on the first subscriber. */
 export function appendSubscriber<T>(
   list: Subscriber<T>[] | null,
   subscriber: Subscriber<T>,
@@ -10,12 +10,12 @@ export function appendSubscriber<T>(
   return list
 }
 
-/** Добавляет элемент, если его ещё нет в списке. */
+/** Appends an item if it is not yet in the list. */
 export function pushUnique<T>(list: T[], item: T): void {
   if (!list.includes(item)) list.push(item)
 }
 
-/** Вызывает все функции отписки и очищает список. */
+/** Calls every unsubscribe function and clears the list. */
 export function detachAll(subscriptions: Unsubscribe[]): void {
   for (const unsubscribe of subscriptions) unsubscribe()
   subscriptions.length = 0

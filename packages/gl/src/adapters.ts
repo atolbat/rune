@@ -6,7 +6,7 @@ import type { WgpuDrawSpec } from '@rune/webgpu'
 import { createWgpuContext, compileWgslSpec } from '@rune/webgpu'
 import { createSliceArena } from '@rune/webgpu'
 
-/** Переносимый dual-source спек: один и тот же на обоих бэкендах. */
+/** Portable dual-source spec: the same on both backends. */
 export interface PortableSpec {
   readonly shader: {
     readonly glsl: { readonly vertex: string; readonly fragment: string }
@@ -18,20 +18,20 @@ export interface PortableSpec {
   readonly instances?: Dynamic<number>
 }
 
-/** Скомпилированное на конкретном бэкенде: запись в ленту + имена привязок. */
+/** Compiled on a specific backend: a tape record function + binding names. */
 export interface CompiledOnBackend {
   readonly bindings: readonly string[]
   record(props: any, ctx: any, writer: TapeWriter): void
 }
 
-/** Адаптер бэкенда: создание контекста и компиляция переносимого спека. */
+/** Backend adapter: context creation and portable spec compilation. */
 export interface BackendAdapter {
   readonly kind: 'webgl2' | 'webgpu'
   create(): unknown
   compile(context: unknown, spec: PortableSpec): CompiledOnBackend
 }
 
-/** Адаптер WebGL2: арена юниформов + codegen-контекст. */
+/** WebGL2 adapter: uniform arena + codegen context. */
 export function webgl2Adapter(): BackendAdapter {
   return {
     kind: 'webgl2',
@@ -47,7 +47,7 @@ export function webgl2Adapter(): BackendAdapter {
   }
 }
 
-/** Адаптер WebGPU: slice-арена + dynamic-offsets контекст. */
+/** WebGPU adapter: slice arena + dynamic-offsets context. */
 export function webgpuAdapter(): BackendAdapter {
   return {
     kind: 'webgpu',
@@ -66,8 +66,8 @@ export function webgpuAdapter(): BackendAdapter {
 function toWebgl2Spec(spec: PortableSpec): DrawSpec {
   return {
     shader: { glsl: spec.shader.glsl },
-    // depth/raster структурно совместимы; blend/frontFace — достояние
-    // state-программы WebGL2 (tape-компилятор читает только depth/raster).
+    // depth/raster are structurally compatible; blend/frontFace belong to
+    // the WebGL2 state program (the tape compiler reads only depth/raster).
     pipeline: spec.pipeline as DrawSpec['pipeline'],
     uniforms: spec.uniforms,
     count: spec.count as DrawSpec['count'],

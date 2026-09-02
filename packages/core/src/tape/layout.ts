@@ -1,4 +1,4 @@
-// View ленты: ноль копий — исполнитель читает те же колонки, что писатель.
+// Tape view: zero copies — the executor reads the same columns the writer wrote.
 
 import type { TapeWriter, WriterColumns } from './writer.ts'
 

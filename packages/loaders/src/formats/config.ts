@@ -1,16 +1,17 @@
 /**
- * formats/config.ts — конфиги: JSON, ZML (XML-подмножество), text, bytes.
+ * formats/config.ts — configs: JSON, ZML (an XML subset), text, bytes.
  *
- * bytesParser — тождественный парсер «сырых байтов»: им грузят .bin/.mtl
- * через resolveExternal и используют loadBytes().
+ * bytesParser — the identity parser for "raw bytes": .bin/.mtl are loaded
+ * with it via resolveExternal, and loadBytes() uses it.
  *
- * ZML здесь — строгий XML-подмножество: элементы, атрибуты, текст, комменты,
- * CDATA,Decl-скипы, entity-подстановки (5 именных + числовые). Пространства
- * имён не разбираются (префикс — часть имени тега). Цель — конфиги, не XHTML.
+ * ZML here is a strict XML subset: elements, attributes, text, comments,
+ * CDATA, decl skips, entity substitution (5 named + numeric). Namespaces
+ * are not parsed (the prefix is part of the tag name). The goal is configs,
+ * not XHTML.
  *
- * Разбор ZML — по байтам: сканер ходит по Uint8Array, строки создаются только
- * для имён/значений (TextDecoder для UTF-8 значений). Никаких split/regex по
- * всему файлу.
+ * ZML parsing is byte-based: the scanner walks the Uint8Array, strings are
+ * created only for names/values (TextDecoder for UTF-8 values). No split/
+ * regex over the whole file.
  */
 
 import type { ParseContext, ParseInput, Parser } from '../core/types.ts'
@@ -18,7 +19,7 @@ import { ParseError } from '../core/errors.ts'
 
 // ─── bytes ───────────────────────────────────────────────────────────────────
 
-/** Сырые байты как ассет (identity-парсер). */
+/** Raw bytes as an asset (the identity parser). */
 export const bytesParser: Parser<Uint8Array> = {
   kind: 'bytes',
   extensions: ['.bin'],
@@ -33,7 +34,7 @@ const SHARED_DECODER = typeof TextDecoder !== 'undefined' ? new TextDecoder('utf
 
 function decodeUtf8(bytes: Uint8Array): string {
   if (SHARED_DECODER === null) {
-    // headless-окружение без TextDecoder — ASCII fallback
+    // a headless environment without TextDecoder — ASCII fallback
     let out = ''
     for (let i = 0; i < bytes.length; i += 4096) {
       out += String.fromCharCode(...bytes.subarray(i, Math.min(i + 4096, bytes.length)))
@@ -43,7 +44,7 @@ function decodeUtf8(bytes: Uint8Array): string {
   return SHARED_DECODER.decode(bytes)
 }
 
-/** Текст как ассет. */
+/** Text as an asset. */
 export const textParser: Parser<string> = {
   kind: 'text',
   extensions: ['.txt'],
@@ -61,7 +62,7 @@ function skipBom(bytes: Uint8Array): Uint8Array {
 
 // ─── JSON ────────────────────────────────────────────────────────────────────
 
-/** JSON-конфиг. TextDecoder + JSON.parse — единственный честный путь. */
+/** A JSON config. TextDecoder + JSON.parse — the only honest path. */
 export const jsonParser: Parser<unknown> = {
   kind: 'json',
   extensions: ['.json'],
@@ -70,18 +71,18 @@ export const jsonParser: Parser<unknown> = {
     try {
       return JSON.parse(text)
     } catch (err) {
-      throw new ParseError(`невалидный JSON: ${(err as Error).message}`, 0, input.ctx.sourceUrl ?? undefined)
+      throw new ParseError(`invalid JSON: ${(err as Error).message}`, 0, input.ctx.sourceUrl ?? undefined)
     }
   },
 }
 
-// ─── ZML (XML-подмножество) ──────────────────────────────────────────────────
+// ─── ZML (an XML subset) ──────────────────────────────────────────────────
 
 export interface ZmlNode {
   readonly name: string
   readonly attrs: Readonly<Record<string, string>>
   readonly children: readonly ZmlNode[]
-  /** Текст внутри тега (trimmed); null — если текста/только пробелы. */
+  /** Text inside the tag (trimmed); null if no text/only whitespace. */
   readonly text: string | null
 }
 
@@ -96,14 +97,14 @@ function isNameChar(c: number): boolean {
   return isNameStart(c) || (c >= 48 && c <= 57) || c === 45 || c === 46
 }
 
-/** Разбор ZML из байтов. */
+/** Parse ZML from bytes. */
 export function parseZmlBytes(bytes: Uint8Array, ctx?: ParseContext): ZmlNode {
   const b = skipBom(bytes)
   const decoder = new ZmlScanner(b)
   return decoder.parseDocument(ctx?.sourceUrl ?? null)
 }
 
-/** ZML-парсер для менеджера. */
+/** The ZML parser for the manager. */
 export const zmlParser: Parser<ZmlNode> = {
   kind: 'zml',
   extensions: ['.zml', '.xml'],
@@ -125,7 +126,7 @@ class ZmlScanner {
     const root = this.parseElement(url)
     this.skipMisc()
     if (this.pos < this.bytes.length) {
-      throw new ParseError('ZML: мусор после корневого элемента', this.pos, url)
+      throw new ParseError('ZML: garbage after the root element', this.pos, url)
     }
     return root
   }
@@ -134,15 +135,15 @@ class ZmlScanner {
     for (;;) {
       this.skipWs()
       if (this.match('<?')) {
-        this.skipUntil('?>', 'ZML: незакрытый <? ... ?>')
+        this.skipUntil('?>', 'ZML: unclosed <? ... ?>')
         continue
       }
       if (this.match('<!--')) {
-        this.skipUntil('-->', 'ZML: незакрытый комментарий')
+        this.skipUntil('-->', 'ZML: unclosed comment')
         continue
       }
       if (this.match('<!DOCTYPE')) {
-        this.skipUntil('>', 'ZML: незакрытый DOCTYPE')
+        this.skipUntil('>', 'ZML: unclosed DOCTYPE')
         continue
       }
       return
@@ -153,7 +154,7 @@ class ZmlScanner {
     for (;;) {
       this.skipWs()
       if (this.match('<!--')) {
-        this.skipUntil('-->', 'ZML: незакрытый комментарий')
+        this.skipUntil('-->', 'ZML: unclosed comment')
         continue
       }
       return
@@ -162,7 +163,7 @@ class ZmlScanner {
 
   private parseElement(url: string | null): ZmlNode {
     if (this.peek() !== 60 /* < */) {
-      throw new ParseError('ZML: ожидался <', this.pos, url)
+      throw new ParseError('ZML: expected <', this.pos, url)
     }
     this.pos++
     const name = this.parseName(url)
@@ -172,11 +173,11 @@ class ZmlScanner {
       return { name, attrs, children: [], text: null }
     }
     if (this.peek() !== 62 /* > */) {
-      throw new ParseError(`ZML: ожидался > после <${name}`, this.pos, url)
+      throw new ParseError(`ZML: expected > after <${name}`, this.pos, url)
     }
     this.pos++
 
-    // содержимое: текст и вложенные элементы
+    // content: text and nested elements
     let text: string | null = null
     const children: ZmlNode[] = []
     let textStart = -1
@@ -184,22 +185,22 @@ class ZmlScanner {
     for (;;) {
       const next = this.indexOfByteFrom(60 /* < */)
       if (next === -1) {
-        throw new ParseError(`ZML: нет закрывающего </${name}>`, this.pos, url)
+        throw new ParseError(`ZML: missing closing </${name}>`, this.pos, url)
       }
       if (textStart === -1 && next > this.pos) {
         textStart = this.pos
         textEnd = next
       } else if (textStart !== -1 && next > this.pos) {
-        // текст уже начат — продолжаем накапливать (между детьми)
+        // the text has already started — keep accumulating (between children)
         textEnd = next
       }
       this.pos = next
       // </close?
       if (this.match(`</${name}`)) {
-        // пропустить возможный ws и >
+        // skip possible ws and >
         this.skipWs()
         if (this.peek() !== 62) {
-          throw new ParseError(`ZML: кривой закрывающий тег </${name}`, this.pos, url)
+          throw new ParseError(`ZML: malformed closing tag </${name}`, this.pos, url)
         }
         this.pos++
         const raw = textStart === -1 ? null : this.bytes.subarray(textStart, textEnd)
@@ -210,21 +211,21 @@ class ZmlScanner {
         }
         return { name, attrs, children, text }
       }
-      // комментарий/CDATA внутри?
+      // a comment/CDATA inside?
       if (this.match('<!--')) {
-        this.skipUntil('-->', 'ZML: незакрытый комментарий')
+        this.skipUntil('-->', 'ZML: unclosed comment')
         continue
       }
       if (this.match('<![CDATA[')) {
         const end = this.indexOfAscii(']]>')
-        if (end === -1) throw new ParseError('ZML: незакрытый CDATA', this.pos, url)
+        if (end === -1) throw new ParseError('ZML: unclosed CDATA', this.pos, url)
         const cdata = decodeUtf8(this.bytes.subarray(this.pos, end))
         text = (text ?? '') + cdata
         this.pos = end + 3
-        textStart = -1 // дальше текст считается заново
+        textStart = -1 // the text starts over after this
         continue
       }
-      // вложенный элемент
+      // a nested element
       const child = this.parseElement(url)
       children.push(child)
       textStart = -1
@@ -234,7 +235,7 @@ class ZmlScanner {
   private parseName(url: string | null): string {
     const start = this.pos
     if (this.pos >= this.bytes.length || !isNameStart(this.bytes[this.pos])) {
-      throw new ParseError('ZML: кривое имя тега', this.pos, url)
+      throw new ParseError('ZML: malformed tag name', this.pos, url)
     }
     this.pos++
     while (this.pos < this.bytes.length && isNameChar(this.bytes[this.pos])) this.pos++
@@ -247,21 +248,21 @@ class ZmlScanner {
       this.skipWs()
       const c = this.peek()
       if (c === 62 || c === 47 /* / */) return attrs
-      if (c === -1) throw new ParseError('ZML: внезапный конец в атрибутах', this.pos, url)
+      if (c === -1) throw new ParseError('ZML: unexpected end in attributes', this.pos, url)
       const name = this.parseName(url)
       this.skipWs()
       if (this.peek() !== 61 /* = */) {
-        throw new ParseError(`ZML: у атрибута ${name} нет =`, this.pos, url)
+        throw new ParseError(`ZML: attribute ${name} has no =`, this.pos, url)
       }
       this.pos++
       this.skipWs()
       const quote = this.peek()
       if (quote !== 39 && quote !== 34) {
-        throw new ParseError(`ZML: значение ${name} без кавычек`, this.pos, url)
+        throw new ParseError(`ZML: value of ${name} without quotes`, this.pos, url)
       }
       this.pos++
       const end = this.indexOfByteFrom(quote)
-      if (end === -1) throw new ParseError(`ZML: значение ${name} не закрыто`, this.pos, url)
+      if (end === -1) throw new ParseError(`ZML: value of ${name} not closed`, this.pos, url)
       const value = decodeEntities(decodeUtf8(this.bytes.subarray(this.pos, end)), this.pos, url)
       this.pos = end + 1
       attrs[name] = value
@@ -347,7 +348,7 @@ function decodeEntities(text: string, offset: number, url: string | null): strin
     } else {
       const mapped = ENTITIES[entity]
       if (mapped !== undefined) out += mapped
-      else throw new ParseError(`ZML: неизвестная entity &${entity};`, offset + next, url)
+      else throw new ParseError(`ZML: unknown entity &${entity};`, offset + next, url)
     }
     i = semi + 1
   }
@@ -358,11 +359,11 @@ function decodeEntities(text: string, offset: number, url: string | null): strin
 // ─── ZML → plain object ──────────────────────────────────────────────────────
 
 /**
- * Конвертация ZmlNode в JS-объект (стиль «xml2js»):
- *  - атрибуты → строковые ключи;
- *  - дочерние элементы → ключ по имени (повторы собираются в массив);
- *  - лист с текстом без атрибутов → сам текст;
- *  - текст при наличии детей/атрибутов → ключ "#text".
+ * Convert a ZmlNode into a JS object ("xml2js" style):
+ *  - attributes → string keys;
+ *  - child elements → a key by name (repeats are collected into an array);
+ *  - a leaf with text and no attributes → the text itself;
+ *  - text when there are children/attributes → the "#text" key.
  */
 export function zmlToObject(node: ZmlNode): unknown {
   const attrKeys = Object.keys(node.attrs)

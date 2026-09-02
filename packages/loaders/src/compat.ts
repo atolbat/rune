@@ -1,8 +1,8 @@
 /**
- * compat.ts — унаследованный простой API (Task «@rune/loaders v0») поверх
- * новой стриминговой машинерии. Сигнатуры сохранены 1:1 (loadImage /
- * loadJSON / loadArrayBuffer), реализация — openByteSource (прогресс,
- * отмена, ретраи). Для нового кода — AssetLibrary.load().
+ * compat.ts — legacy simple API (Task "@rune/loaders v0") on top of the
+ * new streaming machinery. Signatures are preserved 1:1 (loadImage /
+ * loadJSON / loadArrayBuffer); the implementation is openByteSource
+ * (progress, cancellation, retries). For new code — AssetLibrary.load().
  */
 
 import { openByteSource } from './source.ts'
@@ -12,7 +12,7 @@ export interface LegacyLoadOptions {
   readonly signal?: AbortSignal
 }
 
-/** Изображение → ImageBitmap (нативный decode). */
+/** Image → ImageBitmap (native decode). */
 export async function loadImage(url: string, options: LegacyLoadOptions = {}): Promise<ImageBitmap> {
   const source = await openByteSource(url, {
     signal: options.signal,
@@ -23,12 +23,12 @@ export async function loadImage(url: string, options: LegacyLoadOptions = {}): P
   const bytes = source.assembler.fullView()
   const blob = new Blob([bytes as BlobPart])
   if (typeof createImageBitmap !== 'function') {
-    throw new Error('createImageBitmap недоступен в этой среде')
+    throw new Error('createImageBitmap unavailable in this environment')
   }
   return createImageBitmap(blob)
 }
 
-/** JSON-конфиг. */
+/** JSON config. */
 export async function loadJSON<T = unknown>(url: string, options: LegacyLoadOptions = {}): Promise<T> {
   const source = await openByteSource(url, {
     signal: options.signal,
@@ -40,11 +40,11 @@ export async function loadJSON<T = unknown>(url: string, options: LegacyLoadOpti
   try {
     return JSON.parse(text) as T
   } catch (err) {
-    throw new SyntaxError(`loadJSON: ${url} — невалидный JSON: ${(err as Error).message}`, { cause: err })
+    throw new SyntaxError(`loadJSON: ${url} — invalid JSON: ${(err as Error).message}`, { cause: err })
   }
 }
 
-/** Сырые байты (GLB и пр.). */
+/** Raw bytes (GLB etc.). */
 export async function loadArrayBuffer(url: string, options: LegacyLoadOptions = {}): Promise<ArrayBuffer> {
   const source = await openByteSource(url, {
     signal: options.signal,

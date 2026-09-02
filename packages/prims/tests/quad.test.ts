@@ -1,12 +1,12 @@
-// Инварианты полноэкранного квада: размах, обвод CCW (cull 'back'),
-// UV в координатах изображения (v=0 — верх). Урок инцидента «четверть
-// грани»: геометрия примитивов обязана иметь тест размаха и ориентации.
+// Invariants of the fullscreen quad: extent, CCW winding (cull 'back'),
+// UVs in image coordinates (v=0 is the top). Lesson of the "quarter
+// face" incident: primitive geometry must have an extent and orientation test.
 
 import { describe, expect, test } from 'bun:test'
 import { quad } from '../src/quad.ts'
 
 describe('quad()', () => {
-  test('6 вершин, покрывает весь [-1,1]²', () => {
+  test('6 vertices, covers the entire [-1,1]²', () => {
     const g = quad()
     expect(g.vertexCount).toBe(6)
     expect(g.positions.length).toBe(12)
@@ -18,14 +18,14 @@ describe('quad()', () => {
       minX = Math.min(minX, x); maxX = Math.max(maxX, x)
       minY = Math.min(minY, y); maxY = Math.max(maxY, y)
     }
-    // Полный размах: не «четверть» и не единичный квадрат
+    // Full extent: not a "quarter" and not a unit square
     expect(minX).toBe(-1)
     expect(maxX).toBe(1)
     expect(minY).toBe(-1)
     expect(maxY).toBe(1)
   })
 
-  test('все четыре угла клип-пространства присутствуют', () => {
+  test('all four clip-space corners are present', () => {
     const g = quad()
     const corners = new Set<string>()
     for (let i = 0; i < g.vertexCount; i++) {
@@ -38,7 +38,7 @@ describe('quad()', () => {
     expect(corners.size).toBe(4)
   })
 
-  test('обвод CCW: векторное произведение каждого треугольника положительно', () => {
+  test('CCW winding: the cross product of every triangle is positive', () => {
     const g = quad()
     for (let t = 0; t + 2 < g.vertexCount; t += 3) {
       const ax = g.positions[(t + 1) * 2] - g.positions[t * 2]
@@ -49,7 +49,7 @@ describe('quad()', () => {
     }
   })
 
-  test('UV в [0,1]² и согласованы с позициями: (x+1)/2, (1-y)/2', () => {
+  test('UVs in [0,1]² and consistent with positions: (x+1)/2, (1-y)/2', () => {
     const g = quad()
     for (let i = 0; i < g.vertexCount; i++) {
       const x = g.positions[i * 2]
@@ -65,7 +65,7 @@ describe('quad()', () => {
     }
   })
 
-  test('v=0 — верхние углы (image-space): y=+1 → v=0, y=-1 → v=1', () => {
+  test('v=0 is the top corners (image space): y=+1 → v=0, y=-1 → v=1', () => {
     const g = quad()
     for (let i = 0; i < g.vertexCount; i++) {
       const y = g.positions[i * 2 + 1]
@@ -75,7 +75,7 @@ describe('quad()', () => {
     }
   })
 
-  test('треугольники покрывают квад без дыр: центры четырёх квадрантов внутри триангуляции', () => {
+  test('triangles cover the quad without holes: the centers of the four quadrants are inside the triangulation', () => {
     const g = quad()
     const tris: Array<[number, number][]> = []
     for (let t = 0; t + 2 < g.vertexCount; t += 3) {

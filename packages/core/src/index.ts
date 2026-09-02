@@ -1,9 +1,9 @@
-// @rune/core — сигналы, эпохи, ленты, сегменты/live, арена юниформов,
-// стриминг (AIMD), transient-пул, layoutGuard. DOM-free по построению.
-// Восстановленные после сброса окружения модули (Task 68): batch/effect,
+// @rune/core — signals, epochs, tapes, segments/live, the uniform arena,
+// streaming (AIMD), the transient pool, layoutGuard. DOM-free by construction.
+// Modules restored after the environment reset (Task 68): batch/effect,
 // uniformSet/frequencyArena, feed, uploadQueue, sharedRegistry,
-// reflectGlsl/reflectWgsl, serializeTape/parseTape — легаси-поверхности
-// возвращены в публичный API (тесты + tape-пакет + portability harness).
+// reflectGlsl/reflectWgsl, serializeTape/parseTape — legacy surfaces
+// returned to the public API (tests + the tape package + portability harness).
 
 export { signal } from './signal/signal.ts'
 export type { SignalOptions, SignalCell } from './signal/signal.ts'
@@ -50,7 +50,7 @@ export type { LayoutGuardApi, ResizeResult, ResizeVerdict } from './transport/la
 export { createSharedRegistry, attachSharedRegistry, nameHash, schemaHash, SHARED_MAGIC } from './transport/sharedRegistry.ts'
 export type { SharedRegistry, SharedMirror } from './transport/sharedRegistry.ts'
 
-// M5 (Task 73): межпоточные транспорты T0–T3 + ping-pong фиды T3.
+// M5 (Task 73): cross-thread transports T0–T3 + T3 ping-pong feeds.
 export { detectTransport, hasSharedArrayBuffer, createTransport, createTransportHost, attachTransport, createMsgFeedWriter, createMsgFeedReader } from './transport/transport.ts'
 export type {
   TransportMode,
@@ -86,8 +86,8 @@ export type {
   ClearColor,
 } from './journal/journal.ts'
 
-// Task 62: ResourceJournal v2 — стабильные id + контент в журнале.
-// Task 65: WorkingSet + selectResidentOps — soft reset (ленивая резидентность).
+// Task 62: ResourceJournal v2 — stable ids + content in the journal.
+// Task 65: WorkingSet + selectResidentOps — soft reset (lazy residency).
 export { createResourceJournal, selectResidentOps } from './journal/resourceJournal.ts'
 export type {
   ResourceJournal,
@@ -96,8 +96,8 @@ export type {
   ContentRef,
   ContentManifestEntry,
   RestoreReport,
-  // TextureFormat теперь приходит из formats.ts (Task 110) — надмножество
-  // старого журнального типа ('rgba8unorm'|'canvas'|'rgba16float'|'rgba32float' ⊂ TextureFormatId|'canvas').
+  // TextureFormat now comes from formats.ts (Task 110) — a superset
+  // of the old journal type ('rgba8unorm'|'canvas'|'rgba16float'|'rgba32float' ⊂ TextureFormatId|'canvas').
   ClearColor2,
   WorkingSet,
   ResidentSelection,
@@ -112,9 +112,9 @@ export {
 } from './journal/lossPolicy.ts'
 export type { LossKind, LossBackend, LossEvent, LossDecision, LossBudget, RecoveryStrategy } from './journal/lossPolicy.ts'
 
-// Task 66: LRU-политика резидентности — давление памяти между потерями
-// (pressure → evict: оценка GPU-памяти → бюджет → вытеснение LRU).
-// Task 67: textureFormatBytesPerPixel — оценка веса HDR-форматов.
+// Task 66: LRU residency policy — memory pressure between losses
+// (pressure → evict: GPU memory estimate → budget → LRU eviction).
+// Task 67: textureFormatBytesPerPixel — HDR format weight estimate.
 export { estimateTextureBytes, selectLRUEvictions, textureFormatBytesPerPixel } from './journal/residency.ts'
 export type { ResidencyEntry, EvictionSelection, EvictionReport, ResidencyStats } from './journal/residency.ts'
 
@@ -133,8 +133,8 @@ export type {
   PathSupport,
 } from './caps.ts'
 
-// Task 110 (FFT-океан): полный каталог текстурных форматов — общая ось
-// вариантов пайплайна/целей для WebGL2 и WebGPU (formats.ts).
+// Task 110 (FFT ocean): the full texture format catalog — the shared axis
+// of pipeline/target variants for WebGL2 and WebGPU (formats.ts).
 export type {
   TextureFormatFamily,
   TextureFormatKind,

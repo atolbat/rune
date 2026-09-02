@@ -1,34 +1,34 @@
 /**
- * scheduler.ts — планировщик загрузок: приоритеты, квоты, отмена.
+ * scheduler.ts — download scheduler: priorities, quotas, cancellation.
  *
- * Отвечает на вопрос «что качать СЕЙЧАС»:
- *   - maxConcurrent — сколько тел качается параллельно;
- *   - maxBytesInFlight — квота «сколько надо грузить» одновременно:
- *     задание не стартует, пока (в полёте + вес нового) > квоты. Вес —
- *     Content-Length (или weightBytes), уточняется по факту;
- *   - приоритет: меньше = раньше; смена приоритета переупорядочивает очередь;
- *   - paused — «взять паузу» без отмены (resume продолжает с места).
+ * Answers the question "what to download NOW":
+ *   - maxConcurrent — how many bodies download in parallel;
+ *   - maxBytesInFlight — quota for "how much may be loading" at once:
+ *     a job does not start while (in flight + weight of the new one) > quota. Weight is
+ *     Content-Length (or weightBytes), refined as facts arrive;
+ *   - priority: lower = earlier; a priority change reorders the queue;
+ *   - paused — "take a break" without cancelling (resume continues where it left off).
  *
- * Планировщик не знает про форматы и сеть: Job — интерфей с weight()/start().
+ * The scheduler knows nothing about formats or the network: Job is an interface with weight()/start().
  */
 
 export interface SchedulerJob {
   readonly id: number
   priority: number
-  /** Порядок вставки — стабильный FIFO внутри одного приоритета. */
+  /** Insertion order — stable FIFO within a single priority. */
   readonly seq: number
-  /** Ожидаемый вес в байтах (для квоты). Может уточняться. */
+  /** Expected weight in bytes (for the quota). May be refined. */
   weight(): number
-  /** Запуск: resolve = конец работы (успех или ошибка), reject = ошибка. */
+  /** Start: resolve = end of work (success or error), reject = error. */
   start(signal: AbortSignal): Promise<void>
-  /** Вызывается при отмене ДО старта (start не будет вызван). */
+  /** Called on cancellation BEFORE start (start will not be called). */
   onCancelledBeforeStart?(reason?: string): void
 }
 
 export interface SchedulerOptions {
-  /** Параллельных загрузок. Default 3. */
+  /** Parallel downloads. Default 3. */
   readonly maxConcurrent?: number
-  /** Квота байт «в полёте» (веса running-заданий). Default 64 MB. */
+  /** Quota for bytes "in flight" (weights of running jobs). Default 64 MB. */
   readonly maxBytesInFlight?: number
 }
 
@@ -42,10 +42,10 @@ export interface SchedulerStats {
   readonly finished: number
 }
 
-/** Отмена задания, ещё не стартовавшего (queued). */
+/** Cancellation of a job that has not started yet (queued). */
 export class JobCancelled extends Error {
   constructor(reason?: string) {
-    super(reason ?? 'задание отменено до старта')
+    super(reason ?? 'job cancelled before start')
     this.name = 'JobCancelled'
   }
 }
@@ -69,14 +69,14 @@ export class LoadScheduler {
     this.maxBytesInFlight = Math.max(1, options.maxBytesInFlight ?? 64 * 1024 * 1024)
   }
 
-  /** Поставить задание; стартует сразу, если есть слот и квота. */
+  /** Submit a job; starts immediately if there is a slot and quota. */
   submit(job: SchedulerJob): void {
     this.queue.push(job)
     this.sortQueue()
     this.pump()
   }
 
-  /** Сменить приоритет; true если повлияло (queued-задание). */
+  /** Change priority; true if it had an effect (queued job). */
   setPriority(job: SchedulerJob, priority: number): boolean {
     if (job.priority === priority) return false
     job.priority = priority
@@ -86,7 +86,7 @@ export class LoadScheduler {
     return inQueue
   }
 
-  /** Отменить: queued — выкидывается (start не будет); running — abort. */
+  /** Cancel: queued — dropped (start will not be called); running — abort. */
   cancel(job: SchedulerJob, reason?: string): boolean {
     const qi = this.queue.indexOf(job)
     if (qi >= 0) {
@@ -97,7 +97,7 @@ export class LoadScheduler {
     }
     const run = this.running.get(job.id)
     if (run !== undefined) {
-      run.controller.abort(new DOMException(reason ?? 'загрузка отменена', 'AbortError'))
+      run.controller.abort(new DOMException(reason ?? 'loading cancelled', 'AbortError'))
       return true
     }
     return false
@@ -116,13 +116,13 @@ export class LoadScheduler {
     return this.paused
   }
 
-  /** Динамическая смена квоты (например, по network hints). */
+  /** Dynamic quota change (e.g., from network hints). */
   setBytesQuota(bytes: number): void {
     this.maxBytesInFlight = Math.max(1, bytes)
     this.pump()
   }
 
-  /** Вес running-задания уточнён (Content-Length пришёл / байты растут). */
+  /** Weight of a running job refined (Content-Length arrived / bytes grow). */
   updateWeight(job: SchedulerJob): void {
     if (!this.running.has(job.id)) return
     const old = this.weights.get(job.id)
@@ -151,7 +151,7 @@ export class LoadScheduler {
     }
   }
 
-  /** Колбэк «очередь опустела» — для тестов и idle-индикации. */
+  /** "queue is empty" callback — for tests and idle indication. */
   onDrain(listener: () => void): () => void {
     this.drainListeners.add(listener)
     return () => this.drainListeners.delete(listener)
@@ -164,7 +164,7 @@ export class LoadScheduler {
   }
 
   private sortQueue(): void {
-    // Стабильная сортировка (Array.prototype.sort — стабильна по спецификации).
+    // Stable sort (Array.prototype.sort is stable per the specification).
     this.queue.sort((a, b) => a.priority - b.priority || a.seq - b.seq)
   }
 
@@ -175,9 +175,9 @@ export class LoadScheduler {
       if (job === undefined) break
       const weight = Math.max(1, job.weight())
       if (this.running.size > 0 && this.bytesInFlight + weight > this.maxBytesInFlight) {
-        // Квота: голова очереди не лезет — не стартуем НИЧЕГО ниже неё
-        // (приоритетный порядок важнее параллельности: младшие приоритеты
-        // не должны «объедать» старшие, стартуя мимо блокированной головы).
+        // Quota: the queue head does not fit — start NOTHING below it
+        // (priority order matters more than parallelism: lower priorities
+        // must not "starve" higher ones by starting past the blocked head).
         break
       }
       this.queue.shift()
@@ -207,12 +207,12 @@ export class LoadScheduler {
   }
 }
 
-/** Фабрика id для внешних обвязок. */
+/** id factory for external wrappers. */
 export function nextSchedulerJobId(): number {
   return nextJobId++
 }
 
-/** Сброс счётчика id — ТОЛЬКО для тестов (изоляция). */
+/** Reset the id counter — ONLY for tests (isolation). */
 export function resetSchedulerJobIdsForTests(): void {
   nextJobId = 1
 }

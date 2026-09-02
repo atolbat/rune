@@ -1,6 +1,6 @@
 import type { DepthFunc, BlendFactor, CullFace, FrontFace, PrimitiveKind } from '../gpu/facadeTypes.ts'
 
-/** Растеризационное состояние пайплайна WebGPU (M3-подмножество). */
+/** WebGPU pipeline rasterization state (M3 subset). */
 export interface GpuPipelineDesc {
   readonly depth?: { readonly test?: DepthFunc; readonly write?: boolean } | false
   readonly blend?: { readonly src: BlendFactor; readonly dst: BlendFactor } | false
@@ -8,17 +8,17 @@ export interface GpuPipelineDesc {
   readonly primitive?: PrimitiveKind
 }
 
-/** Кэш пайплайнов: структурный ключ → устойчивый id. */
+/** Pipeline cache: structural key → stable id. */
 export interface PipelineCache {
   readonly size: number
   idOf(desc: GpuPipelineDesc, shaderId: number): number
 }
 
-/** Создаёт кэш пайплайнов. */
+/** Creates a pipeline cache. */
 export function createPipelineCache(): PipelineCache {
   const ids = new Map<string, number>()
-  // Id начинаются с 1: 0 зарезервирован как «pipeline не назначен»
-  // (паритет со старым nextPipelineId-счётчиком контекста).
+  // Ids start at 1: 0 is reserved as "no pipeline assigned"
+  // (parity with the old nextPipelineId counter of the context).
   let next = 1
   return {
     get size() { return next - 1 },
@@ -33,7 +33,7 @@ export function createPipelineCache(): PipelineCache {
   }
 }
 
-/** Структурный ключ: каноническая строка полей дескриптора. */
+/** Structural key: a canonical string of descriptor fields. */
 export function structuralKey(desc: GpuPipelineDesc, shaderId: number): string {
   return [
     shaderId,

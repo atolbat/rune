@@ -1,4 +1,4 @@
-/** Типы юниформов GLSL/WGSL, поддерживаемые Uniform ABI (M2). */
+/** GLSL/WGSL uniform types supported by the Uniform ABI (M2). */
 export type UniformType =
   | 'float' | 'int' | 'uint' | 'bool'
   | 'vec2' | 'vec3' | 'vec4'
@@ -8,7 +8,7 @@ export type UniformType =
   | 'mat2' | 'mat3' | 'mat4'
   | 'sampler2D' | 'samplerCube' | 'sampler2DArray'
 
-/** Правила размещения: выравнивание, размер, семейство представления. */
+/** Layout rules: alignment, size, representation family. */
 export interface UniformLayoutInfo {
   readonly align: number
   readonly size: number
@@ -38,17 +38,17 @@ const TABLE: Record<UniformType, UniformLayoutInfo> = {
   sampler2DArray: { align: 4, size: 4, kind: 'i32' },
 }
 
-/** Отдаёт правила std140-размещения для типа юниформа. */
+/** Returns std140 layout rules for a uniform type. */
 export function uniformLayout(type: UniformType): UniformLayoutInfo {
   return TABLE[type]
 }
 
-/** Округляет смещение вверх до выравнивания. */
+/** Rounds an offset up to an alignment. */
 export function alignUp(offset: number, align: number): number {
   return (offset + align - 1) & -align
 }
 
-/** Является ли тип юниформа известным ABI. */
+/** Whether the uniform type is a known ABI type. */
 export function isUniformType(text: string): text is UniformType {
   return text in TABLE
 }

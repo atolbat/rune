@@ -2,9 +2,9 @@ import { describe, test, expect } from 'bun:test'
 import { cube } from '../src/cube.ts'
 
 /**
- * Регрессия инцидента «четверть грани»: CORNER_UV использовался и для
- * позиций → грани сжимались в 1×1 (вместо 2×2) и расходились по углам.
- * Тест фиксирует полный размах, связность и согласованность UV.
+ * Regression for the "quarter face" incident: CORNER_UV was used for
+ * positions too → faces collapsed to 1×1 (instead of 2×2) and diverged at the corners.
+ * The test locks in full extent, connectivity, and UV consistency.
  */
 
 const EPS = 1e-6
@@ -23,8 +23,8 @@ function faceAt(g: ReturnType<typeof cube>, face: number) {
   return verts
 }
 
-describe('prims/cube — полный размах граней', () => {
-  test('36 вершин, массивы согласованы', () => {
+describe('prims/cube — full face extent', () => {
+  test('36 vertices, arrays consistent', () => {
     const g = cube(1)
     expect(g.vertexCount).toBe(36)
     expect(g.positions.length).toBe(36 * 3)
@@ -32,7 +32,7 @@ describe('prims/cube — полный размах граней', () => {
     expect(g.uvs.length).toBe(36 * 2)
   })
 
-  test('bbox = ±half по всем осям (регрессия «четверть грани»)', () => {
+  test('bbox = ±half on all axes ("quarter face" regression)', () => {
     for (const half of [1, 0.5, 2]) {
       const g = cube(half)
       let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity
@@ -51,7 +51,7 @@ describe('prims/cube — полный размах граней', () => {
     }
   })
 
-  test('все 8 углов куба присутствуют', () => {
+  test('all 8 cube corners present', () => {
     const g = cube(1)
     const seen = new Set<string>()
     for (let i = 0; i < g.positions.length; i += 3) {
@@ -60,36 +60,36 @@ describe('prims/cube — полный размах граней', () => {
     for (const x of [-1, 1]) for (const y of [-1, 1]) for (const z of [-1, 1]) {
       expect(seen.has(`${x},${y},${z}`)).toBe(true)
     }
-    expect(seen.size).toBe(8) // ровно 8 уникальных вершин куба
+    expect(seen.size).toBe(8) // exactly 8 unique cube vertices
   })
 
-  test('каждая грань — планарный квадрат 2half×2half с нормалью наружу', () => {
+  test('each face — a planar 2half×2half square with outward normal', () => {
     const g = cube(1)
     for (let f = 0; f < 6; f++) {
       const verts = faceAt(g, f)
-      const [a, b, c, , , d] = verts // 4 угла: v0,v1,v2,v5
-      // рёбра из угла a
+      const [a, b, c, , , d] = verts // 4 corners: v0,v1,v2,v5
+      // edges from corner a
       const e1: [number, number, number] = [b.p[0] - a.p[0], b.p[1] - a.p[1], b.p[2] - a.p[2]]
       const e2: [number, number, number] = [d.p[0] - a.p[0], d.p[1] - a.p[1], d.p[2] - a.p[2]]
-      // нормаль = cross(e1, e2), должна совпадать с атрибутом
+      // normal = cross(e1, e2), must match the attribute
       const n: [number, number, number] = [
         e1[1] * e2[2] - e1[2] * e2[1],
         e1[2] * e2[0] - e1[0] * e2[2],
         e1[0] * e2[1] - e1[1] * e2[0],
       ]
       const len = Math.hypot(n[0], n[1], n[2])
-      expect(Math.abs(len - 4)).toBeLessThan(EPS) // |e1|=|e2|=2, перпендикулярны
+      expect(Math.abs(len - 4)).toBeLessThan(EPS) // |e1|=|e2|=2, perpendicular
       for (let k = 0; k < 3; k++) {
         expect(n[k] / len).toBeCloseTo(a.n[k], 6)
       }
-      // все вершины грани на одинаковом расстоянии от центра по оси нормали
+      // all face vertices at the same distance from the center along the normal axis
       for (const v of verts) {
         expect(v.p[0] * a.n[0] + v.p[1] * a.n[1] + v.p[2] * a.n[2]).toBeCloseTo(1, 6)
       }
     }
   })
 
-  test('UV каждой грани покрывают [0,1]² в углах квадрата', () => {
+  test('each face\'s UVs cover [0,1]² at the square corners', () => {
     const g = cube(1)
     for (let f = 0; f < 6; f++) {
       const verts = faceAt(g, f)
@@ -98,14 +98,14 @@ describe('prims/cube — полный размах граней', () => {
       for (const expected of ['0,0', '1,0', '1,1', '0,1']) {
         expect(uvs).toContain(expected)
       }
-      // регрессия: у четверть-грани угол (0,0) сидел в ЦЕНТРЕ куба
+      // regression: on the quarter face the (0,0) corner sat in the cube CENTER
       const origin = corners.find(v => v.uv[0] === 0 && v.uv[1] === 0)
       const dist = Math.hypot(origin!.p[0], origin!.p[1], origin!.p[2])
-      expect(dist).toBeCloseTo(Math.sqrt(3), 6) // угол куба, не центр грани
+      expect(dist).toBeCloseTo(Math.sqrt(3), 6) // cube corner, not face center
     }
   })
 
-  test('грани связны: каждая грань делит рёбра с соседями (куб, не 6 изолятов)', () => {
+  test('faces are connected: each face shares edges with neighbors (a cube, not 6 isolates)', () => {
     const g = cube(1)
     const edgeMidpoints = new Map<string, number>()
     for (let f = 0; f < 6; f++) {
@@ -117,11 +117,11 @@ describe('prims/cube — полный размах граней', () => {
         edgeMidpoints.set(mid, (edgeMidpoints.get(mid) ?? 0) + 1)
       }
     }
-    expect(edgeMidpoints.size).toBe(12) // 12 рёбер куба
+    expect(edgeMidpoints.size).toBe(12) // 12 cube edges
     for (const [mid, count] of edgeMidpoints) {
-      expect(count).toBe(2) // каждое ребро принадлежит ровно двум граням
+      expect(count).toBe(2) // each edge belongs to exactly two faces
       const [x, y, z] = mid.split(',').map(Number)
-      // середина ребра на расстоянии √2 от центра (не внутри и не снаружи)
+      // edge midpoint at distance √2 from the center (neither inside nor outside)
       expect(Math.hypot(x, y, z)).toBeCloseTo(Math.SQRT2, 6)
     }
   })

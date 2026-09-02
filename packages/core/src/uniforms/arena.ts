@@ -1,81 +1,81 @@
 /**
- * std140-арена: staging-буфер юниформов с поштучным value-compare.
- * Неизменённое значение НЕ помечается грязным (теория C: fround —
- * 0.8 как f64 ≠ 0.8 как f32, сравнение в f32 подавляет ложные аплоады).
+ * std140 arena: a uniform staging buffer with per-value comparison.
+ * An unchanged value is NOT marked dirty (C theory: fround —
+ * 0.8 as f64 ≠ 0.8 as f32, comparison in f32 suppresses false uploads).
  *
- * Две совместимые поверхности:
- *  - float-API (активные рендереры): alloc(sizeFloats) → UniformSlot,
- *    write(slot, values) — слот в float-элементах;
- *  - byte-API (uniformSet/frequencyArena/tape-доставка): alloc(type) →
- *    {offset,size} в байтах, writeFloat/readFloat, dirtyRanges/importBytes.
+ * Two compatible surfaces:
+ *  - float-API (active renderers): alloc(sizeFloats) → UniformSlot,
+ *    write(slot, values) — the slot in float elements;
+ *  - byte-API (uniformSet/frequencyArena/tape delivery): alloc(type) →
+ *    {offset,size} in bytes, writeFloat/readFloat, dirtyRanges/importBytes.
  */
 
 export interface DirtyRange {
-  /** Начало диапазона в массивах буфера. */
+  /** Range begin in buffer arrays. */
   begin: number
-  /** Конец (эксклюзивный). */
+  /** End (exclusive). */
   end: number
 }
 
-/** Байтовый диапазон (для доставки кадров между мирами). */
+/** Byte range (for frame delivery between worlds). */
 export interface ByteRange {
-  /** Начало в байтах от начала буфера арены. */
+  /** Begin in bytes from the start of the arena buffer. */
   from: number
-  /** Конец (эксклюзивный) в байтах. */
+  /** End (exclusive) in bytes. */
   to: number
 }
 
-/** Дескриптор слота в байтах (byte-API). */
+/** Byte slot descriptor (byte-API). */
 export interface UniformSlotBytes {
-  /** Смещение поля в байтах от начала буфера арены. */
+  /** Field offset in bytes from the start of the arena buffer. */
   readonly offset: number
-  /** Размер поля в байтах. */
+  /** Field size in bytes. */
   readonly size: number
 }
 
 export interface UniformSlot {
-  /** Смещение в float-элементах буфера. */
+  /** Offset in float elements of the buffer. */
   readonly base: number
-  /** Число float. */
+  /** Number of floats. */
   readonly size: number
-  /** Грязный с последней загрузки. */
+  /** Dirty since the last upload. */
   dirty: boolean
 }
 
 export interface UniformArena {
   readonly buffer: Float32Array
-  /** Байтовый вид поверх того же буфера (доставка кадров). */
+  /** Byte view over the same buffer (frame delivery). */
   readonly bytes: Uint8Array
-  /** Линейное выделение слота (бамп; float-API). */
+  /** Linear slot allocation (bump; float-API). */
   alloc(size: number): UniformSlot
-  /** Выделение слота по ИМЕНИ ТИПА (byte-API: 'mat4' → 64 байта). */
+  /** Slot allocation by TYPE NAME (byte-API: 'mat4' → 64 bytes). */
   alloc(type: string): UniformSlotBytes
-  /** Запись со сравнением; true = значение изменилось (float-API).
-   *  Скаляр (float-uniform) пишется в первый элемент слота. */
+  /** Write with comparison; true = the value changed (float-API).
+   *  A scalar (float-uniform) is written into the slot's first element. */
   write(slot: UniformSlot, values: ArrayLike<number> | number): boolean
-  /** Запись одного float по байтовому смещению со сравнением (byte-API). */
+  /** Write a single float at a byte offset with comparison (byte-API). */
   writeFloat(slot: number | UniformSlotBytes, value: number): void
-  /** Чтение float по байтовому смещению (byte-API). */
+  /** Read a float at a byte offset (byte-API). */
   readFloat(slot: number | UniformSlotBytes, index?: number): number
-  /** Все слоты, помеченные грязным (снимок). */
+  /** All slots marked dirty (a snapshot). */
   dirtySlots(): UniformSlot[]
-  /** Грязные диапазоны в БАЙТАХ, слитые из смежных слотов (byte-API). */
+  /** Dirty ranges in BYTES, merged from adjacent slots (byte-API). */
   dirtyRanges(): ByteRange[]
-  /** Записать vec4 в слот со value-compare (byte-API). */
+  /** Write a vec4 into a slot with value-compare (byte-API). */
   writeVec4(slot: UniformSlot | UniformSlotBytes, x: number, y: number, z: number, w: number): void
-  /** Грязный ли слот (диагностика/бенчмарки). */
+  /** Whether the slot is dirty (diagnostics/benchmarks). */
   isDirty(slot: UniformSlot | UniformSlotBytes): boolean
-  /** Вливает доставленные байты, помечая пересечённые слоты грязными. */
+  /** Pours delivered bytes in, marking intersected slots dirty. */
   importBytes(from: number, bytes: Uint8Array): void
-  /** Сброс грязных флагов (после загрузки). */
+  /** Reset dirty flags (after upload). */
   clearDirty(): void
-  /** Занятость в float. */
+  /** Usage in floats. */
   used(): number
-  /** Занятость в байтах (byte-API). */
+  /** Usage in bytes (byte-API). */
   readonly usedBytes: number
 }
 
-/** Размеры uniform-типов в байтах (подмножество ABI). */
+/** Uniform type sizes in bytes (an ABI subset). */
 const TYPE_BYTES: Record<string, number> = {
   float: 4, int: 4, uint: 4, bool: 4,
   vec2: 8, vec3: 12, vec4: 16,
@@ -94,24 +94,24 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
   function alloc(sizeOrType: number | string): UniformSlot | UniformSlotBytes {
     if (typeof sizeOrType === 'string') {
       const byteSize = TYPE_BYTES[sizeOrType]
-      if (byteSize === undefined) throw new Error(`rune: неизвестный uniform-тип "${sizeOrType}"`)
+      if (byteSize === undefined) throw new Error(`rune: unknown uniform type "${sizeOrType}"`)
       return allocBytes(byteSize)
     }
     return allocFloats(sizeOrType)
   }
 
   function allocFloats(size: number): UniformSlot {
-    if (cursor + size > floats) throw new Error(`rune: uniform-арена переполнена (${floats} float)`)
+    if (cursor + size > floats) throw new Error(`rune: uniform arena overflowed (${floats} float)`)
     const slot: UniformSlot = { base: cursor, size, dirty: true }
     cursor += size
     slots.push(slot)
     return slot
   }
 
-  /** Выделение по размеру в байтах: слот хранит float-метрики, наружу — байтовый дескриптор. */
+  /** Allocation by size in bytes: the slot stores float metrics, the byte descriptor goes out. */
   function allocBytes(byteSize: number): UniformSlotBytes {
     const size = byteSize / 4
-    if (cursor + size > floats) throw new Error(`rune: uniform-арена переполнена (${floats} float)`)
+    if (cursor + size > floats) throw new Error(`rune: uniform arena overflowed (${floats} float)`)
     const slot: UniformSlot = { base: cursor, size, dirty: true }
     cursor += size
     slots.push(slot)
@@ -121,8 +121,8 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
   function write(slot: UniformSlot, values: ArrayLike<number> | number): boolean {
     let changed = false
     if (typeof values === 'number') {
-      // Скалярный float-uniform: сравнение и запись первого элемента
-      // (раньше values[0] на числе давал undefined → молчаливый ноль).
+      // Scalar float-uniform: comparison and write of the first element
+      // (previously values[0] on a number gave undefined → a silent zero).
       if (Math.fround(values) !== buffer[slot.base]) {
         buffer[slot.base] = values
         changed = true
@@ -155,7 +155,7 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
   function writeFloat(slot: number | UniformSlotBytes, value: number): void {
     const offset = byteOffsetOf(slot)
     if (offset % 4 !== 0 || offset < 0 || offset >= buffer.byteLength) {
-      throw new Error(`rune: writeFloat — неверное смещение ${offset}`)
+      throw new Error(`rune: writeFloat — invalid offset ${offset}`)
     }
     const floatIndex = offset >> 2
     if (Math.fround(value) !== buffer[floatIndex]) {
@@ -220,7 +220,7 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
   function importBytes(from: number, source: Uint8Array): void {
     if (source.byteLength === 0) return
     if (from < 0 || from + source.byteLength > buffer.byteLength) {
-      throw new Error('rune: importBytes выходит за границы арены')
+      throw new Error('rune: importBytes goes out of the arena bounds')
     }
     bytes.set(source, from)
     const fromFloat = from >> 2

@@ -1,13 +1,13 @@
-// Ячейка-сигнал: значение + версия (для dirty-проверок) + подписчики.
-// Уведомления — через schedule() из batch.ts: вне batch мгновенно,
-// внутри batch/epoch.frame — один раз на выходе (§9.11.2: пуш в signal
-// внутри кадра → реактивные derive получают согласованное состояние).
+// Signal cell: value + version (for dirty checks) + subscribers.
+// Notifications go through schedule() from batch.ts: outside a batch —
+// immediately, inside batch/epoch.frame — once on exit (§9.11.2: a push
+// in signal within a frame → reactive derives get consistent state).
 
 import { reportRead } from './tracking.ts'
 import { schedule } from './batch.ts'
 
 export interface SignalOptions {
-  /** Имя для диагностики. */
+  /** Name for diagnostics. */
   readonly name?: string
 }
 
@@ -16,7 +16,7 @@ export interface SignalCell<T> {
   set value(next: T)
   peek(): T
   subscribe(fn: (value: T) => void): () => void
-  /** Монотонный счётчик записей — основа dirty-проверок live-команд. */
+  /** Monotonic write counter — the basis of dirty checks for live commands. */
   readonly version: number
 }
 
@@ -39,15 +39,15 @@ export function signal<T>(initial: T, _options: SignalOptions = {}): SignalCell<
       if (next === current) return
       current = next
       version++
-      // Значение фиксируется на момент записи: подписчик видит то, что
-      // записали, даже если за время batch ячейку переписали снова
-      // (каждая запись планирует своё уведомление — эффекты дедуплицируются
-      // на своём уровне, см. EffectCell.queueRerun).
+      // The value is fixed at the moment of the write: a subscriber sees
+      // what was written, even if the cell is overwritten again during the
+      // batch (each write schedules its own notification — effects are
+      // deduplicated at their own level, see EffectCell.queueRerun).
       const snapshot = current
       schedule(() => {
-        // Снимок: подписчик может отписаться/переподписаться (effect rebind,
-        // derive rebind) прямо в колбэке — мутация живого Set во время
-        // итерации вместе с синхронным schedule даёт живоблок.
+        // Snapshot: a subscriber may unsubscribe/resubscribe (effect rebind,
+        // derive rebind) right in the callback — mutating a live Set during
+        // iteration combined with synchronous schedule gives a livelock.
         for (const fn of [...subscribers]) fn(snapshot)
       })
     },

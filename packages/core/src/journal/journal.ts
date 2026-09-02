@@ -1,58 +1,58 @@
 /**
- * Journal — реестр долгоживущих деклараций (create/destroy ресурса) с replay.
+ * Journal — a registry of long-lived declarations (resource create/destroy) with replay.
  *
- * Контракт (DESIGN.md §9.5 P3, §5.1, §9.9, §8 задача 1):
+ * Contract (DESIGN.md §9.5 P3, §5.1, §9.9, §8 task 1):
  *   Journal.replay(newBackend) = switchBackend = device-loss recovery =
- *   = worker migration — один механизм на три сценария.
+ *   = worker migration — one mechanism for three scenarios.
  *
- * Что журналируется (M1 — базовый набор):
+ * What is journaled (M1 — the basic set):
  *   - createTexture / destroyTexture
  *   - createProgram / destroyProgram
  *   - createBuffer / destroyBuffer
  *   - createTarget / destroyTarget
- *   - texImage2DFromSource — частично: source не сериализуем (ImageBitmap может
- *     быть закрыт, HTMLCanvasElement — DOM-зависим). Журнал хранит kind+flipY;
- *     пользователь при replay регистрирует источник через sourceFor(kind).
+ *   - texImage2DFromSource — partially: source is not serializable (ImageBitmap may
+ *     be closed, HTMLCanvasElement — DOM-dependent). The journal stores kind+flipY;
+ *     the user registers the source at replay via sourceFor(kind).
  *
- * Что НЕ журналируется:
- *   - Frame-опсы (drawArrays, setUniform*, bindTexture) — это per-frame,
- *     идут в Tape, а не в Journal. Journal — только долгоживущие ресурсы.
- *   - texSubImage2D (стриминг) — belongs to Pump<UploadJob>, не к декларациям.
+ * What is NOT journaled:
+ *   - Frame ops (drawArrays, setUniform*, bindTexture) — these are per-frame,
+ *     they go into the Tape, not the Journal. Journal — only long-lived resources.
+ *   - texSubImage2D (streaming) — belongs to Pump<UploadJob>, not to declarations.
  *
- * compact(): удалить пары create→destroy одного id (heap compaction #13).
- *            Если destroy был, но create повторился — оставить последний create.
+ * compact(): remove create→destroy pairs of the same id (heap compaction #13).
+ *            If there was a destroy but create repeated — keep the last create.
  *
- * snapshot(): глубокая копия журнала (#41 resume-snapshot). Пользователь
- *             может replay-нуть на новом backend'е без перезаписи истории.
+ * snapshot(): a deep copy of the journal (#41 resume-snapshot). The user
+ *             can replay onto a new backend without rewriting history.
  *
- * evict(predicate): убрать опсы, подошедшие под предикат (#14 lazy re-declaration).
+ * evict(predicate): remove ops matching the predicate (#14 lazy re-declaration).
  *
- * Идемпотентность replay: повторный replay на том же backend'е даёт те же
- * id'шники — Journal не знает о состоянии backend'а, только о порядке опсов.
- * Если backend уже имеет ресурс с тем же id — ответственность на backend'е
- * (либо игнорировать, либо бросить). Для WebGL2 realGL: createTexture всегда
- * выдаёт новый id — повторный replay создаст дубликаты. Поэтому правильное
- * использование — после потери устройства, на СВЕЖЕМ backend'е.
+ * Replay idempotency: a repeated replay on the same backend yields the same
+ * ids — Journal knows nothing about the backend's state, only about op order.
+ * If the backend already has a resource with the same id — the responsibility is the backend's
+ * (either ignore, or throw). For WebGL2 realGL: createTexture always
+ * yields a new id — a repeated replay will create duplicates. So the correct
+ * usage is after device loss, on a FRESH backend.
  */
 
-/** Цвет очистки цели (используется в createTarget). */
+/** Target clear color (used in createTarget). */
 import type { TextureFormat } from '../formats.ts'
 
 export type ClearColor = readonly [number, number, number, number]
 
-/** Декларация — create или destroy долгоживущего ресурса.
- *  id — это id, выданный facade при create. При replay новый backend
- *  должен выдать тот же id (поэтому replay через registerIdMap). */
+/** A declaration — create or destroy of a long-lived resource.
+ *  id is the id issued by the facade at create. On replay the new backend
+ *  must issue the same id (hence replay via registerIdMap). */
 export type DeclOp =
-  // Task 57: format добавлен для WebGPU — у GPUFacade.createTexture
-  // сигнатура (width, height, format?, options?) отличается от WebGL2
-  // (width, height, options?). При cross-backend replay (например,
-  // journal на WebGPU → replay на WebGL2) format='canvas' будет
-  // молча проигнорирован WebGL2 (он всегда RGBA8). При том же бэкенде
-  // replay передаёт format как есть.
-  // Task 67: формат расширен HDR-значениями (rgba16float/rgba32float) —
-  // сессии маппят их в internalFormat WebGL2 (RGBA16F/RGBA32F) и в
-  // GPUTextureFormat WebGPU ('rgba16float'/'rgba32float').
+  // Task 57: format added for WebGPU — GPUFacade.createTexture's
+  // signature (width, height, format?, options?) differs from WebGL2's
+  // (width, height, options?). In cross-backend replay (e.g.,
+  // journal on WebGPU → replay on WebGL2) format='canvas' will be
+  // silently ignored by WebGL2 (it is always RGBA8). On the same backend
+  // replay passes format as is.
+  // Task 67: the format extended with HDR values (rgba16float/rgba32float) —
+  // sessions map them to the WebGL2 internalFormat (RGBA16F/RGBA32F) and to the
+  // WebGPU GPUTextureFormat ('rgba16float'/'rgba32float').
   | { readonly kind: 'createTexture'; readonly id: number; readonly width: number; readonly height: number; readonly format?: TextureFormat; readonly options?: { readonly mipLevels?: number; readonly maxAnisotropy?: number } }
   | { readonly kind: 'destroyTexture'; readonly id: number }
   | { readonly kind: 'createProgram'; readonly id: number; readonly vertex: string; readonly fragment: string }
@@ -62,56 +62,56 @@ export type DeclOp =
   | { readonly kind: 'createTarget'; readonly id: number; readonly textureId: number; readonly width: number; readonly height: number; readonly depth: boolean; readonly color: ClearColor }
   | { readonly kind: 'destroyTarget'; readonly id: number }
   | { readonly kind: 'texImage2DFromSource'; readonly textureId: number; readonly sourceKind: string; readonly flipY: boolean }
-  // Sub-mip views (Task 56): createTextureView/destroyTextureView — долгоживущие
-  // декларации (как createTexture). При replay на новом backend'е вид
-  // воссоздаётся через target.createTextureView(textureId, { baseMipLevel,
-  // mipLevelCount }). ВНИМАНИЕ: textureId в createTextureView — это id на
-  // исходном backend'е (до device-loss). При replay должен быть замаплен на
-  // новый id через idMap (см. replayJournalOn — caller несёт ответственность
-  // за id-mapping, т.к. только он знает порядок create-ов).
+  // Sub-mip views (Task 56): createTextureView/destroyTextureView — long-lived
+  // declarations (like createTexture). On replay onto a new backend the view
+  // is recreated via target.createTextureView(textureId, { baseMipLevel,
+  // mipLevelCount }). ATTENTION: textureId in createTextureView is the id on
+  // the source backend (before device-loss). On replay it must be mapped to
+  // the new id via idMap (see replayJournalOn — the caller bears responsibility
+  // for id-mapping, since only it knows the order of creates).
   | { readonly kind: 'createTextureView'; readonly id: number; readonly textureId: number; readonly baseMipLevel?: number; readonly mipLevelCount?: number }
   | { readonly kind: 'destroyTextureView'; readonly id: number }
 
-/** Snapshot — глубокая копия журнала для resume (#41). */
+/** Snapshot — a deep copy of the journal for resume (#41). */
 export interface JournalSnapshot {
   readonly ops: readonly DeclOp[]
 }
 
-/** Журнал деклараций: append-only с компактированием. */
+/** Declaration journal: append-only with compaction. */
 export interface Journal {
-  /** Записать декларацию. Append-only, не итерирует. */
+  /** Record a declaration. Append-only, does not iterate. */
   record(op: DeclOp): void
-  /** Воспроизвести опсы на любом совместимом приёмнике.
-   *  Для device-loss recovery: создать новый backend'овый фасад, зарегистри-
-   *  ровать source-provider (для texImage2DFromSource), и replay'нуть. */
+  /** Replay ops onto any compatible receiver.
+   *  For device-loss recovery: create a new backend facade, register
+   *  a source-provider (for texImage2DFromSource), and replay. */
   replay(apply: (op: DeclOp) => void): void
-  /** Все опсы в порядке записи (для отладки/аудита). */
+  /** All ops in recording order (for debugging/audit). */
   entries(): readonly DeclOp[]
-  /** Удалить create→destroy пары того же id; уничтоженные до конца — не нужны.
-   *  Оставшиеся destroy без create — оставляем (это странное состояние, аудит). */
+  /** Remove create→destroy pairs of the same id; ones destroyed to the end are not needed.
+   *  Remaining destroy without create — we keep (a strange state, audit). */
   compact(): void
-  /** Глубокая копия (#41 resume-snapshot). */
+  /** Deep copy (#41 resume-snapshot). */
   snapshot(): JournalSnapshot
-  /** Убрать опсы под предикатом (#14 lazy re-declaration). */
+  /** Remove ops under a predicate (#14 lazy re-declaration). */
   evict(predicate: (op: DeclOp) => boolean): void
-  /** Сбросить журнал в пустое состояние (новая сессия). */
+  /** Reset the journal to an empty state (new session). */
   reset(): void
-  /** Количество опсов. */
+  /** Number of ops. */
   readonly size: number
 }
 
-/** Создать пустой Journal. */
+/** Create an empty Journal. */
 export function createJournal(): Journal {
   const ops: DeclOp[] = []
 
   return {
     record(op) {
-      // Task 61: JSON round-trip (worker migration / device-loss recovery)
-      // превращает Float32Array в plain-object {"0":v0,"1":v1,...}. Записываем
-      // такие опсы через нормализацию — журнал самовосстанавливается до
-      // типизированного состояния, и snapshot()/replay() не падают на
-      // op.data.slice (регрессия «Unhandled rejection: op.data.slice is not
-      // a function»). Все остальные kind'ы проходят как есть.
+      // Task 61: a JSON round-trip (worker migration / device-loss recovery)
+      // turns Float32Array into a plain object {"0":v0,"1":v1,...}. We record
+      // such ops via normalization — the journal self-heals to
+      // typed state, and snapshot()/replay() do not crash on
+      // op.data.slice (the "Unhandled rejection: op.data.slice is not
+      // a function" regression). All other kinds pass through as is.
       ops.push(op.kind === 'createBuffer' && !(op.data instanceof Float32Array)
         ? { ...op, data: toFloat32Array(op.data) }
         : op)
@@ -120,40 +120,40 @@ export function createJournal(): Journal {
       for (const op of ops) apply(op)
     },
     entries() {
-      // Defensive copy: внешний код не должен мутировать внутреннее состояние
+      // Defensive copy: external code must not mutate internal state
       return ops.slice()
     },
     compact() {
-      // Удалить пары create→destroy одного id. Идём с конца: если destroy,
-      // ищем предшествующий create того же ресурса — удаляем оба. Иначе
-      // оставляем (destroy без create — аудиторская аномалия).
+      // Remove create→destroy pairs of the same id. Walk from the end: if destroy,
+      // look for a preceding create of the same resource — drop both. Otherwise
+      // keep it (destroy without create — an audit anomaly).
       //
-      // Task 61 (prune мёртвых ссылок): помимо create→destroy пар, убираем
-      // опсы, ссылающиеся на УНИЧТОЖЕННУЮ текстуру — texImage2DFromSource,
-      // createTextureView и createTarget. Иначе replay такого журнала на
-      // свежем фасаде упадёт: create текстуры удалён парой, а зависимый опс
-      // продолжает ссылаться на несуществующий textureId.
+      // Task 61 (dead-reference prune): besides create→destroy pairs, we drop
+      // ops referencing a DESTROYED texture — texImage2DFromSource,
+      // createTextureView and createTarget. Otherwise replaying such a journal on
+      // a fresh facade would crash: the texture's create is removed by the pair, while a dependent op
+      // keeps referencing a nonexistent textureId.
       const destroyedTextures = new Set<number>()
       const destroyedPrograms = new Set<number>()
       const destroyedBuffers = new Set<number>()
       const destroyedTargets = new Set<number>()
-      // Sub-mip views (Task 56): id-namespace отделен от textureId (≥1M),
-      // но компактирование идёт по тому же принципу — пара create+destroy
-      // одного viewId удаляет оба опса.
+      // Sub-mip views (Task 56): the id namespace is separate from textureId (≥1M),
+      // but compaction follows the same principle — a create+destroy pair
+      // of the same viewId removes both ops.
       const destroyedTextureViews = new Set<number>()
 
-      // Проход 0 (Task 61): позиционная живость текстур для зависимых опсов
+      // Pass 0 (Task 61): positional liveness of textures for dependent ops
       // (texImage2DFromSource / createTextureView / createTarget).
       //
-      // Текстура жива в КОНЕЧНОМ состоянии, если её последний lifecycle-опс —
-      // create. Но этого мало: при «пересоздании» id (create→…→destroy→create)
-      // выживающий create — ПОСЛЕДНИЙ, а зависимый опс мог стоять до него —
-      // такой опс принадлежит мёртвой инкарнации id и на replay ссылался бы
-      // на текстуру до её (пере)создания. Поэтому правило тройное:
-      //   1) последний lifecycle-опс текстуры — create (жива в конце);
-      //   2) зависимый опс стоит ПОСЛЕ последнего create своей текстуры;
-      //   3) в момент зависимого опса текстура существовала (последний
-      //      lifecycle-опс ДО него — create, не destroy).
+      // A texture is alive in the FINAL state if its last lifecycle op is
+      // create. But that is not enough: on id "recreation" (create→…→destroy→create)
+      // the surviving create is the LAST one, while a dependent op may precede it —
+      // such an op belongs to a dead incarnation of the id and on replay would reference
+      // the texture before its (re)creation. Hence the rule is threefold:
+      //   1) the texture's last lifecycle op is create (alive at the end);
+      //   2) the dependent op comes AFTER the last create of its texture;
+      //   3) at the moment of the dependent op the texture existed (the last
+      //      lifecycle op BEFORE it — create, not destroy).
       const lastTexLifecycle = new Map<number, 'create' | 'destroy'>()
       const lastTexCreateIdx = new Map<number, number>()
       for (let i = 0; i < ops.length; i++) {
@@ -165,9 +165,9 @@ export function createJournal(): Journal {
           lastTexLifecycle.set(op.id, 'destroy')
         }
       }
-      // Состояние текстуры на момент каждой позиции (один проход с бегущим стейтом)
+      // Texture state at each position (one pass with running state)
       const runningState = new Map<number, 'create' | 'destroy'>()
-      const aliveAt = new Map<number, boolean>() // индекс зависимого опса → жива ли его текстура (усл. 3)
+      const aliveAt = new Map<number, boolean>() // dependent op index → is its texture alive (cond. 3)
       for (let i = 0; i < ops.length; i++) {
         const op = ops[i]!
         if (op.kind === 'texImage2DFromSource' || op.kind === 'createTextureView' || op.kind === 'createTarget') {
@@ -179,11 +179,11 @@ export function createJournal(): Journal {
         }
       }
       const texAliveAt = (i: number, textureId: number): boolean =>
-        lastTexLifecycle.get(textureId) === 'create'            // усл. 1: жива в конце
-        && (lastTexCreateIdx.get(textureId) ?? -1) < i          // усл. 2: после последнего create
-        && aliveAt.get(i) === true                              // усл. 3: существовала в момент опса
+        lastTexLifecycle.get(textureId) === 'create'            // cond. 1: alive at the end
+        && (lastTexCreateIdx.get(textureId) ?? -1) < i          // cond. 2: after the last create
+        && aliveAt.get(i) === true                              // cond. 3: existed at the op's moment
 
-      // Первый проход: собрать все destroy'и (id + тип)
+      // First pass: collect all destroys (id + type)
       for (const op of ops) {
         if (op.kind === 'destroyTexture') destroyedTextures.add(op.id)
         else if (op.kind === 'destroyProgram') destroyedPrograms.add(op.id)
@@ -192,8 +192,8 @@ export function createJournal(): Journal {
         else if (op.kind === 'destroyTextureView') destroyedTextureViews.add(op.id)
       }
 
-      // Второй проход: убрать create+destroy пары того же id; оставить только
-      // либо create без destroy (живые), либо destroy без create (аномалия).
+      // Second pass: remove create+destroy pairs of the same id; keep only
+      // either create without destroy (alive), or destroy without create (an anomaly).
       const keep: DeclOp[] = []
       const seenDestroy = {
         tex: new Set<number>(),
@@ -202,9 +202,9 @@ export function createJournal(): Journal {
         tgt: new Set<number>(),
         view: new Set<number>(),
       }
-      // Task 61: view- и target-ресурсы, чьи create-опсы выброшены prune'ом
-      // (текстура мертва) — их destroy-опсы тоже выкидываем, чтобы не
-      // оставлять сирот.
+      // Task 61: view and target resources whose create ops were dropped by the prune
+      // (the texture is dead) — their destroy ops are dropped too, so as not to
+      // leave orphans.
       const prunedViewIds = new Set<number>()
       const prunedTargetIds = new Set<number>()
       for (let i = 0; i < ops.length; i++) {
@@ -212,13 +212,13 @@ export function createJournal(): Journal {
         switch (op.kind) {
           case 'createTexture':
             if (destroyedTextures.has(op.id) && !seenDestroy.tex.has(op.id)) {
-              seenDestroy.tex.add(op.id) // пропускаем create — он парный с destroy
+              seenDestroy.tex.add(op.id) // skip the create — it is paired with a destroy
             } else {
               keep.push(op)
             }
             break
           case 'destroyTexture':
-            if (seenDestroy.tex.has(op.id)) continue // уже удалили create — destroy тоже выкинуть
+            if (seenDestroy.tex.has(op.id)) continue // already removed the create — drop the destroy too
             keep.push(op)
             break
           case 'createProgram':
@@ -244,8 +244,8 @@ export function createJournal(): Journal {
             keep.push(op)
             break
           case 'createTarget':
-            // Task 61: target на мёртвой текстуре не восстанавливается —
-            // create выкидываем, его destroy помечаем к удалению.
+            // Task 61: a target on a dead texture is not restored —
+            // drop the create, mark its destroy for removal.
             if (!texAliveAt(i, op.textureId)) {
               prunedTargetIds.add(op.id)
               continue
@@ -257,13 +257,13 @@ export function createJournal(): Journal {
             }
             break
           case 'destroyTarget':
-            if (prunedTargetIds.has(op.id)) continue // create выброшен prune'ом
+            if (prunedTargetIds.has(op.id)) continue // create dropped by the prune
             if (seenDestroy.tgt.has(op.id)) continue
             keep.push(op)
             break
-          // Sub-mip views (Task 56): компактятся по тому же принципу.
+          // Sub-mip views (Task 56): compacted by the same principle.
           case 'createTextureView':
-            // Task 61: view на мёртвой текстуре не восстанавливается.
+            // Task 61: a view on a dead texture is not restored.
             if (!texAliveAt(i, op.textureId)) {
               prunedViewIds.add(op.id)
               continue
@@ -275,12 +275,12 @@ export function createJournal(): Journal {
             }
             break
           case 'destroyTextureView':
-            if (prunedViewIds.has(op.id)) continue // create выброшен prune'ом
+            if (prunedViewIds.has(op.id)) continue // create dropped by the prune
             if (seenDestroy.view.has(op.id)) continue
             keep.push(op)
             break
           case 'texImage2DFromSource':
-            // Task 61: загрузка в мёртвую текстуру не воспроизводится.
+            // Task 61: an upload into a dead texture is not replayed.
             if (!texAliveAt(i, op.textureId)) continue
             keep.push(op)
             break
@@ -292,7 +292,7 @@ export function createJournal(): Journal {
       ops.push(...keep)
     },
     snapshot() {
-      // Глубокая копия опсов. Float32Array копируется через slice.
+      // Deep copy of ops. Float32Array is copied via slice.
       const copy = ops.map(cloneOp)
       return { ops: copy }
     },
@@ -310,28 +310,28 @@ export function createJournal(): Journal {
   }
 }
 
-/** Клонирование опса для snapshot (Float32Array — slice, остальные — readonly). */
+/** Clone an op for a snapshot (Float32Array — slice, the rest — readonly). */
 function cloneOp(op: DeclOp): DeclOp {
   if (op.kind === 'createBuffer') {
-    // Task 61: toFloat32Array — защита от «протухших» опсов, попавших в
-    // журнал в обход нормализации record() (внешняя запись/эксперименты).
-    // Живой путь покрыт record(); здесь — belt-and-suspenders.
+    // Task 61: toFloat32Array — protection from "stale" ops that got into the
+    // journal bypassing record() normalization (external writes/experiments).
+    // The live path is covered by record(); here — belt-and-suspenders.
     return { ...op, data: toFloat32Array(op.data).slice() }
   }
   return op
 }
 
-/** Task 61: коэрсинг данных createBuffer к Float32Array.
+/** Task 61: coercion of createBuffer data to Float32Array.
  *
- * JSON.stringify(Float32Array) даёт {"0":v0,"1":v1,...} — plain object с
- * числовыми ключами (integer-like ключи итерируются в порядке возрастания,
- * порядок значений сохраняется). JSON.parse возвращает такой же plain
- * object — без .slice(), без ArrayBuffer. Эта функция восстанавливает
- * типизированный вид из любого допустимого представления:
- *   • Float32Array → как есть (тот же экземпляр)
+ * JSON.stringify(Float32Array) yields {"0":v0,"1":v1,...} — a plain object with
+ * numeric keys (integer-like keys iterate in ascending order,
+ * value order is preserved). JSON.parse returns the same plain
+ * object — without .slice(), without ArrayBuffer. This function restores the
+ * typed view from any valid representation:
+ *   • Float32Array → as is (the same instance)
  *   • number[]     → new Float32Array(arr)
  *   • plain object {"0":..,"1":..} → new Float32Array(Object.values(obj))
- *   • прочее       → пустой Float32Array (не падаем)
+ *   • other        → an empty Float32Array (we do not crash)
  */
 export function toFloat32Array(data: unknown): Float32Array {
   if (data instanceof Float32Array) return data

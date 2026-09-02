@@ -1,5 +1,5 @@
-// @rune/tape — запись лент в воркерах без GPU и проигрывание на владельце.
-// M5 дорожной карты: stub-ленты, доставка кадров, кросс-мировой replay.
+// @rune/tape — recording tapes in workers without a GPU and replaying on the owner.
+// M5 of the roadmap: stub tapes, frame delivery, cross-world replay.
 
 export { createStub } from './stub.ts'
 export type { TapeStub, RemoteFrame, ShipMode } from './stub.ts'

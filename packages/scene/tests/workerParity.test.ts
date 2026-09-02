@@ -1,14 +1,14 @@
 /**
- * Паритет воркера сцены: НАСТОЯЩИЙ bun-воркер (SAB + Atomics.wait)
- * против T0-конвейера в main. Один и тот же ввод — согласованные
- * миры/битсеты/инстанс-матрицы (инвариант транспортов §7.2).
+ * Scene worker parity: a REAL bun worker (SAB + Atomics.wait)
+ * vs the T0 pipeline in main. The same input — consistent
+ * worlds/bitsets/instance matrices (transport invariant §7.2).
  */
 import { describe, expect, it } from 'bun:test'
 import { Worker } from 'node:worker_threads'
 import { createCamera, createScene, createSceneWorkerBridge } from '../src/index.ts'
 import type { Scene } from '../src/index.ts'
 
-/** Порт bun-воркера под интерфейс моста. */
+/** Bun worker port adapted to the bridge interface. */
 function bunPort(worker: Worker) {
   return {
     postMessage: (message: unknown) => worker.postMessage(message),
@@ -19,7 +19,7 @@ function bunPort(worker: Worker) {
   }
 }
 
-/** Одна и та же топология на любой сцене (детерминизм → одинаковые слоты/ранги). */
+/** The same topology on any scene (determinism → identical slots/ranks). */
 function buildTopology(scene: Scene): void {
   const root = scene.create({ position: [0, 0, 0] })
   for (let i = 0; i < 40; i++) {
@@ -48,11 +48,11 @@ function popcount(words: Uint32Array): number {
 
 const OPTS = { capacity: 512, cameraMax: 1, groupMax: 4, maxInstances: 512 } as const
 
-describe('воркер сцены (SAB, настоящий поток)', () => {
-  it('паритет миров/битсетов/инстансов с T0-конвейером', async () => {
+describe('scene worker (SAB, real thread)', () => {
+  it('parity of worlds/bitsets/instances with the T0 pipeline', async () => {
     const worker = new Worker(new URL("./sceneWorkerEntry.ts", import.meta.url))
     try {
-      // Эталон: T0 в main.
+      // Reference: T0 in main.
       const reference = createScene(OPTS)
       buildTopology(reference)
       const cam = createCamera().setPerspective(Math.PI / 2, 1, 0.1, 100)
@@ -62,7 +62,7 @@ describe('воркер сцены (SAB, настоящий поток)', () => {
       reference.cull([cam])
       reference.collectInstances(0)
 
-      // Зеркало: та же топология в SAB + воркер.
+      // Mirror: the same topology in a SAB + worker.
       const mirror = createScene({ ...OPTS, shared: true })
       buildTopology(mirror)
       const bridge = createSceneWorkerBridge({ scene: mirror, worker: bunPort(worker) })
@@ -73,20 +73,20 @@ describe('воркер сцены (SAB, настоящий поток)', () => {
       expect(snap!.epoch).toBe(1)
       expect(snap!.cameraCount).toBe(1)
 
-      // Воркер снял всю грязь: локальный updateWorld пересчитывает 0 узлов.
+      // The worker consumed all dirt: local updateWorld recomputes 0 nodes.
       expect(mirror.updateWorld()).toBe(0)
 
-      // Паритет миров (та же топология/позиции → те же матрицы).
+      // World parity (same topology/positions → same matrices).
       for (let i = 0; i < reference.views.world.length; i++) {
         expect(Math.abs(mirror.views.world[i] - reference.views.world[i])).toBeLessThan(1e-6)
       }
 
-      // Паритет видимости.
+      // Visibility parity.
       const t0Bits = reference.views.bits.subarray(0, reference.views.bitsWords)
       expect(popcount(snap!.bits[0])).toBe(popcount(t0Bits))
       expect(snap!.bits[0].length).toBe(reference.views.bitsWords)
 
-      // Паритет инстанс-матриц группы 0.
+      // Parity of group 0 instance matrices.
       const t0Seg = reference.instances(0, { cameraIndex: 0 })
       expect(snap!.instances[0][0].count).toBe(t0Seg.count)
       const wm = snap!.instances[0][0].matrices
@@ -94,7 +94,7 @@ describe('воркер сцены (SAB, настоящий поток)', () => {
         expect(Math.abs(wm[i] - t0Seg.matrices[i])).toBeLessThan(1e-6)
       }
 
-      // Вторая эпоха: камера сдвинулась → свежий снимок с другой видимостью.
+      // Second epoch: the camera moved → a fresh snapshot with different visibility.
       cam.setViewLookAt(30, 6, 18, 0, 0, 0, 0, 1, 0)
       reference.updateWorld()
       reference.cull([cam])
@@ -110,11 +110,11 @@ describe('воркер сцены (SAB, настоящий поток)', () => {
       expect(stats.freshTakes).toBeGreaterThanOrEqual(2)
       await bridge.dispose()
     } finally {
-      // dispose() уже terminит воркер; повторный await в bun не резолвится.
+      // dispose() already terminates the worker; a repeated await does not resolve in bun.
     }
   }, 20000)
 
-  it('stale take не блокирует и отдаёт прошлый снимок', async () => {
+  it('stale take does not block and returns the previous snapshot', async () => {
     const worker = new Worker(new URL("./sceneWorkerEntry.ts", import.meta.url))
     try {
       const scene = createScene({ capacity: 64, cameraMax: 1, groupMax: 2, maxInstances: 64, shared: true })
@@ -122,16 +122,16 @@ describe('воркер сцены (SAB, настоящий поток)', () => {
       const bridge = createSceneWorkerBridge({ scene, worker: bunPort(worker) })
       await bridge.ready
       const cam = createCamera()
-      expect(bridge.take()).toBeNull() // до первой публикации снимка нет
+      expect(bridge.take()).toBeNull() // no snapshot before the first publish
       bridge.publish([cam])
       const snap = await bridge.waitFresh(4000)
       expect(snap).not.toBeNull()
-      const again = bridge.take() // воркер уже обработал эту эпоху → stale
+      const again = bridge.take() // the worker already processed this epoch → stale
       expect(again).toBe(snap)
       expect(bridge.stats().staleTakes).toBeGreaterThanOrEqual(1)
       await bridge.dispose()
     } finally {
-      // dispose() уже terminит воркер.
+      // dispose() already terminates the worker.
     }
   }, 20000)
 })

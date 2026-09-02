@@ -1,33 +1,33 @@
-/** Форматы полей feed (M5-подмножество).
- *  float32x2/x3/x4 (Task 73 / M5): векторные поля — dual-bind feed требует
- *  компоненты 1..4 на поле (досье §4.3: layout { position: 'float32x3', … }). */
+/** Feed field formats (M5 subset).
+ *  float32x2/x3/x4 (Task 73 / M5): vector fields — dual-bind feed requires
+ *  1..4 components per field (dossier §4.3: layout { position: 'float32x3', … }). */
 export type FeedFieldFormat = 'float32' | 'float32x2' | 'float32x3' | 'float32x4' | 'unorm8x4'
 
-/** Схема записи feed: имя → формат. */
+/** Feed record schema: name → format. */
 export type FeedLayout = Readonly<Record<string, FeedFieldFormat>>
 
-/** Политика переполнения ринга. */
+/** Ring overflow policy. */
 export type FeedPolicy = 'drop-oldest' | 'drop-new' | 'block'
 
-/** Носитель ринга: SAB (T1/T2, кросс-поток) или ArrayBuffer (T0/T3-мир). */
+/** Ring backing: SAB (T1/T2, cross-thread) or ArrayBuffer (T0/T3 world). */
 export type FeedBacking = 'sab' | 'local'
 
-/** Канал-фид: воркеры пишут в общий ринг, владелец GPU читает атомарно. */
+/** Channel feed: workers write into a shared ring, the GPU owner reads atomically. */
 export interface Feed {
   readonly buffer: ArrayBufferLike
   readonly capacity: number
   readonly stride: number
-  /** Записывает n записей от индекса from (локально, без publish). */
+  /** Writes n records starting at index `from` (locally, without publish). */
   view(from: number, count: number): FeedWriter
-  /** Сахар: дописывает в хвост, возвращает стартовый индекс. */
+  /** Sugar: appends to the tail, returns the starting index. */
   push(count: number): FeedWriter
-  /** Публикует: один атомарный инкремент счётчика на всю партию. */
+  /** Publishes: one atomic increment of the counter for the whole batch. */
   publish(): void
-  /** Атомарный снимок числа опубликованных записей. */
+  /** Atomic snapshot of the number of published records. */
   publishedCount(): number
 }
 
-/** Писатель пакета записей: задаёт поля по имени. */
+/** Batch record writer: sets fields by name. */
 export interface FeedWriter {
   setFloat(name: string, index: number, value: number): void
   setVec2(name: string, index: number, x: number, y: number): void
@@ -38,7 +38,7 @@ export interface FeedWriter {
 
 const HEADER_BYTES = 64 // count(u32), published(u32), dropped(u32), reserved
 
-/** Вычисляет stride записи по layout (выравнивание 4). */
+/** Computes the record stride from the layout (4-byte alignment). */
 export function feedStride(layout: FeedLayout): number {
   let stride = 0
   for (const format of Object.values(layout)) {
@@ -54,23 +54,23 @@ function formatBytes(format: FeedFieldFormat): number {
   return 4 // float32, unorm8x4
 }
 
-/** Число float-компонент поля (для вершинного пути dual-bind). */
+/** Number of float components in a field (for the dual-bind vertex path). */
 export function feedFieldSize(format: FeedFieldFormat): number {
   if (format === 'float32x2') return 2
   if (format === 'float32x3') return 3
   if (format === 'float32x4') return 4
-  return 1 // float32; unorm8x4 — байтовый (вершинно не используется)
+  return 1 // float32; unorm8x4 — byte-sized (not used for vertices)
 }
 
 export interface FeedOptions {
   readonly layout: FeedLayout
   readonly capacity: number
   readonly policy?: FeedPolicy
-  /** Носитель: 'sab' (default, кросс-поток T1/T2) | 'local' (T0/T3-мир). */
+  /** Backing: 'sab' (default, cross-thread T1/T2) | 'local' (T0/T3 world). */
   readonly backing?: FeedBacking
 }
 
-/** Создаёт feed на стороне владельца. */
+/** Creates a feed on the owner side. */
 export function createFeed(options: FeedOptions): Feed {
   const stride = feedStride(options.layout)
   const backing = options.backing ?? 'sab'
@@ -80,7 +80,7 @@ export function createFeed(options: FeedOptions): Feed {
   return makeFeed(buffer, options.layout, options.capacity, options.policy ?? 'drop-oldest')
 }
 
-/** Привязывается к фиду из воркера (тот же layout). */
+/** Attaches to a feed from a worker (same layout). */
 export function attachFeed(buffer: ArrayBufferLike, layout: FeedLayout, capacity: number): Feed {
   return makeFeed(buffer, layout, capacity, 'drop-oldest')
 }
@@ -110,13 +110,13 @@ function makeFeed(
 function reserve(buffer: ArrayBufferLike, capacity: number, count: number, _policy: FeedPolicy): number {
   const u32 = new Uint32Array(buffer)
   const from = Atomics.load(u32, 0)
-  // Task 75 (фикс «Number of bytes to write is too large»): written НИКОГДА
-  // не заходит за capacity. Раньше резерв шёл безусловно (written уходил за
-  // capacity, publish копировал его в published), и рендерер получал
-  // count > capacity → writeBuffer/bufferSubData больше буфера → внезапный
-  // OperationError под стрессом. Теперь окно закрыто = записи считаются
-  // drop'нутыми (счётчик u32[2]), данные пишутся «в пустоту» (OOB-записи
-  // TypedArray молча игнорируются) — published ≤ capacity всегда.
+  // Task 75 (fix for "Number of bytes to write is too large"): written NEVER
+  // goes past capacity. Previously the reserve went unconditionally (written went past
+  // capacity, publish copied it into published), and the renderer got
+  // count > capacity → writeBuffer/bufferSubData larger than the buffer → a sudden
+  // OperationError under stress. Now a closed window = records are counted as
+  // dropped (counter u32[2]), the data is written "into the void" (out-of-bounds
+  // TypedArray writes are silently ignored) — published ≤ capacity always.
   if (from + count > capacity) {
     Atomics.add(u32, 2, count)
     return capacity
@@ -186,6 +186,6 @@ function fieldOffsets(layout: FeedLayout): Map<string, number> {
 
 function requireOffset(offsets: Map<string, number>, name: string): number {
   const offset = offsets.get(name)
-  if (offset === undefined) throw new Error(`rune: поле фида "${name}" не объявлено`)
+  if (offset === undefined) throw new Error(`rune: feed field "${name}" is not declared`)
   return offset
 }

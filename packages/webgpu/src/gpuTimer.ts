@@ -1,65 +1,67 @@
 /**
- * GpuTimer — WebGPU реализация через timestamp-query feature.
+ * GpuTimer — WebGPU implementation via the timestamp-query feature.
  *
- * Контракт (GpuTimer из @rune/core):
- *  - begin(): вызывается в StatsCollector.beginFrame ( ДО кадрового рендера).
- *    Мапит readBuffer прошлого кадра (если есть pending resolve) и читает
- *    результат асинхронно в lastResult.
- *  - end(): noop на уровне timer — на самом деле writeTimestamp(END) делает
- *    GPUFacade через GpuTimerHandle.onEndPass в момент endPass(). Здесь
- *    noop, чтобы совместить с интерфейсом WebGL2 timer'а (где end() тоже
- *    закрывает query).
- *  - result(): возвращает lastResult (ms) или null если:
- *    • первый кадр (нет pending resolve)
+ * Contract (GpuTimer from @rune/core):
+ *  - begin(): called in StatsCollector.beginFrame ( BEFORE frame rendering).
+ *    Maps the previous frame's readBuffer (if there is a pending resolve)
+ *    and reads the result asynchronously into lastResult.
+ *  - end(): noop at the timer level — actually writeTimestamp(END) is done
+ *    by GPUFacade via GpuTimerHandle.onEndPass at endPass(). Here it is
+ *    a noop to stay compatible with the WebGL2 timer interface (where
+ *    end() also closes the query).
+ *  - result(): returns lastResult (ms) or null if:
+ *    • first frame (no pending resolve)
  *    • GPU device lost
  *    • mapAsync failed
- *    • feature недоступен
+ *    • feature unavailable
  *
- * WebGPU timestamp-query — асинхронный:
- *   frame N: writeTimestamp(BEGIN) в beginPass → draw → writeTimestamp(END) в endPass
- *           → resolveQuerySet(BEGIN..END → resolveBuffer) в submit
+ * WebGPU timestamp-query — asynchronous:
+ *   frame N: writeTimestamp(BEGIN) in beginPass → draw → writeTimestamp(END) in endPass
+ *           → resolveQuerySet(BEGIN..END → resolveBuffer) in submit
  *           → copyBuffer resolveBuffer → readBuffer
- *   frame N+1: begin() дёргает mapAsync на readBuffer → читает 2 BigInt64
+ *   frame N+1: begin() triggers mapAsync on readBuffer → reads 2 BigInt64
  *             (start_ns, end_ns) → gpuMs = (end - start) / 1e6
  *
- * Ограничения:
- *  - Chrome 113+ поддерживает timestamp-query (не на всех платформах).
- *  - В headless-тестах (mock GPUDevice) — feature нет, createGpuGpuTimer
- *    вернёт null.
- *  - mapAsync — async, результат приходит через микротаски. Если к моменту
- *    result() map ещё не завершён — отдаём previous lastResult (или null).
+ * Limitations:
+ *  - Chrome 113+ supports timestamp-query (not on all platforms).
+ *  - In headless tests (mock GPUDevice) — no feature, createGpuGpuTimer
+ *    returns null.
+ *  - mapAsync is async, the result arrives via microtasks. If by the time
+ *    result() is called the map is not finished — we return the previous
+ *    lastResult (or null).
  */
 
 import type { GpuTimer } from '@rune/core'
 
-/** Handle, который GPUFacade дёргает в нужные моменты для writeTimestamp.
- *  Сам WebGpuTimer реализует и GpuTimer (core), и GpuTimerHandle. */
+/** Handle that GPUFacade invokes at the right moments for writeTimestamp.
+ *  WebGpuTimer itself implements both GpuTimer (core) and GpuTimerHandle. */
 export interface GpuTimerHandle {
-  /** Вызывается GPUFacade после beginRenderPass. Пишет BEGIN-stamp в pass.
+  /** Called by GPUFacade after beginRenderPass. Writes the BEGIN stamp into the pass.
    *  pass.writeTimestamp(querySet, BEGIN_INDEX). */
   onBeginPass(pass: GPURenderPassEncoder): void
-  /** Вызывается GPUFacade ДО pass.end(). Пишет END-stamp в pass. */
+  /** Called by GPUFacade BEFORE pass.end(). Writes the END stamp into the pass. */
   onEndPass(pass: GPURenderPassEncoder): void
-  /** Вызывается GPUFacade ДО encoder.finish() (в submit). resolveQuerySet +
-   *  copyBuffer. Без этого timestamps остаются в querySet и недоступны CPU. */
+  /** Called by GPUFacade BEFORE encoder.finish() (in submit). resolveQuerySet +
+   *  copyBuffer. Without this, timestamps stay in the querySet and are
+   *  inaccessible to the CPU. */
   onSubmit(encoder: GPUCommandEncoder): void
 }
 
-/** Создаёт WebGPU GpuTimer если device имеет feature 'timestamp-query'.
- *  Иначе возвращает null — caps.has('timestamp-query') будет false,
- *  renderer не подключает timer, gpuMs = null в stats.
+/** Creates a WebGPU GpuTimer if the device has the 'timestamp-query' feature.
+ *  Otherwise returns null — caps.has('timestamp-query') will be false,
+ *  the renderer does not wire the timer, gpuMs = null in stats.
  *
- * @param device — реальный GPUDevice (не mock; mock вернёт null).
+ * @param device — a real GPUDevice (not a mock; a mock returns null).
  */
 export function createGpuGpuTimer(device: GPUDevice): { timer: GpuTimer; handle: GpuTimerHandle } | null {
-  // Проверяем feature через try/catch — features.has может бросать на старых browsers.
+  // Check the feature via try/catch — features.has may throw on older browsers.
   try {
     if (!device.features.has('timestamp-query' as GPUFeatureName)) return null
   } catch {
     return null
   }
 
-  // 2 timestamp slots: BEGIN (0) и END (1).
+  // 2 timestamp slots: BEGIN (0) and END (1).
   let querySet: GPUQuerySet
   try {
     querySet = device.createQuerySet({ type: 'timestamp', count: 2 })
@@ -67,8 +69,9 @@ export function createGpuGpuTimer(device: GPUDevice): { timer: GpuTimer; handle:
     return null
   }
 
-  // GPUBufferUsage — глобальный enum в браузере (Chrome 113+). В headless
-  // окружении без WebGPU его нет. Числовые fallback'и взяты из WebGPU spec
+  // GPUBufferUsage — a global browser enum (Chrome 113+). In a headless
+  // environment without WebGPU it is absent. The numeric fallbacks are
+  // taken from the WebGPU spec
   // (GPUBufferUsage.{MAP_READ=0x1, COPY_DST=0x8, COPY_SRC=0x4, QUERY_RESOLVE=0x20}).
   const MAP_READ = (globalThis as { GPUBufferUsage?: { MAP_READ?: number } }).GPUBufferUsage?.MAP_READ ?? 0x1
   const COPY_DST = (globalThis as { GPUBufferUsage?: { COPY_DST?: number } }).GPUBufferUsage?.COPY_DST ?? 0x8
@@ -79,13 +82,13 @@ export function createGpuGpuTimer(device: GPUDevice): { timer: GpuTimer; handle:
   let readBuffer: GPUBuffer
   try {
     // resolveBuffer: GPUQuerySet → buffer (BigInt64Array × 2 = 16 bytes).
-    // usage QUERY_RESOLVE + COPY_SRC: resolveQuerySet пишет сюда, copy —
-    // во второй buffer для mapAsync.
+    // usage QUERY_RESOLVE + COPY_SRC: resolveQuerySet writes here, the copy —
+    // into a second buffer for mapAsync.
     resolveBuffer = device.createBuffer({
       size: 16,
       usage: QUERY_RESOLVE | COPY_SRC,
     })
-    // readBuffer: конечный пункт для CPU-чтения. mapAsync(READ) → ArrayBuffer.
+    // readBuffer: the final destination for CPU reading. mapAsync(READ) → ArrayBuffer.
     readBuffer = device.createBuffer({
       size: 16,
       usage: COPY_DST | MAP_READ,
@@ -94,7 +97,7 @@ export function createGpuGpuTimer(device: GPUDevice): { timer: GpuTimer; handle:
     return null
   }
 
-  // GPUMapMode — глобальный enum в браузере. В headless нет. READ = 0x1.
+  // GPUMapMode — a global browser enum. Absent in headless. READ = 0x1.
   const MAP_READ_MODE = (globalThis as { GPUMapMode?: { READ?: number } }).GPUMapMode?.READ ?? 0x1
 
   let lastResult: number | null = null
@@ -102,8 +105,8 @@ export function createGpuGpuTimer(device: GPUDevice): { timer: GpuTimer; handle:
   let mapping = false
   let alive = true
 
-  // begin() — мапит readBuffer предыдущего кадра. Если map завершилась —
-  // читаем start_ns и end_ns как BigInt64, считаем ms.
+  // begin() — maps the previous frame's readBuffer. If the map completed —
+  // read start_ns and end_ns as BigInt64, compute ms.
   function safeBegin(): void {
     if (!alive) return
     if (!pendingResolve || mapping) return
@@ -126,13 +129,13 @@ export function createGpuGpuTimer(device: GPUDevice): { timer: GpuTimer; handle:
     }).catch(() => {
       mapping = false
       pendingResolve = false
-      // device lost или map failed — деактивируем
+      // device lost or map failed — deactivate
       alive = false
     })
   }
 
   function safeEnd(): void {
-    // На уровне timer — noop. END-stamp пишет GPUFacade через handle.onEndPass.
+    // At the timer level — noop. The END stamp is written by GPUFacade via handle.onEndPass.
   }
 
   function safeResult(): number | null {
@@ -140,17 +143,17 @@ export function createGpuGpuTimer(device: GPUDevice): { timer: GpuTimer; handle:
     return lastResult
   }
 
-  // ─── GpuTimerHandle реализация ─────────────────────────────────────────
+  // ─── GpuTimerHandle implementation ─────────────────────────────────────────
   function onBeginPass(pass: GPURenderPassEncoder): void {
     if (!alive) return
     try {
-      // writeTimestamp на pass — между beginRenderPass и любым draw.
+      // writeTimestamp on the pass — between beginRenderPass and any draw.
       // BEGIN_INDEX = 0.
       ;(pass as unknown as { writeTimestamp: (set: GPUQuerySet, idx: number) => void })
         .writeTimestamp(querySet, 0)
     } catch {
-      // Некоторые браузеры имеют feature, но не реализовали writeTimestamp на pass.
-      // Деактивируем — будет null result.
+      // Some browsers have the feature but did not implement writeTimestamp on the pass.
+      // Deactivate — the result will be null.
       alive = false
     }
   }

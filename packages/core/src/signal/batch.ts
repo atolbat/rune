@@ -1,10 +1,10 @@
-/** Отложенная работа: внутри batch копится, снаружи исполняется сразу. */
+/** Deferred work: inside a batch it accumulates, outside it runs immediately. */
 type Job = () => void
 
 let depth = 0
 let pending: Job[] = []
 
-/** Группирует записи: подписчики уведомляются один раз, на выходе. */
+/** Groups writes: subscribers are notified once, on exit. */
 export function batch<T>(run: () => T): T {
   enterBatch()
   try {
@@ -21,11 +21,12 @@ function enterBatch(): void {
 function exitBatch(): void {
   depth--
   if (depth === 0) {
-    // Флэш держит batch-контекст (depth=1): работа, запланированная самими
-    // уведомлениями (effect rerun, derive revalidate), копится в следующий
-    // виток флэша, а не исполняется мгновенно. Иначе «один перевыпуск на
-    // batch» ломается: первый rerun сбрасывает дедупликацию до того, как
-    // дошла вторая запись (репорт effect.test: runs=3 вместо 2).
+    // The flush keeps the batch context (depth=1): work scheduled by the
+    // notifications themselves (effect rerun, derive revalidate) accumulates
+    // into the next flush turn instead of running immediately. Otherwise
+    // "one rerun per batch" breaks: the first rerun resets deduplication
+    // before the second write arrives (report from effect.test: runs=3
+    // instead of 2).
     depth++
     try {
       flushPending()
@@ -36,7 +37,7 @@ function exitBatch(): void {
 }
 
 function flushPending(): void {
-  // Каскад: колбэк может планировать новую работу — крутим до опустошения.
+  // Cascade: a callback may schedule new work — spin until drained.
   while (pending.length > 0) {
     const jobs = pending
     pending = []
@@ -44,7 +45,7 @@ function flushPending(): void {
   }
 }
 
-/** Планирует работу: немедленно вне batch, в конец очереди внутри. */
+/** Schedules work: immediately outside a batch, to the end of the queue inside. */
 export function schedule(job: Job): void {
   if (depth === 0) job()
   else pending.push(job)

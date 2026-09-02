@@ -42,7 +42,7 @@ import type { Caps } from '@rune/core'
 import { createCaps } from '@rune/core'
 import type { Journal } from '@rune/core'
 
-/** Контекст кадра: стабильная форма (мутация полей, без аллокаций). */
+/** Frame context: a stable shape (field mutation, no allocations). */
 export interface FrameContext {
   time: number
   dt: number
@@ -50,66 +50,67 @@ export interface FrameContext {
   size: readonly [number, number]
 }
 
-/** Запись команды текущего кадра (для колбэков renderer.frame). */
+/** A record of a command in the current frame (for renderer.frame callbacks). */
 export type Recorder = (command: CompiledCommand, props?: unknown) => void
 
-/** Управление подпиской на кадры. */
+/** Frame subscription management. */
 export interface FrameHandle {
   cancel(): void
 }
 
-/** Рендерер WebGL2: канвас, авто-цикл, resize/DPR, sim-time, команды и live. */
+/** WebGL2 renderer: canvas, auto-loop, resize/DPR, sim-time, commands and live. */
 export interface WebGL2Renderer {
   readonly gl: GLFacade
-  /** Caps — возможности бэкенда. null в headless-режиме (createGL инъектирован). */
+  /** Caps — backend capabilities. null in headless mode (createGL injected). */
   readonly caps: Caps | null
   readonly size: ReadableSignal<readonly [number, number]>
   readonly aspect: ReadableSignal<number>
   readonly time: ReadableSignal<number>
-  /** Стриминг-планировщик: задачи исполняются в idle-слоте каждого кадра. */
+  /** Streaming scheduler: tasks run in the idle slot of every frame. */
   readonly uploads: UploadScheduler
-  /** Кадровый пул скретч-массивов (идея №2): без аллокаций в колбэках. */
+  /** Per-frame pool of scratch arrays (idea #2): no allocations in callbacks. */
   readonly transients: TransientPool
-  /** M5 (Task 73): транспорт-клиент читателя — диагностика режима
-   *  (renderer.transport.mode, досье §7.2: «Диагностика доступна через
-   *  renderer.transport»). null — рендерер без транспорта. */
+  /** M5 (Task 73): the reader's transport client — mode diagnostics
+   *  (renderer.transport.mode, dossier §7.2: "Diagnostics are available via
+   *  renderer.transport"). null — a renderer without transport. */
   readonly transport: TransportClient | null
-  /** M5 (Task 73): создать фид рендерера (dual-bind: vertex-атрибуты +
-   *  storage-массив структур; sync — на границе кадра, грязный диапазон
-   *  одним вызовом). Канал: T0/T1/T2 — SAB/local (.buffer → воркеру),
-   *  T3 — ping-pong (воркер: createMsgFeedWriter; чанки — applyChunks). */
+  /** M5 (Task 73): create a renderer feed (dual-bind: vertex attributes +
+   *  storage array of structs; sync — at the frame boundary, the dirty range
+   *  in one call). Channel: T0/T1/T2 — SAB/local (.buffer → to the worker),
+   *  T3 — ping-pong (worker: createMsgFeedWriter; chunks — applyChunks). */
   feed(options: RendererFeedOptions | TransportFeedView): RendererFeed
-  /** Создаёт пустую текстуру (стриминг — через texture.upload). */
+  /** Creates an empty texture (streaming — via texture.upload). */
   texture(width: number, height: number, options?: { mipLevels?: number; maxAnisotropy?: number; format?: GLTextureFormat }): Texture
-  /** Task 62: handle над существующим стабильным textureId (восстановлен
-   *  restoreResources после потери устройства). Не создаёт GPU-ресурс. */
+  /** Task 62: a handle over an existing stable textureId (restored by
+   *  restoreResources after device loss). Does not create a GPU resource. */
   attachTexture(textureId: number, width: number, height: number, mipLevels?: number): Texture
-  /** Task 64: handle над существующим стабильным viewId — view, восстановленный
-   *  restoreResources() по опсу view.create (viewId ≥ 1M, parent textureId < 1M).
-   *  Не создаёт GPU-ресурс и не пишет в журнал: опс view.create уже там.
-   *  dispose() → deleteTextureView(viewId) — пишет view.destroy в журнал
-   *  сессии (пара для будущего compact). Parent-текстуру освобождайте
-   *  отдельно: attachTexture(...).dispose() → texture.destroy. */
+  /** Task 64: a handle over an existing stable viewId — a view restored
+   *  by restoreResources() from the view.create op (viewId ≥ 1M, parent textureId < 1M).
+   *  Does not create a GPU resource and does not write to the journal: the
+   *  view.create op is already there.
+   *  dispose() → deleteTextureView(viewId) — writes view.destroy into the
+   *  session journal (a pair for a future compact). Release the parent texture
+   *  separately: attachTexture(...).dispose() → texture.destroy. */
   attachView(viewId: number, textureId: number, baseMipLevel?: number, mipLevelCount?: number): TextureView
-  /** Task 62: replay ResourceJournal v2 на СВЕЖЕМ фасаде этой сессии —
-   *  device-loss recovery. Присутствует только при опции resources.
-   *  Task 65: options.workingSet — soft reset (восстановить только сцену;
-   *  остальное лениво через ensureResident). */
+  /** Task 62: replay ResourceJournal v2 on a FRESH facade of this session —
+   *  device-loss recovery. Present only with the resources option.
+   *  Task 65: options.workingSet — soft reset (restore only the scene;
+   *  the rest lazily via ensureResident). */
   restoreResources?(options?: { workingSet?: WorkingSet }): RestoreReport
-  /** Task 65: ленивый возврат ОДНОГО отложенного ресурса после soft reset
-   *  (texture/view/target id). null — уже резидентен / нет сессии. */
+  /** Task 65: lazy return of ONE deferred resource after a soft reset
+   *  (texture/view/target id). null — already resident / no session. */
   ensureResident?(resourceId: number): RestoreReport | null
-  /** Task 66: LRU-вытеснение резидентных текстур до бюджета GPU-памяти
-   *  (обратная сторона ensureResident; давление памяти между потерями).
-   *  Вытесненные ресурсы остаются декларациями+контентом в журнале.
-   *  Присутствует только при опции resources. */
+  /** Task 66: LRU eviction of resident textures down to a GPU memory
+   *  budget (the flip side of ensureResident; memory pressure between losses).
+   *  Evicted resources remain as declarations+content in the journal.
+   *  Present only with the resources option. */
   evictLRU?(options?: { budgetBytes?: number; pinned?: WorkingSet }): EvictionReport
-  /** Task 66: оценка резидентной GPU-памяти + LRU-порядок (диагностика). */
+  /** Task 66: resident GPU memory estimate + LRU order (diagnostics). */
   residencyStats?(): ResidencyStats
   command(spec: DrawSpec): CompiledCommand
-  /** Полноэкранный проход в канвас: входы → фрагмент → экран. */
+  /** Fullscreen pass to the canvas: inputs → fragment → screen. */
   pass(fragment: string, options?: PassOptions): CompiledCommand
-  /** Поверхность-цель: текстура + полноэкранные проходы в неё. */
+  /** Target surface: a texture + fullscreen passes into it. */
   surface(options?: SurfaceOptions): Surface<CompiledCommand>
   live(spec: DrawSpec, deps?: readonly ReadableSignal[], props?: unknown): LiveCommand
   frame(callback: (ctx: FrameContext, record: Recorder) => void): FrameHandle
@@ -117,69 +118,69 @@ export interface WebGL2Renderer {
   step(nowMs: number): void
   start(): void
   stop(): void
-  /** Полный teardown: stop rAF + disconnect ResizeObserver + удалить все
-   *  ресурсы фасада (textures/programs/buffers/targets). После dispose
-   *  рендерер неработоспособен — пересоздавайте через createWebGL2Renderer.
-   *  Идемпотентно: повторный dispose — no-op. */
+  /** Full teardown: stop rAF + disconnect the ResizeObserver + delete all
+   *  facade resources (textures/programs/buffers/targets). After dispose
+   *  the renderer is unusable — re-create it via createWebGL2Renderer.
+   *  Idempotent: a repeated dispose is a no-op. */
   dispose(): void
 }
 
-/** Рендерер-текстура: id фасада + потоковая загрузка поверх планировщика. */
+/** Renderer texture: facade id + streaming upload over the scheduler. */
 export interface Texture extends TextureHandle {
   readonly width: number
   readonly height: number
-  /** Кол-во mip-уровней в цепи (1 = нет цепи). >1 → текстура создана с
-   *  texStorage2D levels=N, MIN_FILTER=LINEAR_MIPMAP_LINEAR. Streaming
-   *  через uploadMip(level) постепенно заполняет мипы от малого к большому;
-   *  MAX_LEVEL автоматически поднимается на загруженный уровень. */
+  /** Number of mip levels in the chain (1 = no chain). >1 → the texture was
+   *  created with texStorage2D levels=N, MIN_FILTER=LINEAR_MIPMAP_LINEAR.
+   *  Streaming via uploadMip(level) gradually fills the mips from small to
+   *  large; MAX_LEVEL is raised automatically to the loaded level. */
   readonly mipLevels: number
-  /** Потоковая загрузка RGBA-байтов: превью → чанки; прогресс и отмена.
-   *  Для ImageBitmap / HTMLCanvasElement / OffscreenCanvas / VideoFrame —
-   *  см. uploadImage (атомарная загрузка без стриминга). */
+  /** Streaming upload of RGBA bytes: preview → chunks; progress and cancel.
+   *  For ImageBitmap / HTMLCanvasElement / OffscreenCanvas / VideoFrame —
+   *  see uploadImage (an atomic upload without streaming). */
   upload(source: Uint8Array, options?: { priority?: number; onProgress?: (fraction: number) => void }): TextureUpload
-  /** Атомарная загрузка из bitmap/canvas/video — одним вызовом, без чанков.
-   *  WebGL2: texImage2D overload с TexImageSource (перезаписывает мип 0).
-   *  WebGPU: copyExternalImageToTexture (через gpu-фасад, если доступно).
-   *  Размер текстуры должен соответствовать источнику (или быть больше —
-   *  тайлы вне источника останутся нетронутыми).
+  /** Atomic upload from a bitmap/canvas/video — one call, no chunks.
+   *  WebGL2: texImage2D overload with TexImageSource (overwrites mip 0).
+   *  WebGPU: copyExternalImageToTexture (via the gpu facade, if available).
+   *  The texture size must match the source (or be larger — tiles outside
+   *  the source remain untouched).
    *
-   *  options.flipY (default false): перевернуть источник по Y. WebGL2 —
-   *  через UNPACK_FLIP_Y_WEBGL; WebGPU — через GPUCopyExternalImageSourceInfo.flipY.
-   *  Паритет: при false оба бэкенда пишут source row 0 в texture row 0
-   *  — отображение идентично. */
+   *  options.flipY (default false): flip the source along Y. WebGL2 —
+   *  via UNPACK_FLIP_Y_WEBGL; WebGPU — via GPUCopyExternalImageSourceInfo.flipY.
+   *  Parity: with false both backends write source row 0 into texture row 0
+   *  — the mapping is identical. */
   uploadImage(source: GLImageSource, options?: { flipY?: boolean }): void
-  /** Загрузка части текстуры (sub-region) из bitmap/canvas/video.
-   *  WebGL2: texSubImage2D overload с TexImageSource (НЕ перезаписывает
-   *  остальную текстуру). WebGPU: copyExternalImageToTexture с destination.origin=(x,y).
+  /** Upload of a part of a texture (sub-region) from a bitmap/canvas/video.
+   *  WebGL2: texSubImage2D overload with TexImageSource (does NOT overwrite
+   *  the rest of the texture). WebGPU: copyExternalImageToTexture with destination.origin=(x,y).
    *
-   *  Используется для:
-   *   - runtime atlas packing (несколько битмапов в одну текстуру),
-   *   - tile replacement (обновление части карты),
+   *  Used for:
+   *   - runtime atlas packing (several bitmaps into one texture),
+   *   - tile replacement (updating part of a map),
    *   - progressive loading.
    *
-   *  Регион определяется [x, y, x+source.width, y+source.height]. Выходит
-   *  за пределы текстуры → GL-error (проверки нет намеренно — дешёвый путь).
-   *  options.flipY (default false) — паритет с WebGPU (см. uploadImage). */
+   *  The region is defined by [x, y, x+source.width, y+source.height]. Going
+   *  outside the texture → a GL-error (no check on purpose — the cheap path).
+   *  options.flipY (default false) — parity with WebGPU (see uploadImage). */
   uploadSubImage(x: number, y: number, source: GLImageSource, options?: { flipY?: boolean }): void
-  /** Загрузка конкретного mip-уровня (level 0 = базовый, 1 = 1/2 размер, и т.д.).
+  /** Upload of a specific mip level (level 0 = base, 1 = 1/2 size, etc.).
    *
-   *  WebGL2: texImage2D с level параметром. Source должен иметь размер N/(2^level).
-   *  Для mip-chain текстуры (mipLevels>1) поднимает TEXTURE_MAX_LEVEL до level —
-   *  sampler видит только загруженные мипы, без чёрного кадра при частичной
-   *  загрузке. Для non-mip текстуры (mipLevels=1) загрузка level>0 не имеет
-   *  видимого эффекта без пересоздания текстуры.
-   *  WebGPU: copyExternalImageToTextureMip с destination.mipLevel=level.
-   *  WebGPU-путь игнорирует WebGL2-specific опции internalFormat/format/type
-   *  (формат текстуры задан при createTexture, не при upload).
+   *  WebGL2: texImage2D with a level parameter. The source must have size N/(2^level).
+   *  For a mip-chain texture (mipLevels>1) raises TEXTURE_MAX_LEVEL up to level —
+   *  the sampler sees only loaded mips, without a black frame during partial
+   *  loading. For a non-mip texture (mipLevels=1) loading level>0 has no
+   *  visible effect without re-creating the texture.
+   *  WebGPU: copyExternalImageToTextureMip with destination.mipLevel=level.
+   *  The WebGPU path ignores the WebGL2-specific options internalFormat/format/type
+   *  (the texture format is set at createTexture, not at upload).
    *
-   *  options.flipY (default false) — паритет с WebGPU (см. uploadImage).
+   *  options.flipY (default false) — parity with WebGPU (see uploadImage).
    *
-   *  options.internalFormat/format/type (WebGL2-only, Task 55): строгий контракт
-   *  формата/типа для HDR-данных. Default: RGBA8/RGBA/UNSIGNED_BYTE. Для
+   *  options.internalFormat/format/type (WebGL2-only, Task 55): a strict
+   *  format/type contract for HDR data. Default: RGBA8/RGBA/UNSIGNED_BYTE. For
    *  RGBA16F: internalFormat=0x881A, format=0x1908, type=0x140B (HALF_FLOAT).
-   *  WebGPU-путь эти опции игнорирует.
+   *  The WebGPU path ignores these options.
    *
-   *  Используется MipStreamer'ом для progressive mip upload. */
+   *  Used by the MipStreamer for progressive mip upload. */
   uploadMip(
     level: number,
     source: GLImageSource,
@@ -193,76 +194,76 @@ export interface Texture extends TextureHandle {
       type?: number
     },
   ): void
-  /** Создать sub-mip-range view текстуры (Task 58: expose через public handle).
+  /** Create a sub-mip-range view of the texture (Task 58: exposed via the public handle).
    *
-   *  WebGPU: GPUTextureView с baseMipLevel/mipLevelCount — sampler видит
-   *  только указанный диапазон мипов. Полезно для deep-zoom paging:
-   *  bindTexture(viewId) выбирает конкретный мип без авто-LOD.
+   *  WebGPU: a GPUTextureView with baseMipLevel/mipLevelCount — the sampler sees
+   *  only the specified mip range. Useful for deep-zoom paging:
+   *  bindTexture(viewId) picks a specific mip without auto-LOD.
    *
-   *  WebGL2: эмулируется через TEXTURE_BASE_LEVEL / TEXTURE_MAX_LEVEL при
+   *  WebGL2: emulated via TEXTURE_BASE_LEVEL / TEXTURE_MAX_LEVEL at
    *  bindTexture (Task 56: GLFacade.createTextureView). Disjoint id namespace:
-   *  viewId ≥ 1M, textureId < 1M — bindTexture(viewId|textureId) работает
-   *  без изменения сигнатуры.
+   *  viewId ≥ 1M, textureId < 1M — bindTexture(viewId|textureId) works
+   *  without changing the signature.
    *
-   *  Контракт:
-   *   - textureId должен иметь mipLevels ≥ 2 (иначе view не имеет смысла).
-   *   - baseMipLevel (default 0): стартовый mip-уровень для view.
-   *   - mipLevelCount (default = mipLevels - baseMipLevel): кол-во мипов в view.
+   *  Contract:
+   *   - textureId must have mipLevels ≥ 2 (otherwise the view makes no sense).
+   *   - baseMipLevel (default 0): the starting mip level of the view.
+   *   - mipLevelCount (default = mipLevels - baseMipLevel): the number of mips in the view.
    *   - baseMipLevel + mipLevelCount ≤ mipLevels.
    *
-   *  @returns TextureView handle с viewId. bindTexture(viewId) выбирает
-   *  диапазон мипов. dispose() — освобождает view (deleteTextureView).
+   *  @returns a TextureView handle with viewId. bindTexture(viewId) picks the
+   *  mip range. dispose() — releases the view (deleteTextureView).
    *
-   *  Journal-интеграция: createTextureView/destroyTextureView — долгоживущие
-   *  декларации, автоматически пишутся в Journal через withJournal /
-   *  withJournalGpu. При device-loss recovery воссоздаются через
+   *  Journal integration: createTextureView/destroyTextureView — long-lived
+   *  declarations, automatically written to the Journal via withJournal /
+   *  withJournalGpu. At device-loss recovery they are re-created via
    *  replayJournalOn / replayJournalOnGpu. */
   createView(options?: { baseMipLevel?: number; mipLevelCount?: number }): TextureView
-  /** Освободить GPU-текстуру (gl.deleteTexture). Идемпотентно.
-   *  Также освобождает все sub-mip views (созданные через createView) —
-   * facade сам убирает их из внутреннего кэша. */
+  /** Release the GPU texture (gl.deleteTexture). Idempotent.
+   *  Also releases all sub-mip views (created via createView) —
+   * the facade itself removes them from its internal cache. */
   dispose(): void
 }
 
-/** Sub-mip view текстуры (Task 58): expose GPUFacade.createTextureView
- *  через public Texture handle. View — это срез текстуры по диапазону
- *  мип-уровней; sampler видит только [baseMipLevel, baseMipLevel +
- *  mipLevelCount - 1]. Используется в deep-zoom paging и LOD-clamp
- *  сценариях.
+/** A sub-mip view of a texture (Task 58): exposes GPUFacade.createTextureView
+ *  via the public Texture handle. A view is a slice of the texture over a mip
+ *  range; the sampler sees only [baseMipLevel, baseMipLevel +
+ *  mipLevelCount - 1]. Used in deep-zoom paging and LOD-clamp
+ *  scenarios.
  *
- *  Паритет WebGPU ↔ WebGL2: на обоих бэкендах viewId ≥ 1M, disjoint
- *  namespace с textureId (< 1M). bindTexture(viewId) работает одинаково.
+ *  WebGPU ↔ WebGL2 parity: on both backends viewId ≥ 1M, a disjoint
+ *  namespace with textureId (< 1M). bindTexture(viewId) works the same.
  *
- *  Dispose: deleteTextureView(viewId) на facade. Идемпотентно. Не трогает
- *  parent texture (она управляется через Texture.dispose()). */
+ *  Dispose: deleteTextureView(viewId) on the facade. Idempotent. Does not touch
+ *  the parent texture (it is managed via Texture.dispose()). */
 export interface TextureView {
-  /** viewId ≥ 1_000_000. Передаётся в bindTexture(viewId, unit) или
-   *  в текстурный референс команды (textureId: viewId). */
+  /** viewId ≥ 1_000_000. Passed to bindTexture(viewId, unit) or into a
+   *  command's texture reference (textureId: viewId). */
   readonly viewId: number
-  /** Parent textureId (< 1M) — для информации. */
+  /** Parent textureId (< 1M) — for information. */
   readonly textureId: number
   readonly baseMipLevel: number
   readonly mipLevelCount: number | undefined
-  /** Освободить view (facade.deleteTextureView). Идемпотентно.
-   *  Parent texture НЕ трогается. */
+  /** Release the view (facade.deleteTextureView). Idempotent.
+   *  The parent texture is NOT touched. */
   dispose(): void
 }
 
-/** Вычислить кол-во mip-уровней для текстуры размером w×h.
- *  = 1 + floor(log2(min(w, h))). Например:
- *   - 256×256 → 9 уровней (level 0 = 256², 1 = 128², ..., 8 = 1×1)
- *   - 64×64  → 7 уровней
- *   - 4×4    → 3 уровня
- *  Возвращает 1 если min(w,h) ≤ 1 (нет mip-chain).
+/** Compute the number of mip levels for a texture of size w×h.
+ *  = 1 + floor(log2(min(w, h))). For example:
+ *   - 256×256 → 9 levels (level 0 = 256², 1 = 128², ..., 8 = 1×1)
+ *   - 64×64  → 7 levels
+ *   - 4×4    → 3 levels
+ *  Returns 1 if min(w,h) ≤ 1 (no mip chain).
  *
- *  Используется MipStreamer'ом и renderer.texture({ mipLevels: 'auto' }). */
+ *  Used by the MipStreamer and renderer.texture({ mipLevels: 'auto' }). */
 export function computeMipLevels(w: number, h: number): number {
   const minDim = Math.min(w, h)
   if (minDim <= 1) return 1
   return 1 + Math.floor(Math.log2(minDim))
 }
 
-/** Опции WebGL2-рендерера; инъекции — для headless-тестов. */
+/** WebGL2 renderer options; injections — for headless tests. */
 export interface WebGL2RendererOptions {
   readonly canvas: AnyCanvas | string
   readonly dpr?: number
@@ -273,55 +274,55 @@ export interface WebGL2RendererOptions {
   readonly requestFrame?: (callback: (timestamp: number) => void) => () => void
   readonly observeResize?: boolean
   readonly now?: () => number
-  /** Journal — реестр долгоживущих деклараций для device-loss recovery
-   *  (= switchBackend = worker migration). Если передан, GLFacade
-   *  оборачивается декоратором withJournal: create/destroy-опсы пишутся
-   *  автоматически. Replay — через replayJournalOn(journal, newGL, sourceFor). */
+  /** Journal — a registry of long-lived declarations for device-loss recovery
+   *  (= switchBackend = worker migration). If passed, GLFacade
+   *  is wrapped with the withJournal decorator: create/destroy ops are
+   *  written automatically. Replay — via replayJournalOn(journal, newGL, sourceFor). */
   readonly journal?: Journal
-  /** Task 62: ResourceJournal v2 — стабильные id + КОНТЕНТ в журнале.
-   *  Если передан, GLFacade оборачивается resourceSession-декоратором:
-   *  texture/view/target получают стабильные id (переживают потерю
-   *  устройства), write/update/writeMip-опсы хранят CPU-источники в
-   *  ContentStore. restoreResources() восстанавливает ВСЁ — декларации
-   *  и пиксели — replay-ем тех же примитивов на свежем фасаде.
-   *  Приоритет над journal (v1): переданы оба — используется resources. */
+  /** Task 62: ResourceJournal v2 — stable ids + CONTENT in the journal.
+   *  If passed, GLFacade is wrapped with the resourceSession decorator:
+   *  texture/view/target get stable ids (surviving device loss),
+   *  write/update/writeMip ops store CPU sources in the ContentStore.
+   *  restoreResources() restores EVERYTHING — declarations and
+   *  pixels — by replaying the same primitives on a fresh facade.
+   *  Priority over journal (v1): if both are passed — resources is used. */
   readonly resources?: ResourceJournal
-  /** Приём тихих GL-ошибок (WebGL2-паритет onGpuError у WebGPU): раз в кадр
-   *  после submit дренажится gl.getError() — все коды ошибок, накопленные
-   *  за кадр, уходят одним сообщением. Дедупликация: подряд идущие кадры с
-   *  той же ошибкой не спамят (одно сообщение на изменение состояния).
-   *  Используется демо для вывода на экран («[webgl2 GL error] …») — тихие
-   *  GL_INVALID_* иначе превращаются в «чёрный канвас» без диагностики. */
+  /** Sink for silent GL errors (the WebGL2 parity of WebGPU's onGpuError):
+   *  once per frame after submit, gl.getError() is drained — all error codes
+   *  accumulated over the frame go out in one message. Deduplication: consecutive
+   *  frames with the same error do not spam (one message per state change).
+   *  Used by the demo to display on screen ("[webgl2 GL error] …") — silent
+   *  GL_INVALID_* otherwise turn into a "black canvas" with no diagnostics. */
   readonly onGlError?: (message: string) => void
-  /** StatsCollector — для RendererStats (cpuMs, drawCalls, memoryEstimate).
-   *  В step() вызывает beginFrame()/endFrame() и addMemory при createTexture. */
+  /** StatsCollector — for RendererStats (cpuMs, drawCalls, memoryEstimate).
+   *  In step() calls beginFrame()/endFrame() and addMemory at createTexture. */
   readonly stats?: StatsCollector
-  /** Caps-объект — пробинг выполнен на уровне unified createRenderer.
-   *  WebGL2-путь использует только для caps.backend строки. */
+  /** The caps object — probing was done at the level of the unified createRenderer.
+   *  The WebGL2 path uses it only for the caps.backend string. */
   readonly caps?: Caps | null
-  /** M5 (Task 73): транспорт-клиент читателя (renderer.transport —
-   *  диагностика режима; досье §7.2). Опционально: без него renderer.feed()
-   *  создаёт канал по detectTransport(). */
+  /** M5 (Task 73): the reader's transport client (renderer.transport —
+   *  mode diagnostics; dossier §7.2). Optional: without it renderer.feed()
+   *  creates a channel via detectTransport(). */
   readonly transport?: TransportClient
 }
 
 const DEFAULT_CLEAR = { color: [0.07, 0.08, 0.11, 1] as const, depth: 1 }
 
-/** Создаёт WebGL2-рендерер с авто-циклом (явный путь без авто-выбора). */
+/** Creates a WebGL2 renderer with an auto-loop (the explicit path without auto-selection). */
 export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Renderer {
   const canvas = resolveCanvasAny(options.canvas)
   const dpr = canvasDpr(canvas, options.dpr)
-  // acquireWebGL2 даёт raw WebGL2RenderingContext — сохраняем для caps-probing.
-  // Если createGL инъектирован (headless-тесты) — probing пропускаем (нет raw gl).
+  // acquireWebGL2 yields a raw WebGL2RenderingContext — kept for caps-probing.
+  // If createGL is injected (headless tests) — probing is skipped (no raw gl).
   const rawContext = options.createGL === undefined ? acquireWebGL2(canvas) : null
   const rawGl = options.createGL !== undefined ? options.createGL(canvas) : createRealGL(rawContext!)
-  // Task 62: resourceSession (v2) имеет приоритет над journal (v1):
-  // стабильные id + контент в журнале + restoreResources(). v1-путь
-  // (withJournal) сохранён для обратной совместимости существующих тестов.
+  // Task 62: resourceSession (v2) takes priority over journal (v1):
+  // stable ids + content in the journal + restoreResources(). The v1 path
+  // (withJournal) is kept for backward compatibility of existing tests.
   const session = options.resources !== undefined ? createResourceSessionGL(rawGl, options.resources) : null
-  // Journal-декоратор (v1): пишет create/destroy-опсы в реестр для device-loss recovery.
-  // Frame-опсы (useProgram, setUniform*, drawArrays и пр.) — не журналируются
-  // (это per-frame, идут в Tape, а не в Journal).
+  // Journal decorator (v1): writes create/destroy ops into the registry for device-loss recovery.
+  // Frame ops (useProgram, setUniform*, drawArrays etc.) — not journaled
+  // (they are per-frame, going into the Tape, not the Journal).
   const gl = session !== null
     ? session.facade
     : (options.journal !== undefined ? withJournal(rawGl, options.journal) : rawGl)
@@ -336,11 +337,11 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
   })
 
   const epoch = createEpoch()
-  const layoutGuard = createLayoutGuard() // сейфгард: петли «атрибут↔layout↔observer»
+  const layoutGuard = createLayoutGuard() // safeguard: "attribute↔layout↔observer" loops
   const uploads = createUploadScheduler(options.uploads ?? {})
-  const transients = createTransientPool() // идея №2: скретч без GC
-  const feeds = new Set<RendererFeed>() // M5: sync на границе кадра
-  const builtinValues = createPassBuiltins() // u_time/u_resolution/u_texel проходов
+  const transients = createTransientPool() // idea #2: scratch without GC
+  const feeds = new Set<RendererFeed>() // M5: sync at the frame boundary
+  const builtinValues = createPassBuiltins() // u_time/u_resolution/u_texel of passes
   const writer = createTapeWriter(64)
   const [initW, initH] = getCanvasCssSize(canvas)
   const size = signal<readonly [number, number]>([initW, initH])
@@ -358,29 +359,31 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
   let disposed = false
 
   const [startW, startH] = getCanvasCssSize(canvas)
-  resize(startW, startH) // синхронный стартовый вьюпорт
+  resize(startW, startH) // synchronous initial viewport
   const resizeObserver = observeSize(canvas, options)
-  // Task 64 fix: FR-чистка забытых handle'ов — ТОЛЬКО GPU-cleanup через raw-фасад,
-  // БЕЗ записи texture.destroy в журнал. Раньше колбэк звал сессионный фасад:
-  // после device-loss GC собирал старые handle'ы (demo обнуляет их при re-init),
-  // FR писал texture.destroy в ЖИВОЙ журнал → compact() вычищал create→destroy
-  // пары → «журнал пустой» на следующей потере → сцена не восстанавливалась.
-  // Семантика: FR срабатывает на УТЕЧКЕ (юзер забыл dispose) — это не
-  // семантическое уничтожение ресурса, recovery-журнал он трогать не вправе.
-  // Журнал остаётся источником истины: restoreResources() пересоздаст текстуру.
+  // Task 64 fix: FR cleanup of forgotten handles — ONLY GPU cleanup via the raw
+  // facade, WITHOUT writing texture.destroy to the journal. Previously the
+  // callback called the session facade: after device-loss GC collected old
+  // handles (the demo nulls them at re-init), FR wrote texture.destroy into
+  // the LIVE journal → compact() purged create→destroy pairs → "the journal is
+  // empty" on the next loss → the scene did not restore.
+  // Semantics: FR fires on a LEAK (the user forgot dispose) — it is not the
+  // semantic destruction of a resource and has no right to touch the recovery
+  // journal. The journal remains the source of truth: restoreResources()
+  // will re-create the texture.
   const textureRegistry = makeTextureFinalizationRegistry(textureId => {
     if (session !== null) {
-      // Стабильный id → raw id текущей инкарнации; id уже не известен сессии —
-      // ресурс давно освобождён явно, чистить нечего.
+      // Stable id → raw id of the current incarnation; the id is already unknown
+      // to the session — the resource was freed explicitly long ago, nothing to clean.
       const raw = session.rawId(textureId)
       if (raw !== undefined) rawGl.deleteTexture(raw)
       return
     }
-    // Без resourceSession (v1-путь): id фасадные, журнал не ведётся.
+    // Without resourceSession (v1 path): facade ids, no journal is kept.
     gl.deleteTexture(textureId)
   })
-  // StatsCollector — обвязка для cpuMs/drawCalls/memoryEstimate. Если не
-  // инъекцирован (headless-тесты или demo без явной инъекции) — создаём свой.
+  // StatsCollector — the plumbing for cpuMs/drawCalls/memoryEstimate. If not
+  // injected (headless tests or a demo without an explicit injection) — we create our own.
   const ownStatsCollector = options.stats ?? null
   const statsCollector = ownStatsCollector ?? createStatsCollector(options.now)
 
@@ -405,11 +408,11 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
         createPassCommand(fragment, passOptions, targetId, () => [width, height]),
       capture: (command: CompiledCommand, captureOptions: { clear?: boolean } = {}) =>
         withTarget(command, targetId, captureOptions.clear !== false),
-      // Task 80: readback — синхронный readPixels через фасад (флип строк —
-      // внутри фасада); наружу — единый контракт SurfaceRead (RGBA8, сверху-вниз).
+      // Task 80: readback — synchronous readPixels via the facade (row flip —
+      // inside the facade); outside — the unified SurfaceRead contract (RGBA8, top-down).
       read: () => {
         if (surfaceDisposed) {
-          return Promise.reject(new Error('rune: surface.read() после dispose — поверхность уже освобождена'))
+          return Promise.reject(new Error('rune: surface.read() after dispose — the surface is already released'))
         }
         try {
           return Promise.resolve({ width, height, data: gl.readTargetPixels(targetId) })
@@ -449,7 +452,7 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     }
     const compiled = compileDrawSpec({
       shader: { glsl: { vertex: PASS_VERT_GLSL, fragment } },
-      // Полноэкранный проход: без глубины и куллинга — квад перекрывает всё
+      // Fullscreen pass: no depth and no culling — the quad covers everything
       pipeline: { depth: { test: 'always', write: false }, raster: { cull: 'none' } },
       attributes: {
         position: { data: FULLSCREEN_QUAD.positions, size: 2 },
@@ -464,38 +467,41 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
 
   function texture(width: number, height: number, options?: { mipLevels?: number; maxAnisotropy?: number; format?: GLTextureFormat }): Texture {
     const mipLevels = options?.mipLevels ?? 1
-    // Task 67 HDR: формат хранения (rgba8/rgba16f/rgba32f) — уходит в фасад
-    // (texStorage2D internalFormat + авто-вывод type загрузок) и в журнал
-    // (texture.create.format → восстановление тем же форматом).
+    // Task 67 HDR: the storage format (rgba8/rgba16f/rgba32f) — goes to the
+    // facade (texStorage2D internalFormat + automatic derivation of upload
+    // type) and to the journal (texture.create.format → restoration with the
+    // same format).
     const format = options?.format
     const textureId = gl.createTexture(width, height, { mipLevels, maxAnisotropy: options?.maxAnisotropy, format })
-    // Memory tracking: байт/пиксель по формату (rgba16f — 8, rgba32f — 16).
-    // Mip-chain добавляет ~33% (sum 1/4+1/16+...). Для 256² rgba16f с 9
-    // уровнями: 256*256*8 * 4/3 ≈ 700 КБ (2× от rgba8).
+    // Memory tracking: bytes/pixel by format (rgba16f — 8, rgba32f — 16).
+    // A mip chain adds ~33% (sum 1/4+1/16+...). For 256² rgba16f with 9
+    // levels: 256*256*8 * 4/3 ≈ 700 KB (2× vs rgba8).
     const bytesPerPixel = format === 'rgba16f' ? 8 : format === 'rgba32f' ? 16 : 4
     const memBytes = Math.round(width * height * bytesPerPixel * (mipLevels > 1 ? 4 / 3 : 1))
     statsCollector?.addMemory(memBytes)
     const handle = makeTextureHandle(textureId, width, height, mipLevels, memBytes)
-    // Belt-and-suspenders: если пользователь забыл вызвать dispose() и
-    // отпустил ссылку на handle — FR вызовет gl.deleteTexture за нас.
-    // НО! FR недетерминирован по времени (зависит от GC). Для production
-    // всегда полагаться на явный dispose().
+    // Belt-and-suspenders: if the user forgot to call dispose() and
+    // released the handle reference — FR will call gl.deleteTexture for us.
+    // BUT! FR is nondeterministic in timing (depends on GC). For production
+    // always rely on an explicit dispose().
     textureRegistry.register(handle, textureId)
     return handle
   }
 
-  /** Task 62: handle над УЖЕ существующим стабильным textureId — для
-   *  текстур, восстановленных restoreResources() после потери устройства.
-   *  Не создаёт GPU-ресурс и не пишет в журнал: опс texture.create уже там.
-   *  upload-методы и dispose работают через текущий фасад (стабильный id). */
+  /** Task 62: a handle over an ALREADY existing stable textureId — for
+   *  textures restored by restoreResources() after device loss.
+   *  Does not create a GPU resource and does not write to the journal: the
+   *  texture.create op is already there. The upload methods and dispose work
+   *  through the current facade (stable id). */
   function attachTexture(textureId: number, width: number, height: number, mipLevels = 1): Texture {
     return makeTextureHandle(textureId, width, height, Math.max(1, mipLevels), 0)
   }
 
-  /** Общий строитель TextureView-handle (createView и attachView — один путь;
-   *  Task 62-принцип «create и attach — один и тот же код»). Отличается только
-   *  источник viewId: свежесозданный фасадом vs восстановленный из журнала.
-   *  onDispose — bookkeeping родителя (subViews.delete) до освобождения. */
+  /** The common builder of a TextureView handle (createView and attachView —
+   *  one path; Task 62 principle "create and attach — the same code"). Only the
+   *  source of viewId differs: freshly created by the facade vs restored from
+   *  the journal. onDispose — the parent's bookkeeping (subViews.delete)
+   *  before release. */
   function makeTextureViewHandle(
     viewId: number,
     textureId: number,
@@ -513,28 +519,28 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
         if (viewDisposed) return
         viewDisposed = true
         onDispose?.()
-        try { gl.deleteTextureView(viewId) } catch { /* facade уже умер — no-op */ }
+        try { gl.deleteTextureView(viewId) } catch { /* the facade is already dead — no-op */ }
       },
     }
   }
 
-  /** Task 64: handle над УЖЕ существующим стабильным viewId — для view'ов,
-   *  восстановленных restoreResources() по опсу view.create. Не создаёт
-   *  GPU-ресурс и не пишет в журнал. dispose() → deleteTextureView (запишет
-   *  view.destroy в журнал сессии). */
+  /** Task 64: a handle over an ALREADY existing stable viewId — for views
+   *  restored by restoreResources() from the view.create op. Does not create
+   *  a GPU resource and does not write to the journal. dispose() →
+   *  deleteTextureView (will write view.destroy into the session journal). */
   function attachView(viewId: number, textureId: number, baseMipLevel = 0, mipLevelCount?: number): TextureView {
     return makeTextureViewHandle(viewId, textureId, baseMipLevel, mipLevelCount)
   }
 
-  /** Общий строитель Texture-handle (create и attach — один путь).
-   *  memBytes=0 → без memory-tracking (adopted-текстура уже учтена при create). */
+  /** The common builder of a Texture handle (create and attach — one path).
+   *  memBytes=0 → no memory tracking (an adopted texture is already counted at create). */
   function makeTextureHandle(textureId: number, width: number, height: number, mipLevels: number, memBytes: number): Texture {
     let manuallyDisposed = false
-    // Task 58: sub-views создаются через createView. Список нужен для
-    // cascade dispose: при dispose() parent-текстуры мы освобождаем и views.
-    // (Это дублирует поведение facade.deleteTexture, который сам убирает
-    // sub-views из внутреннего кэша — но мы держим ссылки на TextureView
-    // handles, чтобы их dispose() тоже стал no-op без throw.)
+    // Task 58: sub-views are created via createView. The list is needed for
+    // cascade dispose: when the parent texture is disposed we release the views too.
+    // (This duplicates the behavior of facade.deleteTexture, which itself removes
+    // sub-views from its internal cache — but we hold references to the TextureView
+    // handles so that their dispose() also becomes a no-op without throwing.)
     const subViews: Set<TextureView> = new Set()
     const handle: Texture = {
       textureId,
@@ -549,10 +555,10 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
       uploadSubImage: (x, y, source, options) => gl.texSubImage2DFromSource(textureId, x, y, source, options),
       uploadMip: (level, source, options) => gl.texImage2DLevel(textureId, level, source, options),
       createView: (viewOptions) => {
-        // Делегируем в facade.createTextureView (Task 56: WebGL2 LOD-clamp
-        // через TEXTURE_BASE_LEVEL/TEXTURE_MAX_LEVEL; WebGPU — нативный
-        // GPUTextureView). Facade бросает Error при невалидных опциях
-        // (textureId не найден, mipLevels < 2, baseMipLevel вне диапазона).
+        // Delegate to facade.createTextureView (Task 56: WebGL2 LOD-clamp
+        // via TEXTURE_BASE_LEVEL/TEXTURE_MAX_LEVEL; WebGPU — a native
+        // GPUTextureView). The facade throws an Error on invalid options
+        // (textureId not found, mipLevels < 2, baseMipLevel out of range).
         const viewId = gl.createTextureView(textureId, viewOptions)
         const view: TextureView = makeTextureViewHandle(
           viewId, textureId,
@@ -566,14 +572,14 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
       dispose: () => {
         if (manuallyDisposed) return
         manuallyDisposed = true
-        // Сначала освобождаем все sub-views (чтобы их dispose-флаги выставились
-        // и будущие вызовы были no-op). Facade.deleteTexture тоже убирает
-        // sub-views из кэша, но мы вызываем явно для симметрии API.
+        // First release all sub-views (so their dispose flags get set and
+        // future calls are no-ops). Facade.deleteTexture also removes the
+        // sub-views from the cache, but we call explicitly for API symmetry.
         for (const view of subViews) view.dispose()
         subViews.clear()
         gl.deleteTexture(textureId)
         if (memBytes > 0) statsCollector?.subMemory(memBytes)
-        // Отменить FR-регистрацию (если был): unregister гасит будущий колбэк
+        // Cancel the FR registration (if any): unregister suppresses the future callback
         textureRegistry.unregister(handle)
       },
     }
@@ -593,8 +599,8 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
   }
 
   function resize(cssWidth: number, cssHeight: number): void {
-    // Идемпотентность: повторные срабатывания наблюдателя с тем же CSS-размером
-    // не трогают backing store (каждая запись canvas.width сбрасывает буфер).
+    // Idempotency: repeated observer firings with the same CSS size
+    // do not touch the backing store (every canvas.width write resets the buffer).
     if (cssWidth === lastCssWidth && cssHeight === lastCssHeight) return
     lastCssWidth = cssWidth
     lastCssHeight = cssHeight
@@ -609,14 +615,14 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
   function step(nowMs: number): void {
     updateFrameContext(nowMs)
     statsCollector?.beginFrame()
-    transients.beginFrame() // скретч прошлого кадра начинает стареть
+    transients.beginFrame() // the previous frame's scratch starts aging
     epoch.frame(() => {
-      // M5 (Task 73): транспорт — снапшот изменившихся слотов на границе
-      // кадра (эпоха): зеркала сигналов согласованы до колбэков кадра.
+      // M5 (Task 73): transport — snapshot the changed slots at the frame
+      // boundary (the epoch): signal mirrors are consistent before the frame callbacks.
       options.transport?.sampleAll()
-      // M5 (Task 73): фиды — снять published, залить грязный диапазон
-      // одним вызовом, поднять count-сигнал. Команды кадра читают
-      // уже согласованный снапшот.
+      // M5 (Task 73): feeds — read published, upload the dirty range
+      // in one call, raise the count signal. The frame's commands read
+      // an already consistent snapshot.
       for (const feed of feeds) feed.sync()
       time.value = frameCtx.time
       writer.reset()
@@ -625,21 +631,21 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
       emitFrameCallbacks()
       writer.emit(OpCode.EndPass, 0, 0, 0, 0)
       executor.run(writerView(writer))
-      uploads.drain() // idle-слот: стриминг исполняется после кадра
+      uploads.drain() // idle slot: streaming runs after the frame
     })
     statsCollector?.endFrame()
     drainGlErrors()
   }
 
-  /** Task 69: дренаж тихих GL-ошибок раз в кадр (паритет onGpuError).
-   *  getError() возвращает ОДИН код и снимает флаг — крутим до NO_ERROR
-   *  (с пределом защиты от бесконечного цикла). Ошибки, накопленные любыми
-   *  опсами кадра (загрузки, дравы, state-переключения), ловятся здесь.
-   *  CONTEXT_LOST_WEBGL тоже пройдёт — дублирует listener, но раньше него
-   *  (listener_async — событие асинхронное). */
+  /** Task 69: drain silent GL errors once per frame (parity with onGpuError).
+   *  getError() returns ONE code and clears the flag — we loop until NO_ERROR
+   *  (with a limit to guard against an infinite loop). Errors accumulated by any
+   *  ops of the frame (uploads, draws, state switches) are caught here.
+   *  CONTEXT_LOST_WEBGL will pass too — duplicating the listener, but earlier
+   *  (listener_async — the event is asynchronous). */
   let lastGlErrorKey = ''
   function drainGlErrors(): void {
-    if (rawContext === null) return // headless-инъекция facade — нет raw-контекста
+    if (rawContext === null) return // headless facade injection — no raw context
     const codes: number[] = []
     for (let i = 0; i < 16; i++) {
       const code = rawContext.getError()
@@ -651,10 +657,10 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
       return
     }
     const key = codes.join(',')
-    if (key === lastGlErrorKey) return // не спамим одну и ту же ошибку каждый кадр
+    if (key === lastGlErrorKey) return // do not spam the same error every frame
     lastGlErrorKey = key
     const described = codes.map(c => `${glErrorName(c)} (0x${c.toString(16)})`).join(', ')
-    options.onGlError?.(`GL error: ${described} — ошибка накоплена в последнем кадре (создание текстур/загрузки/draw)`)
+    options.onGlError?.(`GL error: ${described} — an error accumulated in the last frame (texture creation/uploads/draw)`)
   }
 
   function updateFrameContext(nowMs: number): void {
@@ -702,16 +708,16 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     const observer = new ResizeObserver(() => {
       const [cssW, cssH] = getCanvasCssSize(canvas)
       const verdict = layoutGuard.classify(cssW, cssH)
-      if (verdict.verdict !== 'apply') return // ignore: дребезг; runaway: петля заблокирована
+      if (verdict.verdict !== 'apply') return // ignore: jitter; runaway: the loop is blocked
       resize(verdict.cssWidth, verdict.cssHeight)
     })
     observer.observe(canvas)
     return observer
   }
 
-  /** M5 (Task 73): фид рендерера — dual-bind канал инстансных данных.
-   *  Создаёт GPU-зеркало (createBuffer — журналируемый DeclOp) и вешает
-   *  sync на границу кадра (внутри epoch.frame — count-сигнал согласован). */
+  /** M5 (Task 73): a renderer feed — a dual-bind channel of instance data.
+   *  Creates a GPU mirror (createBuffer — a journaled DeclOp) and hooks
+   *  sync onto the frame boundary (inside epoch.frame — the count signal is consistent). */
   function feed(feedOptions: RendererFeedOptions | TransportFeedView): RendererFeed {
     const rendererFeed = createRendererFeedGL(gl, feedOptions)
     feeds.add(rendererFeed)
@@ -723,38 +729,38 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     disposed = true
     stop()
     resizeObserver?.disconnect()
-    // M5: фиды рендерера — GPU-буферы (GL: deleteBuffer → журналируемый
-    // destroy; WebGPU: keyed-кэш фасада чистится его dispose()).
+    // M5: renderer feeds — GPU buffers (GL: deleteBuffer → a journaled
+    // destroy; WebGPU: the facade's keyed cache is cleaned by its dispose()).
     for (const rendererFeed of feeds) rendererFeed.dispose()
     feeds.clear()
-    // Удалить всё, что накопилось во внутренних кэшах фасада.
-    // (фасад умеет идемпотентно delete по несуществующему id — но мы
-    // проходим по своим записям, чтобы не трогать то, что юзер уже dispose'нул.)
-    // На уровне фасада нет итератора — поэтому полагаемся на то, что
-    // пользователь должен держать ссылки на Texture/Surface и диспозить их
-    // сам. renderer.dispose() — это «закрыть цикл + снести ResizeObserver
-    // + обнулить кадровый контекст». Полное разрушение GL-контекста делает
-    // браузер при потере страницы.
+    // Delete everything accumulated in the facade's internal caches.
+    // (the facade can idempotently delete a nonexistent id — but we walk
+    // our own records so as not to touch what the user already disposed.)
+    // There is no iterator at the facade level — so we rely on the
+    // user holding references to Texture/Surface and disposing them
+    // themselves. renderer.dispose() is "close the loop + tear down the
+    // ResizeObserver + reset the frame context". Full destruction of the GL
+    // context is done by the browser when the page goes away.
   }
 
-  // Caps probing: на real gl-контексте (если есть). Headless-режим (createGL
-  // инъектирован) — caps = null; тесты должны инъекцировать свой caps.
-  // GpuTimer — если есть расширение EXT_disjoint_timer_query_webgl2. Подключается
-  // к statsCollector через setGpuTimer — gpuMs начнёт писаться в snapshot().
+  // Caps probing: on the real gl context (if present). Headless mode (createGL
+  // injected) — caps = null; tests must inject their own caps.
+  // GpuTimer — if the EXT_disjoint_timer_query_webgl2 extension exists. Hooked
+  // to statsCollector via setGpuTimer — gpuMs starts being written to snapshot().
   const probedCaps: Caps | null = (() => {
     if (options.caps !== undefined) return options.caps
     if (rawContext === null) return null
     try {
       const query = probeGLCaps(makeGLProbe(rawContext))
-      // GPU timer-query: создаём если caps.has('timestamp-query'). В StatsCollector
-      // подключается через setGpuTimer — gpuMs появится в snapshot() в следующем кадре.
+      // GPU timer-query: create it if caps.has('timestamp-query'). Hooked into
+      // StatsCollector via setGpuTimer — gpuMs will appear in snapshot() in the next frame.
       if (query.features.has('timestamp-query')) {
         const timer: GpuTimer | null = createGLGpuTimer(rawContext)
         if (timer !== null) {
           statsCollector.setGpuTimer(timer)
         }
       }
-      // statsProvider всегда берёт снапшот из statsCollector (внешний ИЛИ наш).
+      // statsProvider always takes a snapshot from statsCollector (external OR our own).
       return createCaps(query, () => statsCollector.snapshot())
     } catch {
       return null
@@ -792,13 +798,14 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
 }
 
 function acquireWebGL2(canvas: AnyCanvas): WebGL2RenderingContext {
-  // Каскад: часть драйверов отвергает antialias+preserveDrawingBuffer вместе.
-  // alpha:false — Task 69: ПАРИТЕТ КОМПОЗИТИНГА с WebGPU (alphaMode:'opaque').
-  // С alpha:true (было — дефолт) прозрачные пиксели кадра (например, пустые
-  // области атласа (0,0,0,0)) становятся СКВОЗНЫМИ — композитор показывает
-  // фон страницы, поведение зависит от браузера/GPU/фон-стилей. С alpha:false
-  // альфа игнорируется при композитинге: те же пиксели — чёрные, РОВНО как
-  // на WebGPU. Одинаковая сцена — одинаковая картинка на обоих бэкендах.
+  // Cascade: some drivers reject antialias+preserveDrawingBuffer together.
+  // alpha:false — Task 69: COMPOSITING PARITY with WebGPU (alphaMode:'opaque').
+  // With alpha:true (the previous default) transparent frame pixels (e.g. empty
+  // atlas regions (0,0,0,0)) become SEE-THROUGH — the compositor shows the
+  // page background; the behavior depends on browser/GPU/background styles.
+  // With alpha:false alpha is ignored at compositing: the same pixels are
+  // black, EXACTLY as on WebGPU. The same scene — the same picture on both
+  // backends.
   const attempts: WebGLContextAttributes[] = [
     { antialias: true, preserveDrawingBuffer: true, alpha: false },
     { antialias: false, preserveDrawingBuffer: true, alpha: false },
@@ -811,11 +818,11 @@ function acquireWebGL2(canvas: AnyCanvas): WebGL2RenderingContext {
   const inIframe = typeof window !== 'undefined' && window.self !== window.top
   throw new Error(
     inIframe
-      ? 'rune: WebGL2 недоступен внутри этого превью-окна (iframe без доступа к GPU). ' +
-        'Откройте страницу напрямую в браузере — в новой вкладке Chrome/Edge/Safari.'
-      : 'rune: WebGL2 недоступен. Включите аппаратное ускорение в настройках браузера ' +
-        '(система → Использовать аппаратное ускорение, перезапуск) или откройте файл ' +
-        'в Chrome/Edge/Firefox свежей версии.',
+      ? 'rune: WebGL2 is unavailable inside this preview window (an iframe without GPU access). ' +
+        'Open the page directly in the browser — in a new Chrome/Edge/Safari tab.'
+      : 'rune: WebGL2 is unavailable. Enable hardware acceleration in the browser settings ' +
+        '(system → Use hardware acceleration, restart) or open the file in an ' +
+        'up-to-date Chrome/Edge/Firefox.',
   )
 }
 
@@ -823,7 +830,7 @@ function defaultNow(): number {
   return performance.now()
 }
 
-/** Человекочитаемое имя GL-кода ошибки (WebGL2 spec + CONTEXT_LOST_WEBGL). */
+/** A human-readable name of a GL error code (WebGL2 spec + CONTEXT_LOST_WEBGL). */
 function glErrorName(code: number): string {
   switch (code) {
     case 0x0500: return 'INVALID_ENUM'
@@ -848,23 +855,24 @@ function removeItem<T>(list: T[], item: T): void {
   if (at >= 0) list.splice(at, 1)
 }
 
-/** FinalizationRegistry для Texture: belt-and-suspenders.
+/** FinalizationRegistry for Texture: belt-and-suspenders.
  *
- * Если пользователь забыл вызвать texture.dispose() и отпустил ссылку на
- * handle — GC соберёт объект, FR колбэк подчистит GPU-текстуру за нас.
+ * If the user forgot to call texture.dispose() and released the handle
+ * reference — GC will collect the object, the FR callback will clean up the
+ * GPU texture for us.
  *
- * ВАЖНО: FR НЕ детерминирован. Зависит от GC, который может не пойти пока
- * давление памяти не появится. Для production-кода ВСЕГДА полагаться на
- * явный dispose(). FR — только страхующий механизм для утечек.
+ * IMPORTANT: FR is NOT deterministic. It depends on GC, which may not run
+ * until memory pressure appears. For production code ALWAYS rely on an
+ * explicit dispose(). FR is only a safety net for leaks.
  *
- * ВАЖНО (Task 64): disposer вызывается ТОЛЬКО для GPU-cleanup. Он не имеет
- * права писать semantic-опсы (texture.destroy) в ResourceJournal: FR срабатывает
- * на утечке, а не на намеренном освобождении, и журнал восстановления не должен
- * зависеть от расписания GC (после device-loss старые handle'ы собираются GC —
- * это НЕ должно вычищать create-опсы из журнала).
+ * IMPORTANT (Task 64): the disposer is invoked ONLY for GPU cleanup. It has
+ * no right to write semantic ops (texture.destroy) into the ResourceJournal:
+ * FR fires on a leak, not on an intentional release, and the recovery journal
+ * must not depend on the GC schedule (after device-loss old handles are
+ * collected by GC — this must NOT purge create ops from the journal).
  *
- * env-проверка: в среде без FinalizationRegistry (старые Node/sandbox) —
- * возвращается no-op registry. */
+ * env check: in an environment without FinalizationRegistry (old Node/sandbox) —
+ * a no-op registry is returned. */
 function makeTextureFinalizationRegistry(disposeGpu: (textureId: number) => void): {
   register: (target: object, heldValue: number) => void
   unregister: (target: object) => void
@@ -873,12 +881,12 @@ function makeTextureFinalizationRegistry(disposeGpu: (textureId: number) => void
     return { register: () => {}, unregister: () => {} }
   }
   const registry = new FinalizationRegistry((textureId: number) => {
-    // Ошибки GPU-cleanup (фасад уже мёртв после dispose renderer'а) — молча
-    // пропускаем: чистить нечего.
+    // GPU-cleanup errors (the facade is already dead after renderer dispose) —
+    // silently skipped: nothing to clean.
     try {
       disposeGpu(textureId)
     } catch {
-      // фасад закрыт — нечего диспозить
+      // the facade is closed — nothing to dispose
     }
   })
   return {

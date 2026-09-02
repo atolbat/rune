@@ -1,82 +1,82 @@
 /**
- * types.ts — контракт ассетов и загрузок @rune/loaders.
+ * types.ts — the asset and loading contract of @rune/loaders.
  *
- * Слои (см. DESIGN.md rune — «Валидированный дизайн»):
- *   LoadScheduler  — приоритеты/квоты/отмена, ничего не знает про форматы;
- *   источник       — fetch-стрим с прогрессом и abort;
- *   парсер         — формат: GLB/OBJ/FBX/изображение/конфиг;
- *   AssetLibrary   — кэш, dedup, preload, групповой прогресс.
+ * Layers (see DESIGN.md rune — "Validated design"):
+ *   LoadScheduler  — priorities/quotas/cancellation, knows nothing about formats;
+ *   source         — fetch stream with progress and abort;
+ *   parser         — format: GLB/OBJ/FBX/image/config;
+ *   AssetLibrary   — cache, dedup, preload, group progress.
  *
- * Лоадеры НЕ знают про GPU: результат — декодированные данные
- * (типизированные массивы, ImageBitmap, объекты). GPU-интеграция —
- * в @rune/gl / @rune/kit или пользовательском коде.
+ * Loaders do NOT know about the GPU: the result is decoded data
+ * (typed arrays, ImageBitmap, objects). GPU integration —
+ * lives in @rune/gl / @rune/kit or in user code.
  */
 
-/** Фаза жизненного цикла ассета. */
+/** Asset lifecycle phase. */
 export type AssetPhase =
-  | 'queued'      // в очереди планировщика (ждёт слот/квоту)
-  | 'fetching'    // тело качается (байты растут)
-  | 'parsing'     // байты разбираются форматом (GLB-чанки, OBJ-строки…)
-  | 'transforming'// пост-пайп пользователя (transform-функции)
-  | 'done'        // готов, лежит в кэше
-  | 'error'       // упал (сеть/формат/трансформ)
-  | 'cancelled';  // отменён пользователем/сигналом
+  | 'queued'      // in the scheduler queue (waiting for a slot/quota)
+  | 'fetching'    // the body is downloading (bytes grow)
+  | 'parsing'     // bytes are parsed by a format (GLB chunks, OBJ lines...)
+  | 'transforming'// user post-pipe (transform functions)
+  | 'done'        // ready, sits in the cache
+  | 'error'       // failed (network/format/transform)
+  | 'cancelled';  // cancelled by user/signal
 
-/** Снимок прогресса ассета — иммутабельная запись на каждый апдейт. */
+/** Asset progress snapshot — an immutable record on every update. */
 export interface AssetProgress {
   readonly phase: AssetPhase
-  /** Загружено байт тела (fetch). */
+  /** Body bytes loaded (fetch). */
   readonly loaded: number
-  /** Полная длина тела, если известна (Content-Length). */
+  /** Total body length, if known (Content-Length). */
   readonly total: number
-  /** Прогресс фазы 0..1 (fetch — байты; parse — вложенные единицы; done — 1). */
+  /** Phase progress 0..1 (fetch — bytes; parse — nested units; done — 1). */
   readonly phaseRatio: number
-  /** Агрегат 0..1: фазы взвешены (fetch 70%, parse 20%, transform 10%). */
+  /** Aggregate 0..1: phases weighted (fetch 70%, parse 20%, transform 10%). */
   readonly ratio: number
-  /** Уникальный URL (ключ кэша). */
+  /** Unique URL (cache key). */
   readonly url: string
-  /** Пришёл из кэша (мгновенно, без сети). */
+  /** Came from the cache (instantly, no network). */
   readonly cached: boolean
-  /** Человекочитаемая деталь фазы (имя чанка, кол-во мешей…). */
+  /** Human-readable phase detail (chunk name, mesh count...). */
   readonly detail: string
 }
 
-/** Вес фаз в агрегатном ratio. */
+/** Phase weights in the aggregate ratio. */
 export const PHASE_WEIGHTS: Readonly<Record<'fetch' | 'parse' | 'transform', number>> = {
   fetch: 0.7,
   parse: 0.2,
   transform: 0.1,
 }
 
-/** Опции загрузки — «широкие настройки» общего лоадера. */
+/** Load options — "broad settings" of the general loader. */
 export interface LoadOptions {
-  /** Приоритет: меньше — раньше. 0 — высший, default 5. */
+  /** Priority: lower — earlier. 0 is highest, default 5. */
   readonly priority?: number
-  /** Ожидаемый вес в байтах для квоты in-flight (default: Content-Length). */
+  /** Expected weight in bytes for the in-flight quota (default: Content-Length). */
   readonly weightBytes?: number
-  /** Внешняя отмена. */
+  /** External cancellation. */
   readonly signal?: AbortSignal
-  /** Таймаут на установку соединения (не на всё тело), мс. */
+  /** Timeout for establishing the connection (not for the whole body), ms. */
   readonly connectTimeoutMs?: number
-  /** Повторы при сетевых ошибках (default 1; abort не ретраится). */
+  /** Retries on network errors (default 1; abort is not retried). */
   readonly retries?: number
-  /** Пост-парсинг трансформы, применяются по цепочке. */
+  /** Post-parse transforms, applied in a chain. */
   readonly transform?: readonly AssetTransform[]
-  /** Прогресс-колбэк (тот же снимок, что и в handle.progress). */
+  /** Progress callback (the same snapshot as in handle.progress). */
   readonly onProgress?: (progress: AssetProgress) => void
-  /** Форсировать парсер (минует авто-определение по расширению/магике). */
+  /** Force a parser (bypasses auto-detection by extension/magic bytes). */
   readonly parser?: string
-  /** Не писать результат в кэш (одноразовая загрузка). */
+  /** Do not write the result to the cache (one-off load). */
   readonly noCache?: boolean
 }
 
-/** Трансформ: (asset, meta) => новый asset. Синхронный или async. */
+/** Transform: (asset, meta) => a new asset. Sync or async. */
 export type AssetTransform<TIn = unknown, TOut = unknown> = (
   asset: TIn,
   meta: AssetMeta,
 ) => TOut | Promise<TOut>
 
-/** Метаданные ассета для трансформов. */
+/** Asset metadata for transforms. */
 export interface AssetMeta {
   readonly url: string
   readonly bytes: number
@@ -84,17 +84,17 @@ export interface AssetMeta {
   readonly parsedMs: number
 }
 
-/** Хэндл загрузки: thenable + управление. */
+/** Load handle: thenable + control. */
 export interface AssetHandle<T = unknown> extends PromiseLike<T> {
   readonly url: string
   readonly key: string
-  /** Текущее состояние (снимок, иммутабельно). */
+  /** Current state (snapshot, immutable). */
   readonly progress: AssetProgress
-  /** Состояние жизненного цикла. */
+  /** Lifecycle state. */
   readonly state: AssetPhase
-  /** Отменить (queued — мгновенно; fetching — abort сети). */
+  /** Cancel (queued — instantly; fetching — network abort). */
   cancel(reason?: string): boolean
-  /** Сменить приоритет queued-задания. Running — только внутри планировщика. */
+  /** Change the priority of a queued job. Running — only inside the scheduler. */
   setPriority(priority: number): boolean
   then<R1 = T, R2 = never>(
     onfulfilled?: ((value: T) => R1 | PromiseLike<R1>) | null,
@@ -102,7 +102,7 @@ export interface AssetHandle<T = unknown> extends PromiseLike<T> {
   ): PromiseLike<R1 | R2>
 }
 
-/** События библиотеки. */
+/** Library events. */
 export type LibraryEvent =
   | { readonly type: 'progress'; readonly handle: AssetHandle }
   | { readonly type: 'done'; readonly handle: AssetHandle }
@@ -110,16 +110,16 @@ export type LibraryEvent =
   | { readonly type: 'cancelled'; readonly handle: AssetHandle }
   | { readonly type: 'evicted'; readonly url: string; readonly bytes: number }
 
-/** Групповая загрузка: агрегатный прогресс + общая отмена. */
+/** Group load: aggregate progress + shared cancellation. */
 export interface LoadGroup<T = unknown> {
   readonly urls: readonly string[]
   readonly promise: Promise<readonly T[]>
-  /** Агрегатный прогресс 0..1 (взвешен по Content-Length/весу). */
+  /** Aggregate progress 0..1 (weighted by Content-Length/weight). */
   readonly progress: AssetProgress
   cancel(reason?: string): void
 }
 
-/** Статистика библиотеки. */
+/** Library statistics. */
 export interface LibraryStats {
   readonly cached: number
   readonly cacheBytes: number

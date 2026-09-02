@@ -1,6 +1,6 @@
-// Стек трекинга зависимостей: signal.value при чтении регистрирует ячейку
-// в активном сборщике derive. Крошечный реактивный рантайм без аллокаций
-// на горячем пути (регистрация — push в переиспользуемый массив).
+// Dependency tracking stack: signal.value on read registers the cell
+// in the derive's active collector. A tiny reactive runtime without
+// allocations on the hot path (registration is a push into a reused array).
 
 const collectors: unknown[][] = []
 

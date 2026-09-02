@@ -1,19 +1,20 @@
 /**
- * core/source.ts — нормализация LoadSource → { байты | поток | fetchUrl }.
+ * core/source.ts — normalization of LoadSource → { bytes | stream | fetchUrl }.
  *
- * Менеджеру всё равно, откуда данные: URL, Request, готовый Response, Blob,
- * ReadableStream, AsyncIterable или байты в руках. Здесь это приводится к
- * одной форме, а fetch-фаза пропускается, если байты уже есть.
+ * The manager does not care where the data comes from: a URL, Request, a
+ * ready Response, Blob, ReadableStream, AsyncIterable, or bytes in hand.
+ * Here it is all reduced to one form, and the fetch phase is skipped when
+ * the bytes are already available.
  */
 
 import type { LoadSource, NormalizedSource } from './types.ts'
 import { LoadError } from './errors.ts'
 import { streamToAsyncIterable } from './pipe.ts'
 
-/** Привести любой источник к NormalizedSource. */
+/** Coerce any source to NormalizedSource. */
 export function normalizeSource(source: LoadSource): NormalizedSource {
   if (typeof source === 'string') {
-    if (source.length === 0) throw new LoadError('source', 'пустой URL')
+    if (source.length === 0) throw new LoadError('source', 'empty URL')
     return { url: source, totalBytes: null, fetchUrl: source, fetchRequest: null }
   }
   if (source instanceof URL) {
@@ -26,7 +27,7 @@ export function normalizeSource(source: LoadSource): NormalizedSource {
     const url = source.url || null
     const total = responseTotalBytes(source)
     if (source.body === null) {
-      // Тела нет (204/304 и т.п.) — пустой поток, ноль байтов на выходе.
+      // No body (204/304 etc.) — an empty stream, zero bytes at the output.
       return { url, stream: emptyIterable(), totalBytes: total, fetchUrl: null, fetchRequest: null }
     }
     return { url, stream: streamToAsyncIterable(source.body), totalBytes: total, fetchUrl: null, fetchRequest: null }
@@ -35,10 +36,10 @@ export function normalizeSource(source: LoadSource): NormalizedSource {
     return { url: null, bytes: new Uint8Array(source), totalBytes: source.byteLength, fetchUrl: null, fetchRequest: null }
   }
   if (source instanceof Uint8Array) {
-    // Копию не делаем: контракт — источник нельзя мутировать после передачи.
+    // We do not copy: the contract is that the source must not be mutated after being handed over.
     return { url: null, bytes: source, totalBytes: source.byteLength, fetchUrl: null, fetchRequest: null }
   }
-  // Blob/File: у File есть name (для resolveExternal-подсказок), размер известен
+  // Blob/File: File has a name (for resolveExternal hints), the size is known
   if (typeof Blob !== 'undefined' && source instanceof Blob) {
     const url = source instanceof File ? (source as File).name : null
     const stream = streamToAsyncIterable(source.stream() as ReadableStream<Uint8Array>)
@@ -52,16 +53,16 @@ export function normalizeSource(source: LoadSource): NormalizedSource {
   if (typeof (source as AsyncIterable<Uint8Array>)[Symbol.asyncIterator] === 'function') {
     return { url: null, stream: source as AsyncIterable<Uint8Array>, totalBytes: null, fetchUrl: null, fetchRequest: null }
   }
-  throw new LoadError('source', `normalizeSource: неизвестный тип источника ${Object.prototype.toString.call(source)}`)
+  throw new LoadError('source', `normalizeSource: unknown source type ${Object.prototype.toString.call(source)}`)
 }
 
-/** Пустой AsyncIterable (Response без тела). */
+/** An empty AsyncIterable (a Response without a body). */
 function emptyIterable(): AsyncIterable<Uint8Array> {
   async function *gen(): AsyncGenerator<Uint8Array> {}
   return gen()
 }
 
-/** Длина из content-length (учёт content-encoding не входит в задачу v1). */
+/** Length from content-length (content-encoding handling is out of scope for v1). */
 export function responseTotalBytes(response: Response): number | null {
   const header = response.headers?.get('content-length')
   if (header === null || header === undefined) return null
@@ -69,7 +70,7 @@ export function responseTotalBytes(response: Response): number | null {
   return Number.isFinite(n) && n >= 0 ? n : null
 }
 
-/** Content-Type из Response (безThrows). */
+/** Content-Type from a Response (no throws). */
 export function responseMimeType(response: Response): string | null {
   const t = response.headers?.get('content-type')
   if (t === null || t === undefined) return null

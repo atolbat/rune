@@ -1,11 +1,11 @@
 /**
- * Тесты caps-модуля (M4, DESIGN.md §11.4 + §5.2).
+ * Tests for the caps module (M4, DESIGN.md §11.4 + §5.2).
  *
- * Покрываем:
- *  - createCaps(): has/format/path/ext/stats/limit/backend — корректность делегирования
+ * Covered:
+ *  - createCaps(): has/format/path/ext/stats/limit/backend — delegation correctness
  *  - StatsCollector: beginFrame/endFrame, addDrawCall, addMemory/subMemory
- *  - Probe → Caps конверсия: probeGLCaps + createCaps — интеграция
- *  - Edge cases: неизвестная фича → false, неизвестный формат → 'none'
+ *  - Probe → Caps conversion: probeGLCaps + createCaps — integration
+ *  - Edge cases: unknown feature → false, unknown format → 'none'
  */
 
 import { test } from 'bun:test'
@@ -17,9 +17,9 @@ import type { GLProbe } from '@rune/webgl2'
 import { probeGPUCaps, makeGPUProbe } from '@rune/webgpu'
 import type { GPUProbe } from '@rune/webgpu'
 
-// ─── createCaps: базовый контракт ────────────────────────────────────────────
+// ─── createCaps: basic contract ────────────────────────────────────────────
 
-test('createCaps: has() возвращает true только для фич в query.features', () => {
+test('createCaps: has() returns true only for features in query.features', () => {
   const query: CapsQuery = {
     features: new Set(['astc', 'etc2', 'instancing']),
     formatMatrix: new Map(),
@@ -36,7 +36,7 @@ test('createCaps: has() возвращает true только для фич в 
   expect(caps.has('timestamp-query')).toBe(false)
 })
 
-test('createCaps: format() возвращает native/fallback/none из матрицы', () => {
+test('createCaps: format() returns native/fallback/none from the matrix', () => {
   const formatMatrix = new Map([
     ['rgba8unorm|sampled', 'native' as const],
     ['rgba8unorm|render', 'native' as const],
@@ -56,14 +56,14 @@ test('createCaps: format() возвращает native/fallback/none из мат
   expect(caps.format('rgba8unorm', 'sampled')).toBe('native')
   expect(caps.format('rgba8unorm', 'storage')).toBe('none')
   expect(caps.format('rgba16float', 'render')).toBe('fallback')
-  // Неизвестный формат → 'none' (не падает)
+  // Unknown format → 'none' (no crash)
   expect(caps.format('unknown-format', 'sampled')).toBe('none')
 })
 
-test('createCaps: ext() возвращает raw extension или null', () => {
+test('createCaps: ext() returns the raw extension or null', () => {
   const astcExt = { /* mock extension object */ format: 'astc' }
-  // Явный <string, unknown>: без него TS выводит Map<string, union-of-объектов>
-  // и не подбирает перегрузку конструктора для разнородных значений.
+  // Explicit <string, unknown>: without it TS infers Map<string, union-of-objects>
+  // and cannot pick a constructor overload for heterogeneous values.
   const extensions = new Map<string, unknown>([
     ['WEBGL_compressed_texture_astc', astcExt],
     ['EXT_texture_filter_anisotropic', { maxAnisotropy: 16 }],
@@ -82,7 +82,7 @@ test('createCaps: ext() возвращает raw extension или null', () => {
   expect(caps.ext('NONEXISTENT_EXT')).toBeNull()
 })
 
-test('createCaps: path() возвращает supported/unsupported/unknown', () => {
+test('createCaps: path() returns supported/unsupported/unknown', () => {
   const paths = new Map([
     ['canvas-direct', 'supported' as const],
     ['asyncbmp', 'unsupported' as const],
@@ -98,11 +98,11 @@ test('createCaps: path() возвращает supported/unsupported/unknown', ()
   const caps = createCaps(query)
   expect(caps.path('canvas-direct')).toBe('supported')
   expect(caps.path('asyncbmp')).toBe('unsupported')
-  // Неизвестный путь → 'unknown'
+  // Unknown path → 'unknown'
   expect(caps.path('some-future-path')).toBe('unknown')
 })
 
-test('createCaps: limit() возвращает число из query.limits', () => {
+test('createCaps: limit() returns the number from query.limits', () => {
   const query: CapsQuery = {
     features: new Set(),
     formatMatrix: new Map(),
@@ -117,7 +117,7 @@ test('createCaps: limit() возвращает число из query.limits', ()
   expect(caps.limit('maxUnknown')).toBeNull()
 })
 
-test('createCaps: backend() возвращает строку', () => {
+test('createCaps: backend() returns the string', () => {
   const query: CapsQuery = {
     features: new Set(),
     formatMatrix: new Map(),
@@ -130,7 +130,7 @@ test('createCaps: backend() возвращает строку', () => {
   expect(caps.backend).toBe('webgpu')
 })
 
-test('createCaps: stats() возвращает zero-state если нет statsProvider', () => {
+test('createCaps: stats() returns the zero state when there is no statsProvider', () => {
   const query: CapsQuery = {
     features: new Set(),
     formatMatrix: new Map(),
@@ -148,7 +148,7 @@ test('createCaps: stats() возвращает zero-state если нет statsP
   expect(s.hitRate).toBe(1.0)
 })
 
-test('createCaps: stats() делегирует в statsProvider', () => {
+test('createCaps: stats() delegates to statsProvider', () => {
   const stats: ReturnType<StatsProvider> = {
     cpuMs: 5.2,
     gpuMs: 3.1,
@@ -174,7 +174,7 @@ test('createCaps: stats() делегирует в statsProvider', () => {
   expect(s.hitRate).toBe(0.85)
 })
 
-test('createCaps: invalidate() сбрасывает statsProvider (caps.stats() возвращает zero)', () => {
+test('createCaps: invalidate() resets statsProvider (caps.stats() returns zero)', () => {
   const provider: StatsProvider = () => ({
     cpuMs: 7.7,
     gpuMs: null,
@@ -197,9 +197,9 @@ test('createCaps: invalidate() сбрасывает statsProvider (caps.stats() 
   expect(caps.stats().cpuMs).toBe(0)
 })
 
-// ─── StatsCollector: cpuMs и counters ─────────────────────────────────────────
+// ─── StatsCollector: cpuMs and counters ─────────────────────────────────────────
 
-test('StatsCollector: beginFrame/endFrame измеряет cpuMs', () => {
+test('StatsCollector: beginFrame/endFrame measures cpuMs', () => {
   let t = 1000
   const sc = createStatsCollector(() => t)
   sc.beginFrame()
@@ -210,7 +210,7 @@ test('StatsCollector: beginFrame/endFrame измеряет cpuMs', () => {
   expect(s.frameCount).toBe(1)
 })
 
-test('StatsCollector: addDrawCall инкрементит счётчик в текущем кадре', () => {
+test('StatsCollector: addDrawCall increments the counter in the current frame', () => {
   const sc = createStatsCollector()
   sc.beginFrame()
   sc.addDrawCall()
@@ -227,12 +227,12 @@ test('StatsCollector: addMemory/subMemory — text bytes', () => {
   expect(sc.snapshot().memoryEstimate).toBe(3072)
   sc.subMemory(1024)
   expect(sc.snapshot().memoryEstimate).toBe(2048)
-  // subMemory не уходит в минус
+  // subMemory does not go negative
   sc.subMemory(99999)
   expect(sc.snapshot().memoryEstimate).toBe(0)
 })
 
-test('StatsCollector: beginFrame обнуляет drawCalls но не memory', () => {
+test('StatsCollector: beginFrame zeroes drawCalls but not memory', () => {
   const sc = createStatsCollector()
   sc.beginFrame()
   sc.addDrawCall()
@@ -241,20 +241,20 @@ test('StatsCollector: beginFrame обнуляет drawCalls но не memory', (
   expect(sc.snapshot().drawCalls).toBe(1)
   expect(sc.snapshot().memoryEstimate).toBe(1024)
 
-  // Новый кадр
+  // New frame
   sc.beginFrame()
-  // drawCalls уже 0 (новый кадр)
+  // drawCalls is already 0 (new frame)
   expect(sc.snapshot().drawCalls).toBe(0)
-  // memoryEstimate НЕ обнулился (аккумулятор текстур)
+  // memoryEstimate was NOT zeroed (texture accumulator)
   expect(sc.snapshot().memoryEstimate).toBe(1024)
-  // frameCount растёт
+  // frameCount grows
   expect(sc.snapshot().frameCount).toBe(2)
 })
 
-// ─── probeGLCaps: мок GL-контекста ────────────────────────────────────────────
+// ─── probeGLCaps: GL context mock ────────────────────────────────────────────
 
 function makeMockGLProbe(extensions: Record<string, unknown>, limits: Record<string, number> = {}): GLProbe {
-  // Псевдо-константы WebGL2 — вымышленные значения, для теста
+  // Pseudo WebGL2 constants — made-up values, for the test
   const C = {
     MAX_TEXTURE_SIZE: 0x0D33,
     MAX_3D_TEXTURE_SIZE: 0x8073,
@@ -301,7 +301,7 @@ function makeMockGLProbe(extensions: Record<string, unknown>, limits: Record<str
   }
 }
 
-test('probeGLCaps: ASTC + ETC2 расширения → features.has()', () => {
+test('probeGLCaps: ASTC + ETC2 extensions → features.has()', () => {
   const probe = makeMockGLProbe({
     'WEBGL_compressed_texture_astc': { /* astc ext */ },
     'WEBGL_compressed_texture_etc': { /* etc2 ext */ },
@@ -311,15 +311,15 @@ test('probeGLCaps: ASTC + ETC2 расширения → features.has()', () => {
   expect(query.features.has('astc')).toBe(true)
   expect(query.features.has('etc2')).toBe(true)
   expect(query.features.has('bc1')).toBe(false)
-  expect(query.features.has('instancing')).toBe(true)  // нативно в WebGL2
+  expect(query.features.has('instancing')).toBe(true)  // native in WebGL2
 })
 
-test('probeGLCaps: float-blend требует EXT_color_buffer_float И EXT_float_blend', () => {
-  // Без EXT_color_buffer_float — float-blend нет
+test('probeGLCaps: float-blend requires EXT_color_buffer_float AND EXT_float_blend', () => {
+  // Without EXT_color_buffer_float — no float-blend
   let probe = makeMockGLProbe({ 'EXT_float_blend': { /* ext */ } })
   expect(probeGLCaps(probe).features.has('float32-blend')).toBe(false)
 
-  // С обоими — есть
+  // With both — present
   probe = makeMockGLProbe({
     'EXT_color_buffer_float': { /* ext */ },
     'EXT_float_blend': { /* ext */ },
@@ -330,7 +330,7 @@ test('probeGLCaps: float-blend требует EXT_color_buffer_float И EXT_floa
   expect(caps.ext('EXT_float_blend')).toBeDefined()
 })
 
-test('probeGLCaps: limits копируются в query.limits', () => {
+test('probeGLCaps: limits are copied into query.limits', () => {
   const probe = makeMockGLProbe({}, {
     maxTextureSize2D: 8192,
     maxTextureSize3D: 2048,
@@ -350,7 +350,7 @@ test('probeGLCaps: limits копируются в query.limits', () => {
   expect(caps.limit('maxViewportHeight')).toBe(16384)
 })
 
-test('probeGLCaps: format matrix — rgba8unorm baseline native (кроме storage)', () => {
+test('probeGLCaps: format matrix — rgba8unorm baseline native (except storage)', () => {
   const probe = makeMockGLProbe({})
   const caps = createCaps(probeGLCaps(probe))
   expect(caps.format('rgba8unorm', 'sampled')).toBe('native')
@@ -361,15 +361,15 @@ test('probeGLCaps: format matrix — rgba8unorm baseline native (кроме stor
   expect(caps.format('rgba8unorm', 'storage')).toBe('none')
 })
 
-test('probeGLCaps: rgba16float render требует EXT_color_buffer_half_float', () => {
-  // Без расширения — render=none
+test('probeGLCaps: rgba16float render requires EXT_color_buffer_half_float', () => {
+  // Without the extension — render=none
   let probe = makeMockGLProbe({})
   let caps = createCaps(probeGLCaps(probe))
   expect(caps.format('rgba16float', 'sampled')).toBe('native')
   expect(caps.format('rgba16float', 'render')).toBe('none')
   expect(caps.format('rgba16float', 'filter')).toBe('none')
 
-  // С EXT_color_buffer_half_float — render=native, filter=native (half_float_linear)
+  // With EXT_color_buffer_half_float — render=native, filter=native (half_float_linear)
   probe = makeMockGLProbe({
     'EXT_color_buffer_half_float': { /* ext */ },
     'OES_texture_half_float_linear': { /* ext */ },
@@ -379,7 +379,7 @@ test('probeGLCaps: rgba16float render требует EXT_color_buffer_half_float
   expect(caps.format('rgba16float', 'filter')).toBe('native')
 })
 
-test('probeGLCaps: path() возвращает supported для baseline paths', () => {
+test('probeGLCaps: path() returns supported for baseline paths', () => {
   const probe = makeMockGLProbe({})
   const caps = createCaps(probeGLCaps(probe))
   expect(caps.path('canvas-direct')).toBe('supported')
@@ -398,7 +398,7 @@ function makeMockGPUProbe(features: Set<string>, limits: Record<string, number>)
   }
 }
 
-test('probeGPUCaps: ASTC + BC через features', () => {
+test('probeGPUCaps: ASTC + BC via features', () => {
   const probe = makeMockGPUProbe(new Set(['texture-compression-astc', 'texture-compression-bc']), {})
   const query = probeGPUCaps(probe)
   expect(query.backend).toBe('webgpu')
@@ -407,19 +407,20 @@ test('probeGPUCaps: ASTC + BC через features', () => {
   expect(query.features.has('bc3')).toBe(true)
   expect(query.features.has('bc7')).toBe(true)
   expect(query.features.has('etc2')).toBe(false)
-  // Нативные WebGPU фичи с путями исполнения в движке — всегда есть
+  // Native WebGPU features with execution paths in the engine — always present
   expect(query.features.has('instancing')).toBe(true)
-  // Контракт 5 (Task 79, гигиена caps): WebGPU-АПИ умеет compute/storage,
-  // но движок НЕ исполняет (нет dispatch / storage-биндингов / drawIndirect)
-  // — заявления сняты. GL-проб их тоже не заявляет: паритет восстановлен.
+  // Contract 5 (Task 79, caps hygiene): the WebGPU API can do compute/storage,
+  // but the engine does NOT execute them (no dispatch / storage bindings /
+  // drawIndirect) — the claims were dropped. The GL probe doesn't claim them
+  // either: parity restored.
   expect(query.features.has('compute')).toBe(false)
   expect(query.features.has('storage-buffer')).toBe(false)
   expect(query.features.has('storage-texture')).toBe(false)
   expect(query.features.has('draw-indirect')).toBe(false)
 })
 
-test('probeGPUCaps: MSAA из maxSampleCount', () => {
-  // maxSampleCount=4 → msaa-2x и msaa-4x, но НЕ msaa-8x
+test('probeGPUCaps: MSAA from maxSampleCount', () => {
+  // maxSampleCount=4 → msaa-2x and msaa-4x, but NOT msaa-8x
   const probe = makeMockGPUProbe(new Set(), { maxSampleCount: 4 })
   const caps = createCaps(probeGPUCaps(probe))
   expect(caps.has('msaa-2x')).toBe(true)
@@ -428,7 +429,7 @@ test('probeGPUCaps: MSAA из maxSampleCount', () => {
   expect(caps.has('msaa-16x')).toBe(false)
 })
 
-test('probeGPUCaps: bgra8-storage через feature', () => {
+test('probeGPUCaps: bgra8-storage via feature', () => {
   let probe = makeMockGPUProbe(new Set(['bgra8unorm-storage']), {})
   let caps = createCaps(probeGPUCaps(probe))
   expect(caps.has('bgra8-storage')).toBe(true)
@@ -440,8 +441,8 @@ test('probeGPUCaps: bgra8-storage через feature', () => {
   expect(caps.format('bgra8unorm', 'storage')).toBe('none')
 })
 
-test('probeGPUCaps: float32-filterable влияет на rgba32float render', () => {
-  // Без float32-filterable: rgba32float render=none
+test('probeGPUCaps: float32-filterable affects rgba32float render', () => {
+  // Without float32-filterable: rgba32float render=none
   let probe = makeMockGPUProbe(new Set(), {})
   let caps = createCaps(probeGPUCaps(probe))
   expect(caps.format('rgba32float', 'sampled')).toBe('native')
@@ -451,7 +452,7 @@ test('probeGPUCaps: float32-filterable влияет на rgba32float render', ()
   caps = createCaps(probeGPUCaps(probe))
   expect(caps.format('rgba32float', 'render')).toBe('native')
   expect(caps.format('rgba32float', 'filter')).toBe('native')
-  expect(caps.format('rgba32float', 'msaa')).toBe('none')  // 32float msaa — никогда
+  expect(caps.format('rgba32float', 'msaa')).toBe('none')  // 32float msaa — never
 })
 
 // ─── probeGPUCaps: anisotropic filtering (Task 51 + device-limits fallback) ──
@@ -463,34 +464,34 @@ test('probeGPUCaps: maxAnisotropy=16 → features.has(anisotropic)=true, limits.
   expect(caps.limit('maxAnisotropy')).toBe(16)
 })
 
-test('probeGPUCaps: maxAnisotropy=undefined → fallback к 16 (нативный WebGPU)', () => {
-  // Браузер не репортит maxAnisotropy ни в adapter.limits, ни в device.limits.
-  // WebGPU нативно поддерживает anisotropic filtering — fallback к 16.
+test('probeGPUCaps: maxAnisotropy=undefined → fallback to 16 (native WebGPU)', () => {
+  // The browser does not report maxAnisotropy in adapter.limits or device.limits.
+  // WebGPU natively supports anisotropic filtering — fallback to 16.
   const probe = makeMockGPUProbe(new Set(), {})
   const caps = createCaps(probeGPUCaps(probe))
   expect(caps.has('anisotropic')).toBe(true)
   expect(caps.limit('maxAnisotropy')).toBe(16)
 })
 
-test('probeGPUCaps: maxAnisotropy=1 → всё равно true (Task 54: WebGPU baseline)', () => {
-  // Task 54: WebGPU spec — maxAnisotropy НЕ входит в GPUSupportedLimits.
-  // Если нестандартное расширение браузера возвращает 1, мы всё равно
-  // считаем anisotropic доступной, т.к. WebGPU нативно поддерживает её
-  // (платформа клампит GPUSamplerDescriptor.maxAnisotropy к своему максимуму).
-  // caps.has('anisotropic')=true, limits.maxAnisotropy=16 — детерминированно.
+test('probeGPUCaps: maxAnisotropy=1 → still true (Task 54: WebGPU baseline)', () => {
+  // Task 54: WebGPU spec — maxAnisotropy is NOT part of GPUSupportedLimits.
+  // If a nonstandard browser extension returns 1, we still consider
+  // anisotropic available, since WebGPU natively supports it
+  // (the platform clamps GPUSamplerDescriptor.maxAnisotropy to its maximum).
+  // caps.has('anisotropic')=true, limits.maxAnisotropy=16 — deterministic.
   const probe = makeMockGPUProbe(new Set(), { maxAnisotropy: 1 })
   const caps = createCaps(probeGPUCaps(probe))
   expect(caps.has('anisotropic')).toBe(true)
-  expect(caps.limit('maxAnisotropy')).toBe(16) // переопределено на 16 (нативный WebGPU max)
+  expect(caps.limit('maxAnisotropy')).toBe(16) // overridden to 16 (native WebGPU max)
 })
 
-test('makeGPUProbe: adapter.limits.maxAnisotropy=undefined, device.limits.maxAnisotropy=16 → fallback к device', () => {
-  // Симулируем браузер, где adapter.limits НЕ содержит maxAnisotropy,
-  // но device.limits (после requestDevice()) — да. Это реальный кейс
-  // на Chromium < 130 и Safari < 18.
+test('makeGPUProbe: adapter.limits.maxAnisotropy=undefined, device.limits.maxAnisotropy=16 → fallback to device', () => {
+  // Simulate a browser where adapter.limits does NOT contain maxAnisotropy,
+  // but device.limits (after requestDevice()) does. This is a real case
+  // on Chromium < 130 and Safari < 18.
   const adapter = {
     features: new Set<string>(),
-    limits: { /* adapter.limits БЕЗ maxAnisotropy */ } as unknown as Record<string, number>,
+    limits: { /* adapter.limits WITHOUT maxAnisotropy */ } as unknown as Record<string, number>,
     info: { vendor: 'MockVendor', architecture: 'MockArch', description: 'Mock' },
   } as unknown as GPUAdapter
   const device = {
@@ -498,11 +499,11 @@ test('makeGPUProbe: adapter.limits.maxAnisotropy=undefined, device.limits.maxAni
   } as unknown as GPUDevice
 
   const probe = makeGPUProbe(adapter, 'bgra8unorm', device)
-  expect(probe.getLimit('maxAnisotropy')).toBe(16) // fallback к device.limits
-  expect(probe.getLimit('maxBindGroups')).toBeUndefined() // нет ни в adapter, ни в device
+  expect(probe.getLimit('maxAnisotropy')).toBe(16) // fallback to device.limits
+  expect(probe.getLimit('maxBindGroups')).toBeUndefined() // not in adapter, not in device
 })
 
-test('makeGPUProbe: adapter.limits.maxAnisotropy=8 → возвращает adapter значение (device не нужен)', () => {
+test('makeGPUProbe: adapter.limits.maxAnisotropy=8 → returns the adapter value (device not needed)', () => {
   const adapter = {
     features: new Set<string>(),
     limits: { maxAnisotropy: 8 } as unknown as Record<string, number>,
@@ -513,24 +514,24 @@ test('makeGPUProbe: adapter.limits.maxAnisotropy=8 → возвращает adap
   expect(probe.getLimit('maxAnisotropy')).toBe(8)
 })
 
-test('makeGPUProbe: без device (recording-фасад) — только adapter.limits', () => {
+test('makeGPUProbe: without device (recording facade) — adapter.limits only', () => {
   const adapter = {
     features: new Set<string>(),
     limits: { maxAnisotropy: 4 } as unknown as Record<string, number>,
     info: { vendor: 'MockVendor', architecture: 'MockArch', description: 'Mock' },
   } as unknown as GPUAdapter
 
-  // device не передан (как в recording-фасаде)
+  // device not passed (as in the recording facade)
   const probe = makeGPUProbe(adapter, 'bgra8unorm')
   expect(probe.getLimit('maxAnisotropy')).toBe(4)
 })
 
-test('Integration: probeGPUCaps + makeGPUProbe с device fallback → caps.has(anisotropic)=true', () => {
-  // Сценарий из реального браузера: adapter.limits НЕ содержит maxAnisotropy,
-  // но device.limits содержит. probe.getLimit() fallback к device.
+test('Integration: probeGPUCaps + makeGPUProbe with device fallback → caps.has(anisotropic)=true', () => {
+  // A real-browser scenario: adapter.limits does NOT contain maxAnisotropy,
+  // but device.limits does. probe.getLimit() falls back to device.
   const adapter = {
     features: new Set<string>(),
-    limits: {} as unknown as Record<string, number>, // пустые adapter.limits
+    limits: {} as unknown as Record<string, number>, // empty adapter.limits
     info: { vendor: 'MockVendor', architecture: 'MockArch', description: 'Mock' },
   } as unknown as GPUAdapter
   const device = {
@@ -539,17 +540,17 @@ test('Integration: probeGPUCaps + makeGPUProbe с device fallback → caps.has(a
 
   const probe = makeGPUProbe(adapter, 'bgra8unorm', device)
   const caps = createCaps(probeGPUCaps(probe))
-  expect(caps.has('anisotropic')).toBe(true) // было false до фикса Task 51+
+  expect(caps.has('anisotropic')).toBe(true) // was false before the Task 51+ fix
   expect(caps.limit('maxAnisotropy')).toBe(16)
 })
 
-// ─── uploadMip (recordingGL): проверка записи ────────────────────────────────
+// ─── uploadMip (recordingGL): write verification ────────────────────────────────
 
 import { createRecordingGL } from '@rune/webgl2'
 
-test('uploadMip (recordingGL): запись вызова texImage2DLevel с level и flipY', () => {
+test('uploadMip (recordingGL): records the texImage2DLevel call with level and flipY', () => {
   const rec = createRecordingGL()
-  // Source — HTMLCanvasElement (наиболее универсальный)
+  // Source — HTMLCanvasElement (the most universal)
   const c = (typeof document !== 'undefined')
     ? document.createElement('canvas')
     : { width: 4, height: 4 } as unknown as HTMLCanvasElement
@@ -562,21 +563,21 @@ test('uploadMip (recordingGL): запись вызова texImage2DLevel с leve
   expect(rec.calls[0]).toContain('flipY=true')
 })
 
-test('uploadMip (recordingGL): flipY по умолчанию false', () => {
+test('uploadMip (recordingGL): flipY defaults to false', () => {
   const rec = createRecordingGL()
   const c = { width: 2, height: 2 } as unknown as HTMLCanvasElement
   rec.gl.texImage2DLevel(1, 0, c)
   expect(rec.calls[0]).toContain('flipY=false')
 })
 
-test('uploadMip (recordingGL): flipY=false явно', () => {
+test('uploadMip (recordingGL): flipY=false explicitly', () => {
   const rec = createRecordingGL()
   const c = { width: 2, height: 2 } as unknown as HTMLCanvasElement
   rec.gl.texImage2DLevel(3, 1, c, { flipY: false })
   expect(rec.calls[0]).toContain('flipY=false')
 })
 
-// ─── Интеграция: probeGLCaps → createCaps → renderer-подобный usage ──────────
+// ─── Integration: probeGLCaps → createCaps → renderer-like usage ──────────
 
 test('Integration: mock GL probe → caps → full workflow', () => {
   const probe = makeMockGLProbe({
@@ -601,7 +602,7 @@ test('Integration: mock GL probe → caps → full workflow', () => {
 
   const caps = createCaps(probeGLCaps(probe), () => sc.snapshot())
 
-  // Проверка типичного workflow
+  // Check the typical workflow
   expect(caps.backend).toBe('webgl2')
   expect(caps.has('astc')).toBe(true)
   expect(caps.has('anisotropic')).toBe(true)
@@ -615,5 +616,5 @@ test('Integration: mock GL probe → caps → full workflow', () => {
   expect(s.memoryEstimate).toBe(1024)
   expect(s.frameCount).toBe(1)
   expect(s.cpuMs).toBeGreaterThan(-1) // 0+ (depends on mock now())
-  expect(s.gpuMs).toBeNull() // timer-query подключается отдельно
+  expect(s.gpuMs).toBeNull() // timer-query is wired up separately
 })

@@ -1,12 +1,13 @@
 /**
- * Куб: 6 граней × 2 треугольника × 3 вершины = 36 вершин.
- * Позиционные углы — {-1,+1}² (грань занимает полный [-half,+half]²),
- * текстурные UV — [0,1]². Раздельные таблицы: смешение (урок инцидента
- * «четверть грани»: углы 0..1 сжимали грань в четверть и разносили
- * грани по углам куба) ломало геометрию при корректных UV.
+ * Cube: 6 faces × 2 triangles × 3 vertices = 36 vertices.
+ * Positional corners — {-1,+1}² (a face spans the full [-half,+half]²),
+ * texture UVs — [0,1]². Separate tables: mixing them (the lesson of the
+ * "quarter face" incident: corners 0..1 squeezed the face into a quarter
+ * and scattered faces across cube corners) broke the geometry while the
+ * UVs were correct.
  */
 
-/** Геометрия куба: атрибуты параллельны, по вершине на элемент. */
+/** Cube geometry: attributes are parallel, one vertex per element. */
 export interface CubeGeometry {
   readonly positions: Float32Array
   readonly normals: Float32Array
@@ -14,7 +15,7 @@ export interface CubeGeometry {
   readonly vertexCount: number
 }
 
-/** Грань: нормаль + тангенциальный базис (cross(u, v) = n, фронт CCW). */
+/** Face: normal + tangential basis (cross(u, v) = n, CCW front). */
 interface Face {
   readonly n: readonly [number, number, number]
   readonly u: readonly [number, number, number]
@@ -30,7 +31,7 @@ const FACES: readonly Face[] = [
   { n: [0, -1, 0], u: [1, 0, 0], v: [0, 0, 1] },
 ]
 
-/** Позиционные координаты угла грани в единицах half: полный размах. */
+/** Positional coordinates of a face corner in units of half: full extent. */
 const CORNER_POS: ReadonlyArray<readonly [number, number]> = [
   [-1, -1],
   [1, -1],
@@ -38,7 +39,7 @@ const CORNER_POS: ReadonlyArray<readonly [number, number]> = [
   [-1, 1],
 ]
 
-/** Текстурные координаты угла (порядок согласован с CORNER_POS). */
+/** Texture coordinates of a corner (order matches CORNER_POS). */
 const CORNER_UV: ReadonlyArray<readonly [number, number]> = [
   [0, 0],
   [1, 0],
@@ -46,7 +47,7 @@ const CORNER_UV: ReadonlyArray<readonly [number, number]> = [
   [0, 1],
 ]
 
-/** Куб половинной стороны `half` (cube(1) — единичный по стороне). */
+/** Cube with half side length `half` (cube(1) is unit by side). */
 export function cube(half: number): CubeGeometry {
   const positions = new Float32Array(FACES.length * 6 * 3)
   const normals = new Float32Array(FACES.length * 6 * 3)
@@ -58,26 +59,27 @@ export function cube(half: number): CubeGeometry {
   return { positions, normals, uvs, vertexCount: FACES.length * 6 }
 }
 
-/** Параметры бокса (Task 109, как BoxGeometry three.js): размер + сегменты НА ГРАНЬ. */
+/** Box parameters (Task 109, like three.js BoxGeometry): size + segments PER FACE. */
 export interface BoxParams {
-  /** Размер по X. */
+  /** Size along X. */
   readonly width?: number
-  /** Размер по Y. */
+  /** Size along Y. */
   readonly height?: number
-  /** Размер по Z. */
+  /** Size along Z. */
   readonly depth?: number
-  /** Сегментов вдоль X на гранях ±Z/±Y. */
+  /** Segments along X on the ±Z/±Y faces. */
   readonly widthSegments?: number
-  /** Сегментов вдоль Y на гранях ±Z/±X. */
+  /** Segments along Y on the ±Z/±X faces. */
   readonly heightSegments?: number
-  /** Сегментов вдоль Z на гранях ±X/±Y. */
+  /** Segments along Z on the ±X/±Y faces. */
   readonly depthSegments?: number
 }
 
 /**
- * Бокс width×height×depth с сеткой сегментов на каждую грань (Task 109).
- * box() без аргументов = куб 1×1×1 без сегментов (36 вершин, куб-совместим).
- * UV каждой грани покрывает [0,1]², нормали наружу, winding CCW.
+ * Box width×height×depth with a segment grid on each face (Task 109).
+ * box() with no arguments = a 1×1×1 cube without segments (36 vertices,
+ * cube-compatible). Each face's UV covers [0,1]², normals point outward,
+ * CCW winding.
  */
 export function box(params: BoxParams = {}): CubeGeometry {
   const width = params.width ?? 1
@@ -87,7 +89,7 @@ export function box(params: BoxParams = {}): CubeGeometry {
   const hs = Math.max(1, Math.floor(params.heightSegments ?? 1))
   const ds = Math.max(1, Math.floor(params.depthSegments ?? 1))
 
-  // полугабариты по осям
+  // half-extents along the axes
   const hx = width / 2
   const hy = height / 2
   const hz = depth / 2
@@ -98,7 +100,7 @@ export function box(params: BoxParams = {}): CubeGeometry {
     return hz
   }
 
-  // сетка сегментов для каждой грани: (вдоль u, вдоль v)
+  // segment grid for each face: (along u, along v)
   const faceSegs: readonly [number, number][] = [
     [ws, hs], [ws, hs], // ±Z: u=X, v=Y
     [ds, hs], [ds, hs], // ±X: u=Z, v=Y
@@ -120,7 +122,7 @@ export function box(params: BoxParams = {}): CubeGeometry {
     const hn = halfOf(face.n)
     for (let j = 0; j < sv; j++) {
       for (let i = 0; i < su; i++) {
-        // 4 угла ячейки в нормализованных координатах [-1,1]²
+        // 4 corners of a cell in normalized coordinates [-1,1]²
         const corners: ReadonlyArray<readonly [number, number, number, number]> = [
           [-1 + (2 * i) / su, -1 + (2 * j) / sv, i / su, j / sv],
           [-1 + (2 * (i + 1)) / su, -1 + (2 * j) / sv, (i + 1) / su, j / sv],
@@ -146,7 +148,7 @@ export function box(params: BoxParams = {}): CubeGeometry {
   return { positions, normals, uvs, vertexCount }
 }
 
-/** Пишет 6 вершин грани (2 треугольника 0-1-2 / 0-2-3), возвращает новый курсор. */
+/** Writes 6 vertices of a face (2 triangles 0-1-2 / 0-2-3), returns the new cursor. */
 function emitFace(
   face: Face,
   half: number,
@@ -155,7 +157,7 @@ function emitFace(
   uvs: Float32Array,
   at: number,
 ): number {
-  // 4 угла: центр грани ± полная полугарань; порядок согласован с CORNER_UV
+  // 4 corners: face center ± the full half-face; order matches CORNER_UV
   const corners = CORNER_POS.map(([cp, cq]) => [
     (face.n[0] + face.u[0] * cp + face.v[0] * cq) * half,
     (face.n[1] + face.u[1] * cp + face.v[1] * cq) * half,

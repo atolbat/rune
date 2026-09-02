@@ -53,14 +53,14 @@ function tapeOf(command: { record(p: any, c: any, w: any): void }) {
 }
 
 describe('portability harness', () => {
-  it('один и тот же спек даёт одинаковые имена привязок на обоих бэкендах', () => {
+  it('the same spec yields the same binding names on both backends', () => {
     const gl = compileOn(webgl2Adapter(), makeSpec())
     const gpu = compileOn(webgpuAdapter(), makeSpec())
     expect(gl.bindings).toEqual(gpu.bindings)
     expect(gl.bindings).toEqual(['u_mvp', 'u_tint', 'u_alpha'])
   })
 
-  it('ленты различаются только локальными id: op/count/instances совпадают', () => {
+  it('tapes differ only in local ids: op/count/instances match', () => {
     const gl = compileOn(webgl2Adapter(), makeSpec())
     const gpu = compileOn(webgpuAdapter(), makeSpec())
     const a = tapeOf(gl)
@@ -72,7 +72,7 @@ describe('portability harness', () => {
     expect(a.c[0]).toBe(b.c[0])   // instances
   })
 
-  it('switchBackend пере-компилирует живые команды; хэндл продолжает работать', () => {
+  it('switchBackend recompiles live commands; the handle keeps working', () => {
     const harness = createPortability({ webgl2: webgl2Adapter(), webgpu: webgpuAdapter() })
     const command = harness.compile(makeSpec())
     expect(harness.backend).toBe('webgl2')
@@ -84,23 +84,23 @@ describe('portability harness', () => {
     expect(summary.backend).toBe('webgpu')
     expect(harness.backend).toBe('webgpu')
 
-    const after = tapeOf(command) // тот же хэндл — новая компиляция
+    const after = tapeOf(command) // the same handle — a new compilation
     expect(after.op[0]).toBe(OpCode.Draw)
     expect(after.b[0]).toBe(before.b[0])
   })
 
-  it('destroy исключает команду из replay', () => {
+  it('destroy excludes the command from replay', () => {
     const harness = createPortability({ webgl2: webgl2Adapter(), webgpu: webgpuAdapter() })
     const doomed = harness.compile(makeSpec())
     const keeper = harness.compile(makeSpec())
     harness.destroy(doomed)
 
     const summary = harness.simulateLoss()
-    expect(summary.recompiled).toBe(1) // только keeper
+    expect(summary.recompiled).toBe(1) // only the keeper
     expect(tapeOf(keeper).op[0]).toBe(OpCode.Draw)
   })
 
-  it('simulateLoss и switchBackend — один механизм (потеря = смена на себя)', () => {
+  it('simulateLoss and switchBackend — one mechanism (loss = switching to itself)', () => {
     const harness = createPortability({ webgl2: webgl2Adapter(), webgpu: webgpuAdapter() })
     harness.compile(makeSpec())
     const lost = harness.simulateLoss()
@@ -109,7 +109,7 @@ describe('portability harness', () => {
     expect(harness.backend).toBe('webgl2')
   })
 
-  it('журнал растёт декларациями и destroy', () => {
+  it('the journal grows with declarations and destroy', () => {
     const harness = createPortability({ webgl2: webgl2Adapter(), webgpu: webgpuAdapter() })
     const first = harness.compile(makeSpec())
     harness.compile(makeSpec())
@@ -123,22 +123,22 @@ function compileOn(adapter: BackendAdapter, spec: PortableSpec) {
   return adapter.compile(context, spec)
 }
 
-describe('reflection cache (теория F)', () => {
-  it('повторная рефлексия того же исходника возвращает тот же объект', async () => {
+describe('reflection cache (theory F)', () => {
+  it('repeated reflection of the same source returns the same object', async () => {
     const { reflectGlsl } = await import('@rune/core')
     const first = reflectGlsl(GLSL_VERT, GLSL_FRAG)
     const second = reflectGlsl(GLSL_VERT, GLSL_FRAG)
     expect(second).toBe(first)
   })
 
-  it('компиляция сотен команд с общим шейдером не парсит исходник повторно', () => {
+  it('compiling hundreds of commands with a shared shader does not parse the source again', () => {
     const arena = createUniformArena(1 << 20)
     const ctx = createCompileContext(arena, 'interpret')
     for (let i = 0; i < 200; i++) {
       compileDrawSpec({ ...makeSpecGl(), uniforms: { u_alpha: i / 200 } } as any, ctx)
     }
     expect(ctx.commands.length).toBe(200)
-    expect(ctx.programs.size).toBe(1) // одна программа на один исходник
+    expect(ctx.programs.size).toBe(1) // one program per source
   })
 })
 

@@ -1,15 +1,15 @@
 /**
- * Байтовые утилиты для потоковых парсеров @rune/loaders.
+ * Byte utilities for the streaming parsers of @rune/loaders.
  *
- * Все текстовые форматы (OBJ/MTL/ZML/INI, заголовки GLB/FBX) парсятся
- * напрямую из Uint8Array — БЕЗ декодирования всего файла в строку.
- * Причина: лоадеры работают в стриминге (чанк мог прийти частично),
- * а String.fromCharCode на гигабайтных буферах ломает latency кадра.
+ * All text formats (OBJ/MTL/ZML/INI, GLB/FBX headers) are parsed
+ * directly from Uint8Array — WITHOUT decoding the whole file into a string.
+ * Reason: loaders work in streaming mode (a chunk may arrive partially),
+ * and String.fromCharCode on gigabyte buffers wrecks frame latency.
  *
- * Контракт модуля: чистые функции над Uint8Array, ноль зависимостей.
+ * Module contract: pure functions over Uint8Array, zero dependencies.
  */
 
-/** Коды символов, используемые парсерами (без magic-чисел в коде). */
+/** Character codes used by the parsers (no magic numbers in code). */
 export const CHAR = {
   CR: 13,
   LF: 10,
@@ -26,16 +26,16 @@ export const CHAR = {
   DIGIT_9: 57,
 } as const
 
-/** Пробельный символ для построчных форматов (SPACE/TAB/CR/LF). */
+/** Whitespace character for line-based formats (SPACE/TAB/CR/LF). */
 export function isWhitespace(byte: number): boolean {
   return byte === CHAR.SPACE || byte === CHAR.TAB || byte === CHAR.CR || byte === CHAR.LF
 }
 
 /**
- * Декодирует ASCII-подстроку [start, start+length) в JS-строку.
- * Чанками по 8 КБ, чтобы не переполнить стек String.fromCharCode.
- * Используется для заголовков (glTF/BIN/FBX-magic) и коротких токенов
- * форматов (имена узлов, ключевые слова OBJ/MTL).
+ * Decodes an ASCII substring [start, start+length) into a JS string.
+ * In chunks of 8 KB so String.fromCharCode does not overflow the stack.
+ * Used for headers (glTF/BIN/FBX-magic) and short format tokens
+ * (node names, OBJ/MTL keywords).
  */
 export function asciiDecode(bytes: Uint8Array, start: number, length: number): string {
   let out = ''
@@ -48,13 +48,13 @@ export function asciiDecode(bytes: Uint8Array, start: number, length: number): s
 }
 
 /**
- * Быстрый разбор десятичного числа из байтов [start, end).
+ * Fast decimal number parsing from bytes [start, end).
  *
- * Ручная реализация вместо parseFloat(asciiDecode(...)): не аллоцирует
- * строку, останавливается на первом не-числовом байте, возвращает NaN
- * если цифр нет вовсе. Поддерживает знак, дробную часть и экспоненту
- * (в т.ч. «1e-5»). Диапазон точности — как у Number, т.к. мантисса
- * собирается в целое до 2^53.
+ * A hand-written implementation instead of parseFloat(asciiDecode(...)):
+ * does not allocate a string, stops at the first non-numeric byte, returns
+ * NaN if there are no digits at all. Supports sign, fractional part and
+ * exponent (including "1e-5"). The precision range is the same as Number,
+ * since the mantissa is assembled into an integer up to 2^53.
  */
 export function parseDecimal(bytes: Uint8Array, start: number, end: number): number {
   if (start >= end) return NaN
@@ -107,18 +107,18 @@ export function parseDecimal(bytes: Uint8Array, start: number, end: number): num
   return negative ? -value : value
 }
 
-/** Выравнивание длины чанка GLB вверх до границы 4 байта. */
+/** Rounds a GLB chunk length up to a 4-byte boundary. */
 export function align4(n: number): number {
   const rest = n % 4
   return rest === 0 ? n : n + 4 - rest
 }
 
-/** performance.now() там где есть, иначе Date.now() (Node/браузер/Bun). */
+/** performance.now() where available, otherwise Date.now() (Node/browser/Bun). */
 export function nowMs(): number {
   return typeof performance < 'u' ? performance.now() : Date.now()
 }
 
-/** Ограничение value диапазоном [min, max]. */
+/** Clamps a value to the [min, max] range. */
 export function clamp(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n))
 }

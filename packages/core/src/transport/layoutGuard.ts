@@ -1,8 +1,8 @@
 /**
- * LayoutGuard: классификатор событий ресайза. Три вердикта:
- *  apply   — новый размер, применять
- *  ignore  — дребезг (тот же размер)
- *  runaway — петля A→B→A→B (инцидент DPR: каждый ресайз порождал новый)
+ * LayoutGuard: a resize event classifier. Three verdicts:
+ *  apply   — new size, apply it
+ *  ignore  — debounce (the same size)
+ *  runaway — an A→B→A→B loop (the DPR incident: each resize spawned a new one)
  */
 
 export type ResizeVerdict = 'apply' | 'ignore' | 'runaway'
@@ -35,7 +35,7 @@ export function createLayoutGuard(): LayoutGuardApi {
     return { verdict: 'apply', cssWidth: width, cssHeight: height }
   }
 
-  /** Последние 4 события чередуют два размера — петля ресайза. */
+  /** The last 4 events alternate between two sizes — a resize loop. */
   function oscillates(): boolean {
     if (recent.length < 4) return false
     const last4 = recent.slice(-4)

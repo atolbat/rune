@@ -5,11 +5,11 @@ import { createResourceSessionGPU } from '../src/resourceSessionGPU.ts'
 import type { GLFacade, GLImageSource } from '@rune/webgl2'
 import type { GPUFacade, GPUImageSource } from '@rune/webgpu'
 
-/** Фейковый источник (ImageBitmap-подобный). */
+/** Fake source (ImageBitmap-like). */
 const src = (w: number, h: number): { width: number; height: number; id: string } =>
   ({ width: w, height: h, id: `s${w}x${h}-${Math.random().toString(36).slice(2, 7)}` })
 
-// ─── Fake GLFacade: пишет все вызовы в лог, id — монотонный счётчик ─────────
+// ─── Fake GLFacade: logs all calls, id is a monotonic counter ─────────
 
 interface GLCall { method: string; args: unknown[] }
 
@@ -96,8 +96,8 @@ function makeFakeGPU(): { facade: GPUFacade; calls: GLCall[] } {
   return { facade: facade as unknown as GPUFacade, calls }
 }
 
-describe('resourceSessionGL — стабильные id и журналирование', () => {
-  test('createTexture возвращает стабильные id; журнал получает texture.create', () => {
+describe('resourceSessionGL — stable ids and journaling', () => {
+  test('createTexture returns stable ids; journal gets texture.create', () => {
     const j = createResourceJournal()
     const { facade } = makeFakeGL()
     const session = createResourceSessionGL(facade, j)
@@ -108,7 +108,7 @@ describe('resourceSessionGL — стабильные id и журналиров�
     expect(j.entries()[0]).toMatchObject({ kind: 'texture.create', id: 1, width: 256, height: 256 })
   })
 
-  test('texSubImage2DFromSource журналируется как texture.update с ContentRef', () => {
+  test('texSubImage2DFromSource is journaled as texture.update with ContentRef', () => {
     const j = createResourceJournal()
     const { facade } = makeFakeGL()
     const s = createResourceSessionGL(facade, j)
@@ -120,23 +120,23 @@ describe('resourceSessionGL — стабильные id и журналиров�
     expect(j.getSource((op as { content: { ref: number } }).content.ref)).toBe(source)
   })
 
-  test('id-трансляция: facade получает RAW id, приложение — стабильный', () => {
+  test('id translation: the facade gets the RAW id, the application gets the stable one', () => {
     const j = createResourceJournal()
     const { facade: raw, calls } = makeFakeGL()
     const s = createResourceSessionGL(raw, j)
     const t1 = s.facade.createTexture(64, 64) // raw 1
-    s.facade.deleteTexture(t1)                // raw 1 удалён
-    const t2 = s.facade.createTexture(64, 64) // стабильный 2, raw 2
+    s.facade.deleteTexture(t1)                // raw 1 deleted
+    const t2 = s.facade.createTexture(64, 64) // stable 2, raw 2
     expect(t2).toBe(2)
     const source = src(64, 64)
     s.facade.texSubImage2DFromSource(t2, 0, 0, source as never)
-    // последний вызов получил raw id = 2 (правильная текстура!)
+    // the last call received raw id = 2 (the right texture!)
     const last = calls[calls.length - 1]!
     expect(last.method).toBe('texSubImage2DFromSource')
     expect(last.args[0]).toBe(2)
   })
 
-  test('programs/buffers — pass-through raw id, журнал их НЕ хранит', () => {
+  test('programs/buffers — pass-through raw id, the journal does NOT store them', () => {
     const j = createResourceJournal()
     const { facade: raw } = makeFakeGL()
     const s = createResourceSessionGL(raw, j)
@@ -149,47 +149,47 @@ describe('resourceSessionGL — стабильные id и журналиров�
   })
 })
 
-describe('resourceSessionGL — restore (регрессия пользователя: дырки в id)', () => {
-  test('после create/delete/create + compact restore даёт ТЕ ЖЕ стабильные id и правильные raw-маппинги', () => {
-    // Сценарий из баг-репорта: журнал имеет ДЫРКИ (id 3 уничтожен),
-    // replay v1 выдавал плотный ряд 1,2,3,4 и «НЕ СОВПАДАЮТ».
+describe('resourceSessionGL — restore (user regression: holes in ids)', () => {
+  test('after create/delete/create + compact, restore yields THE SAME stable ids and correct raw mappings', () => {
+    // Scenario from the bug report: the journal has HOLES (id 3 destroyed),
+    // replay v1 produced a dense row 1,2,3,4 and "DO NOT MATCH".
     const j = createResourceJournal()
     const fake1 = makeFakeGL()
     const s1 = createResourceSessionGL(fake1.facade, j)
-    const t1 = s1.facade.createTexture(256, 256) // стабильный 1
-    const t2 = s1.facade.createTexture(64, 64)   // стабильный 2
-    const t3 = s1.facade.createTexture(64, 64)   // стабильный 3 (будет уничтожен)
-    const t4 = s1.facade.createTexture(128, 128) // стабильный 4 — ДЫРКА после delete t3
+    const t1 = s1.facade.createTexture(256, 256) // stable 1
+    const t2 = s1.facade.createTexture(64, 64)   // stable 2
+    const t3 = s1.facade.createTexture(64, 64)   // stable 3 (will be destroyed)
+    const t4 = s1.facade.createTexture(128, 128) // stable 4 — a HOLE after deleting t3
     const tileA = src(64, 64)
     const tileB = src(64, 64)
     s1.facade.texSubImage2DFromSource(t2, 0, 0, tileA as never)
     s1.facade.texSubImage2DFromSource(t2, 64, 0, tileB as never)
-    s1.facade.deleteTexture(t3) // дырка в стабильных id
+    s1.facade.deleteTexture(t3) // a hole in stable ids
     void t1; void t4
 
-    // Потеря устройства: compact + restore на СВЕЖЕМ фасаде (та же сессия
-    // имитируется новой обёрткой над новым raw-фасадом).
+    // Device loss: compact + restore on a FRESH facade (the same session
+    // is emulated by a new wrapper over a new raw facade).
     j.compact()
     const fake2 = makeFakeGL()
     const s2 = createResourceSessionGL(fake2.facade, j)
     const report = s2.restore()
 
-    // Стабильные id живых текстур — ТЕ ЖЕ (по построению, не «повезло»)
+    // Stable ids of live textures — THE SAME (by construction, not by "luck")
     expect(report.textureIds).toEqual([1, 2, 4])
-    // Контент пере-залит: 2 sub-image вызова на raw id текстуры 2
+    // Content re-uploaded: 2 sub-image calls on texture 2's raw id
     const subs = fake2.calls.filter(c => c.method === 'texSubImage2DFromSource')
     expect(subs).toHaveLength(2)
     expect(subs[0]!.args[0]).toBe(s2.mapping.get(2))
     expect(subs[0]!.args[1]).toBe(0)
     expect(subs[1]!.args[1]).toBe(64)
-    // Источники — те же объекты из ContentStore
+    // Sources — the same objects from ContentStore
     expect(subs[0]!.args[3]).toBe(tileA)
     expect(subs[1]!.args[3]).toBe(tileB)
     expect(report.contentOps).toBe(2)
     expect(report.skipped).toBe(0)
   })
 
-  test('texture.write / writeMip / view.create / target.create восстанавливаются', () => {
+  test('texture.write / writeMip / view.create / target.create are restored', () => {
     const j = createResourceJournal()
     const fake1 = makeFakeGL()
     const s1 = createResourceSessionGL(fake1.facade, j)
@@ -210,20 +210,20 @@ describe('resourceSessionGL — restore (регрессия пользовате
     expect(report.viewIds.length).toBe(1)
     expect(report.targetIds.length).toBe(1)
     expect(report.contentOps).toBe(2) // write + writeMip
-    // write пришёл с flipY=true (сохранён в опсе)
+    // write came with flipY=true (saved in the op)
     const write = fake2.calls.find(c => c.method === 'texImage2DFromSource')!
     expect(write.args[2]).toEqual({ flipY: true })
-    // view создан на ПРАВИЛЬНУЮ текстуру (raw id = mapping t)
+    // view created on the RIGHT texture (raw id = mapping t)
     const view = fake2.calls.find(c => c.method === 'createTextureView')!
     expect(view.args[0]).toBe(s2.mapping.get(t))
   })
 
-  test('мёртвый источник (закрытый битмап-подобный) — опс пропускается, restore не падает', () => {
+  test('dead source (closed bitmap-like) — the op is skipped, restore does not crash', () => {
     const j = createResourceJournal()
     const fake1 = makeFakeGL()
     const s1 = createResourceSessionGL(fake1.facade, j)
     const t = s1.facade.createTexture(64, 64)
-    const dead = { width: 0, height: 0 } // «закрытый» ImageBitmap
+    const dead = { width: 0, height: 0 } // "closed" ImageBitmap
     s1.facade.texSubImage2DFromSource(t, 0, 0, dead as never)
 
     const fake2 = makeFakeGL()
@@ -234,8 +234,8 @@ describe('resourceSessionGL — restore (регрессия пользовате
   })
 })
 
-describe('resourceSessionGPU — стабильные id, полнота копии, restore', () => {
-  test('полная копия → texture.write; sub-region → texture.update', () => {
+describe('resourceSessionGPU — stable ids, copy completeness, restore', () => {
+  test('full copy → texture.write; sub-region → texture.update', () => {
     const j = createResourceJournal()
     const { facade: raw } = makeFakeGPU()
     const s = createResourceSessionGPU(raw, j)
@@ -250,13 +250,13 @@ describe('resourceSessionGPU — стабильные id, полнота коп�
     expect(upd).toMatchObject({ kind: 'texture.update', x: 64, y: 0, w: 64, h: 64, flipY: true })
   })
 
-  test('restore: id стабильны, контент залит с правильными координатами и raw id', () => {
+  test('restore: ids are stable, content uploaded with correct coordinates and raw id', () => {
     const j = createResourceJournal()
     const fake1 = makeFakeGPU()
     const s1 = createResourceSessionGPU(fake1.facade, j)
     const tA = s1.facade.createTexture(256, 256, 'rgba8unorm')
     const tB = s1.facade.createTexture(64, 64, 'rgba8unorm')
-    s1.facade.deleteTexture(tA) // дырка
+    s1.facade.deleteTexture(tA) // a hole
     const tile = src(64, 64)
     s1.facade.copyExternalImageToTexture(tB, tile as never, 0, 0, 64, 64, false)
 
@@ -270,10 +270,10 @@ describe('resourceSessionGPU — стабильные id, полнота коп�
     expect(copy.args[0]).toBe(s2.mapping.get(tB))
     expect(copy.args[3]).toBe(0) // dstX
     expect(copy.args[5]).toBe(64) // copyWidth
-    expect(copy.args[6]).toBe(false) // flipY из опса (сохранён при записи)
+    expect(copy.args[6]).toBe(false) // flipY from the op (saved at write time)
   })
 
-  test('writeMip восстанавливается через copyExternalImageToTextureMip', () => {
+  test('writeMip is restored via copyExternalImageToTextureMip', () => {
     const j = createResourceJournal()
     const fake1 = makeFakeGPU()
     const s1 = createResourceSessionGPU(fake1.facade, j)
@@ -290,7 +290,7 @@ describe('resourceSessionGPU — стабильные id, полнота коп�
     expect(mip.args[0]).toBe(s2.mapping.get(t))
   })
 
-  test('bindTexture транслирует и textureId, и viewId (namespace ≥1M)', () => {
+  test('bindTexture translates both textureId and viewId (namespace ≥1M)', () => {
     const j = createResourceJournal()
     const { facade: raw, calls } = makeFakeGPU()
     const s = createResourceSessionGPU(raw, j)
@@ -307,16 +307,16 @@ describe('resourceSessionGPU — стабильные id, полнота коп�
   })
 })
 
-describe('resourceSession — сидирование счётчиков из журнала', () => {
-  test('новая сессия не переиспользует стабильные id из журнала', () => {
+describe('resourceSession — seeding counters from the journal', () => {
+  test('a new session does not reuse stable ids from the journal', () => {
     const j = createResourceJournal()
     const fake1 = makeFakeGL()
     const s1 = createResourceSessionGL(fake1.facade, j)
-    s1.facade.createTexture(64, 64) // стабильный 1
-    s1.facade.createTexture(64, 64) // стабильный 2
+    s1.facade.createTexture(64, 64) // stable 1
+    s1.facade.createTexture(64, 64) // stable 2
 
-    // Re-init: НОВАЯ сессия над свежим raw-фасадом, тот же журнал.
-    // До restore() приложение создаёт текстуру — id должен быть 3, не 1.
+    // Re-init: a NEW session over a fresh raw facade, same journal.
+    // Before restore() the application creates a texture — id must be 3, not 1.
     const fake2 = makeFakeGL()
     const s2 = createResourceSessionGL(fake2.facade, j)
     const t3 = s2.facade.createTexture(64, 64)
@@ -324,21 +324,21 @@ describe('resourceSession — сидирование счётчиков из ж�
   })
 })
 
-// ─── Task 65: soft reset (restore(workingSet)) + ленивая резидентность ──────
+// ─── Task 65: soft reset (restore(workingSet)) + lazy residency ──────
 
-describe('Task 65 — restore(workingSet): soft reset только сцены', () => {
-  test('GL: восстанавливает только рабочее множество, остальное — deferred', () => {
+describe('Task 65 — restore(workingSet): soft reset of the scene only', () => {
+  test('GL: restores only the working set, the rest is deferred', () => {
     const j = createResourceJournal()
     const { facade, calls } = makeFakeGL()
     const s = createResourceSessionGL(facade, j)
-    // Сцена: текстура 1 с контентом; скрытый ресурс: текстура 2 с контентом.
+    // Scene: texture 1 with content; hidden resource: texture 2 with content.
     const scene = s.facade.createTexture(256, 256)
     s.facade.texImage2DFromSource(scene, src(256, 256) as never, { flipY: false })
     const hidden = s.facade.createTexture(128, 128)
     s.facade.texImage2DFromSource(hidden, src(128, 128) as never, { flipY: false })
     j.compact()
 
-    // Потеря устройства → свежая сессия (новый fake-фасад), soft reset.
+    // Device loss → fresh session (new fake facade), soft reset.
     const { facade: gl2, calls: calls2 } = makeFakeGL()
     const s2 = createResourceSessionGL(gl2, j)
     const report = s2.restore({ textureIds: [scene] })
@@ -346,16 +346,16 @@ describe('Task 65 — restore(workingSet): soft reset только сцены', 
     expect(report.contentOps).toBe(1)
     expect(report.deferred).toBeDefined()
     expect(report.deferred!.textures).toEqual([hidden])
-    // На фасаде создана ТОЛЬКО одна текстура (сцена): create-вызовов — 1.
+    // Only ONE texture (the scene) created on the facade: 1 create call.
     const creates = calls2.filter(c => c.method === 'createTexture')
     expect(creates).toHaveLength(1)
     expect(creates[0]!.args).toEqual([256, 256, undefined])
-    // Контент сцены пере-залит (texImage2DFromSource), контент hidden — НЕТ.
+    // Scene content is re-uploaded (texImage2DFromSource), the hidden content is NOT.
     expect(calls2.filter(c => c.method === 'texImage2DFromSource')).toHaveLength(1)
     void calls
   })
 
-  test('GL: ensureResident лениво возвращает отложенный ресурс с контентом', () => {
+  test('GL: ensureResident lazily brings back a deferred resource with content', () => {
     const j = createResourceJournal()
     const { facade } = makeFakeGL()
     const s = createResourceSessionGL(facade, j)
@@ -368,23 +368,23 @@ describe('Task 65 — restore(workingSet): soft reset только сцены', 
     const s2 = createResourceSessionGL(gl2, j)
     const report = s2.restore({ textureIds: [scene] })
     expect(report.deferred!.textures).toEqual([hidden])
-    expect(s2.rawId(hidden)).toBeUndefined() // не резидентен
+    expect(s2.rawId(hidden)).toBeUndefined() // not resident
 
     const lazy = s2.ensureResident(hidden)
     expect(lazy).not.toBeNull()
     expect(lazy!.textureIds).toEqual([hidden])
-    expect(lazy!.contentOps).toBe(1) // контент вернулся вместе с текстурой
-    expect(s2.rawId(hidden)).toBeDefined() // теперь резидентен
+    expect(lazy!.contentOps).toBe(1) // content came back together with the texture
+    expect(s2.rawId(hidden)).toBeDefined() // now resident
 
-    // Идемпотентно: повторный вызов — no-op (null), без дублей на фасаде.
+    // Idempotent: a repeated call is a no-op (null), no duplicates on the facade.
     const again = s2.ensureResident(hidden)
     expect(again).toBeNull()
-    // createTexture на фасаде: сцены НЕ было (empty workingSet в этом тесте не
-    // применяется — restore получил scene), поэтому ровно 2: scene + hidden.
+    // createTexture on the facade: the scene was NOT deferred (empty workingSet
+    // is not used in this test — restore received scene), so exactly 2: scene + hidden.
     expect(calls2.filter(c => c.method === 'createTexture')).toHaveLength(2)
   })
 
-  test('GL: ensureResident(viewId) тянет parent-текстуру и её mip-контент', () => {
+  test('GL: ensureResident(viewId) pulls in the parent texture and its mip content', () => {
     const j = createResourceJournal()
     const { facade } = makeFakeGL()
     const s = createResourceSessionGL(facade, j)
@@ -394,7 +394,7 @@ describe('Task 65 — restore(workingSet): soft reset только сцены', 
     const view = s.facade.createTextureView(parent, { baseMipLevel: 4, mipLevelCount: 3 })
     j.compact()
 
-    // Soft reset БЕЗ view: parent отложен вместе с контентом.
+    // Soft reset WITHOUT the view: the parent is deferred together with its content.
     const { facade: gl2, calls: calls2 } = makeFakeGL()
     const s2 = createResourceSessionGL(gl2, j)
     const report = s2.restore({})
@@ -402,7 +402,7 @@ describe('Task 65 — restore(workingSet): soft reset только сцены', 
     expect(report.deferred!.textures).toEqual([parent])
     expect(report.deferred!.views).toEqual([view])
 
-    // Ленивый возврат view: parent create + write + writeMip + view.create.
+    // Lazy bring-back of the view: parent create + write + writeMip + view.create.
     const lazy = s2.ensureResident(view)
     expect(lazy).not.toBeNull()
     expect(lazy!.textureIds).toEqual([parent])
@@ -412,7 +412,7 @@ describe('Task 65 — restore(workingSet): soft reset только сцены', 
     expect(calls2.filter(c => c.method === 'createTextureView')).toHaveLength(1)
   })
 
-  test('GPU: восстанавливает только рабочее множество + ленивый ensureResident', () => {
+  test('GPU: restores only the working set + lazy ensureResident', () => {
     const j = createResourceJournal()
     const { facade } = makeFakeGPU()
     const s = createResourceSessionGPU(facade, j)
@@ -434,10 +434,10 @@ describe('Task 65 — restore(workingSet): soft reset только сцены', 
     expect(lazy).not.toBeNull()
     expect(lazy!.textureIds).toEqual([hidden])
     expect(lazy!.contentOps).toBe(1)
-    expect(s2.ensureResident(hidden)).toBeNull() // идемпотентно
+    expect(s2.ensureResident(hidden)).toBeNull() // idempotent
   })
 
-  test('GPU: view-сцена через workingSet (parent+контент+view одним restore)', () => {
+  test('GPU: view scene via workingSet (parent+content+view in one restore)', () => {
     const j = createResourceJournal()
     const { facade } = makeFakeGPU()
     const s = createResourceSessionGPU(facade, j)
@@ -458,8 +458,8 @@ describe('Task 65 — restore(workingSet): soft reset только сцены', 
   })
 })
 
-describe('Task 65 — dispose отложенного (нерезидентного) ресурса', () => {
-  test('GL: deleteTexture отложенной текстуры не бросает и убивает декларацию', () => {
+describe('Task 65 — disposing a deferred (non-resident) resource', () => {
+  test('GL: deleteTexture of a deferred texture does not throw and kills the declaration', () => {
     const j = createResourceJournal()
     const { facade } = makeFakeGL()
     const s = createResourceSessionGL(facade, j)
@@ -467,21 +467,21 @@ describe('Task 65 — dispose отложенного (нерезидентног
     s.facade.texImage2DFromSource(tex, src(64, 64) as never, { flipY: false })
     j.compact()
 
-    // Soft reset без этой текстуры → отложена.
+    // Soft reset without this texture → deferred.
     const { facade: gl2 } = makeFakeGL()
     const s2 = createResourceSessionGL(gl2, j)
     const report = s2.restore({})
     expect(report.deferred!.textures).toEqual([tex])
 
-    // Dispose отложенной: НЕ бросает (raw-вызова нет), destroy пишется.
+    // Dispose of the deferred one: does NOT throw (no raw call), destroy is written.
     expect(() => s2.facade.deleteTexture(tex)).not.toThrow()
     expect(j.entries().some(op => op.kind === 'texture.destroy' && op.id === tex)).toBe(true)
-    // compact вычищает пару create→destroy — журнал пуст, ContentStore чист.
+    // compact purges the create→destroy pair — journal empty, ContentStore clean.
     j.compact()
     expect(j.size).toBe(0)
   })
 
-  test('GPU: deleteTextureView отложенного view — только декларация', () => {
+  test('GPU: deleteTextureView of a deferred view — declaration only', () => {
     const j = createResourceJournal()
     const { facade } = makeFakeGPU()
     const s = createResourceSessionGPU(facade, j)
@@ -491,11 +491,11 @@ describe('Task 65 — dispose отложенного (нерезидентног
 
     const { facade: gpu2 } = makeFakeGPU()
     const s2 = createResourceSessionGPU(gpu2, j)
-    const report = s2.restore({ textureIds: [parent] }) // view НЕ в рабочем множестве
+    const report = s2.restore({ textureIds: [parent] }) // view NOT in the working set
     expect(report.deferred!.views).toEqual([view])
     expect(() => s2.facade.deleteTextureView(view)).not.toThrow()
     j.compact()
-    // view.create + view.destroy пара вычищена; parent create жив.
+    // view.create + view.destroy pair purged; parent create lives on.
     expect(j.entries().map(o => o.kind)).toEqual(['texture.create'])
   })
 })

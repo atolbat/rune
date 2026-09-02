@@ -1,4 +1,4 @@
-// Публичные типы реактивности (мир видит только чтение и подписку).
+// Public reactivity types (the world sees only read and subscribe).
 
 export interface ReadableSignal<T = unknown> {
   readonly value: T

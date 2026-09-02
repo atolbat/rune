@@ -1,41 +1,41 @@
-// Контракт фасада WebGL2: толстые операции, тонкий исполнитель.
+// WebGL2 facade contract: fat operations, thin executor.
 
-/** Источник для атомарной загрузки текстуры (без стриминга/чанков).
- *  TexImageSource из lib.dom.d.ts (с OffscreenCanvas и VideoFrame при наличии). */
+/** Source for atomic texture upload (no streaming/chunks).
+ *  TexImageSource from lib.dom.d.ts (with OffscreenCanvas and VideoFrame when available). */
 export type GLImageSource =
   | ImageBitmap
   | HTMLCanvasElement
   | HTMLImageElement
   | HTMLVideoElement
   | OffscreenCanvas
-  // VideoFrame доступен только при WebCodecs, но TS-тип знает
+  // VideoFrame is only available with WebCodecs, but the TS type knows about it
   | (typeof globalThis extends { VideoFrame: infer V } ? V : never)
 
-/** Формат хранения текстуры WebGL2 (Task 67: HDR).
- *  'rgba8' (default) — internalFormat RGBA8, загрузка (RGBA, UNSIGNED_BYTE).
- *  'rgba16f' — RGBA16F, загрузка (RGBA, HALF_FLOAT): 8 б/пиксель.
- *  'rgba32f' — RGBA32F, загрузка (RGBA, FLOAT): 16 б/пиксель.
- *  Хранение float-текстур — core WebGL2; линейная фильтрация rgba16f — core,
- *  rgba32f — OES_texture_float_linear (без неё MIN_FILTER деградирует до
- *  NEAREST); рендер В float-цель — EXT_color_buffer_float. */
+/** WebGL2 texture storage format (Task 67: HDR).
+ *  'rgba8' (default) — internalFormat RGBA8, upload (RGBA, UNSIGNED_BYTE).
+ *  'rgba16f' — RGBA16F, upload (RGBA, HALF_FLOAT): 8 bytes/pixel.
+ *  'rgba32f' — RGBA32F, upload (RGBA, FLOAT): 16 bytes/pixel.
+ *  Storing float textures is core WebGL2; linear filtering of rgba16f is core,
+ *  rgba32f — OES_texture_float_linear (without it MIN_FILTER degrades to
+ *  NEAREST); rendering TO a float target — EXT_color_buffer_float. */
 export type GLTextureFormat = 'rgba8' | 'rgba16f' | 'rgba32f'
 
 export interface GLFacade {
   createProgram(vertex: string, fragment: string): number
   useProgram(programId: number): void
   createBuffer(data: Float32Array): number
-  /** M5 (Task 73): динамическое обновление буфера (feed dual-bind) —
-   *  bufferSubData поверх существующего хранилища. Рендерер фида
-   *  вызывает один раз на кадр с грязным диапазоном записей. */
+  /** M5 (Task 73): dynamic buffer update (feed dual-bind) —
+   *  bufferSubData on top of the existing storage. The feed renderer
+   *  calls it once per frame with a dirty range of records. */
   updateBuffer(bufferId: number, data: Float32Array, byteOffset?: number): void
-  /** Привязать вершинный атрибут. stride/byteOffset (M5): интерливинг
-   *  записей фида — bindVertexBuffer(buf, loc, size, stride, offset)
+  /** Bind a vertex attribute. stride/byteOffset (M5): interleaving of
+   *  feed records — bindVertexBuffer(buf, loc, size, stride, offset)
    *  → vertexAttribPointer(loc, size, FLOAT, false, stride, offset).
-   *  Default (undefined) — tight-раскладка (stride 0, offset 0),
-   *  обратная совместимость.
-   *  divisor (Task 75): 1 → vertexAttribDivisor(loc, 1) — атрибут
-   *  читается один раз на ИНСТАНС (квады-звёзды из фида); 0/undefined —
-   *  обычный per-vertex (обратная совместимость). */
+   *  Default (undefined) — tight layout (stride 0, offset 0),
+   *  backward compatibility.
+   *  divisor (Task 75): 1 → vertexAttribDivisor(loc, 1) — the attribute
+   *  is read once per INSTANCE (star quads from the feed); 0/undefined —
+   *  regular per-vertex (backward compatibility). */
   bindVertexBuffer(bufferId: number, location: number, size: number, stride?: number, byteOffset?: number, divisor?: number): void
   setUniformMatrix4(programId: number, name: string, values: Float32Array): void
   setUniform4fv(programId: number, name: string, values: Float32Array): void
@@ -43,38 +43,38 @@ export interface GLFacade {
   setUniform2fv(programId: number, name: string, values: Float32Array): void
   setUniform1f(programId: number, name: string, value: number): void
   setUniform1i(programId: number, name: string, value: number): void
-  /** Создать GPU-текстуру.
+  /** Create a GPU texture.
    *
-   *  options.mipLevels (default 1): кол-во mip-уровней в цепи. Если >1 —
-   *  используется gl.texStorage2D(target, levels, internalFormat, w, h)
-   *  (immutable storage; internalFormat соответствует options.format) и
-   *  TEXTURE_MIN_FILTER = LINEAR_MIPMAP_LINEAR (минификация выбирает mip
-   *  по distance). Если 1 — обычный texImage2D level=0 с null (mutable
+   *  options.mipLevels (default 1): the number of mip levels in the chain. If >1 —
+   *  gl.texStorage2D(target, levels, internalFormat, w, h) is used
+   *  (immutable storage; internalFormat matches options.format) and
+   *  TEXTURE_MIN_FILTER = LINEAR_MIPMAP_LINEAR (minification picks a mip
+   *  by distance). If 1 — a plain texImage2D level=0 with null (mutable
    *  storage), MIN_FILTER = LINEAR.
    *
-   *  mipLevels высчитывается как 1 + floor(log2(min(w,h))). Можно передать
-   *  'auto' (через string — но TS-контракт требует number, поэтому юзер
-   *  сам считает или использует helper computeMipLevels(w, h)).
+   *  mipLevels is computed as 1 + floor(log2(min(w,h))). You can pass
+   *  'auto' (via string — but the TS contract requires a number, so the user
+   *  computes it themselves or uses the helper computeMipLevels(w, h)).
    *
-   *  options.format (default 'rgba8', Task 67): формат хранения — 'rgba8' |
-   *  'rgba16f' | 'rgba32f'. Влияет на internalFormat аллокации (texStorage2D
-   *  / texImage2D-null) И на последующие загрузки: texImage2DFromSource /
-   *  texSubImage2DFromSource / texImage2DLevel автоматически выводят пару
-   *  (format, type) из формата текстуры (HALF_FLOAT / FLOAT) — WebGL2
-   *  отклоняет несогласованные комбинации GL_INVALID_OPERATION'ом молча
-   *  (та же ловушка, что Task 64, теперь для HDR).
+   *  options.format (default 'rgba8', Task 67): storage format — 'rgba8' |
+   *  'rgba16f' | 'rgba32f'. Affects the internalFormat of the allocation (texStorage2D
+   *  / texImage2D-null) AND subsequent uploads: texImage2DFromSource /
+   *  texSubImage2DFromSource / texImage2DLevel automatically derive the
+   *  (format, type) pair from the texture's format (HALF_FLOAT / FLOAT) — WebGL2
+   *  silently rejects mismatched combinations with GL_INVALID_OPERATION
+   *  (the same trap as Task 64, now for HDR).
    *
-   *  options.maxAnisotropy (default 1 для non-mip, anisoMax для mip): включить
-   *  анизотропную фильтрацию — sampler берёт несколько сэмплов под разными
-   *  углами для лучшего качества под наклоном. Требует расширение
-   *  EXT_texture_filter_anisotropic (caps.has('anisotropic')). Без расширения
-   *  опция игнорируется. Степень двойки: 1 (off), 2, 4, 8, 16 (max desktop).
-   *  Применяется только при mipLevels>1 (на non-mip бесполезна).
+   *  options.maxAnisotropy (default 1 for non-mip, anisoMax for mip): enable
+   *  anisotropic filtering — the sampler takes several samples at different
+   *  angles for better quality at oblique angles. Requires the
+   *  EXT_texture_filter_anisotropic extension (caps.has('anisotropic')). Without the extension
+   *  the option is ignored. Power of two: 1 (off), 2, 4, 8, 16 (max desktop).
+   *  Only applied when mipLevels>1 (useless on non-mip).
    *
-   *  Контракт с texImage2DLevel: текстура с mipLevels=N ожидает, что
-   *  уровни 0..N-1 будут загружены через texImage2DLevel(texId, level, src).
-   *  texStorage2D гарантирует, что level L имеет размер w/(2^L) × h/(2^L)
-   *  — WebGL2 сам проверит при texImage2D, если источник не совпадает —
+   *  Contract with texImage2DLevel: a texture with mipLevels=N expects
+   *  levels 0..N-1 to be uploaded via texImage2DLevel(texId, level, src).
+   *  texStorage2D guarantees that level L has size w/(2^L) × h/(2^L)
+   *  — WebGL2 itself will check on texImage2D; if the source does not match —
    *  GL_INVALID_VALUE. */
   createTexture(
     width: number,
@@ -82,109 +82,109 @@ export interface GLFacade {
     options?: { mipLevels?: number; maxAnisotropy?: number; format?: GLTextureFormat },
   ): number
   texSubImage2D(textureId: number, x: number, y: number, width: number, height: number, bytes: Uint8Array): void
-  /** Атомарная загрузка из bitmap/canvas/video — без стриминга, одним вызовом.
-   *  Использует texImage2D overload с TexImageSource (перезаписывает текстуру).
+  /** Atomic upload from bitmap/canvas/video — no streaming, a single call.
+   *  Uses the texImage2D overload with TexImageSource (overwrites the texture).
    *
-   *  flipY (default true): перевернуть источник по Y при загрузке — даёт
-   *  паритет с WebGPU (textureSample там использует top-left origin).
-   *  Для WebGL2 без flip: canvas row 0 (top) → texture row 0 (V=0 = bottom
-   *  в конвенциях GL) — то есть текстура видна «вверх ногами» на кубе.
-   *  flipY=true через gl.pixelStorei(UNPACK_FLIP_Y_WEBGL, true) перед
-   *  texImage2D, сброс к false после — состояние не течёт. */
+   *  flipY (default true): flip the source along Y on upload — gives
+   *  parity with WebGPU (textureSample there uses a top-left origin).
+   *  For WebGL2 without flip: canvas row 0 (top) → texture row 0 (V=0 = bottom
+   *  in GL conventions) — i.e. the texture appears "upside down" on a cube.
+   *  flipY=true via gl.pixelStorei(UNPACK_FLIP_Y_WEBGL, true) before
+   *  texImage2D, reset to false after — the state does not leak. */
   texImage2DFromSource(textureId: number, source: GLImageSource, options?: { flipY?: boolean }): void
-  /** Загрузка части текстуры (sub-region) из bitmap/canvas/video.
-   *  Использует texSubImage2D overload с TexImageSource. НЕ перезаписывает
-   *  остальные пиксели — только регион [x, y, x+w, y+h].
+  /** Upload a part of a texture (sub-region) from bitmap/canvas/video.
+   *  Uses the texSubImage2D overload with TexImageSource. Does NOT overwrite
+   *  the remaining pixels — only the region [x, y, x+w, y+h].
    *
-   *  Используется для:
-   *   - runtime atlas packing (несколько битмапов в одну текстуру),
-   *   - tile replacement (обновление части карты),
-   *   - progressive loading (загрузка тайлов по мере необходимости).
+   *  Used for:
+   *   - runtime atlas packing (several bitmaps into one texture),
+   *   - tile replacement (updating part of a map),
+   *   - progressive loading (loading tiles as needed).
    *
-   *  flipY (default true) — аналогично texImage2DFromSource. */
+   *  flipY (default true) — same as texImage2DFromSource. */
   texSubImage2DFromSource(textureId: number, x: number, y: number, source: GLImageSource, options?: { flipY?: boolean }): void
-  /** Загрузка конкретного mip-уровня текстуры (level 0 = базовый, 1 = 1/2 размер и т.д.).
+  /** Upload a specific mip level of a texture (level 0 = base, 1 = 1/2 size, etc.).
    *
-   *  Использует texImage2D overload с level параметром: gl.texImage2D(target, level,
-   *  internalFormat, format, type, source). Перезаписывает указанный mip целиком.
+   *  Uses the texImage2D overload with the level parameter: gl.texImage2D(target, level,
+   *  internalFormat, format, type, source). Overwrites the specified mip entirely.
    *
-   *  Контракт mip-цепи: для текстуры размером N×N с mip chain levels=1+log2(N),
-   *  каждый level L имеет размер N/(2^L). WebGL2 требует, чтобы все мипы были
-   *  загружены для текстуры без FILTERING_MIPMAP, иначе texture() в шейдере вернёт
-   *  чёрный при минификации.
+   *  Mip-chain contract: for an N×N texture with mip chain levels=1+log2(N),
+   *  each level L has size N/(2^L). WebGL2 requires all mips to be
+   *  uploaded for a texture without FILTERING_MIPMAP, otherwise texture() in the shader returns
+   *  black on minification.
    *
-   *  Используется MipStreamer'ом для progressive mip upload (от маленького к большому).
+   *  Used by the MipStreamer for progressive mip upload (from small to large).
    *
-   *  Строгий формат/тип (Task 55): опциональные internalFormat/format/type
-   *  позволяют загружать HDR-данные (RGBA16F, RGBA32F) и нестандартные типы
-   *  (HALF_FLOAT, FLOAT, UNSIGNED_INT_2_10_10_10_REV). Без опций —
-   *  авто-вывод ИЗ ФОРМАТА ТЕКСТУРЫ (Task 67): createTexture(...,{format:'rgba16f'})
-   *  → (RGBA, HALF_FLOAT), {format:'rgba32f'} → (RGBA, FLOAT), иначе —
-   *  RGBA8/RGBA/UNSIGNED_BYTE. WebGL2 отклоняет несогласованные пары
-   *  GL_INVALID_OPERATION'ом молча — авто-вывод закрывает эту ловушку.
+   *  Strict format/type (Task 55): the optional internalFormat/format/type
+   *  allow uploading HDR data (RGBA16F, RGBA32F) and non-standard types
+   *  (HALF_FLOAT, FLOAT, UNSIGNED_INT_2_10_10_10_REV). Without the options —
+   *  auto-derivation FROM THE TEXTURE FORMAT (Task 67): createTexture(...,{format:'rgba16f'})
+   *  → (RGBA, HALF_FLOAT), {format:'rgba32f'} → (RGBA, FLOAT), otherwise —
+   *  RGBA8/RGBA/UNSIGNED_BYTE. WebGL2 silently rejects mismatched pairs
+   *  with GL_INVALID_OPERATION — auto-derivation closes this trap.
    *
-   *  Контракт texImage2D(source) overload требует, чтобы format/type были
-   *  совместимы с internalFormat текстуры (созданной через createTexture с
-   *  gl.texStorage2D target internalFormat). Для RGBA8 (default) подойдут
-   *  RGBA/UNSIGNED_BYTE; для RGBA16F — RGBA/HALF_FLOAT. Несовпадение →
+   *  The texImage2D(source) overload contract requires format/type to be
+   *  compatible with the texture's internalFormat (created via createTexture with
+   *  gl.texStorage2D target internalFormat). For RGBA8 (default),
+   *  RGBA/UNSIGNED_BYTE works; for RGBA16F — RGBA/HALF_FLOAT. A mismatch →
    *  GL_INVALID_ENUM / GL_INVALID_OPERATION (WebGL2 spec).
    *
-   *  Значения GLenum — числа (e.g. gl.RGBA8=0x8058, gl.RGBA=0x1908,
+   *  GLenum values are numbers (e.g. gl.RGBA8=0x8058, gl.RGBA=0x1908,
    *  gl.UNSIGNED_BYTE=0x1401, gl.HALF_FLOAT=0x140B, gl.FLOAT=0x1406).
-   *  Юзер может передать как числовое значение, так и gl.RGBA8 если
-   *  имеет доступ к контексту (через createGL injection). */
+   *  The user can pass either the numeric value or gl.RGBA8 if they
+   *  have access to the context (via createGL injection). */
   texImage2DLevel(
     textureId: number,
     level: number,
     source: GLImageSource,
     options?: {
       flipY?: boolean
-      /** internalFormat GLenum (default — из формата текстуры). Например: gl.RGBA16F. */
+      /** internalFormat GLenum (default — from the texture's format). For example: gl.RGBA16F. */
       internalFormat?: number
-      /** format GLenum (default — из формата текстуры). Например: gl.RGBA. */
+      /** format GLenum (default — from the texture's format). For example: gl.RGBA. */
       format?: number
-      /** type GLenum (default — из формата текстуры). Например: gl.HALF_FLOAT. */
+      /** type GLenum (default — from the texture's format). For example: gl.HALF_FLOAT. */
       type?: number
     },
   ): void
-  /** Привязать текстуру (или sub-mip view — Task 56) к сэмплер-юниту.
+  /** Bind a texture (or a sub-mip view — Task 56) to a sampler unit.
    *
-   *  id ∈ [1, 1M) — textureId (default view): sampler видит всю mip-chain
-   *  с base=0 и max=meta.maxLoadedLevel (progressive streaming, см. createTexture
-   *  и texImage2DLevel).
+   *  id ∈ [1, 1M) — textureId (default view): the sampler sees the whole mip-chain
+   *  with base=0 and max=meta.maxLoadedLevel (progressive streaming, see createTexture
+   *  and texImage2DLevel).
    *
-   *  id ∈ [1M, ∞) — viewId (sub-mip view, созданный через createTextureView):
-   *  sampler видит только диапазон [view.baseMipLevel,
-   *  view.baseMipLevel + view.mipLevelCount - 1]. Реализуется через
+   *  id ∈ [1M, ∞) — viewId (sub-mip view, created via createTextureView):
+   *  the sampler sees only the range [view.baseMipLevel,
+   *  view.baseMipLevel + view.mipLevelCount - 1]. Implemented via
    *  gl.texParameteri(TEXTURE_BASE_LEVEL / TEXTURE_MAX_LEVEL).
    *
-   *  Контракт без утечки state: при каждом bindTexture вызове BASE_LEVEL и
-   *  MAX_LEVEL сбрасываются/устанавливаются заново. Если bind с viewId после
-   *  bind с textureId (или наоборот) — параметры не протекают между вызовами.
+   *  No state-leak contract: on every bindTexture call BASE_LEVEL and
+   *  MAX_LEVEL are reset/set anew. If a bind with viewId follows a
+   *  bind with textureId (or vice versa) — the parameters do not leak between calls.
    *
-   *  Disjoint id namespace (как в WebGPU GPUFacade, см. realGPU.ts:335):
-   *  textureId и viewId никогда не пересекаются. */
+   *  Disjoint id namespace (as in the WebGPU GPUFacade, see realGPU.ts:335):
+   *  textureId and viewId never intersect. */
   bindTexture(textureOrViewId: number, unit: number): void
-  /** Создать sub-mip-range view текстуры (Task 56: WebGL2 LOD-clamp API).
+  /** Create a sub-mip-range view of a texture (Task 56: WebGL2 LOD-clamp API).
    *
-   *  WebGL2 не имеет настоящего GPUTextureView (как WebGPU). Эмуляция через
-   *  TEXTURE_BASE_LEVEL / TEXTURE_MAX_LEVEL параметры текстуры — применяются
-   *  в bindTexture при каждой смене id (см. bindTexture контракт).
+   *  WebGL2 has no real GPUTextureView (like WebGPU). Emulated via the
+   *  TEXTURE_BASE_LEVEL / TEXTURE_MAX_LEVEL texture parameters — applied
+   *  in bindTexture on every id change (see the bindTexture contract).
    *
-   *  Паритет с WebGPU createTextureView:
-   *   - baseMipLevel (default 0): стартовый mip-уровень для view
-   *   - mipLevelCount (default = texture.mipLevels - baseMipLevel): кол-во
-   *     мипов в view. view видит диапазон [baseMipLevel, baseMipLevel +
+   *  Parity with WebGPU createTextureView:
+   *   - baseMipLevel (default 0): the starting mip level of the view
+   *   - mipLevelCount (default = texture.mipLevels - baseMipLevel): the number of
+   *     mips in the view. The view sees the range [baseMipLevel, baseMipLevel +
    *     mipLevelCount - 1].
    *
-   *  Ограничения:
-   *   - textureId должен существовать и иметь mipLevels ≥ 2 (иначе view
-   *     не имеет смысла — sampler и так использует только level 0).
+   *  Constraints:
+   *   - textureId must exist and have mipLevels ≥ 2 (otherwise the view
+   *     makes no sense — the sampler only uses level 0 anyway).
    *   - baseMipLevel + mipLevelCount ≤ texture.mipLevels.
-   *   - При нарушении бросает Error (actionable).
+   *   - On violation throws an Error (actionable).
    *
-   *  @returns viewId ≥ 1_000_000. Используется в bindTexture(viewId, unit).
-   *  @see bindTexture для семантики LOD-clamp при bind. */
+   *  @returns viewId ≥ 1_000_000. Used in bindTexture(viewId, unit).
+   *  @see bindTexture for the LOD-clamp semantics on bind. */
   createTextureView(
     textureId: number,
     options?: {
@@ -195,15 +195,15 @@ export interface GLFacade {
   setViewport(width: number, height: number): void
   setDepthMode(test: string, write: boolean): void
   setCull(mode: string): void
-  /** Task 75: блендинг пайплайна. src/dst — BlendFactor-строки фасада
-   *  ('one', 'one-minus-src-alpha', ...); null/null — выключить.
-   *  Премультиплицированный вывод шейдера: аддитив = ('one','one'),
-   *  классическая прозрачность = ('one','one-minus-src-alpha'). */
+  /** Task 75: pipeline blending. src/dst — facade BlendFactor strings
+   *  ('one', 'one-minus-src-alpha', ...); null/null — turn it off.
+   *  Premultiplied shader output: additive = ('one','one'),
+   *  classic transparency = ('one','one-minus-src-alpha'). */
   setBlend(src: string | null, dst: string | null): void
   clear(color: readonly [number, number, number, number] | readonly number[], depth: number | null): void
   drawArrays(mode: string, first: number, count: number, instances: number): void
-  /** Цель рендера: FBO с цветовой текстурой (и опциональной глубиной).
-   *  targetId 0 — канвас (встроенная цель, не создаётся). */
+  /** Render target: an FBO with a color texture (and optional depth).
+   *  targetId 0 — the canvas (a built-in target, not created). */
   createTarget(
     textureId: number,
     width: number,
@@ -211,49 +211,49 @@ export interface GLFacade {
     depth: boolean,
     color: readonly [number, number, number, number],
   ): number
-  /** Переключить цель: 0 = канвас. clear — очистить цель её цветом
-   *  (для канваса игнорируется: канвас чистит BeginPass). */
+  /** Switch the target: 0 = the canvas. clear — clear the target with its color
+   *  (ignored for the canvas: BeginPass clears the canvas). */
   bindTarget(targetId: number, clear: boolean): void
-  /** Task 80 (readback): прочитать пиксели ЦЕЛИ (surface) — синхронно.
+  /** Task 80 (readback): read the pixels of a TARGET (surface) — synchronously.
    *
-   *  Контракт паритета с GPU-фасадом (Promise<Uint8Array>):
-   *   - RGBA8, tight-раскладка (rowBytes = width*4);
-   *   - строки СВЕРХУ ВНИЗ: data[0..3] = верхний-левый пиксель — GL
-   *     readPixels отдаёт снизу-вверх (origin — левый-НИЖНИЙ угол), фасад
-   *     переворачивает строки; WebGPU-текстуры и так хранятся сверху-вниз —
-   *     один и тот же индекс = один и тот же пиксель на обоих бэкендах;
-   *   - текущая привязка FBO сохраняется и восстанавливается (state не течёт).
+   *  Parity contract with the GPU facade (Promise<Uint8Array>):
+   *   - RGBA8, tight layout (rowBytes = width*4);
+   *   - rows TOP-DOWN: data[0..3] = the top-left pixel — GL
+   *     readPixels returns bottom-up (origin — the bottom-left corner), the facade
+   *     flips the rows; WebGPU textures are already stored top-down —
+   *     the same index = the same pixel on both backends;
+   *   - the current FBO binding is saved and restored (state does not leak).
    *
-   *  targetId 0 (канвас) не читается — честный Error (WebGPU-путь не может
-   *  детерминированно читать presented-канвас — паритет важнее полноты);
-   *  читайте поверхность: renderer.surface(...) → capture/проходы →
-   *  surface.read(). Читает содержимое ПОСЛЕ последнего исполненного кадра
-   *  (внутри frame-колбэка — промежуточное состояние). */
+   *  targetId 0 (the canvas) is not read — an honest Error (the WebGPU path cannot
+   *  deterministically read the presented canvas — parity matters more than completeness);
+   *  read the surface instead: renderer.surface(...) → capture/passes →
+   *  surface.read(). Reads the contents AFTER the last executed frame
+   *  (inside the frame callback — an intermediate state). */
   readTargetPixels(targetId: number): Uint8Array
 
   // ─── Disposal (M1 §9.9 disposal discipline) ─────────────────────────────
-  // Каждый delete* освобождает GPU-ресурс и убирает запись из внутреннего
-  // кэша фасада. Повторный вызов с тем же id — no-op (идемпотентность).
-  // Рантайм также пишет destroy-опс в Journal (если фасад обёрнут withJournal).
+  // Every delete* frees the GPU resource and removes the entry from the facade's
+  // internal cache. A repeat call with the same id — a no-op (idempotence).
+  // The runtime also writes a destroy-op to the Journal (if the facade is wrapped with withJournal).
 
-  /** Удалить текстуру: gl.deleteTexture. Удаляет из textures Map.
-   *  Также удаляет ВСЕ sub-mip views этой текстуры (созданные через
-   *  createTextureView) — иначе bindTexture(viewId) продолжил бы работать
-   *  с удалённой текстурой (no-op silently, но бесполезно). */
+  /** Delete a texture: gl.deleteTexture. Removes it from the textures Map.
+   *  Also deletes ALL sub-mip views of this texture (created via
+   *  createTextureView) — otherwise bindTexture(viewId) would keep working
+   *  with a deleted texture (a silent no-op, but useless). */
   deleteTexture(textureId: number): void
-  /** Удалить цель: gl.deleteFramebuffer + (если была глубина) gl.deleteRenderbuffer.
-   *  Не трогает текстуру (она — отдельный ресурс). Удаляет из targets Map. */
+  /** Delete a target: gl.deleteFramebuffer + (if it had depth) gl.deleteRenderbuffer.
+   *  Does not touch the texture (it is a separate resource). Removes it from the targets Map. */
   deleteTarget(targetId: number): void
-  /** Удалить программу: gl.deleteProgram. Удаляет из programs Map. */
+  /** Delete a program: gl.deleteProgram. Removes it from the programs Map. */
   deleteProgram(programId: number): void
-  /** Удалить буфер: gl.deleteBuffer. Удаляет из buffers Map. */
+  /** Delete a buffer: gl.deleteBuffer. Removes it from the buffers Map. */
   deleteBuffer(bufferId: number): void
-  /** Удалить sub-mip view (созданный через createTextureView выше).
-   *  Default-view (привязка напрямую textureId в bindTexture) не может быть
-   *  удалён этим методом — он управляется через deleteTexture.
-   *  Идемпотентно: повторный deleteTextureView того же id — no-op.
+  /** Delete a sub-mip view (created via createTextureView above).
+   *  The default view (binding textureId directly in bindTexture) cannot be
+   *  deleted by this method — it is managed via deleteTexture.
+   *  Idempotent: a repeat deleteTextureView with the same id — a no-op.
    *
-   *  После deleteTextureView: bindTexture(viewId, ...) — no-op (запись
-   *  не найдена, sampler останется с предыдущим состоянием). */
+   *  After deleteTextureView: bindTexture(viewId, ...) — a no-op (the entry
+   *  is not found, the sampler keeps its previous state). */
   deleteTextureView(viewId: number): void
 }

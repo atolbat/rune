@@ -1,15 +1,15 @@
 /**
- * Диск (круг в плоскости XZ, нормаль +Y) и кольцо- annulus (плоская
- * шайба). Веерная триангуляция от центра (диск) / ленты по радиусам
- * (кольцо); UV концентрические — [0,1]² на bbox.
+ * Disk (circle in the XZ plane, +Y normal) and annulus ring (flat washer).
+ * Fan triangulation from the center (disk) / strips along radii (ring);
+ * UVs are concentric — [0,1]² on the bbox.
  */
 
 import type { Geometry } from './types.ts'
 
 export interface DiskParams {
-  /** Радиус (default 1). */
+  /** Radius (default 1). */
   readonly radius?: number
-  /** Сегментов по окружности (default 48). */
+  /** Segments around the circumference (default 48). */
   readonly segments?: number
 }
 
@@ -24,7 +24,7 @@ export function disk(params: DiskParams = {}): Geometry {
     const a1 = ((i + 1) / seg) * Math.PI * 2
     const c0 = Math.cos(a0), s0 = Math.sin(a0)
     const c1 = Math.cos(a1), s1 = Math.sin(a1)
-    // CCW при взгляде сверху (+Y): центр → a1 → a0
+    // CCW viewed from above (+Y): center → a1 → a0
     const tri: ReadonlyArray<readonly [number, number, number, number, number]> = [
       [0, 0, 0.5, 0.5, 0],
       [c1 * radius, s1 * radius, 0.5 + 0.5 * c1, 0.5 + 0.5 * s1, 0],
@@ -45,11 +45,11 @@ export function disk(params: DiskParams = {}): Geometry {
 }
 
 export interface RingParams {
-  /** Внутренний радиус (default 0.5). */
+  /** Inner radius (default 0.5). */
   readonly innerRadius?: number
-  /** Внешний радиус (default 1). */
+  /** Outer radius (default 1). */
   readonly outerRadius?: number
-  /** Сегментов по окружности (default 48). */
+  /** Segments around the circumference (default 48). */
   readonly segments?: number
 }
 
@@ -65,7 +65,7 @@ export function ring(params: RingParams = {}): Geometry {
     const a1 = ((i + 1) / seg) * Math.PI * 2
     const c0 = Math.cos(a0), s0 = Math.sin(a0)
     const c1 = Math.cos(a1), s1 = Math.sin(a1)
-    // CCW сверху: (in,a0) → (in,a1) → (out,a1) и (in,a0) → (out,a1) → (out,a0)
+    // CCW from above: (in,a0) → (in,a1) → (out,a1) and (in,a0) → (out,a1) → (out,a0)
     const quad: ReadonlyArray<readonly [number, number, number, number]> = [
       [c0 * innerRadius, s0 * innerRadius, i / seg, 0],
       [c1 * innerRadius, s1 * innerRadius, (i + 1) / seg, 0],

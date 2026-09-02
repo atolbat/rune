@@ -1,23 +1,25 @@
 /**
- * Платоновы тела: тетраэдр, октаэдр, икосаэдр, додекаэдр — с ПАРАМЕТРОМ
- * DETAIL (Task 109): каждый треугольник грани делится на (detail+1)²
- * подтреугольников, новые вершины проецируются на описанную сферу
- * (геодезическая сабдивизия, как PolyhedronGeometry в three.js).
- * detail = 0 — классическое тело с ПЛОСКИМИ гранями (додекаэдр —
- * честные копланарные пятиугольники; в three.js грани выпуклены всегда —
- * у нас плоские вершины радиусные, грани у detail 0 плоские).
+ * Platonic solids: tetrahedron, octahedron, icosahedron, dodecahedron —
+ * with the DETAIL parameter (Task 109): each face triangle is split into
+ * (detail+1)² sub-triangles, the new vertices are projected onto the
+ * circumscribed sphere (geodesic subdivision, like PolyhedronGeometry in
+ * three.js). detail = 0 — the classic solid with FLAT faces (the
+ * dodecahedron — honest coplanar pentagons; in three.js faces are always
+ * bulged — here the vertices are radial, yet the faces at detail 0 are
+ * flat).
  *
- * Затенение — плоское: нормаль на вершину = нормаль (под)треугольника.
- * Радиус описанной сферы = 1·radius.
+ * Shading is flat: the per-vertex normal = the (sub)triangle's normal.
+ * The circumscribed sphere radius = 1·radius.
  *
- * Додекаэдр: 20 вершин (золотое сечение φ), 12 пятиугольных граней —
- * двойственность к икосаэдру (вершины = центры граней, грань = 5 центров
- * смежных при вершине, CCW-сортировка по углу в плоскости ⊥ вершине).
+ * Dodecahedron: 20 vertices (the golden ratio φ), 12 pentagonal faces —
+ * duality with the icosahedron (vertices = face centers, a face = 5
+ * centers of the faces adjacent at a vertex, CCW sort by angle in the
+ * plane ⊥ to the vertex).
  *
- * UV (Task 108): ПЛАНАРНАЯ развёртка в плоскости ИСХОДНОЙ грани — базис
- * из нормали, проекция вершин веера, bbox → [0,1]². При сабдивизии UV
- * подтреугольников — барицентрическая интерполяция углов грани —
- * непрерывность текстуры внутри грани сохраняется.
+ * UV (Task 108): a PLANAR unwrapping in the plane of the ORIGINAL face —
+ * a basis from the normal, projection of the fan vertices, bbox → [0,1]².
+ * Under subdivision the sub-triangle UVs are a barycentric interpolation
+ * of the face corners — texture continuity inside a face is preserved.
  */
 
 import type { Geometry } from './types.ts'
@@ -25,17 +27,17 @@ import type { Geometry } from './types.ts'
 type V3 = readonly [number, number, number]
 
 export interface PolyhedronParams {
-  /** Радиус описанной сферы (default 1). */
+  /** Circumscribed sphere radius (default 1). */
   readonly radius?: number
   /**
-   * Сабдивизия граней (default 0): 0 — классика, 1 — 4 подтреугольника,
-   * 2 — 16, 3 — 64 … Вершины подтреугольников проецируются на сферу
-   * радиуса — при detail ≥ 1 тело стремится к сфере.
+   * Face subdivision (default 0): 0 — classic, 1 — 4 sub-triangles,
+   * 2 — 16, 3 — 64 … Sub-triangle vertices are projected onto the sphere
+   * of the radius — at detail ≥ 1 the solid tends toward a sphere.
    */
   readonly detail?: number
 }
 
-/** Планарные UV углов грани (базис из нормали, bbox → [0,1]²). */
+/** Planar UVs of face corners (a basis from the normal, bbox → [0,1]²). */
 function planarCornerUv(fan: readonly V3[]): readonly (readonly [number, number])[] {
   const a = fan[0]!
   const b1 = fan[1]!
@@ -49,7 +51,7 @@ function planarCornerUv(fan: readonly V3[]): readonly (readonly [number, number]
   nx /= len
   ny /= len
   nz /= len
-  // Базис плоскости грани: t = up × n (up — не коллинеарен n), b = n × t
+  // Face-plane basis: t = up × n (up — not collinear with n), b = n × t
   const upX = Math.abs(ny) < 0.9 ? 0 : 1
   const upY = Math.abs(ny) < 0.9 ? 1 : 0
   let tx = upY * nz
@@ -81,10 +83,10 @@ function planarCornerUv(fan: readonly V3[]): readonly (readonly [number, number]
 }
 
 /**
- * Сабдивизия треугольника (a, b, c) на (d+1)² подтреугольников.
- * Вершины — точки решётки барицентрических координат; при project=true
- * каждая проецируется на сферу радиуса radius. Возвращает подтреугольники
- * с барицентрическими весами для UV-интерполяции.
+ * Subdivision of a triangle (a, b, c) into (d+1)² sub-triangles.
+ * The vertices are lattice points in barycentric coordinates; with
+ * project=true each is projected onto the sphere of the given radius.
+ * Returns sub-triangles with barycentric weights for UV interpolation.
  */
 function subdivide(
   a: V3, b: V3, c: V3,
@@ -99,8 +101,8 @@ function subdivide(
     return [p[0] / len * radius, p[1] / len * radius, p[2] / len * radius]
   }
   const out: Array<{ tri: readonly [V3, V3, V3]; w: readonly [readonly [number, number], readonly [number, number], readonly [number, number]] }> = []
-  const n = d + 1 // решётка n×n подтреугольников по строкам
-  // Вершины решётки: P(i,j) = a + i/n·(b−a) + j/n·(c−a), i+j ≤ n
+  const n = d + 1 // an n×n lattice of sub-triangles by rows
+  // Lattice vertices: P(i,j) = a + i/n·(b−a) + j/n·(c−a), i+j ≤ n
   const point = (i: number, j: number): V3 =>
     onSphere([
       a[0] + (b[0] - a[0]) * (i / n) + (c[0] - a[0]) * (j / n),
@@ -110,8 +112,8 @@ function subdivide(
   const bary = (i: number, j: number): readonly [number, number] => [i / n, j / n]
   for (let j = 0; j < n; j++) {
     for (let i = 0; i < n - j; i++) {
-      // Нисходящий подтреугольник: (i,j), (i+1,j), (i,j+1)
-      // Восходящий (если не на диагонали): (i+1,j), (i+1,j+1), (i,j+1)
+      // Downward sub-triangle: (i,j), (i+1,j), (i,j+1)
+      // Upward (if not on the diagonal): (i+1,j), (i+1,j+1), (i,j+1)
       const p00 = point(i, j)
       const p10 = point(i + 1, j)
       const p01 = point(i, j + 1)
@@ -131,7 +133,7 @@ function subdivide(
   return out
 }
 
-/** Плоский веер грани (с сабдивизией): n-угольник → (n−2)·(d+1)² тр-ков. */
+/** Flat fan of a face (with subdivision): an n-gon → (n−2)·(d+1)² triangles. */
 function flatFan(
   fan: readonly V3[],
   radius: number,
@@ -143,7 +145,7 @@ function flatFan(
   const cornerUv = planarCornerUv(fan)
   const d = Math.max(0, Math.floor(detail))
   const project = d > 0
-  // Веер: (fan[0], fan[i], fan[i+1]) — ориентация таблиц CCW снаружи
+  // Fan: (fan[0], fan[i], fan[i+1]) — the tables' orientation is CCW from outside
   for (let i = 1; i < fan.length - 1; i++) {
     const a = fan[0]!
     const b = fan[i]!
@@ -152,7 +154,7 @@ function flatFan(
     const ub = cornerUv[i]!
     const uc = cornerUv[i + 1]!
     for (const { tri, w } of subdivide(a, b, c, d, radius, project)) {
-      // Нормаль (под)треугольника — плоское затенение
+      // The (sub)triangle's normal — flat shading
       const [pa, pb, pc] = tri
       const ex = pb[0] - pa[0], ey = pb[1] - pa[1], ez = pb[2] - pa[2]
       const fx = pc[0] - pa[0], fy = pc[1] - pa[1], fz = pc[2] - pa[2]
@@ -199,7 +201,7 @@ function pack(parts: Array<{ positions: number[]; normals: number[]; uvs: number
   }
 }
 
-/** Полигоны тела → Geometry с параметрами (radius, detail). */
+/** A solid's polygons → Geometry with parameters (radius, detail). */
 function polyhedron(
   faces: ReadonlyArray<readonly V3[]>,
   params: PolyhedronParams,
@@ -209,7 +211,7 @@ function polyhedron(
   return pack(faces.map(f => flatFan(f, radius, detail)))
 }
 
-// ─── Тетраэдр (4 грани × 4 вершины) ─────────────────────────────────────────
+// ─── Tetrahedron (4 faces × 4 vertices) ─────────────────────────────────────
 
 const TETRA: readonly V3[] = [
   [1, 1, 1], [1, -1, -1], [-1, 1, -1], [-1, -1, 1],
@@ -227,7 +229,7 @@ export function tetrahedron(params: PolyhedronParams = {}): Geometry {
   return polyhedron(TETRA_FACES.map(f => f.map(v => [v[0] * s, v[1] * s, v[2] * s] as V3)), { ...params, radius })
 }
 
-// ─── Октаэдр (8 граней) ──────────────────────────────────────────────────────
+// ─── Octahedron (8 faces) ─────────────────────────────────────────────────────
 
 const OCTA_FACES: ReadonlyArray<readonly V3[]> = (() => {
   const v: readonly V3[] = [
@@ -244,7 +246,7 @@ export function octahedron(params: PolyhedronParams = {}): Geometry {
   return polyhedron(OCTA_FACES.map(f => f.map(v => [v[0] * radius, v[1] * radius, v[2] * radius] as V3)), params)
 }
 
-// ─── Икосаэдр (20 треугольных граней) ────────────────────────────────────────
+// ─── Icosahedron (20 triangular faces) ────────────────────────────────────────
 
 const ICO_FACES: ReadonlyArray<readonly V3[]> = (() => {
   const t = (1 + Math.sqrt(5)) / 2
@@ -270,20 +272,22 @@ export function icosahedron(params: PolyhedronParams = {}): Geometry {
   return polyhedron(ICO_FACES.map(f => f.map(v => [v[0] * radius, v[1] * radius, v[2] * radius] as V3)), { ...params, radius })
 }
 
-// ─── Додекаэдр (12 пятиугольных граней) ──────────────────────────────────────
+// ─── Dodecahedron (12 pentagonal faces) ──────────────────────────────────────────
 
 /**
- * Додекаэдр строится как ДВОЙСТВЕННЫЙ икосаэдру — без таблиц «из головы»:
- *   • 20 вершин = центры 20 граней икосаэдра (нормализованы на радиус);
- *   • 12 граней = по одной на вершину икосаэдра: 5 центров граней,
- *     СМЕЖНЫХ в этой вершине, сортируются по углу в плоскости ⊥ вершине
- *     (CCW снаружи).
- * Правильность следует из правильности икосаэдра: двойственность
- * гарантирует и копланарность пятёрок, и пятиугольность.
+ * The dodecahedron is built as the DUAL of the icosahedron — without
+ * tables "from memory":
+ *   • the 20 vertices = the centers of the 20 icosahedron faces
+ *     (normalized to the radius);
+ *   • the 12 faces = one per icosahedron vertex: the 5 centers of the
+ *     faces ADJACENT at that vertex, sorted by angle in the plane ⊥ to
+ *     the vertex (CCW from outside).
+ * Correctness follows from the icosahedron's correctness: duality
+ * guarantees both the coplanarity of the fives and their pentagonality.
  */
 export function dodecahedron(params: PolyhedronParams = {}): Geometry {
   const radius = params.radius ?? 1
-  // Уникальные вершины икосаэдра (все на радиусе 1)
+  // Unique icosahedron vertices (all at radius 1)
   const vertices: V3[] = []
   const seen = new Set<string>()
   for (const face of ICO_FACES) {
@@ -295,7 +299,7 @@ export function dodecahedron(params: PolyhedronParams = {}): Geometry {
       }
     }
   }
-  // Вершины додекаэдра = центры граней икосаэдра (нормализованы)
+  // Dodecahedron vertices = icosahedron face centers (normalized)
   const dv = ICO_FACES.map(f => {
     const c: V3 = [
       (f[0]![0] + f[1]![0] + f[2]![0]) / 3,
@@ -305,8 +309,9 @@ export function dodecahedron(params: PolyhedronParams = {}): Geometry {
     const len = Math.hypot(c[0], c[1], c[2]) || 1
     return [c[0] / len, c[1] / len, c[2] / len] as V3
   })
-  // Грань додекаэдра при вершине икосаэдра k: центры граней икосаэдра,
-  // содержащих k (их ровно 5), CCW вокруг направления вершины
+  // The dodecahedron face at icosahedron vertex k: the centers of the
+  // icosahedron faces containing k (exactly 5 of them), CCW around the
+  // vertex direction
   const dFaces: V3[][] = []
   for (const c of vertices) {
     const ring: V3[] = []
@@ -314,9 +319,9 @@ export function dodecahedron(params: PolyhedronParams = {}): Geometry {
       if (ICO_FACES[f]!.includes(c)) ring.push(dv[f]!)
     }
     if (ring.length !== 5) {
-      throw new Error(`rune: prims — двойственность сломана: у вершины икосаэдра ${ring.length} смежных граней (ожидалось 5)`)
+      throw new Error(`rune: prims — duality broken: an icosahedron vertex has ${ring.length} adjacent faces (expected 5)`)
     }
-    // Базис плоскости грани: un × w = c — CCW при взгляде СНАРУЖИ (с +c)
+    // Face-plane basis: un × w = c — CCW viewed from OUTSIDE (from +c)
     const up: V3 = Math.abs(c[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0]
     const u: V3 = [
       up[1] * c[2] - up[2] * c[1],

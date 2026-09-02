@@ -1,22 +1,22 @@
-// Task 67: HDR-форматы текстур (RGBA16F/RGBA32F) в realGL.
+// Task 67: HDR texture formats (RGBA16F/RGBA32F) in realGL.
 //
-// Контракт:
+// Contract:
 //  • createTexture({format:'rgba16f', mipLevels:N}) → texStorage2D c
 //    internalFormat RGBA16F (0x881A); {format:'rgba32f'} → RGBA32F (0x8816).
-//  • Mutable-путь (mipLevels=1) аллоцируется парой (internalFormat,
-//    uploadFormat, uploadType) формата: RGBA16F+RGBA+HALF_FLOAT и т.д.
-//  • Загрузки (texImage2DFromSource / texSubImage2DFromSource /
-//    texImage2DLevel) БЕЗ явных GLenum выводят (format, type) из формата
-//    ХРАНЕНИЯ текстуры: (RGBA, HALF_FLOAT) для rgba16f, (RGBA, FLOAT) для
-//    rgba32f. Несогласованная пара (RGBA, UNSIGNED_BYTE) → молчаливый
-//    GL_INVALID_OPERATION — та же ловушка, что Task 64, теперь для HDR.
-//  • Фильтрация: rgba16f — LINEAR core; rgba32f без OES_texture_float_linear
-//    деградирует до NEAREST (текстура остаётся complete — не чёрный кадр).
+//  • The mutable path (mipLevels=1) is allocated with the format's
+//    (internalFormat, uploadFormat, uploadType) triple: RGBA16F+RGBA+HALF_FLOAT etc.
+//  • Uploads (texImage2DFromSource / texSubImage2DFromSource /
+//    texImage2DLevel) WITHOUT explicit GLenums derive (format, type) from the
+//    texture's STORAGE format: (RGBA, HALF_FLOAT) for rgba16f, (RGBA, FLOAT) for
+//    rgba32f. A mismatched pair (RGBA, UNSIGNED_BYTE) → a silent
+//    GL_INVALID_OPERATION — the same trap as Task 64, now for HDR.
+//  • Filtering: rgba16f — LINEAR core; rgba32f without OES_texture_float_linear
+//    degrades to NEAREST (the texture stays complete — not a black frame).
 
 import { describe, test, expect } from 'bun:test'
 import { createRealGL } from '../src/realGL.ts'
 
-// Спек-фиксированные GLenum для ассертов.
+// Spec-fixed GLenums for the asserts.
 const RGBA8 = 0x8058
 const RGBA16F = 0x881a
 const RGBA32F = 0x8816
@@ -39,8 +39,8 @@ interface GLRecorder {
   readonly params: Array<{ pname: number; value: number }>
 }
 
-/** Mock-GL: записывает texStorage2D/texImage2D/texSubImage2D/texParameteri.
- *  floatLinear — управляет OES_texture_float_linear (есть/нет). */
+/** Mock GL: records texStorage2D/texImage2D/texSubImage2D/texParameteri.
+ *  floatLinear — controls OES_texture_float_linear (present/absent). */
 function mockGL(floatLinear: boolean): { gl: WebGL2RenderingContext; rec: GLRecorder } {
   const calls: string[] = []
   const storage: GLRecorder['storage'] = []
@@ -62,8 +62,8 @@ function mockGL(floatLinear: boolean): { gl: WebGL2RenderingContext; rec: GLReco
       storage.push({ levels, internalFormat, w, h })
     },
     texImage2D: (...args: unknown[]) => {
-      // Две перегрузки WebGL2: (t, level, ifmt, w, h, border, fmt, type, null)
-      // — аллокация; (t, level, ifmt, fmt, type, source) — загрузка источника.
+      // Two WebGL2 overloads: (t, level, ifmt, w, h, border, fmt, type, null)
+      // — allocation; (t, level, ifmt, fmt, type, source) — source upload.
       if (args.length === 6) {
         const [t, level, internalFormat, format, type, source] = args as [number, number, number, number, number, unknown]
         calls.push(`texImage2D(${level},0x${internalFormat.toString(16)},0x${format.toString(16)},0x${type.toString(16)},src)`)
@@ -95,8 +95,8 @@ function mockGL(floatLinear: boolean): { gl: WebGL2RenderingContext; rec: GLReco
   return { gl, rec: { calls, storage, images, subs, params } }
 }
 
-describe('realGL Task 67: HDR-форматы хранения', () => {
-  test('rgba16f + mip-chain: texStorage2D с internalFormat RGBA16F', () => {
+describe('realGL Task 67: HDR storage formats', () => {
+  test('rgba16f + mip-chain: texStorage2D with internalFormat RGBA16F', () => {
     const { gl, rec } = mockGL(false)
     const facade = createRealGL(gl)
     facade.createTexture(64, 64, { mipLevels: 4, format: 'rgba16f' })
@@ -104,14 +104,14 @@ describe('realGL Task 67: HDR-форматы хранения', () => {
     expect(rec.storage[0]).toEqual({ levels: 4, internalFormat: RGBA16F, w: 64, h: 64 })
   })
 
-  test('rgba32f + mip-chain: texStorage2D с internalFormat RGBA32F', () => {
+  test('rgba32f + mip-chain: texStorage2D with internalFormat RGBA32F', () => {
     const { gl, rec } = mockGL(false)
     const facade = createRealGL(gl)
     facade.createTexture(64, 64, { mipLevels: 3, format: 'rgba32f' })
     expect(rec.storage[0]!.internalFormat).toBe(RGBA32F)
   })
 
-  test('rgba16f mutable (mipLevels=1): texImage2D-null с RGBA16F/RGBA/HALF_FLOAT', () => {
+  test('rgba16f mutable (mipLevels=1): texImage2D-null with RGBA16F/RGBA/HALF_FLOAT', () => {
     const { gl, rec } = mockGL(false)
     const facade = createRealGL(gl)
     facade.createTexture(64, 64, { format: 'rgba16f' })
@@ -122,7 +122,7 @@ describe('realGL Task 67: HDR-форматы хранения', () => {
     expect(rec.images[0]!.source).toBeNull()
   })
 
-  test('rgba32f mutable: аллокация с FLOAT-типом', () => {
+  test('rgba32f mutable: allocation with the FLOAT type', () => {
     const { gl, rec } = mockGL(false)
     const facade = createRealGL(gl)
     facade.createTexture(32, 32, { format: 'rgba32f' })
@@ -130,7 +130,7 @@ describe('realGL Task 67: HDR-форматы хранения', () => {
     expect(rec.images[0]!.type).toBe(FLOAT)
   })
 
-  test('дефолт без формата — прежний RGBA8/UNSIGNED_BYTE (регрессия)', () => {
+  test('default without a format — the former RGBA8/UNSIGNED_BYTE (regression)', () => {
     const { gl, rec } = mockGL(false)
     const facade = createRealGL(gl)
     facade.createTexture(64, 64, { mipLevels: 4 })
@@ -141,20 +141,20 @@ describe('realGL Task 67: HDR-форматы хранения', () => {
   })
 })
 
-describe('realGL Task 67: авто-вывод (format, type) загрузок из формата хранения', () => {
-  test('texImage2DFromSource на rgba16f mip-chain → texSubImage2D с HALF_FLOAT', () => {
+describe('realGL Task 67: auto-derivation of upload (format, type) from the storage format', () => {
+  test('texImage2DFromSource on an rgba16f mip-chain → texSubImage2D with HALF_FLOAT', () => {
     const { gl, rec } = mockGL(false)
     const facade = createRealGL(gl)
     const tex = facade.createTexture(64, 64, { mipLevels: 4, format: 'rgba16f' })
     const source = { width: 64, height: 64 }
     facade.texImage2DFromSource(tex, source as never)
-    // immutable-текстура → texSubImage2D level=0 (контракт Task 64),
-    // но теперь с парой (RGBA, HALF_FLOAT) — иначе молчаливый INVALID_OPERATION.
+    // an immutable texture → texSubImage2D level=0 (the Task 64 contract),
+    // but now with the (RGBA, HALF_FLOAT) pair — otherwise a silent INVALID_OPERATION.
     expect(rec.subs).toHaveLength(1)
     expect(rec.subs[0]).toMatchObject({ level: 0, x: 0, y: 0, format: RGBA, type: HALF_FLOAT })
   })
 
-  test('texSubImage2DFromSource на rgba32f → FLOAT', () => {
+  test('texSubImage2DFromSource on rgba32f → FLOAT', () => {
     const { gl, rec } = mockGL(false)
     const facade = createRealGL(gl)
     const tex = facade.createTexture(64, 64, { format: 'rgba32f' })
@@ -162,7 +162,7 @@ describe('realGL Task 67: авто-вывод (format, type) загрузок и
     expect(rec.subs[0]).toMatchObject({ format: RGBA, type: FLOAT })
   })
 
-  test('texImage2DLevel на rgba16f mip-chain → (RGBA, HALF_FLOAT) по умолчанию', () => {
+  test('texImage2DLevel on an rgba16f mip-chain → (RGBA, HALF_FLOAT) by default', () => {
     const { gl, rec } = mockGL(false)
     const facade = createRealGL(gl)
     const tex = facade.createTexture(64, 64, { mipLevels: 4, format: 'rgba16f' })
@@ -170,18 +170,18 @@ describe('realGL Task 67: авто-вывод (format, type) загрузок и
     expect(rec.subs[0]).toMatchObject({ level: 2, format: RGBA, type: HALF_FLOAT })
   })
 
-  test('texImage2DLevel: явные GLenum перекрывают авто-вывод (Task 55 совместимость)', () => {
+  test('texImage2DLevel: explicit GLenums override auto-derivation (Task 55 compatibility)', () => {
     const { gl, rec } = mockGL(false)
     const facade = createRealGL(gl)
     const tex = facade.createTexture(64, 64, { mipLevels: 4, format: 'rgba16f' })
-    // RGBA16F принимает и (RGBA, FLOAT) — WebGPU-style явная передача.
+    // RGBA16F also accepts (RGBA, FLOAT) — a WebGPU-style explicit pass.
     facade.texImage2DLevel(tex, 1, { width: 32, height: 32 } as never, {
       internalFormat: RGBA16F, format: RGBA, type: FLOAT,
     })
     expect(rec.subs[0]).toMatchObject({ level: 1, format: RGBA, type: FLOAT })
   })
 
-  test('обычная RGBA8-текстура: загрузки остаются (RGBA, UNSIGNED_BYTE)', () => {
+  test('a plain RGBA8 texture: uploads stay (RGBA, UNSIGNED_BYTE)', () => {
     const { gl, rec } = mockGL(false)
     const facade = createRealGL(gl)
     const tex = facade.createTexture(64, 64)
@@ -190,8 +190,8 @@ describe('realGL Task 67: авто-вывод (format, type) загрузок и
   })
 })
 
-describe('realGL Task 67: фильтрация float-текстур', () => {
-  test('rgba16f — LINEAR core (даже без OES_texture_float_linear)', () => {
+describe('realGL Task 67: filtering of float textures', () => {
+  test('rgba16f — LINEAR core (even without OES_texture_float_linear)', () => {
     const { gl, rec } = mockGL(false)
     const facade = createRealGL(gl)
     facade.createTexture(64, 64, { mipLevels: 4, format: 'rgba16f' })
@@ -199,7 +199,7 @@ describe('realGL Task 67: фильтрация float-текстур', () => {
     expect(rec.params.some(p => p.pname === TEXTURE_MAG_FILTER && p.value === LINEAR)).toBe(true)
   })
 
-  test('rgba32f без OES_texture_float_linear — NEAREST (complete, не чёрный)', () => {
+  test('rgba32f without OES_texture_float_linear — NEAREST (complete, not black)', () => {
     const { gl, rec } = mockGL(false)
     const facade = createRealGL(gl)
     facade.createTexture(64, 64, { mipLevels: 4, format: 'rgba32f' })
@@ -207,14 +207,14 @@ describe('realGL Task 67: фильтрация float-текстур', () => {
     expect(rec.params.some(p => p.pname === TEXTURE_MAG_FILTER && p.value === NEAREST)).toBe(true)
   })
 
-  test('rgba32f с OES_texture_float_linear — LINEAR', () => {
+  test('rgba32f with OES_texture_float_linear — LINEAR', () => {
     const { gl, rec } = mockGL(true)
     const facade = createRealGL(gl)
     facade.createTexture(64, 64, { mipLevels: 4, format: 'rgba32f' })
     expect(rec.params.some(p => p.pname === TEXTURE_MIN_FILTER && p.value === LINEAR_MIPMAP_LINEAR)).toBe(true)
   })
 
-  test('rgba32f без mip — NEAREST без расширения, LINEAR с ним', () => {
+  test('rgba32f without mip — NEAREST without the extension, LINEAR with it', () => {
     const { gl, rec } = mockGL(false)
     const facade = createRealGL(gl)
     facade.createTexture(64, 64, { format: 'rgba32f' })

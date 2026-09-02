@@ -1,6 +1,6 @@
 // eslint.config.js — flat config (ESLint 9).
-// Область: только исходники библиотеки packages/*/src (тесты, демо и скрипты
-// сознательно вне линта — их контракты проверяют typecheck и bun test).
+// Scope: only library sources in packages/*/src (tests, demos and scripts
+// are deliberately outside linting — typecheck and bun test verify their contracts).
 import js from '@eslint/js'
 import tseslint from 'typescript-eslint'
 
@@ -21,7 +21,7 @@ export default tseslint.config(
   {
     files: ['packages/*/src/**/*.ts'],
     rules: {
-      // Индустриальный базис: recommended + точечные ужесточения.
+      // Industrial baseline: recommended + targeted stricter rules.
       'eqeqeq': ['error', 'smart'],
       'no-var': 'error',
       'prefer-const': 'error',

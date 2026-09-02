@@ -1,15 +1,15 @@
-// Рекордер-фасад: те же операции, но строками — основа юнит-тестов
-// порядка вызовов на tape-путях (уроки инцидентов 36/37).
-// Плюс сырая state-поверхность (enableDepthTest/depthFunc/…) — её применяет
-// state-программа (state/stateProgram.ts) в обоих режимах исполнения.
+// Recording facade: the same operations, but as strings — the foundation of unit tests
+// for call order on the tape paths (the lessons of incidents 36/37).
+// Plus a raw state surface (enableDepthTest/depthFunc/…) — it is applied by the
+// state program (state/stateProgram.ts) in both execution modes.
 
 import type { GLFacade, GLImageSource } from './facade.ts'
 import type { DepthFunc, CullFace, FrontFace, BlendFactor } from './gl/facade.ts'
 import type { StateProgramGL } from './gl/shadow.ts'
 
 export interface RecordingGL {
-  /** GLFacade + сырая state-поверхность: рекордер реализует ОБЕ (см. комментарий
-   *  шапки) — тип отражает это, чтобы state-программы принимались без кастов. */
+  /** GLFacade + raw state surface: the recorder implements BOTH (see the header
+   *  comment) — the type reflects this so state programs are accepted without casts. */
   readonly gl: GLFacade & StateProgramGL
   readonly calls: string[]
 }
@@ -20,7 +20,7 @@ export function createRecordingGL(): RecordingGL {
   let nextBuffer = 1
   let nextTexture = 1
   let nextTarget = 1
-  let nextTextureView = 1_000_000 // disjoint namespace с textureId (<1M)
+  let nextTextureView = 1_000_000 // disjoint namespace with textureId (<1M)
   let currentTarget = 0
 
   const gl: GLFacade & {
@@ -48,9 +48,9 @@ export function createRecordingGL(): RecordingGL {
     updateBuffer: (bufferId, data, byteOffset = 0) =>
       calls.push(`updateBuffer(${bufferId},${data.length},${byteOffset})`),
     bindVertexBuffer: (bufferId, location, size, stride, byteOffset, divisor) => {
-      // M5: интерливинг фида — суффикс stride@offset; tight — без него.
-      // Task 75: инстанс-делитель — суффикс !i (только когда ≠ 0 — старые
-      // записи вызовов в тестах не меняются).
+      // M5: feed interleaving — a stride@offset suffix; tight — without it.
+      // Task 75: the instance divisor — an !i suffix (only when ≠ 0 — old
+      // call records in tests stay unchanged).
       const interleave = stride !== undefined || byteOffset !== undefined
         ? `,${stride ?? 0}@${byteOffset ?? 0}`
         : ''
@@ -69,7 +69,7 @@ export function createRecordingGL(): RecordingGL {
       const parts: string[] = []
       if (mipLevels > 1) parts.push(`mipLevels=${mipLevels}`)
       if (aniso !== undefined) parts.push(`aniso=${aniso}`)
-      // Task 67: формат хранения в запись (rgba16f/rgba32f — HDR-текстуры).
+      // Task 67: the storage format into the record (rgba16f/rgba32f — HDR textures).
       if (options?.format !== undefined && options.format !== 'rgba8') parts.push(options.format)
       if (parts.length > 0) {
         calls.push(`createTexture(${width},${height},${parts.join(',')})`)
@@ -81,9 +81,9 @@ export function createRecordingGL(): RecordingGL {
     texSubImage2D: (textureId, x, y, width, height) => calls.push(`texSubImage2D(${textureId},${x},${y},${width},${height})`),
     texImage2DFromSource: (textureId, source, options) => {
       const kind = describeSource(source)
-      // flipY в запись: по умолчанию false (паритет с realGL.texImage2DFromSource
-      // и WebGPU copyExternalImageToTexture — оба пишут source row 0 в texture
-      // row 0). Тесты могут искать «,flipY=false» или «,flipY=true» явно.
+      // flipY into the record: defaults to false (parity with realGL.texImage2DFromSource
+      // and WebGPU copyExternalImageToTexture — both write source row 0 into texture
+      // row 0). Tests may explicitly look for ",flipY=false" or ",flipY=true".
       const flipY = options?.flipY ?? false
       calls.push(`texImage2DFromSource(${textureId},${kind},flipY=${flipY})`)
     },
@@ -106,22 +106,22 @@ export function createRecordingGL(): RecordingGL {
     createTextureView: (textureId, options) => {
       const base = options?.baseMipLevel ?? 0
       const count = options?.mipLevelCount
-      // Формат записи: `createTextureView(texId,mip=base+count)` или
-      // `createTextureView(texId)` если base=0 и count не передан (default view).
-      // Word-boundary: используем `,mip=` чтобы не путать с другими суффиксами.
+      // Record format: `createTextureView(texId,mip=base+count)` or
+      // `createTextureView(texId)` if base=0 and count is not passed (default view).
+      // Word-boundary: we use `,mip=` so as not to confuse it with other suffixes.
       const hasOpts = base !== 0 || count !== undefined
       const optSuffix = hasOpts ? `,mip=${base}${count !== undefined ? `+${count}` : ''}` : ''
       calls.push(`createTextureView(${textureId}${optSuffix})`)
-      // Возвращаем фейковый viewId из диапазона sub-views (≥1M), как в realGL.
+      // Return a fake viewId from the sub-view range (≥1M), like realGL.
       return nextTextureView++
     },
     deleteTextureView: viewId => calls.push(`deleteTextureView(${viewId})`),
     setViewport: (width, height) => calls.push(`setViewport(${width},${height})`),
     setDepthMode: (test, write) => calls.push(`setDepthMode(${test},${write})`),
     setCull: mode => calls.push(`setCull(${mode})`),
-    // Task 75: блендинг пайплайна (null/null = выкл).
+    // Task 75: pipeline blending (null/null = off).
     setBlend: (src, dst) => calls.push(`setBlend(${src ?? 'off'},${dst ?? 'off'})`),
-    // Сырая state-поверхность (state-программы, M2-легаси + реальные сценарии).
+    // Raw state surface (state programs, M2 legacy + real scenarios).
     enableDepthTest: () => calls.push('enableDepthTest'),
     disableDepthTest: () => calls.push('disableDepthTest'),
     depthMask: on => calls.push(`depthMask(${on})`),
@@ -140,7 +140,7 @@ export function createRecordingGL(): RecordingGL {
       return nextTarget++
     },
     bindTarget: (targetId, clear) => {
-      // Тот же skip-контракт, что и realGL: без дублирующих bindTarget
+      // The same skip contract as realGL: no duplicate bindTarget
       if (targetId === currentTarget && !clear) return
       currentTarget = targetId
       calls.push(`bindTarget(${targetId},${clear ? 1 : 0})`)
@@ -153,12 +153,12 @@ export function createRecordingGL(): RecordingGL {
       currentTarget = 0
       calls.push(`deleteTarget(${targetId})`)
     },
-    // Task 80: readback — записываем вызов; рекордер без GPU отдаёт пустой
-    // массив (форма контракта realGL: Uint8Array, строки сверху-вниз).
-    // Контракт targetId 0 (канвас не читается) зеркалим: throw как в realGL.
+    // Task 80: readback — record the call; the GPU-less recorder returns an empty
+    // array (the realGL contract's shape: Uint8Array, rows top-down).
+    // The targetId 0 contract (the canvas is not readable) is mirrored: throw as in realGL.
     readTargetPixels: targetId => {
       if (targetId === 0) {
-        throw new Error('rune: readTargetPixels(0) — канвас не читается (паритет с WebGPU: presented-текстура живёт один кадр). Читайте ПОВЕРХНОСТЬ: renderer.surface(...) → capture/проходы → surface.read()')
+        throw new Error('rune: readTargetPixels(0) — the canvas cannot be read (parity with WebGPU: the presented texture lives for one frame). Read the SURFACE instead: renderer.surface(...) → capture/passes → surface.read()')
       }
       calls.push(`readTargetPixels(${targetId})`)
       return new Uint8Array(0)
@@ -170,25 +170,25 @@ export function createRecordingGL(): RecordingGL {
   return { gl, calls }
 }
 
-/** Округление значения для строки вызова: значение прошло через f32-арену
- *  (fround), сырая печать даёт «0.800000011920929» — округляем до 3 знаков
- *  (тот же приём, что у легаси-рекордера gl/facade.ts). */
+/** Round a value for the call string: the value went through the f32 arena
+ *  (fround); a raw print gives "0.800000011920929" — we round to 3 decimals
+ *  (the same trick as in the legacy recorder gl/facade.ts). */
 function roundValue(value: number): number {
   return Math.round(value * 1000) / 1000
 }
 
-/** Имя типа источника для записи в строку вызова. */
+/** The source type name for the call string. */
 function describeSource(source: GLImageSource): string {
-  // 1. instanceof-проверки (если глобал доступен в окружении)
+  // 1. instanceof checks (if the global is available in the environment)
   if (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) return 'ImageBitmap'
   if (typeof OffscreenCanvas !== 'undefined' && source instanceof OffscreenCanvas) return 'OffscreenCanvas'
   if (typeof HTMLCanvasElement !== 'undefined' && source instanceof HTMLCanvasElement) return 'HTMLCanvasElement'
   if (typeof HTMLVideoElement !== 'undefined' && source instanceof HTMLVideoElement) return 'HTMLVideoElement'
-  // 2. Fallback: duck-typing через наличие характерных методов
+  // 2. Fallback: duck-typing by the presence of characteristic methods
   if (typeof source === 'object' && source !== null) {
-    if ('getContext' in source) return 'OffscreenCanvas' // или HTMLCanvasElement, но в headless-тестах — Offscreen
-    if ('close' in source && 'width' in source) return 'ImageBitmap' // ImageBitmap имеет close() и width/height
+    if ('getContext' in source) return 'OffscreenCanvas' // or HTMLCanvasElement, but in headless tests — Offscreen
+    if ('close' in source && 'width' in source) return 'ImageBitmap' // ImageBitmap has close() and width/height
   }
-  // 3. Последний fallback — constructor.name (для моков с .constructor)
+  // 3. Last fallback — constructor.name (for mocks with .constructor)
   return (source as { constructor: { name: string } }).constructor?.name ?? 'unknown'
 }

@@ -1,46 +1,47 @@
 /**
- * capsProbe для WebGPU — пробитие adapter.features + adapter.limits + adapter.info.
+ * capsProbe for WebGPU — probing adapter.features + adapter.limits + adapter.info.
  *
- * Соответствия (FeatureId ↔ WebGPU GPUFeatureName):
+ * Mappings (FeatureId ↔ WebGPU GPUFeatureName):
  *   astc               ↔ 'texture-compression-astc'
  *   bc1, bc3, bc7      ↔ 'texture-compression-bc'
  *   etc2               ↔ 'texture-compression-etc2'
  *   depth-clamp        ↔ 'depth-clamping'
  *   timestamp-query    ↔ 'timestamp-query'
  *   pipeline-stats     ↔ 'pipeline-statistics-query'
- *   occlusion-query    ↔ 'occlusion-query' (нативно в WebGPU)
+ *   occlusion-query    ↔ 'occlusion-query' (native in WebGPU)
  *   bgra8-storage      ↔ 'bgra8unorm-storage'
  *   float32-filterable ↔ 'float32-filterable'
  *   rg11b10ufloat-render ↔ 'rg11b10ufloat-render'
- *   shared-exponent   ↔ 'shared-texture-bgra8unorm' — нет, правильнее:
- *                        'rgba8snorm-...'-семейство. Для M4 — упрощённо.
+ *   shared-exponent   ↔ 'shared-texture-bgra8unorm' — no, more precisely:
+ *                        the 'rgba8snorm-...' family. Simplified for M4.
  *
- * В WebGPU 'instancing' всегда нативно (нет ограничения), 'depth-texture' —
- *   нативно (depth-аттачменты пайплайнов). 'anisotropic' — базовая
- *   спецификация (GPUSamplerDescriptor.maxAnisotropy).
- * Контракт 5 (Task 79, гигиена caps): НЕ заявлять фичу без пути исполнения
- *   в движке. WebGPU-АПИ умеет compute/storage/drawIndirect, но рендереры
- *   rune их НЕ исполняют (нет dispatch, нет storage-биндингов, нет drawIndirect)
- *   — поэтому 'compute', 'storage-buffer', 'storage-texture', 'draw-indirect'
- *   НЕ заявляются, пока пути не появятся (M6+). Паритет с WebGL2-пробом.
- * 'msaa-2x'/'4x'/'8x' — device.limits.maxSampleCount (обычно 4 на mobile, 8 на desktop).
+ * In WebGPU 'instancing' is always native (no restriction), 'depth-texture' is
+ *   native (pipeline depth attachments). 'anisotropic' is base
+ *   specification (GPUSamplerDescriptor.maxAnisotropy).
+ * Contract 5 (Task 79, caps hygiene): do NOT claim a feature without an
+ *   execution path in the engine. The WebGPU API can do
+ *   compute/storage/drawIndirect, but rune's renderers do NOT execute them
+ *   (no dispatch, no storage bindings, no drawIndirect)
+ *   — therefore 'compute', 'storage-buffer', 'storage-texture', 'draw-indirect'
+ *   are NOT claimed until the paths appear (M6+). Parity with the WebGL2 probe.
+ * 'msaa-2x'/'4x'/'8x' — device.limits.maxSampleCount (usually 4 on mobile, 8 on desktop).
  *
- * FormatMatrix в WebGPU: query через device.features для float/blend.
- * rgba8unorm — baseline native, всегда.
+ * FormatMatrix in WebGPU: query via device.features for float/blend.
+ * rgba8unorm — baseline native, always.
  * rgba16float — renderable iff features.has('float32-filterable') (paradox name —
- * на самом деле и для float16). Честнее: sampleable всегда, renderable iff
- * features.has('float32-filterable') ИЛИ color-attachment-float.
+ * it actually covers float16 too). More precisely: sampleable always, renderable iff
+ * features.has('float32-filterable') OR color-attachment-float.
  */
 
 import type { CapsQuery, FeatureName, FormatAxis, FormatSupport } from '@rune/core'
 
-/** Минимальный интерфейс для probing WebGPU-адаптера. */
+/** Minimal interface for probing a WebGPU adapter. */
 export interface GPUProbe {
   /** adapter.features.has(name). */
   hasFeature(name: string): boolean
-  /** adapter.limits[limit] — сначала adapter, потом fallback к device.limits
-   *  (нужно для maxAnisotropy: на некоторых браузерах поле доступно только
-   *  в device.limits после requestDevice(), но не в adapter.limits). */
+  /** adapter.limits[limit] — first adapter, then fallback to device.limits
+   *  (needed for maxAnisotropy: in some browsers the field is available only
+   *  in device.limits after requestDevice(), but not in adapter.limits). */
   getLimit(name: string): number | undefined
   /** adapter.info (vendor / architecture / description). */
   info: { vendor: string; architecture: string; description: string }
@@ -49,7 +50,7 @@ export interface GPUProbe {
 }
 
 /**
- * Пробит CapsQuery из GPUProbe (обёртка над adapter/device).
+ * Probes CapsQuery from a GPUProbe (wrapper over adapter/device).
  */
 export function probeGPUCaps(probe: GPUProbe): CapsQuery {
   const features = new Set<FeatureName>()
@@ -72,7 +73,7 @@ export function probeGPUCaps(probe: GPUProbe): CapsQuery {
     ['bgra8-storage', 'bgra8unorm-storage'],
     ['float32-filterable', 'float32-filterable'],
     ['rg11b10ufloat-render', 'rg11b10ufloat-render'],
-    ['shared-exponent', 'rgba8snorm-color-render-..'], // упрощённо
+    ['shared-exponent', 'rgba8snorm-color-render-..'], // simplified
   ]
   for (const [feature, gpuName] of featureMap) {
     if (probe.hasFeature(gpuName)) {
@@ -81,29 +82,30 @@ export function probeGPUCaps(probe: GPUProbe): CapsQuery {
     }
   }
 
-  // Нативные фичи WebGPU (всегда есть в спецификации — без расширения).
-  // Контракт 5 (Task 79): заявляем ТОЛЬКО то, что движок исполняет:
+  // Native WebGPU features (always in the specification — no extension).
+  // Contract 5 (Task 79): we claim ONLY what the engine executes:
   //   'instancing' — draw(instances) + stepMode 'instance' (Task 75);
-  //   'depth-texture' — depth-аттачменты пайплайнов (test/write);
-  //   'offscreen-canvas'/'video-frame' — фичи среды.
-  // НЕ заявляем (API умеет, движок — ещё нет; пути появятся в M6+):
+  //   'depth-texture' — pipeline depth attachments (test/write);
+  //   'offscreen-canvas'/'video-frame' — environment features.
+  // NOT claimed (the API can, the engine cannot yet; paths appear in M6+):
   //   'compute', 'storage-buffer', 'storage-texture', 'draw-indirect'.
-  //   Раньше добавлялись безусловно — ложь для потребителя caps (аудит
-  //   Task 72: «снять ложные compute/draw-indirect заявления»).
+  //   Previously these were added unconditionally — a lie for caps consumers
+  //   (audit Task 72: "remove false compute/draw-indirect claims").
   features.add('instancing')
   features.add('depth-texture')
-  features.add('offscreen-canvas') // браузерная среда, не device feature
+  features.add('offscreen-canvas') // browser environment, not a device feature
   if (typeof VideoFrame !== 'undefined') features.add('video-frame')
 
-  // ─── Limits (adapter.limits — всегда числа для всех GPU limit'ов) ────────
-  // ВАЖНО: 'maxAnisotropy' включён явно — это даёт parity с WebGL2, где
-  // 'anisotropic' feature пробивается через EXT_texture_filter_anisotropic.
-  // На WebGPU нет одноимённого GPUFeatureName; anisotropic filtering нативно
-  // (GPUSamplerDescriptor.maxAnisotropy), а её максимальное значение доступно
-  // через device.limits.maxAnisotropy (обычно 16 на desktop, 1 на mobile без
-  // поддержки). Когда maxAnisotropy ≥ 2 — добавляем 'anisotropic' в features
-  // (см. ниже), чтобы caps.has('anisotropic')=true согласовывалось с реальным
-  // применением maxAnisotropy в realGPU.createTexture.
+  // ─── Limits (adapter.limits — always numbers for all GPU limits) ────────
+  // IMPORTANT: 'maxAnisotropy' is included explicitly — this gives parity
+  // with WebGL2, where the 'anisotropic' feature is probed via
+  // EXT_texture_filter_anisotropic. WebGPU has no GPUFeatureName of the
+  // same name; anisotropic filtering is native
+  // (GPUSamplerDescriptor.maxAnisotropy), and its maximum value is available
+  // via device.limits.maxAnisotropy (usually 16 on desktop, 1 on mobile
+  // without support). When maxAnisotropy ≥ 2 — add 'anisotropic' to features
+  // (see below) so caps.has('anisotropic')=true stays consistent with the
+  // actual maxAnisotropy usage in realGPU.createTexture.
   const limitNames = [
     'maxTextureDimension1D',
     'maxTextureDimension2D',
@@ -138,44 +140,46 @@ export function probeGPUCaps(probe: GPUProbe): CapsQuery {
   for (const name of limitNames) {
     const v = probe.getLimit(name)
     if (typeof v === 'number' && Number.isFinite(v)) {
-      // Снэйк-кейс для унификации с WebGL2 mapping (maxTextureSize2D).
+      // Snake case for unification with the WebGL2 mapping (maxTextureSize2D).
       const alias = name
         .replace('maxTextureDimension2D', 'maxTextureSize2D')
         .replace('maxTextureDimension3D', 'maxTextureSize3D')
         .replace('maxTextureDimension1D', 'maxTextureSize1D')
       limits[alias] = v
-      limits[name] = v // оригинальное имя
+      limits[name] = v // original name
     }
   }
 
   // ─── Anisotropic filtering feature ───────────────────────────────────────
   //
-  // ВАЖНО (Task 54, WebGPU spec ver. 2026-08-20, MDN GPUSupportedLimits):
-  // `maxAnisotropy` НЕ входит в специфицированный список свойств
-  // `GPUSupportedLimits` (ни adapter.limits, ни device.limits). Поля
-  // `adapter.limits.maxAnisotropy` / `device.limits.maxAnisotropy` НЕ
-  // существуют как стандартные — обращение к ним через Record<string, number>
-  // всегда возвращает `undefined` (а не 0, не 1, не 16).
+  // IMPORTANT (Task 54, WebGPU spec ver. 2026-08-20, MDN GPUSupportedLimits):
+  // `maxAnisotropy` is NOT part of the specified list of
+  // `GPUSupportedLimits` properties (neither adapter.limits nor
+  // device.limits). The fields
+  // `adapter.limits.maxAnisotropy` / `device.limits.maxAnisotropy` do NOT
+  // exist as standard — accessing them via Record<string, number>
+  // always returns `undefined` (not 0, not 1, not 16).
   //
-  // На WebGPU anisotropic filtering — это часть базовой спецификации (без
-  // feature-request, без requiredLimits). Платформа автоматически клампит
-  // `GPUSamplerDescriptor.maxAnisotropy` к своему нативному максимуму (обычно
-  // 16 на desktop, 1 на некоторых мобильных GPU без поддержки). См. MDN
+  // On WebGPU anisotropic filtering is part of the base specification (no
+  // feature-request, no requiredLimits). The platform automatically clamps
+  // `GPUSamplerDescriptor.maxAnisotropy` to its native maximum (usually
+  // 16 on desktop, 1 on some mobile GPUs without support). See MDN
   // GPUDevice.createSampler: "Most implementations support maxAnisotropy
   // values in a range between 1 and 16, inclusive. The value used will be
   // clamped to the maximum value that the underlying platform supports."
   //
-  // Поэтому на WebGPU ВСЕГДА считаем feature 'anisotropic' доступной, а
-  // максимальное значение = 16 (нативный WebGPU max по спецификации).
-  // realGPU.createTexture передаёт maxAnisotropy через GPUSamplerDescriptor
-  // и платформа клампит — согласовано с caps.has('anisotropic')=true.
+  // Therefore on WebGPU we ALWAYS consider the 'anisotropic' feature
+  // available, with the maximum value = 16 (the native WebGPU max per
+  // specification). realGPU.createTexture passes maxAnisotropy via
+  // GPUSamplerDescriptor and the platform clamps — consistent with
+  // caps.has('anisotropic')=true.
   //
-  // Это контрастирует с WebGL2, где anisotropic требует расширения
-  // EXT_texture_filter_anisotropic и пробивается через MAX_TEXTURE_MAX_ANISOTROPY.
+  // This contrasts with WebGL2, where anisotropic requires the
+  // EXT_texture_filter_anisotropic extension and is probed via MAX_TEXTURE_MAX_ANISOTROPY.
   features.add('anisotropic')
   limits['maxAnisotropy'] = 16
 
-  // MSAA — из device.limits.maxSampleCount (в WebGPU это явно есть)
+  // MSAA — from device.limits.maxSampleCount (WebGPU has this explicitly)
   const msc = probe.getLimit('maxSampleCount')
   if (typeof msc === 'number') {
     if (msc >= 2) features.add('msaa-2x')
@@ -183,14 +187,14 @@ export function probeGPUCaps(probe: GPUProbe): CapsQuery {
     if (msc >= 8) features.add('msaa-8x')
     if (msc >= 16) features.add('msaa-16x')
   } else {
-    // По умолчанию для desktop WebGPU — 4x.
+    // Default for desktop WebGPU — 4x.
     features.add('msaa-2x')
     features.add('msaa-4x')
   }
 
   // ─── FormatMatrix ─────────────────────────────────────────────────────────
-  // Полная матрица WebGPU определяется через wgpu NativeCaps + canvas config.
-  // Для M4 — упрощённо: native для базовых, feature-зависимые для float.
+  // The full WebGPU matrix is determined via wgpu NativeCaps + canvas config.
+  // For M4 — simplified: native for the basics, feature-dependent for float.
   const hasFloat32Filter = features.has('float32-filterable')
   const hasRg11b10 = features.has('rg11b10ufloat-render')
 
@@ -210,13 +214,13 @@ export function probeGPUCaps(probe: GPUProbe): CapsQuery {
   }
   setFmt('rgba8unorm-srgb', 'storage', 'none')
 
-  // bgra8unorm — preferred canvas format, нативно. Storage iff feature.
+  // bgra8unorm — preferred canvas format, native. Storage iff feature.
   for (const axis of ['sampled', 'render', 'blend', 'filter', 'msaa'] as const) {
     setFmt('bgra8unorm', axis, 'native')
   }
   setFmt('bgra8unorm', 'storage', features.has('bgra8-storage') ? 'native' : 'none')
 
-  // r8unorm, rg8unorm — sampled/filter, не render
+  // r8unorm, rg8unorm — sampled/filter, not render
   for (const axis of ['sampled', 'filter'] as const) {
     setFmt('r8unorm', axis, 'native')
     setFmt('rg8unorm', axis, 'native')
@@ -226,7 +230,7 @@ export function probeGPUCaps(probe: GPUProbe): CapsQuery {
     setFmt('rg8unorm', axis, 'none')
   }
 
-  // rgba16float — sampled всегда, filter/render iff float32-filterable (paradox WebGPU)
+  // rgba16float — sampled always, filter/render iff float32-filterable (WebGPU paradox)
   setFmt('rgba16float', 'sampled', 'native')
   setFmt('rgba16float', 'filter', hasFloat32Filter ? 'native' : 'none')
   setFmt('rgba16float', 'render', hasFloat32Filter ? 'native' : 'none')
@@ -239,7 +243,7 @@ export function probeGPUCaps(probe: GPUProbe): CapsQuery {
   setFmt('rgba32float', 'filter', hasFloat32Filter ? 'native' : 'none')
   setFmt('rgba32float', 'render', hasFloat32Filter ? 'native' : 'none')
   setFmt('rgba32float', 'blend', hasFloat32Filter ? 'native' : 'none')
-  setFmt('rgba32float', 'msaa', 'none') // 32float не MSAA никогда
+  setFmt('rgba32float', 'msaa', 'none') // 32float is never MSAA
   setFmt('rgba32float', 'storage', 'none')
 
   // rg11b10ufloat — render iff feature
@@ -258,7 +262,7 @@ export function probeGPUCaps(probe: GPUProbe): CapsQuery {
     setFmt('depth24plus', axis, 'none')
   }
 
-  // depth24plus-stencil8 — то же
+  // depth24plus-stencil8 — same
   for (const axis of ['sampled', 'render', 'msaa'] as const) {
     setFmt('depth24plus-stencil8', axis, 'native')
   }
@@ -283,13 +287,14 @@ export function probeGPUCaps(probe: GPUProbe): CapsQuery {
 }
 
 /**
- * Создаёт GPUProbe обёртку над реальным GPUAdapter (+ опционально GPUDevice).
+ * Creates a GPUProbe wrapper over a real GPUAdapter (+ optionally GPUDevice).
  *
- * ВАЖНО: на некоторых браузерах (Chromium < 130, Safari < 18, Firefox < 140)
- * adapter.limits НЕ содержит maxAnisotropy, хотя device.limits — да. Поэтому
- * getLimit() сначала пробует adapter.limits[name], потом device.limits[name].
- * Это критично для caps.has('anisotropic'): без fallback'а к device.limits
- * caps лжёт (false), хотя sampler реально применяет anisotropic.
+ * IMPORTANT: in some browsers (Chromium < 130, Safari < 18, Firefox < 140)
+ * adapter.limits does NOT contain maxAnisotropy, while device.limits does.
+ * So getLimit() first tries adapter.limits[name], then device.limits[name].
+ * This is critical for caps.has('anisotropic'): without the fallback to
+ * device.limits caps lies (false), although the sampler actually applies
+ * anisotropic.
  */
 export function makeGPUProbe(
   adapter: GPUAdapter,
@@ -300,13 +305,13 @@ export function makeGPUProbe(
   // Adapter.limits — GPUSupportedLimits (sync getters).
   const features = adapter.features
   const adapterLimits = adapter.limits
-  // Device.limits — fallback к adapter.limits. Опционально (recording-фасад
-  // не передаёт device, тогда getLimit работает только с adapter.limits).
+  // Device.limits — fallback to adapter.limits. Optional (the recording
+  // facade passes no device, then getLimit works only with adapter.limits).
   const deviceLimits = device?.limits ?? null
 
-  // Adapter.info — это Promise<GPUAdapterInfo> в стандарте, но на практике
-  // многие браузеры уже возвращают sync adapter.info (Chrome 113+).
-  // Для probing sync path; если нет — fallback к пустым строкам.
+  // Adapter.info is Promise<GPUAdapterInfo> in the standard, but in practice
+  // many browsers already return sync adapter.info (Chrome 113+).
+  // We probe the sync path; if absent — fallback to empty strings.
   let infoCache: { vendor: string; architecture: string; description: string } | null = null
   const getInfo = () => {
     if (infoCache) return infoCache
@@ -333,12 +338,12 @@ export function makeGPUProbe(
     },
     getLimit: (name) => {
       try {
-        // 1) Adapter.limits — максимальные лимиты адаптера (можно запросить
-        // через requiredLimits при requestDevice()).
+        // 1) Adapter.limits — the adapter's maximum limits (can be requested
+        // via requiredLimits in requestDevice()).
         const adapterV = (adapterLimits as unknown as Record<string, number>)[name]
         if (typeof adapterV === 'number') return adapterV
-        // 2) Device.limits — fallback (после requestDevice без requiredLimits
-        // device.limits содержит дефолтные значения, включая maxAnisotropy).
+        // 2) Device.limits — fallback (after requestDevice without requiredLimits
+        // device.limits contains default values, including maxAnisotropy).
         if (deviceLimits !== null) {
           const deviceV = (deviceLimits as unknown as Record<string, number>)[name]
           if (typeof deviceV === 'number') return deviceV

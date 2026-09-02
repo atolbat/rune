@@ -1,66 +1,67 @@
 /**
- * Grid — плоская сетка с УПРАВЛЯЕМЫМ разрешением и структурой (Task 112).
+ * Grid — a flat mesh with CONTROLLABLE resolution and structure (Task 112).
  *
- * Досье §10.2: «Пакет @rune/prims — чистые данные, генерируемые и в
- * воркере: quad и tri (фуллскрин), grid (высотки и океаны), cube, …;
- * опция wireframe даёт line-индексы для отладки».
+ * Dossier §10.2: "The @rune/prims package — pure data, generated in a
+ * worker too: quad and tri (fullscreen), grid (heightfields and oceans),
+ * cube, …; the wireframe option gives line indices for debugging".
  *
- * Ответ на замечание Task 112 («для океана используется один большой квад,
- * разрешением квада и его внутренней структурой мы не можем управлять»):
- * grid() даёт полный контроль внутренней структуры —
- *  • segmentsX/segmentsZ — разрешение сетки (число ячеек по осям;
- *    вершины (segmentsX+1)×(segmentsZ+1));
- *  • origin + size — положение и размер в мире;
- *  • uv — [0..1] по сетке (для сэмплинга дисплейс-карт);
- *  • indices — треугольники; edgeIndices — уникальные рёбра (wireframe,
- *    gl.LINES / WebGPU line-list — как в FFT-океане).
+ * The answer to the Task 112 remark ("the ocean uses one big quad; we
+ * cannot control the quad's resolution and its internal structure"):
+ * grid() gives full control over the internal structure —
+ *  • segmentsX/segmentsZ — mesh resolution (cell count per axis;
+ *    vertices (segmentsX+1)×(segmentsZ+1));
+ *  • origin + size — position and size in the world;
+ *  • uv — [0..1] over the mesh (for displacement-map sampling);
+ *  • indices — triangles; edgeIndices — unique edges (wireframe,
+ *    gl.LINES / WebGPU line-list — as in the FFT ocean).
  *
- * Высотки/океаны собираются связкой prims.grid + вершинный шейдер с
- * дисплейс-текстурой (досье: «высотки собираются из связки prims.grid,
- * transform с текстурой высот»); здесь — чистые данные без GL-зависимостей.
+ * Heightfields/oceans are assembled from prims.grid + a vertex shader with
+ * a displacement texture (dossier: "heightfields are assembled from
+ * prims.grid plus a transform with a height texture"); here — pure data
+ * without GL dependencies.
  */
 
-/** Геометрия сетки: позиции (x, z), UV, индексы треугольников и рёбер. */
+/** Mesh geometry: positions (x, z), UVs, triangle and edge indices. */
 export interface GridGeometry {
-  /** Позиции: (segmentsX+1)·(segmentsZ+1) вершин, интерливинг [x, z]. */
+  /** Positions: (segmentsX+1)·(segmentsZ+1) vertices, interleaved [x, z]. */
   readonly positions: Float32Array
-  /** UV: те же вершины, [u, v]; v растёт по +Z. */
+  /** UVs: the same vertices, [u, v]; v grows along +Z. */
   readonly uvs: Float32Array
-  /** Треугольники: segmentsX·segmentsZ·6 индексов (обвод CCW сверху). */
+  /** Triangles: segmentsX·segmentsZ·6 indices (CCW winding from above). */
   readonly indices: Uint32Array
-  /** Уникальные рёбра (wireframe): пары индексов, gl.LINES-совместимо. */
+  /** Unique edges (wireframe): index pairs, gl.LINES-compatible. */
   readonly edgeIndices: Uint32Array
   readonly vertexCount: number
   readonly indexCount: number
-  /** Разрешение (для UI/статистики). */
+  /** Resolution (for UI/statistics). */
   readonly segmentsX: number
   readonly segmentsZ: number
 }
 
 export interface GridOptions {
-  /** Размер по X (метры/юниты). */
+  /** Size along X (meters/units). */
   readonly sizeX: number
-  /** Размер по Z. */
+  /** Size along Z. */
   readonly sizeZ: number
-  /** Число ячеек по X (вершин по X — segmentsX+1). Default 1. */
+  /** Number of cells along X (vertices along X — segmentsX+1). Default 1. */
   readonly segmentsX?: number
-  /** Число ячеек по Z. Default = segmentsX. */
+  /** Number of cells along Z. Default = segmentsX. */
   readonly segmentsZ?: number
-  /** Центр сетки (x, z). Default [0, 0]. */
+  /** Mesh center (x, z). Default [0, 0]. */
   readonly origin?: readonly [number, number]
 }
 
-/** Плоская сетка в плоскости XZ (y=0), UV [0..1]. */
+/** Flat mesh in the XZ plane (y=0), UV [0..1]. */
 export function grid(options: GridOptions): GridGeometry {
   const sizeX = options.sizeX
   const sizeZ = options.sizeZ
   const segmentsX = options.segmentsX ?? 1
   const segmentsZ = options.segmentsZ ?? options.segmentsX ?? 1
   if (!Number.isFinite(sizeX) || !Number.isFinite(sizeZ) || sizeX <= 0 || sizeZ <= 0) {
-    throw new Error(`grid: размер должен быть > 0, получено ${sizeX}×${sizeZ}`)
+    throw new Error(`grid: size must be > 0, got ${sizeX}×${sizeZ}`)
   }
   if (!Number.isInteger(segmentsX) || !Number.isInteger(segmentsZ) || segmentsX < 1 || segmentsZ < 1) {
-    throw new Error(`grid: сегменты — целые ≥ 1, получено ${segmentsX}×${segmentsZ}`)
+    throw new Error(`grid: segments must be integers ≥ 1, got ${segmentsX}×${segmentsZ}`)
   }
   const [cx, cz] = options.origin ?? [0, 0]
   const halfX = sizeX / 2
@@ -85,7 +86,7 @@ export function grid(options: GridOptions): GridGeometry {
     }
   }
 
-  // Треугольники: CCW при взгляде сверху (+Y). Диагональ ячейки — как в
+  // Triangles: CCW viewed from above (+Y). The cell diagonal — as in
   // david.li/waves (topLeft→bottomLeft→bottomRight, bottomRight→topRight→topLeft).
   const indices = new Uint32Array(segmentsX * segmentsZ * 6)
   let t = 0

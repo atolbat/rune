@@ -1,18 +1,18 @@
 /**
- * Кватернионы (x, y, z, w), Hamilton-произведение — как gl-matrix.
- * Все функции пишут в out и возвращают его; входы не мутируются.
- * Конвенция вращений — правая тройка, положительный угол — против часовой
- * при взгляде с конца оси (та же, что у mat4RotationX/Y в mat4.ts).
+ * Quaternions (x, y, z, w), Hamilton product — like gl-matrix.
+ * All functions write into out and return it; inputs are not mutated.
+ * Rotation convention — right-handed triple, a positive angle is counterclockwise
+ * when viewed from the end of the axis (the same as mat4RotationX/Y in mat4.ts).
  */
 
-/** Аллоцирует единичный кватернион. */
+/** Allocates an identity quaternion. */
 export function quatCreate(): Float32Array {
   const out = new Float32Array(4)
   out[3] = 1
   return out
 }
 
-/** Единичный кватернион (без вращения). */
+/** Identity quaternion (no rotation). */
 export function quatIdentity(out: Float32Array): Float32Array {
   out[0] = 0
   out[1] = 0
@@ -21,7 +21,7 @@ export function quatIdentity(out: Float32Array): Float32Array {
   return out
 }
 
-/** Нормализация (_len²=0 → identity, без NaN). */
+/** Normalization (_len²=0 → identity, no NaN). */
 export function quatNormalize(out: Float32Array, q: Float32Array): Float32Array {
   const x = q[0], y = q[1], z = q[2], w = q[3]
   const len = Math.sqrt(x * x + y * y + z * z + w * w)
@@ -34,7 +34,7 @@ export function quatNormalize(out: Float32Array, q: Float32Array): Float32Array 
   return out
 }
 
-/** out = a · b (применяет b, затем a — как композиция матриц a·b). */
+/** out = a · b (applies b, then a — like the matrix composition a·b). */
 export function quatMultiply(out: Float32Array, a: Float32Array, b: Float32Array): Float32Array {
   const ax = a[0], ay = a[1], az = a[2], aw = a[3]
   const bx = b[0], by = b[1], bz = b[2], bw = b[3]
@@ -45,7 +45,7 @@ export function quatMultiply(out: Float32Array, a: Float32Array, b: Float32Array
   return out
 }
 
-/** Вращение вокруг оси (нормализуется на месте входа). */
+/** Rotation around an axis (normalized from the input values). */
 export function quatAxisAngle(
   out: Float32Array,
   x: number, y: number, z: number,
@@ -63,8 +63,8 @@ export function quatAxisAngle(
   return out
 }
 
-/** YXZ-эйлеры (yaw-Y, pitch-X, roll-Z) — камерная конвенция FPS/орбит:
- *  поворот сначала вокруг Y, затем вокруг ЛОКАЛЬНОГО X, затем локального Z. */
+/** YXZ Euler angles (yaw-Y, pitch-X, roll-Z) — the FPS/orbit camera convention:
+ *  rotate first around Y, then around the LOCAL X, then the local Z. */
 export function quatFromEulerYXZ(
   out: Float32Array,
   yawY: number, pitchX: number, rollZ: number,
@@ -72,7 +72,7 @@ export function quatFromEulerYXZ(
   const cy = Math.cos(yawY / 2), sy = Math.sin(yawY / 2)
   const cp = Math.cos(pitchX / 2), sp = Math.sin(pitchX / 2)
   const cr = Math.cos(rollZ / 2), sr = Math.sin(rollZ / 2)
-  // q = qY · qX · qZ (выведено раскрытием Hamilton-произведения)
+  // q = qY · qX · qZ (derived by expanding the Hamilton product)
   out[0] = cy * sp * cr + sy * cp * sr
   out[1] = sy * cp * cr - cy * sp * sr
   out[2] = cy * cp * sr - sy * sp * cr
@@ -80,7 +80,7 @@ export function quatFromEulerYXZ(
   return out
 }
 
-/** Сферическая интерполяция (кратчайшая дуга). */
+/** Spherical interpolation (the shortest arc). */
 export function quatSlerp(out: Float32Array, a: Float32Array, b: Float32Array, t: number): Float32Array {
   const ax = a[0], ay = a[1], az = a[2], aw = a[3]
   let bx = b[0], by = b[1], bz = b[2], bw = b[3]
@@ -91,7 +91,7 @@ export function quatSlerp(out: Float32Array, a: Float32Array, b: Float32Array, t
   }
   let s0: number, s1: number
   if (cosTheta > 0.9995) {
-    // Близкие — линейная интерполяция + нормализация.
+    // Close — linear interpolation + normalization.
     s0 = 1 - t
     s1 = t
   } else {

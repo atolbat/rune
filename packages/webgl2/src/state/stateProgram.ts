@@ -5,7 +5,7 @@ import type { GLShadow } from '../gl/shadow.ts'
 
 export type { StateProgramGL } from '../gl/shadow.ts'
 
-/** Описание растеризационного состояния пайплайна (M2-подмножество). */
+/** Description of the rasterization state of a pipeline (M2 subset). */
 export interface PipelineDesc {
   readonly depth?: { readonly test?: DepthFunc; readonly write?: boolean } | false
   readonly blend?: { readonly src: BlendFactor; readonly dst: BlendFactor } | false
@@ -15,12 +15,12 @@ export interface PipelineDesc {
   }
 }
 
-/** Применённая state-программа: два режима исполнения — один результат. */
+/** An applied state program: two execution modes — one result. */
 export type StateProgram = (gl: StateProgramGL, shadow: GLShadow) => void
 
 export type StateMode = 'interpret' | 'codegen'
 
-/** Компилирует state-программу пайплайна в выбранном режиме. */
+/** Compiles a pipeline state program in the selected mode. */
 export function compileStateProgram(
   pipeline: PipelineDesc,
   programId: number,
@@ -31,7 +31,7 @@ export function compileStateProgram(
   return (gl, shadow) => applyActions(actions, shadow, gl)
 }
 
-/** Действия по умолчанию соответствуют конвенции regl: depth less+write. */
+/** The default actions follow the regl convention: depth less+write. */
 function collectActions(pipeline: PipelineDesc, programId: number): StateAction[] {
   const actions: StateAction[] = []
   emitDepth(pipeline.depth, actions)
@@ -68,7 +68,7 @@ function emitCull(cull: CullFace | 'none' | undefined, actions: StateAction[]): 
   actions.push({ call: 'cullFace', face: cull })
 }
 
-/** Codegen: специализированная функция с инлайн-сравнениями (turbo-режим). */
+/** Codegen: a specialized function with inline comparisons (turbo mode). */
 function compileCodegen(actions: readonly StateAction[]): StateProgram {
   const body = actions.map(emitGuard).join('\n')
   const factory = new Function('gl', 'S', body) as StateProgram

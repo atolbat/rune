@@ -12,9 +12,9 @@ function okRoute(body: Uint8Array | string = 'hello', delayMs = 0) {
   return { body, delayMs }
 }
 
-// ─── приоритеты ──────────────────────────────────────────────────────────────
+// ─── priorities ──────────────────────────────────────────────────────────────
 
-test('приоритеты: high выезжает раньше low при занятом слоте', async () => {
+test('priorities: high goes earlier than low when the slot is busy', async () => {
   const log = createFetchLog()
   const manager = createLoadManager({
     fetchImpl: fakeFetch(
@@ -27,7 +27,7 @@ test('приоритеты: high выезжает раньше low при зан
     ),
     concurrency: 1,
   })
-  // a стартует сразу (слот один), b и c — в очередь
+  // a starts immediately (one slot), b and c go to the queue
   manager.load('http://t/a', { kind: 'bytes' })
   manager.load('http://t/c', { kind: 'bytes', priority: Priority.low })
   manager.load('http://t/b', { kind: 'bytes', priority: Priority.high })
@@ -36,7 +36,7 @@ test('приоритеты: high выезжает раньше low при зан
   manager.dispose()
 })
 
-test('критический приоритет обходит normal', async () => {
+test('critical priority bypasses normal', async () => {
   const log = createFetchLog()
   const routes: Record<string, { body: Uint8Array }> = {}
   for (const name of ['n1', 'n2', 'n3', 'n4', 'crit']) {
@@ -47,13 +47,13 @@ test('критический приоритет обходит normal', async ()
   for (const n of ['n2', 'n3', 'n4']) manager.load(`http://t/${n}`, { kind: 'bytes' })
   manager.load('http://t/crit', { kind: 'bytes', priority: Priority.critical })
   await manager.drain()
-  expect(log.starts[1]).toBe('http://t/crit') // после n1 (который уже стартовал)
+  expect(log.starts[1]).toBe('http://t/crit') // after n1 (which already started)
   manager.dispose()
 })
 
-// ─── параллелизм ─────────────────────────────────────────────────────────────
+// ─── parallelism ─────────────────────────────────────────────────────────────
 
-test('concurrency: не больше N одновременных', async () => {
+test('concurrency: no more than N simultaneous', async () => {
   const log = createFetchLog()
   const routes: Record<string, ReturnType<typeof okRoute>> = {}
   for (let i = 0; i < 6; i++) routes[`http://t/${i}`] = okRoute(bytes(100), 25)
@@ -61,11 +61,11 @@ test('concurrency: не больше N одновременных', async () => 
   const handles = Array.from({ length: 6 }, (_, i) => manager.load(`http://t/${i}`, { kind: 'bytes' }))
   await Promise.all(handles.map(h => h.ready))
   expect(log.maxActive).toBeLessThanOrEqual(2)
-  expect(log.maxActive).toBeGreaterThanOrEqual(2) // реально параллелили
+  expect(log.maxActive).toBeGreaterThanOrEqual(2) // really ran in parallel
   manager.dispose()
 })
 
-test('байтовый бюджет: задача ждёт освобождения резерва', async () => {
+test('byte budget: a job waits for the reservation to be freed', async () => {
   const log = createFetchLog()
   const routes: Record<string, ReturnType<typeof okRoute>> = {
     'http://t/a': okRoute(bytes(100), 30),
@@ -81,16 +81,16 @@ test('байтовый бюджет: задача ждёт освобожден�
   manager.load('http://t/b', { kind: 'bytes', expectedBytes: 100 })
   manager.load('http://t/c', { kind: 'bytes', expectedBytes: 100 })
   await manager.drain()
-  // резерв a (100) + b (100) > 150 → c ждал конца a или b
+  // reservation of a (100) + b (100) > 150 → c waited for the end of a or b
   expect(log.starts.indexOf('http://t/c')).toBeGreaterThan(log.starts.indexOf('http://t/a'))
   const stats = manager.stats()
   expect(stats.inflightBytes).toBe(0)
   manager.dispose()
 })
 
-// ─── отмена ──────────────────────────────────────────────────────────────────
+// ─── cancellation ──────────────────────────────────────────────────────────────────
 
-test('cancel в очереди: fetch не вызывается, ready реджектится', async () => {
+test('cancel in the queue: fetch is not called, ready rejects', async () => {
   const log = createFetchLog()
   const manager = createLoadManager({
     fetchImpl: fakeFetch({
@@ -101,15 +101,15 @@ test('cancel в очереди: fetch не вызывается, ready редж�
   })
   const slow = manager.load('http://t/slow', { kind: 'bytes' })
   const queued = manager.load('http://t/never', { kind: 'bytes' })
-  queued.cancel('не нужен')
-  await expect(queued.ready).rejects.toThrow('не нужен')
+  queued.cancel('not needed')
+  await expect(queued.ready).rejects.toThrow('not needed')
   expect(log.calls).not.toContain('http://t/never')
   await slow.ready
   expect(manager.stats().cancelled).toBe(1)
   manager.dispose()
 })
 
-test('cancel во время fetch: сигнал доходит до fetchImpl', async () => {
+test('cancel during fetch: the signal reaches fetchImpl', async () => {
   const manager = createLoadManager({
     fetchImpl: fakeFetch({ 'http://t/slow': okRoute(bytes(10), 150) }),
     concurrency: 1,
@@ -122,7 +122,7 @@ test('cancel во время fetch: сигнал доходит до fetchImpl',
   manager.dispose()
 })
 
-test('внешний AbortSignal: отмена до старта и во время', async () => {
+test('external AbortSignal: cancellation before start and during', async () => {
   const controller = new AbortController()
   const manager = createLoadManager({
     fetchImpl: fakeFetch({ 'http://t/x': okRoute(bytes(10), 80) }),
@@ -139,7 +139,7 @@ test('внешний AbortSignal: отмена до старта и во вре�
   manager.dispose()
 })
 
-test('dispose: всё отменяется, менеджер закрыт', async () => {
+test('dispose: everything is cancelled, the manager is closed', async () => {
   const manager = createLoadManager({
     fetchImpl: fakeFetch({ 'http://t/s': okRoute(bytes(10), 120) }),
     concurrency: 4,
@@ -153,9 +153,9 @@ test('dispose: всё отменяется, менеджер закрыт', asyn
   expect(() => manager.load('http://t/s')).toThrow()
 })
 
-// ─── прогресс ────────────────────────────────────────────────────────────────
+// ─── progress ────────────────────────────────────────────────────────────────
 
-test('прогресс: receivedBytes/totalBytes/fraction по чанкам', async () => {
+test('progress: receivedBytes/totalBytes/fraction by chunks', async () => {
   const body = bytes(300)
   const stream = new ReadableStream<Uint8Array>({
     start(c) {
@@ -178,7 +178,7 @@ test('прогресс: receivedBytes/totalBytes/fraction по чанкам', as
     void events
     return undefined
   })
-  // отдельный прогон с onProgress (тот же роутинг через Response)
+  // a separate run with onProgress (the same routing via Response)
   const body200 = bytes(200)
   const stream2 = new ReadableStream<Uint8Array>({
     start(c) {
@@ -201,16 +201,16 @@ test('прогресс: receivedBytes/totalBytes/fraction по чанкам', as
   expect(last.total).toBe(200)
   expect(last.received).toBe(200)
   expect(last.fraction).toBe(1)
-  //received растёт монотонно
+  //received grows monotonically
   for (let i = 1; i < progress.length; i++) {
     expect(progress[i].received).toBeGreaterThanOrEqual(progress[i - 1].received)
   }
   manager.dispose()
 })
 
-// ─── ретраи и таймауты ───────────────────────────────────────────────────────
+// ─── retries and timeouts ───────────────────────────────────────────────────────
 
-test('ретрай на 500 → успех', async () => {
+test('retry on 500 → success', async () => {
   const log = createFetchLog()
   const manager = createLoadManager({
     fetchImpl: fakeFetch({ 'http://t/flaky': { body: 'data', failFirst: 2 } }, log),
@@ -222,7 +222,7 @@ test('ретрай на 500 → успех', async () => {
   manager.dispose()
 })
 
-test('ретраи кончились → LoadError http', async () => {
+test('retries exhausted → LoadError http', async () => {
   const manager = createLoadManager({
     fetchImpl: fakeFetch({ 'http://t/dead': { body: '', failFirst: 100 } }),
     concurrency: 1,
@@ -237,7 +237,7 @@ test('ретраи кончились → LoadError http', async () => {
   manager.dispose()
 })
 
-test('таймаут фазы fetch → LoadError timeout', async () => {
+test('fetch phase timeout → LoadError timeout', async () => {
   const manager = createLoadManager({
     fetchImpl: fakeFetch({ 'http://t/slow': okRoute(bytes(10), 300) }),
     concurrency: 1,
@@ -252,7 +252,7 @@ test('таймаут фазы fetch → LoadError timeout', async () => {
   manager.dispose()
 })
 
-test('404 не ретраится', async () => {
+test('404 is not retried', async () => {
   const log = createFetchLog()
   const manager = createLoadManager({
     fetchImpl: fakeFetch({ 'http://t/404': { status: 404, body: '' } }, log),
@@ -265,7 +265,7 @@ test('404 не ретраится', async () => {
 
 // ─── resolveExternal ─────────────────────────────────────────────────────────
 
-test('resolveExternal: дочерняя загрузка через менеджер', async () => {
+test('resolveExternal: a child load through the manager', async () => {
   const log = createFetchLog()
   const manager = createLoadManager({
     fetchImpl: fakeFetch(
@@ -289,7 +289,7 @@ test('resolveExternal: дочерняя загрузка через менедж
   manager.dispose()
 })
 
-test('resolveExternal: отмена родителя каскадом отменяет ребёнка', async () => {
+test('resolveExternal: parent cancellation cancels the child in a cascade', async () => {
   const log = createFetchLog()
   const manager = createLoadManager({
     fetchImpl: fakeFetch(
@@ -308,7 +308,7 @@ test('resolveExternal: отмена родителя каскадом отмен
     },
   }
   const parent = manager.load('http://t/parent', { kind: 'bytes', parser: externalParser })
-  await sleep(30) // parse уже ждёт ребёнка
+  await sleep(30) // parse is already waiting for the child
   parent.cancel()
   await expect(parent.ready).rejects.toThrow()
   await sleep(30)
@@ -316,9 +316,9 @@ test('resolveExternal: отмена родителя каскадом отмен
   manager.dispose()
 })
 
-// ─── группы ──────────────────────────────────────────────────────────────────
+// ─── groups ──────────────────────────────────────────────────────────────────
 
-test('group.enough(2): кворум + демоут остатка', async () => {
+test('group.enough(2): quorum + demotion of the rest', async () => {
   const log = createFetchLog()
   const routes: Record<string, ReturnType<typeof okRoute>> = {}
   for (let i = 0; i < 4; i++) routes[`http://t/g${i}`] = okRoute(bytes(10, 0x30 + i), 20)
@@ -326,17 +326,17 @@ test('group.enough(2): кворум + демоут остатка', async () => 
   const manager = createLoadManager({
     fetchImpl: fakeFetch(routes, log),
     concurrency: 1,
-    agingPerSecond: 0, // чистый порядок приоритетов
+    agingPerSecond: 0, // pure priority order
   })
   const group = manager.group('level')
   for (let i = 0; i < 4; i++) group.add(`http://t/g${i}`, { kind: 'bytes' })
   const enough = await group.enough(2)
   expect(enough.length).toBe(2)
-  // после кворума: демоутнутые (prefetch) уступают новому normal
+  // after the quorum: demoted (prefetch) yield to a new normal
   const late = manager.load('http://t/important', { kind: 'bytes' })
   await late.ready
   await group.waitAll()
-  // important (normal) поехал раньше демоутнутых g2/g3 (prefetch)
+  // important (normal) went before the demoted g2/g3 (prefetch)
   const idxLate = log.starts.indexOf('http://t/important')
   const idxG2 = log.starts.indexOf('http://t/g2')
   const idxG3 = log.starts.indexOf('http://t/g3')
@@ -347,12 +347,12 @@ test('group.enough(2): кворум + демоут остатка', async () => 
   manager.dispose()
 })
 
-test('group.progress: байт-взвешенная доля', async () => {
+test('group.progress: byte-weighted share', async () => {
   const body100 = bytes(100)
   const body300 = bytes(300)
   const stream300 = new ReadableStream<Uint8Array>({
     async start(c) {
-      await sleep(60) // первый чанк — после замера прогресса
+      await sleep(60) // the first chunk — after the progress measurement
       c.enqueue(body300.subarray(0, 150))
       await sleep(20)
       c.enqueue(body300.subarray(150))
@@ -368,7 +368,7 @@ test('group.progress: байт-взвешенная доля', async () => {
   const group = manager.group()
   group.add('http://t/small', { kind: 'bytes', expectedBytes: 100 })
   const h2 = group.add(new Response(stream300, { status: 200, headers: { 'content-length': '300' } }), { kind: 'bytes' })
-  // small (100) первым — потом большой
+  // small (100) first — then the big one
   await sleep(5)
   const afterSmall = group.progress
   expect(afterSmall.done).toBe(1)
@@ -379,7 +379,7 @@ test('group.progress: байт-взвешенная доля', async () => {
   manager.dispose()
 })
 
-test('group: ошибка → waitAll реджектится AggregateError, settleAll — нет', async () => {
+test('group: an error → waitAll rejects with AggregateError, settleAll does not', async () => {
   const manager = createLoadManager({
     fetchImpl: fakeFetch({
       'http://t/good': okRoute('ok'),
@@ -390,16 +390,16 @@ test('group: ошибка → waitAll реджектится AggregateError, set
   const group = manager.group('mixed')
   group.add('http://t/good', { kind: 'bytes' })
   group.add('http://t/bad', { kind: 'bytes' })
-  await expect(group.waitAll()).rejects.toThrow('упало 1')
+  await expect(group.waitAll()).rejects.toThrow('1 of 2 failed')
   const settled = await group.settleAll()
   expect(settled.filter(s => s.value !== undefined).length).toBe(1)
   expect(settled.filter(s => s.error !== undefined).length).toBe(1)
   manager.dispose()
 })
 
-// ─── стриминговые парсеры через менеджер ─────────────────────────────────────
+// ─── streaming parsers through the manager ─────────────────────────────────────
 
-test('стриминговый парсер: parse() не зовётся, sink получает чанки', async () => {
+test('streaming parser: parse() is not called, the sink receives chunks', async () => {
   const { parser } = makeCountingStreamParser()
   const stream = new ReadableStream<Uint8Array>({
     start(c) {
@@ -411,15 +411,15 @@ test('стриминговый парсер: parse() не зовётся, sink �
   const manager = createLoadManager({ fetchImpl: fakeFetch({}), concurrency: 1 })
   const h = manager.load(new Response(stream, { status: 200 }), { parser })
   const result = (await h.ready) as { pushes: number; bytes: number; parsed: boolean }
-  expect(result.parsed).toBe(false) // через sink, не через parse
+  expect(result.parsed).toBe(false) // via the sink, not via parse
   expect(result.pushes).toBe(2)
   expect(result.bytes).toBe(5)
   manager.dispose()
 })
 
-// ─── sniffing и источники ────────────────────────────────────────────────────
+// ─── sniffing and sources ────────────────────────────────────────────────────
 
-test('sniffing: PNG-магика без kind → image-парсер', async () => {
+test('sniffing: PNG magic without kind → image parser', async () => {
   let decoded = ''
   const manager = createLoadManager({
     fetchImpl: fakeFetch({ 'http://t/pic.png': okRoute(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2])) }),
@@ -435,7 +435,7 @@ test('sniffing: PNG-магика без kind → image-парсер', async () =
   manager.dispose()
 })
 
-test('источники: Uint8Array и AsyncIterable без fetch', async () => {
+test('sources: Uint8Array and AsyncIterable without fetch', async () => {
   const manager = createLoadManager({ fetchImpl: fakeFetch({}), concurrency: 2 })
   const data = new TextEncoder().encode('raw-bytes')
   const v1 = await manager.load(data, { kind: 'bytes' }).ready
@@ -467,7 +467,7 @@ test('stats + pruneTerminal', async () => {
   manager.dispose()
 })
 
-test('drain резолвится после всех задач', async () => {
+test('drain resolves after all jobs', async () => {
   const manager = createLoadManager({
     fetchImpl: fakeFetch({
       'http://t/1': okRoute('a', 15),

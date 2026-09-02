@@ -3,9 +3,9 @@ import { createWebGpuRenderer } from '../src/index.ts'
 import { createRecordingGPU } from '@rune/webgpu'
 
 /**
- * Текстурные WG-команды (инциденты 36/37): ensurePipeline получает размеры
- * атрибутов команды ([3x3x2] — включая uv float32x2), bindTexture между
- * пайплайном и draw, ленивое создание один раз.
+ * Texture WG commands (incidents 36/37): ensurePipeline receives the command's
+ * attribute sizes ([3x3x2] — including uv float32x2), bindTexture between
+ * the pipeline and draw, lazy creation exactly once.
  */
 
 const WGSL_TEX = `struct Params {
@@ -35,8 +35,8 @@ function fakeCanvas(): HTMLCanvasElement {
   return { clientWidth: 800, clientHeight: 600, width: 800, height: 600 } as unknown as HTMLCanvasElement
 }
 
-describe('webgpu текстурный tape-путь', () => {
-  it('ensurePipeline с [3x3x2] и tex; bindTexture между пайплайном и draw', async () => {
+describe('webgpu texture tape path', () => {
+  it('ensurePipeline with [3x3x2] and tex; bindTexture between the pipeline and draw', async () => {
     const { gpu, calls } = createRecordingGPU()
     const renderer = await createWebGpuRenderer({
       canvas: fakeCanvas(),
@@ -66,12 +66,12 @@ describe('webgpu текстурный tape-путь', () => {
     const bindAt = calls.indexOf(`bindTexture(${textureId})`)
     const drawAt = calls.findIndex(call => call.startsWith('draw(36,1)'))
     expect(pipelineAt).toBeGreaterThanOrEqual(0)
-    expect(bindAt).toBeGreaterThan(pipelineAt) // текстура после пайплайна
-    expect(drawAt).toBeGreaterThan(bindAt)     // и до draw
+    expect(bindAt).toBeGreaterThan(pipelineAt) // texture after the pipeline
+    expect(drawAt).toBeGreaterThan(bindAt)     // and before draw
     renderer.stop()
   })
 
-  it('ensurePipeline ровно один раз на команду (лениво, без пересоздания)', async () => {
+  it('ensurePipeline exactly once per command (lazily, without re-creation)', async () => {
     const { gpu, calls } = createRecordingGPU()
     const renderer = await createWebGpuRenderer({
       canvas: fakeCanvas(),

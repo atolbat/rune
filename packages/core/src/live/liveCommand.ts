@@ -1,24 +1,24 @@
-// Live-команда: сегмент + dirty по зависимостям + every(n) амортизация.
+// Live command: a segment + dirty-by-dependencies + every(n) amortization.
 
 import type { SegmentStore } from '../tape/segments.ts'
 import type { TapeWriter, WriterColumns } from '../tape/writer.ts'
 import type { ReadableSignal } from '../signal/types.ts'
 
 export interface LiveCommand {
-  /** Идентификатор (индекс в реестре рендерера). */
+  /** Identifier (index in the renderer's registry). */
   readonly id: number
-  /** Темпоральная амортизация: эмит раз в n кадров (bloom/SSAO через кадр). */
+  /** Temporal amortization: emit once every n frames (bloom/SSAO every other frame). */
   every(n: number): LiveCommand
-  /** Тик кадра: фаза и активность. Вызывается сборщиком кадра. */
+  /** Frame tick: phase and activity. Called by the frame builder. */
   tickFrame(): void
-  /** Эмитится ли команда в текущем кадре. */
+  /** Whether the command is emitted in the current frame. */
   readonly active: boolean
-  /** Зависимости изменились с последней записи. */
+  /** Dependencies changed since the last recording. */
   readonly dirty: boolean
-  /** Записать в ленту (свежую или кэш-реплей). force=true — перезаписать
-   *  сегмент заново (полный путь без кэша — бенчмарк «полной перезаписи»). */
+  /** Record into the tape (fresh or cache replay). force=true — rewrite
+   *  the segment from scratch (the full path without the cache — the "full rewrite" benchmark). */
   emit(writer: TapeWriter, force?: boolean): boolean
-  /** Принудительная инвалидация кэша. */
+  /** Forced cache invalidation. */
   invalidate(): void
 }
 
@@ -44,7 +44,7 @@ export function createLiveCommand(
   let dirty = true
 
   function every(n: number): LiveCommand {
-    if (n < 1) throw new Error('rune: every(n) требует n >= 1')
+    if (n < 1) throw new Error('rune: every(n) requires n >= 1')
     frameStride = n
     framePhase = frameCounter % n
     return command
@@ -101,12 +101,12 @@ export function createLiveCommand(
   return command
 }
 
-/** Реплей упакованных строк в ленту (bulk — без поштучных emit-вызовов). */
+/** Replays packed rows into the tape (bulk — without per-op emit calls). */
 function replay(writer: TapeWriter, rows: Int32Array, count: number): void {
   writer.emitPacked(rows, count)
 }
 
-/** Пакование колонок скретч-писателя в плотные строки. */
+/** Packs the scratch writer's columns into dense rows. */
 function packRows(columns: WriterColumns, count: number): Int32Array {
   const rows = new Int32Array(count * 5)
   for (let at = 0; at < count; at++) {
@@ -120,9 +120,9 @@ function packRows(columns: WriterColumns, count: number): Int32Array {
   return rows
 }
 
-/** Личный писатель команды — копия ленты только при перезаписи.
- *  Растёт ×2 как лента: длинная команда (>64 опов) НЕ обрезается —
- *  «тихая потеря сегмента» хуже аллокации на холодном пути роста. */
+/** The command's private writer — a tape copy only when rewriting.
+ *  Grows ×2 like the tape: a long command (>64 ops) is NOT truncated —
+ *  a "silent segment loss" is worse than an allocation on the cold growth path. */
 function createScratchWriter(): TapeWriter {
   let capacity = 64
   let op: Int32Array = new Int32Array(capacity)
@@ -178,7 +178,7 @@ function createScratchWriter(): TapeWriter {
     emit,
     emitPacked,
     get count() { return count },
-    // Геттер отдаёт СВЕЖИЕ массивы: после grow() старые ссылки устарели.
+    // The getter returns FRESH arrays: after grow() old references are stale.
     get columns() { return { op, a, b, c, d } },
   }
 }

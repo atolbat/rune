@@ -1,21 +1,21 @@
 /**
- * Плоскость-земля (нормаль +Y): width × height МИЛЛИМЕТРОВ… нет, просто
- * единиц, widthSegments × heightSegments ячеек — НЕЗАВИСИМЫЕ размеры и
- * разрешение по осям (Task 109: как PlaneGeometry в three.js; прежде —
- * только квадрат size × size). База для террейнов и «пола» сцен;
- * CCW при взгляде сверху.
+ * Ground plane (+Y normal): width × height in MILLIMETERS… no, just
+ * units, widthSegments × heightSegments cells — INDEPENDENT sizes and
+ * resolution per axis (Task 109: like PlaneGeometry in three.js; before —
+ * only a square size × size). The base for terrains and scene "floors";
+ * CCW viewed from above.
  */
 
 import type { Geometry } from './types.ts'
 
 export interface PlaneParams {
-  /** Ширина по X (default 1). */
+  /** Width along X (default 1). */
   readonly width?: number
-  /** Глубина по Z (default 1). */
+  /** Depth along Z (default 1). */
   readonly height?: number
-  /** Ячеек по X (default 1). */
+  /** Cells along X (default 1). */
   readonly widthSegments?: number
-  /** Ячеек по Z (default 1). */
+  /** Cells along Z (default 1). */
   readonly heightSegments?: number
 }
 
@@ -46,8 +46,9 @@ export function plane(params: PlaneParams = {}): Geometry {
   }
   for (let j = 0; j < cellsZ; j++) {
     for (let i = 0; i < cellsX; i++) {
-      // CCW при взгляде сверху: cross((i,j+1)−(i,j), (i+1,j+1)−(i,j)) = +Y.
-      // Обход (i,j) → (i+1,j) → … давал −Y — плоскость была видна снизу
+      // CCW viewed from above: cross((i,j+1)−(i,j), (i+1,j+1)−(i,j)) = +Y.
+      // The winding (i,j) → (i+1,j) → … gave −Y — the plane was visible
+      // from below
       emit(i, j)
       emit(i, j + 1)
       emit(i + 1, j + 1)

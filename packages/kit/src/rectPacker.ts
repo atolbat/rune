@@ -1,54 +1,54 @@
 /**
- * RectPacker — упаковщик прямоугольников в больший прямоугольник.
+ * RectPacker — packs rectangles into a larger rectangle.
  *
- * Контракт (см. дизайн-раунд «Use case B: Runtime packing»):
- *  - Чисто алгоритмическая задача. Не знает про GPU, текстуры, ImageBitmap.
- *  - Юзер пакует слоты, потом сам копирует биты в регион через
+ * Contract (see the design round "Use case B: Runtime packing"):
+ *  - A purely algorithmic task. Knows nothing about the GPU, textures, ImageBitmap.
+ *  - The user packs slots, then copies the bits into the region themselves via
  *    Texture.uploadSubImage(x, y, bitmap).
- *  - Алгоритмы: 'shelf' (быстрый, для одинаковых размеров — тайлы) и
- *    'maxrects' (классический для пестрых размеров).
+ *  - Algorithms: 'shelf' (fast, for uniform sizes — tiles) and
+ *    'maxrects' (the classic for mixed sizes).
  *
- * Типичный flow:
+ * Typical flow:
  *   const packer = createRectPacker(2048, 2048, { algorithm: 'maxrects' })
  *   const slots = packer.pack([
  *     { id: 'grass', w: 64, h: 64 },
  *     { id: 'stone', w: 64, h: 64 },
  *   ])
- *   if (!slots) throw new Error('Не влезло — нужен больший атлас')
+ *   if (!slots) throw new Error('Did not fit — a larger atlas is needed')
  *   // slots: [{ id: 'grass', x: 0, y: 0, w: 64, h: 64 }, ...]
  */
 
 export interface RectInput {
-  /** Идентификатор слота — пользовательский, чтобы потом сопоставить. */
+  /** Slot identifier — user-supplied, for matching later. */
   readonly id: string
   readonly w: number
   readonly h: number
 }
 
 export interface RectSlot extends RectInput {
-  /** Позиция в атласе (top-left). */
+  /** Position in the atlas (top-left). */
   readonly x: number
   readonly y: number
 }
 
 export interface RectPackerOptions {
-  /** Алгоритм упаковки. Default 'shelf'.
-   *  - 'shelf': раскладывает по строкам высотой = max height в строке.
-   *    O(n log n), хорошо для тайловых атласов.
-   *  - 'maxrects': классический MAXRECTS-BSSF. O(n^2) в худшем случае,
-   *    но хорошо упаковывает пёстрые размеры. */
+  /** Packing algorithm. Default 'shelf'.
+   *  - 'shelf': lays out rows of height = max height in the row.
+   *    O(n log n), good for tile atlases.
+   *  - 'maxrects': the classic MAXRECTS-BSSF. O(n^2) in the worst case,
+   *    but packs mixed sizes well. */
   readonly algorithm?: 'shelf' | 'maxrects'
-  /** Отступ между слотами (для mip-крови). Default 0. */
+  /** Gap between slots (against mip bleeding). Default 0. */
   readonly padding?: number
 }
 
-/** Состояние упаковщика. */
+/** Packer state. */
 export interface RectPacker {
-  /** Запаковать набор прямоугольников. Вернёт null, если не влезло. */
+  /** Pack a set of rectangles. Returns null if they do not fit. */
   pack(items: readonly RectInput[]): RectSlot[] | null
-  /** Текущая заполненность (по площади). */
+  /** Current fill ratio (by area). */
   readonly usedArea: number
-  /** Ширина/высота атласа. */
+  /** Atlas width/height. */
   readonly width: number
   readonly height: number
 }
@@ -64,13 +64,13 @@ export function createRectPacker(width: number, height: number, options: RectPac
     return packMaxRects(items)
   }
 
-  // ─── Shelf packer ──────────────────────────────────────────────────────────
+  // ─── Shelf packer ────────────────────────────────────────────────────────
   //
-  // Раскладывает по строкам. Каждая строка имеет высоту = max height в строке.
-  // Хорошо работает для однотипных тайлов (всё 64x64 — идеально).
+  // Lays out rows. Each row has a height = the max height in that row.
+  // Works well for uniform tiles (all 64x64 — perfect).
 
   function packShelf(items: readonly RectInput[]): RectSlot[] | null {
-    // Сортируем по убыванию высоты — это эвристика First-Fit Decreasing.
+    // Sort by height descending — this is the First-Fit Decreasing heuristic.
     const sorted = [...items].sort((a, b) => b.h - a.h || b.w - a.w)
     const slots: RectSlot[] = []
     let x = padding
@@ -80,13 +80,13 @@ export function createRectPacker(width: number, height: number, options: RectPac
     for (const item of sorted) {
       const w = item.w + padding * 2
       const h = item.h + padding * 2
-      // Не влезает в текущую строку — переносим на новую
+      // Does not fit into the current row — move to a new row
       if (x + w > width + padding) {
         y += rowHeight
         x = padding
         rowHeight = 0
       }
-      // Не влезает по высоте — атлас слишком мал
+      // Does not fit vertically — the atlas is too small
       if (y + h > height + padding) return null
       slots.push({ id: item.id, x, y, w: item.w, h: item.h })
       usedArea += item.w * item.h
@@ -98,14 +98,14 @@ export function createRectPacker(width: number, height: number, options: RectPac
 
   // ─── MaxRects packer (BSSF variant) ───────────────────────────────────────
   //
-  // Классический алгоритм MAXRECTS-BSSF (Best Short Side Fit). Поддерживает
-  // свободные прямоугольники; при упаковке нового слота разбивает пересечённые.
-  // Хорош для пёстрых размеров.
+  // The classic MAXRECTS-BSSF algorithm (Best Short Side Fit). Maintains
+  // free rectangles; when a new slot is placed, it splits the intersected ones.
+  // Good for mixed sizes.
 
   interface FreeRect { x: number; y: number; w: number; h: number }
 
   function packMaxRects(items: readonly RectInput[]): RectSlot[] | null {
-    // Свободные прямоугольники. Изначально — весь атлас.
+    // Free rectangles. Initially — the whole atlas.
     const free: FreeRect[] = [{ x: padding, y: padding, w: width - padding * 2, h: height - padding * 2 }]
     const slots: RectSlot[] = []
     const sorted = [...items].sort((a, b) => (b.w * b.h) - (a.w * a.h))
@@ -113,36 +113,36 @@ export function createRectPacker(width: number, height: number, options: RectPac
     for (const item of sorted) {
       const w = item.w + padding * 2
       const h = item.h + padding * 2
-      // Best Short Side Fit: ищем свободный rect, куда влезает, минимизируя
-      // короткую оставшуюся сторону.
+      // Best Short Side Fit: find a free rect that fits, minimizing
+      // the short remaining side.
       let best: { rect: FreeRect; score: number } | null = null
       for (const rect of free) {
         if (rect.w >= w && rect.h >= h) {
           const shortSide = Math.min(rect.w - w, rect.h - h)
           const longSide = Math.max(rect.w - w, rect.h - h)
-          const score = shortSide * 1000 + longSide // short side доминирует
+          const score = shortSide * 1000 + longSide // the short side dominates
           if (best === null || score < best.score) {
             best = { rect, score }
           }
         }
       }
-      if (best === null) return null // не влезло
+      if (best === null) return null // does not fit
       const chosen = best.rect
       slots.push({ id: item.id, x: chosen.x + padding, y: chosen.y + padding, w: item.w, h: item.h })
       usedArea += item.w * item.h
-      // Разбиваем пересечённые свободные прямоугольники
+      // Split the intersected free rectangles
       const newFree: FreeRect[] = []
       for (const rect of free) {
         if (!intersects(rect, chosen, w, h)) {
           newFree.push(rect)
           continue
         }
-        // Делим на части
+        // Split into parts
         for (const part of splitRect(rect, { x: chosen.x, y: chosen.y, w, h })) {
           if (part.w > 0 && part.h > 0) newFree.push(part)
         }
       }
-      // Промежуточная чистка: убираем free, целиком содержащиеся в других
+      // Intermediate cleanup: drop free rects fully contained in others
       free.length = 0
       outer: for (let i = 0; i < newFree.length; i++) {
         for (let j = 0; j < newFree.length; j++) {
@@ -161,13 +161,13 @@ export function createRectPacker(width: number, height: number, options: RectPac
 
   function splitRect(free: FreeRect, used: FreeRect): FreeRect[] {
     const result: FreeRect[] = []
-    // Левый кусок
+    // Left piece
     if (used.x > free.x) result.push({ x: free.x, y: free.y, w: used.x - free.x, h: free.h })
-    // Правый кусок
+    // Right piece
     if (used.x + used.w < free.x + free.w) result.push({ x: used.x + used.w, y: free.y, w: free.x + free.w - (used.x + used.w), h: free.h })
-    // Верхний кусок
+    // Top piece
     if (used.y > free.y) result.push({ x: free.x, y: free.y, w: free.w, h: used.y - free.y })
-    // Нижний кусок
+    // Bottom piece
     if (used.y + used.h < free.y + free.h) result.push({ x: free.x, y: used.y + used.h, w: free.w, h: free.y + free.h - (used.y + used.h) })
     return result
   }

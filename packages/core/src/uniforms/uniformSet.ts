@@ -1,32 +1,32 @@
 import type { ReadableSignal } from '../signal/types.ts'
 
-/** Типы полей uniform-набора (подмножество ABI). */
+/** Uniform set field types (an ABI subset). */
 export type UniformSetFieldType =
   | 'float' | 'int' | 'uint' | 'bool'
   | 'vec2' | 'vec3' | 'vec4'
   | 'ivec2' | 'ivec3' | 'ivec4'
   | 'mat2' | 'mat3' | 'mat4'
 
-/** Схема набора: имя поля → тип. */
+/** Set schema: field name → type. */
 export type UniformSetSchema = Readonly<Record<string, UniformSetFieldType>>
 
-/** Значение поля: скаляр, массив или сигнал над ним. */
+/** Field value: a scalar, an array, or a signal over them. */
 export type UniformSetValue = number | readonly number[] | Float32Array | ReadableSignal<number | readonly number[] | Float32Array>
 
-/** Именованный расшаренный набор юниформов со слотом арены. */
+/** A named shared uniform set with an arena slot. */
 export interface UniformSet<S extends UniformSetSchema = UniformSetSchema> {
   readonly name: string
-  /** Слот выделяется ареной при создании (до первой команды). */
+  /** The slot is allocated by the arena at creation (before the first command). */
   attach(alloc: (type: UniformSetFieldType) => { offset: number; size: number }): void
-  /** Пишет значения в арену (значения или сигналы — peek). */
+  /** Writes values into the arena (values or signals — peek). */
   write(writeFloat: (offset: number, value: number) => void): void
-  /** Постоянная связь: сигналы читаются при каждом write. */
+  /** Persistent binding: signals are read on every write. */
   link(values: Partial<Record<keyof S, ReadableSignal<any>>>): void
-  /** Снимок смещений полей (для компиляции команд). */
+  /** Snapshot of field offsets (for command compilation). */
   readonly offsets: Readonly<Partial<Record<keyof S, number>>>
 }
 
-/** Создаёт именованный uniform-набор (камера, свет — по конвенции имён). */
+/** Creates a named uniform set (camera, light — by naming convention). */
 export function createUniformSet<S extends UniformSetSchema>(
   name: string,
   schema: S,
@@ -36,7 +36,7 @@ export function createUniformSet<S extends UniformSetSchema>(
   let attached = false
   let linked: Partial<Record<keyof S, ReadableSignal<any>>> = {}
   const cache: Partial<Record<keyof S, UniformSetValue>> = {}
-  void options.frequency // хинт для frequency-split арен (реализуется ареной)
+  void options.frequency // a hint for frequency-split arenas (implemented by the arena)
 
   function attach(alloc: (type: UniformSetFieldType) => { offset: number; size: number }): void {
     if (attached) return

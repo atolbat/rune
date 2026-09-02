@@ -1,108 +1,108 @@
 /**
- * ResourceJournal (v2) — журнал ПЕРВИЧНЫХ ресурсов с КОНТЕНТОМ.
+ * ResourceJournal (v2) — a journal of PRIMARY resources with CONTENT.
  *
- * Задача (переработка Task 62): старый Journal хранил декларации с
- * счётчиковыми id фасада. Replay на свежем фасаде выдаёт плотную
- * последовательность id — при любой «дырке» (compact/evict/ленивые
- * пайплайны) id сдвигаются, зависимые опсы ссылаются на чужие текстуры,
- * и приложение не может восстановить сцену («texture id 1, 2, 4 → 1, 2,
- * 3, 4 НЕ СОВПАДАЮТ»).
+ * Task (a Task 62 rework): the old Journal stored declarations with
+ * facade counter ids. A replay on a fresh facade yields a dense
+ * id sequence — with any "hole" (compact/evict/lazy
+ * pipelines) ids shift, dependent ops reference foreign textures,
+ * and the application cannot restore the scene ("texture id 1, 2, 4 → 1, 2,
+ * 3, 4 DO NOT MATCH").
  *
- * Новая модель — три решения:
+ * The new model — three decisions:
  *
- * 1. СТАБИЛЬНЫЕ ID. Опс несёт id, назначенный уровнем НАД фасадом
- *    (resourceSession). Replay принимает id из опса и строит mapping
- *    стабильный-id → новый фасадный id. Id совпадают ДО и ПОСЛЕ потери
- *    устройства ПО ПОСТРОЕНИЮ — сверять нечего, ошибиться негде.
+ * 1. STABLE IDS. An op carries an id assigned by the level ABOVE the facade
+ *    (resourceSession). Replay takes the id from the op and builds a mapping
+ *    stable-id → new facade id. Ids match BEFORE and AFTER device
+ *    loss BY CONSTRUCTION — nothing to compare, nowhere to err.
  *
- * 2. ПРИМИТИВНЫЕ ОПСЫ. Все действия движка над первичными ресурсами
- *    сведены к простому набору:
+ * 2. PRIMITIVE OPS. All engine actions on primary resources
+ *    are reduced to a simple set:
  *      texture.create / texture.write / texture.update / texture.writeMip
  *      / texture.destroy
  *      view.create / view.destroy            (sub-mip views)
  *      target.create / target.destroy        (render targets)
- *    Нормальная работа и восстановление — ОДИН И ТОТ ЖЕ путь: replay
- *    выполняет те же примитивы через тот же фасадный API.
+ *    Normal operation and recovery — ONE AND THE SAME path: replay
+ *    executes the same primitives through the same facade API.
  *
- * 3. КОНТЕНТ В ЖУРНАЛЕ. texture.write/update/writeMip хранят ContentRef —
- *    ссылку на CPU-источник в ContentStore (ImageBitmap/OffscreenCanvas/
- *    HTMLCanvasElement/...). Источники переживают потерю GPU-устройства,
- *    поэтому replay восстанавливает ПИКСЕЛИ, а не только декларации.
- *    «В чём смысл журнала, если он просит пересоздать атлас?» — теперь
- *    атлас восстанавливается сам, включая тайлы.
+ * 3. CONTENT IN THE JOURNAL. texture.write/update/writeMip store a ContentRef —
+ *    a reference to a CPU source in ContentStore (ImageBitmap/OffscreenCanvas/
+ *    HTMLCanvasElement/...). Sources survive GPU device loss,
+ *    so replay restores PIXELS, not just declarations.
+ *    "What is the point of a journal that asks to recreate the atlas?" — now
+ *    the atlas restores itself, tiles included.
  *
- * Что в журнал НЕ попадает (намеренно):
- *   - Programs/buffers команд (GL) — ПРОИЗВОДНОЕ состояние: чистая функция
- *     от спеков команд, владелец (renderer) пересоздаёт их лениво при
- *     первом draw. Журнал хранит только ПЕРВИЧНОЕ состояние (контент).
- *   - texSubImage2D (raw-байтовый стриминг) — домен UploadScheduler'а:
- *     Pump сам пере-стримит свои данные, журналирование чанков взорвёт
- *     журнал.
- *   - Frame-опсы (bind/draw/uniform/...) — Tape, не журнал.
+ * What does NOT get into the journal (intentionally):
+ *   - Command programs/buffers (GL) — DERIVED state: a pure function
+ *     of command specs; the owner (renderer) recreates them lazily on the
+ *     first draw. The journal stores only PRIMARY state (content).
+ *   - texSubImage2D (raw byte streaming) — the UploadScheduler's domain:
+ *     the Pump re-streams its own data; journaling chunks would blow up
+ *     the journal.
+ *   - Frame ops (bind/draw/uniform/...) — the Tape, not the journal.
  *
- * compact() (сверх пар create→destroy из v1):
- *   - texture.write поглощает ВСЕ предыдущие write/update/writeMip той же
- *     текстуры (полная перезапись делает их бессмысленными);
- *   - повторный texture.update того же точного прямоугольника — выживает
- *     последний (last-write-wins);
- *   - create→destroy пары + висячие ссылки (Task 61) — как в v1:
- *     зависимый опс мёртвой текстуры выбрасывается вместе с destroy-опсами
- *     призумленных view/target (без сирот);
- *   - ContentStore GC (Task 65): источники, на которые не ссылается НИ ОДИН
- *     оставшийся контент-опс, освобождаются — CPU-память не течёт от
- *     «прожал много кнопок» (каждая создала-и-выбросила текстуру).
+ * compact() (beyond the v1 create→destroy pairs):
+ *   - texture.write absorbs ALL previous write/update/writeMip of the same
+ *     texture (a full rewrite makes them pointless);
+ *   - a repeated texture.update of the same exact rectangle — the last one
+ *     survives (last-write-wins);
+ *   - create→destroy pairs + dangling references (Task 61) — as in v1:
+ *     a dependent op of a dead texture is dropped together with the destroy ops
+ *     of the pruned view/target (no orphans);
+ *   - ContentStore GC (Task 65): sources not referenced by a SINGLE
+ *     remaining content op are released — CPU memory does not leak from
+ *     "pressed many buttons" (each created-and-discarded a texture).
  *
- * Task 65 (soft reset / ленивая резидентность):
- *   - WorkingSet — какие ресурсы обязаны быть в GPU-памяти после потери
- *     (сцена); всё остальное восстанавливается ЛЕНИВО (ensureResident);
- *   - selectResidentOps(ops, keep) — чистая функция: замыкание рабочего
- *     множества (view → parent texture, target → parent texture, контент →
- *     своя текстура) + списки отложенных ресурсов;
- *   - RestoreReport.deferred — что осталось в журнале невосстановленным.
+ * Task 65 (soft reset / lazy residency):
+ *   - WorkingSet — which resources must be in GPU memory after the loss
+ *     (the scene); everything else is restored LAZILY (ensureResident);
+ *   - selectResidentOps(ops, keep) — a pure function: the closure of the
+ *     working set (view → parent texture, target → parent texture, content →
+ *     its own texture) + lists of deferred resources;
+ *   - RestoreReport.deferred — what remained unrestored in the journal.
  *
- * Сериализация (worker migration): ops — plain objects, JSON-safe.
- * Источники ContentStore НЕ сериализуются (ImageBitmap закрыт/передан,
- * canvas — DOM). snapshot() возвращает манифест контента (refs + kind +
- * размеры); принимающая сторона пере-регистрирует источники через
- * attachSource(ref, source) перед replay.
+ * Serialization (worker migration): ops — plain objects, JSON-safe.
+ * ContentStore sources are NOT serialized (ImageBitmap closed/transferred,
+ * canvas — DOM). snapshot() returns a content manifest (refs + kind +
+ * sizes); the receiving side re-registers sources via
+ * attachSource(ref, source) before replay.
  */
 
-/** Формат текстуры (Task 67: HDR).
- *  'rgba8unorm' — дефолт обоих бэкендов (WebGL2: RGBA8).
- *  'canvas' — формат канваса WebGPU (обычно bgra8unorm); WebGL2 игнорирует
- *  и аллоцирует RGBA8 (рендер в текстуру на GL всегда через свою текстуру).
+/** Texture format (Task 67: HDR).
+ *  'rgba8unorm' — the default of both backends (WebGL2: RGBA8).
+ *  'canvas' — the WebGPU canvas format (usually bgra8unorm); WebGL2 ignores it
+ *  and allocates RGBA8 (render-to-texture on GL always goes through its own texture).
  *  'rgba16float' / 'rgba32float' — HDR: WebGL2 → RGBA16F/RGBA32F
- *  (texStorage2D/texImage2D internalFormat + HALF_FLOAT/FLOAT type при
- *  загрузке), WebGPU → rgba16float/rgba32float (core, renderable).
- *  Требования: WebGL2 — хранение float-текстур core; ЛИНЕЙНАЯ фильтрация
- *  rgba16float core, rgba32float требует OES_texture_float_linear;
- *  рендер В float-цель требует EXT_color_buffer_float. WebGPU — оба формата
- *  core (rgba32float не фильтруется линейно без feature 'float32-filterable'). */
-// Task 110 (реставрация): TextureFormat унифицирован с formats.ts —
-// полный канонический каталог (старый журнальный узкий тип был его подмножеством).
+ *  (texStorage2D/texImage2D internalFormat + HALF_FLOAT/FLOAT type on
+ *  upload), WebGPU → rgba16float/rgba32float (core, renderable).
+ *  Requirements: WebGL2 — float texture storage is core; LINEAR filtering of
+ *  rgba16float is core, rgba32float requires OES_texture_float_linear;
+ *  rendering INTO a float target requires EXT_color_buffer_float. WebGPU — both formats are
+ *  core (rgba32float is not linearly filterable without the 'float32-filterable' feature). */
+// Task 110 (restoration): TextureFormat is unified with formats.ts —
+// the full canonical catalog (the old narrow journal type was its subset).
 import { TEXTURE_FORMATS, type TextureFormat, type TextureFormatId } from '../formats.ts'
 export type { TextureFormat }
 
-/** Байт на пиксель по формату: несжатые — texelBytes каталога, сжатые —
- *  оценка по блоку, неизвестные/не указанные — 4 (rgba8-совместимые). */
+/** Bytes per pixel by format: uncompressed — the catalog's texelBytes, compressed —
+ *  a per-block estimate, unknown/unspecified — 4 (rgba8-compatible). */
 export function textureFormatBytesPerPixel(format?: TextureFormat): number {
   if (format === undefined) return 4
   const info = TEXTURE_FORMATS[format as TextureFormatId]
   if (info === undefined) return 4
   if (info.blockWidth > 1 || info.blockHeight > 1) {
-    // сжатые: байты на блок / текселей на блок (оценка средней плотности)
+    // compressed: bytes per block / texels per block (an average density estimate)
     return info.blockBytes / (info.blockWidth * info.blockHeight)
   }
   return info.texelBytes
 }
 
-/** Цвет очистки цели. */
+/** Target clear color. */
 export type ClearColor2 = readonly [number, number, number, number]
 
-/** Ссылка на CPU-источник пикселей в ContentStore журнала.
- *  kind — имя типа источника ('ImageBitmap', 'OffscreenCanvas', ...),
- *  width/height — размеры НА МОМЕНТ записи (replay не зависит от того,
- *  жив ли источник сейчас: мёртвый → опс пропускается с warning'ом). */
+/** A reference to a CPU pixel source in the journal's ContentStore.
+ *  kind — the source type name ('ImageBitmap', 'OffscreenCanvas', ...),
+ *  width/height — the sizes AT RECORDING TIME (replay does not depend on
+ *  whether the source is alive now: dead → the op is skipped with a warning). */
 export interface ContentRef {
   readonly ref: number
   readonly kind: string
@@ -110,8 +110,8 @@ export interface ContentRef {
   readonly height: number
 }
 
-/** Примитивные опсы над первичными ресурсами. id — СТАБИЛЬНЫЕ id уровня
- *  resourceSession (не фасадные). Зависимые ссылки (textureId) — тоже. */
+/** Primitive ops over primary resources. id — STABLE resourceSession-level
+ *  ids (not facade ones). Dependent references (textureId) — too. */
 export type ResOp =
   | { readonly kind: 'texture.create'; readonly id: number; readonly width: number; readonly height: number; readonly format?: TextureFormat; readonly options?: { readonly mipLevels?: number; readonly maxAnisotropy?: number } }
   | { readonly kind: 'texture.write'; readonly id: number; readonly content: ContentRef; readonly flipY: boolean }
@@ -123,8 +123,8 @@ export type ResOp =
   | { readonly kind: 'target.create'; readonly id: number; readonly textureId: number; readonly width: number; readonly height: number; readonly depth: boolean; readonly color: ClearColor2 }
   | { readonly kind: 'target.destroy'; readonly id: number }
 
-/** Манифест контента — что должно быть пере-регистрировано на принимающей
- *  стороне (worker migration) перед replay снапшота. */
+/** Content manifest — what must be re-registered on the receiving
+ *  side (worker migration) before replaying the snapshot. */
 export interface ContentManifestEntry {
   readonly ref: number
   readonly kind: string
@@ -132,53 +132,53 @@ export interface ContentManifestEntry {
   readonly height: number
 }
 
-/** Рабочее множество (Task 65 soft reset): какие ресурсы обязаны вернуться в
- *  GPU-память немедленно после потери устройства. Всё живое, что НЕ вошло —
- *  остаётся декларацией в журнале и возвращается лениво (ensureResident).
- *  Пустое множество = «сцены нет»: после loss — чистый бэкенд. */
+/** Working set (Task 65 soft reset): which resources must return to
+ *  GPU memory immediately after device loss. Everything alive that is NOT included —
+ *  stays a declaration in the journal and returns lazily (ensureResident).
+ *  An empty set = "no scene": after loss — a clean backend. */
 export interface WorkingSet {
   readonly textureIds?: readonly number[]
   readonly viewIds?: readonly number[]
   readonly targetIds?: readonly number[]
 }
 
-/** Результат выбора резидентных опсов: минимальный подсписок журнала,
- *  восстанавливающий рабочее множество (+ что осталось отложенным). */
+/** The resident-op selection result: the minimal sublist of the journal
+ *  restoring the working set (+ what remained deferred). */
 export interface ResidentSelection {
-  /** Опсы для replay в исходном порядке (create + контент + зависимые). */
+  /** Ops for replay in original order (create + content + dependents). */
   readonly ops: readonly ResOp[]
-  /** Живые текстуры, НЕ вошедшие в рабочее множество (отложены). */
+  /** Live textures NOT included in the working set (deferred). */
   readonly deferredTextures: readonly number[]
-  /** Живые views, НЕ вошедшие (отложены). */
+  /** Live views NOT included (deferred). */
   readonly deferredViews: readonly number[]
-  /** Живые targets, НЕ вошедшие (отложены). */
+  /** Live targets NOT included (deferred). */
   readonly deferredTargets: readonly number[]
 }
 
-/** Выбрать опсы резидентного подмножества (чистая функция).
+/** Select the ops of the resident subset (a pure function).
  *
- * Замыкание рабочего множества:
- *   • keep.textureIds → их texture.create + ВСЕ их контент-опсы
- *     (write/update/writeMip живой инкарнации);
- *   • keep.viewIds → их view.create + parent-текстура (create + контент —
- *     view без пикселей родителя бессмыслен);
- *   • keep.targetIds → их target.create + parent-текстура (create БЕЗ
- *     контента — в target контент перезапишется рендером);
- *   • views/targets на НЕ вошедших текстурах — отложены (дажели их parent
- *     вошёл: view — отдельный ресурс, возвращается своим ensureResident).
+ * Working-set closure:
+ *   • keep.textureIds → their texture.create + ALL their content ops
+ *     (write/update/writeMip of the live incarnation);
+ *   • keep.viewIds → their view.create + the parent texture (create + content —
+ *     a view without the parent's pixels is pointless);
+ *   • keep.targetIds → their target.create + the parent texture (create WITHOUT
+ *     content — in a target the content is overwritten by rendering);
+ *   • views/targets on NOT included textures — deferred (even if their parent
+ *     is included: a view is a separate resource, it returns via its own ensureResident).
  *
- * Живость — по последнему lifecycle-опсу (семантика compact): последняя
- * инкарнация create→…→destroy→create жива, её опсы и берём. */
+ * Liveness — by the last lifecycle op (compact semantics): the last
+ * incarnation create→…→destroy→create is alive, and we take its ops. */
 export function selectResidentOps(ops: readonly ResOp[], keep: WorkingSet): ResidentSelection {
-  // Живые ресурсы: последний lifecycle-опс — create.
+  // Live resources: the last lifecycle op is create.
   const lastTexLifecycle = new Map<number, 'create' | 'destroy'>()
   const lastViewLifecycle = new Map<number, 'create' | 'destroy'>()
   const lastTargetLifecycle = new Map<number, 'create' | 'destroy'>()
-  // Последний create view/target → parent textureId (для замыкания родителей).
+  // Last view/target create → parent textureId (for the parent closure).
   const viewParent = new Map<number, number>()
   const targetParent = new Map<number, number>()
-  // Индекс ПОСЛЕДНЕГО create (контент мёртвой инкарнации не восстанавливаем —
-  // семантика compact: create→…→destroy→create жива только последняя).
+  // The index of the LAST create (dead-incarnation content is not restored —
+  // compact semantics: in create→…→destroy→create only the last one is alive).
   const lastTexCreateIdx = new Map<number, number>()
   const lastViewCreateIdx = new Map<number, number>()
   const lastTargetCreateIdx = new Map<number, number>()
@@ -192,7 +192,7 @@ export function selectResidentOps(ops: readonly ResOp[], keep: WorkingSet): Resi
     else if (op.kind === 'target.destroy') lastTargetLifecycle.set(op.id, 'destroy')
   }
 
-  // Замыкание текстур: запрошенные + родители запрошенных views/targets.
+  // Texture closure: the requested ones + the parents of the requested views/targets.
   const texKeep = new Set<number>(keep.textureIds ?? [])
   const viewKeep = new Set<number>(keep.viewIds ?? [])
   const targetKeep = new Set<number>(keep.targetIds ?? [])
@@ -204,8 +204,8 @@ export function selectResidentOps(ops: readonly ResOp[], keep: WorkingSet): Resi
     const parent = targetParent.get(targetId)
     if (parent !== undefined) texKeep.add(parent)
   }
-  // Views требуют КОНТЕНТ родителя (сэмплить нечего без пикселей);
-  // targets — нет (рендер сам перезапишет).
+  // Views require the parent's CONTENT (nothing to sample without pixels);
+  // targets do not (rendering will overwrite it).
   const texNeedsContent = new Set<number>(keep.textureIds ?? [])
   for (const viewId of viewKeep) {
     const parent = viewParent.get(viewId)
@@ -217,9 +217,9 @@ export function selectResidentOps(ops: readonly ResOp[], keep: WorkingSet): Resi
     const op = ops[i]!
     switch (op.kind) {
       case 'texture.create': {
-        // Только ПОСЛЕДНЯЯ инкарнация (мёртвые create выброшены парой
-        // с destroy в compact; без compact — тоже корректно: контент
-        // мёртвой инкарнации всё равно не валиден).
+        // Only the LAST incarnation (dead creates were dropped in a pair
+        // with destroy in compact; without compact — also correct: dead-incarnation
+        // content is invalid anyway).
         if (texKeep.has(op.id) && lastTexCreateIdx.get(op.id) === i) selected.push(op)
         break
       }
@@ -245,7 +245,7 @@ export function selectResidentOps(ops: readonly ResOp[], keep: WorkingSet): Resi
         break
       }
       default:
-        break // destroy-опсы при восстановлении — no-op по определению
+        break // destroy ops during recovery — a no-op by definition
     }
   }
 
@@ -264,73 +264,73 @@ export function selectResidentOps(ops: readonly ResOp[], keep: WorkingSet): Resi
   return { ops: selected, deferredTextures, deferredViews, deferredTargets }
 }
 
-/** Снимок журнала: ops JSON-safe + манифест контента. */
+/** Journal snapshot: JSON-safe ops + a content manifest. */
 export interface ResourceJournalSnapshot {
   readonly ops: readonly ResOp[]
   readonly content: readonly ContentManifestEntry[]
 }
 
-/** Квантификация восстановления — что произошло при replay. */
+/** Recovery quantification — what happened during the replay. */
 export interface RestoreReport {
-  /** Сколько опсов исполнено (без destroy-пропусков). */
+  /** How many ops were executed (without destroy skips). */
   readonly opsReplayed: number
-  /** Стабильные id живых текстур (совпадают с id до потери ПО ПОСТРОЕНИЮ). */
+  /** Stable ids of live textures (match the pre-loss ids BY CONSTRUCTION). */
   readonly textureIds: readonly number[]
-  /** Стабильные id живых view'ов. */
+  /** Stable ids of live views. */
   readonly viewIds: readonly number[]
-  /** Стабильные id живых целей. */
+  /** Stable ids of live targets. */
   readonly targetIds: readonly number[]
-  /** Сколько контент-опсов (write/update/writeMip) пере-залито. */
+  /** How many content ops (write/update/writeMip) were re-uploaded. */
   readonly contentOps: number
-  /** Сколько контент-опсов пропущено (источник мёртв/не пере-регистрирован). */
+  /** How many content ops were skipped (source dead/not re-registered). */
   readonly skipped: number
-  /** Task 65: живые ресурсы, НЕ вошедшие в рабочее множество (soft reset) —
- *  остались декларациями в журнале, вернутся через ensureResident().
- *  Отсутствует/пусто при полном restore (strategy='full'). */
+  /** Task 65: live resources NOT included in the working set (soft reset) —
+ *  remained declarations in the journal, will return via ensureResident().
+ *  Absent/empty on a full restore (strategy='full'). */
   readonly deferred?: { readonly textures: readonly number[]; readonly views: readonly number[]; readonly targets: readonly number[] }
 }
 
-/** Журнал первичных ресурсов: append-only + компактирование + ContentStore. */
+/** Primary resource journal: append-only + compaction + ContentStore. */
 export interface ResourceJournal {
-  /** Записать примитивный опс. Append-only. */
+  /** Record a primitive op. Append-only. */
   record(op: ResOp): void
-  /** Исполнить опсы в порядке записи на любом приёмнике. */
+  /** Execute ops in recording order on any receiver. */
   replay(apply: (op: ResOp) => void): void
-  /** Все опсы в порядке записи (защитная копия). */
+  /** All ops in recording order (a defensive copy). */
   entries(): readonly ResOp[]
-  /** Компактирование: пары create→destroy, поглощение write'ом,
-   *  last-write-wins одинаковых rect, prune висячих ссылок. */
+  /** Compaction: create→destroy pairs, absorption by write,
+   *  last-write-wins of identical rects, pruning of dangling references. */
   compact(): void
-  /** Глубокая копия (ops клонируются; ContentStore разделяется — источники
-   *  живые объекты, клонировать битмапы = удвоение памяти). */
+  /** Deep copy (ops are cloned; ContentStore is shared — sources are
+   *  live objects, cloning bitmaps = doubling memory). */
   snapshot(): ResourceJournalSnapshot
-  /** Убрать опсы под предикатом. */
+  /** Remove ops under a predicate. */
   evict(predicate: (op: ResOp) => boolean): void
-  /** Сброс в пустое состояние (новая сессия). ContentStore не чистится:
-   *  источники может держать приложение. */
+  /** Reset to an empty state (a new session). ContentStore is not cleaned:
+   *  the application may hold the sources. */
   reset(): void
   readonly size: number
 
   // ─── ContentStore ───────────────────────────────────────────────────────
-  /** Зарегистрировать CPU-источник пикселей. Возвращает ссылку для опсов. */
+  /** Register a CPU pixel source. Returns a reference for ops. */
   storeSource(source: unknown, kind: string, width: number, height: number): ContentRef
-  /** Источник по ссылке (null — не зарегистрирован/мёртв). */
+  /** Source by reference (null — not registered/dead). */
   getSource(ref: number): unknown
-  /** Worker migration: пере-регистрировать источник под существующий ref. */
+  /** Worker migration: re-register a source under an existing ref. */
   attachSource(ref: number, source: unknown): void
-  /** Жив ли источник (не null и не закрытый ImageBitmap). */
+  /** Is the source alive (not null and not a closed ImageBitmap). */
   isSourceAlive(ref: number): boolean
 
-  // ─── Сидирование стабильных id ──────────────────────────────────────────
-  /** Максимальный стабильный texture.create id (+1 = следующий свободный). */
+  // ─── Stable id seeding ──────────────────────────────────────────
+  /** The maximal stable texture.create id (+1 = the next free one). */
   maxTextureId(): number
-  /** Максимальный стабильный view.create id. */
+  /** The maximal stable view.create id. */
   maxViewId(): number
-  /** Максимальный стабильный target.create id. */
+  /** The maximal stable target.create id. */
   maxTargetId(): number
 }
 
-/** Мёртвый источник: закрытый ImageBitmap (close()) отдаёт width=0. */
+/** A dead source: a closed ImageBitmap (close()) reports width=0. */
 function sourceIsDead(source: unknown): boolean {
   if (source === null || source === undefined) return true
   if (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) {
@@ -339,13 +339,13 @@ function sourceIsDead(source: unknown): boolean {
   return false
 }
 
-/** Создать пустой ResourceJournal. */
+/** Create an empty ResourceJournal. */
 export function createResourceJournal(): ResourceJournal {
   const ops: ResOp[] = []
   const sources = new Map<number, unknown>()
-  // Task 65: монотонный счётчик ref — НЕ sources.size: после GC-чистки
-  // compact() размер карты падает, а ref'ы обязаны оставаться уникальными
-  // навсегда (иначе новый источник перезапишет живой ref).
+  // Task 65: a monotonic ref counter — NOT sources.size: after the GC cleanup
+  // of compact() the map size drops, while refs must remain unique
+  // forever (otherwise a new source would overwrite a live ref).
   let nextRef = 1
 
   function storeSource(source: unknown, kind: string, width: number, height: number): ContentRef {
@@ -354,9 +354,9 @@ export function createResourceJournal(): ResourceJournal {
     return { ref, kind, width, height }
   }
 
-  /** ContentStore GC: выкинуть источники, на которые не ссылается ни один
-   *  контент-опс. Вызывается из compact() — CPU-память не течёт от
-   *  созданных-и-выброшенных текстур (их опсы уже удалены парами). */
+  /** ContentStore GC: drop sources not referenced by any
+   *  content op. Called from compact() — CPU memory does not leak from
+   *  created-and-discarded textures (their ops are already removed in pairs). */
   function pruneSources(): number {
     const used = new Set<number>()
     for (const op of ops) {
@@ -383,13 +383,13 @@ export function createResourceJournal(): ResourceJournal {
     },
 
     compact() {
-      // ─── Шаг 1: живость текстур (Task 61 семантика, обобщённая на v2) ──
-      // Текстура жива в КОНЕЧНОМ состоянии, если её последний lifecycle-опс
-      // — create (create→…→destroy→create = жива, инкарнация №2). Зависимые
-      // опсы (write/update/writeMip/view.create/target.create) мертвы, если:
-      //   1) последний lifecycle-опс текстуры — destroy (мертва в конце); или
-      //   2) опс стоит ДО последнего create (принадлежит мёртвой инкарнации);
-      //   3) в момент опса текстура была уничтожена (бегущий стейт).
+      // ─── Step 1: texture liveness (Task 61 semantics, generalized to v2) ──
+      // A texture is alive in the FINAL state if its last lifecycle op
+      // is create (create→…→destroy→create = alive, incarnation #2). Dependent
+      // ops (write/update/writeMip/view.create/target.create) are dead if:
+      //   1) the texture's last lifecycle op is destroy (dead at the end); or
+      //   2) the op comes BEFORE the last create (belongs to a dead incarnation);
+      //   3) at the op's moment the texture was destroyed (running state).
       const lastTexLifecycle = new Map<number, 'create' | 'destroy'>()
       const lastTexCreateIdx = new Map<number, number>()
       for (let i = 0; i < ops.length; i++) {
@@ -403,8 +403,8 @@ export function createResourceJournal(): ResourceJournal {
       }
       const running = new Map<number, 'create' | 'destroy'>()
       const aliveAt = new Map<number, boolean>()
-      // Контент-опсы (write/update/writeMip) ссылаются на текстуру полем id;
-      // view.create/target.create — полем textureId.
+      // Content ops (write/update/writeMip) reference a texture by the id field;
+      // view.create/target.create — by the textureId field.
       const opTextureId = (op: ResOp): number | null =>
         op.kind === 'texture.write' || op.kind === 'texture.update' || op.kind === 'texture.writeMip'
           ? op.id
@@ -427,10 +427,10 @@ export function createResourceJournal(): ResourceJournal {
         && (lastTexCreateIdx.get(textureId) ?? -1) < i
         && aliveAt.get(i) === true
 
-      // ─── Шаг 2: пары create→destroy + зависимые мёртвых текстур ────────
-      // Один проход: create, парный с destroy, выкидывается вместе с destroy.
-      // View/target на мёртвой текстуре выкидываются, их destroy'и — тоже
-      // (без сирот). Контент-опсы мёртвой текстуры выкидываются.
+      // ─── Step 2: create→destroy pairs + dependents of dead textures ────────
+      // One pass: a create paired with a destroy is dropped together with the destroy.
+      // A view/target on a dead texture is dropped, its destroys too
+      // (no orphans). Content ops of a dead texture are dropped.
       const seenTexDestroy = new Set<number>()
       const seenViewDestroy = new Set<number>()
       const seenTargetDestroy = new Set<number>()
@@ -441,10 +441,10 @@ export function createResourceJournal(): ResourceJournal {
       }
       const prunedViews = new Set<number>()
       const prunedTargets = new Set<number>()
-      // Паттерн v1 (проверен Task 61): идём по ops; create id с destroy-парой
-      // пропускаем ТОЛЬКО ПЕРВЫЙ (и помечаем id); повторный create того же id
-      // (create→…→destroy→create) остаётся — выживает последняя инкарнация.
-      // destroy помеченного id выбрасывается (его create уже удалён).
+      // The v1 pattern (verified by Task 61): walk ops; the create of an id with a destroy pair
+      // is skipped ONLY THE FIRST TIME (and the id is marked); a repeated create of the same id
+      // (create→…→destroy→create) stays — the last incarnation survives.
+      // The destroy of a marked id is dropped (its create is already removed).
       const keep: ResOp[] = []
       const pairedTexCreateDropped = new Set<number>()
       const pairedViewCreateDropped = new Set<number>()
@@ -454,13 +454,13 @@ export function createResourceJournal(): ResourceJournal {
         switch (op.kind) {
           case 'texture.create':
             if (seenTexDestroy.has(op.id) && !pairedTexCreateDropped.has(op.id)) {
-              pairedTexCreateDropped.add(op.id) // первый create — парный с destroy
+              pairedTexCreateDropped.add(op.id) // the first create — paired with a destroy
             } else {
               keep.push(op)
             }
             break
           case 'texture.destroy':
-            if (pairedTexCreateDropped.has(op.id)) continue // парный create удалён
+            if (pairedTexCreateDropped.has(op.id)) continue // the paired create is removed
             keep.push(op)
             break
           case 'view.create':
@@ -502,20 +502,20 @@ export function createResourceJournal(): ResourceJournal {
       ops.length = 0
       ops.push(...keep)
 
-      // ─── Шаг 3: коалесцинг контента ────────────────────────────────────
-      // texture.write(x) поглощает все предыдущие контент-опсы x. Повторный
-      // texture.update того же rect — выживает последний (last-write-wins).
-      // writeMip НЕ поглощается write'ом (другой mip-уровень); одинаковый
-      // writeMip(level) — выживает последний.
+      // ─── Step 3: content coalescing ────────────────────────────────────
+      // texture.write(x) absorbs all previous content ops of x. A repeated
+      // texture.update of the same rect — the last one survives (last-write-wins).
+      // writeMip is NOT absorbed by write (a different mip level); an identical
+      // writeMip(level) — the last one survives.
       const contentKeep: ResOp[] = []
-      /** Индексы в contentKeep, которые надо удалить после прохода. */
+      /** Indices in contentKeep that must be removed after the pass. */
       const absorbed = new Set<number>()
       for (let i = 0; i < ops.length; i++) {
         const op = ops[i]!
         if (op.kind === 'texture.write') {
-          // поглотить все предыдущие write/update этой текстуры (полная
-          // перезапись делает их бессмысленными). writeMip — ДРУГОЙ mip-уровень,
-          // write его НЕ поглощает.
+          // absorb all previous write/update of this texture (a full
+          // rewrite makes them pointless). writeMip is a DIFFERENT mip level,
+          // write does NOT absorb it.
           for (let j = 0; j < contentKeep.length; j++) {
             const prev = contentKeep[j]!
             if (prev.id === op.id && (prev.kind === 'texture.write' || prev.kind === 'texture.update')) {
@@ -524,7 +524,7 @@ export function createResourceJournal(): ResourceJournal {
           }
           contentKeep.push(op)
         } else if (op.kind === 'texture.update') {
-          // last-write-wins для того же rect
+          // last-write-wins for the same rect
           for (let j = 0; j < contentKeep.length; j++) {
             const prev = contentKeep[j]!
             if (prev.id === op.id && prev.kind === 'texture.update'
@@ -549,11 +549,11 @@ export function createResourceJournal(): ResourceJournal {
       ops.length = 0
       ops.push(...coalesced)
 
-      // ─── Шаг 4 (Task 65): ContentStore GC ──────────────────────────────
-      // Источники, на которые не ссылается ни один оставшийся контент-опс,
-      // освобождаем: их текстуры уже уничтожены (пары create→destroy) или
-      // их контент поглощён последним write. Иначе «прожал много кнопок» →
-      // десятки мёртвых ImageBitmap/canvas в CPU-памяти навсегда.
+      // ─── Step 4 (Task 65): ContentStore GC ──────────────────────────────
+      // Sources not referenced by any remaining content op
+      // are released: their textures are already destroyed (create→destroy pairs) or
+      // their content is absorbed by the last write. Otherwise "pressed many buttons" →
+      // dozens of dead ImageBitmap/canvas in CPU memory forever.
       pruneSources()
     },
 
@@ -608,7 +608,7 @@ export function createResourceJournal(): ResourceJournal {
   }
 }
 
-/** Метаданные ContentRef из опсов журнала (для манифеста). */
+/** ContentRef metadata from journal ops (for the manifest). */
 function opContentByRef(ops: readonly ResOp[], ref: number): ContentManifestEntry {
   for (const op of ops) {
     if (op.kind === 'texture.write' || op.kind === 'texture.update' || op.kind === 'texture.writeMip') {
@@ -618,7 +618,7 @@ function opContentByRef(ops: readonly ResOp[], ref: number): ContentManifestEntr
   return { ref, kind: 'unknown', width: 0, height: 0 }
 }
 
-/** Клон опса (глубина 1: все поля readonly-примитивы + ContentRef-объект). */
+/** Op clone (depth 1: all fields are readonly primitives + the ContentRef object). */
 function cloneResOp(op: ResOp): ResOp {
   if (op.kind === 'texture.write' || op.kind === 'texture.update' || op.kind === 'texture.writeMip') {
     return { ...op, content: { ...op.content } }

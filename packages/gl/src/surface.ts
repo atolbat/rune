@@ -1,102 +1,102 @@
 /**
- * Surface + pass — единая структура полноэкранных проходов.
+ * Surface + pass — a unified structure for fullscreen passes.
  *
- * Вместо двух отдельных сахаров (frag() для генерации картинки и image()
- * для показа) — ОДНА конструкция: проход «N входов → фрагментный шейдер →
- * цель». Вырожденные случаи:
- *   - генерация:  pass без входов, target = surface (бывший frag)
- *   - показ:      pass с входом, target = канвас (бывший image)
- *   - постпроцессинг: capture() рисует сцену В surface, затем цепочка
- *     pass'ов surface → surface → канвас, каждый — обычная команда
- *     рендер-пасса (пишется в ту же ленту через record()).
+ * Instead of two separate sugars (frag() to generate an image and image()
+ * to display it) — ONE construct: a pass of "N inputs → fragment shader →
+ * target". Degenerate cases:
+ *   - generation:  a pass with no inputs, target = surface (former frag)
+ *   - display:     a pass with an input, target = canvas (former image)
+ *   - post-processing: capture() renders the scene INTO a surface, then a
+ *     chain of passes surface → surface → canvas, each an ordinary render
+ *     pass command (written to the same tape via record()).
  *
- * Пользователь пишет ТОЛЬКО фрагментную стадию; вершинную рантайм
- * генерирует (клип-пространственный квад из @rune/prims). Контракт
- * шейдера: атрибуты position/uv уже заняты, varying/in — v_uv (GLSL)
- * или @location(0) uv (WGSL, точка входа fsMain).
+ * The user writes ONLY the fragment stage; the runtime generates the
+ * vertex stage (a clip-space quad from @rune/prims). The shader
+ * contract: position/uv attributes are already taken, varying/in — v_uv (GLSL)
+ * or @location(0) uv (WGSL, entry point fsMain).
  */
 
 import { quad } from '@rune/prims'
 import { OpCode } from '@rune/core'
 import type { TapeWriter } from '@rune/core'
 
-/** Ссылка на текстуру-вход: Texture (renderer), SurfaceTexture — годится любая. */
+/** Reference to an input texture: Texture (renderer) or SurfaceTexture — either works. */
 export interface TextureRef {
   readonly textureId: number
 }
 
-/** Опции полноэкранного прохода. */
+/** Options of a fullscreen pass. */
 export interface PassOptions {
-  /** Юниформы: значение | (props, ctx) => значение (как в command()). */
+  /** Uniforms: value | (props, ctx) => value (as in command()). */
   readonly uniforms?: Record<string, unknown>
-  /** Входы: имя sampler'а в шейдере → текстура/поверхность.
-   *  v1 WebGPU: один вход на проход (ограничение bind-группы текстур). */
+  /** Inputs: sampler name in the shader → texture/surface.
+   *  v1 WebGPU: one input per pass (texture bind group limitation). */
   readonly inputs?: Record<string, TextureRef>
-  /** Цель: поверхность (undefined → канвас). */
+  /** Target: a surface (undefined → canvas). */
   readonly target?: { readonly targetId: number }
-  /** Очистить цель перед проходом (default false: квад перекрывает всё). */
+  /** Clear the target before the pass (default false: the quad covers everything). */
   readonly clear?: boolean
 }
 
-/** Опции поверхности-цели. */
+/** Options of a target surface. */
 export interface SurfaceOptions {
   readonly width?: number
   readonly height?: number
-  /** Своя глубина — для capture() 3D-сцен (default false). */
+  /** Own depth — for capture() of 3D scenes (default false). */
   readonly depth?: boolean
-  /** Цвет очистки (default — фон рендерера). */
+  /** Clear color (default — the renderer background). */
   readonly color?: readonly [number, number, number, number]
 }
 
-/** Результат чтения поверхности (Task 80: readback — первый срез
- *  buffer/MRT/readback из остаточного бэклога аудита Task 72).
+/** Result of reading a surface (Task 80: readback — the first slice of
+ *  buffer/MRT/readback from the residual backlog of the Task 72 audit).
  *
- *  Контракт ОДИНАКОВ на обоих бэкендах — «одна сцена — одна картинка»
- *  распространена и на CPU-чтение: один и тот же индекс = один и тот же
- *  пиксель независимо от бэкенда:
- *   - data: RGBA8, tight-раскладка (rowBytes = width*4);
- *   - строки СВЕРХУ ВНИЗ (texture row 0 = верх): GL-фасад переворачивает
- *     readPixels, WebGPU-фасад уплотняет 256-байтовое выравнивание и
- *     свиззлит BGRA→RGBA — наружу торчит один и тот же формат. */
+ *  The contract is IDENTICAL on both backends — "one scene — one image"
+ *  extends to CPU reads as well: the same index = the same
+ *  pixel regardless of backend:
+ *   - data: RGBA8, tight layout (rowBytes = width*4);
+ *   - rows TOP-DOWN (texture row 0 = top): the GL facade flips
+ *     readPixels, the WebGPU facade compacts the 256-byte alignment and
+ *     swizzles BGRA→RGBA — the same format is exposed to the outside. */
 export interface SurfaceRead {
   readonly width: number
   readonly height: number
-  /** RGBA8 (4 б/пиксель), row-major, первая строка — верхняя. */
+  /** RGBA8 (4 bytes/pixel), row-major, first row is the top one. */
   readonly data: Uint8Array
 }
 
-/** Поверхность: текстура-цель + полноэкранные проходы в неё. */
+/** Surface: a target texture + fullscreen passes into it. */
 export interface Surface<C> {
-  /** Id цели для BindTarget (диагностика/подстановка в passOptions.target). */
+  /** Target id for BindTarget (diagnostics/substitution into passOptions.target). */
   readonly targetId: number
-  /** Текстура поверхности — вход для следующих проходов. */
+  /** Surface texture — an input for subsequent passes. */
   readonly texture: { readonly textureId: number; readonly width: number; readonly height: number }
   readonly width: number
   readonly height: number
-  /** Полноэкранный проход, пишущий В эту поверхность. */
+  /** Fullscreen pass writing INTO this surface. */
   pass(fragment: string, options?: PassOptions): C
-  /** Повернуть любую команду целью в эту поверхность (сцена → текстура).
-   *  clear default true: 3D-сцене нужны чистые цвет и глубина. */
+  /** Re-target any command to this surface (scene → texture).
+   *  clear default true: a 3D scene needs clean color and depth. */
   capture(command: C, options?: { readonly clear?: boolean }): C
-  /** Task 80: прочитать пиксели поверхности на CPU.
+  /** Task 80: read surface pixels to the CPU.
    *
-   *  Читает содержимое ПОСЛЕ последнего исполненного кадра (вызов вне
-   *  frame-колбэка; WebGPU-путь асинхронный — mapAsync). После dispose —
-   *  reject с honest-ошибкой. Результат — SurfaceRead (RGBA8, сверху-вниз,
-   *  паритет бэкендов — см. SurfaceRead). Не журналируется: чтение — не
-   *  декларация, replay-восстановления не требует. */
+   *  Reads the contents AFTER the last executed frame (call outside
+   *  the frame callback; the WebGPU path is asynchronous — mapAsync). After dispose —
+   *  reject with an honest error. The result is a SurfaceRead (RGBA8, top-down,
+   *  backend parity — see SurfaceRead). Not journaled: a read is not a
+   *  declaration and needs no replay restoration. */
   read(): Promise<SurfaceRead>
-  /** Освободить GPU-ресурсы поверхности (target + текстура).
-   *  Идемпотентно: повторный вызов — no-op. После dispose pass()/capture()
-   *  на этом surface кидать НЕ надо — но и вызвать их не стоит.
-   *  Журнал (если обёрнут) — destroyTarget + destroyTexture опсы пишутся. */
+  /** Release the surface's GPU resources (target + texture).
+   *  Idempotent: a repeated call is a no-op. After dispose, pass()/capture()
+   *  on this surface must NOT throw — but you shouldn't call them either.
+   *  The journal (if wrapped) — destroyTarget + destroyTexture ops are written. */
   dispose(): void
 }
 
-/** Квад полноэкранных проходов (общий для обоих бэкендов). */
+/** The quad of fullscreen passes (shared by both backends). */
 export const FULLSCREEN_QUAD = quad()
 
-/** Генерируемая вершинная стадия GLSL: проводит UV квада во фрагмент. */
+/** Generated GLSL vertex stage: feeds the quad's UV to the fragment. */
 export const PASS_VERT_GLSL = `#version 300 es
 layout(location = 0) in vec2 position;
 layout(location = 1) in vec2 uv;
@@ -106,7 +106,7 @@ void main() {
   gl_Position = vec4(position, 0.0, 1.0);
 }`
 
-/** Генерируемая вершинная стадия WGSL (препендится к фрагменту пользователя). */
+/** Generated WGSL vertex stage (prepended to the user's fragment). */
 export const PASS_VERT_WGSL = `struct RunePassVsOut {
   @builtin(position) pos : vec4<f32>,
   @location(0) uv : vec2<f32>,
@@ -123,8 +123,8 @@ fn vsMain(
 }
 `
 
-/** Обёртка команды: перед записью оригинала эмитит BindTarget.
- *  id сохранён — исполнитель находит оригинал в реестре команд. */
+/** Command wrapper: emits BindTarget before recording the original.
+ *  id is preserved — the executor finds the original in the command registry. */
 export function withTarget<C extends { readonly id: number }>(
   command: C & { record(props: unknown, frameCtx: unknown, writer: TapeWriter): void },
   targetId: number,
@@ -140,10 +140,10 @@ export function withTarget<C extends { readonly id: number }>(
   } as unknown as C
 }
 
-/** Имена билтин-юниформов, которые pass подставляет автоматически. */
+/** Names of builtin uniforms that a pass substitutes automatically. */
 const BUILTIN_NAMES = ['u_time', 'u_resolution', 'u_texel'] as const
 
-/** Какие билтины объявлены в шейдере (по вхождению имени). */
+/** Which builtins are declared in the shader (by name occurrence). */
 export function scanBuiltins(fragment: string): ReadonlySet<string> {
   const found = new Set<string>()
   for (const name of BUILTIN_NAMES) {
@@ -152,7 +152,7 @@ export function scanBuiltins(fragment: string): ReadonlySet<string> {
   return found
 }
 
-/** Мутабельные значения билтинов: обновляются на каждом record, без GC. */
+/** Mutable builtin values: updated on every record, no GC. */
 export interface PassBuiltins {
   readonly time: Float32Array
   readonly resolution: Float32Array
@@ -167,8 +167,8 @@ export function createPassBuiltins(): PassBuiltins {
   }
 }
 
-/** Вписать билтин-резолверы в uniforms спека прохода.
- *  resolutionSource: актуальный размер ЦЕЛИ в пикселях буфера (кадровый). */
+/** Write builtin resolvers into the uniforms of a pass spec.
+ *  resolutionSource: the actual size of the TARGET in buffer pixels (per-frame). */
 export function applyBuiltins(
   uniforms: Record<string, unknown>,
   builtins: ReadonlySet<string>,

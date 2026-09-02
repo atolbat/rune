@@ -5,28 +5,28 @@ import { parseFBX } from '../src/fbx.ts'
 import { AssetLoader } from '../src/registry.ts'
 import type { FbxModel } from '../src/index.ts'
 const SAMBA = new URL('../../demo/assets/samba-dancing.fbx', import.meta.url)
-// Тяжёлая Mixamo-фикстура не входит в состав библиотеки: тесты включаются
-// автоматически, если положить файл по пути packages/loaders/demo/assets/.
+// The heavy Mixamo fixture is not part of the library: the tests are enabled
+// automatically if the file is placed at packages/loaders/demo/assets/.
 const hasFixture = existsSync(SAMBA)
 const it = test.skipIf(!hasFixture)
 
-it('parseFBX: Mixamo Samba Dancing — скелет, скин, клипы', async () => {
+it('parseFBX: Mixamo Samba Dancing — skeleton, skin, clips', async () => {
   const buffer = await readFile(SAMBA)
   const model: FbxModel = await parseFBX(buffer.buffer.slice(
     buffer.byteOffset,
     buffer.byteOffset + buffer.byteLength,
   ) as ArrayBuffer)
 
-  // Геометрия
+  // Geometry
   expect(model.meshes.length).toBeGreaterThan(0)
   for (const mesh of model.meshes) {
     expect(mesh.positions.length).toBe(mesh.vertexCount * 3)
     expect(mesh.indices.length % 3).toBe(0)
-    // скин обязателен для анимируемой модели
+    // a skin is mandatory for an animatable model
     expect(mesh.skin).toBeDefined()
     expect(mesh.skin!.jointIndices.length).toBe(mesh.vertexCount * 4)
     expect(mesh.skin!.jointWeights.length).toBe(mesh.vertexCount * 4)
-    // веса нормализованы
+    // weights are normalized
     for (let v = 0; v < mesh.vertexCount; v++) {
       const sum =
         mesh.skin!.jointWeights[v * 4] +
@@ -37,9 +37,9 @@ it('parseFBX: Mixamo Samba Dancing — скелет, скин, клипы', asyn
     }
   }
 
-  // Скелет: топологический порядок (родитель раньше ребёнка)
+  // Skeleton: topological order (parent before child)
   const joints = model.skeleton.joints
-  expect(joints.length).toBeGreaterThan(20) // Mixamo-скелет ~55 костей
+  expect(joints.length).toBeGreaterThan(20) // Mixamo skeleton ~55 bones
   for (let i = 0; i < joints.length; i++) {
     expect(joints[i].parent).toBeLessThan(i)
     expect(joints[i].parent).toBeGreaterThanOrEqual(-1)
@@ -47,7 +47,7 @@ it('parseFBX: Mixamo Samba Dancing — скелет, скин, клипы', asyn
   const withInvBind = joints.filter((j) => j.invBind !== undefined)
   expect(withInvBind.length).toBeGreaterThan(10)
 
-  // Клипы анимации
+  // Animation clips
   expect(model.clips.length).toBeGreaterThanOrEqual(1)
   for (const clip of model.clips) {
     expect(clip.duration).toBeGreaterThan(0)
@@ -59,7 +59,7 @@ it('parseFBX: Mixamo Samba Dancing — скелет, скин, клипы', asyn
     for (const track of clip.tracksR) {
       expect(track.times.length).toBeGreaterThan(0)
       expect(track.quats.length).toBe(track.times.length * 4)
-      // кватернионы нормализованы
+      // quaternions are normalized
       for (let k = 0; k < track.quats.length; k += 4) {
         const len = Math.hypot(
           track.quats[k],
@@ -74,7 +74,7 @@ it('parseFBX: Mixamo Samba Dancing — скелет, скин, клипы', asyn
   }
 })
 
-it('AssetLoader: полный конвейер .fbx (registry → parseFBX)', async () => {
+it('AssetLoader: the full .fbx pipeline (registry → parseFBX)', async () => {
   const bytes = await readFile(SAMBA)
   const fetchImpl = (async () =>
     new Response(new Uint8Array(bytes), {
@@ -91,6 +91,6 @@ it('AssetLoader: полный конвейер .fbx (registry → parseFBX)', as
   expect(model.clips.length).toBeGreaterThanOrEqual(1)
   expect(phases).toContain('parsing')
   expect(phases[phases.length - 1]).toBe('done')
-  // закэшировано и доступно через get()
+  // cached and available via get()
   expect(loader.get('https://mixamo/samba-dancing.fbx')).toBeDefined()
 }, 60000)

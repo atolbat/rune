@@ -1,19 +1,20 @@
 /**
- * Task 69: rgba32float без feature 'float32-filterable' — bind-group и пайплайн
- * обязаны использовать sampleType 'unfilterable-float' + sampler 'non-filtering'.
- * Захардкоженный 'float' давал валидационную ошибку CreateBindGroup:
- * «None of the supported sample types (UnfilterableFloat) of
- * [Texture RGBA32Float] match the expected sample types (Float)».
+ * Task 69: rgba32float without feature 'float32-filterable' — the bind group
+ * and pipeline must use sampleType 'unfilterable-float' + sampler
+ * 'non-filtering'. The hardcoded 'float' produced a CreateBindGroup
+ * validation error:
+ * "None of the supported sample types (UnfilterableFloat) of
+ * [Texture RGBA32Float] match the expected sample types (Float)".
  *
- * Здесь — полный mock navigator.gpu/device: проверяем дескрипторы, которые
- * фасад реально отправляет в device.createBindGroupLayout/createRenderPipeline/
- * createSampler, и переключение варианта пайплайна в bindTexture.
+ * Here — a full mock of navigator.gpu/device: we check the descriptors the
+ * facade actually sends to device.createBindGroupLayout/createRenderPipeline/
+ * createSampler, and the pipeline variant switch in bindTexture.
  */
 
 import { afterEach, describe, expect, it } from 'bun:test'
 import { createRealGPU } from '../src/realGPU.ts'
 
-/** WGSL, валидный для ОБЕИХ вариаций sampleType (textureSampleLevel). */
+/** WGSL valid for BOTH sampleType variants (textureSampleLevel). */
 const WGSL_LEVEL = `
 @group(0) @binding(0) var<uniform> params : vec4<f32>;
 @group(1) @binding(0) var s : sampler;
@@ -26,7 +27,7 @@ struct VSOut { @builtin(position) pos : vec4<f32>, @location(0) uv : vec2<f32> }
   return textureSampleLevel(t, s, in.uv, 0.0);
 }`
 
-/** WGSL с textureSample — НЕсовместим с 'unfilterable-float' (диагностика). */
+/** WGSL with textureSample — NOT compatible with 'unfilterable-float' (diagnostics). */
 const WGSL_SAMPLE = WGSL_LEVEL.replace('textureSampleLevel(t, s, in.uv, 0.0)', 'textureSample(t, s, in.uv)')
 
 interface MockCalls {
@@ -57,7 +58,7 @@ function installMockGpu(deviceFeatures: string[]): { calls: MockCalls; canvas: u
   const device = {
     features: new Set(deviceFeatures),
     limits: {},
-    lost: new Promise(() => {}), // никогда не резолвится в тесте
+    lost: new Promise(() => {}), // never resolves in the test
     addEventListener: () => {},
     createTexture: (desc: Record<string, unknown>) => ({
       __desc: desc,
@@ -137,8 +138,8 @@ function installMockGpu(deviceFeatures: string[]): { calls: MockCalls; canvas: u
   const nav = navigator as unknown as { gpu?: unknown }
   const prevGpu = nav.gpu
   ;(navigator as unknown as { gpu: unknown }).gpu = gpuMock
-  // WebGPU-глобалы (Bun их не определяет — фасад использует
-  // GPUTextureUsage/GPUShaderStage/GPUBufferUsage константы).
+  // WebGPU globals (Bun does not define them — the facade uses the
+  // GPUTextureUsage/GPUShaderStage/GPUBufferUsage constants).
   const g = globalThis as Record<string, unknown>
   const prevGlobals = {
     GPUTextureUsage: g.GPUTextureUsage,
@@ -161,36 +162,36 @@ function installMockGpu(deviceFeatures: string[]): { calls: MockCalls; canvas: u
   }
 }
 
-/** sampleType текстурной записи BGL (binding 1); undefined — нет текстурной записи (group 0). */
+/** The sampleType of the BGL texture entry (binding 1); undefined — no texture entry (group 0). */
 function sampleTypeOf(bgl: { entries: Array<Record<string, unknown>> }): string | undefined {
   const texEntry = bgl.entries.find(e => 'texture' in e)
   if (texEntry === undefined) return undefined
   return (texEntry.texture as { sampleType?: string }).sampleType
 }
 
-describe('Task 69: rgba32float без float32-filterable — unfilterable bind path', () => {
+describe('Task 69: rgba32float without float32-filterable — unfilterable bind path', () => {
   const cleanups: Array<() => void> = []
   afterEach(() => { for (const c of cleanups.splice(0)) c() })
 
-  it('feature запрашивается у адаптера, если поддерживается', async () => {
+  it('the feature is requested from the adapter if supported', async () => {
     const { calls, canvas, cleanup } = installMockGpu(['float32-filterable'])
     cleanups.push(cleanup)
     await createRealGPU(canvas as never)
     expect(calls.requestedFeatures[0]).toContain('float32-filterable')
   })
 
-  it('без feature: rgba32float → sampler nearest + bind-group unfilterable-float/non-filtering', async () => {
+  it('without the feature: rgba32float → nearest sampler + unfilterable-float/non-filtering bind group', async () => {
     const { calls, canvas, cleanup } = installMockGpu([])
     cleanups.push(cleanup)
     const gpu = await createRealGPU(canvas as never)
     const tex = gpu.createTexture(256, 256, 'rgba32float')
-    // sampler деградирует до nearest (все три фильтра)
+    // the sampler degrades to nearest (all three filters)
     const sampler = calls.samplers[calls.samplers.length - 1]!
     expect(sampler.magFilter).toBe('nearest')
     expect(sampler.minFilter).toBe('nearest')
-    // пайплайн + бинд текстуры + draw: bind-group layout с unfilterable-float.
-    // Мульти-текстурный контракт: bindTexture НАКАПЛИВАЕТ биндинги, bind-группа
-    // фиксируется в draw() (однотекстурные команды — прежний состав группы)
+    // pipeline + texture bind + draw: bind-group layout with unfilterable-float.
+    // Multi-texture contract: bindTexture ACCUMULATES bindings, the bind group
+    // is fixed in draw() (single-texture commands — the previous group composition)
     gpu.ensurePipeline(1, WGSL_LEVEL, [2, 2], true)
     gpu.beginPass(0)
     gpu.usePipeline(1)
@@ -200,8 +201,9 @@ describe('Task 69: rgba32float без float32-filterable — unfilterable bind p
     expect(unfilterableBgl).toBeDefined()
     const samplerEntry = unfilterableBgl!.entries.find(e => (e as { sampler?: unknown }).sampler !== undefined)
     expect((samplerEntry!.sampler as { type?: string }).type).toBe('non-filtering')
-    // bind-group построен на СВОЁМ layout с ТЕМ ЖЕ sampleType/sampler-типом
-    // (layout bind-group и layout пайплайна — разные объекты, но совместимые)
+    // the bind group is built on ITS OWN layout with THE SAME sampleType/sampler
+    // type (the bind-group layout and the pipeline layout are different
+    // objects, but compatible)
     const bg = calls.bindGroups[calls.bindGroups.length - 1]!
     const bgEntries = (bg.layout as { entries: Array<Record<string, unknown>> }).entries
     const bgTex = bgEntries.find(e => 'texture' in e)!
@@ -210,8 +212,8 @@ describe('Task 69: rgba32float без float32-filterable — unfilterable bind p
     expect((bgSampler.sampler as { type?: string }).type).toBe('non-filtering')
     expect(bg.entries[0]!.binding).toBe(0)
     expect(bg.entries[1]!.binding).toBe(1)
-    // пайплайн-вариант: созданы ДВА render pipeline (float + unfilterable),
-    // пасс переключён на вариант с unfilterable-Layout
+    // pipeline variant: TWO render pipelines created (float + unfilterable),
+    // the pass switched to the variant with the unfilterable layout
     expect(calls.renderPipelines.length).toBe(2)
     const unfilterablePl = calls.pipelineLayouts.find(pl =>
       pl.bindGroupLayouts.some(b => sampleTypeOf(b as { entries: Array<Record<string, unknown>> }) === 'unfilterable-float'),
@@ -223,13 +225,13 @@ describe('Task 69: rgba32float без float32-filterable — unfilterable bind p
     expect(calls.passSetBindGroup.some(([i]) => i === 1)).toBe(true)
   })
 
-  it('мульти-текстуры: два бинда до draw → ОДНА bind-группа с tex@1 и tex@2', async () => {
+  it('multi-textures: two binds before draw → ONE bind group with tex@1 and tex@2', async () => {
     const { calls, canvas, cleanup } = installMockGpu([])
     cleanups.push(cleanup)
     const gpu = await createRealGPU(canvas as never)
     const baseTex = gpu.createTexture(256, 256)
     const normalTex = gpu.createTexture(256, 256)
-    // WGSL с ДВУМЯ texture_2d в group 1 — layout обязан дать bindings 1..2
+    // WGSL with TWO texture_2d in group 1 — the layout must provide bindings 1..2
     const wgsl2 = WGSL_LEVEL.replace(
       '@group(1) @binding(1) var t : texture_2d<f32>;',
       '@group(1) @binding(1) var t : texture_2d<f32>;\n@group(1) @binding(2) var n : texture_2d<f32>;',
@@ -241,18 +243,18 @@ describe('Task 69: rgba32float без float32-filterable — unfilterable bind p
     gpu.bindTexture(normalTex)
     const bindGroupsBefore = calls.bindGroups.length
     gpu.draw(3, 1)
-    // ровно ОДНА новая bind-группа на draw (не по одной на каждый бинд)
+    // exactly ONE new bind group per draw (not one per bind)
     expect(calls.bindGroups.length).toBe(bindGroupsBefore + 1)
     const bg = calls.bindGroups[calls.bindGroups.length - 1]!
     expect(bg.entries).toHaveLength(3)
     expect(bg.entries.map(e => e.binding)).toEqual([0, 1, 2])
-    // texture-слоты 1 и 2 — ДВЕ разные текстуры
+    // texture slots 1 and 2 — TWO different textures
     const textures = bg.entries.filter(e => (e.resource as { viewId?: number }).viewId !== undefined)
     expect(textures).toHaveLength(2)
     expect(textures[0]!.resource).not.toBe(textures[1]!.resource)
   })
 
-  it('без feature: rgba8unorm → прежний путь (float + filtering, ОДИН пайплайн)', async () => {
+  it('without the feature: rgba8unorm → the previous path (float + filtering, ONE pipeline)', async () => {
     const { calls, canvas, cleanup } = installMockGpu([])
     cleanups.push(cleanup)
     const gpu = await createRealGPU(canvas as never)
@@ -270,7 +272,7 @@ describe('Task 69: rgba32float без float32-filterable — unfilterable bind p
     expect((samplerEntry!.sampler as { type?: string }).type).toBe('filtering')
   })
 
-  it('С feature: rgba32float → LINEAR + sampleType float (без вариантов)', async () => {
+  it('WITH the feature: rgba32float → LINEAR + sampleType float (no variants)', async () => {
     const { calls, canvas, cleanup } = installMockGpu(['float32-filterable'])
     cleanups.push(cleanup)
     const gpu = await createRealGPU(canvas as never)
@@ -286,7 +288,7 @@ describe('Task 69: rgba32float без float32-filterable — unfilterable bind p
     expect(bgl).toBeDefined()
   })
 
-  it('textureSample-шейдер + unfilterable вариант → проактивная диагностика onGpuError', async () => {
+  it('textureSample shader + unfilterable variant → proactive onGpuError diagnostics', async () => {
     const { calls, canvas, cleanup } = installMockGpu([])
     cleanups.push(cleanup)
     const errors: string[] = []
@@ -299,7 +301,7 @@ describe('Task 69: rgba32float без float32-filterable — unfilterable bind p
     expect(errors.some(m => m.includes('textureSample'))).toBe(true)
   })
 
-  it('смена текстуры в рамках одного пайплайна: unfilterable → filterable переключает вариант обратно', async () => {
+  it('texture change within one pipeline: unfilterable → filterable switches the variant back', async () => {
     const { calls, canvas, cleanup } = installMockGpu([])
     cleanups.push(cleanup)
     const gpu = await createRealGPU(canvas as never)
@@ -320,7 +322,7 @@ describe('Task 69: rgba32float без float32-filterable — unfilterable bind p
     expect(floatPl).toBeDefined()
     const pipelineOf = (pl: unknown) => calls.renderPipelines.find(p => p.layout === pl)
     expect(calls.passSetPipeline[calls.passSetPipeline.length - 1]).toBe(pipelineOf(unfilterablePl))
-    // следующая команда биндит filterable — пайплайн возвращается к 'float'
+    // the next command binds a filterable one — the pipeline returns to 'float'
     gpu.usePipeline(1)
     gpu.bindTexture(tex8)
     expect(calls.passSetPipeline[calls.passSetPipeline.length - 1]).toBe(pipelineOf(floatPl))

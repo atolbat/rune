@@ -1,25 +1,25 @@
 /**
- * Transient-пул (идея №2 раннего каталога): кадровые временные данные
- * без GC-давления. Массив, взятый в кадре, гарантированно живёт `depth`
- * кадров (глубина полёта — как в тройной буферизации), затем молча
- * переиспользуется. Содержимое после выдачи не определено — это скретч.
+ * Transient pool (idea #2 of the early catalog): per-frame temporary data
+ * without GC pressure. An array taken in a frame is guaranteed to live `depth`
+ * frames (flight depth — like in triple buffering), then it is silently
+ * reused. Contents after lease are undefined — this is scratch.
  */
 
-/** Кадровый пул временных массивов. */
+/** Per-frame pool of temporary arrays. */
 export interface TransientPool {
-  /** Начало кадра: предыдущие выдачи начинают стареть. */
+  /** Frame start: previous leases start aging. */
   beginFrame(): void
-  /** Скретч-массив на кадры (не обнулён). */
+  /** Scratch array for frames (not zeroed). */
   f32(length: number): Float32Array
   f64(length: number): Float64Array
   i32(length: number): Int32Array
   u32(length: number): Uint32Array
   u8(length: number): Uint8Array
-  /** Снимок счётчиков (тесты/диагностика). */
+  /** Snapshot of counters (tests/diagnostics). */
   stats(): TransientPoolStats
 }
 
-/** Счётчики пула: создано всего, ждут в пуле, выдано сейчас. */
+/** Pool counters: created total, waiting in the pool, currently leased. */
 export interface TransientPoolStats {
   readonly created: number
   readonly pooled: number
@@ -31,7 +31,7 @@ export interface TransientPoolStats {
 type View = Float32Array | Float64Array | Int32Array | Uint32Array | Uint8Array
 type Tag = 'f32' | 'f64' | 'i32' | 'u32' | 'u8'
 
-/** Бин типа+длины: свободные буферы и выданные (FIFO по кадрам). */
+/** Type+length bin: free buffers and leased ones (FIFO by frames). */
 interface Bin {
   readonly free: View[]
   readonly leased: Array<{ buf: View; frame: number }>
@@ -47,7 +47,7 @@ const MAKE: Record<Tag, (length: number) => View> = {
   u8: length => new Uint8Array(length),
 }
 
-/** Создаёт пул; depth — минимальный срок жизни буфера в кадрах. */
+/** Creates the pool; depth is the minimum buffer lifetime in frames. */
 export function createTransientPool(depth = 2): TransientPool {
   const bins = new Map<string, Bin>()
   let created = 0
@@ -74,7 +74,7 @@ export function createTransientPool(depth = 2): TransientPool {
     return fresh
   }
 
-  /** Выданные, прожившие depth кадров, возвращаются в свободные. */
+  /** Leased buffers that have lived depth frames are returned to free. */
   function reclaim(bin: Bin): void {
     while (bin.leased.length > 0 && frames - bin.leased[0].frame >= depth) {
       bin.free.push(bin.leased.shift()!.buf)

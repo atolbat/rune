@@ -5,10 +5,10 @@ import { mat4Multiply, mat4Perspective, mat4RotationX, mat4RotationY, mat4Transl
 import { cube } from '@rune/prims'
 
 /**
- * showOnWebGpu(): показ куба на WebGPU — зеркало WebGL2-версии.
- * Тот же стриминг текстуры, те же опции; ленты + executor. Обе ветки шейдера
- * (с текстурой и без) несут одно и то же Lambert-освещение — паритет
- * затенения граней с GLSL-версией из scene.ts (инцидент «плоский куб»).
+ * showOnWebGpu(): show the cube on WebGPU — a mirror of the WebGL2 version.
+ * Same texture streaming, same options; tapes + executor. Both shader branches
+ * (with and without texture) carry the same Lambert lighting — parity of
+ * face shading with the GLSL version from scene.ts (the "flat cube" incident).
  */
 
 const WGSL_TEX = `
@@ -78,7 +78,7 @@ fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(params.u_albedo.rgb * (0.3 + lambert * 0.7), 1.0);
 }`
 
-/** Показ на WebGPU. Пауза — для табов/переключений (как у WebGL2-версии). */
+/** A showing on WebGPU. Pause — for tabs/switching (like the WebGL2 version). */
 export interface WebGpuShow {
   readonly renderer: WebGpuRenderer
   stop(): void
@@ -86,11 +86,11 @@ export interface WebGpuShow {
   resume(): void
 }
 
-/** Запускает показ куба на WebGPU (стриминг текстуры — как в WebGL2-версии). */
+/** Starts showing the cube on WebGPU (texture streaming — as in the WebGL2 version). */
 export async function showOnWebGpu(canvas: HTMLCanvasElement, options: ShowOptions): Promise<WebGpuShow> {
   const spin = options.spin ?? 0.7
   const albedo = options.albedo ?? [0.35, 0.6, 0.95]
-  // Инъекции пробрасываются: рекордер-фасад гоняет webgpu-путь без браузера
+  // Injections are passed through: the recorder facade runs the webgpu path without a browser
   const renderer = await createWebGpuRenderer({
     canvas,
     onGpuError: () => {},
@@ -102,7 +102,7 @@ export async function showOnWebGpu(canvas: HTMLCanvasElement, options: ShowOptio
   const geometry = cube(1)
   const hasTexture = options.texture !== undefined
 
-  // Текстура до команды: спек ссылается на хэндл
+  // Texture before the command: the spec references the handle
   let textureId: number | undefined
   if (hasTexture && options.texture !== undefined) {
     const size = options.textureSize ?? 1024
@@ -124,7 +124,7 @@ export async function showOnWebGpu(canvas: HTMLCanvasElement, options: ShowOptio
 
   const spec: Record<string, unknown> = {
     shader: { wgsl: hasTexture ? WGSL_TEX : WGSL_FLAT },
-    // Паритет растеризации с WebGL2-сценой (scene.ts): тот же depth/cull
+    // Rasterization parity with the WebGL2 scene (scene.ts): same depth/cull
     pipeline: { depth: { test: 'less', write: true }, raster: { cull: 'back' } },
     uniforms,
     attributes,
@@ -136,7 +136,7 @@ export async function showOnWebGpu(canvas: HTMLCanvasElement, options: ShowOptio
 
   const drawCube = renderer.command(spec as never)
 
-  // Стриминг текстуры — тем же планировщиком, что и WebGL2-версия
+  // Texture streaming — by the same scheduler as the WebGL2 version
   if (hasTexture && options.texture !== undefined && textureId !== undefined) {
     const { streamTexture } = await import('@rune/core')
     void streamTexture(

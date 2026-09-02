@@ -5,18 +5,18 @@ import { createRecordingGL } from '@rune/webgl2'
 import { createRecordingGPU } from '@rune/webgpu'
 
 /**
- * createRenderer — единый entry point с авто-выбором бэкенда (DESIGN.md §9.12).
- * Sync constructor + lazy discovery через .command() + async .start().
+ * createRenderer — the single entry point with automatic backend choice (DESIGN.md §9.12).
+ * Sync constructor + lazy discovery via .command() + async .start().
  *
- * Покрываем:
- *  - strict WebGL2 (backend='webgl2') — sync init, surface/pass работают после start
+ * Covered:
+ *  - strict WebGL2 (backend='webgl2') — sync init, surface/pass work after start
  *  - strict WebGPU (backend='webgpu') — async init
- *  - auto default — WebGPU preferred, fallback WebGL2 (если спеки требуют)
- *  - GLSL-only spec + оба доступны → фолбэк на WebGL2 с reason
- *  - late-reject: WGSL-only command на WebGL2 кидает actionable
- *  - BackendResolutionError несёт структурированный decision
- *  - lazy proxy command: работает до .start(), бросает если .record() до старта
- *  - whyBackend() возвращает decision после .start(), null до
+ *  - auto default — WebGPU preferred, fallback WebGL2 (if the specs require it)
+ *  - GLSL-only spec + both available → fallback to WebGL2 with a reason
+ *  - late-reject: a WGSL-only command on WebGL2 throws an actionable error
+ *  - BackendResolutionError carries a structured decision
+ *  - lazy proxy command: works before .start(), throws if .record() before start
+ *  - whyBackend() returns the decision after .start(), null before
  */
 
 function fakeCanvas(): HTMLCanvasElement {
@@ -49,8 +49,8 @@ const WGSL_ONLY: AutoDrawSpec = {
 
 const COMMON = { observeResize: false, requestFrame: () => () => {}, now: () => 0 }
 
-describe('createRenderer — единый entry point с lazy discovery', () => {
-  it('strict backend="webgl2" — sync init + whyBackend возвращает decision после start', async () => {
+describe('createRenderer — the single entry point with lazy discovery', () => {
+  it('strict backend="webgl2" — sync init + whyBackend returns the decision after start', async () => {
     const recording = createRecordingGL()
     const r = createRenderer({
       canvas: fakeCanvas(),
@@ -58,21 +58,21 @@ describe('createRenderer — единый entry point с lazy discovery', () => 
       createGL: () => recording.gl,
       ...COMMON,
     })
-    expect(r.backend).toBeNull()       // до start
+    expect(r.backend).toBeNull()       // before start
     expect(r.whyBackend()).toBeNull()
-    const tri = r.command(DUAL)        // lazy proxy до start
+    const tri = r.command(DUAL)        // lazy proxy before start
     expect(tri).toBeDefined()
     await r.start()
     expect(r.backend).toBe('webgl2')
     expect(r.decision?.chosen).toBe('webgl2')
-    expect(r.decision?.message).toContain('Принудительный')
+    expect(r.decision?.message).toContain('Forced')
     r.stop()
   })
 
-  it('auto default с GLSL-only спекой + оба бэкенда доступны → фолбэк на WebGL2 с reason', async () => {
+  it('auto default with a GLSL-only spec + both backends available → fallback to WebGL2 with a reason', async () => {
     const recording = createRecordingGL()
-    // createGL инжектит → hardware = { webgl2: true, webgpu: false } (createGPU не инъектирован)
-    // Но GLSL-only → covers=false для webgpu. Так как webgpu недоступен — всё равно фолбэк на webgl2.
+    // createGL is injected → hardware = { webgl2: true, webgpu: false } (createGPU is not injected)
+    // But GLSL-only → covers=false for webgpu. Since webgpu is unavailable — a fallback to webgl2 anyway.
     const r = createRenderer({
       canvas: fakeCanvas(),
       // default backend = ['webgpu', 'webgl2']
@@ -87,7 +87,7 @@ describe('createRenderer — единый entry point с lazy discovery', () => 
     r.stop()
   })
 
-  it('strict backend="webgl2", DUAL спек — компилирует GLSL-вариант, не требует wgsl', async () => {
+  it('strict backend="webgl2", DUAL spec — compiles the GLSL variant, does not require wgsl', async () => {
     const recording = createRecordingGL()
     const r = createRenderer({
       canvas: fakeCanvas(),
@@ -97,16 +97,16 @@ describe('createRenderer — единый entry point с lazy discovery', () => 
     })
     const tri = r.command(DUAL)
     await r.start()
-    // proxy подключён к реальной команде — record() должен делегировать без throw
+    // the proxy is connected to the real command — record() must delegate without throwing
     expect(() => {
-      // inner есть, surface работает после start
+      // the inner exists, surface works after start
       r.surface({ width: 8, height: 8 })
     }).not.toThrow()
-    expect(tri.id).toBeGreaterThanOrEqual(0)  // proxy получил id от real после _attach
+    expect(tri.id).toBeGreaterThanOrEqual(0)  // the proxy got the id from the real one after _attach
     r.stop()
   })
 
-  it('strict backend="webgpu", инъекция createGPU — WebGPU init', async () => {
+  it('strict backend="webgpu", createGPU injection — WebGPU init', async () => {
     const original = (globalThis as { navigator?: unknown }).navigator
     ;(globalThis as { navigator?: unknown }).navigator = { gpu: { requestAdapter: async () => ({}) } }
     try {
@@ -120,14 +120,14 @@ describe('createRenderer — единый entry point с lazy discovery', () => 
       r.command(DUAL)
       await r.start()
       expect(r.backend).toBe('webgpu')
-      expect(r.decision?.message).toContain('Принудительный')
+      expect(r.decision?.message).toContain('Forced')
       r.stop()
     } finally {
       ;(globalThis as { navigator?: unknown }).navigator = original
     }
   })
 
-  it('late-reject: WGSL-only command после старта на WebGL2 кидает actionable', async () => {
+  it('late-reject: a WGSL-only command after start on WebGL2 throws an actionable error', async () => {
     const recording = createRecordingGL()
     const r = createRenderer({
       canvas: fakeCanvas(),
@@ -136,11 +136,11 @@ describe('createRenderer — единый entry point с lazy discovery', () => 
       ...COMMON,
     })
     await r.start()
-    expect(() => r.command(WGSL_ONLY)).toThrow(/WGSL.*WebGL2|переЗапустите|перезапустите|backend/i)
+    expect(() => r.command(WGSL_ONLY)).toThrow(/WGSL.*WebGL2|Restart|restart|backend/i)
     r.stop()
   })
 
-  it('late-reject: GLSL-only command на WebGL2 — проходит (нет throw)', async () => {
+  it('late-reject: a GLSL-only command on WebGL2 — passes (no throw)', async () => {
     const recording = createRecordingGL()
     const r = createRenderer({
       canvas: fakeCanvas(),
@@ -153,26 +153,26 @@ describe('createRenderer — единый entry point с lazy discovery', () => 
     r.stop()
   })
 
-  it('BackendResolutionError — strict backend="webgpu", недоступен → выбрасывает с decision', async () => {
+  it('BackendResolutionError — strict backend="webgpu", unavailable → throws with the decision', async () => {
     const r = createRenderer({
       canvas: fakeCanvas(),
-      backend: 'webgpu',  // strict WebGPU, в node недоступен (нет navigator.gpu)
+      backend: 'webgpu',  // strict WebGPU, unavailable in node (no navigator.gpu)
       ...COMMON,
     })
     r.command(DUAL)
     try {
       await r.start()
-      expect.unreachable('должна бросить BackendResolutionError')
+      expect.unreachable('must throw BackendResolutionError')
     } catch (e) {
       expect(e).toBeInstanceOf(BackendResolutionError)
       const err = e as BackendResolutionError
       expect(err.decision.chosen).toBeNull()
       expect(err.decision.verdicts.webgpu.available).toBe(false)
-      expect(err.decision.message).toContain('недоступен')
+      expect(err.decision.message).toContain('unavailable')
     }
   })
 
-  it('lazy proxy command: .record() до .start() кидает понятную ошибку', () => {
+  it('lazy proxy command: .record() before .start() throws a clear error', () => {
     const recording = createRecordingGL()
     const r = createRenderer({
       canvas: fakeCanvas(),
@@ -182,14 +182,14 @@ describe('createRenderer — единый entry point с lazy discovery', () => 
     })
     const tri = r.command(DUAL)
     expect(() => {
-      // Вызываем record напрямую, как executor в кадре
+      // Call record directly, like an executor in a frame
       ;(tri as { record: (p: unknown, ctx: { time: number; dt: number; aspect: number }, w: unknown) => void })
         .record({}, { time: 0, dt: 0, aspect: 1 }, null)
     }).toThrow(/start/)
-    // НЕ вызываем r.start() — оставляем ресурс неинициализированным; тест завершается без побочных эффектов
+    // Do NOT call r.start() — leave the resource uninitialized; the test finishes without side effects
   })
 
-  it('frame() до start — колбэк выполняется после start', async () => {
+  it('frame() before start — the callback runs after start', async () => {
     const recording = createRecordingGL()
     const r = createRenderer({
       canvas: fakeCanvas(),
@@ -199,9 +199,9 @@ describe('createRenderer — единый entry point с lazy discovery', () => 
     })
     let frames = 0
     r.frame(() => { frames++ })
-    expect(frames).toBe(0)  // ещё не запущен
+    expect(frames).toBe(0)  // not started yet
     await r.start()
-    r.step(16)  // вручную крутит кадр
+    r.step(16)  // manually drives a frame
     expect(frames).toBe(1)
     r.stop()
   })

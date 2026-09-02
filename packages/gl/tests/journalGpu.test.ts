@@ -8,27 +8,27 @@ import type { GPUImageSource } from '@rune/webgpu'
 /**
  * Task 57: WebGPU journal-decorator (withJournalGpu + replayJournalOnGpu).
  *
- * Контракт (паритет с journalGl.ts для WebGL2):
- *  1. withJournalGpu(gpu, journal) — оборачивает GPUFacade декоратором.
- *  2. create/destroy-опсы (createTexture, createTarget, createTextureView,
- *     copyExternalImageToTexture как full-texture upload) пишутся автоматически.
- *  3. Frame-опсы (usePipeline, bindUniforms, bindTexture, draw, submit и пр.)
- *     НЕ журналируются (это per-frame, идут в Tape, не в Journal).
- *  4. copyExternalImageToTextureMip (mip streaming) — frame-op, не журналируется.
- *  5. Sub-region copyExternalImageToTexture (dstX != 0 || dstY != 0) — frame-op
- *     (atlas packing), не журналируется.
- *  6. Replay на новом фасаде: replayJournalOnGpu(journal, newGpu, sourceFor?)
- *     — воссоздаёт все долгоживущие ресурсы в правильном порядке.
- *  7. sourceFor(kind) callback для copyExternalImageToTexture — возвращает
- *     готовый источник по kind ('ImageBitmap', 'HTMLCanvasElement' и т.д.).
- *     Если callback не передан или вернул null — опс пропускается (текстура
- *     остаётся пустой, sampler вернёт нули).
+ * Contract (parity with journalGl.ts for WebGL2):
+ *  1. withJournalGpu(gpu, journal) — wraps the GPUFacade with a decorator.
+ *  2. create/destroy ops (createTexture, createTarget, createTextureView,
+ *     copyExternalImageToTexture as a full-texture upload) are written automatically.
+ *  3. Frame ops (usePipeline, bindUniforms, bindTexture, draw, submit etc.)
+ *     are NOT journaled (they are per-frame, they go into the Tape, not the Journal).
+ *  4. copyExternalImageToTextureMip (mip streaming) — a frame op, not journaled.
+ *  5. Sub-region copyExternalImageToTexture (dstX != 0 || dstY != 0) — a frame op
+ *     (atlas packing), not journaled.
+ *  6. Replay on a fresh facade: replayJournalOnGpu(journal, newGpu, sourceFor?)
+ *     — recreates all long-lived resources in the right order.
+ *  7. The sourceFor(kind) callback for copyExternalImageToTexture — returns
+ *     a ready source by kind ('ImageBitmap', 'HTMLCanvasElement', etc.).
+ *     If the callback is not passed or returned null — the op is skipped (the
+ *     texture stays empty, the sampler will return zeros).
  *
- * Сценарий device-loss recovery:
- *  1. Пользователь создал текстуру/цель/view — Journal записал.
- *  2. Устройство потеряно (старый GPUFacade умер).
- *  3. Создаётся новый GPUFacade (через createRealGPU).
- *  4. replayJournalOnGpu(journal, newGpu, sourceFor) — пересоздаёт все ресурсы.
+ * Device-loss recovery scenario:
+ *  1. The user created a texture/target/view — the Journal recorded it.
+ *  2. The device was lost (the old GPUFacade died).
+ *  3. A new GPUFacade is created (via createRealGPU).
+ *  4. replayJournalOnGpu(journal, newGpu, sourceFor) — recreates all resources.
  */
 
 function fakeBitmap(w: number, h: number): ImageBitmap {
@@ -36,7 +36,7 @@ function fakeBitmap(w: number, h: number): ImageBitmap {
 }
 
 describe('Task 57 — withJournalGpu decorator', () => {
-  it('createTexture автоматически пишется в журнал (с format по умолчанию undefined)', () => {
+  it('createTexture is written to the journal automatically (with the default format undefined)', () => {
     const journal = createJournal()
     const { gpu } = createRecordingGPU()
     const decorated = withJournalGpu(gpu, journal)
@@ -48,11 +48,11 @@ describe('Task 57 — withJournalGpu decorator', () => {
     const op = texOps[0] as Extract<DeclOp, { kind: 'createTexture' }>
     expect(op.width).toBe(128)
     expect(op.height).toBe(128)
-    expect(op.format).toBeUndefined() // format не передан → undefined (replay: default RGBA8)
+    expect(op.format).toBeUndefined() // format not passed → undefined (replay: default RGBA8)
     expect(op.options).toBeUndefined()
   })
 
-  it('createTexture с format=canvas → format сохранён в опсе', () => {
+  it('createTexture with format=canvas → format saved in the op', () => {
     const journal = createJournal()
     const { gpu } = createRecordingGPU()
     const decorated = withJournalGpu(gpu, journal)
@@ -63,7 +63,7 @@ describe('Task 57 — withJournalGpu decorator', () => {
     expect(op.format).toBe('canvas')
   })
 
-  it('createTexture с mipLevels + maxAnisotropy → options сохранены', () => {
+  it('createTexture with mipLevels + maxAnisotropy → options saved', () => {
     const journal = createJournal()
     const { gpu } = createRecordingGPU()
     const decorated = withJournalGpu(gpu, journal)
@@ -76,7 +76,7 @@ describe('Task 57 — withJournalGpu decorator', () => {
     expect(op.options?.maxAnisotropy).toBe(8)
   })
 
-  it('deleteTexture → destroyTexture опс в журнале', () => {
+  it('deleteTexture → a destroyTexture op in the journal', () => {
     const journal = createJournal()
     const { gpu } = createRecordingGPU()
     const decorated = withJournalGpu(gpu, journal)
@@ -90,7 +90,7 @@ describe('Task 57 — withJournalGpu decorator', () => {
     expect((ops[1] as Extract<DeclOp, { kind: 'destroyTexture' }>).id).toBe(id)
   })
 
-  it('createTarget + deleteTarget → журналируются', () => {
+  it('createTarget + deleteTarget → journaled', () => {
     const journal = createJournal()
     const { gpu } = createRecordingGPU()
     const decorated = withJournalGpu(gpu, journal)
@@ -111,7 +111,7 @@ describe('Task 57 — withJournalGpu decorator', () => {
     expect(targetOp.color).toEqual([0.1, 0.2, 0.3, 1])
   })
 
-  it('createTextureView + deleteTextureView → журналируются', () => {
+  it('createTextureView + deleteTextureView → journaled', () => {
     const journal = createJournal()
     const { gpu } = createRecordingGPU()
     const decorated = withJournalGpu(gpu, journal)
@@ -131,7 +131,7 @@ describe('Task 57 — withJournalGpu decorator', () => {
     expect(viewOp.mipLevelCount).toBe(2)
   })
 
-  it('copyExternalImageToTexture (full-texture) → texImage2DFromSource опс в журнале', () => {
+  it('copyExternalImageToTexture (full-texture) → a texImage2DFromSource op in the journal', () => {
     const journal = createJournal()
     const { gpu } = createRecordingGPU()
     const decorated = withJournalGpu(gpu, journal)
@@ -149,7 +149,7 @@ describe('Task 57 — withJournalGpu decorator', () => {
     expect(uploadOp.flipY).toBe(false) // default
   })
 
-  it('copyExternalImageToTexture с flipY=true → flipY=true в опсе', () => {
+  it('copyExternalImageToTexture with flipY=true → flipY=true in the op', () => {
     const journal = createJournal()
     const { gpu } = createRecordingGPU()
     const decorated = withJournalGpu(gpu, journal)
@@ -162,7 +162,7 @@ describe('Task 57 — withJournalGpu decorator', () => {
     expect(uploadOp.flipY).toBe(true)
   })
 
-  it('copyExternalImageToTexture sub-region (dstX=8, dstY=8) → НЕ журналируется (atlas packing = frame-op)', () => {
+  it('copyExternalImageToTexture sub-region (dstX=8, dstY=8) → NOT journaled (atlas packing = frame-op)', () => {
     const journal = createJournal()
     const { gpu } = createRecordingGPU()
     const decorated = withJournalGpu(gpu, journal)
@@ -172,16 +172,16 @@ describe('Task 57 — withJournalGpu decorator', () => {
     decorated.copyExternalImageToTexture(texId, src, 8, 8, 16, 16)
 
     const ops = journal.entries()
-    // Только createTexture — sub-region upload не журналируется
+    // Only createTexture — a sub-region upload is not journaled
     expect(ops.length).toBe(1)
     expect(ops[0].kind).toBe('createTexture')
   })
 
-  it('Task 61: copyExternalImageToTexture sub-region в (0,0) с размером МЕНЬШЕ текстуры → НЕ журналируется', () => {
-    // Раньше эвристика проверяла только dstX=dstY=0: sub-region копия в левом
-    // верхнем углу (первый тайл атласа, uploadSubImage в origin) ошибочно
-    // журналировалась как полная загрузка — replay заливал бы текстуру
-    // обрезанным источником. Теперь — size-aware: только полное покрытие.
+  it('Task 61: copyExternalImageToTexture sub-region at (0,0) with a size SMALLER than the texture → NOT journaled', () => {
+    // Earlier the heuristic only checked dstX=dstY=0: a sub-region copy in the
+    // top-left corner (the first atlas tile, uploadSubImage at the origin) was
+    // mistakenly journaled as a full upload — replay would fill the texture
+    // with a cropped source. Now — size-aware: only full coverage.
     const journal = createJournal()
     const { gpu } = createRecordingGPU()
     const decorated = withJournalGpu(gpu, journal)
@@ -195,7 +195,7 @@ describe('Task 57 — withJournalGpu decorator', () => {
     expect(ops[0].kind).toBe('createTexture')
   })
 
-  it('Task 61: copyExternalImageToTexture полного размера в (0,0) → журналируется (size-aware совпадение)', () => {
+  it('Task 61: copyExternalImageToTexture of full size at (0,0) → journaled (size-aware match)', () => {
     const journal = createJournal()
     const { gpu } = createRecordingGPU()
     const decorated = withJournalGpu(gpu, journal)
@@ -209,7 +209,7 @@ describe('Task 57 — withJournalGpu decorator', () => {
     expect(ops[1].kind).toBe('texImage2DFromSource')
   })
 
-  it('copyExternalImageToTextureMip (mip streaming) → НЕ журналируется (frame-op)', () => {
+  it('copyExternalImageToTextureMip (mip streaming) → NOT journaled (frame-op)', () => {
     const journal = createJournal()
     const { gpu } = createRecordingGPU()
     const decorated = withJournalGpu(gpu, journal)
@@ -219,12 +219,12 @@ describe('Task 57 — withJournalGpu decorator', () => {
     decorated.copyExternalImageToTextureMip(texId, 5, src, 0, 0, 8, 8)
 
     const ops = journal.entries()
-    // Только createTexture — mip upload не журналируется
+    // Only createTexture — a mip upload is not journaled
     expect(ops.length).toBe(1)
     expect(ops[0].kind).toBe('createTexture')
   })
 
-  it('Frame-опсы НЕ журналируются: usePipeline, bindTexture, draw, submit', () => {
+  it('Frame ops are NOT journaled: usePipeline, bindTexture, draw, submit', () => {
     const journal = createJournal()
     const { gpu } = createRecordingGPU()
     const decorated = withJournalGpu(gpu, journal)
@@ -236,12 +236,12 @@ describe('Task 57 — withJournalGpu decorator', () => {
     decorated.endPass()
     decorated.submit()
 
-    // Только createTexture
+    // Only createTexture
     expect(journal.size).toBe(1)
     expect(journal.entries()[0].kind).toBe('createTexture')
   })
 
-  it('configure/resize/installTimer — НЕ журналируются (lifecycle, не ресурсы)', () => {
+  it('configure/resize/installTimer — NOT journaled (lifecycle, not resources)', () => {
     const journal = createJournal()
     const { gpu } = createRecordingGPU()
     const decorated = withJournalGpu(gpu, journal)
@@ -253,7 +253,7 @@ describe('Task 57 — withJournalGpu decorator', () => {
     expect(journal.size).toBe(0)
   })
 
-  it('public getters делегируют на underlying facade (adapter/device/preferredFormat/timer)', () => {
+  it('public getters delegate to the underlying facade (adapter/device/preferredFormat/timer)', () => {
     const journal = createJournal()
     const { gpu } = createRecordingGPU()
     const decorated = withJournalGpu(gpu, journal)
@@ -267,8 +267,8 @@ describe('Task 57 — withJournalGpu decorator', () => {
 })
 
 describe('Task 57 — replayJournalOnGpu', () => {
-  it('replay пересоздаёт ресурсы на новом фасаде в правильном порядке', () => {
-    // Фаза 1: первый фасад создал ресурсы, журнал записал
+  it('replay recreates resources on a fresh facade in the right order', () => {
+    // Phase 1: the first facade created resources, the journal recorded them
     const journal = createJournal()
     const oldRecording = createRecordingGPU()
     const oldGpu = withJournalGpu(oldRecording.gpu, journal)
@@ -277,13 +277,13 @@ describe('Task 57 — replayJournalOnGpu', () => {
     oldGpu.createTarget(texId, 64, 64, true, [0.1, 0.2, 0.3, 1])
     oldGpu.createTextureView(texId, { baseMipLevel: 0, mipLevelCount: 1 })
 
-    // Фаза 2: «устройство потеряно» — создаём НОВЫЙ фасад и replay'ем
+    // Phase 2: "the device is lost" — we create a NEW facade and replay it
     const newRecording = createRecordingGPU()
     replayJournalOnGpu(journal, newRecording.gpu)
 
-    // Все create-опсы дошли: createTexture(64,64), createTarget, createTextureView.
-    // ВАЖНО: фильтр с exact prefix, чтобы не поймать createTextureView в
-    // createTexture-счётчике (startsWith('createTexture') ловит оба).
+    // All create ops arrived: createTexture(64,64), createTarget, createTextureView.
+    // IMPORTANT: a filter with an exact prefix, so as not to catch createTextureView in
+    // the createTexture counter (startsWith('createTexture') catches both).
     const newCreateTex = newRecording.calls.filter(c => c.startsWith('createTexture(')).length
     const newCreateTarget = newRecording.calls.filter(c => c.startsWith('createTarget(')).length
     const newCreateView = newRecording.calls.filter(c => c.startsWith('createTextureView(')).length
@@ -293,7 +293,7 @@ describe('Task 57 — replayJournalOnGpu', () => {
     expect(newCreateView).toBe(1)
   })
 
-  it('replay с sourceFor: copyExternalImageToTexture (texImage2DFromSource) восстанавливается', () => {
+  it('replay with sourceFor: copyExternalImageToTexture (texImage2DFromSource) is restored', () => {
     const journal = createJournal()
     const oldRecording = createRecordingGPU()
     const oldGpu = withJournalGpu(oldRecording.gpu, journal)
@@ -302,7 +302,7 @@ describe('Task 57 — replayJournalOnGpu', () => {
     const src = fakeBitmap(16, 16)
     oldGpu.copyExternalImageToTexture(texId, src, 0, 0, 16, 16)
 
-    // Новый фасад + sourceFor-callback
+    // A fresh facade + a sourceFor callback
     const newRecording = createRecordingGPU()
     const sourceFor = (kind: string): GPUImageSource | null => {
       if (kind === 'ImageBitmap') return fakeBitmap(16, 16) as GPUImageSource
@@ -310,14 +310,14 @@ describe('Task 57 — replayJournalOnGpu', () => {
     }
     expect(() => replayJournalOnGpu(journal, newRecording.gpu, sourceFor)).not.toThrow()
 
-    // copyExternalImageToTexture дошел
+    // copyExternalImageToTexture arrived
     const uploadCalls = newRecording.calls.filter(c => c.startsWith('copyExternalImageToTexture'))
     expect(uploadCalls.length).toBe(1)
-    // Проверяем что dstX=0, dstY=0 (full-texture upload, не sub-region)
+    // Check that dstX=0, dstY=0 (full-texture upload, not sub-region)
     expect(uploadCalls[0]).toContain('@0,0')
   })
 
-  it('replay без sourceFor: texImage2DFromSource пропускается (без исключения)', () => {
+  it('replay without sourceFor: texImage2DFromSource is skipped (without an exception)', () => {
     const journal = createJournal()
     const oldRecording = createRecordingGPU()
     const oldGpu = withJournalGpu(oldRecording.gpu, journal)
@@ -326,15 +326,15 @@ describe('Task 57 — replayJournalOnGpu', () => {
     const src = fakeBitmap(8, 8)
     oldGpu.copyExternalImageToTexture(texId, src, 0, 0, 8, 8)
 
-    // Новый фасад БЕЗ sourceFor
+    // A fresh facade WITHOUT sourceFor
     const newRecording = createRecordingGPU()
     expect(() => replayJournalOnGpu(journal, newRecording.gpu)).not.toThrow()
-    // createTexture дошел, copyExternalImageToTexture — пропущен
+    // createTexture arrived, copyExternalImageToTexture — skipped
     expect(newRecording.calls.some(c => c.startsWith('createTexture'))).toBe(true)
     expect(newRecording.calls.some(c => c.startsWith('copyExternalImageToTexture'))).toBe(false)
   })
 
-  it('replay не мутирует исходный журнал (snapshot-семантика через append-only)', () => {
+  it('replay does not mutate the original journal (snapshot semantics via append-only)', () => {
     const journal = createJournal()
     const oldRecording = createRecordingGPU()
     const oldGpu = withJournalGpu(oldRecording.gpu, journal)
@@ -344,33 +344,33 @@ describe('Task 57 — replayJournalOnGpu', () => {
     const newRecording = createRecordingGPU()
     replayJournalOnGpu(journal, newRecording.gpu)
 
-    // Журнал не мутировал при replay
+    // The journal did not mutate during replay
     expect(journal.entries().length).toBe(originalOps.length)
   })
 
-  it('compact убирает createTexture → destroyTexture пару перед replay', () => {
+  it('compact removes the createTexture → destroyTexture pair before replay', () => {
     const journal = createJournal()
     const oldRecording = createRecordingGPU()
     const oldGpu = withJournalGpu(oldRecording.gpu, journal)
 
     const texId = oldGpu.createTexture(64, 64) // createTexture
     oldGpu.deleteTexture(texId) // destroyTexture
-    // compaction: пара create→destroy одного id удаляет оба опса
+    // compaction: a create→destroy pair of the same id removes both ops
     journal.compact()
 
     expect(journal.size).toBe(0)
 
-    // Replay на новом фасаде — пустой журнал → ничего не делается
+    // Replay on a fresh facade — an empty journal → nothing is done
     const newRecording = createRecordingGPU()
     replayJournalOnGpu(journal, newRecording.gpu)
     expect(newRecording.calls.length).toBe(0)
   })
 
-  it('cross-backend replay: WebGL2-only опсы (createProgram/createBuffer) игнорируются на WebGPU', () => {
-    // Симулируем журнал, записанный на WebGL2 (есть createProgram/createBuffer).
-    // Эти DeclOp variants не валидны для WebGPU (там нет отдельных программ/
-    // буферов как ресурсов — пайплайны ленивые, vertex buffers — keyed по
-    // Float32Array). applyGpuOp должен молча их пропускать (default case).
+  it('cross-backend replay: WebGL2-only ops (createProgram/createBuffer) are ignored on WebGPU', () => {
+    // Simulate a journal recorded on WebGL2 (it has createProgram/createBuffer).
+    // These DeclOp variants are not valid for WebGPU (there are no separate programs/
+    // buffers as resources — pipelines are lazy, vertex buffers are keyed by
+    // Float32Array). applyGpuOp must silently skip them (default case).
     const journal = createJournal()
     journal.record({ kind: 'createProgram', id: 1, vertex: 'V', fragment: 'F' })
     journal.record({ kind: 'createBuffer', id: 1, data: new Float32Array([1, 2, 3]) })
@@ -378,7 +378,7 @@ describe('Task 57 — replayJournalOnGpu', () => {
 
     const newRecording = createRecordingGPU()
     expect(() => replayJournalOnGpu(journal, newRecording.gpu)).not.toThrow()
-    // createTexture дошел, createProgram/createBuffer — проигнорированы
+    // createTexture arrived, createProgram/createBuffer — ignored
     expect(newRecording.calls.some(c => c.startsWith('createTexture'))).toBe(true)
     expect(newRecording.calls.some(c => c.startsWith('createProgram'))).toBe(false)
     expect(newRecording.calls.some(c => c.startsWith('createBuffer'))).toBe(false)

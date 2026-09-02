@@ -1,37 +1,37 @@
 /**
- * Caps — модуль возможностей бэкенда (M4, DESIGN.md §11.4 + §5.2).
+ * Caps — backend capabilities module (M4, DESIGN.md §11.4 + §5.2).
  *
- * Контракт (досье v1.0 §11.4, добавлено в addendum §5.2):
- *  - caps.has(FeatureId): boolean            — фича доступна нативно?
- *  - caps.format(f, axis): FormatSupport    — 6-осная матрица форматов
- *  - caps.path(name): PathSupport           — переносимость present-путей
- *  - caps.ext(name): unknown | null        — escape-hatch к сырому расширению
+ * Contract (dossier v1.0 §11.4, added in addendum §5.2):
+ *  - caps.has(FeatureId): boolean            — is the feature available natively?
+ *  - caps.format(f, axis): FormatSupport    — 6-axis format matrix
+ *  - caps.path(name): PathSupport           — present-path portability
+ *  - caps.ext(name): unknown | null        — escape-hatch to the raw extension
  *  - caps.stats(): RendererStats           — cpuMs, gpuMs, memoryEstimate, hit-rate
- *  - caps.invalidate(): void                — сброс кэша (после device-loss / backend-swap)
+ *  - caps.invalidate(): void                — cache reset (after device-loss / backend-swap)
  *
- * Дизайн: backend-агностический каркас в @rune/core. Backend (WebGL2 / WebGPU)
- * пробитует реальную среду и поставляет `CapsQuery` — структура с measured
- * capabilities. `createCaps(query, statsProvider)` строит замкнутый объект с
- * методами интерфейса.
+ * Design: a backend-agnostic skeleton in @rune/core. The backend (WebGL2 / WebGPU)
+ * probes the real environment and supplies `CapsQuery` — a structure with measured
+ * capabilities. `createCaps(query, statsProvider)` builds a closed object with
+ * interface methods.
  *
- * RendererStats — runtime-метрики, обновляются рендерером каждый кадр.
- * cpuMs — performance.now() обвязка вокруг frame callback (дешёво, везде).
- * gpuMs — требует EXT_disjoint_timer_query (WebGL2) или pipeline-statistics-query
- * (WebGPU feature). Без расширения = null — честно, не фейковый 0.
- * memoryEstimate — ручной счётчик: размер текстур (w*h*channels*bytesPerChannel)
- * + размер буферов. В @rune/webgl2 realGL ведётся Map<textureId, GPUTexture>
- * — там же считаем bytes.
+ * RendererStats — runtime metrics, updated by the renderer every frame.
+ * cpuMs — a performance.now() wrapper around the frame callback (cheap, everywhere).
+ * gpuMs — requires EXT_disjoint_timer_query (WebGL2) or pipeline-statistics-query
+ * (WebGPU feature). Without the extension = null — honest, not a fake 0.
+ * memoryEstimate — a manual counter: texture size (w*h*channels*bytesPerChannel)
+ * + buffer size. In @rune/webgl2 realGL keeps a Map<textureId, GPUTexture>
+ * — bytes are counted there as well.
  *
- * Контракт 5 (честность гейтов): недоступная возможность — null или 'none'
- * в матрице, а не молчаливое падение. caps.has('float-blend') === false
- * на Mali без EXT_float_blend — юзер может гейтить код на это.
+ * Contract 5 (gate honesty): an unavailable capability is null or 'none'
+ * in the matrix, not a silent crash. caps.has('float-blend') === false
+ * on Mali without EXT_float_blend — the user can gate code on this.
  */
 
-// ─── FeatureId — канонические имена фич ──────────────────────────────────────
+// ─── FeatureId — canonical feature names ──────────────────────────────────────
 //
-// Соответствие WebGPU features ↔ FeatureId (по канону):
+// WebGPU features ↔ FeatureId mapping (per the canon):
 //   texture-compression-astc  → 'astc'
-//   texture-compression-bc    → 'bc1' | 'bc3' | 'bc7' (один флаг → 3 FeatureId'а)
+//   texture-compression-bc    → 'bc1' | 'bc3' | 'bc7' (one flag → 3 FeatureIds)
 //   texture-compression-etc2  → 'etc2'
 //   depth-clamping            → 'depth-clamp'
 //   timestamp-query           → 'timestamp-query'
@@ -40,7 +40,7 @@
 //   bgra8unorm-storage        → 'bgra8-storage'
 //   float32-filterable        → 'float32-filterable'
 //
-// Соответствие WebGL2 extensions ↔ FeatureId:
+// WebGL2 extensions ↔ FeatureId mapping:
 //   WEBGL_compressed_texture_astc  → 'astc'
 //   WEBGL_compressed_texture_s3tc  → 'bc1' | 'bc3' (BC1=RGB DXT1, BC3=RGBA DXT5)
 //   EXT_texture_compression_rgtc   → 'bc4' | 'bc5'
@@ -51,13 +51,13 @@
 //   OES_texture_float              → 'float32-texture'
 //   OES_texture_half_float         → 'float16-texture'
 //   EXT_texture_filter_anisotropic → 'anisotropic'
-//   ANGLE_instanced_arrays          → 'instancing' (но в WebGL2 — нативно!)
+//   ANGLE_instanced_arrays          → 'instancing' (but in WebGL2 — native!)
 //   EXT_disjoint_timer_query_webgl2 → 'timestamp-query'
 //   OES_texture_float_linear       → 'float32-filterable'
 //
-// 'instancing' в WebGL2 нативно (gl.drawArraysInstanced), без расширения.
-// В WebGPU — всегда есть (drawIndirect/vertex buffers), но limits.maxDrawBuffers
-// может быть 0 в software-fallback.
+// 'instancing' is native in WebGL2 (gl.drawArraysInstanced), no extension needed.
+// In WebGPU — always present (drawIndirect/vertex buffers), but limits.maxDrawBuffers
+// may be 0 in a software fallback.
 
 export type FeatureId =
   // Compression
@@ -112,111 +112,111 @@ export type FeatureId =
   | 'video-frame'
   | 'bgra8-storage'
 
-/** Допускаются строковые alias'ы для расширений, не перечисленных в FeatureId. */
+/** String aliases are allowed for extensions not listed in FeatureId. */
 export type FeatureName = FeatureId | (string & {})
 
-// ─── FormatAxis — 6 осей матрицы переносимости форматов ──────────────────────
+// ─── FormatAxis — 6 axes of the format portability matrix ──────────────────────
 
 export type FormatAxis =
-  | 'sampled'    // текстурирование (texture() в шейдере)
-  | 'render'     // как render target (color attachment)
-  | 'blend'      // blending работает при использовании как render target
-  | 'filter'     // linear filtering доступен (не только nearest)
+  | 'sampled'    // texturing (texture() in the shader)
+  | 'render'     // as a render target (color attachment)
+  | 'blend'      // blending works when used as a render target
+  | 'filter'     // linear filtering available (not just nearest)
   | 'msaa'       // multisample render target
   | 'storage'    // storage texture (imageStore / writeonly storage)
 
-// ─── FormatSupport — уровень поддержки ───────────────────────────────────────
+// ─── FormatSupport — support level ───────────────────────────────────────
 
 export type FormatSupport =
-  | 'native'    // GPU нативно поддерживает
-  | 'fallback'  // эмуляция (медленно) — не для production hot path
-  | 'none'      // не поддерживается
+  | 'native'    // natively supported by the GPU
+  | 'fallback'  // emulation (slow) — not for a production hot path
+  | 'none'      // not supported
 
-// ─── PathSupport — переносимость present-путей (упрощённо для M4) ────────────
+// ─── PathSupport — present-path portability (simplified for M4) ────────────
 //
-// Полный PathRegistry с PathState (healthy/degraded/disabled через Decay.ratio)
-// — это M8 (#61, #62). В M4 — упрощённый PathSupport: supported/unsupported.
-// RendererStats и degradationRatio появятся в M8 с PathState.
+// A full PathRegistry with PathState (healthy/degraded/disabled via Decay.ratio)
+// — that is M8 (#61, #62). In M4 — a simplified PathSupport: supported/unsupported.
+// RendererStats and degradationRatio will arrive in M8 with PathState.
 
 export type PathSupport = 'supported' | 'unsupported' | 'unknown'
 
-// ─── RendererStats — runtime-метрики кадра ──────────────────────────────────
+// ─── RendererStats — per-frame runtime metrics ──────────────────────────────────
 //
-// Обновляются рендерером на каждый кадр. Snapshot через caps.stats().
-// hitRate — пока всегда 1.0 (нет кэша компиляции шейдеров с инвалидирующимся
-// состоянием); будет Wiring когда появятся cache-invalidation триггеры.
+// Updated by the renderer every frame. Snapshot via caps.stats().
+// hitRate — for now always 1.0 (no shader compilation cache with invalidatable
+// state); will be wired when cache-invalidation triggers appear.
 
 export interface RendererStats {
-  /** CPU-side время на обработку кадра (мс). Включает: frame callback, recorder
-   *  push, dispatch Tape. Не включает rAF-wait. Измеряется через performance.now(). */
+  /** CPU-side time to process a frame (ms). Includes: frame callback, recorder
+   *  push, dispatch Tape. Does not include rAF-wait. Measured via performance.now(). */
   readonly cpuMs: number
-  /** GPU-side время на отрисовку (мс). null если нет расширения timer-query
-   *  (EXT_disjoint_timer_query / pipeline-statistics-query). Честно null —
-   *  не фейковый 0. */
+  /** GPU-side time to draw (ms). null if there is no timer-query extension
+   *  (EXT_disjoint_timer_query / pipeline-statistics-query). Honestly null —
+   *  not a fake 0. */
   readonly gpuMs: number | null
-  /** Оценка занятой GPU-памяти (байт). Сумма: textures (w*h*channels*bpc) +
-   *  vertex buffers (data.length * 4 для Float32Array). Не точная — не учитывает
-   *  mip-цепи (×1.33) и alignment/padding. Достаточно для dashboards. */
+  /** Estimate of GPU memory used (bytes). Sum: textures (w*h*channels*bpc) +
+   *  vertex buffers (data.length * 4 for Float32Array). Not exact — does not count
+   *  mip chains (×1.33) or alignment/padding. Good enough for dashboards. */
   readonly memoryEstimate: number
-  /** Кол-во draw calls в последнем кадре. */
+  /** Number of draw calls in the last frame. */
   readonly drawCalls: number
-  /** Счётчик кадров с момента старта. */
+  /** Frame counter since start. */
   readonly frameCount: number
-  /** Cache hit-rate (0..1). Пока всегда 1.0 — нет инвалидаций. */
+  /** Cache hit-rate (0..1). For now always 1.0 — no invalidations. */
   readonly hitRate: number
 }
 
-// ─── CapsQuery — что backend пробирует и поставляет в createCaps ─────────────
+// ─── CapsQuery — what the backend probes and supplies to createCaps ─────────────
 
 /**
- * Backend-зависимая часть Caps. Заполняется webgl2/capsProbe или webgpu/capsProbe
- * на старте рендерера. createCaps(query) строит замкнутый Caps-объект.
+ * The backend-dependent part of Caps. Filled in by webgl2/capsProbe or webgpu/capsProbe
+ * at renderer startup. createCaps(query) builds a closed Caps object.
  */
 export interface CapsQuery {
-  /** Множество доступных FeatureId. */
+  /** The set of available FeatureIds. */
   readonly features: ReadonlySet<FeatureName>
-  /** Карта format × axis → support. Ключ — `${format}|${axis}`. */
+  /** Map of format × axis → support. Key — `${format}|${axis}`. */
   readonly formatMatrix: ReadonlyMap<string, FormatSupport>
-  /** Карта present-path → support. */
+  /** Map of present-path → support. */
   readonly paths: ReadonlyMap<string, PathSupport>
-  /** Карта имени расширения → raw object (getExtension / features.has). */
+  /** Map of extension name → raw object (getExtension / features.has). */
   readonly extensions: ReadonlyMap<string, unknown>
-  /** Лимиты адаптера (maxTextureSize, maxBufferSize, maxTextureUnits, etc.). */
+  /** Adapter limits (maxTextureSize, maxBufferSize, maxTextureUnits, etc.). */
   readonly limits: Readonly<Record<string, number>>
-  /** Бэкенд-строка: 'webgl2' | 'webgpu' | 'webgl1' | 'software'. */
+  /** Backend string: 'webgl2' | 'webgpu' | 'webgl1' | 'software'. */
   readonly backend: string
 }
 
-// ─── StatsProvider — callback от рендерера для свежих метрик ─────────────────
+// ─── StatsProvider — renderer callback for fresh metrics ─────────────────
 
 export type StatsProvider = () => RendererStats
 
-// ─── Caps — публичный интерфейс (досье §11.4) ───────────────────────────────
+// ─── Caps — public interface (dossier §11.4) ───────────────────────────────
 
 export interface Caps {
-  /** Доступна ли фича нативно (не 'fallback'). */
+  /** Whether the feature is available natively (not 'fallback'). */
   has(f: FeatureName): boolean
-  /** Поддержка формата по оси. */
+  /** Format support along an axis. */
   format(f: string, axis: FormatAxis): FormatSupport
-  /** Переносимость present-пути (упрощённо для M4). */
+  /** Present-path portability (simplified for M4). */
   path(name: string): PathSupport
-  /** Raw расширение (escape-hatch). null если недоступно. */
+  /** Raw extension (escape-hatch). null if unavailable. */
   ext(name: string): unknown | null
-  /** Свежие метрики кадра. */
+  /** Fresh frame metrics. */
   stats(): RendererStats
-  /** Лимит адаптера (maxTextureSize2D, maxBufferSize, ...). */
+  /** Adapter limit (maxTextureSize2D, maxBufferSize, ...). */
   limit(name: string): number | null
-  /** Бэкенд. */
+  /** Backend. */
   readonly backend: string
-  /** Сброс кэша — вызвать после device-loss / backend-swap. */
+  /** Cache reset — call after device-loss / backend-swap. */
   invalidate(): void
 }
 
-// ─── createCaps — фабрика ────────────────────────────────────────────────────
+// ─── createCaps — factory ────────────────────────────────────────────────────
 //
-// Принимает query (результат probing) и statsProvider (callback от рендерера).
-// statsProvider может быть null на момент createCaps (рендерер ещё не запустил
-// frame loop) — stats() вернёт zero-state, потом statsProvider подключится.
+// Takes a query (the probing result) and a statsProvider (a renderer callback).
+// statsProvider may be null at createCaps time (the renderer has not yet started the
+// frame loop) — stats() returns zero-state, then statsProvider is attached.
 
 const ZERO_STATS: RendererStats = {
   cpuMs: 0,
@@ -228,8 +228,8 @@ const ZERO_STATS: RendererStats = {
 }
 
 export function createCaps(query: CapsQuery, statsProvider: StatsProvider | null = null): Caps {
-  // Snapshot запроса на момент создания. invalidate() — пересоздаёт snapshot
-  // (например, после device-loss юзер пере-пробивает и пересоздаёт caps).
+  // Snapshot of the query at creation time. invalidate() — rebuilds the snapshot
+  // (e.g., after device-loss the user re-probes and recreates caps).
   const snapshot = query
   let statsRef = statsProvider
 
@@ -262,28 +262,28 @@ export function createCaps(query: CapsQuery, statsProvider: StatsProvider | null
       return snapshot.backend
     },
     invalidate() {
-      // Помечаем snapshot как требующий перепробинга. Реальный reprobe
-      // делает бэкенд (вызывает probeGLCaps / probeGPUCaps заново и
-      // создаёт новый Caps). invalidate() — соглашение: вызвать на
+      // Marks the snapshot as requiring a re-probe. The actual reprobe
+      // is done by the backend (calls probeGLCaps / probeGPUCaps again and
+      // creates a new Caps). invalidate() — a convention: call on
       // device-lost / contextlost.
-      // Здесь просто сбрасываем statsProvider — юзер может передать новый.
+      // Here we simply reset statsProvider — the user may pass a new one.
       statsRef = null
     },
   }
 }
 
-// ─── StatsCollector — CPU-side измерение времени кадра ──────────────────────
+// ─── StatsCollector — CPU-side frame time measurement ──────────────────────
 //
-// Рендерер обвязывает frame callback в statsCollector.beginFrame()/endFrame().
-// beginFrame возвращает timer который endFrame() читает для cpuMs. drawCalls
-// и memoryEstimate обновляются отдельными setters — recorder постит drawCall count
-// после каждой записи, realGL постит memoryEstimate после createTexture/createBuffer.
+// The renderer wraps the frame callback in statsCollector.beginFrame()/endFrame().
+// beginFrame returns a timer which endFrame() reads for cpuMs. drawCalls
+// and memoryEstimate are updated via separate setters — the recorder posts the drawCall count
+// after each recording, realGL posts memoryEstimate after createTexture/createBuffer.
 //
-// gpuMs: если statsCollector подключен к GpuTimer (setGpuTimer), то endFrame()
-// дёргает timer.result() предыдущего кадра (GPU timer async — результат приходит
-// не сразу). Это даёт gpuMs со сдвигом в 1 кадр (типичный паттерн в GPU
-// profiling: frame N дёргает timer, frame N+1 читает результат). Без GpuTimer
-// gpuMs = null (честно, не фейковый 0).
+// gpuMs: if statsCollector is connected to a GpuTimer (setGpuTimer), endFrame()
+// pulls timer.result() of the previous frame (GPU timer is async — the result arrives
+// not immediately). This gives gpuMs with a 1-frame lag (a typical pattern in GPU
+// profiling: frame N pulls the timer, frame N+1 reads the result). Without a GpuTimer
+// gpuMs = null (honest, not a fake 0).
 
 export interface StatsCollector {
   beginFrame(): void
@@ -291,41 +291,41 @@ export interface StatsCollector {
   addDrawCall(): void
   addMemory(bytes: number): void
   subMemory(bytes: number): void
-  /** Текущий snapshot — то, что возвращает caps.stats(). */
+  /** Current snapshot — what caps.stats() returns. */
   snapshot(): RendererStats
-  /** Сброс счётчиков на кадр (вызывается beginFrame). */
+  /** Reset per-frame counters (called by beginFrame). */
   resetForFrame(): void
-  /** Подключить GPU-timer (если доступен). null — нет расширения, gpuMs = null. */
+  /** Attach a GPU-timer (if available). null — no extension, gpuMs = null. */
   setGpuTimer(timer: GpuTimer | null): void
 }
 
-// ─── GpuTimer — GPU-side измерение времени кадра ──────────────────────────────
+// ─── GpuTimer — GPU-side frame time measurement ──────────────────────────────
 //
-// GPU timer-query работает асинхронно: begin()/end() вписывают метки в
-// command stream GPU, result() читает результат когда GPU дойдёт.
-// Из-за этого типичный паттерн — frame N вызывает begin/end, frame N+1
-// дёргает result() и получает gpuMs.
+// GPU timer-query works asynchronously: begin()/end() write markers into the
+// GPU command stream, result() reads the result once the GPU gets there.
+// Because of this the typical pattern — frame N calls begin/end, frame N+1
+// pulls result() and gets gpuMs.
 //
 // WebGL2: EXT_disjoint_timer_query_webgl2 — beginQuery(TIME_ELAPSED)/endQuery,
-// результат читается через getQueryObject в следующем кадре. Если disjoint=GPU
-// reset — отбрасываем, пере-запускаем.
+// the result is read via getQueryObject in the next frame. If disjoint=GPU
+// reset — we discard it and re-run.
 //
-// WebGPU: timestamp-query feature — beginEndWriteTimestamp, результат читается
-// через resolveQuerySet в буфер. Реализован в packages/webgpu/src/gpuTimer.ts
-// (createGpuGpuTimer) и подключается в realGPU.ts при наличии feature
-// 'timestamp-query' на адаптере. На адаптерах без feature gpuTimer=null, gpuMs=null.
+// WebGPU: timestamp-query feature — beginEndWriteTimestamp, the result is read
+// via resolveQuerySet into a buffer. Implemented in packages/webgpu/src/gpuTimer.ts
+// (createGpuGpuTimer) and attached in realGPU.ts when the adapter has the
+// 'timestamp-query' feature. On adapters without the feature gpuTimer=null, gpuMs=null.
 
 export interface GpuTimer {
-  /** Старт таймера в текущем кадре. beginFrame()/endFrame() вызывают
-   *  это между собой. idempotent: если уже запущен — no-op. */
+  /** Start the timer in the current frame. beginFrame()/endFrame() call
+   *  this between themselves. Idempotent: if already started — no-op. */
   begin(): void
-  /** Финиш таймера. Закрывает query. */
+  /** Finish the timer. Closes the query. */
   end(): void
-  /** Читает результат предыдущего кадра. null если:
-   *   - timer не запускался (первый кадр)
-   *   - GPU disjoint (reset) — отбрасываем
-   *   - расширение недоступно
-   *  Возвращает ms (float). Со сдвигом в 1 кадр. */
+  /** Reads the previous frame's result. null if:
+   *   - the timer was not started (first frame)
+   *   - GPU disjoint (reset) — we discard
+   *   - the extension is unavailable
+   *  Returns ms (float). With a 1-frame lag. */
   result(): number | null
 }
 
@@ -344,11 +344,11 @@ export function createStatsCollector(now: () => number = () => performance.now()
       drawCalls = 0
       cpuMs = 0
       frameCount++
-      // GPU timer: begin на старте кадра (под обвязку frame callback).
-      // result() читаем НЕ здесь (он асинхронный) — а в snapshot(), после
-      // того как endFrame уже закрыл query предыдущего кадра.
+      // GPU timer: begin at frame start (under the frame callback wrapper).
+      // result() is NOT read here (it is asynchronous) — but in snapshot(), after
+      // endFrame has already closed the previous frame's query.
       if (gpuTimer !== null) {
-        // Читаем результат ПРЕДЫДУЩЕГО кадра (он был закрыт в past endFrame).
+        // Read the PREVIOUS frame's result (it was closed in a past endFrame).
         const prev = gpuTimer.result()
         gpuMs = prev
         gpuTimer.begin()

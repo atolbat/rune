@@ -1,60 +1,61 @@
 /**
- * FFT Стокхэма — РЕЦЕПТ kit (Task 112).
+ * Stockham FFT — a kit RECIPE (Task 112).
  *
- * Решение пользователя Task 112: «FFT не должен быть в ядре. В ките или ещё
- * где — да. Но там явно есть полезные паттерны, что можно оставить в ядре».
- * Паттерны (halfFloat-кодек, pingPong, формат-тиры) уехали в @rune/core;
- * сам FFT — рецепт kit: чистое расписание проходов + дуал-соурс чанки
- * (GLSL/WGSL с одинаковыми именами — досье §10.3 «Kit — библиотека
- * дуал-соурс чанков и рецептов»).
+ * Per the user's decision in Task 112: "FFT must not live in the core. In kit
+ * or anywhere else — yes. But there are clearly useful patterns there that
+ * can stay in the core".
+ * The patterns (halfFloat codec, pingPong, format tiers) moved to @rune/core;
+ * the FFT itself is a kit recipe: a pure pass schedule + dual-source chunks
+ * (GLSL/WGSL with identical names — see dossier §10.3 "Kit — a library of
+ * dual-source chunks and recipes").
  *
- * Что здесь:
- *  • fft2dPasses(resolution) — ПЛАН 2D-БПФ Стокхэма: 2·log₂N проходов
- *    (N/2 горизонтальных + N/2 вертикальных), ping-pong parity, размер
- *    подтрансформации 2^k. Чистая функция — бэкенд-агностична: вызывающий
- *    мапит 'a'/'b'/'result' на свои текстуры и биндит чанк шейдера.
- *  • FFT_GLSL_SUBTRANSFORM / FFT_WGSL_SUBTRANSFORM — один и тот же проход
- *    сабтрансформации на двух языках: четыре комплексных числа в RGBA
- *    (две последовательности трансформируются одновременно — как в
- *    david.li/waves), ось — юниформом (одна программа на обе оси — вместо
- *    двух #define-вариантов демо), вход — u_input.
+ * What lives here:
+ *  • fft2dPasses(resolution) — the Stockham 2D-FFT PLAN: 2·log₂N passes
+ *    (N/2 horizontal + N/2 vertical), ping-pong parity, subtransform size
+ *    2^k. A pure function — backend-agnostic: the caller maps 'a'/'b'/'result'
+ *    onto its own textures and binds the shader chunk.
+ *  • FFT_GLSL_SUBTRANSFORM / FFT_WGSL_SUBTRANSFORM — the same subtransform
+ *    pass in two languages: four complex numbers packed in RGBA
+ *    (two sequences transformed simultaneously — as in david.li/waves),
+ *    the axis via a uniform (one program for both axes — instead of two
+ *    #define variants as in the demo), input via u_input.
  *
- * Контракт прохода (оба бэкенда):
+ * Pass contract (both backends):
  *   uniforms: u_transformSize (N), u_subtransformSize (2^k), u_horizontal (0|1)
- *   texture:  u_input (RGBA, NEAREST-семантика: чтение по центрам текселей)
- *   output:   текущая цель рендера N×N
+ *   texture:  u_input (RGBA, NEAREST semantics: read at texel centers)
+ *   output:   the current render target N×N
  */
 
-/** Один проход БПФ из плана. */
+/** One FFT pass from the plan. */
 export interface FftPass {
-  /** Индекс прохода (0 .. 2·log₂N-1). */
+  /** Pass index (0 .. 2·log₂N-1). */
   readonly index: number
-  /** Ось: первая половина — строки (horizontal), вторая — столбцы. */
+  /** Axis: the first half — rows (horizontal), the second — columns. */
   readonly axis: 'horizontal' | 'vertical'
-  /** Размер подтрансформации 2^k (k = 1..log₂N). */
+  /** Subtransform size 2^k (k = 1..log₂N). */
   readonly subtransformSize: number
-  /** Откуда ЧИТАТЬ: 'a'/'b' — ping-pong пара, 'spectrum' — вход плана. */
+  /** Where to READ from: 'a'/'b' — the ping-pong pair, 'spectrum' — the plan input. */
   readonly input: 'spectrum' | 'a' | 'b'
-  /** Куда ПИСАТЬ: 'a'/'b' — ping-pong пара, 'result' — финальный выход. */
+  /** Where to WRITE: 'a'/'b' — the ping-pong pair, 'result' — the final output. */
   readonly output: 'a' | 'b' | 'result'
 }
 
 /**
- * План 2D-БПФ Стокхэма для сетки resolution×resolution (степень двойки).
+ * Stockham 2D-FFT plan for a resolution×resolution grid (a power of two).
  *
- * Выводит ту же последовательность, что цикл демо david.li/waves:
+ * Emits the same sequence as the david.li/waves demo loop:
  *   i=0            : spectrum → a
- *   i нечёт        : a → b
- *   i чёт (внутри) : b → a
- *   i=последний    : (по parity) a|b → result
- *   на i=iterations/2 ось меняется horizontal → vertical
- *   subtransformSize = 2^((i mod N/2·log₂… см. код) + 1)
+ *   i odd          : a → b
+ *   i even (inside): b → a
+ *   i=last         : (by parity) a|b → result
+ *   at i=iterations/2 the axis switches horizontal → vertical
+ *   subtransformSize = 2^((i mod N/2·log₂… see the code) + 1)
  *
- * Пример (N=4, 4 прохода): [h:2 spec→a] [h:4 a→b] [v:2 b→a] [v:4 a→res].
+ * Example (N=4, 4 passes): [h:2 spec→a] [h:4 a→b] [v:2 b→a] [v:4 a→res].
  */
 export function fft2dPasses(resolution: number): readonly FftPass[] {
   if (resolution < 2 || (resolution & (resolution - 1)) !== 0) {
-    throw new Error(`fft2dPasses: resolution должен быть степенью двойки ≥ 2, получено ${resolution}`)
+    throw new Error(`fft2dPasses: resolution must be a power of two ≥ 2, got ${resolution}`)
   }
   const logN = Math.round(Math.log2(resolution))
   const iterations = logN * 2
@@ -69,9 +70,9 @@ export function fft2dPasses(resolution: number): readonly FftPass[] {
       input = 'spectrum'
       output = 'a'
     } else if (i === iterations - 1) {
-      // Чётность (iterations-1) после i=0 (spec→a): нечётные пишут в b…
-      // Последний вход — по parity: повторяет логику демо
-      // (iterations % 2 === 0 ? PING : PONG) при ping=a, pong=b.
+      // Parity of (iterations-1) after i=0 (spec→a): odd passes write to b…
+      // The last input — by parity: mirrors the demo logic
+      // (iterations % 2 === 0 ? PING : PONG) with ping=a, pong=b.
       input = iterations % 2 === 0 ? 'a' : 'b'
       output = 'result'
     } else if (i % 2 === 1) {
@@ -86,10 +87,10 @@ export function fft2dPasses(resolution: number): readonly FftPass[] {
   return passes
 }
 
-/** GLSL ES 3.00-проход сабтрансформации (фрагмент). Ось — юниформом:
- *  одна программа на обе оси (в демо — два #define-варианта; здесь —
- *  половина компиляций). Полноэкранный треугольник — из gl_VertexID
- *  (см. fullscreenPass.ts), вершинный буфер не нужен. */
+/** GLSL ES 3.00 subtransform pass (fragment). The axis via a uniform:
+ *  one program for both axes (the demo uses two #define variants; here —
+ *  half the compilations). The fullscreen triangle comes from gl_VertexID
+ *  (see fullscreenPass.ts), no vertex buffer needed. */
 export const FFT_GLSL_SUBTRANSFORM = /* glsl */ `#version 300 es
 precision highp float;
 
@@ -128,12 +129,12 @@ void main() {
 }
 `
 
-/** WGSL-проход сабтрансформации (фрагмент; вершина — fullscreenPass-чанк).
- *  textureLoad вместо texture2D: сим-проходы читают точно по центрам
- *  текселей (NEAREST-семантика побитово; david.li/waves-порты). */
+/** WGSL subtransform pass (fragment; the vertex is the fullscreenPass chunk).
+ *  textureLoad instead of texture2D: sim passes read exactly at texel
+ *  centers (NEAREST semantics bit-for-bit; david.li/waves ports). */
 export const FFT_WGSL_SUBTRANSFORM = /* wgsl */ `
 struct FftUniforms {
-  u: vec4f, // x: transformSize, y: subtransformSize, z: horizontal, w: —
+  u: vec4f, // x: transformSize, y: subtransformSize, z: horizontal, w: unused
 }
 
 @group(0) @binding(0) var<uniform> uni: FftUniforms;

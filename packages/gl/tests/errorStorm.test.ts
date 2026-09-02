@@ -3,9 +3,9 @@ import { createWebGpuRenderer } from '../src/index.ts'
 import { createRecordingGPU } from '@rune/webgpu'
 import type { GPUFacade } from '@rune/webgpu'
 
-/** REGRESSION (требование заказчика): шторм ошибок GPU → пауза рендера. */
+/** REGRESSION (customer requirement): a storm of GPU errors → render pause. */
 describe('error-storm guard', () => {
-  it('после 3 ошибок GPU рендер ставится на паузу; restart снимает', async () => {
+  it('after 3 GPU errors rendering is paused; restart clears it', async () => {
     const { gpu } = createRecordingGPU()
     const reported: string[] = []
     let captured: ((message: string) => void) | undefined
@@ -19,34 +19,34 @@ describe('error-storm guard', () => {
       onGpuError: message => reported.push(message),
       observeResize: false,
       now: () => 0,
-      requestFrame: () => () => {}, // Bun без rAF: цикл управляется step вручную
+      requestFrame: () => () => {}, // Bun without rAF: the loop is driven manually via step
     })
 
     let frames = 0
     renderer.frame(() => { frames++ })
 
     renderer.step(100)
-    expect(frames).toBe(1) // до ошибок рендер жив
+    expect(frames).toBe(1) // before errors the render is alive
 
-    captured!('ошибка 1')
-    captured!('ошибка 2')
-    captured!('ошибка 3') // порог: пауза
-    expect(reported.length).toBe(4) // три ошибки + сводка о паузе
-    expect(reported[3]).toContain('рендер остановлен')
+    captured!('error 1')
+    captured!('error 2')
+    captured!('error 3') // threshold: pause
+    expect(reported.length).toBe(4) // three errors + the pause summary
+    expect(reported[3]).toContain('rendering stopped')
 
     renderer.step(200)
-    expect(frames).toBe(1) // пауза: кадры не рисуются
+    expect(frames).toBe(1) // pause: frames are not drawn
 
-    captured!('ошибка 4') // тишина после паузы: не репортится
+    captured!('error 4') // silence after the pause: not reported
     expect(reported.length).toBe(4)
 
     renderer.restart()
     renderer.step(300)
-    expect(frames).toBe(2) // цикл восстановлен
+    expect(frames).toBe(2) // the loop is restored
     renderer.stop()
   })
 
-  it('одиночные ошибки не останавливают рендер', async () => {
+  it('single errors do not stop the render', async () => {
     const { gpu } = createRecordingGPU()
     let captured: ((message: string) => void) | undefined
     const renderer = await createWebGpuRenderer({
@@ -61,10 +61,10 @@ describe('error-storm guard', () => {
     let frames = 0
     renderer.frame(() => { frames++ })
 
-    captured!('единичная ошибка')
+    captured!('single error')
     renderer.step(100)
     renderer.step(200)
-    expect(frames).toBe(2) // одна ошибка — не повод для паузы
+    expect(frames).toBe(2) // one error is not a reason to pause
     renderer.stop()
   })
 })

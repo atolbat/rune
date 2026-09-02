@@ -1,9 +1,9 @@
-// @rune/scene — максимально плоский data-oriented сценовый граф (Task 81).
+// @rune/scene — a maximally flat data-oriented scene graph (Task 81).
 //
-// Камеры, фрустум-отсечение (иерархическое, сферы, trivial accept/reject),
-// инстанс-группы (компакция видимых матриц в один пул на группу) и вынос
-// конвейера в воркер поверх SharedArrayBuffer — один буфер, одни горячие
-// циклы в обоих режимах (T0 локально / T1-T2 воркер).
+// Cameras, frustum culling (hierarchical, spheres, trivial accept/reject),
+// instance groups (compaction of visible matrices into one pool per group)
+// and moving the pipeline into a worker over a SharedArrayBuffer — one
+// buffer, the same hot loops in both modes (T0 local / T1-T2 worker).
 
 export {
   createSceneBuffer,
@@ -28,9 +28,9 @@ export type { Scene, SceneNodeInit, SceneOptions, SceneCullResult } from './scen
 export { createCamera, applyObliqueClipPlane } from './camera.ts'
 export type { Camera } from './camera.ts'
 
-// Task 86: Renderable — абстрактная сущность «что рисовать» (пасс/политика/
-// рецепт меша/материал), сводимая к мешу резолвером; инстанс-пакет — деталь
-// компакции, а не пользовательская сущность.
+// Task 86: Renderable — an abstract "what to draw" entity (pass/policy/
+// mesh recipe/material), reduced to a mesh by the resolver; the instance
+// pack is a compaction detail, not a user-facing entity.
 export {
   createRenderableRegistry,
   RENDER_PASS_ORDER,

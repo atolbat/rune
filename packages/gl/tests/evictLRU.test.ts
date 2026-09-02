@@ -5,7 +5,7 @@ import { createResourceSessionGPU } from '../src/resourceSessionGPU.ts'
 import type { GLFacade, GLImageSource } from '@rune/webgl2'
 import type { GPUFacade, GPUImageSource } from '@rune/webgpu'
 
-/** Фейковый источник (ImageBitmap-подобный). */
+/** Fake source (ImageBitmap-like). */
 const src = (w: number, h: number): { width: number; height: number; id: string } =>
   ({ width: w, height: h, id: `s${w}x${h}-${Math.random().toString(36).slice(2, 7)}` })
 
@@ -92,70 +92,70 @@ function makeFakeGPU(): { facade: GPUFacade; calls: GLCall[] } {
   return { facade: facade as unknown as GPUFacade, calls }
 }
 
-/** Raw-вызовы фасада данного метода. */
+/** Raw facade calls of the given method. */
 const callsOf = (calls: GLCall[], method: string): unknown[][] =>
   calls.filter(c => c.method === method).map(c => c.args)
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('resourceSession.evictLRU — LRU-вытеснение (GL)', () => {
-  test('вытесняет LRU-первой, raw deleteTexture, журнал НЕ меняется', () => {
+describe('resourceSession.evictLRU — LRU eviction (GL)', () => {
+  test('evicts the LRU-first one, raw deleteTexture, the journal is NOT changed', () => {
     const j = createResourceJournal()
     const { facade: raw, calls } = makeFakeGL()
     const s = createResourceSessionGL(raw, j)
     const a = s.facade.createTexture(256, 256) // 256 KB, raw 1
     const b = s.facade.createTexture(256, 256) // 256 KB, raw 2
     const c = s.facade.createTexture(256, 256) // 256 KB, raw 3
-    // Использования: B свежее всех, C не трогали после create, A — самый старый
+    // Usage: B is the freshest, C was not touched after create, A is the oldest
     s.facade.bindTexture(b, 0)
-    s.facade.bindTexture(a, 0) // A теперь свежее C
+    s.facade.bindTexture(a, 0) // A is now fresher than C
     const sizeBefore = j.size
     const opsBefore = JSON.stringify(j.entries())
-    // Бюджет: 2 текстуры (512 KB) влезают, 3 (768 KB) — нет
+    // Budget: 2 textures (512 KB) fit, 3 (768 KB) do not
     const rep = s.evictLRU({ budgetBytes: 512 * 1024 })
-    // LRU = C (только create-touch) → вытеснен один
+    // LRU = C (create-touch only) → one evicted
     expect(rep.textures).toEqual([c])
     expect(rep.freedBytes).toBe(256 * 256 * 4)
     expect(rep.residentBytes).toBe(512 * 1024) // A + B
     expect(rep.residentTextures).toEqual([a, b].sort((x, y) => x - y))
-    // Raw deleteTexture вызван ровно для raw id C (3)
+    // Raw deleteTexture called exactly for raw id C (3)
     expect(callsOf(calls, 'deleteTexture')).toEqual([[3]])
-    // Журнал нетронут — ресурс жив декларацией (вытеснение ≠ уничтожение)
+    // The journal is untouched — the resource lives via its declaration (eviction ≠ destruction)
     expect(j.size).toBe(sizeBefore)
     expect(JSON.stringify(j.entries())).toBe(opsBefore)
-    // Сессия больше не знает raw id C
+    // The session no longer knows raw id C
     expect(s.rawId(c)).toBeUndefined()
     expect(s.rawId(a)).toBe(1)
     expect(s.rawId(b)).toBe(2)
   })
 
-  test('bindTexture отмечает использование: сцена не вытесняется, свежая — вытесняется', () => {
+  test('bindTexture marks usage: the scene is not evicted, the fresh one is', () => {
     const j = createResourceJournal()
     const { facade: raw } = makeFakeGL()
     const s = createResourceSessionGL(raw, j)
     const scene = s.facade.createTexture(256, 256)
     const hidden = s.facade.createTexture(256, 256)
-    // Сцена биндится КАЖДЫЙ кадр (автотач), hidden — один раз создан
+    // The scene is bound EVERY frame (auto-touch), hidden was created once
     for (let frame = 0; frame < 10; frame++) s.facade.bindTexture(scene, 0)
-    const rep = s.evictLRU({ budgetBytes: 256 * 256 * 4 }) // только одна влезает
+    const rep = s.evictLRU({ budgetBytes: 256 * 256 * 4 }) // only one fits
     expect(rep.textures).toEqual([hidden])
     expect(rep.residentTextures).toEqual([scene])
   })
 
-  test('pinned (рабочее множество) защищает текстуру даже без bind', () => {
+  test('pinned (working set) protects a texture even without bind', () => {
     const j = createResourceJournal()
     const { facade: raw } = makeFakeGL()
     const s = createResourceSessionGL(raw, j)
-    const scene = s.facade.createTexture(256, 256) // старая (никогда не биндилась)
+    const scene = s.facade.createTexture(256, 256) // old (never bound)
     const fresh = s.facade.createTexture(256, 256)
-    s.facade.bindTexture(fresh, 0) // свежая, но НЕ в сцене
+    s.facade.bindTexture(fresh, 0) // fresh, but NOT in the scene
     const rep = s.evictLRU({ budgetBytes: 256 * 256 * 4, pinned: { textureIds: [scene] } })
-    // pinned неприкосновенен, несмотря на самый старый lastUse
+    // pinned is untouchable, despite the oldest lastUse
     expect(rep.textures).toEqual([fresh])
     expect(rep.residentTextures).toEqual([scene])
   })
 
-  test('замыкание: view и target вытесненной текстуры уходят вместе с ней', () => {
+  test('closure: the view and target of an evicted texture go with it', () => {
     const j = createResourceJournal()
     const { facade: raw, calls } = makeFakeGL()
     const s = createResourceSessionGL(raw, j)
@@ -163,46 +163,46 @@ describe('resourceSession.evictLRU — LRU-вытеснение (GL)', () => {
     const view = s.facade.createTextureView(parent, { baseMipLevel: 1, mipLevelCount: 1 })
     const target = s.facade.createTarget(parent, 64, 64, false, [0, 0, 0, 1])
     const other = s.facade.createTexture(64, 64)
-    const rep = s.evictLRU({ budgetBytes: 64 * 64 * 4 }) // одна текстура влезает
-    // LRU-порядок: parent (touch от create+view+target) vs other (create):
-    // parent создан раньше → вытесняется parent вместе с view и target.
+    const rep = s.evictLRU({ budgetBytes: 64 * 64 * 4 }) // one texture fits
+    // LRU order: parent (touch from create+view+target) vs other (create):
+    // parent was created earlier → parent is evicted together with its view and target.
     expect(rep.textures).toEqual([parent])
     expect(rep.views).toEqual([view])
     expect(rep.targets).toEqual([target])
-    // Raw-вызовы: view и target удалены ДО/вместе с текстурой
-    expect(callsOf(calls, 'deleteTextureView').flat()).toContain(view - 1_000_000 + 1_000_000) // raw view id по стабильному не проверяем — ниже
+    // Raw calls: the view and target are deleted BEFORE/together with the texture
+    expect(callsOf(calls, 'deleteTextureView').flat()).toContain(view - 1_000_000 + 1_000_000) // the raw view id is not checked via the stable one — see below
     expect(s.rawId(view)).toBeUndefined()
     expect(s.rawId(target)).toBeUndefined()
-    // other — резидентен
+    // other is resident
     expect(s.rawId(other)).toBeDefined()
   })
 
-  test('ensureResident возвращает вытесненный ресурс С контентом, стабильный id тот же', () => {
+  test('ensureResident brings back the evicted resource WITH its content, the stable id is the same', () => {
     const j = createResourceJournal()
     const { facade: raw, calls } = makeFakeGL()
     const s = createResourceSessionGL(raw, j)
     const a = s.facade.createTexture(64, 64)
     const source = src(64, 64)
     s.facade.texImage2DFromSource(a, source as never, { flipY: false })
-    s.evictLRU({ budgetBytes: 0 }) // вытеснить всё
+    s.evictLRU({ budgetBytes: 0 }) // evict everything
     expect(s.rawId(a)).toBeUndefined()
     const rep = s.ensureResident(a)
     expect(rep).not.toBeNull()
-    expect(rep!.textureIds).toEqual([a]) // стабильный id совпадает
-    expect(rep!.contentOps).toBe(1) // контент пере-залит
+    expect(rep!.textureIds).toEqual([a]) // the stable id matches
+    expect(rep!.contentOps).toBe(1) // the content is re-uploaded
     expect(s.rawId(a)).toBeDefined()
-    // createTexture появился ВТОРОЙ раз (новая инкарнация raw) + заливка
+    // createTexture appeared a SECOND time (a new raw incarnation) + upload
     expect(callsOf(calls, 'createTexture').length).toBe(2)
     expect(callsOf(calls, 'texImage2DFromSource').length).toBe(2)
   })
 
-  test('после вытеснения deleteTexture убивает декларацию (не бросает), compact чистит пару', () => {
+  test('after eviction deleteTexture kills the declaration (does not throw), compact cleans the pair', () => {
     const j = createResourceJournal()
     const { facade: raw } = makeFakeGL()
     const s = createResourceSessionGL(raw, j)
     const a = s.facade.createTexture(64, 64)
     s.evictLRU({ budgetBytes: 0 })
-    // Явное удаление вытесненного: raw-вызова нет — только destroy-опс
+    // Explicit deletion of the evicted one: no raw call — only a destroy op
     expect(() => s.facade.deleteTexture(a)).not.toThrow()
     const sizeBefore = j.size
     j.compact()
@@ -210,17 +210,17 @@ describe('resourceSession.evictLRU — LRU-вытеснение (GL)', () => {
     expect(j.entries().some(op => op.kind === 'texture.create' && op.id === a)).toBe(false)
   })
 
-  test('residencyStats: байты по размерам+mip, сортировка LRU, views/targets списком', () => {
+  test('residencyStats: bytes by size+mip, LRU order, views/targets as a list', () => {
     const j = createResourceJournal()
     const { facade: raw } = makeFakeGL()
     const s = createResourceSessionGL(raw, j)
-    const flat = s.facade.createTexture(100, 100) // 40 000 байт
+    const flat = s.facade.createTexture(100, 100) // 40 000 bytes
     const mips = s.facade.createTexture(100, 100, { mipLevels: 9 }) // ≈ ×4/3
     const view = s.facade.createTextureView(mips, { baseMipLevel: 0, mipLevelCount: 2 })
-    s.facade.bindTexture(flat, 0) // flat теперь свежее
+    s.facade.bindTexture(flat, 0) // flat is now fresher
     const stats = s.residencyStats()
     expect(stats.textures.length).toBe(2)
-    // LRU-порядок: mips использовался раньше flat
+    // LRU order: mips was used earlier than flat
     expect(stats.textures[0]!.id).toBe(mips)
     expect(stats.textures[1]!.id).toBe(flat)
     expect(stats.textures[0]!.bytes).toBeGreaterThan(stats.textures[1]!.bytes)
@@ -228,7 +228,7 @@ describe('resourceSession.evictLRU — LRU-вытеснение (GL)', () => {
     expect(stats.totalBytes).toBe(stats.textures[0]!.bytes + stats.textures[1]!.bytes)
   })
 
-  test('без бюджет-опций (по умолчанию ∞) — никого не вытесняет', () => {
+  test('without budget options (default ∞) — evicts nobody', () => {
     const j = createResourceJournal()
     const { facade: raw } = makeFakeGL()
     const s = createResourceSessionGL(raw, j)
@@ -239,7 +239,7 @@ describe('resourceSession.evictLRU — LRU-вытеснение (GL)', () => {
     expect(rep.residentTextures.length).toBe(2)
   })
 
-  test('restore(workingSet) чистит LRU-учёт мёртвой инкарнации: отложенное не «резидентно»', () => {
+  test('restore(workingSet) clears the LRU accounting of the dead incarnation: deferred is not "resident"', () => {
     const j = createResourceJournal()
     const { facade: raw } = makeFakeGL()
     const s = createResourceSessionGL(raw, j)
@@ -247,21 +247,21 @@ describe('resourceSession.evictLRU — LRU-вытеснение (GL)', () => {
     const hidden = s.facade.createTexture(64, 64)
     const source = src(64, 64)
     s.facade.texImage2DFromSource(scene, source as never, { flipY: false })
-    // Потеря + soft reset: только сцена
+    // Loss + soft reset: the scene only
     const rep = s.restore({ textureIds: [scene] })
     expect(rep.textureIds).toEqual([scene])
     expect(rep.deferred?.textures).toEqual([hidden])
-    // Учёт честный: hidden НЕ резидентен (не претендует на память)
+    // Honest accounting: hidden is NOT resident (does not claim memory)
     const stats = s.residencyStats()
     expect(stats.textures.map(t => t.id)).toEqual([scene])
-    // Вытеснять нечего: в памяти только сцена
+    // Nothing to evict: only the scene is in memory
     const ev = s.evictLRU({ budgetBytes: 0, pinned: { textureIds: [scene] } })
     expect(ev.textures).toEqual([])
   })
 })
 
-describe('resourceSession.evictLRU — LRU-вытеснение (GPU)', () => {
-  test('паритет: LRU-вытеснение + журнал нетронут + ensureResident с контентом', () => {
+describe('resourceSession.evictLRU — LRU eviction (GPU)', () => {
+  test('parity: LRU eviction + the journal untouched + ensureResident with content', () => {
     const j = createResourceJournal()
     const { facade: raw, calls } = makeFakeGPU()
     const s = createResourceSessionGPU(raw, j)
@@ -269,10 +269,10 @@ describe('resourceSession.evictLRU — LRU-вытеснение (GPU)', () => {
     const b = s.facade.createTexture(128, 128, 'rgba8unorm') // raw 2
     const source = src(128, 128)
     s.facade.copyExternalImageToTexture(b, source as never, 0, 0, 128, 128, false)
-    s.facade.bindTexture(a) // GPU bindTexture без unit: A свежее
+    s.facade.bindTexture(a) // GPU bindTexture without a unit: A is fresher
     const sizeBefore = j.size
     const opsBefore = JSON.stringify(j.entries())
-    // Бюджет под одну текстуру: LRU = B (create+copy, но bind не было после)
+    // Budget for one texture: LRU = B (create+copy, but no bind afterwards)
     const rep = s.evictLRU({ budgetBytes: 128 * 128 * 4 })
     expect(rep.textures).toEqual([b])
     expect(callsOf(calls, 'deleteTexture')).toEqual([[2]])
@@ -280,7 +280,7 @@ describe('resourceSession.evictLRU — LRU-вытеснение (GPU)', () => {
     expect(JSON.stringify(j.entries())).toBe(opsBefore)
     expect(s.rawId(b)).toBeUndefined()
     expect(s.rawId(a)).toBe(1)
-    // Ленивый возврат с контентом
+    // Lazy bring-back with content
     const back = s.ensureResident(b)
     expect(back).not.toBeNull()
     expect(back!.textureIds).toEqual([b])
@@ -288,7 +288,7 @@ describe('resourceSession.evictLRU — LRU-вытеснение (GPU)', () => {
     expect(s.rawId(b)).toBeDefined()
   })
 
-  test('замыкание views на GPU: вытеснение текстуры убирает и view', () => {
+  test('views closure on GPU: evicting the texture removes the view too', () => {
     const j = createResourceJournal()
     const { facade: raw } = makeFakeGPU()
     const s = createResourceSessionGPU(raw, j)
@@ -300,19 +300,19 @@ describe('resourceSession.evictLRU — LRU-вытеснение (GPU)', () => {
     expect(s.rawId(view)).toBeUndefined()
   })
 
-  test('bindTexture по view отмечает РОДИТЕЛЯ (view — алиас хранилища)', () => {
+  test('bindTexture on a view marks the PARENT (a view is a storage alias)', () => {
     const j = createResourceJournal()
     const { facade: raw } = makeFakeGPU()
     const s = createResourceSessionGPU(raw, j)
     const t1 = s.facade.createTexture(64, 64, 'rgba8unorm', { mipLevels: 4 })
     const v1 = s.facade.createTextureView(t1, { baseMipLevel: 0, mipLevelCount: 2 })
     const t2 = s.facade.createTexture(64, 64, 'rgba8unorm')
-    // Сэмплим через view t1 — это использование t1
+    // We sample through view t1 — this is a use of t1
     s.facade.bindTexture(v1)
-    // Бюджет = оценка t1 (mip-chain 4 уровня ≈ 21728 байт): влезает только она
+    // Budget = the t1 estimate (a 4-level mip-chain ≈ 21728 bytes): only it fits
     const budget = estimateTextureBytes(64, 64, 4)
     const rep = s.evictLRU({ budgetBytes: budget })
-    // t2 — LRU (после create не использовался), t1 свежее через view
+    // t2 is LRU (not used after create), t1 is fresher via the view
     expect(rep.textures).toEqual([t2])
     expect(rep.residentTextures).toEqual([t1])
   })

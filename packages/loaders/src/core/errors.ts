@@ -1,27 +1,27 @@
 /**
- * core/errors.ts — таксономия ошибок загрузки.
+ * core/errors.ts — loading error taxonomy.
  *
- * Одна иерархия LoadError с кодом вместо восьми классов-синглтонов:
- * менеджер, парсеры и пользовательский код матчут `err.code`.
+ * A single LoadError hierarchy with a code instead of eight singleton classes:
+ * the manager, parsers and user code match on `err.code`.
  */
 
 export type LoadErrorCode =
-  | 'http'        // не-2xx ответ (кроме ретраимых 5xx/429 — их ретраит менеджер)
-  | 'network'     // fetch кинул (offline, DNS, aborted connect)
-  | 'timeout'     // истёк timeoutMs фазы fetch
-  | 'abort'       // отмена пользователем/группой/менеджером
-  | 'parse'       // формат не разобрался (битый/усечённый файл)
-  | 'unsupported' // формат известен, но фича не поддержана (Draco, ASCII FBX)
-  | 'source'      // кривой LoadSource / нет парсера для kind
-  | 'budget'      // бюджет байтов/элементов превышен (library)
+  | 'http'        // non-2xx response (except retryable 5xx/429 — the manager retries those)
+  | 'network'     // fetch threw (offline, DNS, aborted connect)
+  | 'timeout'     // the fetch phase's timeoutMs expired
+  | 'abort'       // cancelled by user/group/manager
+  | 'parse'       // the format failed to parse (corrupt/truncated file)
+  | 'unsupported' // the format is known but a feature is unsupported (Draco, ASCII FBX)
+  | 'source'      // malformed LoadSource / no parser for the kind
+  | 'budget'      // byte/element budget exceeded (library)
 
 export class LoadError extends Error {
   readonly code: LoadErrorCode
-  /** HTTP-статус, если был ответ. */
+  /** HTTP status, if there was a response. */
   readonly status: number | null
-  /** Исходная ошибка (Error/DOMException/...). */
+  /** Original error (Error/DOMException/...). */
   readonly cause: unknown
-  /** URL, если известен. */
+  /** URL, if known. */
   readonly url: string | null
 
   constructor(
@@ -38,9 +38,9 @@ export class LoadError extends Error {
   }
 }
 
-/** Ошибка разбора формата — с позицией, если парсер её знает. */
+/** Format parse error — with a position, if the parser knows it. */
 export class ParseError extends LoadError {
-  /** Байтовое смещение, где сломались (или -1). */
+  /** Byte offset where it broke (or -1). */
   readonly offset: number
 
   constructor(message: string, offset = -1, url?: string | null) {
@@ -50,7 +50,7 @@ export class ParseError extends LoadError {
   }
 }
 
-/** Формат распознан, но требует неподдержанной фичи. */
+/** The format was recognized but requires an unsupported feature. */
 export class UnsupportedError extends LoadError {
   constructor(message: string, url?: string | null) {
     super('unsupported', message, { url })
@@ -58,7 +58,7 @@ export class UnsupportedError extends LoadError {
   }
 }
 
-/** DOMException-подобный AbortError (без DOM-зависимости). */
+/** DOMException-like AbortError (without a DOM dependency). */
 export function abortError(reason?: string): Error {
   const err = new Error(reason ?? 'The operation was aborted')
   err.name = 'AbortError'
@@ -73,7 +73,7 @@ export function isAbortError(err: unknown): boolean {
   )
 }
 
-/** Отмена или ошибка — в promise-мир всё реджектится, включая cancel(). */
+/** Cancellation or error — everything rejects in the promise world, including cancel(). */
 export function throwIfAborted(signal: AbortSignal, what: string): void {
   if (signal.aborted) {
     const reason = typeof signal.reason === 'string' ? signal.reason : undefined

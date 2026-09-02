@@ -2,13 +2,13 @@ import { createPipelineCache } from '../src/index.ts'
 import type { GpuPipelineDesc } from '../src/index.ts'
 
 /**
- * Теория D: стратегия ключей кэша пайплайнов.
- * Вариант 1 (строковый): каждый кадр пересобирает структурный ключ
- *   (join полей + конкатенации) и лезет в Map<string, id>.
- * Вариант 2 (целочисленный): команда хранит pipelineId; на кадре — чтение
- *   плоского массива + проверка dirty-флага версий пайплайн-сигналов.
- * Гипотеза: целочисленный путь дешевле на порядок; строковый нужен
- * только при реактивном изменении дескриптора.
+ * Theory D: the strategy of pipeline cache keys.
+ * Variant 1 (string): every frame rebuilds the structural key
+ *   (field joins + concatenations) and goes into Map<string, id>.
+ * Variant 2 (integer): the command stores a pipelineId; per frame — a flat
+ *   array read + a dirty-flag check of the pipeline signals' versions.
+ * Hypothesis: the integer path is an order of magnitude cheaper; the string one
+ * is only needed for a reactive descriptor change.
  */
 
 const COMMANDS = 1000
@@ -22,8 +22,8 @@ const DESCS: GpuPipelineDesc[] = Array.from({ length: COMMANDS }, (_, i) => ({
 
 const cache = createPipelineCache()
 const shaderIds = DESCS.map((_, i) => (i * 2654435761) >>> 0)
-const cachedIds = DESCS.map((desc, i) => cache.idOf(desc, shaderIds[i])) // прегретый кэш
-const versions = new Uint32Array(COMMANDS) // версии пайплайн-сигналов команд
+const cachedIds = DESCS.map((desc, i) => cache.idOf(desc, shaderIds[i])) // a preheated cache
+const versions = new Uint32Array(COMMANDS) // versions of the commands' pipeline signals
 
 function runStringKeys(): number {
   let sink = 0
@@ -38,11 +38,11 @@ function runIntegerRegistry(): number {
   let sink = 0
   for (let i = 0; i < COMMANDS; i++) {
     if (versions[i] !== 0) {
-      versions[i] = 0 // сигнал менялся бы — редкий путь
+      versions[i] = 0 // the signal would have changed — the rare path
       sink ^= cache.idOf(DESCS[i], shaderIds[i])
       continue
     }
-    sink ^= cachedIds[i] // горячий путь: плоское чтение массива
+    sink ^= cachedIds[i] // the hot path: a flat array read
   }
   return sink
 }
@@ -58,13 +58,13 @@ function bestOf(repeats: number, run: () => number): number {
   return best
 }
 
-// прогрев
+// warm-up
 for (let i = 0; i < 50; i++) { runStringKeys(); runIntegerRegistry() }
 
 const stringMs = bestOf(FRAMES, runStringKeys)
 const integerMs = bestOf(FRAMES, runIntegerRegistry)
 
-console.log('── Теория D: ключи кэша пайплайнов, кадр из 1000 команд ──')
-console.log(`строковые ключи      : ${stringMs.toFixed(4)} мс`)
-console.log(`целочисленный реестр : ${integerMs.toFixed(4)} мс`)
-console.log(`целочисленный быстрее в ${(stringMs / integerMs).toFixed(1)} раза`)
+console.log('── Theory D: pipeline cache keys, frame of 1000 commands ──')
+console.log(`string keys          : ${stringMs.toFixed(4)} ms`)
+console.log(`integer registry     : ${integerMs.toFixed(4)} ms`)
+console.log(`integer is ${(stringMs / integerMs).toFixed(1)}x faster`)

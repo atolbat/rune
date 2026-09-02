@@ -20,8 +20,8 @@ const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
 
 const TINT = signal([1, 0.5, 0.25, 1] as const)
 
-// Кадровый контекст для record(): тесты не используют динамические значения
-// от time/dt/aspect, поэтому нули (структурный тип требует поля).
+// Frame context for record(): the tests do not use dynamic values from
+// time/dt/aspect, hence zeros (the structural type requires the fields).
 const CTX = { time: 0, dt: 0, aspect: 1 } as const
 
 function makeSpec(): DrawSpec {
@@ -39,8 +39,8 @@ function makeSpec(): DrawSpec {
 
 const PROPS = { mvp: IDENTITY, alpha: 0.8, count: 3 }
 
-describe('stub → player (кросс-мировой кадр)', () => {
-  it('слоты stub и главного мира совпадают — layout детерминирован', () => {
+describe('stub → player (a cross-world frame)', () => {
+  it('stub and main world slots match — the layout is deterministic', () => {
     const stub = createStub()
     const stubCommand = stub.command(makeSpec())
 
@@ -53,14 +53,14 @@ describe('stub → player (кросс-мировой кадр)', () => {
     )
   })
 
-  it('кадр из воркера играет на главном: значения юниформов доезжают', () => {
+  it('a frame from the worker plays on the main world: uniform values arrive', () => {
     const stub = createStub()
     const stubCommand = stub.command(makeSpec())
     const writer = createTapeWriter(16)
     stubCommand.record(PROPS, CTX, writer)
     const frame = stub.ship(writer, 'full')
 
-    // главный мир: та же компиляция → те же id и смещения
+    // main world: the same compilation → the same ids and offsets
     const mainArena = createUniformArena(1 << 16)
     const mainCtx = createCompileContext(mainArena, 'interpret')
     const mainCommand = compileDrawSpec(makeSpec(), mainCtx)
@@ -73,29 +73,29 @@ describe('stub → player (кросс-мировой кадр)', () => {
     player.play(frame)
 
     expect(calls).toContain(`useProgram(${mainCommand.programId})`)
-    expect(calls).toContain('uniformMatrix4fv(u_mvp)')        // mvp из воркера
-    expect(calls).toContain('uniform4fv(u_tint)')              // tint из воркера
-    expect(calls).toContain('uniform1f(u_alpha,0.8)')          // alpha из воркера (значение видно в записи)
+    expect(calls).toContain('uniformMatrix4fv(u_mvp)')        // mvp from the worker
+    expect(calls).toContain('uniform4fv(u_tint)')              // tint from the worker
+    expect(calls).toContain('uniform1f(u_alpha,0.8)')          // alpha from the worker (the value is visible in the recording)
     expect(calls).toContain('drawArrays(triangles,0,3,1)')
   })
 
-  it('dirty-режим доставляет только изменившиеся диапазоны', () => {
+  it('dirty mode delivers only the changed ranges', () => {
     const stub = createStub()
     const stubCommand = stub.command(makeSpec())
     const first = createTapeWriter(8)
     stubCommand.record(PROPS, CTX, first)
-    stub.ship(first, 'full') // прогрев: значения уже в арене stub
+    stub.ship(first, 'full') // warm-up: the values are already in the stub arena
 
     stub.arena.clearDirty()
     const second = createTapeWriter(8)
-    stubCommand.record({ ...PROPS, alpha: 0.9 }, CTX, second) // меняется только alpha
+    stubCommand.record({ ...PROPS, alpha: 0.9 }, CTX, second) // only alpha changes
     const frame = stub.ship(second, 'dirty')
 
     expect(frame.arena.byteLength).toBeGreaterThan(0)
     expect(frame.arena.byteLength).toBeLessThan(stub.arena.usedBytes)
   })
 
-  it('второй кадр без изменений: dirty-кадр пуст, uniform-вызовов нет', () => {
+  it('a second frame without changes: the dirty frame is empty, no uniform calls', () => {
     const stub = createStub()
     const stubCommand = stub.command(makeSpec())
 
@@ -111,11 +111,11 @@ describe('stub → player (кросс-мировой кадр)', () => {
     calls.length = 0
 
     const idle = createTapeWriter(8)
-    stubCommand.record(PROPS, CTX, idle) // те же значения — арена чиста
+    stubCommand.record(PROPS, CTX, idle) // the same values — the arena is clean
     const frame = stub.ship(idle, 'dirty')
     expect(frame.arena.byteLength).toBe(0)
 
     player.play(frame)
-    expect(calls).toEqual(['drawArrays(triangles,0,3,1)']) // только draw
+    expect(calls).toEqual(['drawArrays(triangles,0,3,1)']) // draw only
   })
 })

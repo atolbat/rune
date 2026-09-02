@@ -2,11 +2,11 @@ import { createFrequencyArena, createUniformSet, signal } from '../src/index.ts'
 import { createUniformArena } from '../src/index.ts'
 
 /**
- * Теория L: единая арена против frequency-split.
- * Сценарий: 100 команд, каждая с 4 draw-юниформами; 2 пер-кадровых поля
- * (камера+время) на всех. Гипотеза: split не меняет число записей, но
- * frame-зона грузится ОДНИМ куском раз в кадр (меньше вызовов загрузки),
- * а при статичной камере — ноль загрузок frame-зоны вовсе.
+ * Theory L: unified arena vs frequency-split.
+ * Scenario: 100 commands, each with 4 draw uniforms; 2 per-frame fields
+ * (camera+time) shared by all. Hypothesis: split does not change the number of writes, but
+ * the frame zone is uploaded in ONE chunk once per frame (fewer upload calls),
+ * and with a static camera — zero frame-zone uploads at all.
  */
 
 const COMMANDS = 100
@@ -40,13 +40,13 @@ function makeSplit(): Zone {
 }
 
 function simulate(zone: Zone, staticCamera: boolean): { uploads: number; ms: number } {
-  // Пер-кадровые: камера (статичная или вращающаяся) + время
+  // Per-frame: camera (static or rotating) + time
   const camera = createUniformSet('camera', { u_viewProj: 'mat4' }, { frequency: 'frame' })
   camera.attach(t => zone.alloc(t, 'frame'))
   const time = signal(0)
   camera.link({ u_viewProj: signal([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]) })
 
-  // Draw-юниформы команд
+  // Draw uniforms of commands
   const commands = []
   for (let i = 0; i < COMMANDS; i++) {
     const mat = createUniformSet(`mat${i}`, { a: 'float', b: 'float', c: 'float', d: 'float' }, { frequency: 'draw' })
@@ -63,7 +63,7 @@ function simulate(zone: Zone, staticCamera: boolean): { uploads: number; ms: num
     for (const command of commands) {
       command.alpha.value = (frame % 10 === 0) ? command.alpha.peek() + 0.01 : command.alpha.peek()
     }
-    // Запись кадра: сначала frame-набор, потом draw-наборы
+    // Frame recording: first the frame set, then the draw sets
     camera.write((offset, value) => zone.writeFloat(offset, value))
     for (const command of commands) {
       command.mat.write((offset, value) => zone.writeFloat(offset, value))
@@ -83,15 +83,15 @@ function bestOf(repeats: number, run: () => { uploads: number; ms: number }): { 
   return best
 }
 
-// Прогрев
+// Warm-up
 simulate(makeUnified(), true); simulate(makeSplit(), true)
 
 const unifiedRotating = bestOf(5, () => simulate(makeUnified(), false))
 const splitRotating = bestOf(5, () => simulate(makeSplit(), false))
 const splitStatic = bestOf(5, () => simulate(makeSplit(), true))
 
-console.log('── Теория L: frequency-split арена (100 команд × 60 кадров) ──')
-console.log(`единая арена (камера вращается) : ${unifiedRotating.uploads} загрузок, ${unifiedRotating.ms.toFixed(2)} мс`)
-console.log(`split арена (камера вращается)  : ${splitRotating.uploads} загрузок, ${splitRotating.ms.toFixed(2)} мс`)
-console.log(`split арена (камера СТАТИЧНА)   : ${splitStatic.uploads} загрузок, ${splitStatic.ms.toFixed(2)} мс`)
-console.log(`выигрыш split при статичной камере: ×${(unifiedRotating.uploads / splitStatic.uploads).toFixed(1)} загрузок`)
+console.log('── Theory L: frequency-split arena (100 commands × 60 frames) ──')
+console.log(`unified arena (camera rotating) : ${unifiedRotating.uploads} uploads, ${unifiedRotating.ms.toFixed(2)} ms`)
+console.log(`split arena (camera rotating)  : ${splitRotating.uploads} uploads, ${splitRotating.ms.toFixed(2)} ms`)
+console.log(`split arena (camera STATIC)    : ${splitStatic.uploads} uploads, ${splitStatic.ms.toFixed(2)} ms`)
+console.log(`split gain with a static camera: ×${(unifiedRotating.uploads / splitStatic.uploads).toFixed(1)} uploads`)

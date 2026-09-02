@@ -1,7 +1,7 @@
 /**
- * streamTexture: превью → чанки через AIMD-планировщик → прогресс.
- * Превью (билинейная выборка до бюджета) идёт приоритетом на +1 выше
- * чанков — быстрый отклик, затем доводка полного качества.
+ * streamTexture: preview → chunks via the AIMD scheduler → progress.
+ * The preview (bilinear sampling down to the budget) goes at a priority
+ * one above the chunks — fast response, then a refinement to full quality.
  */
 
 import type { UploadScheduler } from './uploadScheduler.ts'
@@ -12,29 +12,29 @@ export type TileUploader = (tile: TileRect, bytes: Uint8Array) => void
 
 export interface TextureUploadOptions {
   readonly priority?: number
-  /** Бюджет превью в байтах (default 64 КБ). */
+  /** Preview budget in bytes (default 64 KB). */
   readonly previewBudget?: number
   readonly onProgress?: (fraction: number) => void
 }
 
 export interface TextureUpload {
-  /** Готовность 0..1 по чанкам (превью не считается). */
+  /** Readiness 0..1 by chunks (the preview doesn't count). */
   readonly progress: number
   cancel(): void
-  /** Резолв по завершении (или отмене). */
+  /** Resolves on completion (or cancel). */
   readonly done: Promise<void>
 }
 
 export type TextureUploadResult = TextureUpload
 
-/** Ширина превью — кратна 64 (WebGPU bytesPerRow-выравнивание 256). */
+/** Preview width — a multiple of 64 (WebGPU bytesPerRow alignment of 256). */
 function previewWidth(width: number, budget: number): number {
   const scale = Math.min(1, Math.sqrt(budget / (width * width * 4)))
   const scaled = Math.max(64, Math.floor(width * scale / 64) * 64)
   return Math.min(width, scaled)
 }
 
-/** Билинейная выборка source (w×h) в превью pw×ph. */
+/** Bilinear sampling of source (w×h) into a pw×ph preview. */
 function downsample(source: Uint8Array, w: number, h: number, pw: number, ph: number): Uint8Array {
   const out = new Uint8Array(pw * ph * 4)
   for (let y = 0; y < ph; y++) {
@@ -80,9 +80,10 @@ export function streamTexture(
   let tilesDone = 0
   const tiles = chunkRect(width, height, tileForBudget(width, previewBudget))
 
-  // Теория N: спрос поднимает окно — текстура размером до бёрст-капа
-  // грузится целиком в первый idle-слот. Кадр N рисует загрузку кадра
-  // N-1: текстура видна полной уже со второго кадра, как в старых демо.
+  // N theory: demand raises the window — a texture up to the burst cap
+  // in size loads entirely into the first idle slot. Frame N draws the
+  // frame N-1 load: the texture is fully visible as early as the second
+  // frame, like in the old demos.
   scheduler.burst(source.length)
 
   let resolveDone: () => void
@@ -92,7 +93,7 @@ export function streamTexture(
     if (tilesDone >= tiles.length) resolveDone()
   }
 
-  // Превью: маленькая копия — приоритет выше чанков, идёт первым
+  // Preview: a small copy — higher priority than chunks, goes first
   const pw = previewWidth(width, previewBudget)
   const ph = Math.max(1, Math.round(height * pw / width))
   const preview = downsample(source, width, height, pw, ph)
@@ -105,7 +106,7 @@ export function streamTexture(
     },
   })
 
-  // Чанки: полный ряд на задачу (теория K)
+  // Chunks: a full row per task (K theory)
   for (const tile of tiles) {
     const bytes = tileBytes(tile, source, width)
     scheduler.push({

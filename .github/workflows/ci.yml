@@ -21,7 +21,7 @@ jobs:
       - name: Build library
         run: bun run build
       - name: Dist freshness (warn if committed bundle is stale)
-        run: git diff --exit-code -- dist/ || echo "::warning::dist/ в ветке отличается от свежей сборки — закоммитьте bun run build (Pages раздаёт демо из dist)"
+        run: git diff --exit-code -- dist/ || echo "::warning::dist/ in the branch differs from a fresh build — commit bun run build (Pages serves the demo from dist)"
       - name: Tests
         run: bun test
       - name: Upload dist artifact

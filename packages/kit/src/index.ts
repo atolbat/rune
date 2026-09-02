@@ -1,16 +1,16 @@
 /**
- * @rune/kit — высокоуровневые утилиты поверх @rune/gl.
+ * @rune/kit — high-level utilities on top of @rune/gl.
  *
- * Слой между ядром (@rune/gl с примитивами Texture/Command/...) и
- * пользовательским кодом. Включает:
- *  - AssetCache<T>: generic-кэш с refcount/TTL/churn-window/scope.
- *  - RectPacker: упаковщик прямоугольников (shelf + maxrects).
- *  - MipStreamer: progressive mip-стриминг.
- *  - createTextureView: sub-region текстуры (UV-rect эмуляция для WebGL2).
- *  - batchCommand: обобщённый батч поверх command.
+ * A layer between the core (@rune/gl with the Texture/Command/... primitives)
+ * and user code. Includes:
+ *  - AssetCache<T>: a generic cache with refcount/TTL/churn-window/scope.
+ *  - RectPacker: a rectangle packer (shelf + maxrects).
+ *  - MipStreamer: progressive mip streaming.
+ *  - createTextureView: a texture sub-region (UV-rect emulation for WebGL2).
+ *  - batchCommand: a generalized batch on top of command.
  *
- * Контракт: kit НЕ знает про HTTP/decode — для этого есть @rune/loaders.
- * Kit знает про GPU (через @rune/gl интерфейс), но не лезет в сеть.
+ * Contract: kit knows NOTHING about HTTP/decode — that is @rune/loaders' job.
+ * Kit knows about the GPU (via the @rune/gl interface) but never touches the network.
  */
 
 export {
@@ -33,9 +33,9 @@ export type {
   RectPackerOptions,
 } from './rectPacker.ts'
 
-// Task 62: унифицированный атлас поверх Texture — packer + слоты + upload
-// через texture.uploadSubImage (журналируется ResourceJournal v2 → атлас
-// восстанавливается после потери устройства вместе с контентом).
+// Task 62: a unified atlas on top of Texture — packer + slots + upload
+// via texture.uploadSubImage (logged by ResourceJournal v2 → the atlas is
+// restored after device loss together with its content).
 export {
   createAtlas,
 } from './atlas.ts'

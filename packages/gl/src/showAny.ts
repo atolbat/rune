@@ -6,11 +6,11 @@ import { probeWebGpu } from './showOn.ts'
 import { showOnWebGpu } from './showWebgpu.ts'
 
 /**
- * show(): куб в одну строку на ЛУЧШЕМ доступном бэкенде.
- * WebGPU с авто-фолбэком на WebGL2 — тот же принцип, что в демо-6.
+ * show(): a cube in one line on the BEST available backend.
+ * WebGPU with automatic fallback to WebGL2 — the same principle as in demo-6.
  */
 
-/** Показ на выбранном бэкенде. */
+/** A showing on the chosen backend. */
 export interface AnyShow {
   readonly backend: 'webgpu' | 'webgl2'
   readonly webgl2?: Show
@@ -18,14 +18,14 @@ export interface AnyShow {
   stop(): void
 }
 
-/** Показать куб: WebGPU, при недоступности — WebGL2 (фолбэк). */
+/** Show a cube: WebGPU, falling back to WebGL2 when unavailable. */
 export async function showAny(
   target: string | HTMLCanvasElement,
   options: ShowOptions = {},
 ): Promise<AnyShow> {
   const canvas = resolveCanvas(target)
 
-  // Проба WebGPU без захвата канваса
+  // Probe WebGPU without acquiring the canvas
   if (await probeWebGpu()) {
     try {
       const webgpu = await showOnWebGpu(canvas, options)
@@ -36,18 +36,18 @@ export async function showAny(
     }
   }
 
-  // Фолбэк: канвас мог быть захвачен webgpu-попыткой — всегда свежий
+  // Fallback: the canvas may have been acquired by the webgpu attempt — always fresh
   const fresh = freshCanvas(canvas)
   const webgl2 = show(fresh, options)
-  setBackendLabel('WebGL2 (фолбэк)', options.badge)
+  setBackendLabel('WebGL2 (fallback)', options.badge)
   return { backend: 'webgl2', webgl2, stop: () => webgl2.stop() }
 }
 
 function resolveCanvas(target: string | HTMLCanvasElement): HTMLCanvasElement {
   if (typeof target !== 'string') return target
-  if (typeof document === 'undefined') throw new Error('rune: show без DOM требует элемент')
+  if (typeof document === 'undefined') throw new Error('rune: show without DOM requires an element')
   const canvas = document.querySelector<HTMLCanvasElement>(target)
-  if (canvas === null) throw new Error(`rune: канвас "${target}" не найден`)
+  if (canvas === null) throw new Error(`rune: canvas "${target}" not found`)
   return canvas
 }
 
@@ -68,9 +68,9 @@ function reportFallbackReason(error: unknown): void {
   const reason = document.querySelector('#reason') as HTMLElement | null
   if (reason === null) return
   reason.style.display = 'block'
-  reason.textContent = `WebGPU не запустился: ${String(error instanceof Error ? error.message : error)}\nРендерим на WebGL2.`
+  reason.textContent = `WebGPU failed to start: ${String(error instanceof Error ? error.message : error)}\nFalling back to WebGL2.`
 }
 
-// Реэкспорт для совместимости: show без указания бэкенда = showAny
+// Re-export for compatibility: show without a backend specified = showAny
 export { show as showWebgl2 }
 export type { WebGL2Renderer }

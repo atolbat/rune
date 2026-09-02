@@ -1,25 +1,25 @@
 /**
- * Atlas — унифицированный атлас поверх Texture (Task 62).
+ * Atlas — a unified atlas on top of Texture (Task 62).
  *
- * ДО: атлас был «ручной» практикой вызывающего кода (packer → слоты →
- * uploadSubImage руками) + приложение держало «контент-план» (atlasRedo),
- * чтобы пере-залить тайлы после потери устройства. Журнал v1 хранил только
- * декларации — и после recovery просил «нажми Build atlas снова».
+ * BEFORE: the atlas was a "manual" practice of the calling code (packer → slots →
+ * uploadSubImage by hand) + the application kept a "content plan" (atlasRedo)
+ * to re-upload tiles after device loss. The v1 journal stored only
+ * declarations — and after recovery it asked "press Build atlas again".
  *
- * ПОСЛЕ: атлас — тонкий слой над Texture. ВСЕ его действия сведены к
- * примитивам Texture:
- *   createAtlas(texture)          → CPU-объект (слотов/упаковки нет в GPU)
- *   atlas.pack(w, h)              → RectPacker + таблица слотов (CPU)
+ * AFTER: the atlas is a thin layer over Texture. ALL of its actions reduce to
+ * Texture primitives:
+ *   createAtlas(texture)          → a CPU object (no slots/packing in the GPU)
+ *   atlas.pack(w, h)              → RectPacker + a slot table (CPU)
  *   atlas.upload(slot, source)    → texture.uploadSubImage(x, y, source)
- *   atlas.view(slot)              → createTextureView (UV-rect)
+ *   atlas.view(slot)              → createTextureView (UV rect)
  *   atlas.dispose()               → texture.dispose()
  *
- * Т.к. Texture-путь обёрнут resourceSession (опция resources рендерера),
- * каждый upload ЖУРНАЛИРУЕТСЯ как texture.update с ContentRef на источник.
- * После потери устройства restoreResources() возвращает текстуру атласа И
- * все тайлы — atlasRedo-хак больше не нужен. Кросс-бэкенд: один и тот же
- * код работает на WebGL2 и WebGPU (uploadSubImage — унифицированный
- * handle-метод).
+ * Since the Texture path is wrapped in a resourceSession (the renderer's resources option),
+ * every upload IS JOURNALED as texture.update with a ContentRef to the source.
+ * After device loss restoreResources() brings back the atlas texture AND
+ * all tiles — the atlasRedo hack is no longer needed. Cross-backend: the same
+ * code runs on WebGL2 and WebGPU (uploadSubImage is a unified
+ * handle method).
  */
 
 import { createRectPacker } from './rectPacker.ts'
@@ -27,7 +27,7 @@ import type { RectPacker, RectPackerOptions, RectSlot } from './rectPacker.ts'
 import type { TextureView } from './textureView.ts'
 import { createTextureView } from './textureView.ts'
 
-/** Минимальный контракт Texture для атласа (реальный Texture из @rune/gl). */
+/** The minimal Texture contract for the atlas (the real Texture from @rune/gl). */
 export interface AtlasTexture {
   readonly textureId: number
   readonly width: number
@@ -36,7 +36,7 @@ export interface AtlasTexture {
   dispose(): void
 }
 
-/** Слот атласа — регион + UV-прямоугольник. */
+/** An atlas slot — a region + UV rectangle. */
 export interface AtlasSlot {
   readonly id: string
   readonly x: number
@@ -46,34 +46,34 @@ export interface AtlasSlot {
 }
 
 export interface AtlasOptions {
-  /** Опции упаковщика: algorithm ('shelf'|'maxrects'), padding. */
+  /** Packer options: algorithm ('shelf'|'maxrects'), padding. */
   readonly packer?: RectPackerOptions
 }
 
 export interface Atlas {
-  /** Текстура-носитель (унифицированный handle — renderer.texture/attachTexture). */
+  /** The carrier texture (a unified handle — renderer.texture/attachTexture). */
   readonly texture: AtlasTexture
   readonly width: number
   readonly height: number
-  /** Запаковать партию прямоугольников. null — не влезло.
-   *  Повторные вызовы пакуют в свободное место того же атласа. */
+  /** Pack a batch of rectangles. null — they did not fit.
+   *  Repeated calls pack into the free space of the same atlas. */
   pack(items: readonly { id: string; w: number; h: number }[]): RectSlot[] | null
-  /** Залить источник в слот (texSubImage2DFromSource / copyExternalImageToTexture).
-   *  Журналируется как texture.update → переживает потерю устройства. */
+  /** Upload a source into a slot (texSubImage2DFromSource / copyExternalImageToTexture).
+   *  Journaled as texture.update → survives device loss. */
   upload(slot: AtlasSlot | string, source: unknown, options?: { flipY?: boolean }): void
-  /** UV-регион слота (для шейдеров с u_uvOffset/u_uvScale). */
+  /** The UV region of a slot (for shaders with u_uvOffset/u_uvScale). */
   view(slot: AtlasSlot | string): TextureView
-  /** Слот по id (null — нет такого). */
+  /** A slot by id (null — not found). */
   slot(id: string): AtlasSlot | null
-  /** Все запакованные слоты. */
+  /** All packed slots. */
   slots(): readonly AtlasSlot[]
-  /** Освободить атлас: texture.dispose() (сама текстура — первичный ресурс,
-   *  dispose пишется в журнал; повторный pack после dispose — throw). */
+  /** Release the atlas: texture.dispose() (the texture itself is the primary resource,
+   *  dispose is written to the journal; a pack after dispose — throw). */
   dispose(): void
 }
 
-/** Создать атлас над текстурой. Текстура передаётся снаружи: у приложения
- *  остаются все возможности renderer.texture (mipLevels, anisotropy). */
+/** Create an atlas over a texture. The texture is passed in from outside: the
+ *  application keeps all renderer.texture capabilities (mipLevels, anisotropy). */
 export function createAtlas(texture: AtlasTexture, options: AtlasOptions = {}): Atlas {
   const packer: RectPacker = createRectPacker(texture.width, texture.height, options.packer ?? { algorithm: 'shelf' })
   const slotById = new Map<string, AtlasSlot>()
@@ -82,7 +82,7 @@ export function createAtlas(texture: AtlasTexture, options: AtlasOptions = {}): 
   function resolve(slot: AtlasSlot | string): AtlasSlot {
     const s = typeof slot === 'string' ? slotById.get(slot) : slot
     if (s === undefined || s === null) {
-      throw new Error(`Atlas: слот «${typeof slot === 'string' ? slot : slot.id}» не запакован в этот атлас`)
+      throw new Error(`Atlas: slot "${typeof slot === 'string' ? slot : slot.id}" is not packed into this atlas`)
     }
     return s
   }
@@ -122,6 +122,6 @@ export function createAtlas(texture: AtlasTexture, options: AtlasOptions = {}): 
   }
 
   function requireAlive(): void {
-    if (disposed) throw new Error('Atlas: уже dispose — создайте новый атлас')
+    if (disposed) throw new Error('Atlas: already disposed — create a new atlas')
   }
 }

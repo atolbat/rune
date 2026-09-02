@@ -1,5 +1,5 @@
-// @rune/math — колонко-мажорные матрицы 4×4 (WebGL-конвенция) для rune.
-// out-первый стиль: результат пишется в переданный массив, ноль аллокаций.
+// @rune/math — column-major 4×4 matrices (the WebGL convention) for rune.
+// out-first style: the result is written into the passed array, zero allocations.
 
 export {
   mat4Create,
@@ -11,8 +11,8 @@ export {
   mat4Translation,
 } from './mat4.ts'
 
-// Task 81 (подготовка @rune/scene): аффинное произведение, lookAt, орто,
-// обращения, TRS-композиция. Восстановлено по контракту tests/mat4Ext.test.ts.
+// Task 81 (preparing @rune/scene): affine product, lookAt, ortho,
+// inversions, TRS composition. Restored per the tests/mat4Ext.test.ts contract.
 export {
   mat4MultiplyAffine,
   mat4Invert,

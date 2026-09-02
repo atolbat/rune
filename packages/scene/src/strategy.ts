@@ -1,72 +1,72 @@
 /**
- * strategy.ts — когда выносить сцену в воркер (Task 81).
+ * strategy.ts — when to offload the scene to a worker (Task 81).
  *
- * Никаких догм — только измеренные константы (bench.ts этого пакета,
- * bun 1.3.14, контейнер 4 ядра; на другом железе перекалибруйте
- * measureScenePipeline). Главные измеренные факты:
+ * No dogmas — only measured constants (bench.ts of this package,
+ * bun 1.3.14, a 4-core container; on other hardware re-calibrate
+ * measureScenePipeline). The main measured facts:
  *
- *   • грязевой конвейер почти бесплатен на покое: 100k узлов = 0.5 мс;
- *   • полный конвейер с анимацией: ~160 нс/анимируемый узел + ~5 нс/узел;
- *   • синхронизация моста (publish+take) ≈ 1 мкс — не аргумент;
- *   • НО латентность воркера (пробуждение+конвейер+опрос) 1.3–2 мс на
- *     ≤100k узлов и ~12 мс на 1M — воркер ДОРОЖЕ локального прогона по
- *     wall-clock (конвейер в потоке ~2.5× медленнее + пробуждение);
- *   • оверлап работает: при 3 мс main-работы воркер успевает в 90% кадров
- *     на ≤100k узлов, на 1M — не успевает (0%).
+ *   • the dirty pipeline is nearly free at rest: 100k nodes = 0.5 ms;
+ *   • the full pipeline with animation: ~160 ns per animated node + ~5 ns per node;
+ *   • bridge synchronization (publish+take) ≈ 1 µs — not an argument;
+ *   • BUT worker latency (wake+pipeline+poll) is 1.3–2 ms at
+ *     ≤100k nodes and ~12 ms at 1M — by wall-clock the worker is MORE
+ *     EXPENSIVE than a local run (the in-thread pipeline is ~2.5× slower + wake);
+ *   • overlap works: with 3 ms of main work the worker makes it in 90% of frames
+ *     at ≤100k nodes; at 1M it does not (0%).
  *
- * Вывод (честный): воркер — НЕ про снижение латентности кадра, а про
- * освобождение main-времени, когда конвейер дороже ~1 мс И main занят
- * другой работой (рендер/GPU-сабмиты). Ниже порога — T0 локально.
+ * Conclusion (honest): the worker is NOT about reducing frame latency, but
+ * about freeing main-thread time when the pipeline costs more than ~1 ms AND
+ * main is busy with other work (rendering/GPU submits). Below the threshold — T0 locally.
  *
- * Правило честности: без SAB (изоляция не выдана) воркер сцены недоступен —
- * рекомендация T0, как в транспортной лестнице ядра (§7.2).
+ * Honesty rule: without a SAB (isolation not granted) the scene worker is
+ * unavailable — recommendation T0, as in the core transport ladder (§7.2).
  */
 import type { Camera } from './camera.ts'
 import type { Scene } from './scene.ts'
 
-/** Статичная часть конвейера на узел, нс (updateWorld-проверки+refit+cull). */
+/** Static part of the pipeline per node, ns (updateWorld checks+refit+cull). */
 export const STATIC_NS_PER_NODE = 5.4
 
-/** Анимационная часть: setLocalTR + пересчёт цепочки мира, нс/узел. */
+/** Animation part: setLocalTR + world-chain recomputation, ns/node. */
 export const ANIMATED_NS_PER_NODE = 160
 
-/** Компакция инстанса, нс (при ~50% видимости). */
+/** Instance compaction, ns (at ~50% visibility). */
 export const INSTANCE_NS = 20
 
-/** Синхронизация моста (publish+take), мс — практически бесплатно. */
+/** Bridge synchronization (publish+take), ms — practically free. */
 export const WORKER_SYNC_MS = 0.002
 
-/** Конвейер в воркере медленнее локального (замерено на 100k–1M). */
+/** The pipeline in a worker is slower than local (measured at 100k–1M). */
 export const WORKER_PIPELINE_INFLATION = 2.5
 
-/** Минимальный выигрыш main-времени, при котором воркер «имеет смысл». */
+/** Minimum main-time gain at which the worker "makes sense". */
 export const MIN_GAIN_MS = 1.0
 
 export interface SceneStrategyInputs {
-  /** Живых узлов сцены. */
+  /** Live scene nodes. */
   readonly nodeCount: number
-  /** Узлов, чей локальный TRS меняется каждый кадр. */
+  /** Nodes whose local TRS changes every frame. */
   readonly animatedNodes: number
-  /** Видимых инстансов на кадр (все камеры). */
+  /** Visible instances per frame (all cameras). */
   readonly visibleInstances?: number
   readonly cameraCount: number
-  /** Доступен ли SAB + воркер. */
+  /** Whether SAB + worker are available. */
   readonly workerAvailable: boolean
-  /** Бюджет кадра, мс (default 16.7). */
+  /** Frame budget, ms (default 16.7). */
   readonly frameBudgetMs?: number
 }
 
 export interface SceneStrategy {
   readonly offloadToWorker: boolean
-  /** Честное объяснение решения (для логов/диагностики). */
+  /** Honest explanation of the decision (for logs/diagnostics). */
   readonly reason: string
-  /** Оценка main-стоимости конвейера, мс. */
+  /** Estimated main cost of the pipeline, ms. */
   readonly estimatedPipelineMs: number
-  /** Оценка времени воркера на тот же конвейер, мс. */
+  /** Estimated worker time for the same pipeline, ms. */
   readonly estimatedWorkerMs: number
 }
 
-/** Оценка стоимости конвейера (мс) по измеренной модели. */
+/** Estimate of the pipeline cost (ms) from the measured model. */
 export function estimatePipelineMs(inputs: SceneStrategyInputs): number {
   const cameras = Math.max(1, inputs.cameraCount)
   const visible = inputs.visibleInstances ?? 0
@@ -74,20 +74,20 @@ export function estimatePipelineMs(inputs: SceneStrategyInputs): number {
     inputs.nodeCount * STATIC_NS_PER_NODE +
     inputs.animatedNodes * ANIMATED_NS_PER_NODE +
     visible * INSTANCE_NS
-  // cull линеен по камерам, трансформы — нет.
+  // cull is linear in cameras, transforms are not.
   return (base * (1 + (cameras - 1) * 0.35)) / 1e6
 }
 
-/** Оценка: выносить ли конвейер сцены в воркер. */
+/** Recommendation: whether to offload the scene pipeline to a worker. */
 export function recommendSceneStrategy(inputs: SceneStrategyInputs): SceneStrategy {
   const budget = inputs.frameBudgetMs ?? 16.7
   const pipelineMs = estimatePipelineMs(inputs)
-  const workerMs = pipelineMs * WORKER_PIPELINE_INFLATION + 1.3 // + пробуждение/опрос
+  const workerMs = pipelineMs * WORKER_PIPELINE_INFLATION + 1.3 // + wake/poll
 
   if (!inputs.workerAvailable) {
     return {
       offloadToWorker: false,
-      reason: 'SAB/воркер недоступны — T0-конвейер (лестница транспортов ядра)',
+      reason: 'SAB/worker unavailable — T0 pipeline (core transport ladder)',
       estimatedPipelineMs: pipelineMs,
       estimatedWorkerMs: workerMs,
     }
@@ -95,7 +95,7 @@ export function recommendSceneStrategy(inputs: SceneStrategyInputs): SceneStrate
   if (pipelineMs < WORKER_SYNC_MS + MIN_GAIN_MS) {
     return {
       offloadToWorker: false,
-      reason: `конвейер ~${pipelineMs.toFixed(2)} мс < порога ${MIN_GAIN_MS} мс: синхронизация и латентность не окупаются, локально дешевле`,
+      reason: `pipeline ~${pipelineMs.toFixed(2)} ms < threshold ${MIN_GAIN_MS} ms: synchronization and latency do not pay off, local is cheaper`,
       estimatedPipelineMs: pipelineMs,
       estimatedWorkerMs: workerMs,
     }
@@ -103,22 +103,22 @@ export function recommendSceneStrategy(inputs: SceneStrategyInputs): SceneStrate
   if (workerMs > budget) {
     return {
       offloadToWorker: false,
-      reason: `воркеру нужно ~${workerMs.toFixed(1)} мс > бюджет кадра ${budget} мс: поток не успевает, оверлап невозможен`,
+      reason: `worker needs ~${workerMs.toFixed(1)} ms > frame budget ${budget} ms: the thread cannot make it in time, overlap impossible`,
       estimatedPipelineMs: pipelineMs,
       estimatedWorkerMs: workerMs,
     }
   }
   return {
     offloadToWorker: true,
-    reason: `конвейер ~${pipelineMs.toFixed(2)} мс: воркер освобождает main (сам справляется за ~${workerMs.toFixed(1)} мс < ${budget} мс), оверлап с рендером`,
+    reason: `pipeline ~${pipelineMs.toFixed(2)} ms: the worker frees main (handles it in ~${workerMs.toFixed(1)} ms < ${budget} ms), overlap with rendering`,
     estimatedPipelineMs: pipelineMs,
     estimatedWorkerMs: workerMs,
   }
 }
 
 /**
- * Калибровка на живой сцене: медианное время прогона конвейера (мс).
- * Используйте для авто-решения на железе пользователя.
+ * Calibration on a live scene: median pipeline run time (ms).
+ * Use it for an automatic decision on the user's hardware.
  */
 export function measureScenePipeline(
   scene: Scene,
@@ -127,7 +127,7 @@ export function measureScenePipeline(
 ): number {
   const runs = opts.runs ?? 7
   scene.pack()
-  // Прогрев JIT + грязи.
+  // JIT + dirt warm-up.
   for (let i = 0; i < runs; i++) {
     scene.updateWorld()
     scene.refitGroupBounds()

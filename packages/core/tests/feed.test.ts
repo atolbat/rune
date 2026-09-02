@@ -4,11 +4,11 @@ import { createFeed, attachFeed, feedStride } from '../src/index.ts'
 const LAYOUT = { pos: 'float32', speed: 'float32', color: 'unorm8x4' } as const
 
 describe('feed', () => {
-  it('stride считается по layout', () => {
+  it('stride is computed from the layout', () => {
     expect(feedStride(LAYOUT)).toBe(12)
   })
 
-  it('воркер пишет пакет и публикует одним атомарным счётчиком', () => {
+  it('a worker writes a batch and publishes it with a single atomic counter', () => {
     const feed = createFeed({ layout: LAYOUT, capacity: 1024 })
     const workerSide = attachFeed(feed.buffer, LAYOUT, 1024)
 
@@ -19,13 +19,13 @@ describe('feed', () => {
     batch.setFloat('speed', 0, 0.25)
     batch.setVec4Bytes('color', 0, 255, 128, 0, 255)
 
-    expect(workerSide.publishedCount()).toBe(0) // до publish не видно
+    expect(workerSide.publishedCount()).toBe(0) // not visible before publish
     workerSide.publish()
     expect(workerSide.publishedCount()).toBe(3)
-    expect(feed.publishedCount()).toBe(3) // владелец видит то же число
+    expect(feed.publishedCount()).toBe(3) // the owner sees the same number
   })
 
-  it('несколько пакетов подряд публикуются последовательно', () => {
+  it('several batches in a row are published sequentially', () => {
     const feed = createFeed({ layout: LAYOUT, capacity: 64 })
     const w = attachFeed(feed.buffer, LAYOUT, 64)
     w.push(10).setFloat('pos', 0, 0)
@@ -35,13 +35,13 @@ describe('feed', () => {
     expect(feed.publishedCount()).toBe(15)
   })
 
-  it('запись в не объявленное поле — ошибка', () => {
+  it('writing to an undeclared field is an error', () => {
     const feed = createFeed({ layout: LAYOUT, capacity: 8 })
     const batch = feed.push(1)
     expect(() => batch.setFloat('unknown', 0, 1)).toThrow()
   })
 
-  it('данные читаются владельцем из общего буфера', () => {
+  it('the owner reads the data from the shared buffer', () => {
     const feed = createFeed({ layout: { value: 'float32' }, capacity: 8 })
     const w = attachFeed(feed.buffer, { value: 'float32' }, 8)
     const batch = w.push(2)
@@ -54,15 +54,15 @@ describe('feed', () => {
     expect(records[1]).toBe(22)
   })
 
-  // ── M5 (Task 73): векторные форматы + local-носитель ──
+  // ── M5 (Task 73): vector formats + local backing ──
 
-  it('stride векторных полей: float32x2/x3/x4 (досье §4.3 layout фида)', () => {
+  it('stride of vector fields: float32x2/x3/x4 (dossier §4.3 feed layout)', () => {
     expect(feedStride({ p: 'float32x2' })).toBe(8)
     expect(feedStride({ position: 'float32x3', color: 'float32x3', radius: 'float32' })).toBe(28)
     expect(feedStride({ m: 'float32x4' })).toBe(16)
   })
 
-  it('setVec2/3/4 пишут компоненты в интерливинг-запись', () => {
+  it('setVec2/3/4 write components into an interleaved record', () => {
     const layout = { position: 'float32x3', uv: 'float32x2', tint: 'float32x4' } as const
     const feed = createFeed({ layout, capacity: 4 })
     const b = feed.push(2)
@@ -71,14 +71,14 @@ describe('feed', () => {
     b.setVec4('tint', 1, 9, 8, 7, 6)
     feed.publish()
     const f32 = new Float32Array(feed.buffer, 64)
-    // Запись 0: [1,2,3, 0.5,0.25, 0,0,0] — stride 9 float.
+    // Record 0: [1,2,3, 0.5,0.25, 0,0,0] — stride 9 float.
     expect(f32[0]).toBe(1); expect(f32[2]).toBe(3)
     expect(f32[3]).toBe(0.5); expect(f32[4]).toBe(0.25)
-    // Запись 1: tint с offset 5.
+    // Record 1: tint with offset 5.
     expect(f32[9 + 5]).toBe(9); expect(f32[9 + 8]).toBe(6)
   })
 
-  it('backing local — ArrayBuffer вместо SAB (T0/T3-мир)', () => {
+  it('local backing — ArrayBuffer instead of a SAB (T0/T3 world)', () => {
     const feed = createFeed({ layout: { value: 'float32' }, capacity: 8, backing: 'local' })
     expect(feed.buffer instanceof ArrayBuffer).toBe(true)
     feed.push(1).setFloat('value', 0, 3.25)

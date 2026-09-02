@@ -1,18 +1,19 @@
 /**
- * RendererFeed (M5, Task 73): feed dual-bind на стороне рендерера.
+ * RendererFeed (M5, Task 73): the dual-bind feed on the renderer side.
  *
- * Досье §4.3: канал фида биндится двумя способами одновременно — как поток
- * вершинных атрибутов (интерливинг-записи: stride/offset поля) и как
- * GPU-массив структур (storage на WebGPU / UBO std140 на WebGL2 —
- * обвязка шейдер-биндинга — M2 renderer.buffer(), здесь готовые данные).
+ * Dossier §4.3: the feed channel is bound in two ways simultaneously — as a
+ * vertex attribute stream (interleaved records: field stride/offset) and as a
+ * GPU array of structs (storage on WebGPU / UBO std140 on WebGL2 —
+ * shader-binding plumbing — M2 renderer.buffer(); here the data is ready).
  *
- * Граница кадра (§7.2): рендерер снимает атомарный счётчик published и
- * загружает ГРЯЗНЫЙ ДИАПАЗОН одним вызовом (GL: bufferSubData;
- * WebGPU: queue.writeBuffer). Count — сигнал (u_lightCount).
+ * Frame boundary (§7.2): the renderer reads the atomic published counter and
+ * uploads the DIRTY RANGE with a single call (GL: bufferSubData;
+ * WebGPU: queue.writeBuffer). Count is a signal (u_lightCount).
  *
- * Транспорт-инвариант: канал один и тот же в T0/T1/T2 (SAB/local ринг,
- * .buffer передаётся воркеру), в T3 — ping-pong (воркер: createMsgFeedWriter,
- * чанки приезжают applyChunks'ом, буферы возвращаются takeRecycled'ом).
+ * Transport invariant: the channel is the same in T0/T1/T2 (SAB/local ring,
+ * .buffer is passed to the worker); in T3 — ping-pong (worker:
+ * createMsgFeedWriter, chunks arrive via applyChunks, buffers are returned
+ * via takeRecycled).
  */
 
 import type {
@@ -29,31 +30,31 @@ import type { SignalCell } from '@rune/core'
 import type { GLFacade } from '@rune/webgl2'
 import type { GPUFacade } from '@rune/webgpu'
 
-/** Опции создания фида рендерера. */
+/** Options for creating a renderer feed. */
 export interface RendererFeedOptions {
   readonly layout: FeedLayout
   readonly capacity: number
   readonly policy?: FeedPolicy
-  /** Транспорт-режим канала. Default: SAB-детект окружения (T1/T2), без
-   *  SAB — T3 (msg ping-pong). 'memory' — одиночный мир. */
+  /** Transport mode of the channel. Default: SAB detection of the environment
+   *  (T1/T2), without SAB — T3 (msg ping-pong). 'memory' — a single world. */
   readonly mode?: TransportMode
 }
 
-/** Vertex-путь: привязка поля записи для attributes спека. */
+/** Vertex path: record field binding for the attributes of a spec. */
 export interface FeedAttributeBinding {
   readonly data: Float32Array
   readonly size: number
   readonly stride: number
   readonly offset: number
-  /** GL: внешний GPU-буфер фида (executor не создаёт свой). */
+  /** GL: the feed's external GPU buffer (the executor does not create its own). */
   readonly bufferId?: number
-  /** Task 75: шаг выборки записи — 'instance' (квады-звёзды: одна запись
-   *  = один инстанс, углы квада разворачиваются из vertex_index в шейдере)
-   *  | 'vertex' (default — вершинный суп, как в треугольной галактике). */
+  /** Task 75: record sampling step — 'instance' (star quads: one record
+   *  = one instance, quad corners are derived from vertex_index in the shader)
+   *  | 'vertex' (default — a vertex soup, as in the triangle galaxy). */
   readonly step?: 'vertex' | 'instance'
 }
 
-/** Storage-путь: массив структур как единый буфер. */
+/** Storage path: an array of structs as a single buffer. */
 export interface RendererFeedStorage {
   readonly data: Float32Array
   readonly stride: number
@@ -61,30 +62,30 @@ export interface RendererFeedStorage {
 }
 
 export interface RendererFeed {
-  /** Канал писателя (T0/T1/T2): отдай .buffer воркеру (attachFeed) или
-   *  пиши сам. null в T3 — писатель живёт в воркере (createMsgFeedWriter). */
+  /** Writer's channel (T0/T1/T2): hand .buffer to the worker (attachFeed) or
+   *  write yourself. null in T3 — the writer lives in the worker (createMsgFeedWriter). */
   readonly channel: Feed | null
-  /** Опубликовано записей — сигнал (u_lightCount, instances). */
+  /** Published record count — a signal (u_lightCount, instances). */
   readonly count: ReadableSignal<number>
   readonly stride: number
   readonly capacity: number
-  /** Vertex-путь: интерливинг-привязка поля (attributes спека). */
+  /** Vertex path: interleaved field binding (attributes of a spec). */
   attribute(field: string, step?: 'vertex' | 'instance'): FeedAttributeBinding
-  /** Storage-путь: массив структур (std140-обвязка — M2 buffer()). */
+  /** Storage path: an array of structs (std140 plumbing — M2 buffer()). */
   readonly storage: RendererFeedStorage
-  /** T3: применить чанки писателя (доставка — postMessage юзера). */
+  /** T3: apply the writer's chunks (delivery — the user's postMessage). */
   applyChunks(chunks: ReadonlyArray<TransportFeedChunk>): void
-  /** T3: буферы, готовые к возврату писателю (после загрузки в GPU). */
+  /** T3: buffers ready to be returned to the writer (after uploading to the GPU). */
   takeRecycled(): TransportFeedChunk[]
-  /** Граница кадра (вызывает рендерер): грязный диапазон → GPU одним вызовом. */
+  /** Frame boundary (called by the renderer): dirty range → GPU in one call. */
   sync(): void
   dispose(): void
 }
 
-/** FeedId для T3-reader'а (renderer-мир знает свой фид). */
+/** FeedId for the T3 reader (the renderer world knows its feed). */
 const MSG_FEED_ID = 1
 
-/** Поле layout: байтовое смещение + размер в компонентах. */
+/** A layout field: byte offset + size in components. */
 interface FieldInfo {
   readonly offset: number
   readonly size: number
@@ -100,7 +101,7 @@ function fieldInfos(layout: FeedLayout): Map<string, FieldInfo> {
   return infos
 }
 
-/** View поверх core-фида (T0/T1/T2): стабильные байты + атомарный счётчик. */
+/** A view over the core feed (T0/T1/T2): stable bytes + an atomic counter. */
 function coreFeedView(feed: Feed, feedId: number): TransportFeedView {
   const u32 = new Uint32Array(feed.buffer)
   const bytes = new Float32Array(feed.buffer, 64, (feed.capacity * feed.stride) / 4)
@@ -110,11 +111,11 @@ function coreFeedView(feed: Feed, feedId: number): TransportFeedView {
     capacity: feed.capacity,
     count: () => Atomics.load(u32, 1),
     bytes: () => bytes,
-    recycle: () => { /* буфер общий — возвращать нечего */ },
+    recycle: () => { /* shared buffer — nothing to return */ },
   }
 }
 
-/** Общая часть фида рендерера: канал + view + count + dirty-трекинг. */
+/** The common part of a renderer feed: channel + view + count + dirty tracking. */
 interface FeedCore {
   readonly channel: Feed | null
   readonly view: TransportFeedView
@@ -129,8 +130,8 @@ interface FeedCore {
 
 function createFeedCore(options: RendererFeedOptions | TransportFeedView): FeedCore {
   const countSignal = signal(0)
-  // Внешний view (транспорт-привязанный): есть count()/bytes(); layout
-  // везёт сам view (все транспорты его заполняют — attribute() работает).
+  // An external (transport-bound) view: has count()/bytes(); the layout
+  // is carried by the view itself (all transports fill it in — attribute() works).
   if ('count' in options && typeof options.count === 'function') {
     const view = options as TransportFeedView
     return {
@@ -148,8 +149,8 @@ function createFeedCore(options: RendererFeedOptions | TransportFeedView): FeedC
   const opts = options as RendererFeedOptions
   const mode = opts.mode ?? detectTransport()
   if (mode === 'msg') {
-    // T3: рендер-мир — читатель ping-pong (писатель — createMsgFeedWriter
-    // в воркере, тот же layout/capacity; доставка чанков — applyChunks).
+    // T3: the render world is a ping-pong reader (the writer is createMsgFeedWriter
+    // in the worker, the same layout/capacity; chunk delivery — applyChunks).
     const reader = createMsgFeedReader(MSG_FEED_ID, { layout: opts.layout, capacity: opts.capacity })
     return {
       channel: null,
@@ -184,28 +185,28 @@ function createFeedCore(options: RendererFeedOptions | TransportFeedView): FeedC
 
 // ────────────────────────── WebGL2 ──────────────────────────
 
-/** Фид рендерера на WebGL2: GPU-буфер через фасад (createBuffer — журналируемый
- *  DeclOp; replay после device-loss восстанавливает пустое хранилище, sync
- *  перезаливает содержимое). Грязный диапазон — bufferSubData одним вызовом. */
+/** WebGL2 renderer feed: a GPU buffer through the facade (createBuffer — a journaled
+ *  DeclOp; replay after device-loss restores empty storage, sync
+ *  refills the contents). Dirty range — one bufferSubData call. */
 export function createRendererFeedGL(gl: GLFacade, options: RendererFeedOptions | TransportFeedView): RendererFeed {
   const core = createFeedCore(options)
-  const bufferId = gl.createBuffer(core.view.bytes()) // хранилище capacity*stride
+  const bufferId = gl.createBuffer(core.view.bytes()) // capacity*stride storage
   let disposed = false
 
   function sync(): void {
     if (disposed) return
-    // Task 75: count транспорта может сообщить больше capacity только при
-    // баге писателя — clamp держит инвариант «загружаем не больше буфера».
+    // Task 75: the transport's count can exceed capacity only when the writer
+    // is buggy — the clamp keeps the invariant "we upload no more than the buffer holds".
     const published = Math.min(core.view.count(), core.capacity)
     if (published > core.synced) {
       const strideF = core.stride / 4
       const bytes = core.view.bytes()
-      // Грязный диапазон [synced, published) — ОДИН bufferSubData (§4.3).
+      // Dirty range [synced, published) — ONE bufferSubData (§4.3).
       gl.updateBuffer(bufferId, bytes.subarray(core.synced * strideF, published * strideF), core.synced * core.stride)
       core.synced = published
       core.countSignal.value = published
     }
-    core.view.recycle() // T3: ping-pong возврат
+    core.view.recycle() // T3: ping-pong return
   }
 
   return {
@@ -235,25 +236,25 @@ export function createRendererFeedGL(gl: GLFacade, options: RendererFeedOptions 
 
 // ────────────────────────── WebGPU ──────────────────────────
 
-/** Фид рендерера на WebGPU: keyed-буфер по стабильной Float32Array view
- *  (создаётся syncVertexBuffer'ом), writeBuffer одним вызовом на кадр.
- *  Device-loss: свежий фасад → keyed-кэш пуст → первый sync пересоздаст. */
+/** WebGPU renderer feed: a keyed buffer keyed by the stable Float32Array view
+ *  (created by syncVertexBuffer), one writeBuffer per frame.
+ *  Device-loss: a fresh facade → the keyed cache is empty → the first sync re-creates it. */
 export function createRendererFeedGPU(gpu: GPUFacade, options: RendererFeedOptions | TransportFeedView): RendererFeed {
   const core = createFeedCore(options)
   let disposed = false
 
   function sync(): void {
     if (disposed) return
-    // Task 75: clamp до capacity — writeBuffer никогда не превышает буфер
-    // (страховка от писателя с нарушенным инвариантом count ≤ capacity).
+    // Task 75: clamp to capacity — writeBuffer never exceeds the buffer
+    // (protection against a writer violating the count ≤ capacity invariant).
     const published = Math.min(core.view.count(), core.capacity)
     if (published > core.synced) {
-      // Грязный диапазон [0, published*stride) — ОДИН writeBuffer (append-only).
+      // Dirty range [0, published*stride) — ONE writeBuffer (append-only).
       gpu.syncVertexBuffer(core.view.bytes(), published * core.stride)
       core.synced = published
       core.countSignal.value = published
     }
-    core.view.recycle() // T3: ping-pong возврат
+    core.view.recycle() // T3: ping-pong return
   }
 
   return {
@@ -263,8 +264,8 @@ export function createRendererFeedGPU(gpu: GPUFacade, options: RendererFeedOptio
     get capacity() { return core.capacity },
     attribute: (field, step) => {
       const info = requireField(core, field)
-      // WebGPU: интерливинг живёт в пайплайне ({size, stride, offset, step});
-      // биндинг — bindVertexBuffer(slot, data) по стабильному view.
+      // WebGPU: interleaving lives in the pipeline ({size, stride, offset, step});
+      // the binding is bindVertexBuffer(slot, data) over the stable view.
       return { data: core.view.bytes(), size: info.size, stride: core.stride, offset: info.offset, step: step ?? 'vertex' }
     },
     storage: {
@@ -276,7 +277,7 @@ export function createRendererFeedGPU(gpu: GPUFacade, options: RendererFeedOptio
     takeRecycled: () => core.msgReader?.takeRecycled() ?? [],
     sync,
     dispose: () => {
-      // Keyed-буфер живёт в фасаде (dispose фасада чистит всё).
+      // The keyed buffer lives in the facade (disposing the facade cleans everything).
       disposed = true
     },
   }
@@ -285,7 +286,7 @@ export function createRendererFeedGPU(gpu: GPUFacade, options: RendererFeedOptio
 function requireField(core: FeedCore, field: string): FieldInfo {
   const info = core.fields.get(field)
   if (info === undefined) {
-    throw new Error(`rune: поле фида "${field}" не объявлено в layout`)
+    throw new Error(`rune: feed field "${field}" is not declared in the layout`)
   }
   return info
 }

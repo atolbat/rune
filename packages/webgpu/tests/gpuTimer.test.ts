@@ -1,22 +1,23 @@
 /**
- * Тесты WebGPU GpuTimer — createGpuGpuTimer.
+ * WebGPU GpuTimer tests — createGpuGpuTimer.
  *
- * В headless-окружении нет реального GPUDevice, поэтому тесты создают mock
- * объекты с подходящим shape. Реальная интеграция (с querySet, writeTimestamp,
- * mapAsync) проверяется только в real-browser smoke test с GPU.
+ * In a headless environment there is no real GPUDevice, so the tests create
+ * mock objects with a suitable shape. Real integration (with querySet,
+ * writeTimestamp, mapAsync) is checked only in a real-browser smoke test
+ * with a GPU.
  *
- * Тесты проверяют:
- *  - createGpuGpuTimer возвращает null если device.features.has('timestamp-query') === false
- *  - createGpuGpuTimer возвращает { timer, handle } если feature есть
- *  - timer.result() возвращает null на первом кадре (нет pending resolve)
- *  - timer.begin()/end() не бросают без pending resolve
- *  - handle.onBeginPass/onEndPass/onSubmit безопасно вызываются на mock pass/encoder
+ * The tests check:
+ *  - createGpuGpuTimer returns null if device.features.has('timestamp-query') === false
+ *  - createGpuGpuTimer returns { timer, handle } if the feature is present
+ *  - timer.result() returns null on the first frame (no pending resolve)
+ *  - timer.begin()/end() do not throw without a pending resolve
+ *  - handle.onBeginPass/onEndPass/onSubmit are safely callable on a mock pass/encoder
  */
 
 import { describe, expect, it } from 'bun:test'
 import { createGpuGpuTimer } from '../src/gpuTimer.ts'
 
-// Mock GPUDevice с features.has(name)
+// Mock GPUDevice with features.has(name)
 function makeMockDevice(hasFeature: boolean): GPUDevice {
   return {
     features: {
@@ -37,7 +38,7 @@ function makeMockDevice(hasFeature: boolean): GPUDevice {
   } as unknown as GPUDevice
 }
 
-// Mock GPURenderPassEncoder с writeTimestamp
+// Mock GPURenderPassEncoder with writeTimestamp
 function makeMockPass(): GPURenderPassEncoder {
   return {
     writeTimestamp: () => {},
@@ -45,7 +46,7 @@ function makeMockPass(): GPURenderPassEncoder {
   } as unknown as GPURenderPassEncoder
 }
 
-// Mock GPUCommandEncoder с resolveQuerySet + copyBufferToBuffer
+// Mock GPUCommandEncoder with resolveQuerySet + copyBufferToBuffer
 function makeMockEncoder(): GPUCommandEncoder {
   return {
     resolveQuerySet: () => {},
@@ -55,13 +56,13 @@ function makeMockEncoder(): GPUCommandEncoder {
 }
 
 describe('createGpuGpuTimer — feature gating', () => {
-  it('возвращает null если device не имеет timestamp-query feature', () => {
+  it('returns null if the device lacks the timestamp-query feature', () => {
     const device = makeMockDevice(false)
     const result = createGpuGpuTimer(device)
     expect(result).toBeNull()
   })
 
-  it('возвращает { timer, handle } если device имеет timestamp-query feature', () => {
+  it('returns { timer, handle } if the device has the timestamp-query feature', () => {
     const device = makeMockDevice(true)
     const result = createGpuGpuTimer(device)
     expect(result).not.toBeNull()
@@ -70,59 +71,60 @@ describe('createGpuGpuTimer — feature gating', () => {
   })
 })
 
-describe('GpuTimer — контракт на mock (без реального GPU)', () => {
-  it('result() возвращает null на свежем timer (нет pending resolve)', () => {
+describe('GpuTimer — contract on mocks (without a real GPU)', () => {
+  it('result() returns null on a fresh timer (no pending resolve)', () => {
     const device = makeMockDevice(true)
     const { timer } = createGpuGpuTimer(device)!
     expect(timer.result()).toBeNull()
   })
 
-  it('begin() не бросает без pending resolve', () => {
+  it('begin() does not throw without a pending resolve', () => {
     const device = makeMockDevice(true)
     const { timer } = createGpuGpuTimer(device)!
     expect(() => timer.begin()).not.toThrow()
   })
 
-  it('end() не бросает (noop на уровне timer)', () => {
+  it('end() does not throw (noop at the timer level)', () => {
     const device = makeMockDevice(true)
     const { timer } = createGpuGpuTimer(device)!
     expect(() => timer.end()).not.toThrow()
   })
 })
 
-describe('GpuTimerHandle — mock вызовы', () => {
-  it('onBeginPass не бросает на mock pass', () => {
+describe('GpuTimerHandle — mock calls', () => {
+  it('onBeginPass does not throw on a mock pass', () => {
     const device = makeMockDevice(true)
     const { handle } = createGpuGpuTimer(device)!
     const pass = makeMockPass()
     expect(() => handle.onBeginPass(pass)).not.toThrow()
   })
 
-  it('onEndPass не бросает на mock pass', () => {
+  it('onEndPass does not throw on a mock pass', () => {
     const device = makeMockDevice(true)
     const { handle } = createGpuGpuTimer(device)!
     const pass = makeMockPass()
     expect(() => handle.onEndPass(pass)).not.toThrow()
   })
 
-  it('onSubmit не бросает на mock encoder', () => {
+  it('onSubmit does not throw on a mock encoder', () => {
     const device = makeMockDevice(true)
     const { handle } = createGpuGpuTimer(device)!
     const encoder = makeMockEncoder()
     expect(() => handle.onSubmit(encoder)).not.toThrow()
   })
 
-  it('после onSubmit begin() запускает mapAsync (mock resolved)', async () => {
+  it('after onSubmit begin() starts mapAsync (mock resolved)', async () => {
     const device = makeMockDevice(true)
     const { timer, handle } = createGpuGpuTimer(device)!
     const encoder = makeMockEncoder()
     handle.onSubmit(encoder)
-    // begin() запускает mapAsync — mock resolve() сразу
+    // begin() starts mapAsync — the mock resolves() immediately
     await timer.begin()
-    // После resolved map результат — null (mock getMappedRange возвращает
-    // ArrayBuffer 16 = 2 BigInt64 = 0,0 → result null из-за end < start проверки)
-    // На самом деле end=0, start=0 → end>=start → result = 0ms. Проверим
-    // что не undefined.
+    // After a resolved map the result is null (the mock getMappedRange
+    // returns ArrayBuffer 16 = 2 BigInt64 = 0,0 → result null due to the
+    // end < start check)
+    // Actually end=0, start=0 → end>=start → result = 0ms. Check
+    // that it is not undefined.
     const r = timer.result()
     expect(r === null || typeof r === 'number').toBe(true)
   })

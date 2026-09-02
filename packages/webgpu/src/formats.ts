@@ -1,66 +1,67 @@
 /**
- * Таблица форматов текстур WebGPU (Task 112).
+ * WebGPU texture format table (Task 112).
  *
- * Перенос таблиц W3C WebGPU TR (§26 «Texture Formats»):
+ * A port of the W3C WebGPU TR tables (§26 "Texture Formats"):
  *  • Plain color formats — RENDER_ATTACHMENT / blendable / multisampling /
  *    STORAGE_BINDING + texel block copy footprint;
- *  • Depth-stencil formats — аспекты, copy src/dst;
- *  • Packed/compressed (rgb9e5ufloat, BC, ETC2/EAC, ASTC) — блоки и фичи.
+ *  • Depth-stencil formats — aspects, copy src/dst;
+ *  • Packed/compressed (rgb9e5ufloat, BC, ETC2/EAC, ASTC) — blocks and features.
  *
- * Фичи-гейты (availability определяется features адаптера):
- *  • texture-compression-bc / -etc2 / -astc — блочные семейства;
- *  • float32-filterable — LINEAR-фильтрация 32F;
- *  • float32-blendable — блендинг в 32F-цели;
+ * Feature gates (availability is determined by adapter features):
+ *  • texture-compression-bc / -etc2 / -astc — block families;
+ *  • float32-filterable — LINEAR filtering of 32F;
+ *  • float32-blendable — blending into 32F targets;
  *  • bgra8unorm-storage — write-only storage bgra8unorm;
- *  • rg11b10ufloat-renderable — рендер в rg11b10ufloat;
- *  • texture-formats-tier1/tier2 — V2-спека: renderability snorm-семейства
- *    и расширенный storage. На адаптерах без этих фич (все браузеры V1)
- *    соответствующие возможности честно недоступны.
+ *  • rg11b10ufloat-renderable — rendering into rg11b10ufloat;
+ *  • texture-formats-tier1/tier2 — V2 spec: snorm-family renderability
+ *    and extended storage. On adapters without these features (all V1
+ *    browsers) the respective capabilities are honestly unavailable.
  *
- * Storage: кодируется ТОЛЬКО write-only (набор V1: rgba8unorm/snorm/
+ * Storage: encoded as write-ONLY (the V1 set: rgba8unorm/snorm/
  * uint/sint, rgba16uint/sint/float, r32uint/sint/float, rgba32uint/sint/
- * float + bgra8unorm за фичей). Read-only/read-write storage — за tier2,
- * движок их пока не исполняет (caps.has('storage-texture') === false,
- * Контракт 5 из Task 79) — в таблице не заявлены.
+ * float + bgra8unorm behind a feature). Read-only/read-write storage is
+ * behind tier2, the engine does not execute it yet
+ * (caps.has('storage-texture') === false,
+ * Contract 5 of Task 79) — not claimed in the table.
  *
- * Канонические имена/статика — @rune/core (formats.ts); канонический id
- * для WebGPU-форматов равен строке GPUTextureFormat один-в-один.
+ * Canonical names/statics — @rune/core (formats.ts); the canonical id
+ * for WebGPU formats equals the GPUTextureFormat string one-to-one.
  */
 
 import type { TextureFormatId } from '@rune/core'
 import { TEXTURE_FORMATS } from '@rune/core'
 
-/** Условие возможности: core | имя GPUFeatureName | false. */
+/** Capability condition: core | GPUFeatureName | false. */
 export type GpuFeatureGate = true | string | false
 
-/** WebGPU-специфика формата. */
+/** WebGPU specifics of a format. */
 export interface GPUFormatInfo {
-  /** Строка GPUTextureFormat (для WebGPU V1-браузеров недоступные форматы
-   *  перекрыты requiredFeature — браузер отвергнет createTexture, наша
-   *  проверка делает это раньше и честнее). */
+  /** The GPUTextureFormat string (in V1 WebGPU browsers unavailable formats
+   *  are gated by requiredFeature — the browser will reject createTexture;
+   *  our check does it earlier and more honestly). */
   readonly gpu: string
-  /** COPY_SRC/COPY_DST/TEXTURE_BINDING — все plain-форматы умеют;
-   *  помечено для depth24plus-семейства (copy dst запрещён спекой). */
+  /** COPY_SRC/COPY_DST/TEXTURE_BINDING — all plain formats can do it;
+   *  annotated for the depth24plus family (copy dst is forbidden by the spec). */
   readonly copySrc: boolean
   readonly copyDst: boolean
-  /** RENDER_ATTACHMENT: true | имя фичи | false. */
+  /** RENDER_ATTACHMENT: true | feature name | false. */
   readonly renderAttachment: GpuFeatureGate
-  /** Блендинг (только для renderAttachment). */
+  /** Blending (only for renderAttachment). */
   readonly blendable: GpuFeatureGate
-  /** LINEAR-фильтрация: true | 'float32-filterable' | false. */
+  /** LINEAR filtering: true | 'float32-filterable' | false. */
   readonly filterable: GpuFeatureGate
   /** Multisample render target. */
   readonly multisample: boolean
-  /** write-only STORAGE_BINDING: true | имя фичи | false (набор V1). */
+  /** write-only STORAGE_BINDING: true | feature name | false (the V1 set). */
   readonly storageWrite: GpuFeatureGate
-  /** Фича, требуемая для САМОГО формата (compressed/tier) — не для осей. */
+  /** Feature required for the format ITSELF (compressed/tier) — not for axes. */
   readonly requiredFeature?: string
 }
 
 const CORE = true
 
-/** Таблица: канонический id → WebGPU-специфика (V1-браузерная реальность
- *  + tier-гейты V2-спеки; ср. с GL_FORMATS в webgl2/formats.ts). */
+/** Table: canonical id → WebGPU specifics (V1 browser reality
+ *  + tier gates of the V2 spec; cf. GL_FORMATS in webgl2/formats.ts). */
 export const GPU_FORMATS: Readonly<Partial<Record<TextureFormatId, GPUFormatInfo>>> = {
   // 8-bit
   r8unorm: { gpu: 'r8unorm', copySrc: CORE, copyDst: CORE, renderAttachment: CORE, blendable: CORE, filterable: CORE, multisample: true, storageWrite: false },
@@ -77,8 +78,8 @@ export const GPU_FORMATS: Readonly<Partial<Record<TextureFormatId, GPUFormatInfo
   rgba8uint: { gpu: 'rgba8uint', copySrc: CORE, copyDst: CORE, renderAttachment: CORE, blendable: false, filterable: false, multisample: true, storageWrite: CORE },
   rgba8sint: { gpu: 'rgba8sint', copySrc: CORE, copyDst: CORE, renderAttachment: CORE, blendable: false, filterable: false, multisample: true, storageWrite: CORE },
   bgra8unorm: { gpu: 'bgra8unorm', copySrc: CORE, copyDst: CORE, renderAttachment: CORE, blendable: CORE, filterable: CORE, multisample: true, storageWrite: 'bgra8unorm-storage' },
-  // V2-формат: в V1-браузерах отсутствует в enum; feature 'core-features-and-
-  // limits' есть только на V2-адаптерах (нормальный режим) — честный гейт.
+  // V2 format: absent from the enum in V1 browsers; the 'core-features-and-
+  // limits' feature exists only on V2 adapters (normal mode) — an honest gate.
   'bgra8unorm-srgb': { gpu: 'bgra8unorm-srgb', copySrc: CORE, copyDst: CORE, renderAttachment: CORE, blendable: CORE, filterable: CORE, multisample: true, storageWrite: false, requiredFeature: 'core-features-and-limits' },
   // 16-bit int/float
   r16uint: { gpu: 'r16uint', copySrc: CORE, copyDst: CORE, renderAttachment: CORE, blendable: false, filterable: false, multisample: true, storageWrite: 'texture-formats-tier1' },
@@ -90,7 +91,7 @@ export const GPU_FORMATS: Readonly<Partial<Record<TextureFormatId, GPUFormatInfo
   rgba16uint: { gpu: 'rgba16uint', copySrc: CORE, copyDst: CORE, renderAttachment: CORE, blendable: false, filterable: false, multisample: true, storageWrite: CORE },
   rgba16sint: { gpu: 'rgba16sint', copySrc: CORE, copyDst: CORE, renderAttachment: CORE, blendable: false, filterable: false, multisample: true, storageWrite: CORE },
   rgba16float: { gpu: 'rgba16float', copySrc: CORE, copyDst: CORE, renderAttachment: CORE, blendable: CORE, filterable: CORE, multisample: true, storageWrite: CORE },
-  // V2-only 16-bit unorm/snorm (tier1): в браузерах V1 формата нет вовсе.
+  // V2-only 16-bit unorm/snorm (tier1): in V1 browsers the format does not exist at all.
   r16unorm: { gpu: 'r16unorm', copySrc: CORE, copyDst: CORE, renderAttachment: CORE, blendable: CORE, filterable: false, multisample: true, storageWrite: CORE, requiredFeature: 'texture-formats-tier1' },
   r16snorm: { gpu: 'r16snorm', copySrc: CORE, copyDst: CORE, renderAttachment: CORE, blendable: CORE, filterable: CORE, multisample: true, storageWrite: CORE, requiredFeature: 'texture-formats-tier1' },
   rg16unorm: { gpu: 'rg16unorm', copySrc: CORE, copyDst: CORE, renderAttachment: CORE, blendable: CORE, filterable: false, multisample: true, storageWrite: CORE, requiredFeature: 'texture-formats-tier1' },
@@ -112,15 +113,15 @@ export const GPU_FORMATS: Readonly<Partial<Record<TextureFormatId, GPUFormatInfo
   rgb10a2unorm: { gpu: 'rgb10a2unorm', copySrc: CORE, copyDst: CORE, renderAttachment: CORE, blendable: CORE, filterable: CORE, multisample: true, storageWrite: 'texture-formats-tier1' },
   rg11b10ufloat: { gpu: 'rg11b10ufloat', copySrc: CORE, copyDst: CORE, renderAttachment: 'rg11b10ufloat-renderable', blendable: 'texture-formats-tier1', filterable: CORE, multisample: false, storageWrite: 'texture-formats-tier1' },
   rgb9e5ufloat: { gpu: 'rgb9e5ufloat', copySrc: CORE, copyDst: CORE, renderAttachment: false, blendable: false, filterable: CORE, multisample: false, storageWrite: false },
-  // Depth/stencil (copy dst запрещён для depth24plus-семейства; depth32float
-  // — copy dst тоже запрещён по спеке, copy src разрешён)
+  // Depth/stencil (copy dst is forbidden for the depth24plus family; depth32float
+  // — copy dst is also forbidden per spec, copy src is allowed)
   stencil8: { gpu: 'stencil8', copySrc: CORE, copyDst: CORE, renderAttachment: CORE, blendable: false, filterable: false, multisample: true, storageWrite: false },
   depth16unorm: { gpu: 'depth16unorm', copySrc: CORE, copyDst: CORE, renderAttachment: CORE, blendable: false, filterable: false, multisample: true, storageWrite: false },
   depth24plus: { gpu: 'depth24plus', copySrc: false, copyDst: false, renderAttachment: CORE, blendable: false, filterable: false, multisample: true, storageWrite: false },
   'depth24plus-stencil8': { gpu: 'depth24plus-stencil8', copySrc: false, copyDst: false, renderAttachment: CORE, blendable: false, filterable: false, multisample: true, storageWrite: false },
   depth32float: { gpu: 'depth32float', copySrc: CORE, copyDst: false, renderAttachment: CORE, blendable: false, filterable: false, multisample: true, storageWrite: false },
   'depth32float-stencil8': { gpu: 'depth32float-stencil8', copySrc: CORE, copyDst: false, renderAttachment: CORE, blendable: false, filterable: false, multisample: true, storageWrite: false },
-  // BC (feature texture-compression-bc; блоки 4×4)
+  // BC (feature texture-compression-bc; 4×4 blocks)
   'bc1-rgba-unorm': bc('bc1-rgba-unorm'), 'bc1-rgba-unorm-srgb': bc('bc1-rgba-unorm-srgb'),
   'bc2-rgba-unorm': bc('bc2-rgba-unorm'), 'bc2-rgba-unorm-srgb': bc('bc2-rgba-unorm-srgb'),
   'bc3-rgba-unorm': bc('bc3-rgba-unorm'), 'bc3-rgba-unorm-srgb': bc('bc3-rgba-unorm-srgb'),
@@ -128,13 +129,13 @@ export const GPU_FORMATS: Readonly<Partial<Record<TextureFormatId, GPUFormatInfo
   'bc5-rg-unorm': bc('bc5-rg-unorm'), 'bc5-rg-snorm': bc('bc5-rg-snorm'),
   'bc6h-rgb-ufloat': bc('bc6h-rgb-ufloat'), 'bc6h-rgb-float': bc('bc6h-rgb-float'),
   'bc7-rgba-unorm': bc('bc7-rgba-unorm'), 'bc7-rgba-unorm-srgb': bc('bc7-rgba-unorm-srgb'),
-  // ETC2/EAC (feature texture-compression-etc2; блоки 4×4)
+  // ETC2/EAC (feature texture-compression-etc2; 4×4 blocks)
   'etc2-rgb8unorm': etc('etc2-rgb8unorm'), 'etc2-rgb8unorm-srgb': etc('etc2-rgb8unorm-srgb'),
   'etc2-rgb8a1unorm': etc('etc2-rgb8a1unorm'), 'etc2-rgb8a1unorm-srgb': etc('etc2-rgb8a1unorm-srgb'),
   'etc2-rgba8unorm': etc('etc2-rgba8unorm'), 'etc2-rgba8unorm-srgb': etc('etc2-rgba8unorm-srgb'),
   'eac-r11unorm': etc('eac-r11unorm'), 'eac-r11snorm': etc('eac-r11snorm'),
   'eac-rg11unorm': etc('eac-rg11unorm'), 'eac-rg11snorm': etc('eac-rg11snorm'),
-  // ASTC (feature texture-compression-astc; блоки 16 байт)
+  // ASTC (feature texture-compression-astc; 16-byte blocks)
   ...astcEntries(),
 }
 
@@ -158,41 +159,41 @@ function astcEntries(): Record<string, GPUFormatInfo> {
   return out
 }
 
-// ─── Запросы ─────────────────────────────────────────────────────────────────
+// ─── Queries ─────────────────────────────────────────────────────────────────
 
-/** WebGPU-специфика формата; undefined — WebGPU формат не поддерживает
- *  (GL-only: rgb8*, rgb16*, rgb32*, rgb565/rgba4/rgb5a1; псевдо 'canvas'). */
+/** WebGPU specifics of a format; undefined — WebGPU does not support the format
+ *  (GL-only: rgb8*, rgb16*, rgb32*, rgb565/rgba4/rgb5a1; pseudo 'canvas'). */
 export function gpuFormatInfo(format: TextureFormatId): GPUFormatInfo | undefined {
   return GPU_FORMATS[format]
 }
 
-/** Интерфейс фич адаптера (GPUSupportedFeatures-совместимый). */
+/** Adapter feature interface (GPUSupportedFeatures-compatible). */
 export interface GpuFeatureSet {
   has(feature: string): boolean
 }
 
-/** Формат доступен на этом устройстве? (requiredFeature-гейт). */
+/** Is the format available on this device? (requiredFeature gate). */
 export function gpuFormatAvailable(format: TextureFormatId, features: GpuFeatureSet): { readonly ok: boolean; readonly reason?: string } {
   const info = GPU_FORMATS[format]
   if (info === undefined) {
-    return { ok: false, reason: `WebGPU не поддерживает формат '${format}' (GL-only или вне каталога)` }
+    return { ok: false, reason: `WebGPU does not support format '${format}' (GL-only or out of catalog)` }
   }
   if (info.requiredFeature !== undefined && !features.has(info.requiredFeature)) {
-    return { ok: false, reason: `формат '${format}' требует feature '${info.requiredFeature}' (адаптер её не выдаёт)` }
+    return { ok: false, reason: `format '${format}' requires feature '${info.requiredFeature}' (the adapter does not provide it)` }
   }
   return { ok: true }
 }
 
-/** Ось возможности с учётом фич адаптера. */
+/** Capability axis with adapter features taken into account. */
 export function gpuCapability(gate: GpuFeatureGate, features: GpuFeatureSet): boolean {
   if (gate === true) return true
   if (gate === false) return false
   return features.has(gate)
 }
 
-/** bytesPerRow для writeTexture/readback региона width: несжатые —
- *  texelBytes·w; сжатые — blockBytes·ceil(w/blockWidth) (WebGPU требует
- *  выравнивания 256 для copy, writeTexture допускает кратное blockBytes). */
+/** bytesPerRow for a writeTexture/readback region of width: uncompressed —
+ *  texelBytes·w; compressed — blockBytes·ceil(w/blockWidth) (WebGPU requires
+ *  256 alignment for copy, writeTexture allows a multiple of blockBytes). */
 export function gpuBytesPerRow(format: TextureFormatId, width: number): number {
   const info = TEXTURE_FORMATS[format]
   if (info === undefined) return width * 4

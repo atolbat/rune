@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * postinstall: гарантирует workspace-симлинки node_modules/@rune/*.
+ * postinstall: ensures the node_modules/@rune/* workspace symlinks.
  *
- * Часть окружений (например, bun 1.3.14 в контейнерах) не создаёт симлинки
- * workspace-пакетов автоматически. Скрипт идемпотентен: создаёт ссылку,
- * только если её нет, и не трогает существующие.
+ * Some environments (e.g. bun 1.3.14 in containers) do not create workspace
+ * package symlinks automatically. The script is idempotent: it creates a link
+ * only if it is missing and never touches existing ones.
  */
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, symlinkSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -31,7 +31,7 @@ for (const entry of readdirSync(packagesDir)) {
       continue
     }
   } catch {
-    continue // пакет без манифеста пропускаем
+    continue // skip packages without a manifest
   }
 
   mkdirSync(modulesDir, { recursive: true })
@@ -41,8 +41,8 @@ for (const entry of readdirSync(packagesDir)) {
     symlinkSync(pkgDir, link, 'dir')
     created.push(`@rune/${name}`)
   } catch {
-    // best effort — не ломаем установку
+    // best effort — do not break the install
   }
 }
 
-if (created.length) console.log(`[rune] созданы workspace-симлинки: ${created.join(', ')}`)
+if (created.length) console.log(`[rune] created workspace symlinks: ${created.join(', ')}`)

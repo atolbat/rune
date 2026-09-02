@@ -1,19 +1,19 @@
 /**
- * worker.ts — кадровый конвейер сцены и точка входа воркера (Task 81).
+ * worker.ts — the scene frame pipeline and the worker entry point (Task 81).
  *
- * runScenePipeline — ЕДИНЫЙ кадр конвейера: updateWorld → refit → cull →
- * instances. Вызывается и main-потоком (T0), и воркером (T1/T2) — паритет
- * по построению, разница только в том, КТО вызвал.
+ * runScenePipeline — ONE pipeline frame: updateWorld → refit → cull →
+ * instances. Called both by the main thread (T0) and by the worker (T1/T2) —
+ * parity by construction, the only difference is WHO called it.
  *
- * runSceneWorker — цикл воркера: спит на Atomics.wait(H_INPUT_EPOCH),
- * просыпается на publish(), исполняет конвейер в буфер (epoch & 1),
- * публикует H_OUTPUT_EPOCH. Останов — CMD_STOP в H_CMD_FLAGS + notify
- * (мост dispose()).
+ * runSceneWorker — the worker loop: sleeps on Atomics.wait(H_INPUT_EPOCH),
+ * wakes on publish(), runs the pipeline into buffer (epoch & 1),
+ * publishes H_OUTPUT_EPOCH. Stop — CMD_STOP in H_CMD_FLAGS + notify
+ * (bridge dispose()).
  *
- * Протокол честности кадра: main пишет локали/структуру/камеры ТОЛЬКО до
- * Atomics.store(H_INPUT_EPOCH); воркер читает их ТОЛЬКО после пробуждения;
- * main читает битсеты/пулы ТОЛЬКО после H_OUTPUT_EPOCH == опубликованной
- * эпохе. Двухбуферность пулов исключает tearing между соседними эпохами.
+ * Frame honesty protocol: main writes locals/structure/cameras ONLY before
+ * Atomics.store(H_INPUT_EPOCH); the worker reads them ONLY after waking;
+ * main reads bitsets/pools ONLY after H_OUTPUT_EPOCH == the published
+ * epoch. Double buffering of pools rules out tearing between adjacent epochs.
  */
 import type { SceneViews } from './layout.ts'
 import { buildSceneViews } from './layout.ts'
@@ -33,8 +33,8 @@ import { collectInstancesViews } from './instances.ts'
 import { refitGroupBoundsViews, updateWorldViews } from './transforms.ts'
 
 /**
- * Один кадр конвейера сцены в буфер bufferIndex (0/1).
- * Возвращает суммарное время фаз (мс) для диагностики.
+ * One scene pipeline frame into buffer bufferIndex (0/1).
+ * Returns the total time of the phases (ms) for diagnostics.
  */
 export function runScenePipeline(views: SceneViews, bufferIndex: number): number {
   const headerI = views.headerI
@@ -59,13 +59,13 @@ function now(): number {
     : Date.now()
 }
 
-/** Хуки наблюдения за воркером (диагностика/тесты). */
+/** Hooks for observing the worker (diagnostics/tests). */
 export interface SceneWorkerHooks {
-  /** Вызывается после каждого обработанного кадра. */
+  /** Called after each processed frame. */
   onFrame?(epoch: number, frameMs: number): void
 }
 
-/** Запуск воркера сцены (вызывается ВНУТРИ потока воркера). */
+/** Start the scene worker (called INSIDE the worker thread). */
 export function runSceneWorker(
   sab: SharedArrayBuffer,
   hooks: SceneWorkerHooks = {},
@@ -83,10 +83,10 @@ export function runSceneWorker(
   }
 
   while (!stopped) {
-    // Спим до смены inputEpoch. Notify может быть ПОТЕРЯН, если main
-    // опубликовал кадр до входа воркера в wait — поэтому таймаут короткий,
-    // а решение об обработке принимается по ЭПОХАМ (output < input), а не
-    // по факту пробуждения: потерянный кадр подберётся через таймаут.
+    // Sleep until inputEpoch changes. A notify can be LOST if main
+    // published a frame before the worker entered wait — hence the short
+    // timeout, and the decision to process is made by EPOCHS (output < input),
+    // not by the fact of waking: a lost frame will be picked up via the timeout.
     Atomics.wait(headerI, H_INPUT_EPOCH, lastInput, 50)
     if (stopped) break
     if ((Atomics.load(headerI, H_CMD_FLAGS) & CMD_STOP) !== 0) break
@@ -94,7 +94,7 @@ export function runSceneWorker(
     const output = Atomics.load(headerI, H_OUTPUT_EPOCH)
     if (output >= input) {
       lastInput = input
-      continue // этот кадр уже обработан
+      continue // this frame is already processed
     }
     lastInput = input
     const frameMs = runScenePipeline(views, input & 1)

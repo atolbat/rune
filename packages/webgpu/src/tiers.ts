@@ -1,50 +1,53 @@
 /**
- * §8-3 (M4, Контракт 4): requestTier — ЛЕСТНИЦА переговоров с адаптером.
+ * §8-3 (M4, Contract 4): requestTier — a LADDER of negotiations with the
+ * adapter.
  *
- * Было (до Task 101): createRealGPU звал adapter.requestDevice() почти без
- * параметров — единственная «переговорная» логика: timestamp-query /
- * float32-filterable / float32-blendable запрашивались ЕСЛИ адаптер их
- * имеет, при отказе — повтор без requiredFeatures (см. realGPU.ts).
+ * Before (until Task 101): createRealGPU called adapter.requestDevice() with
+ * almost no parameters — the only "negotiation" logic: timestamp-query /
+ * float32-filterable / float32-blendable were requested IF the adapter has
+ * them, on refusal — a retry without requiredFeatures (see realGPU.ts).
  *
- * Стало: профили «desktop / mobile / fallback» (§5.3, профиль §9.2 —
- * ЗАПРАШИВАЕМЫЕ tiers, не захардкоженные по userAgent) прогоняются через
+ * Now: the "desktop / mobile / fallback" profiles (§5.3, profile §9.2 —
+ * REQUESTED tiers, not hardcoded by userAgent) are run through
  * negotiateDevice():
  *
- *   шаг 1..k  requestDevice({ requiredFeatures, requiredLimits }) по
- *             лестнице лимитов ПО УБЫВАНИЮ (например maxTextureDimension2D
- *             16384 → 8192 → адаптерные дефолты, DESIGN §4: «спускается
- *             с 16384 → 8192 при отказе»);
- *   шаг k+1   requestDevice({ requiredFeatures }) — лимиты не запрашиваем;
- *   шаг k+2   bare requestDevice() — честный fallback (прошлое поведение
- *             createRealGPU как последний шаг — контракт сохранён).
+ *   step 1..k  requestDevice({ requiredFeatures, requiredLimits }) down
+ *             a ladder of limits in DESCENDING order (e.g. maxTextureDimension2D
+ *             16384 → 8192 → adapter defaults, DESIGN §4: "descends
+ *             from 16384 → 8192 on refusal");
+ *   step k+1   requestDevice({ requiredFeatures }) — limits not requested;
+ *   step k+2   bare requestDevice() — honest fallback (the previous
+ *             behavior of createRealGPU as the last step — the contract
+ *             is preserved).
  *
- * Каждый шаг пишется в steps[] (NegotiationStep) — трасса переговоров
- * видна вызывающему коду (демо requestTier показывает её вживую).
+ * Every step is written into steps[] (NegotiationStep) — the negotiation
+ * trace is visible to the caller (the requestTier demo shows it live).
  *
- * probeContextEviction() — зонд вытеснения WebGL-контекстов (§7-уточнение 2:
- * «не хардкод 8, а измеряемый профиль»: на Mali даёт 9, на десктопе 16+,
- * замер на Raspberry Pi (Mali Valhall): 18 живых без вытеснения — потолок
- * задаётся maxProbes, среда может держать больше).
- * Измерение: создаём webgl2-контексты один за другим и смотрим, на каком
- * по счёту браузер убьёт СТАРЕЙШИЙ (kill-oldest). safeMax = evictedAt − 1
- * (safetyMargin(1)). Фабрика контекстов инъектится — юнит-тесты считают
- * логику без реального GPU.
+ * probeContextEviction() — a WebGL-context eviction probe (§7-clarification 2:
+ * "not a hardcoded 8, but a measured profile": on Mali it gives 9, on
+ * desktop 16+, measurement on Raspberry Pi (Mali Valhall): 18 alive
+ * without eviction — the ceiling is set by maxProbes, the environment
+ * may keep more).
+ * Measurement: we create webgl2 contexts one by one and watch at which
+ * one in order the browser kills the OLDEST (kill-oldest). safeMax =
+ * evictedAt − 1 (safetyMargin(1)). The context factory is injected —
+ * unit tests check the logic without a real GPU.
  *
- * Гигиена (Контракт 5, Task 79): tier НЕ заявляет фичи, у которых нет пути
- * исполнения в движке — набор запрашиваемых фич остался прежним
- * (SOFT_FEATURES), меняются только лимиты и хинты профиля.
+ * Hygiene (Contract 5, Task 79): the tier does NOT claim features that
+ * have no execution path in the engine — the requested feature set stays
+ * as before (SOFT_FEATURES), only limits and profile hints change.
  */
 
-/** Идентификатор тира. */
+/** Tier identifier. */
 export type WebGpuTierId = 'desktop' | 'mobile' | 'fallback'
 
-/** Запрос тира вызывающего кода: конкретный профиль или 'auto' (детект). */
+/** Tier request from the caller: a concrete profile or 'auto' (detection). */
 export type WebGpuTierRequest = 'auto' | WebGpuTierId
 
-/** Минимальный структурный тип адаптера — реальный GPUAdapter ему
- *  удовлетворяет, юнит-тесты подставляют фейк. limits — информационное
- *  поле (лестница НЕ индексирует адаптерные лимиты: переговоры идут
- *  только через requestDevice, Контракт 4). */
+/** Minimal structural adapter type — a real GPUAdapter satisfies it,
+ *  unit tests substitute a fake. limits is an informational field
+ *  (the ladder does NOT index adapter limits: negotiations happen only
+ *  via requestDevice, Contract 4). */
 export interface TierAdapter {
   readonly features: { has(name: string): boolean }
   readonly limits?: object
@@ -52,24 +55,24 @@ export interface TierAdapter {
   requestDevice(descriptor?: GPUDeviceDescriptor): Promise<unknown>
 }
 
-/** Хинты профиля (§9.2): потребитель может НЕ следовать — это не лимиты
- *  устройства, а рекомендации движка/приложения для этого тира. */
+/** Profile hints (§9.2): the consumer may NOT follow them — they are not
+ *  device limits but engine/application recommendations for this tier. */
 export interface TierHints {
-  /** Потолок DPR канваса (мобильный профиль: dpr ≤ 2). */
+  /** Canvas DPR cap (mobile profile: dpr ≤ 2). */
   readonly dprCap: number
-  /** Ориентировочный бюджет GPU-памяти на текстуры, МБ (мобильный: 256). */
+  /** Approximate GPU memory budget for textures, MB (mobile: 256). */
   readonly textureBudgetMb: number
-  /** Человекочитаемое имя профиля. */
+  /** Human-readable profile name. */
   readonly label: string
 }
 
-/** Лестница одного лимита: значения ПО УБЫВАНИЮ. */
+/** Ladder of a single limit: values in DESCENDING order. */
 export interface TierLimitLadder {
   readonly limit: string
   readonly values: readonly number[]
 }
 
-/** Спецификация тира: лестницы лимитов + хинты профиля. */
+/** Tier specification: limit ladders + profile hints. */
 export interface TierSpec {
   readonly id: WebGpuTierId
   readonly limits: readonly TierLimitLadder[]
@@ -77,12 +80,13 @@ export interface TierSpec {
 }
 
 /**
- * Фичи, запрашиваемые ЕСЛИ адаптер их поддерживает (мягкие — refusal не
- * фатален, ladder спустится до bare requestDevice). Набор не расширяется
- * тиром: у всего здесь есть путь исполнения в движке (Контракт 5):
+ * Features requested IF the adapter supports them (soft — a refusal is
+ * not fatal, the ladder descends to bare requestDevice). The set is not
+ * extended by the tier: everything here has an execution path in the
+ * engine (Contract 5):
  *   timestamp-query     — GpuTimer (device.createQuerySet timestamp);
- *   float32-filterable  — LINEAR-фильтрация rgba32float (Task 69);
- *   float32-blendable   — блендинг 32F-целей (Task 81).
+ *   float32-filterable  — LINEAR filtering of rgba32float (Task 69);
+ *   float32-blendable   — blending 32F targets (Task 81).
  */
 export const SOFT_FEATURES: readonly GPUFeatureName[] = [
   'timestamp-query',
@@ -91,11 +95,11 @@ export const SOFT_FEATURES: readonly GPUFeatureName[] = [
 ]
 
 /**
- * Тиры (DESIGN §5.3: desktop / mobile / fallback; §4: спуск 16384 → 8192).
- * Лестницы указывают ЗАПРАШИВАЕМЫЕ значения: requestDevice поднимает лимит
- * до значения, если адаптер умеет; если нет — reject, и negotiation
- * спускается на ступень ниже. Последняя ступень любой лестницы — не
- * запрашивать лимит вовсе (адаптерные дефолты).
+ * Tiers (DESIGN §5.3: desktop / mobile / fallback; §4: descent 16384 → 8192).
+ * Ladders specify REQUESTED values: requestDevice raises a limit to the
+ * value if the adapter can; if not — reject, and negotiation descends one
+ * step. The last step of any ladder is to not request the limit at all
+ * (adapter defaults).
  */
 export const TIERS: Readonly<Record<WebGpuTierId, TierSpec>> = {
   desktop: {
@@ -104,7 +108,7 @@ export const TIERS: Readonly<Record<WebGpuTierId, TierSpec>> = {
       { limit: 'maxTextureDimension2D', values: [16384, 8192] },
       { limit: 'maxBufferSize', values: [1073741824, 268435456] },
     ],
-    hints: { dprCap: 3, textureBudgetMb: 1024, label: 'Desktop — полные лимиты' },
+    hints: { dprCap: 3, textureBudgetMb: 1024, label: 'Desktop — full limits' },
   },
   mobile: {
     id: 'mobile',
@@ -112,34 +116,36 @@ export const TIERS: Readonly<Record<WebGpuTierId, TierSpec>> = {
       { limit: 'maxTextureDimension2D', values: [8192] },
       { limit: 'maxBufferSize', values: [268435456] },
     ],
-    hints: { dprCap: 2, textureBudgetMb: 256, label: 'Mobile (§9.2): dpr ≤ 2, бюджет 256 МБ' },
+    hints: { dprCap: 2, textureBudgetMb: 256, label: 'Mobile (§9.2): dpr ≤ 2, budget 256 MB' },
   },
   fallback: {
     id: 'fallback',
     limits: [],
-    hints: { dprCap: 1, textureBudgetMb: 64, label: 'Fallback — адаптерные дефолты' },
+    hints: { dprCap: 1, textureBudgetMb: 64, label: 'Fallback — adapter defaults' },
   },
 }
 
-/** Мобильные семейства GPU (adapter.info.architecture) — сигнал «мобильный
- *  профиль». Поколения Mali Dawn называет по микроархитектуре («valhall»,
- *  «bifrost», «midgard», «immortalis» — репорт с Mali Valhall: vendor «arm»,
- *  architecture «valhall»), поэтому ВЕНДОР «arm» тоже сигналит mobile —
- *  GPU-линейка ARM это только Mali (мобильный класс). SwiftShader (софтверный
- *  рендер headless/слабых машин) тоже консервативен по лимитам — относим к
- *  mobile-тиру. UA НЕ используется (§5.3: «запрашиваемые tiers, а не
- *  захардкоженные по userAgent»). Apple-вендор НЕ добавляем: iPhone и Mac
- *  сообщают одинаковый info — неразличимо, остаётся консервативный desktop. */
+/** Mobile GPU families (adapter.info.architecture) — a "mobile profile"
+ *  signal. Dawn names Mali generations by microarchitecture ("valhall",
+ *  "bifrost", "midgard", "immortalis" — report from Mali Valhall: vendor
+ *  "arm", architecture "valhall"), so the VENDOR "arm" also signals
+ *  mobile — ARM's GPU line is only Mali (mobile class). SwiftShader
+ *  (software renderer of headless/weak machines) is also conservative in
+ *  limits — classified into the mobile tier. UA is NOT used (§5.3:
+ *  "requested tiers, not hardcoded by userAgent"). The Apple vendor is
+ *  NOT added: iPhone and Mac report the same info — indistinguishable,
+ *  so conservative desktop remains. */
 const MOBILE_ARCH_RE = /mali|valhall|bifrost|midgard|immortalis|adreno|powervr|xclipse|videocore|swiftshader/i
 
-/** Вендоры, вся GPU-линейка которых — мобильный класс (ARM = Mali). */
+/** Vendors whose entire GPU line is the mobile class (ARM = Mali). */
 const MOBILE_VENDOR_RE = /^arm$/i
 
 /**
- * Детект тира по adapter.info/limits. Это ТОЛЬКО дефолт для tier:'auto' —
- * приложение всегда может запросить профиль явно (главное требование §5.3).
- * Эвристика консервативна: неизвестный адаптер = desktop (лестница всё
- * равно спустится при отказе, потерь нет).
+ * Tier detection from adapter.info/limits. This is ONLY the default for
+ * tier:'auto' — the application can always request a profile explicitly
+ * (the main requirement of §5.3). The heuristic is conservative: an
+ * unknown adapter = desktop (the ladder will descend on refusal anyway,
+ * no loss).
  */
 export function detectTier(adapter: { readonly info?: { vendor?: string; architecture?: string; description?: string } }): WebGpuTierId {
   const info = adapter.info
@@ -149,34 +155,34 @@ export function detectTier(adapter: { readonly info?: { vendor?: string; archite
   return 'desktop'
 }
 
-/** Один шаг переговоров (трасса для приложения/демо). */
+/** One negotiation step (trace for the application/demo). */
 export interface NegotiationStep {
-  /** Что пробовали на этом шаге (человекочитаемо). */
+  /** What was tried at this step (human-readable). */
   readonly label: string
   readonly ok: boolean
   readonly error?: string
-  /** Лимиты этого шага (для ок-шага — ГРАНТИРОВАННЫЕ требуемые лимиты). */
+  /** Limits of this step (for an ok step — the GUARANTEED required limits). */
   readonly requiredLimits?: Readonly<Record<string, number>>
 }
 
-/** Результат переговоров. */
+/** Negotiation result. */
 export interface NegotiatedTier {
-  /** Что просили ('auto' уже развёрнут в конкретный профиль). */
+  /** What was requested ('auto' is already resolved into a concrete profile). */
   readonly requested: WebGpuTierRequest
-  /** Что получили: 'fallback' — выжил только bare requestDevice. */
+  /** What was granted: 'fallback' — only bare requestDevice survived. */
   readonly granted: WebGpuTierId
   readonly device: unknown
-  /** Фичи, реально запрошенные у адаптера (мягкие, отфильтрованы по has). */
+  /** Features actually requested from the adapter (soft, filtered by has). */
   readonly requiredFeatures: readonly string[]
-  /** Лимиты финального успешного шага (пусто — адаптерные дефолты). */
+  /** Limits of the final successful step (empty — adapter defaults). */
   readonly requiredLimits: Readonly<Record<string, number>>
-  /** Полная трасса: каждая ступень + финальный ок-шаг. */
+  /** Full trace: every step + the final ok step. */
   readonly steps: readonly NegotiationStep[]
   readonly hints: TierHints
 }
 
 export interface NegotiateDeviceOptions {
-  /** Живой колбэк шага (демо подсвечивает ступени по мере переговоров). */
+  /** Live step callback (the demo highlights steps as negotiations proceed). */
   readonly onStep?: (step: NegotiationStep) => void
 }
 
@@ -185,15 +191,15 @@ function errorText(error: unknown): string {
 }
 
 /**
- * Лестница переговоров: лимиты по убыванию → только фичи → bare.
- * Возвращает ГРАНТИРОВАННЫЙ шаг; если падает даже bare — ретраунет
- * исходную ошибку (адаптер мёртв, тут уже не чем торговаться).
+ * Negotiation ladder: limits in descending order → features only → bare.
+ * Returns the GUARANTEED step; if even bare fails — rethrows the
+ * original error (the adapter is dead, there is nothing left to bargain).
  *
- * ⚠ Dawn/Chrome: УСПЕШНЫЙ requestDevice «потребляет» адаптер (adapter is
- * "consumed") — один адаптер даёт одно устройство. Провальные попытки
- * лестницы адаптер НЕ потребляют, поэтому спуск внутри одного вызова
- * работает; для ПОВТОРНЫХ переговоров запрашивайте свежий адаптер
- * (navigator.gpu.requestAdapter() снова).
+ * ⚠ Dawn/Chrome: a SUCCESSFUL requestDevice "consumes" the adapter (adapter
+ * is "consumed") — one adapter yields one device. Failed ladder attempts
+ * do NOT consume the adapter, so the descent within one call works; for
+ * REPEATED negotiations request a fresh adapter
+ * (navigator.gpu.requestAdapter() again).
  */
 export async function negotiateDevice(
   adapter: TierAdapter,
@@ -202,18 +208,19 @@ export async function negotiateDevice(
 ): Promise<NegotiatedTier> {
   const resolved: WebGpuTierId = tier === 'auto' ? detectTier(adapter) : tier
   const spec = TIERS[resolved]
-  // Мягкие фичи: просим только то, что адаптер заявляет (прошлое поведение
-  // realGPU — сохранено как первый шаг лестницы). Явный fallback-тир —
-  // bare-семантика: никаких фич вовсе (gpuTimer честно не подключится).
+  // Soft features: request only what the adapter declares (the previous
+  // realGPU behavior — preserved as the first step of the ladder). An
+  // explicit fallback tier — bare semantics: no features at all (gpuTimer
+  // honestly will not be wired).
   const requiredFeatures = resolved === 'fallback'
     ? []
     : SOFT_FEATURES.filter(name => adapter.features.has(name))
   const steps: NegotiationStep[] = []
   const emit = (step: NegotiationStep): void => { steps.push(step); options?.onStep?.(step) }
 
-  // Ступени по лестницам лимитов: индекс k = «берём k-е значение каждой
-  // лестницы» (короткая лестница отдаёт последнее значение). Первая
-  // ступень — все максимумы, затем спуск. Хинты ступени: maxTextureDimension2D.
+  // Steps over the limit ladders: index k = "take the k-th value of every
+  // ladder" (a short ladder yields its last value). The first step — all
+  // maxima, then the descent. Step hints: maxTextureDimension2D.
   const maxLen = Math.max(0, ...spec.limits.map(l => l.values.length))
   for (let k = 0; k < maxLen; k++) {
     const requiredLimits: Record<string, number> = {}
@@ -222,8 +229,8 @@ export async function negotiateDevice(
     }
     const tex = requiredLimits['maxTextureDimension2D']
     const label = tex === undefined
-      ? `${resolved} · лимиты (ступень ${k + 1})`
-      : `${resolved} · текстуры ≤ ${tex}px`
+      ? `${resolved} · limits (step ${k + 1})`
+      : `${resolved} · textures ≤ ${tex}px`
     try {
       const device = await adapter.requestDevice({ requiredFeatures, requiredLimits })
       emit({ label, ok: true, requiredLimits })
@@ -233,16 +240,16 @@ export async function negotiateDevice(
     }
   }
 
-  // Ступень без лимитов (адаптерные дефолты) — но с мягкими фичами.
+  // Step without limits (adapter defaults) — but with soft features.
   try {
     const device = await adapter.requestDevice({ requiredFeatures })
-    emit({ label: `${resolved} · без requiredLimits (дефолты адаптера)`, ok: true, requiredLimits: {} })
+    emit({ label: `${resolved} · no requiredLimits (adapter defaults)`, ok: true, requiredLimits: {} })
     return { requested: tier, granted: resolved, device, requiredFeatures, requiredLimits: {}, steps, hints: spec.hints }
   } catch (error) {
-    emit({ label: `${resolved} · без requiredLimits (дефолты адаптера)`, ok: false, error: errorText(error) })
+    emit({ label: `${resolved} · no requiredLimits (adapter defaults)`, ok: false, error: errorText(error) })
   }
 
-  // Bare — прежний финальный fallback realGPU (без фич: gpuMs честно null).
+  // Bare — the previous final fallback of realGPU (no features: gpuMs honestly null).
   try {
     const device = await adapter.requestDevice()
     emit({ label: 'fallback · bare requestDevice()', ok: true, requiredLimits: {} })
@@ -253,45 +260,45 @@ export async function negotiateDevice(
   }
 }
 
-// ─── Зонд вытеснения WebGL-контекстов (§7-уточнение 2) ───────────────────────
+// ─── WebGL context eviction probe (§7-clarification 2) ───────────────────────
 
-/** Контекст-минимум для зонда (реальный WebGL2RenderingContext
- *  isContextLost() + WEBGL_lose_context ему удовлетворяет). */
+/** Minimal context for the probe (a real WebGL2RenderingContext with
+ *  isContextLost() + WEBGL_lose_context satisfies it). */
 export interface EvictionContext {
   readonly isLost: boolean
   lose?(): void
 }
 
 export interface EvictionProbeOptions {
-  /** Хардкап создаваемых контекстов (браузеры держат ~16; default 24). */
+  /** Hard cap of created contexts (browsers keep ~16; default 24). */
   readonly maxProbes?: number
-  /** Пауза после создания контекста до проверки isContextLost, мс
-   *  (браузер убивает старейший асинхронно; default 60). */
+  /** Pause after creating a context before checking isContextLost, ms
+   *  (the browser kills the oldest asynchronously; default 60). */
   readonly settleMs?: number
-  /** Фабрика контекстов — инъекция для юнит-тестов. null от фабрики =
-   *  webgl2 недоступен. */
+  /** Context factory — injection for unit tests. null from the factory =
+   *  webgl2 unavailable. */
   readonly create?: () => EvictionContext | null
-  /** Живой колбэк: создан i-й контекст (1-based), жив ли старейший. */
+  /** Live callback: the i-th context created (1-based), whether the oldest is alive. */
   readonly onProbe?: (info: { index: number; created: number; oldestLost: boolean }) => void
 }
 
 export interface EvictionProbeResult {
-  /** На каком по счёту контексте умер старейший (1-based). null — за
-   *  maxProbes вытеснения не случилось (capped=true). */
+  /** At which context in order the oldest died (1-based). null — no
+   *  eviction happened within maxProbes (capped=true). */
   readonly evictedAt: number | null
-  /** evictedAt − safetyMargin(1): безопасное число одновременных контекстов. */
+  /** evictedAt − safetyMargin(1): the safe number of simultaneous contexts. */
   readonly safeMax: number | null
-  /** Сколько контекстов успели создать. */
+  /** How many contexts were created. */
   readonly probed: number
-  /** true — дошли до maxProbes без вытеснения (нижняя граница меры). */
+  /** true — reached maxProbes without eviction (lower bound of the measurement). */
   readonly capped: boolean
-  /** webgl2 недоступен в среде. */
+  /** webgl2 unavailable in the environment. */
   readonly unavailable?: boolean
 }
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
 
-/** Реальная фабрика: 4×4-канвас + webgl2-контекст. */
+/** The real factory: a 4×4 canvas + a webgl2 context. */
 function createWebGL2Context(): EvictionContext | null {
   const canvas = document.createElement('canvas')
   canvas.width = 4
@@ -302,10 +309,10 @@ function createWebGL2Context(): EvictionContext | null {
 }
 
 /**
- * Измерение порога вытеснения контекстов (kill-oldest). Создаёт контексты
- * по одному; после каждого ждёт settleMs и проверяет старейший. Как только
- * старейший потерян — evictedAt = номер последнего созданного, все
- * созданные контексты освобождаются через WEBGL_lose_context (если есть).
+ * Measuring the context eviction threshold (kill-oldest). Creates contexts
+ * one by one; after each waits settleMs and checks the oldest. As soon as
+ * the oldest is lost — evictedAt = the number of the last created one, all
+ * created contexts are released via WEBGL_lose_context (if present).
  */
 export async function probeContextEviction(options?: EvictionProbeOptions): Promise<EvictionProbeResult> {
   const maxProbes = options?.maxProbes ?? 24
@@ -315,7 +322,7 @@ export async function probeContextEviction(options?: EvictionProbeOptions): Prom
 
   const cleanup = (): void => {
     for (const ctx of contexts) {
-      try { ctx.lose?.() } catch { /* контекст уже мёртв */ }
+      try { ctx.lose?.() } catch { /* context already dead */ }
     }
   }
 
@@ -323,7 +330,7 @@ export async function probeContextEviction(options?: EvictionProbeOptions): Prom
     for (let index = 1; index <= maxProbes; index++) {
       const ctx = create()
       if (ctx === null) {
-        // webgl2 нет вовсе: это честный результат «среда без GL» (не ошибка).
+        // webgl2 absent entirely: this is an honest "environment without GL" result (not an error).
         if (index === 1) return { evictedAt: null, safeMax: null, probed: 0, capped: false, unavailable: true }
         break
       }
@@ -332,7 +339,7 @@ export async function probeContextEviction(options?: EvictionProbeOptions): Prom
       const oldestLost = contexts[0]!.isLost
       options?.onProbe?.({ index, created: contexts.length, oldestLost })
       if (oldestLost) {
-        // kill-oldest: старейший умер при появлении index-го контекста.
+        // kill-oldest: the oldest died when the index-th context appeared.
         return { evictedAt: index, safeMax: index - 1, probed: contexts.length, capped: false }
       }
     }

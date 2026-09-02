@@ -1,34 +1,35 @@
 /**
- * Seqlock поверх SharedArrayBuffer.
- * Единственный писатель; читатели — без блокировок, tearing исключён.
- * Раскладку слота (где версия, где значение) задаёт вызывающий код.
+ * Seqlock over a SharedArrayBuffer.
+ * A single writer; readers are lock-free, tearing is excluded.
+ * The slot layout (where the version is, where the value is) is defined by
+ * the calling code.
  *
- * Версия читается/пишется через Atomics (SeqCst): порядок «нечётная версия
- * → значение → чётная версия» не разворачивается слабой памятью (ARM).
- * Значение остаётся в DataView — атомарность ему не нужна, его прикрывает
- * версия. Чтение ограничено лимитом попыток: зависший писатель (баг)
- * заканчивается ошибкой, а не вечным спином.
+ * The version is read/written via Atomics (SeqCst): the "odd version →
+ * value → even version" order is not reordered by weak memory (ARM).
+ * The value stays in a DataView — it needs no atomicity, the version
+ * covers it. Reads are bounded by an attempt limit: a hung writer (a bug)
+ * ends in an error, not an eternal spin.
  */
 
-/** Результат валидного чтения слота. */
+/** The result of a valid slot read. */
 export interface SeqlockRead {
   readonly version: number
   readonly value: number
 }
 
-/** Предел попыток чтения: живой писатель закрывает слот за наносекунды;
- *  65 536 повторов — это миллисекунды спина, дальше подозрение на livelock. */
+/** Read attempt limit: a live writer closes the slot in nanoseconds;
+ *  65 536 retries is milliseconds of spinning — beyond that, a livelock is suspected. */
 const MAX_READ_ATTEMPTS = 1 << 16
 
-/** Кэш Int32Array-представлений: версия обязана ходить через Atomics. */
+/** Cache of Int32Array views: the version must go through Atomics. */
 const atomicsViews = new WeakMap<DataView, Int32Array>()
 
-/** Int32Array поверх того же буфера, что и DataView (4-байтовое выравнивание). */
+/** An Int32Array over the same buffer as the DataView (4-byte alignment). */
 function atomicsView(data: DataView): Int32Array {
   let view = atomicsViews.get(data)
   if (view === undefined) {
     if (data.byteOffset % 4 !== 0 || data.byteLength % 4 !== 0) {
-      throw new Error('rune: seqlock требует 4-байтового выравнивания буфера')
+      throw new Error('rune: seqlock requires 4-byte buffer alignment')
     }
     view = new Int32Array(data.buffer, data.byteOffset, data.byteLength >> 2)
     atomicsViews.set(data, view)
@@ -36,13 +37,13 @@ function atomicsView(data: DataView): Int32Array {
   return view
 }
 
-/** Индекс версии в Int32Array: смещение обязано быть кратно 4. */
+/** Version index in the Int32Array: the offset must be a multiple of 4. */
 function versionIndex(versionAt: number): number {
-  if ((versionAt & 3) !== 0) throw new Error('rune: seqlock-версия обязана лежать на 4-байтовой границе')
+  if ((versionAt & 3) !== 0) throw new Error('rune: seqlock version must lie on a 4-byte boundary')
   return versionAt >> 2
 }
 
-/** Читает слот с валидацией: повтор при нечётной версии и при смене по ходу чтения. */
+/** Reads the slot with validation: retry on an odd version and on a change during the read. */
 export function readSeqlock(data: DataView, versionAt: number, valueAt: number): SeqlockRead {
   const i32 = atomicsView(data)
   const at = versionIndex(versionAt)
@@ -54,20 +55,20 @@ export function readSeqlock(data: DataView, versionAt: number, valueAt: number):
       if (before === after) return { version: before, value }
     }
   }
-  throw new Error('rune: seqlock не закрылся за предел попыток — писатель держит слот (livelock)')
+  throw new Error('rune: seqlock did not close within the attempt limit — the writer holds the slot (livelock)')
 }
 
-/** Пишет слот: версия нечётная → значение → версия чётная. */
+/** Writes the slot: version odd → value → version even. */
 export function writeSeqlock(data: DataView, versionAt: number, valueAt: number, value: number): void {
   const i32 = atomicsView(data)
   const at = versionIndex(versionAt)
   const version = Atomics.load(i32, at)
-  Atomics.store(i32, at, version + 1) // вход писателя: нечётная
+  Atomics.store(i32, at, version + 1) // writer entry: odd
   data.setFloat64(valueAt, value, true)
-  Atomics.store(i32, at, version + 2) // выход: чётная
+  Atomics.store(i32, at, version + 2) // exit: even
 }
 
-/** Текущая версия слота без чтения значения. */
+/** Current slot version without reading the value. */
 export function seqlockVersion(data: DataView, versionAt: number): number {
   return Atomics.load(atomicsView(data), versionIndex(versionAt))
 }

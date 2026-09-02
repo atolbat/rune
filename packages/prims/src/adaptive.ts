@@ -1,78 +1,81 @@
 /**
- * Адаптивный тайловый рельеф (Task 109): плоскость, склеенная из ТАЙЛОВ
- * вокруг камеры — ближние кольца подробные, дальние грубые, общий радиус
- * построения до заданного (fog закрывает «условную бесконечность»).
+ * Adaptive tiled relief (Task 109): a plane stitched together from TILES
+ * around the camera — near rings detailed, far rings coarse, a total build
+ * radius up to a given one (fog hides the "conditional infinity").
  *
- * УМНАЯ СКЛЕЙКА (требование юзера: «вертексы совпадают и не формируют
- * обрезки в воздухе на границах тайлов при дисплейсе»):
- *   1. РАЗРЕШЕНИЯ — степени двойки: соседние тайлы ОДИНАКОВОГО уровня
- *      сэмплируют высоту в ОДИНАКОВЫХ мировых точках (решётка тайла
- *      snapped к решётке maxSegments) — общие ребра совпадают ВЕРШИНА В
- *      ВЕРШИНУ, шов невидим даже при дисплейсе (heightFn глобальная).
- *   2. Нормали — центральные разности heightFn с мировым шагом тайла:
- *      на общем ребре равноразрешённых тайлов формулы дают ИДЕНТИЧНЫЕ
- *      нормали (та же точка, тот же шаг) — шва освещения нет.
- *   3. РАЗНЫЕ уровни соседей (T-стык): грубое ребро — хорда, мелкое
- *      сэмплирует точнее → щели. Их закрывает ЮБКА (skirt) — стенка
- *      вниз от края тайла (индустриальный стандарт Cesium/гео-рендеров):
- *      при displace стенка следует за высотой края, «обрезков в воздухе»
- *      нет. Юбки можно выключить параметром — и УВИДЕТЬ разницу.
+ * SMART STITCHING (user requirement: "vertices match and do not form cutoffs
+ * hanging in the air at tile borders under displacement"):
+ *   1. RESOLUTIONS are powers of two: adjacent tiles of the SAME level
+ *      sample the height at IDENTICAL world points (the tile grid is
+ *      snapped to the maxSegments grid) — shared edges match VERTEX FOR
+ *      VERTEX, the seam is invisible even under displacement (heightFn is
+ *      global).
+ *   2. Normals are central differences of heightFn with the tile's world
+ *      step: on a shared edge of equal-resolution tiles the formulas give
+ *      IDENTICAL normals (the same point, the same step) — no lighting
+ *      seam.
+ *   3. DIFFERENT neighbor levels (T-junction): the coarse edge is a chord,
+ *      the fine one samples more precisely → gaps. A SKIRT closes them —
+ *      a wall going down from the tile's edge (the industry standard of
+ *      Cesium/geo renderers): under displacement the wall follows the edge
+ *      height, no "cutoffs in the air". Skirts can be turned off with a
+ *      parameter — and you can SEE the difference.
  *
- * Контракт GeometryFeed (feed.ts): update() возвращает true при
- * пересборке — демо перепушивает атрибуты команды (hot swap) и
- * динамический count. Пересборка квантована: не чаще движения камеры
- * на tileSize/2 (мура пересборок при орбите исключена).
+ * The GeometryFeed contract (feed.ts): update() returns true on a rebuild —
+ * the demo re-pushes the command attributes (hot swap) and the dynamic
+ * count. Rebuilds are quantized: no more often than camera movement by
+ * tileSize/2 (rebuild shimmer during orbiting is excluded).
  */
 
 import type { Geometry } from './types.ts'
 import { fbm2D, ridged2D } from './noise.ts'
 
-/** Высота в МИРОВЫХ координатах (непрерывна на всей плоскости). */
+/** Height in WORLD coordinates (continuous over the whole plane). */
 export type WorldHeightFn = (x: number, z: number) => number
 
 export interface AdaptiveTerrainParams {
-  /** Рельеф в мировых координатах. */
+  /** Relief in world coordinates. */
   readonly heightFn: WorldHeightFn
-  /** Амплитуда высоты (default 1). */
+  /** Height amplitude (default 1). */
   readonly amplitude?: number
-  /** Размер тайла в единицах мира (default 4). */
+  /** Tile size in world units (default 4). */
   readonly tileSize?: number
-  /** Радиус построения от камеры (default 24; fog за ним — «бесконечность»). */
+  /** Build radius from the camera (default 24; fog behind it — "infinity"). */
   readonly radius?: number
-  /** Максимальное разрешение тайла — ячеек на сторону, степень двойки (default 32). */
+  /** Maximum tile resolution — cells per side, a power of two (default 32). */
   readonly maxSegments?: number
-  /** Минимальное разрешение дальних тайлов (default 4). */
+  /** Minimum resolution of far tiles (default 4). */
   readonly minSegments?: number
-  /** Глубина юбки в единицах высоты (default 0.4); 0 — без юбок. */
+  /** Skirt depth in height units (default 0.4); 0 — no skirts. */
   readonly skirtDepth?: number
-  /** Агрессивность LOD: уровень +1 на каждые lodBias·tileSize дистанции (default 2.6). */
+  /** LOD aggressiveness: level +1 per lodBias·tileSize of distance (default 2.6). */
   readonly lodBias?: number
 }
 
 export interface AdaptiveTerrain {
   readonly geometry: Geometry
-  /** true = геометрия пересобрана (камера ушла > tileSize/2). */
+  /** true = the geometry has been rebuilt (the camera moved > tileSize/2). */
   update(camX: number, camZ: number): boolean
   readonly rebuilds: number
   readonly tiles: number
   readonly lastMs: number
   readonly center: { readonly x: number; readonly z: number }
-  /** Сводка уровней: сколько тайлов на каждом (диагностика/лог). */
+  /** Level summary: how many tiles at each (diagnostics/logging). */
   readonly levelCounts: readonly number[]
 }
 
 interface TileDesc {
-  /** Индексы решётки тайла. */
+  /** Tile grid indices. */
   readonly ix: number
   readonly iz: number
-  /** Ячеек на сторону (степень двойки). */
+  /** Cells per side (a power of two). */
   readonly res: number
 }
 
-/** Разрешение тайла по дистанции до камеры (степень двойки, ≥ min). */
+/** Tile resolution by distance to the camera (a power of two, ≥ min). */
 function tileResolution(dist: number, p: Required<Pick<AdaptiveTerrainParams, 'maxSegments' | 'minSegments' | 'lodBias' | 'tileSize'>>): number {
   const { maxSegments, minSegments, lodBias, tileSize } = p
-  // уровень 0 пока dist < lodBias·tileSize; дальше — удвоение дистанции
+  // level 0 while dist < lodBias·tileSize; beyond that — doubling the distance
   const rel = Math.max(dist, 1e-6) / (lodBias * tileSize)
   const level = Math.max(0, Math.ceil(Math.log2(rel)))
   const res = Math.max(minSegments, maxSegments >> level)
@@ -88,8 +91,8 @@ export function createAdaptiveTerrain(params: AdaptiveTerrainParams): AdaptiveTe
   const skirtDepth = params.skirtDepth ?? 0.4
   const lodBias = params.lodBias ?? 2.6
   const heightFn = params.heightFn
-  // Палитра (uv.y) — ФИКСИРОВАННЫЙ диапазон по амплитуде: стабильные цвета
-  // между пересборками (локальный min/max «дышал» бы при движении)
+  // The palette (uv.y) — a FIXED range by amplitude: stable colors
+  // between rebuilds (a local min/max would "breathe" as the camera moves)
   const hNorm = (h: number): number => {
     const t = (h / amplitude + 1) / 2 // h/amp ∈ [−1, 1] → [0, 1]
     return t < 0 ? 0 : t > 1 ? 1 : t
@@ -136,7 +139,7 @@ export function createAdaptiveTerrain(params: AdaptiveTerrainParams): AdaptiveTe
   function build(camX: number, camZ: number): Geometry {
     const t0 = performance.now()
     const tileList = tilesFor(camX, camZ)
-    // Точный prealloc: сетка + юбки (по 4 стороны)
+    // Exact prealloc: grid + skirts (4 sides each)
     let quadCount = 0
     for (const tile of tileList) {
       quadCount += tile.res * tile.res + (skirtDepth > 0 ? 4 * tile.res : 0)
@@ -146,9 +149,9 @@ export function createAdaptiveTerrain(params: AdaptiveTerrainParams): AdaptiveTe
     const uvs = new Float32Array(quadCount * 6 * 2)
     const cursor = { v: 0 }
     levelCounts = []
-    // Task 110: нормировка уровня LOD для uv.x (0 = макс. детализация,
-    // 1 = minSegments). Шейдер океана красит тайлы по кольцам LOD —
-    // адаптивность ВИДНА без каркаса.
+    // Task 110: normalized LOD level for uv.x (0 = max detail,
+    // 1 = minSegments). The ocean shader colors tiles by LOD rings —
+    // adaptivity is VISIBLE without a wireframe.
     const maxLevel = Math.max(1, Math.log2(maxSegments / minSegments))
     for (const tile of tileList) {
       const level = Math.round(Math.log2(maxSegments / tile.res))
@@ -163,9 +166,9 @@ export function createAdaptiveTerrain(params: AdaptiveTerrainParams): AdaptiveTe
     return { positions, normals, uvs, vertexCount: cursor.v }
   }
 
-  /** Один тайл: сетка высот с апроном (±1 ячейка) → квады + юбки.
-   *  Task 110: lodNorm — нормированный уровень тайла (uv.x; 0 = max detail)
-   *  для LOD-раскраски колец в шейдере (палитра рельефа — uv.y, не задет). */
+  /** One tile: a height grid with an apron (±1 cell) → quads + skirts.
+   *  Task 110: lodNorm — the tile's normalized level (uv.x; 0 = max detail)
+   *  for LOD ring coloring in the shader (the relief palette — uv.y, untouched). */
   function emitTile(
     tile: TileDesc,
     positions: Float32Array,
@@ -178,7 +181,7 @@ export function createAdaptiveTerrain(params: AdaptiveTerrainParams): AdaptiveTe
     const step = tileSize / res
     const x0 = tile.ix * tileSize
     const z0 = tile.iz * tileSize
-    // Высоты с апроном: (res+3)² — для центральных разностей на краях
+    // Heights with an apron: (res+3)² — for central differences at the edges
     const dim = res + 3
     const heights = new Float32Array(dim * dim)
     for (let j = 0; j < dim; j++) {
@@ -188,7 +191,7 @@ export function createAdaptiveTerrain(params: AdaptiveTerrainParams): AdaptiveTe
         heights[j * dim + i] = heightFn(wx, wz) * amplitude
       }
     }
-    // Сетка (внутри апрона): индексы [1..res+1]
+    // The grid (inside the apron): indices [1..res+1]
     const at = (i: number, j: number): number => heights[(j + 1) * dim + (i + 1)]
     const emit = (i: number, j: number, yOverride?: number, nOverride?: readonly [number, number, number]): void => {
       const v = cursor.v
@@ -201,8 +204,8 @@ export function createAdaptiveTerrain(params: AdaptiveTerrainParams): AdaptiveTe
         normals[v * 3 + 1] = nOverride[1]
         normals[v * 3 + 2] = nOverride[2]
       } else {
-        // Центральные разности по апрону (на краю тайла — тоже центральные:
-        // соседний тайл того же разрешения считает ТАКУЮ ЖЕ нормаль)
+        // Central differences over the apron (at the tile's edge — also central:
+        // the adjacent tile of the same resolution computes THE SAME normal)
         const dhdx = (at(i + 1, j) - at(i - 1, j)) / (2 * step)
         const dhdz = (at(i, j + 1) - at(i, j - 1)) / (2 * step)
         let nx = -dhdx
@@ -215,13 +218,13 @@ export function createAdaptiveTerrain(params: AdaptiveTerrainParams): AdaptiveTe
         normals[v * 3 + 1] = ny / len
         normals[v * 3 + 2] = nz
       }
-      uvs[v * 2] = lodNorm // Task 110: уровень LOD тайла (0 = max detail)
+      uvs[v * 2] = lodNorm // Task 110: the tile's LOD level (0 = max detail)
       uvs[v * 2 + 1] = hNorm(h)
       cursor.v = v + 1
     }
     for (let j = 0; j < res; j++) {
       for (let i = 0; i < res; i++) {
-        // CCW сверху (как plane/terrain)
+        // CCW from above (as in plane/terrain)
         emit(i, j)
         emit(i, j + 1)
         emit(i + 1, j + 1)
@@ -231,17 +234,18 @@ export function createAdaptiveTerrain(params: AdaptiveTerrainParams): AdaptiveTe
       }
     }
     if (skirtDepth <= 0) return
-    // Юбки: стенка вниз от каждого края. Нормаль — горизонтальная НАРУЖУ
-    // от тайла (cull:back прячет встречную юбку соседа). Юбка ниже края на
-    // skirtDepth·amplitude — при displace следует за краем, щель закрыта.
-    // Winding: квады (A_k, A_{k+1}, B_{k+1}) + (A_k, B_{k+1}, B_k) — наружу
-    // при обходе параметра к ВПРАВО от смотрящего СНАРУЖИ; стороны,
-    // где параметр идёт влево, обходятся в обратном порядке (reverse)
+    // Skirts: a wall going down from each edge. The normal — horizontal OUTWARD
+    // from the tile (cull:back hides the neighbor's counter-facing skirt). The
+    // skirt is below the edge by skirtDepth·amplitude — under displacement it
+    // follows the edge, the gap is closed.
+    // Winding: quads (A_k, A_{k+1}, B_{k+1}) + (A_k, B_{k+1}, B_k) — outward
+    // when the parameter advances to the RIGHT of an OUTSIDE viewer; sides
+    // where the parameter goes left are traversed in reverse order (reverse)
     const drop = skirtDepth * amplitude
     const down = (i: number, j: number, n: readonly [number, number, number]): void => {
       emit(i, j, at(i, j) - drop, n)
     }
-    /** Лента из res сегментов: A — край, B — юбка; reverse — наружная нормаль. */
+    /** A strip of res segments: A — the edge, B — the skirt; reverse — the outward normal. */
     const skirt = (
       count: number,
       edgeA: (k: number) => void,
@@ -259,28 +263,28 @@ export function createAdaptiveTerrain(params: AdaptiveTerrainParams): AdaptiveTe
         edgeB(k0)
       }
     }
-    // Запад (i=0, наружу −X): снаружи параметр j идёт влево — reverse
+    // West (i=0, outward −X): viewed from outside, the parameter j goes left — reverse
     skirt(
       res,
       k => emit(0, k),
       k => down(0, k, [-1, 0, 0]),
       true,
     )
-    // Восток (i=res, наружу +X): j вправо — прямой
+    // East (i=res, outward +X): j to the right — direct
     skirt(
       res,
       k => emit(res, k),
       k => down(res, k, [1, 0, 0]),
       false,
     )
-    // Север (j=0, наружу −Z): i вправо — прямой
+    // North (j=0, outward −Z): i to the right — direct
     skirt(
       res,
       k => emit(k, 0),
       k => down(k, 0, [0, 0, -1]),
       false,
     )
-    // Юг (j=res, наружу +Z): i влево — reverse
+    // South (j=res, outward +Z): i to the left — reverse
     skirt(
       res,
       k => emit(k, res),
@@ -294,8 +298,9 @@ export function createAdaptiveTerrain(params: AdaptiveTerrainParams): AdaptiveTe
       return geometry
     },
     update(camX: number, camZ: number): boolean {
-      // Квантованный триггер: пересборка при уходе ≥ tileSize/2
-      // (ровно на границе — тоже пора: «не чаще», а не «строго больше»)
+      // A quantized trigger: rebuild when moving ≥ tileSize/2
+      // (exactly on the boundary — also time: "no more often", not "strictly
+      // greater")
       if (Math.hypot(camX - lastX, camZ - lastZ) < tileSize / 2) return false
       geometry = build(camX, camZ)
       rebuilds++
@@ -319,19 +324,19 @@ export function createAdaptiveTerrain(params: AdaptiveTerrainParams): AdaptiveTe
   }
 }
 
-// ─── Пресеты рельефа в МИРОВЫХ координатах ───────────────────────────────────
+// ─── Relief presets in WORLD coordinates ───────────────────────────────────
 
-/** Холмы: мягкий fBm по мировым координатам (частота ~0.3/unit). */
+/** Hills: soft fBm over world coordinates (frequency ~0.3/unit). */
 export function worldHills(seed = 7): WorldHeightFn {
   return (x, z) => fbm2D(x * 0.3, z * 0.3, seed, 5) - 0.5
 }
 
-/** Хребты: острые гряды ridged-мультимфрактала. */
+/** Ridges: sharp ridges of a ridged multifractal. */
 export function worldRidged(seed = 11): WorldHeightFn {
   return (x, z) => (ridged2D(x * 0.22, z * 0.22, seed, 6, 1.4) - 0.45) * 1.2
 }
 
-/** Дюны: анизотропные |sin|-гряды, искривлённые шумом. */
+/** Dunes: anisotropic |sin| ridges, warped by noise. */
 export function worldDunes(seed = 5): WorldHeightFn {
   return (x, z) => {
     const warp = fbm2D(x * 0.2, z * 0.2, seed, 3) * 0.8
@@ -341,7 +346,7 @@ export function worldDunes(seed = 5): WorldHeightFn {
   }
 }
 
-/** Каньон: террасы-ступени (столовые плато) по миру. */
+/** Canyon: step terraces (table plateaus) over the world. */
 export function worldCanyon(seed = 9): WorldHeightFn {
   return (x, z) => {
     const base = fbm2D(x * 0.18, z * 0.18, seed, 4)
@@ -353,7 +358,7 @@ export function worldCanyon(seed = 9): WorldHeightFn {
   }
 }
 
-/** Остров: холмы × радиальный спад вокруг (0, 0) — океан до горизонта. */
+/** Island: hills × radial falloff around (0, 0) — an ocean to the horizon. */
 export function worldIsland(seed = 3): WorldHeightFn {
   return (x, z) => {
     const d = Math.hypot(x, z)
@@ -370,11 +375,11 @@ export interface AdaptivePreset {
   readonly note: string
 }
 
-/** Именованные адаптивные рельефы для UI. */
+/** Named adaptive reliefs for the UI. */
 export const adaptivePresets: Readonly<Record<string, AdaptivePreset>> = {
-  hills: { label: 'Холмы', height: worldHills, amplitude: 1, note: 'fBm по миру: кольца LOD вокруг камеры, юбки на стыках' },
-  ridged: { label: 'Хребты', height: worldRidged, amplitude: 1.1, note: 'ridged-гряды: острые вершины уходят в грубые дальние кольца' },
-  island: { label: 'Остров', height: worldIsland, amplitude: 1.3, note: 'радиальный спад: океан до тумана — видно, как LOD глушит даль' },
-  dunes: { label: 'Дюны', height: worldDunes, amplitude: 0.6, note: 'анизотропные гряды: юбки держат стыки при displace' },
-  canyon: { label: 'Каньон', height: worldCanyon, amplitude: 1, note: 'террасы-ступени: плоские плато читаются на любом LOD' },
+  hills: { label: 'Hills', height: worldHills, amplitude: 1, note: 'fBm over the world: LOD rings around the camera, skirts at seams' },
+  ridged: { label: 'Ridges', height: worldRidged, amplitude: 1.1, note: 'ridged ridges: sharp peaks fade into coarse far rings' },
+  island: { label: 'Island', height: worldIsland, amplitude: 1.3, note: 'radial falloff: an ocean up to the fog — you can see LOD muting the distance' },
+  dunes: { label: 'Dunes', height: worldDunes, amplitude: 0.6, note: 'anisotropic ridges: skirts hold the seams under displace' },
+  canyon: { label: 'Canyon', height: worldCanyon, amplitude: 1, note: 'step terraces: flat plateaus read at any LOD' },
 }

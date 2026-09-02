@@ -1,86 +1,86 @@
 /**
- * AssetCache<T> — обобщённый кэш ассетов с refcount, TTL и churn-window.
+ * AssetCache<T> — a generic asset cache with refcount, TTL and a churn-window.
  *
- * Контракт (см. дизайн-раунд «Слой 3: Кэш»):
- *  - Generic: хранит любые ассеты (ImageBitmap, Texture, объекты).
- *  - acquire(key, loader): если есть в кэше и не истёк — возвращает сразу,
- *    иначе запускает loader (функция пользователя, возвращает Promise<T>),
- *    дедуплицирует параллельные запросы по тому же ключу.
- *  - refcount: каждый acquire инкрементирует; release — декрементирует. Когда
- *    refcount = 0, ассет становится кандидатом на eviction (но не диспозится
- *    сразу — см. churn-window).
- *  - TTL: ассет с refcount = 0 живёт ещё N кадров (baseTtlFrames) — типичный
- *    «вернулся на уровень — не загружать заново». После TTL — кандидат на
- *    eviction по байтовому бюджету.
- *  - churn-window: если за последние churnWindowMs происходило много
- *    dispose-ов, cache «остужается» — не эвиктит, а ждёт (против thrashing).
- *  - scope(): создаёт child-cache, при dispose которого все его acquire'ы
- *    автоматически release'ятся (для уровня/сцены).
+ * Contract (see the design round "Layer 3: Cache"):
+ *  - Generic: stores any assets (ImageBitmap, Texture, objects).
+ *  - acquire(key, loader): if present in the cache and not expired — returns immediately,
+ *    otherwise starts the loader (a user function returning Promise<T>),
+ *    deduplicating concurrent requests for the same key.
+ *  - refcount: every acquire increments it; release decrements it. When
+ *    refcount = 0, the asset becomes an eviction candidate (but is not disposed
+ *    right away — see the churn-window).
+ *  - TTL: an asset with refcount = 0 lives for another N frames (baseTtlFrames) — the
+ *    typical "returned to a level — don't reload" case. After the TTL — an
+ *    eviction candidate under the byte budget.
+ *  - churn-window: if many dispose events happened within the last churnWindowMs,
+ *    the cache "cools down" — it stops evicting and waits (against thrashing).
+ *  - scope(): creates a child cache whose dispose automatically releases all of
+ *    its acquires (for a level/scene).
  *
- * Кэш знает про loader function (через callback), но НЕ знает про GPU —
- * разделение «texture primitive не знает про loader» сохранено.
+ * The cache knows about the loader function (via a callback) but NOT about the GPU —
+ * the separation "a texture primitive knows nothing about the loader" is preserved.
  */
 
-/** Опция acquire: можно переопределить TTL и приоритет. */
+/** acquire option: TTL and priority can be overridden. */
 export interface AcquireOptions {
-  /** Переопределить baseTtlFrames для этой записи. */
+  /** Override baseTtlFrames for this entry. */
   readonly ttlFrames?: number
-  /** Приоритет eviction: выше = дольше живёт при давлении. Default 1. */
+  /** Eviction priority: higher = survives longer under pressure. Default 1. */
   readonly priority?: number
 }
 
-/** Параметры создания AssetCache. */
+/** AssetCache creation parameters. */
 export interface AssetCacheOptions {
-  /** Байтовый бюджет. При превышении — LRU eviction (по lastTouched). */
+  /** Byte budget. When exceeded — LRU eviction (by lastTouched). */
   readonly maxBytes: number
-  /** Сколько кадров ассет живёт после refcount=0. Default 60 (≈1 сек при 60fps). */
+  /** How many frames an asset lives after refcount=0. Default 60 (≈1 s at 60fps). */
   readonly baseTtlFrames?: number
-  /** Окно для churn detection. Если в окне >churnThreshold dispose-ов —
-   *  eviction ставится на паузу. Default 60_000 (1 минута). */
+  /** Window for churn detection. If the window sees >churnThreshold dispose events,
+   *  eviction is paused. Default 60_000 (1 minute). */
   readonly churnWindowMs?: number
-  /** Порог churn: при каком числе dispose в окне — пауза eviction. Default 8. */
+  /** Churn threshold: how many dispose events in the window pause eviction. Default 8. */
   readonly churnThreshold?: number
-  /** Источник кадрового счётчика. Default: внешний, см. tick(). */
+  /** Frame counter source. Default: external, see tick(). */
   readonly now?: () => number
 }
 
-/** Обёртка над пользовательским ассетом. */
+/** Wrapper around a user asset. */
 export interface AssetHandle<T> {
-  /** Загруженный ассет. undefined, если ещё грузится или произошла ошибка. */
+  /** The loaded asset. undefined while it is still loading or after an error. */
   readonly value: T | undefined
-  /** Promise, который резолвится когда value станет доступен. */
+  /** A promise that resolves once value becomes available. */
   readonly ready: Promise<T>
-  /** Освободить ссылку. Декрементирует refcount. Идемпотентно. */
+  /** Release the reference. Decrements the refcount. Idempotent. */
   release(): void
-  /** Принудительно диспозить (даже если refcount > 0). Внутренний метод —
-   *  для случаев вроде switchBackend, когда весь кэш сносится. */
+  /** Force a dispose (even if refcount > 0). An internal method —
+   *  for cases like switchBackend, when the whole cache is torn down. */
   dispose(): void
 }
 
-/** Внутреннее состояние записи. */
+/** Internal entry state. */
 interface Entry<T> {
   readonly key: string
   value: T | undefined
   promise: Promise<T>
   refcount: number
-  /** Кадр последнего touch (для LRU). */
+  /** Frame of the last touch (for LRU). */
   lastTouchedFrame: number
-  /** Кадр когда refcount стал 0. null если ещё активен. */
+  /** Frame when refcount reached 0. null while still active. */
   zeroSinceFrame: number | null
   readonly ttlFrames: number
   readonly priority: number
-  /** Если ассет имеет dispose — вызовем его при eviction. */
+  /** If the asset has a dispose — we call it on eviction. */
   disposer: ((value: T) => void) | null
-  /** Ошибка загрузки (если была). После error — entry можно перезапросить. */
+  /** Load error (if any). After an error the entry can be re-requested. */
   error: unknown | null
 }
 
 /**
- * Создаёт обобщённый кэш ассетов.
+ * Creates a generic asset cache.
  *
- * @param disposer Опциональная функция для диспоза ассетов (например,
- *   `t => t.dispose()` для Texture). Если не передан — значения просто
- *   забываются, GC их соберёт.
+ * @param disposer An optional function for disposing assets (e.g.
+ *   `t => t.dispose()` for a Texture). If not passed — the values are simply
+ *   forgotten, GC will collect them.
  */
 export function createAssetCache<T>(options: AssetCacheOptions, disposer?: (value: T) => void): AssetCache<T> {
   const baseTtl = options.baseTtlFrames ?? 60
@@ -106,7 +106,7 @@ export function createAssetCache<T>(options: AssetCacheOptions, disposer?: (valu
       return makeHandle(existing)
     }
 
-    // Новый ассет — стартуем загрузку
+    // A new asset — start the load
     const promise = loader(key).then(
       value => {
         entry.value = value
@@ -115,9 +115,9 @@ export function createAssetCache<T>(options: AssetCacheOptions, disposer?: (valu
       },
       err => {
         entry.error = err
-        // Не удаляем entry сразу — пусть юзер увидит ошибку через ready.
-        // Переподключение через acquire() с тем же key создаст новый entry
-        // только если юзер сначала release'ит текущий (что удалит entry).
+        // Do not delete the entry right away — let the user see the error via ready.
+        // Re-acquiring with the same key creates a new entry
+        // only if the user first releases the current one (which deletes the entry).
         throw err
       },
     )
@@ -151,7 +151,7 @@ export function createAssetCache<T>(options: AssetCacheOptions, disposer?: (valu
       try {
         entry.disposer(entry.value)
       } catch {
-        // disposer не должен бросать — но мы не позволим ему развалить кэш
+        // the disposer must not throw — but we won't let it break the cache
       }
     }
     entries.delete(entry.key)
@@ -170,10 +170,10 @@ export function createAssetCache<T>(options: AssetCacheOptions, disposer?: (valu
     }
   }
 
-  /** Кадровый тик: продвигает TTL, при необходимости эвиктит. */
+  /** Frame tick: advances the TTL, evicts when needed. */
   function tick(): void {
     currentFrame++
-    // Сброс churn-паузы: если dispose-ов в окне стало мало — снимаем паузу
+    // Churn-pause reset: if the dispose events in the window drop — lift the pause
     const now = externalNow()
     const cutoff = now - churnWindowMs
     while (disposeTimestamps.length > 0 && disposeTimestamps[0] < cutoff) {
@@ -182,10 +182,10 @@ export function createAssetCache<T>(options: AssetCacheOptions, disposer?: (valu
     if (disposeTimestamps.length <= churnThreshold) {
       churnPaused = false
     }
-    if (churnPaused) return // не эвиктим — защита от thrashing
+    if (churnPaused) return // no eviction — thrashing protection
 
-    // TTL expiry: refcount=0 и прошло достаточно кадров → удаляем.
-    // `>=` (не `>`): после zeroSinceFrame=F, на frame F+ttl ассет должен быть эвикчен.
+    // TTL expiry: refcount=0 and enough frames have passed → delete.
+    // `>=` (not `>`): after zeroSinceFrame=F, on frame F+ttl the asset must be evicted.
     for (const entry of entries.values()) {
       if (entry.refcount === 0 && entry.zeroSinceFrame !== null) {
         const age = currentFrame - entry.zeroSinceFrame
@@ -195,40 +195,40 @@ export function createAssetCache<T>(options: AssetCacheOptions, disposer?: (valu
       }
     }
 
-    // LRU eviction по байтовому бюджету — если есть (байты считает пользователь
-    // через markBytes). Сейчас просто по числу записей не делаем (бюджет
-    // опционален — может не быть задан).
+    // LRU eviction under the byte budget — if one exists (the user counts bytes
+    // via markBytes). For now we don't evict by entry count alone (the budget
+    // is optional — it may be unset).
   }
 
-  /** Сбросить всё: вызвать disposer для всех живых записей.
+  /** Reset everything: call the disposer for all live entries.
    *
-   *  flush() диспозит ВСЕ entries в parent.entries (включая те, что были
-   *  acquired через scope — scope лишь отслеживает handle'ы, не имеет
-   *  собственного entry-мапа). Не вызывает child.flush() — это привело
-   *  бы к бесконечной рекурсии (child.flush() делегирует в parent.flush()).
+   *  flush() disposes ALL entries in parent.entries (including those
+   *  acquired via a scope — a scope merely tracks handles, it has no
+   *  entry map of its own). It does not call child.flush() — that would
+   *  lead to infinite recursion (child.flush() delegates to parent.flush()).
    *
-   *  Scope'ы управляются через scope.dispose() — это release всех handle'ов.
-   *  Parent flush() — это «снести всё», он уже покрывает все entries.
+   *  Scopes are managed via scope.dispose() — that releases all handles.
+   *  A parent flush() is a "tear everything down" operation; it already covers all entries.
    */
   function flush(): void {
     for (const entry of entries.values()) {
       disposeEntry(entry)
     }
     entries.clear()
-    // Не вызываем child.flush() — это привело бы к рекурсии. Scope'ы — это
-    // просто трекеры handle'ов; их dispose() уже не актуален после parent flush
-    // (entries очищены). Но зарегистрированные scope'ы могут оставаться в
-    // childCaches — они безопасно останутся как «disposed» для будущих вызовов
-    // (child.dispose() идемпотентен).
+    // No child.flush() call — it would recurse. Scopes are merely
+    // handle trackers; their dispose() is moot after a parent flush
+    // (entries are cleared). But registered scopes may remain in
+    // childCaches — they safely stay "disposed" for future calls
+    // (child.dispose() is idempotent).
   }
 
-  /** Создать child-cache (scope). При dispose — release всех acquire'ов.
+  /** Create a child cache (a scope). Its dispose releases all acquires.
    *
-   *  Scope НЕ создаёт отдельный entry-мап — он делегирует в parent. Все
-   *  acquire'ы через scope попадают в parent.entries, но scope хранит
-   *  handle'ы и при scope.dispose() делегирует release в parent.
+   *  A scope does NOT create a separate entry map — it delegates to the parent. All
+   *  acquires through a scope land in parent.entries, but the scope keeps
+   *  the handles and on scope.dispose() delegates the release to the parent.
    *
-   *  Таким образом cache.size/stats() отражают суммарное состояние.
+   *  That way cache.size/stats() reflect the combined state.
    */
   function scope(): AssetCache<T> {
     const ownedHandles: AssetHandle<T>[] = []
@@ -258,7 +258,7 @@ export function createAssetCache<T>(options: AssetCacheOptions, disposer?: (valu
     return child
   }
 
-  /** Текущее состояние для отладки. */
+  /** Current state for debugging. */
   function stats(): { size: number; refcounted: number; idle: number } {
     let refcounted = 0
     let idle = 0
@@ -305,18 +305,18 @@ export function createAssetCache<T>(options: AssetCacheOptions, disposer?: (valu
   }
 }
 
-/** Публичный интерфейс кэша. */
+/** Public cache interface. */
 export interface AssetCache<T> {
   acquire(key: string, loader: (key: string) => Promise<T>, opts?: AcquireOptions): AssetHandle<T>
-  /** Кадровый тик: продвигает TTL, эвиктит. */
+  /** Frame tick: advances the TTL, evicts. */
   tick(): void
-  /** Сбросить всё: вызвать disposer для всех живых записей. */
+  /** Reset everything: call the disposer for all live entries. */
   flush(): void
-  /** Создать child-cache (scope). */
+  /** Create a child cache (a scope). */
   scope(): AssetCache<T>
-  /** Текущее состояние для отладки. */
+  /** Current state for debugging. */
   stats(): { size: number; refcounted: number; idle: number }
-  /** Полный teardown. */
+  /** Full teardown. */
   dispose(): void
   readonly size: number
   readonly bytes: number

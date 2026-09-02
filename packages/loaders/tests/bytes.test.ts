@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test'
 import { asciiDecode, align4, isWhitespace, parseDecimal, CHAR, clamp, nowMs } from '../src/bytes.ts'
 
-test('parseDecimal: целые, дробные, экспоненты, знаки', () => {
+test('parseDecimal: integers, fractions, exponents, signs', () => {
   const bytes = (text: string) => new TextEncoder().encode(text)
   expect(parseDecimal(bytes('42'), 0, 2)).toBe(42)
   expect(parseDecimal(bytes('-7'), 0, 2)).toBe(-7)
@@ -15,25 +15,25 @@ test('parseDecimal: целые, дробные, экспоненты, знаки
   expect(parseDecimal(bytes('-1.5e-1'), 0, 7)).toBeCloseTo(-0.15)
 })
 
-test('parseDecimal: стоп на мусоре и NaN без цифр', () => {
+test('parseDecimal: stop on garbage and NaN without digits', () => {
   const bytes = (text: string) => new TextEncoder().encode(text)
-  expect(parseDecimal(bytes('v 1.5'), 0, 6)).toBeNaN() // 'v' — не цифра
+  expect(parseDecimal(bytes('v 1.5'), 0, 6)).toBeNaN() // 'v' — not a digit
   expect(parseDecimal(bytes(''), 0, 0)).toBeNaN()
   expect(parseDecimal(bytes('abc'), 0, 3)).toBeNaN()
   expect(parseDecimal(bytes('-'), 0, 1)).toBeNaN()
-  // чтение среза внутри буфера: «1.5» со смещением
+  // reading a slice inside the buffer: "1.5" with an offset
   const mixed = bytes('x 1.5 y')
   expect(parseDecimal(mixed, 2, 5)).toBe(1.5)
 })
 
-test('asciiDecode: корректность и чанковость', () => {
-  const text = 'glTF'.repeat(3000) // 12000 байт > чанка 8192
+test('asciiDecode: correctness and chunking', () => {
+  const text = 'glTF'.repeat(3000) // 12000 bytes > the 8192 chunk
   const bytes = new TextEncoder().encode(text)
   expect(asciiDecode(bytes, 0, bytes.length)).toBe(text)
   expect(asciiDecode(new TextEncoder().encode('Kaydara FBX Binary  '), 0, 20)).toBe('Kaydara FBX Binary  ')
 })
 
-test('isWhitespace: SPACE/TAB/CR/LF — да, прочее — нет', () => {
+test('isWhitespace: SPACE/TAB/CR/LF — yes, the rest — no', () => {
   expect(isWhitespace(CHAR.SPACE)).toBe(true)
   expect(isWhitespace(CHAR.TAB)).toBe(true)
   expect(isWhitespace(CHAR.CR)).toBe(true)
@@ -42,7 +42,7 @@ test('isWhitespace: SPACE/TAB/CR/LF — да, прочее — нет', () => {
   expect(isWhitespace(0)).toBe(false)
 })
 
-test('align4: выравнивание вверх', () => {
+test('align4: align up', () => {
   expect(align4(0)).toBe(0)
   expect(align4(4)).toBe(4)
   expect(align4(5)).toBe(8)
@@ -50,7 +50,7 @@ test('align4: выравнивание вверх', () => {
   expect(align4(8)).toBe(8)
 })
 
-test('clamp и nowMs — здравый смысл', () => {
+test('clamp and nowMs — common sense', () => {
   expect(clamp(5, 0, 3)).toBe(3)
   expect(clamp(-5, 0, 3)).toBe(0)
   expect(clamp(2, 0, 3)).toBe(2)

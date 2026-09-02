@@ -6,7 +6,7 @@ function slot(): DataView {
 }
 
 describe('seqlock', () => {
-  it('запись затем чтение: значение и чётная версия', () => {
+  it('write then read: the value and an even version', () => {
     const view = slot()
     writeSeqlock(view, 0, 8, 42.5)
     const read = readSeqlock(view, 0, 8)
@@ -15,7 +15,7 @@ describe('seqlock', () => {
     expect(seqlockVersion(view, 0)).toBe(2)
   })
 
-  it('последовательные записи: версия монотонно растёт', () => {
+  it('sequential writes: the version grows monotonically', () => {
     const view = slot()
     writeSeqlock(view, 0, 8, 1)
     writeSeqlock(view, 0, 8, 2)
@@ -24,15 +24,15 @@ describe('seqlock', () => {
     expect(readSeqlock(view, 0, 8).value).toBe(3)
   })
 
-  it('открытый писатель (нечётная версия) — ошибка после лимита попыток, не вечный спин', () => {
+  it('an open writer (odd version) — an error after the attempt limit, not an eternal spin', () => {
     const view = slot()
-    view.setUint32(0, 1, true) // писатель «завис» между входом и выходом
+    view.setUint32(0, 1, true) // the writer "hung" between entry and exit
     expect(() => readSeqlock(view, 0, 8)).toThrow(/livelock/)
   })
 
-  it('невыровненная версия — явная ошибка контракта', () => {
+  it('an unaligned version — an explicit contract error', () => {
     const view = slot()
-    expect(() => readSeqlock(view, 2, 8)).toThrow(/границе/)
-    expect(() => writeSeqlock(view, 2, 8, 1)).toThrow(/границе/)
+    expect(() => readSeqlock(view, 2, 8)).toThrow(/boundary/)
+    expect(() => writeSeqlock(view, 2, 8, 1)).toThrow(/boundary/)
   })
 })

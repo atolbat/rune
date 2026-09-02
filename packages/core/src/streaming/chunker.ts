@@ -1,4 +1,4 @@
-// Чанкер: построчная нарезка текстуры на тайлы (крупный чанк — теория K).
+// Chunker: row-by-row slicing of a texture into tiles (a large chunk — K theory).
 
 export interface TileRect {
   readonly x: number
@@ -7,9 +7,9 @@ export interface TileRect {
   readonly height: number
 }
 
-/** Тайлы полной ширины (ряды высотой tileH, крайний обрезается). */
+/** Full-width tiles (rows of tileH height, the last one is clipped). */
 export function chunkRect(width: number, height: number, tileH: number): TileRect[] {
-  if (tileH < 1) throw new Error('rune: chunkRect требует tileH >= 1')
+  if (tileH < 1) throw new Error('rune: chunkRect requires tileH >= 1')
   const tiles: TileRect[] = []
   for (let y = 0; y < height; y += tileH) {
     const rows = Math.min(tileH, height - y)
@@ -18,16 +18,16 @@ export function chunkRect(width: number, height: number, tileH: number): TileRec
   return tiles
 }
 
-/** Число тайлов без построения массива — ровно chunkRect(...).length.
- *  (Баг-запах прошлой версии: chunkRect.length — арность функции (3),
- *  а не длина массива; результат «случайно сходился».) */
+/** Tile count without building the array — exactly chunkRect(...).length.
+ *  (Bug smell of the previous version: chunkRect.length — the function's
+ *  arity (3), not the array length; the result "coincidentally converged".) */
 export function countTiles(width: number, height: number, tileH: number): number {
-  if (tileH < 1) throw new Error('rune: countTiles требует tileH >= 1')
+  if (tileH < 1) throw new Error('rune: countTiles requires tileH >= 1')
   if (height <= 0) return 0
   return Math.ceil(height / tileH)
 }
 
-/** Высота тайла под байтовый бюджет (потолок 256 строк, минимум 1). */
+/** Tile height under a byte budget (ceiling of 256 rows, minimum 1). */
 export function tileForBudget(width: number, budgetBytes: number): number {
   const rowBytes = width * 4
   if (rowBytes <= 0) return 1
@@ -35,8 +35,8 @@ export function tileForBudget(width: number, budgetBytes: number): number {
 }
 
 /**
- * Байты тайла: полный ряд — subarray без копии; горизонтальный срез —
- * плотная копия (GPU-строки обязаны быть подряд).
+ * Tile bytes: a full row — subarray without a copy; a horizontal slice —
+ * a dense copy (GPU rows must be contiguous).
  */
 export function tileBytes(tile: TileRect, source: Uint8Array, sourceWidth: number): Uint8Array {
   if (tile.width === sourceWidth) {

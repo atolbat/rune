@@ -1,7 +1,12 @@
 /*
- * demo/shared/demo-shell.css — общий стиль всех демо rune.
- * Mobile-first: канвас на всю ширину, тач-цели >= 44px, лог ниже сцены.
- * Тёмная тема по умолчанию; светлая ОС не ломает вёрстку (color-scheme: dark).
+ * demo/shared/demo-shell.css — shared styling for all rune demos.
+ *
+ * Mobile-first: the canvas spans the full width, touch targets >= 44px, the log
+ * sits below the scene. Dark theme by default; a light OS theme does not break
+ * the layout (color-scheme: dark).
+ *
+ * Fullscreen layout (body.rd-fs): an immersive viewer — the stage fills the
+ * viewport, and the controls hide behind a compact FAB + sheet.
  */
 
 :root {
@@ -39,7 +44,7 @@ body {
   gap: 14px;
 }
 
-/* ---------- Заголовок ---------- */
+/* ---------- Header ---------- */
 
 .rd-head { display: flex; flex-direction: column; gap: 4px; }
 
@@ -53,7 +58,7 @@ body {
 
 .rd-desc { margin: 0; color: var(--rd-muted); font-size: 14px; }
 
-/* ---------- Сцена ---------- */
+/* ---------- Stage ---------- */
 
 .rd-stage {
   position: relative;
@@ -110,7 +115,7 @@ body {
   white-space: pre-wrap;
 }
 
-/* ---------- Панель управления ---------- */
+/* ---------- Toolbar ---------- */
 
 .rd-toolbar {
   display: flex;
@@ -139,7 +144,7 @@ body {
 .rd-btn:active { background: #202a44; }
 .rd-btn:focus-visible { outline: 2px solid var(--rd-accent); outline-offset: 1px; }
 
-/* Сегментированный тумблер бэкендов: Авто / WebGL2 / WebGPU */
+/* Segmented backend toggle: Auto / WebGL2 / WebGPU */
 .rd-seg {
   display: flex;
   border: 1px solid var(--rd-border);
@@ -180,7 +185,7 @@ body {
   outline-offset: -2px;
 }
 
-/* ---------- Лог ---------- */
+/* ---------- Log ---------- */
 
 .rd-log {
   border: 1px solid var(--rd-border);
@@ -264,7 +269,7 @@ body {
 
 .rd-log-empty { padding: 10px 12px; color: var(--rd-muted); font-size: 12px; }
 
-/* ---------- Подвал ---------- */
+/* ---------- Footer ---------- */
 
 .rd-hint { margin: 0; color: var(--rd-muted); font-size: 13px; }
 .rd-hint code {
@@ -276,7 +281,96 @@ body {
   font-size: 12px;
 }
 
-/* ---------- Широкие экраны ---------- */
+/* ---------- Fullscreen layout (immersive viewer) ---------- */
+
+/* The stage fills the viewport; the page never scrolls. */
+body.rd-fs { padding: 0; overflow: hidden; height: 100vh; height: 100dvh; }
+body.rd-fs #app { max-width: none; margin: 0; height: 100%; display: block; gap: 0; }
+
+body.rd-fs .rd-stage {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  aspect-ratio: auto;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+body.rd-fs .rd-badge {
+  top: calc(env(safe-area-inset-top, 0px) + 10px);
+  right: calc(env(safe-area-inset-right, 0px) + 10px);
+  font-size: 11px;
+  padding: 3px 9px;
+  z-index: 5;
+}
+
+body.rd-fs .rd-reason {
+  left: calc(env(safe-area-inset-left, 0px) + 10px);
+  right: calc(env(safe-area-inset-right, 0px) + 10px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 64px);
+  z-index: 5;
+}
+
+/* FAB: the only always-visible shell control — opens the sheet. */
+.rd-fab {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 10px);
+  left: calc(env(safe-area-inset-left, 0px) + 10px);
+  z-index: 30;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  border: 1px solid var(--rd-border);
+  background: rgb(11 13 19 / 0.72);
+  color: var(--rd-text);
+  font: 16px/1 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  backdrop-filter: blur(6px);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: manipulation;
+}
+.rd-fab:hover { border-color: var(--rd-border-strong); }
+.rd-fab:active { background: #202a44; }
+.rd-fab:focus-visible { outline: 2px solid var(--rd-accent); outline-offset: 1px; }
+
+/* Sheet: compact control panel behind the FAB (hidden by default). */
+.rd-sheet {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 58px);
+  left: calc(env(safe-area-inset-left, 0px) + 10px);
+  z-index: 29;
+  width: min(300px, calc(100vw - 20px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 12px;
+  background: rgb(11 13 19 / 0.88);
+  border: 1px solid var(--rd-border);
+  backdrop-filter: blur(10px);
+}
+.rd-sheet[hidden] { display: none; }
+
+.rd-sheet-head { display: flex; align-items: center; justify-content: space-between; min-width: 0; }
+.rd-sheet-title {
+  color: var(--rd-muted);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rd-sheet .rd-btn { min-height: 38px; padding: 6px 12px; font-size: 13px; }
+.rd-sheet .rd-seg label { min-height: 38px; padding: 8px 12px; font-size: 13px; }
+.rd-sheet .rd-log-list { max-height: 26vh; }
+.rd-sheet .rd-log-bar .rd-btn { min-height: 34px; padding: 5px 10px; font-size: 12px; }
+
+/* ---------- Wide screens ---------- */
 
 @media (min-width: 720px) {
   body { padding: 24px 16px; }
@@ -284,14 +378,14 @@ body {
   .rd-log-list { max-height: 30vh; }
 }
 
-/* ---------- Мелкие телефоны ---------- */
+/* ---------- Small phones ---------- */
 
 @media (max-width: 360px) {
   .rd-btn { padding: 8px 10px; }
   .rd-seg label { padding: 10px 10px; }
 }
 
-/* На узких экранах подзаголовок панели лога не влезает — прячем */
+/* The log panel subtitle does not fit on narrow screens — hide it */
 @media (max-width: 480px) {
   .rd-log-title { display: none; }
 }

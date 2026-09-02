@@ -1,26 +1,29 @@
 /**
- * resourceSessionGL — стабильно-id сессия над GLFacade + журнал v2.
+ * resourceSessionGL — a stable-id session over GLFacade + journal v2.
  *
- * КОРЕНЬ ПЕРЕДЕЛКИ (Task 62): раньше журнал хранил счётчиковые id фасада,
- * и replay на свежем фасаде выдавал ДРУГИЕ id при любых дырках → зависимые
- * опсы били мимо текстур → сцена не восстанавливалась.
+ * THE ROOT OF THE REWORK (Task 62): previously the journal stored the
+ * facade's counter ids, and replay on a fresh facade produced DIFFERENT ids
+ * whenever there were gaps → dependent ops missed the textures → the scene
+ * did not restore.
  *
- * Теперь сессия вводит СТАБИЛЬНЫЕ id собственным счётчиком (над фасадом):
- *   • публичный facade.createTexture(...) → стабильный id, mapping
- *     стабильный → raw-fasadный, journal.record(texture.create);
- *   • все методы, принимающие textureId/viewId/targetId, транслируют
- *     стабильный id → raw id текущей инкарнации устройства;
- *   • restore() принимает id ИЗ ОПСА журнала и строит mapping заново на
- *     свежем фасаде → id совпадают до и после потери ПО ПОСТРОЕНИЮ.
+ * Now the session introduces STABLE ids with its own counter (over the
+ * facade):
+ *   • public facade.createTexture(...) → a stable id, a mapping of
+ *     stable → raw-facade, journal.record(texture.create);
+ *   • all methods taking textureId/viewId/targetId translate the
+ *     stable id → the raw id of the current device incarnation;
+ *   • restore() takes ids FROM journal ops and rebuilds the mapping on a
+ *     fresh facade → ids match before and after loss BY CONSTRUCTION.
  *
- * Журналируются ПЕРВИЧНЫЕ ресурсы с КОНТЕНТОМ (texture.write/update/
- * writeMip хранят ContentRef на CPU-источник — источники переживают loss).
- * Programs/buffers — ПРОИЗВОДНОЕ состояние: pass-through raw id без записи
- * (renderer пересоздаёт их лениво из спеков команд). Raw-байтовый
- * texSubImage2D — домен UploadScheduler'а, не журналируется.
+ * PRIMARY resources WITH CONTENT are journaled (texture.write/update/
+ * writeMip store a ContentRef to a CPU source — sources survive loss).
+ * Programs/buffers are DERIVED state: pass-through raw ids without
+ * journaling (the renderer re-creates them lazily from command specs).
+ * Raw-byte texSubImage2D is the domain of the UploadScheduler, not
+ * journaled.
  *
- * Восстановление и нормальная работа — ОДИН путь: restore() зовёт те же
- * методы raw-фасада, что и живой код (texImage2DFromSource /
+ * Restoration and normal operation are ONE path: restore() calls the same
+ * raw-facade methods as the live code (texImage2DFromSource /
  * texSubImage2DFromSource / texImage2DLevel / createTextureView / ...).
  */
 
@@ -28,12 +31,12 @@ import type { ResourceJournal, ResOp, RestoreReport, ContentRef, WorkingSet, Evi
 import { selectResidentOps, selectLRUEvictions, estimateTextureBytes } from '@rune/core'
 import type { GLFacade, GLImageSource, GLTextureFormat } from '@rune/webgl2'
 
-/** Стартовый id для namespace view'ов (паритет с realGL: ≥ 1M). */
+/** Starting id for the view namespace (parity with realGL: ≥ 1M). */
 const VIEW_ID_BASE = 1_000_000
 
-/** Task 67: формат журнала (WebGPU-имена) → формат GL-фасада.
- *  'canvas' и 'rgba8unorm' — RGBA8 (дефолт GL, в опсы не пишем).
- *  'rgba16float' → 'rgba16f' (texStorage2D RGBA16F + HALF_FLOAT загрузки).
+/** Task 67: journal format (WebGPU names) → GL facade format.
+ *  'canvas' and 'rgba8unorm' — RGBA8 (the GL default, not written into ops).
+ *  'rgba16float' → 'rgba16f' (texStorage2D RGBA16F + HALF_FLOAT uploads).
  *  'rgba32float' → 'rgba32f' (RGBA32F + FLOAT). */
 export function glFormatFromTextureFormat(fmt?: TextureFormat): GLTextureFormat | undefined {
   if (fmt === 'rgba16float') return 'rgba16f'
@@ -41,7 +44,7 @@ export function glFormatFromTextureFormat(fmt?: TextureFormat): GLTextureFormat 
   return undefined
 }
 
-/** Task 67: формат GL-фасада → формат журнала (undefined = дефолт rgba8unorm). */
+/** Task 67: GL facade format → journal format (undefined = the default rgba8unorm). */
 export function textureFormatFromGL(fmt?: GLTextureFormat): TextureFormat | undefined {
   if (fmt === 'rgba16f') return 'rgba16float'
   if (fmt === 'rgba32f') return 'rgba32float'
@@ -49,64 +52,64 @@ export function textureFormatFromGL(fmt?: GLTextureFormat): TextureFormat | unde
 }
 
 export interface ResourceSessionGL {
-  /** Публичный фасад: тот же контракт GLFacade, но id — стабильные. */
+  /** Public facade: the same GLFacade contract, but the ids are stable. */
   readonly facade: GLFacade
-  /** Текущий стабильный textureId → raw id (диагностика/тесты). */
+  /** Current stable textureId → raw id (diagnostics/tests). */
   readonly mapping: ReadonlyMap<number, number>
-  /** Перевод любого стабильного id (texture/view/target) в raw id текущей
-   *  инкарнации устройства. undefined — id не известен сессии. */
+  /** Translate any stable id (texture/view/target) to the raw id of the
+   *  current device incarnation. undefined — the id is unknown to the session. */
   rawId(stableId: number): number | undefined
-  /** Replay журнала на СВЕЖЕМ raw-фасаде этой сессии.
-   *  Вызывать после re-init устройства, ДО создания новых ресурсов.
-   *  Повторный вызов на живом фасаде создаст дубликаты (как и любой replay).
+  /** Replay the journal on a FRESH raw facade of this session.
+   *  Call after device re-init, BEFORE creating new resources.
+   *  A repeated call on a live facade will create duplicates (as any replay would).
    *
-   *  Task 65 soft reset: keep (рабочее множество) — восстановить ТОЛЬКО
-   *  его замыкание (сцена + контент + родители views); остальное живое
-   *  остаётся декларацией в журнале (report.deferred) и вернётся лениво
-   *  через ensureResident(). Без keep — полный replay (strategy='full'). */
+   *  Task 65 soft reset: keep (the working set) — restore ONLY its
+   *  closure (scene + content + parents of views); the rest stays a
+   *  declaration in the journal (report.deferred) and will come back lazily
+   *  via ensureResident(). Without keep — a full replay (strategy='full'). */
   restore(keep?: WorkingSet): RestoreReport
-  /** Task 65: ленивый возврат ОДНОГО ресурса в GPU-память после soft reset.
-   *  textureId → create + контент; viewId → parent (create + контент) + view;
-   *  targetId → parent create + target. Идемпотентно: уже резидентный
-   *  ресурс — no-op (null). Возвращает отчёт replay подсписка журнала. */
+  /** Task 65: lazy return of ONE resource into GPU memory after a soft reset.
+   *  textureId → create + content; viewId → parent (create + content) + view;
+   *  targetId → parent create + target. Idempotent: an already resident
+   *  resource is a no-op (null). Returns a replay report of a journal sublist. */
   ensureResident(resourceId: number): RestoreReport | null
-  /** Task 66: LRU-вытеснение резидентных текстур до бюджета (обратная
-   *  сторона ensureResident). Вытесненные views/targets — замыкание поверх
-   *  вытесненных текстур. Raw-ресурсы освобождаются, декларации+контент
-   *  остаются в журнале (ресурс вернётся ensureResident'ом). Журнал НЕ
-   *  меняется. pinned (например, рабочее множество сцены) неприкосновенен. */
+  /** Task 66: LRU eviction of resident textures down to a budget (the
+   *  flip side of ensureResident). Evicted views/targets — the closure over
+   *  evicted textures. Raw resources are freed, declarations+content
+   *  remain in the journal (the resource will come back via ensureResident).
+   *  The journal is NOT changed. pinned (e.g. the scene's working set) is untouchable. */
   evictLRU(options?: { budgetBytes?: number; pinned?: WorkingSet }): EvictionReport
-  /** Task 66: оценка резидентной GPU-памяти + порядок LRU (диагностика). */
+  /** Task 66: resident GPU memory estimate + LRU order (diagnostics). */
   residencyStats(): ResidencyStats
 }
 
-/** Создать сессию: стабильные id + журналирование поверх raw-фасада. */
+/** Create a session: stable ids + journaling over a raw facade. */
 export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal): ResourceSessionGL {
-  // стабильный id → raw id (текущая инкарнация устройства)
+  // stable id → raw id (the current device incarnation)
   const texMap = new Map<number, number>()
   const viewMap = new Map<number, number>()
   const targetMap = new Map<number, number>()
-  // Task 66: LRU-учёт резидентности.
-  //  • lastUse: стабильный textureId → монотонный счётчик использования;
-  //  • viewParent/targetParent: зависимый id → родительская текстура
-  //    (замыкание вытеснения: текстура тянет за собой свои views/targets);
-  //  • texMeta: размеры+mipLevels резидентных текстур (оценка GPU-памяти).
+  // Task 66: LRU residency tracking.
+  //  • lastUse: stable textureId → a monotonic usage counter;
+  //  • viewParent/targetParent: dependent id → parent texture
+  //    (the eviction closure: a texture drags its views/targets along);
+  //  • texMeta: dimensions+mipLevels of resident textures (GPU memory estimate).
   let useCounter = 0
   const lastUse = new Map<number, number>()
   const viewParent = new Map<number, number>()
   const targetParent = new Map<number, number>()
   const texMeta = new Map<number, { w: number; h: number; mips: number; format?: TextureFormat }>()
-  // размеры стабильных текстур — для классификации полного upload'а на GPU;
-  // на GL не нужны (texImage2DFromSource всегда полный), но держим для паритета
+  // dimensions of stable textures — for classifying a full GPU upload;
+  // not needed on GL (texImage2DFromSource is always full), but kept for parity
   let nextTex = 1
   let nextView = VIEW_ID_BASE
   let nextTarget = 1
 
-  /** Отметить использование текстуры (свежесть LRU). */
+  /** Mark a texture as used (LRU freshness). */
   function touch(textureId: number): void {
     lastUse.set(textureId, ++useCounter)
   }
-  /** Touch по texture-ИЛИ-view id (view → родительская текстура). */
+  /** Touch by a texture-OR-view id (view → parent texture). */
   function touchTexOrView(texOrViewId: number): void {
     touch(texOrViewId >= VIEW_ID_BASE ? (viewParent.get(texOrViewId) ?? texOrViewId) : texOrViewId)
   }
@@ -121,36 +124,36 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
   const rawTex = (id: number): number => {
     const mapped = texMap.get(id)
     if (mapped === undefined) {
-      throw new Error(`resourceSession: неизвестный стабильный textureId=${id}. ` +
-        `Ресурс не создан в этой сессии (или restore() не выполнен после потери устройства).`)
+      throw new Error(`resourceSession: unknown stable textureId=${id}. ` +
+        `The resource was not created in this session (or restore() has not been run after device loss).`)
     }
     return mapped
   }
   const rawView = (id: number): number => {
     const mapped = viewMap.get(id)
     if (mapped === undefined) {
-      throw new Error(`resourceSession: неизвестный стабильный viewId=${id}.`)
+      throw new Error(`resourceSession: unknown stable viewId=${id}.`)
     }
     return mapped
   }
   const rawTarget = (id: number): number => {
     const mapped = targetMap.get(id)
     if (mapped === undefined) {
-      throw new Error(`resourceSession: неизвестный стабильный targetId=${id}.`)
+      throw new Error(`resourceSession: unknown stable targetId=${id}.`)
     }
     return mapped
   }
-  /** id может быть textureId (<VIEW_ID_BASE) или viewId (≥VIEW_ID_BASE). */
+  /** The id can be a textureId (<VIEW_ID_BASE) or a viewId (≥VIEW_ID_BASE). */
   const rawTexOrView = (id: number): number =>
     id >= VIEW_ID_BASE ? rawView(id) : rawTex(id)
 
   const facade: GLFacade = {
-    // ─── Производное состояние: pass-through raw id, БЕЗ журнала ─────────
+    // ─── Derived state: pass-through raw ids, WITHOUT the journal ─────────
     createProgram: (vertex, fragment) => raw.createProgram(vertex, fragment),
     useProgram: programId => raw.useProgram(programId),
     createBuffer: data => raw.createBuffer(data),
     bindVertexBuffer: (bufferId, location, size, stride, byteOffset, divisor) => raw.bindVertexBuffer(bufferId, location, size, stride, byteOffset, divisor),
-    // M5 (Task 73): feed dual-bind — frame-op (per-frame dirty range), не журналируется.
+    // M5 (Task 73): feed dual-bind — a frame op (per-frame dirty range), not journaled.
     updateBuffer: (bufferId, data, byteOffset) => raw.updateBuffer(bufferId, data, byteOffset),
     setUniformMatrix4: (programId, name, values) => raw.setUniformMatrix4(programId, name, values),
     setUniform4fv: (programId, name, values) => raw.setUniform4fv(programId, name, values),
@@ -159,17 +162,18 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
     setUniform1f: (programId, name, value) => raw.setUniform1f(programId, name, value),
     setUniform1i: (programId, name, value) => raw.setUniform1i(programId, name, value),
 
-    // ─── Первичные ресурсы: стабильные id + журнал ───────────────────────
+    // ─── Primary resources: stable ids + journal ───────────────────────
     createTexture: (width, height, options) => {
       const rawId = raw.createTexture(width, height, options)
       const id = nextTex++
       texMap.set(id, rawId)
-      // Task 67: формат хранения — в meta (residency-байты: HDR 2×/4×) и в
-      // журнал (replay/ensureResident пересоздаст текстуру тем же форматом).
-      // GL-имя ('rgba16f') нормализуем в журнальное ('rgba16float'); в options
-      // формат НЕ дублируем — он живёт на верхнем уровне опса. Опции без
-      // содержимого пишем как undefined — журнал остаётся компактным и
-      // replay передаёт фасаду ровно те же args, что и живой путь.
+      // Task 67: storage format — into meta (residency bytes: HDR 2×/4×) and
+      // into the journal (replay/ensureResident re-creates the texture with
+      // the same format). The GL name ('rgba16f') is normalized to the journal
+      // one ('rgba16float'); we do NOT duplicate the format in options — it
+      // lives at the top level of the op. Options without content are written
+      // as undefined — the journal stays compact and replay passes the facade
+      // exactly the same args as the live path.
       const format = textureFormatFromGL(options?.format)
       const { format: _glFmt, ...rest } = options ?? {}
       const journalOptions = Object.keys(rest).length > 0 ? rest : undefined
@@ -199,8 +203,8 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
       const content = journal.storeSource(source, describeSourceKind(source), w, h)
       journal.record({ kind: 'texture.writeMip', id: textureId, level, content, flipY: options?.flipY ?? false })
     },
-    // Raw-байтовый стриминг — домен UploadScheduler'а: данные держит Pump,
-    // он же их пере-стримит. Журналирование чанков взорвёт журнал.
+    // Raw-byte streaming is the domain of the UploadScheduler: the Pump holds
+    // the data and re-streams it. Journaling chunks would blow up the journal.
     texSubImage2D: (textureId, x, y, width, height, bytes) => {
       touch(textureId)
       raw.texSubImage2D(rawTex(textureId), x, y, width, height, bytes)
@@ -225,7 +229,7 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
       return id
     },
     deleteTextureView: viewId => {
-      // Task 65: отложенный view — только декларация в журнале.
+      // Task 65: a deferred view — only the declaration in the journal.
       const mapped = viewMap.get(viewId)
       if (mapped !== undefined) raw.deleteTextureView(mapped)
       viewMap.delete(viewId)
@@ -248,11 +252,11 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
       }
       raw.bindTarget(targetId === 0 ? 0 : rawTarget(targetId), clear)
     },
-    // Task 80: readback — перевод стабильного id цели в raw-id (pass-through,
-    // чтение не журналируется).
+    // Task 80: readback — translate the stable target id to a raw id (pass-through,
+    // the read is not journaled).
     readTargetPixels: targetId => raw.readTargetPixels(targetId === 0 ? 0 : rawTarget(targetId)),
     deleteTarget: targetId => {
-      // Task 65: отложенная target — только декларация в журнале.
+      // Task 65: a deferred target — only the declaration in the journal.
       const mapped = targetMap.get(targetId)
       if (mapped !== undefined) raw.deleteTarget(mapped)
       targetMap.delete(targetId)
@@ -260,11 +264,11 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
       journal.record({ kind: 'target.destroy', id: targetId })
     },
     deleteTexture: textureId => {
-      // Task 65: ресурс может быть ОТЛОЖЕН (soft reset не восстановил его) —
-      // тогда raw-вызова нет, но texture.destroy в журнале обязателен
-      // (убить декларацию → compact вычистит пару create→destroy).
-      // Task 66: вытесненный (evictLRU) — то же самое: raw нет, декларацию
-      // убивает только ЯВНОЕ удаление (вытеснение — не смерть ресурса).
+      // Task 65: the resource may be DEFERRED (a soft reset did not restore it) —
+      // then there is no raw call, but texture.destroy in the journal is mandatory
+      // (kill the declaration → compact will purge the create→destroy pair).
+      // Task 66: an evicted (evictLRU) resource is the same: no raw, only an
+      // EXPLICIT deletion kills the declaration (eviction is not the death of a resource).
       const mapped = texMap.get(textureId)
       if (mapped !== undefined) raw.deleteTexture(mapped)
       texMap.delete(textureId)
@@ -273,7 +277,7 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
       journal.record({ kind: 'texture.destroy', id: textureId })
     },
 
-    // ─── Frame-опсы: pass-through (не ресурсы) ───────────────────────────
+    // ─── Frame ops: pass-through (not resources) ───────────────────────────
     setViewport: (width, height) => raw.setViewport(width, height),
     setDepthMode: (test, write) => raw.setDepthMode(test, write),
     setCull: mode => raw.setCull(mode),
@@ -284,23 +288,23 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
     deleteBuffer: bufferId => raw.deleteBuffer(bufferId),
   }
 
-  // ─── Task 65: применение одного опса на raw-фасаде БЕЗ записи в журнал ─────
-  // Один код-путь для restore() и ensureResident() (принцип «живое и
-  // восстановление — один путь»): те же фасадные вызовы, что и при живой
-  // работе, только id принимается из опса, а не генерируется счётчиком.
-  // Task 66: каждый применённый опс отмечает использование (touch) —
-  // ensureResident делает ресурс самым свежим в LRU.
+  // ─── Task 65: applying a single op on the raw facade WITHOUT journaling ─────
+  // One code path for restore() and ensureResident() (the principle "live and
+  // restore — one path"): the same facade calls as in live operation,
+  // only the id comes from the op instead of being generated by a counter.
+  // Task 66: every applied op marks usage (touch) —
+  // ensureResident makes the resource the freshest in LRU.
   function applyOp(op: ResOp, acc: {
     opsReplayed: number; contentOps: number; skipped: number
     textureIds: number[]; viewIds: number[]; targetIds: number[]
   }): void {
     switch (op.kind) {
       case 'texture.create': {
-        // Task 67: формат из опса → формат GL-фасада (rgba16float→rgba16f).
-        // «Живое и восстановление — один путь»: applyOp зовёт тот же
-        // raw.createTexture с теми же опциями, что и живой код. Формат
-        // подмешиваем ТОЛЬКО когда он есть — args-контракт идентичен живому
-        // пути (без format-ключа для обычных RGBA8-текстур).
+        // Task 67: format from the op → GL facade format (rgba16float→rgba16f).
+        // "Live and restore — one path": applyOp calls the same
+        // raw.createTexture with the same options as the live code. We mix in
+        // the format ONLY when present — the args contract is identical to the
+        // live path (no format key for ordinary RGBA8 textures).
         const glFormat = glFormatFromTextureFormat(op.format)
         const rawId = raw.createTexture(
           op.width,
@@ -362,8 +366,8 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
         acc.opsReplayed++
         break
       }
-      // destroy-опсы на свежем фасаде — no-op: ресурсов прежней
-      // инкарнации здесь нет (они умерли вместе с устройством).
+      // destroy-ops on a fresh facade — no-op: the resources of the former
+      // incarnation are not here (they died together with the device).
       default:
         break
     }
@@ -371,9 +375,9 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
 
   function restore(keep?: WorkingSet): RestoreReport {
     seedCounters()
-    // Свежая инкарнация устройства: маппинги и LRU-учёт прежней — мусор
-    // (raw id мертвы, а отложенные ресурсы НЕ резидентны). Чистим, иначе
-    // evictLRU/residencyStats считали бы «резидентными» мёртвые id.
+    // A fresh device incarnation: the mappings and LRU tracking of the old one are garbage
+    // (raw ids are dead, and deferred resources are NOT resident). We clean up,
+    // otherwise evictLRU/residencyStats would count dead ids as "resident".
     texMap.clear()
     viewMap.clear()
     targetMap.clear()
@@ -383,8 +387,8 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
     lastUse.clear()
     const acc = { opsReplayed: 0, contentOps: 0, skipped: 0, textureIds: [] as number[], viewIds: [] as number[], targetIds: [] as number[] }
     if (keep !== undefined) {
-      // Task 65 soft reset: только замыкание рабочего множества; остальное
-      // живое — deferred (вернётся лениво через ensureResident).
+      // Task 65 soft reset: only the closure of the working set; the rest
+      // stays deferred (will come back lazily via ensureResident).
       const sel = selectResidentOps(journal.entries(), keep)
       for (const op of sel.ops) applyOp(op, acc)
       return {
@@ -397,8 +401,8 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
   }
 
   function ensureResident(resourceId: number): RestoreReport | null {
-    // Уже резидентен — no-op. namespace: viewId ≥ 1M; texture/target
-    // проверяем по journal-опсам (id < 1M: сперва texture, затем target).
+    // Already resident — no-op. Namespace: viewId ≥ 1M; texture/target are
+    // checked against journal ops (id < 1M: first texture, then target).
     if (resourceId >= VIEW_ID_BASE) {
       if (viewMap.has(resourceId)) return null
       const sel = selectResidentOps(journal.entries(), { viewIds: [resourceId] })
@@ -407,7 +411,7 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
       return { ...acc }
     }
     if (texMap.has(resourceId)) return null
-    // texture или target? Смотрим, что живо в журнале под этим id.
+    // Texture or target? Look at what is alive in the journal under this id.
     const isTexture = journal.entries().some(op => op.kind === 'texture.create' && op.id === resourceId)
     const sel = selectResidentOps(
       journal.entries(),
@@ -418,9 +422,10 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
     return { ...acc }
   }
 
-  // ─── Task 66: LRU-вытеснение (pressure → evict) ────────────────────────────
-  /** Родители запиненных views/targets из ЖУРНАЛА (источник истины; сессия
-   *  знает родителей только резидентных). Взят ПОСЛЕДНИЙ create-опс id. */
+  // ─── Task 66: LRU eviction (pressure → evict) ────────────────────────────
+  /** Parents of pinned views/targets from the JOURNAL (the source of truth;
+   *  the session knows the parents only of resident ones). The LAST create
+   *  op of an id is taken. */
   function pinnedTextures(pinned?: WorkingSet): Set<number> {
     const pin = new Set<number>(pinned?.textureIds ?? [])
     if (pinned?.viewIds !== undefined || pinned?.targetIds !== undefined) {
@@ -432,13 +437,13 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
     return pin
   }
 
-  /** Записи LRU-учёта резидентных текстур. */
+  /** Entries of the LRU tracking of resident textures. */
   function residencyEntries(): { id: number; bytes: number; lastUse: number }[] {
     const entries: { id: number; bytes: number; lastUse: number }[] = []
     for (const id of texMap.keys()) {
       const meta = texMeta.get(id)
-      // Task 67: оценка учитывает формат (rgba16float — 8 б/пиксель,
-      // rgba32float — 16): HDR-текстура «весит» в вытеснении честно.
+      // Task 67: the estimate accounts for the format (rgba16float — 8
+      // bytes/pixel, rgba32float — 16): an HDR texture "weighs" honestly in eviction.
       const bytes = meta !== undefined ? estimateTextureBytes(meta.w, meta.h, meta.mips, meta.format) : 0
       entries.push({ id, bytes, lastUse: lastUse.get(id) ?? 0 })
     }
@@ -463,8 +468,8 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
     const evictedViews: number[] = []
     const evictedTargets: number[] = []
     for (const texId of plan.evictIds) {
-      // Замыкание: резидентные views/targets этой текстуры непригодны без
-      // её хранилища (GL: view — мип-диапазон, target — FBO на текстуре).
+      // Closure: resident views/targets of this texture are useless without
+      // its storage (GL: a view is a mip range, a target is an FBO on the texture).
       for (const [viewId, parent] of viewParent) {
         if (parent === texId && viewMap.has(viewId)) {
           raw.deleteTextureView(viewMap.get(viewId)!)
@@ -481,9 +486,9 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
           evictedTargets.push(targetId)
         }
       }
-      // Освободить raw-текстуру БЕЗ записи в журнал: ресурс жив декларацией
-      // + контентом (как deferred после soft reset) и вернётся через
-      // ensureResident тем же код-путём. Вытеснение — не уничтожение.
+      // Free the raw texture WITHOUT a journal record: the resource lives as a
+      // declaration + content (like deferred after a soft reset) and will come
+      // back via ensureResident through the same code path. Eviction is not destruction.
       const mapped = texMap.get(texId)
       if (mapped !== undefined) raw.deleteTexture(mapped)
       texMap.delete(texId)
@@ -514,7 +519,7 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
   }
 }
 
-/** Размер GL-источника (аналог externalImageSize из @rune/webgpu). */
+/** Size of a GL source (analogous to externalImageSize from @rune/webgpu). */
 function glSourceSize(source: GLImageSource): [number, number] {
   if (typeof HTMLVideoElement !== 'undefined' && source instanceof HTMLVideoElement) {
     return [source.videoWidth || 0, source.videoHeight || 0]
@@ -524,7 +529,7 @@ function glSourceSize(source: GLImageSource): [number, number] {
   return [s.width ?? 0, s.height ?? 0]
 }
 
-/** Имя типа источника (паритет с journalGl/journalGpu v1). */
+/** Source type name (parity with journalGl/journalGpu v1). */
 function describeSourceKind(source: GLImageSource): string {
   if (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) return 'ImageBitmap'
   if (typeof OffscreenCanvas !== 'undefined' && source instanceof OffscreenCanvas) return 'OffscreenCanvas'
@@ -537,9 +542,9 @@ function describeSourceKind(source: GLImageSource): string {
   return (source as { constructor?: { name?: string } }).constructor?.name ?? 'unknown'
 }
 
-/** Мёртвый источник: null/undefined, закрытый ImageBitmap (width=0),
- *  или любой bitmap-подобный объект с нулевыми числовыми размерами
- *  (закрытый/невалидный canvas). Такие источники заливать нельзя. */
+/** A dead source: null/undefined, a closed ImageBitmap (width=0),
+ *  or any bitmap-like object with zero numeric dimensions
+ *  (a closed/invalid canvas). Such sources cannot be uploaded. */
 function sourceAlive(source: unknown): boolean {
   if (source === null || source === undefined) return false
   const s = source as { width?: unknown; height?: unknown }
@@ -549,8 +554,8 @@ function sourceAlive(source: unknown): boolean {
   return true
 }
 
-/** Применить один ResOp к GL-фасаду БЕЗ сессии (raw id = стабильный id).
- *  Полезно для тестов и для приёма опсов на фасаде, где id уже совпадают. */
+/** Apply a single ResOp to a GL facade WITHOUT a session (raw id = stable id).
+ *  Useful for tests and for accepting ops on a facade where ids already match. */
 export function applyResOpGL(op: ResOp, gl: GLFacade, sourceFor: (content: ContentRef) => GLImageSource | null): void {
   switch (op.kind) {
     case 'texture.create': {

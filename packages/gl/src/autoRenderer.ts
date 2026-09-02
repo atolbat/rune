@@ -1,13 +1,13 @@
 /**
- * createAutoRenderer — async-обёртка над createRenderer / createWebGpuRenderer.
+ * createAutoRenderer — an async wrapper over createRenderer / createWebGpuRenderer.
  *
- * 1. Пробирует hardware (probeWebGpu + canvas.getContext('webgl2'))
- * 2. Вызывает resolveBackend({order, specs, hardware}) — чистую функцию
- * 3. Если chosen === null — кидает Error с decision.message
- * 4. Иначе создаёт inner-рендерер нужного бэкенда
+ * 1. Probes hardware (probeWebGpu + canvas.getContext('webgl2'))
+ * 2. Calls resolveBackend({order, specs, hardware}) — a pure function
+ * 3. If chosen === null — throws an Error with decision.message
+ * 4. Otherwise creates an inner renderer of the chosen backend
  *
- * Late-reject: r.command(spec) с неподходящим шейдером кидает actionable-ошибку
- * с инструкцией: что подкрутить.
+ * Late-reject: r.command(spec) with an unsuitable shader throws an actionable error
+ * with instructions on what to adjust.
  */
 
 import type { AutoDrawSpec, BackendDecision, BackendId } from './autoBackend.ts'
@@ -21,7 +21,7 @@ import type { WgpuCommand } from '@rune/webgpu'
 import type { UploadScheduler, TransientPool, ReadableSignal } from '@rune/core'
 import type { Surface, SurfaceOptions, PassOptions } from './surface.ts'
 
-/** Union-команда — у обеих есть record(), структура совместима по форме. */
+/** Union command — both have record(), structurally compatible by shape. */
 export type AnyCommand = CompiledCommand | WgpuCommand
 export type AnyFrameCallback =
   | ((ctx: FrameContext, record: AnyRecorder) => void)
@@ -30,40 +30,40 @@ export type AnyRecorder = (command: AnyCommand, props?: unknown) => void
 
 export interface AutoRendererOptions {
   readonly canvas: HTMLCanvasElement | string
-  /** Порядок попыток. Default ['webgpu', 'webgl2']. Длина 1 = strict. */
+  /** Try order. Default ['webgpu', 'webgl2']. Length 1 = strict. */
   readonly order?: readonly BackendId[]
-  /** Pre-flight спеки для проверки покрытия. */
+  /** Pre-flight specs for coverage checking. */
   readonly specs?: readonly AutoDrawSpec[]
-  /** Инъекции для headless-тестов: GL-фасад (рекордер или real). */
+  /** Injections for headless tests: GL facade (recorder or real). */
   readonly createGL?: RendererOptions['createGL']
-  /** Инъекции для headless-тестов: GPU-фасад. */
+  /** Injections for headless tests: GPU facade. */
   readonly createGPU?: WebGpuRendererOptions['createGPU']
   readonly requestFrame?: (callback: (timestamp: number) => void) => () => void
   readonly observeResize?: boolean
   readonly now?: () => number
   readonly dpr?: number
-  /** Инъекция пробы WebGPU — для тестов. */
+  /** WebGPU probe injection — for tests. */
   readonly probeGpu?: () => Promise<boolean>
-  /** Инъекция пробы WebGL2 — для тестов. Default: typeof WebGL2RenderingContext. */
+  /** WebGL2 probe injection — for tests. Default: typeof WebGL2RenderingContext. */
   readonly probeGl2?: () => boolean
 }
 
 export interface AutoRenderer {
-  /** Выбранный бэкенд. */
+  /** The chosen backend. */
   readonly backend: BackendId
-  /** Структурированная причина выбора. */
+  /** Structured reason for the choice. */
   readonly decision: BackendDecision
-  /** Внутренний рендерер — для прямого доступа (gpu/gl фасад). */
+  /** Inner renderer — for direct access (gpu/gl facade). */
   readonly inner: Renderer | WebGpuRenderer
-  // Унифицированный API
+  // Unified API
   readonly size: ReadableSignal<readonly [number, number]>
   readonly aspect: ReadableSignal<number>
   readonly time: ReadableSignal<number>
   readonly uploads: UploadScheduler
   readonly transients: TransientPool
-  /** Текстура: создаётся на активном бэкенде. */
+  /** Texture: created on the active backend. */
   texture(width: number, height: number): Texture
-  /** Команда с late-reject: spec.shader должен иметь вариант для активного бэкенда. */
+  /** Command with late-reject: spec.shader must have a variant for the active backend. */
   command(spec: AutoDrawSpec): AnyCommand
   pass(fragment: string, options?: PassOptions): AnyCommand
   surface(options?: SurfaceOptions): Surface<AnyCommand>
@@ -74,13 +74,13 @@ export interface AutoRenderer {
   stop(): void
 }
 
-/** Главная точка входа: авто-выбор бэкенда с pre-flight. */
+/** Main entry point: automatic backend selection with pre-flight. */
 export async function createAutoRenderer(options: AutoRendererOptions): Promise<AutoRenderer> {
   const order = options.order ?? ['webgpu', 'webgl2']
 
-  // Пробы hardware (вне resolveBackend — там чистая функция)
-  // Инъекции createGL/createGPU трактуются как «бэкенд доступен»: тест,
-  // передающий фасад, явно берёт ответственность за доступность на себя.
+  // Hardware probes (outside resolveBackend — it is a pure function)
+  // createGL/createGPU injections are treated as "backend available": a test
+  // passing a facade explicitly takes responsibility for availability.
   const probeGpu = options.probeGpu ?? (() => probeWebGpu())
   const probeGl2 = options.probeGl2 ?? defaultProbeGl2
   const hardware = {
@@ -88,13 +88,13 @@ export async function createAutoRenderer(options: AutoRendererOptions): Promise<
     webgl2: options.createGL !== undefined ? true : probeGl2(),
   }
 
-  // Чистый выбор
+  // Pure selection
   const decision = resolveBackend({ order, specs: options.specs, hardware })
   if (decision.chosen === null) {
     throw new BackendResolutionError(decision)
   }
 
-  // Создаём inner-рендерер выбранного бэкенда
+  // Create an inner renderer for the chosen backend
   if (decision.chosen === 'webgpu') {
     const inner = await createWebGpuRenderer({
       canvas: options.canvas,
@@ -116,7 +116,7 @@ export async function createAutoRenderer(options: AutoRendererOptions): Promise<
   return wrapGl(inner, decision)
 }
 
-/** Ошибка с структурированным decision — ловящий код может показать вердикты. */
+/** An error with a structured decision — the catching code can show verdicts. */
 export class BackendResolutionError extends Error {
   readonly decision: BackendDecision
   constructor(decision: BackendDecision) {
@@ -126,7 +126,7 @@ export class BackendResolutionError extends Error {
   }
 }
 
-// ─── обёртки ────────────────────────────────────────────────────────────────
+// ─── wrappers ─────────────────────────────────────────────────────────────
 
 function wrapGl(inner: Renderer, decision: BackendDecision): AutoRenderer {
   return {
@@ -160,8 +160,8 @@ function wrapGpu(inner: WebGpuRenderer, decision: BackendDecision): AutoRenderer
     get time() { return inner.time },
     get uploads() { return inner.uploads },
     get transients() { return inner.transients },
-    // WebGPU-рендерер не имеет texture() — текстуры через gpu.createTexture
-    // (как в showWebgpu.ts). Для унификации — делегируем в фасад.
+    // The WebGPU renderer has no texture() — textures via gpu.createTexture
+    // (as in showWebgpu.ts). For unification — we delegate to the facade.
     texture: (w, h) => ({
       textureId: inner.gpu.createTexture(w, h),
       width: w,
@@ -185,7 +185,7 @@ function commandGl(spec: AutoDrawSpec, inner: Renderer): AnyCommand {
   if (!spec.shader.glsl) {
     throw lateRejectError(spec, 'webgl2', inner)
   }
-  // GL-компилятор принимает DrawSpec с shader.glsl; wgsl-часть игнорируем
+  // The GL compiler accepts a DrawSpec with shader.glsl; the wgsl part is ignored
   return inner.command({
     shader: { glsl: spec.shader.glsl },
     pipeline: spec.pipeline,
@@ -213,21 +213,21 @@ function lateRejectError(spec: AutoDrawSpec, backend: BackendId, _inner: Rendere
   const hasOther = backend === 'webgl2' ? !!spec.shader.wgsl : !!spec.shader.glsl
   const other = backend === 'webgl2' ? 'WGSL' : 'GLSL'
   const target = backend === 'webgl2' ? 'GLSL' : 'WGSL'
-  const id = spec.id ?? '<без id>'
+  const id = spec.id ?? '<no id>'
   if (hasOther) {
     return new Error(
-      `Spec "${id}" имеет только ${other}, а активный бэкенд — ${backend.toUpperCase()} (нет ${target}). ` +
-      `Перезапустите с order=${JSON.stringify(backend === 'webgl2' ? ['webgpu', 'webgl2'] : ['webgl2', 'webgpu'])} ИЛИ добавьте ${target} к спеку.`
+      `Spec "${id}" has only ${other}, but the active backend is ${backend.toUpperCase()} (no ${target}). ` +
+      `Restart with order=${JSON.stringify(backend === 'webgl2' ? ['webgpu', 'webgl2'] : ['webgl2', 'webgpu'])} OR add ${target} to the spec.`
     )
   }
   return new Error(
-    `Spec "${id}" не имеет ни GLSL, ни WGSL. Невалидный спек — добавьте хотя бы один вариант шейдера.`
+    `Spec "${id}" has neither GLSL nor WGSL. Invalid spec — add at least one shader variant.`
   )
 }
 
 // ─── hardware probes ─────────────────────────────────────────────────────────
 
-/** WebGPU-проба: navigator.gpu + requestAdapter(). */
+/** WebGPU probe: navigator.gpu + requestAdapter(). */
 async function probeWebGpu(): Promise<boolean> {
   if (typeof navigator === 'undefined' || !('gpu' in navigator)) return false
   try {
@@ -238,8 +238,8 @@ async function probeWebGpu(): Promise<boolean> {
   }
 }
 
-/** WebGL2-проба по умолчанию: наличие глобального WebGL2RenderingContext.
- *  Не создаёт контекст — это безопасная проверка, не трогает canvas. */
+/** Default WebGL2 probe: presence of the global WebGL2RenderingContext.
+ *  Does not create a context — a safe check, does not touch the canvas. */
 function defaultProbeGl2(): boolean {
   return typeof WebGL2RenderingContext !== 'undefined'
 }

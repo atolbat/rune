@@ -1,24 +1,24 @@
 /**
  * Disposal discipline: manual dispose, page-close, FinalizationRegistry.
  *
- * Слои (см. realGL.ts, realGPU.ts, journalGl.ts, webgl2Renderer.ts):
+ * Layers (see realGL.ts, realGPU.ts, journalGl.ts, webgl2Renderer.ts):
  *
- * 1. Фасадный: deleteTexture/deleteTarget/deleteProgram/deleteBuffer —
- *    вызывают gl.delete* и убирают из внутреннего кэша. Идемпотентны.
+ * 1. Facade: deleteTexture/deleteTarget/deleteProgram/deleteBuffer —
+ *    call gl.delete* and remove from the internal cache. Idempotent.
  *
- * 2. Журнальный: withJournal эмитит destroyTexture/destroyTarget/...
- *    опсы в Journal. После этого Journal.compact() может спаривать
- *    create+destroy. Replay на новом фасаде — destroy no-op (ресурсов нет).
+ * 2. Journal: withJournal emits destroyTexture/destroyTarget/...
+ *    ops into the Journal. After that Journal.compact() can pair
+ *    create+destroy. Replay on a fresh facade — destroy is a no-op (no resources).
  *
- * 3. Рендерер-уровень: Texture.dispose() / Surface.dispose() —
- *    вызывают фасадные delete* + (для Texture) unregister из FR.
+ * 3. Renderer level: Texture.dispose() / Surface.dispose() —
+ *    call the facade delete* + (for Texture) unregister from the FR.
  *
- * 4. Renderer.dispose() — полный teardown: stop rAF + disconnect
- *    ResizeObserver. После dispose рендерер неработоспособен.
+ * 4. Renderer.dispose() — a full teardown: stop rAF + disconnect
+ *    the ResizeObserver. After dispose the renderer is inoperable.
  *
- * 5. FinalizationRegistry (belt-and-suspenders): если пользователь
- *    забыл dispose() и отпустил ссылку на Texture — FR колбэк вызовет
- *    gl.deleteTexture. НЕ детерминирован — GC может не пойти.
+ * 5. FinalizationRegistry (belt-and-suspenders): if the user
+ *    forgot dispose() and released the reference to the Texture — the FR callback
+ *    will call gl.deleteTexture. NOT deterministic — GC may not run.
  */
 
 import { describe, expect, it } from 'bun:test'
@@ -35,8 +35,8 @@ function fakeBitmap(w: number, h: number): ImageBitmap {
   return { width: w, height: h, close: () => {} } as unknown as ImageBitmap
 }
 
-describe('Disposal: ручные delete* методы на фасаде', () => {
-  it('Texture.dispose() вызывает deleteTexture на фасаде (запись в recordingGL)', () => {
+describe('Disposal: manual delete* methods on the facade', () => {
+  it('Texture.dispose() calls deleteTexture on the facade (recorded in recordingGL)', () => {
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
       canvas: fakeCanvas(),
@@ -53,7 +53,7 @@ describe('Disposal: ручные delete* методы на фасаде', () => 
     renderer.stop()
   })
 
-  it('Texture.dispose() идемпотентен: повторный вызов — no-op', () => {
+  it('Texture.dispose() is idempotent: a repeated call — no-op', () => {
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
       canvas: fakeCanvas(),
@@ -64,14 +64,14 @@ describe('Disposal: ручные delete* методы на фасаде', () => 
     })
     const tex = renderer.texture(32, 32)
     tex.dispose()
-    tex.dispose() // повтор — no-op
-    tex.dispose() // и ещё раз — no-op
+    tex.dispose() // repeated — no-op
+    tex.dispose() // and once more — no-op
     const deleteCalls = recording.calls.filter(c => c.startsWith('deleteTexture'))
-    expect(deleteCalls.length).toBe(1) // только один
+    expect(deleteCalls.length).toBe(1) // only one
     renderer.stop()
   })
 
-  it('Surface.dispose() вызывает deleteTarget + deleteTexture (в правильном порядке)', () => {
+  it('Surface.dispose() calls deleteTarget + deleteTexture (in the right order)', () => {
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
       canvas: fakeCanvas(),
@@ -86,14 +86,14 @@ describe('Disposal: ручные delete* методы на фасаде', () => 
     const deleteTextureCalls = recording.calls.filter(c => c.startsWith('deleteTexture'))
     expect(deleteTargetCalls.length).toBe(1)
     expect(deleteTextureCalls.length).toBe(1)
-    // Порядок: target удалён ДО текстуры (target ссылается на текстуру)
+    // Order: the target is deleted BEFORE the texture (the target references the texture)
     const targetIdx = recording.calls.findIndex(c => c.startsWith('deleteTarget'))
     const texIdx = recording.calls.findIndex(c => c.startsWith('deleteTexture'))
     expect(targetIdx).toBeLessThan(texIdx)
     renderer.stop()
   })
 
-  it('Surface.dispose() идемпотентен', () => {
+  it('Surface.dispose() is idempotent', () => {
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
       canvas: fakeCanvas(),
@@ -112,8 +112,8 @@ describe('Disposal: ручные delete* методы на фасаде', () => 
   })
 })
 
-describe('Disposal: Journal получает destroy-опсы (wire-up)', () => {
-  it('Texture.dispose() пишет destroyTexture опс в журнал', () => {
+describe('Disposal: the Journal receives destroy ops (wire-up)', () => {
+  it('Texture.dispose() writes a destroyTexture op into the journal', () => {
     const journal = createJournal()
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
@@ -133,7 +133,7 @@ describe('Disposal: Journal получает destroy-опсы (wire-up)', () => 
     renderer.stop()
   })
 
-  it('Surface.dispose() пишет destroyTarget + destroyTexture опсы', () => {
+  it('Surface.dispose() writes destroyTarget + destroyTexture ops', () => {
     const journal = createJournal()
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
@@ -153,7 +153,7 @@ describe('Disposal: Journal получает destroy-опсы (wire-up)', () => 
     renderer.stop()
   })
 
-  it('Journal.compact() убирает create+destroy пару и висячий texImage2DFromSource после dispose', () => {
+  it('Journal.compact() removes the create+destroy pair and the dangling texImage2DFromSource after dispose', () => {
     const journal = createJournal()
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
@@ -167,20 +167,20 @@ describe('Disposal: Journal получает destroy-опсы (wire-up)', () => 
     const tex = renderer.texture(8, 8)
     tex.uploadImage(fakeBitmap(8, 8) as GLImageSource)
     tex.dispose()
-    // До compact: createTexture + texImage2DFromSource + destroyTexture
+    // Before compact: createTexture + texImage2DFromSource + destroyTexture
     const beforeCompact = journal.entries().length
     expect(beforeCompact).toBeGreaterThanOrEqual(3)
 
     journal.compact()
-    // Task 61: после compact — ПУСТО. createTexture+destroyTexture — пара;
-    // texImage2DFromSource — висячая ссылка на уничтоженную текстуру
-    // (раньше выживал и ломал replay на свежем фасаде: загрузка в
-    // несуществующий textureId).
+    // Task 61: after compact — EMPTY. createTexture+destroyTexture — a pair;
+    // texImage2DFromSource — a dangling reference to the destroyed texture
+    // (it used to survive and break replay on a fresh facade: an upload to
+    // a nonexistent textureId).
     expect(journal.entries()).toEqual([])
     renderer.stop()
   })
 
-  it('Task 61: texImage2DFromSource живой текстуры переживает compact', () => {
+  it('Task 61: texImage2DFromSource of a live texture survives compact', () => {
     const journal = createJournal()
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
@@ -200,8 +200,8 @@ describe('Disposal: Journal получает destroy-опсы (wire-up)', () => 
   })
 })
 
-describe('Disposal: Renderer.dispose() — полный teardown', () => {
-  it('Renderer.dispose() идемпотентен', () => {
+describe('Disposal: Renderer.dispose() — a full teardown', () => {
+  it('Renderer.dispose() is idempotent', () => {
     const renderer = createWebGL2Renderer({
       canvas: fakeCanvas(),
       createGL: () => createRecordingGL().gl,
@@ -216,7 +216,7 @@ describe('Disposal: Renderer.dispose() — полный teardown', () => {
     }).not.toThrow()
   })
 
-  it('Renderer.dispose() останавливает цикл', () => {
+  it('Renderer.dispose() stops the loop', () => {
     let frameCount = 0
     let requestFrameCancel = () => {}
     const renderer = createWebGL2Renderer({
@@ -233,18 +233,18 @@ describe('Disposal: Renderer.dispose() — полный teardown', () => {
     renderer.start()
     renderer.dispose()
     const countAfterDispose = frameCount
-    // Ждём немного — кадр не должен прийти
+    // Wait a bit — no frame should arrive
     return new Promise<void>(resolve => {
       setTimeout(() => {
-        expect(frameCount).toBe(countAfterDispose) // не было новых кадров
+        expect(frameCount).toBe(countAfterDispose) // no new frames
         resolve()
       }, 50)
     })
   })
 })
 
-describe('Disposal: replayJournalOn с destroy-опсами', () => {
-  it('destroy-опсы на новом фасаде — no-op (не бросают)', () => {
+describe('Disposal: replayJournalOn with destroy ops', () => {
+  it('destroy ops on a fresh facade — no-op (do not throw)', () => {
     const journal = createJournal()
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
@@ -259,17 +259,17 @@ describe('Disposal: replayJournalOn с destroy-опсами', () => {
     tex.dispose()
     renderer.stop()
 
-    // Replay на новом фасаде — destroy-опсы НЕ должны бросать
+    // Replay on a fresh facade — destroy ops must NOT throw
     const newRecording = createRecordingGL()
     expect(() => {
-      // Ручной replay: проходим все опсы
+      // Manual replay: walk all ops
       journal.replay(op => {
-        // Имитируем applyOp через простой switch — для destroy-опсов no-op
+        // Simulate applyOp via a simple switch — a no-op for destroy ops
         if (op.kind === 'createTexture' || op.kind === 'createProgram' ||
             op.kind === 'createBuffer' || op.kind === 'createTarget') {
-          // create-опсы — создают ресурс (но возврат id игнорируем)
+          // create ops — create a resource (but we ignore the returned id)
         }
-        // destroy-опсы — no-op
+        // destroy ops — no-op
       })
     }).not.toThrow()
   })

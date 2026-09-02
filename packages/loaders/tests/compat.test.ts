@@ -2,9 +2,9 @@ import { test, expect } from 'bun:test'
 import { fakeFetch } from './helpers.ts'
 
 /**
- * Legacy API (loadImage/loadJSON/loadArrayBuffer) — поверх общего менеджера.
- * Глобалы стабятся ДО динамического импорта пакета: дефолтные платформенные
- * возможности читаются при создании менеджера.
+ * Legacy API (loadImage/loadJSON/loadArrayBuffer) — on top of the general manager.
+ * Globals are stubbed BEFORE the dynamic import of the package: the default platform
+ * capabilities are read when the manager is created.
  */
 
 const realFetch = globalThis.fetch
@@ -42,7 +42,7 @@ test('loadImage: fetch + createImageBitmap', async () => {
   }
 })
 
-test('loadJSON: парсинг конфига', async () => {
+test('loadJSON: parsing a config', async () => {
   const mod = await setup()
   try {
     const cfg = await mod.loadJSON<{ ok: boolean; n: number }>('http://t/cfg.json')
@@ -53,7 +53,7 @@ test('loadJSON: парсинг конфига', async () => {
   }
 })
 
-test('loadArrayBuffer: сырые байты', async () => {
+test('loadArrayBuffer: raw bytes', async () => {
   const mod = await setup()
   try {
     const buffer = await mod.loadArrayBuffer('http://t/blob.bin')
@@ -63,7 +63,7 @@ test('loadArrayBuffer: сырые байты', async () => {
   }
 })
 
-test('loadImage: HTTP-ошибка → реджект', async () => {
+test('loadImage: HTTP error → reject', async () => {
   globalThis.fetch = fakeFetch({ 'http://t/missing.png': { status: 404, body: '' } }) as typeof fetch
   const mod = await import('../src/index.ts')
   try {

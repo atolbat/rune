@@ -1,15 +1,15 @@
 /**
- * formats/mesh.ts — нейтральная модель меша (MeshDocument).
+ * formats/mesh.ts — a neutral mesh model (MeshDocument).
  *
- * Единый выход для OBJ/FBX/glTF: plain data, ни одного GPU/DOM-объекта.
- * Так лоадеры одинаково встраиваются и в голое ядро rune (команда/тейп),
- * и в сценовый граф (адаптер строит свои ноды), и в WebGPU/WebGL2-аплоады.
+ * A single output for OBJ/FBX/glTF: plain data, not a single GPU/DOM object.
+ * This way loaders integrate equally into the bare rune core (command/tape),
+ * into the scene graph (an adapter builds its own nodes), and into WebGPU/WebGL2 uploads.
  *
- * SoA-атрибуты (planar), индексы — Uint32Array. Для interleaved-загрузки в
- * GPU есть interleavePrimitive() — она же считает форматы атрибутов.
+ * SoA attributes (planar), indices — Uint32Array. For interleaved upload into
+ * the GPU there is interleavePrimitive() — it also computes attribute formats.
  */
 
-// ─── примитив ────────────────────────────────────────────────────────────────
+// ─── primitive ────────────────────────────────────────────────────────────────
 
 export type MeshMode =
   | 'triangles'
@@ -20,61 +20,61 @@ export type MeshMode =
   | 'points'
 
 /**
- * Диапазон индексов/вершин с материалом — «submesh»/draw range.
- * НЕ readonly: парсеры FBX/OBJ достраивают сплиты после разбора слоёв;
- * потребитель не мутирует по соглашению.
+ * A range of indices/vertices with a material — a "submesh"/draw range.
+ * NOT readonly: FBX/OBJ parsers complete the splits after parsing layers;
+ * the consumer does not mutate it by agreement.
  */
 export interface SubMesh {
-  /** Индекс в materials документа; -1 = материал по умолчанию. */
+  /** Index into the document materials; -1 = default material. */
   material: number
-  /** Имя группы (obj o/g, имя geometry FBX). null — безымянная. */
+  /** Group name (obj o/g, FBX geometry name). null — unnamed. */
   name: string | null
-  /** Смещение в indices (или в вершинах, если indices === null). */
+  /** Offset in indices (or in vertices, if indices === null). */
   offset: number
-  /** Число индексов/вершин. */
+  /** Number of indices/vertices. */
   count: number
 }
 
-/** Один drawable: набор вершинных атрибутов + индексы + материал-сплиты. */
+/** One drawable: a set of vertex attributes + indices + material splits. */
 export interface MeshPrimitive {
   /** xyz, length = 3 * vertexCount. */
   readonly positions: Float32Array
-  /** xyz, length = 3 * vertexCount; null = посчитает рендер-слой. */
+  /** xyz, length = 3 * vertexCount; null = the render layer computes it. */
   readonly normals: Float32Array | null
   /** uv0, length = 2 * vertexCount. */
   readonly uvs: Float32Array | null
-  /** uv1 (COLOR_ не путать: glTF TEXCOORD_1, FBX UV set 1). */
+  /** uv1 (not COLOR_: glTF TEXCOORD_1, FBX UV set 1). */
   readonly uvs2: Float32Array | null
   /** xyzw (w = handedness), length = 4 * vertexCount. */
   readonly tangents: Float32Array | null
-  /** rgba ПО БАЙТАМ (0..255), length = 4 * vertexCount; normalized на GPU. */
+  /** rgba BY BYTES (0..255), length = 4 * vertexCount; normalized on the GPU. */
   readonly colors: Uint8Array | null
-  /** Скин: 4 joint-индекса на вершину. */
+  /** Skin: 4 joint indices per vertex. */
   readonly joints: Uint16Array | null
-  /** Скин: 4 веса на вершину (сумма = 1). */
+  /** Skin: 4 weights per vertex (sum = 1). */
   readonly weights: Float32Array | null
-  /** null = non-indexed. Всегда u32 наружу (лень даунгрейдить до u16). */
+  /** null = non-indexed. Always u32 outward (too lazy to downgrade to u16). */
   readonly indices: Uint32Array | null
   readonly mode: MeshMode
-  /** Сплиты по материалам; пусто = один draw всем буфером. */
+  /** Splits by materials; empty = one draw over the whole buffer. */
   submeshes: SubMesh[]
-  /** Морф-таргеты не входят в v1 (см. ограничения в gltf.ts). */
+  /** Morph targets are not included in v1 (see the limitations in gltf.ts). */
 }
 
-// ─── материалы ───────────────────────────────────────────────────────────────
+// ─── materials ───────────────────────────────────────────────────────────────
 
 export interface TextureInfo {
-  /** Индекс в images документа. */
+  /** Index into the document images. */
   readonly image: number
-  /** Номер uv-сета (TEXCOORD_n / UV set n). */
+  /** uv set number (TEXCOORD_n / UV set n). */
   readonly texCoord: number
-  /** Индекс в samplers документа; null = дефолт. */
+  /** Index into the document samplers; null = default. */
   readonly sampler: number | null
 }
 
 export type AlphaMode = 'opaque' | 'mask' | 'blend'
 
-/** PBR-ish материал; OBJ/FBX конвертируются в него с потерями (source). */
+/** PBR-ish material; OBJ/FBX are converted into it lossily (source). */
 export interface MaterialData {
   readonly name: string | null
   readonly baseColor: readonly [number, number, number, number]
@@ -92,19 +92,19 @@ export interface MaterialData {
   readonly normalTexture: TextureInfo | null
   readonly emissiveTexture: TextureInfo | null
   readonly occlusionTexture: TextureInfo | null
-  /** Откуда материал: у OBJ/FBX — эвристическое отображение. */
+  /** Where the material came from: for OBJ/FBX — a heuristic mapping. */
   readonly source: 'gltf' | 'obj' | 'fbx'
 }
 
-// ─── картинки/сэмплеры ───────────────────────────────────────────────────────
+// ─── images/samplers ───────────────────────────────────────────────────────
 
-/** Картинка: байты ИЛИ отложенный uri (грузить лениво image-лоадером). */
+/** Image: bytes OR a deferred uri (load lazily with the image loader). */
 export interface ImageAsset {
   readonly name: string | null
   readonly mimeType: string | null
-  /** Байты для декодера (view в исходном буфере или срез). null = uri. */
+  /** Bytes for a decoder (a view in the source buffer or a slice). null = uri. */
   readonly bytes: Uint8Array | null
-  /** Внешний uri (не materialized). */
+  /** External uri (not materialized). */
   readonly uri: string | null
 }
 
@@ -115,60 +115,60 @@ export interface SamplerData {
   readonly wrapT: number
 }
 
-// ─── сцена/ноды ──────────────────────────────────────────────────────────────
+// ─── scene/nodes ──────────────────────────────────────────────────────────────
 
-/** Трансформация ноды: TRS ИЛИ matrix (что задал формат). */
+/** Node transformation: TRS OR matrix (whatever the format gave). */
 export interface NodeData {
   readonly name: string | null
   readonly translation: readonly [number, number, number]
-  /** Кватернион xyzw. */
+  /** Quaternion xyzw. */
   readonly rotation: readonly [number, number, number, number]
   readonly scale: readonly [number, number, number]
-  /** Column-major 4x4, если формат дал матрицу (glTF node.matrix, FBX Lcl+Pre). */
+  /** Column-major 4x4, if the format gave a matrix (glTF node.matrix, FBX Lcl+Pre). */
   readonly matrix: Float32Array | null
-  /** Индексы примитивов в meshes документа (парсеры дописывают). */
+  /** Indices of primitives in the document meshes (parsers append them). */
   primitives: number[]
-  /** Индекс в skins; -1 = не скиннут. */
+  /** Index into skins; -1 = not skinned. */
   skin: number
-  /** Индексы дочерних нод в nodes (парсеры дописывают). */
+  /** Indices of child nodes in nodes (parsers append them). */
   children: number[]
 }
 
 export interface SkinData {
   readonly name: string | null
-  /** Индексы нод-костей (в nodes). */
+  /** Indices of bone nodes (in nodes). */
   readonly joints: readonly number[]
-  /** 16 floats на кость, column-major. */
+  /** 16 floats per bone, column-major. */
   readonly inverseBindMatrices: Float32Array | null
 }
 
-// ─── анимации ────────────────────────────────────────────────────────────────
+// ─── animations ────────────────────────────────────────────────────────────────
 
 export type AnimationPath = 'translation' | 'rotation' | 'scale' | 'weights'
 
 export interface AnimationChannel {
-  /** Индекс ноды в nodes. */
+  /** Node index in nodes. */
   readonly node: number
   readonly path: AnimationPath
-  /** Времена, сек. */
+  /** Times, seconds. */
   readonly times: Float32Array
   /**
-   * Значения; layout: translation/scale = 3f, rotation = 4f (xyzw),
-   * weights = weightCount floats (число морфов примитива ноды).
+   * Values; layout: translation/scale = 3f, rotation = 4f (xyzw),
+   * weights = weightCount floats (the number of morphs of the node's primitive).
    */
   readonly values: Float32Array
-  /** Специфичное для FBX: интерполяция сырым P70-массивом не хранится. */
+  /** FBX-specific: interpolation by a raw P70 array is not stored. */
   readonly interpolation: 'linear' | 'step' | 'cubicspline'
 }
 
 export interface AnimationData {
   readonly name: string | null
-  /** Длительность, сек (max по каналам). */
+  /** Duration, seconds (max over channels). */
   readonly duration: number
   readonly channels: readonly AnimationChannel[]
 }
 
-// ─── документ ────────────────────────────────────────────────────────────────
+// ─── document ────────────────────────────────────────────────────────────────
 
 export interface MeshStats {
   readonly meshes: number
@@ -182,19 +182,19 @@ export interface MeshStats {
 
 export interface MeshDocument {
   readonly source: 'gltf' | 'obj' | 'fbx'
-  /** Имена исходных мешей (glTF mesh.name / FBX Geometry name / obj o). */
+  /** Names of source meshes (glTF mesh.name / FBX Geometry name / obj o). */
   readonly meshNames: readonly (string | null)[]
   readonly meshes: readonly MeshPrimitive[]
   readonly materials: readonly MaterialData[]
   readonly images: readonly ImageAsset[]
   readonly samplers: readonly SamplerData[]
   readonly nodes: readonly NodeData[]
-  /** Индексы корневых нод. */
+  /** Indices of root nodes. */
   readonly scenes: readonly number[][]
   readonly skins: readonly SkinData[]
   readonly animations: readonly AnimationData[]
   readonly stats: MeshStats
-  /** OBJ: список mtllib, которые были найдены/загружены. */
+  /** OBJ: the list of mtllibs that were found/loaded. */
   readonly mtllibs?: readonly string[]
 }
 
@@ -212,16 +212,16 @@ export type VertexAttribute =
 
 export interface InterleavedAttribute {
   readonly attribute: VertexAttribute
-  /** Смещение внутри вершины, байты. */
+  /** Offset within a vertex, bytes. */
   readonly offset: number
-  /** Число компонентов (vec2/3/4). */
+  /** Number of components (vec2/3/4). */
   readonly components: number
   /** 'f32' | 'u8norm' | 'u16'. */
   readonly format: 'f32' | 'u8norm' | 'u16'
 }
 
 export interface InterleaveResult {
-  /** Interleaved-данные; length = stride * vertexCount. */
+  /** Interleaved data; length = stride * vertexCount. */
   readonly buffer: Uint8Array
   readonly stride: number
   readonly vertexCount: number
@@ -240,10 +240,10 @@ const ATTR_SIZE: Record<VertexAttribute, number> = {
 }
 
 /**
- * Interleave выбранных атрибутов примитива в один буфер.
+ * Interleave the selected attributes of a primitive into one buffer.
  * position/normal/uv/tangent/weights → f32; color → unorm8x4; joints → u16x4.
- * Отсутствующий атрибут в примитиве — ошибка (выбирайте по наличию сами,
- * например только position+normal+uv для простых материалов).
+ * A missing attribute in the primitive is an error (pick by presence yourself,
+ * e.g., only position+normal+uv for simple materials).
  */
 export function interleavePrimitive(
   primitive: MeshPrimitive,
@@ -262,11 +262,11 @@ export function interleavePrimitive(
       (attr === 'color' && primitive.colors !== null) ||
       (attr === 'joints' && primitive.joints !== null) ||
       (attr === 'weights' && primitive.weights !== null)
-    if (!present) throw new Error(`interleavePrimitive: атрибут ${attr} отсутствует в примитиве`)
+    if (!present) throw new Error(`interleavePrimitive: attribute ${attr} is missing in the primitive`)
     const format: InterleavedAttribute['format'] =
       attr === 'color' ? 'u8norm' : attr === 'joints' ? 'u16' : 'f32'
     const byteSize = format === 'f32' ? 4 : format === 'u16' ? 2 : 1
-    // выравнивание: f32/u16 на кратное их размеру
+    // alignment: f32/u16 to a multiple of their size
     const align = format === 'f32' ? 4 : format === 'u16' ? 2 : 1
     offset = Math.ceil(offset / align) * align
     layout.push({ attribute: attr, offset, components: ATTR_SIZE[attr], format })
@@ -308,7 +308,7 @@ export function interleavePrimitive(
   return { buffer, stride, vertexCount, attributes: layout }
 }
 
-/** Материал по индексу с фолбэком на дефолт (index -1/вне диапазона). */
+/** Material by index with a fallback to default (index -1/out of range). */
 export function materialAt(doc: MeshDocument, index: number): MaterialData | null {
   if (index < 0 || index >= doc.materials.length) return null
   return doc.materials[index] ?? null
@@ -334,7 +334,7 @@ export const DEFAULT_MATERIAL: MaterialData = {
   source: 'gltf',
 }
 
-/** Собрать MeshStats по массивам (хелпер для парсеров). */
+/** Assemble MeshStats from arrays (a helper for parsers). */
 export function meshStatsOf(
   meshes: readonly MeshPrimitive[],
   materials: readonly unknown[],

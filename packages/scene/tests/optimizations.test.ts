@@ -1,11 +1,11 @@
 /**
- * Тесты оптимизаций Task 85: грязевой refit, плоскостные маски кулинга,
- * штампы групп (скип аплоада), word-skip компакция, фикс setSphereLocal.
+ * Task 85 optimization tests: dirty refit, culling plane masks,
+ * group stamps (upload skip), word-skip compaction, setSphereLocal fix.
  *
- * Главный принцип — ПАРИТЕТ: оптимизированные пути обязаны давать байт-в-байт
- * те же сферW/битсеты/пулы, что и эталонные (forced refit / brute cull),
- * на случайных сценах и случайных камерах. Оптимизация, меняющая результат, —
- * не оптимизация, а баг.
+ * The main principle is PARITY: optimized paths must produce byte-for-byte
+ * the same sphereW/bitsets/pools as the reference ones (forced refit / brute cull),
+ * on random scenes and random cameras. An optimization that changes the result
+ * is not an optimization but a bug.
  */
 import { describe, expect, it } from 'bun:test'
 import {
@@ -23,7 +23,7 @@ import {
 import { buildSceneViews } from '../src/layout.ts'
 import type { Scene, SceneViews } from '../src/index.ts'
 
-/** Детерминированный ГПСЧ. */
+/** Deterministic PRNG. */
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0
   return () => {
@@ -34,7 +34,7 @@ function mulberry32(seed: number): () => number {
   }
 }
 
-/** Случайное дерево: узлы со случайными TRS/сферами/группами. */
+/** Random tree: nodes with random TRS/spheres/groups. */
 function buildRandomScene(seed: number, targetNodes: number): { scene: Scene; views: SceneViews } {
   const rnd = mulberry32(seed)
   const scene = createScene({ capacity: targetNodes + 16, groupMax: 8, shared: false })
@@ -61,7 +61,7 @@ function buildRandomScene(seed: number, targetNodes: number): { scene: Scene; vi
   return { scene, views: scene.views }
 }
 
-/** Кадр конвейера в указанный буфер. */
+/** A pipeline frame into the given buffer. */
 function pipelineFrame(scene: Scene, camOpts: { yaw: number; dist: number }, bufferIndex: number): void {
   const cam = createCamera().setPerspective(1.1, 1, 0.5, 200)
   cam.setViewLookAt(
@@ -74,12 +74,12 @@ function pipelineFrame(scene: Scene, camOpts: { yaw: number; dist: number }, buf
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-describe('Task 85: грязевой refit — паритет с полным', () => {
-  it('случайные мутации: сферы байт-в-байт равны forced-эталону', () => {
+describe('Task 85: dirty refit — parity with full', () => {
+  it('random mutations: spheres byte-for-byte equal the forced reference', () => {
     for (let seed = 1; seed <= 8; seed++) {
       const { scene, views } = buildRandomScene(seed, 400)
       const rnd = mulberry32(seed * 7919)
-      // Несколько раундов мутаций: двигаем случайные узлы, пересоздаём структуру.
+      // Several rounds of mutations: move random nodes, rebuild the structure.
       for (let round = 0; round < 6; round++) {
         for (let m = 0; m < 12; m++) {
           const slot = Math.floor(rnd() * scene.capacity)
@@ -89,51 +89,51 @@ describe('Task 85: грязевой refit — паритет с полным', (
             rnd() - 0.5, rnd() - 0.5, rnd() - 0.5, 1,
             0.4 + rnd(), 0.4 + rnd(), 0.4 + rnd())
         }
-        // Грязевой путь.
+        // Dirty path.
         scene.updateWorld()
         const dirtyRefit = scene.refitGroupBounds()
         const spheresDirty = views.sphereW.slice()
         const dirtyLeft = views.dirtyBounds.reduce((s, w) => s + (w === 0 ? 0 : 1), 0)
-        // Эталон: полный проход на той же сцене.
+        // Reference: a full pass on the same scene.
         const forcedRefit = refitGroupBoundsForcedViews(views)
         const spheresForced = views.sphereW.slice()
         expect(spheresDirty).toEqual(spheresForced)
-        // Грязь полностью съедена (кроме бит за capacity в последнем слове).
+        // Dirt fully consumed (except bits beyond capacity in the last word).
         const liveBits = (scene.count + 31) >>> 5
         let residue = 0
         for (let w = 0; w < liveBits; w++) residue += views.dirtyBounds[w]!
         expect(residue).toBe(0)
         expect(dirtyLeft).toBeGreaterThanOrEqual(0)
-        // Полный refit пересобирает все автограницы, грязевой — только изменённые.
+        // Full refit rebuilds all auto-bounds, dirty — only the changed ones.
         expect(forcedRefit).toBeGreaterThanOrEqual(dirtyRefit)
       }
     }
   })
 
-  it('покой: refit не делает НИЧЕГО (0 узлов)', () => {
+  it('rest: refit does NOTHING (0 nodes)', () => {
     const { scene } = buildRandomScene(42, 300)
     scene.updateWorld()
     scene.refitGroupBounds()
-    // Второй кадр без изменений: ни мира, ни refit.
+    // Second frame without changes: no world, no refit.
     expect(scene.updateWorld()).toBe(0)
     expect(scene.refitGroupBounds()).toBe(0)
   })
 
-  it('анимация листа: refit пересобирает только цепочку к корню', () => {
+  it('leaf animation: refit rebuilds only the chain to the root', () => {
     const { scene, views } = buildRandomScene(7, 300)
     scene.updateWorld()
     scene.refitGroupBounds()
-    // Полный refit ради бейзлайна.
+    // Full refit for the baseline.
     const fullCount = refitGroupBoundsForcedViews(views)
     expect(fullCount).toBeGreaterThan(50)
-    // Двигаем один лист — refit должен тронуть горстку узлов.
-    // Ищем лист, чей родитель на автограницах (не корень и не user-сфера).
+    // Move one leaf — refit should touch a handful of nodes.
+    // Find a leaf whose parent is on auto-bounds (not a root and not a user sphere).
     let leaf = -1
     for (let slot = 0; slot < scene.capacity; slot++) {
       if (!scene.alive(slot) || views.firstChild[slot] >= 0) continue
       const p = views.parent[slot]
-      if (p < 0) continue // корень-лист: цепочки нет
-      if (views.sphereL[p * 4 + 3] > 0) continue // родитель на user-сфере
+      if (p < 0) continue // root-leaf: no chain
+      if (views.sphereL[p * 4 + 3] > 0) continue // parent on a user sphere
       leaf = slot
       break
     }
@@ -145,13 +145,13 @@ describe('Task 85: грязевой refit — паритет с полным', (
     expect(dirtyCount).toBeLessThan(fullCount / 4)
   })
 
-  it('setSphereLocal применяет сферу сразу (регрессия Task 85)', () => {
+  it('setSphereLocal applies the sphere immediately (Task 85 regression)', () => {
     const scene = createScene({ capacity: 8 })
     const root = scene.create({ sphere: [0, 0, 0, 1] })
     scene.updateWorld()
     scene.refitGroupBounds()
     expect(scene.views.sphereW[root * 4 + 3]).toBeCloseTo(1, 5)
-    // Правка сферы без посторонних изменений узла.
+    // Sphere edit without unrelated node changes.
     scene.setSphereLocal(root, 0, 0, 0, 5)
     scene.updateWorld()
     expect(scene.views.sphereW[root * 4 + 3]).toBeCloseTo(5, 5)
@@ -159,8 +159,8 @@ describe('Task 85: грязевой refit — паритет с полным', (
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-describe('Task 85: плоскостные маски кулинга — паритет с brute', () => {
-  it('случайные камеры/сцены: битсеты и статистика совпадают, тестов меньше', () => {
+describe('Task 85: culling plane masks — parity with brute', () => {
+  it('random cameras/scenes: bitsets and stats match, fewer tests', () => {
     for (let seed = 1; seed <= 8; seed++) {
       const { scene, views } = buildRandomScene(seed, 500)
       const rnd = mulberry32(seed * 104729)
@@ -177,14 +177,14 @@ describe('Task 85: плоскостные маски кулинга — пари
           0, 1, 0)
         const brute = cullViewsBrute(views, 0, 1)
         const hier = cullViewsHierarchical(views, 0, 0)
-        // Побитовый паритет (базы буферов 0 и 1 для камеры 0).
+        // Bitwise parity (buffer bases 0 and 1 for camera 0).
         const base0 = bitsBase(views, 0, 0)
         const base1 = bitsBase(views, 1, 0)
         for (let w = 0; w < views.bitsWords; w++) {
           expect(views.bits[base1 + w]).toBe(views.bits[base0 + w])
         }
         expect(hier.visible).toBe(brute.visible)
-        // Маски реально экономят тесты плоскостей (на глубоких деревьях).
+        // Masks really save plane tests (on deep trees).
         expect(hier.planeTests).toBeLessThanOrEqual(brute.planeTests)
       }
     }
@@ -192,44 +192,44 @@ describe('Task 85: плоскостные маски кулинга — пари
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-describe('Task 85: штампы групп (скип аплоада)', () => {
-  it('покой и статичная камера: штампы не растут — аплоад можно пропустить', () => {
+describe('Task 85: group stamps (upload skip)', () => {
+  it('rest and a static camera: stamps do not grow — the upload can be skipped', () => {
     const { scene } = buildRandomScene(3, 300)
     pipelineFrame(scene, { yaw: 0.5, dist: 40 }, 0)
     const stamps = [0, 1, 2, 3].map(g => scene.groupWorldStamp(g))
     const flips = [0, 1, 2, 3].map(g => scene.groupFlipStamp(g, 0))
-    expect(stamps.some(s => s > 0)).toBe(true) // первый кадр — всё новое
-    pipelineFrame(scene, { yaw: 0.5, dist: 40 }, 1) // камера НЕ двигалась
+    expect(stamps.some(s => s > 0)).toBe(true) // first frame — everything new
+    pipelineFrame(scene, { yaw: 0.5, dist: 40 }, 1) // camera did NOT move
     const stamps2 = [0, 1, 2, 3].map(g => scene.groupWorldStamp(g))
     const flips2 = [0, 1, 2, 3].map(g => scene.groupFlipStamp(g, 0))
     expect(stamps2).toEqual(stamps)
     expect(flips2).toEqual(flips)
-    // Ещё кадр — по-прежнему тишина.
+    // One more frame — still quiet.
     pipelineFrame(scene, { yaw: 0.5, dist: 40 }, 0)
     expect([0, 1, 2, 3].map(g => scene.groupWorldStamp(g))).toEqual(stamps)
     expect([0, 1, 2, 3].map(g => scene.groupFlipStamp(g, 0))).toEqual(flips)
   })
 
-  it('движение камеры (флипы видимости) растит ПЕРКАМЕРНЫЕ штампы затронутых групп', () => {
+  it('camera movement (visibility flips) grows the PER-CAMERA stamps of affected groups', () => {
     const { scene } = buildRandomScene(5, 400)
     pipelineFrame(scene, { yaw: 0, dist: 60 }, 0)
     pipelineFrame(scene, { yaw: 0, dist: 60 }, 1)
     const before = [0, 1, 2, 3].map(g => scene.groupFlipStamp(g, 0))
-    pipelineFrame(scene, { yaw: 2.2, dist: 60 }, 0) // камера повернулась
+    pipelineFrame(scene, { yaw: 2.2, dist: 60 }, 0) // camera turned
     const after = [0, 1, 2, 3].map(g => scene.groupFlipStamp(g, 0))
     expect(after.some((s, g) => s > before[g])).toBe(true)
-    // Мир не менялся — общий штамп групп замер (данные инстансов те же,
-    // меняется только ВИДИМОСТЬ — и только у двигавшейся камеры).
+    // The world did not change — the common group stamp froze (instance data is the same,
+    // only VISIBILITY changes — and only for the camera that moved).
     const w0 = scene.groupWorldStamp(0)
     pipelineFrame(scene, { yaw: 2.2, dist: 60 }, 1)
     expect(scene.groupWorldStamp(0)).toBe(w0)
   })
 
-  it('анимация узлов группы A не трогает штамп группы B (чистые кластеры)', () => {
-    // Ручная сцена: два НЕЗАВИСИМых кластера-поддерева (как в демо: кластер
-    // леса = внутренний узел без группы + листья-инстансы одной группы).
-    // В общем поддереве группы перемешаны — мир предка группы B обязан
-    // меняться при движении ребёнка группы A, и штамп B растёт ПРАВИЛЬНО.
+  it('animating group A nodes does not touch the stamp of group B (clean clusters)', () => {
+    // Manual scene: two INDEPENDENT cluster subtrees (as in the demo: a forest
+    // cluster = an internal node without a group + instance leaves of one group).
+    // In a shared subtree groups are mixed — the world of group B's ancestor must
+    // change when a child of group A moves, and B's stamp grows CORRECTLY.
     const scene = createScene({ capacity: 64, groupMax: 4 })
     const clusterA = scene.create({ position: [0, 0, 0] })
     const clusterB = scene.create({ position: [50, 0, 0] })
@@ -244,7 +244,7 @@ describe('Task 85: штампы групп (скип аплоада)', () => {
     pipelineFrame(scene, { yaw: 0.3, dist: 60 }, 1)
     const s0Before = scene.groupWorldStamp(0)
     const s1Before = scene.groupWorldStamp(1)
-    // Анимируем ТОЛЬКО листья кластера A (группа 0).
+    // Animate ONLY the leaves of cluster A (group 0).
     for (const slot of leavesA) {
       scene.setLocal(slot, { position: [slot, 5, 0] })
     }
@@ -252,11 +252,11 @@ describe('Task 85: штампы групп (скип аплоада)', () => {
     const s0After = scene.groupWorldStamp(0)
     const s1After = scene.groupWorldStamp(1)
     expect(s0After).toBeGreaterThan(s0Before)
-    // Кластер B вне поддерева A: его миры/сферы/биты не менялись — штамп замер.
+    // Cluster B is outside A's subtree: its worlds/spheres/bits unchanged — stamp frozen.
     expect(s1After).toBe(s1Before)
   })
 
-  it('pack (структурная правка) инвалидирует все штампы — guard эпохи', () => {
+  it('pack (structural edit) invalidates all stamps — epoch guard', () => {
     const { scene } = buildRandomScene(13, 250)
     pipelineFrame(scene, { yaw: 0.9, dist: 45 }, 0)
     pipelineFrame(scene, { yaw: 0.9, dist: 45 }, 1)
@@ -268,9 +268,9 @@ describe('Task 85: штампы групп (скип аплоада)', () => {
     expect(after.some((s, g) => s > before[g])).toBe(true)
   })
 
-  it('перкамерность: флип камеры 0 не трогает штампы камеры 1 (сообщение групп)', () => {
+  it('per-camera: camera 0 flip does not touch camera 1 stamps (group messaging)', () => {
     const scene = createScene({ capacity: 64, groupMax: 4, cameraMax: 2 })
-    // Полоса узлов группы 0 вдоль X — камера 0 повернётся, камера 1 стоит.
+    // A strip of group 0 nodes along X — camera 0 will turn, camera 1 stands.
     const root = scene.create({})
     for (let i = 0; i < 40; i++) {
       scene.create({ parent: root, group: 0, position: [-60 + i * 3, 0, 0], sphere: [0, 0, 0, 1] })
@@ -280,35 +280,35 @@ describe('Task 85: штампы групп (скип аплоада)', () => {
       c.setViewLookAt(Math.cos(yaw) * 40, 10, Math.sin(yaw) * 40, 0, 0, 0, 0, 1, 0)
       return c
     }
-    // Кадр 1: обе камеры в одном положении — база.
+    // Frame 1: both cameras in the same position — baseline.
     scene.updateWorld(); scene.refitGroupBounds()
     scene.cull([mk(0), mk(0)])
     scene.collectInstances(0, { bufferIndex: 0 })
     scene.collectInstances(1, { bufferIndex: 0 })
     const f0a = scene.groupFlipStamp(0, 0)
     const f1a = scene.groupFlipStamp(0, 1)
-    // Кадр 2 (чередуем буфер): камера 0 ПОВОРАЧИВАЕТСЯ, камера 1 СТОИТ.
+    // Frame 2 (alternating buffer): camera 0 TURNS, camera 1 STAYS.
     scene.cull([mk(2.4), mk(0)], { bufferIndex: 1 })
     scene.collectInstances(0, { bufferIndex: 1 })
     scene.collectInstances(1, { bufferIndex: 1 })
     const f0b = scene.groupFlipStamp(0, 0)
     const f1b = scene.groupFlipStamp(0, 1)
-    expect(f0b).toBeGreaterThan(f0a) // камера 0 крутилась — флипы
-    expect(f1b).toBe(f1a) // камера 1 замерла — её штамп не вырос
+    expect(f0b).toBeGreaterThan(f0a) // camera 0 rotated — flips
+    expect(f1b).toBe(f1a) // camera 1 froze — its stamp did not grow
   })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-describe('Task 85: word-skip компакция', () => {
-  it('сильно отсечённая сцена: пул и счётчики равны полному проходу', () => {
+describe('Task 85: word-skip compaction', () => {
+  it('heavily culled scene: pool and counters equal the full pass', () => {
     const { scene, views } = buildRandomScene(17, 600)
-    const cam = createCamera().setPerspective(0.2, 1, 0.5, 40) // узкий фрустум
+    const cam = createCamera().setPerspective(0.2, 1, 0.5, 40) // narrow frustum
     cam.setViewLookAt(0, 0, 25, 0, 0, 0, 0, 1, 0)
     scene.updateWorld()
     scene.refitGroupBounds()
     scene.cull([cam], { bufferIndex: 0 })
     scene.collectInstances(0, { bufferIndex: 0 })
-    // Подсчёт вручную по битам (эталон).
+    // Manual count from bits (reference).
     const groupCount = views.headerI[11] // H_GROUP_COUNT
     const manual = new Int32Array(8)
     const n = scene.count
@@ -324,22 +324,22 @@ describe('Task 85: word-skip компакция', () => {
       const seg = scene.instances(g, { cameraIndex: 0 })
       expect(seg.count).toBe(manual[g])
     }
-    // Узкий фрустум действительно что-то отсёк.
+    // The narrow frustum really culled something.
     const totalVisible = manual.reduce((s, v) => s + v, 0)
     expect(totalVisible).toBeLessThan(n)
   })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-describe('Task 85: forced-путь (эталон) остаётся корректным', () => {
-  it('updateWorldForcedViews помечает всю грязь и все группы', () => {
+describe('Task 85: forced path (reference) stays correct', () => {
+  it('updateWorldForcedViews marks all dirt and all groups', () => {
     const { scene, views } = buildRandomScene(19, 200)
     updateWorldForcedViews(views)
     const stamp = scene.groupWorldStamp(0)
     expect(stamp).toBeGreaterThan(0)
     const refit = refitGroupBoundsForcedViews(views)
     expect(refit).toBeGreaterThan(0)
-    // После forced refit грязи не осталось.
+    // After forced refit no dirt remains.
     const words = (scene.count + 31) >>> 5
     let residue = 0
     for (let w = 0; w < words; w++) residue += views.dirtyBounds[w]!
@@ -347,7 +347,7 @@ describe('Task 85: forced-путь (эталон) остаётся коррек�
   })
 })
 
-// Прямой импорт view-функций для эталонов.
+// Direct import of view functions for references.
 void updateWorldViews
 void fillBits
 void buildSceneViews

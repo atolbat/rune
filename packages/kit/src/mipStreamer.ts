@@ -1,20 +1,19 @@
 /**
- * MipStreamer — helper для progressive mip-стриминга.
+ * MipStreamer — a helper for progressive mip streaming.
  *
- * Контракт (см. дизайн-раунд «Слой 5: MipStreamer»):
- *  - Принимает Texture-подобный объект с методом uploadMip(level, src).
- *  - Принимает source (ImageBitmap или функция, генерирующая даунсэмплы).
- *  - Стримит мипы от грубого (level=N) к тонкому (level=0): сначала превью
- *    (N=ceil(log2(min(w,h))) — самый маленький мип), потом более детальные.
- *  - Не знает про GPU: просто оркеструет вызовы uploadMip на переданном tex.
+ * Contract (see the design round "Layer 5: MipStreamer"):
+ *  - Accepts a Texture-like object with an uploadMip(level, src) method.
+ *  - Accepts a source (an ImageBitmap or a function generating downsamples).
+ *  - Streams mips from coarse (level=N) to fine (level=0): the preview first
+ *    (N=ceil(log2(min(w,h))) — the smallest mip), then more detailed ones.
+ *  - Knows nothing about the GPU: it just orchestrates uploadMip calls on the passed tex.
  *
- * Зачем: progressive image loading. Сначала юзер видит размытое превью
- * (4x4 мип), потом 64x64, потом полный размер. Это особенно важно для
- * тайловых карт с глубоким зумом (deep-zoom), где полная текстура может
- * весить десятки мегабайт.
+ * Why: progressive image loading. First the user sees a blurry preview
+ * (the 4x4 mip), then 64x64, then the full size. This matters especially for
+ * deep-zoom tiled maps, where the full texture can weigh tens of megabytes.
  */
 
-/** Минимальный интерфейс текстуры, к которой можно стримить мипы. */
+/** Minimal texture interface that mips can be streamed into. */
 export interface MipTargetTexture {
   readonly width: number
   readonly height: number
@@ -22,19 +21,19 @@ export interface MipTargetTexture {
 }
 
 export interface MipStreamerOptions {
-  /** Использовать createImageBitmap для даунсэмплинга (броузерный декодер).
-   *  Если false — используется canvas downsample. Default true. */
+  /** Use createImageBitmap for downsampling (the browser decoder).
+   *  If false — a canvas downsample is used. Default true. */
   readonly useImageBitmap?: boolean
-  /** Минимальный размер мипа (1 = до 1x1, 4 = до 4x4). Default 4. */
+  /** Minimal mip size (1 = down to 1x1, 4 = down to 4x4). Default 4. */
   readonly minMipSize?: number
-  /** Сколько мип-уровней загрузить. По умолчанию — все до minMipSize. */
+  /** How many mip levels to upload. By default — all of them down to minMipSize. */
   readonly maxLevels?: number
 }
 
 /**
- * Создаёт MipStreamer.
+ * Creates a MipStreamer.
  *
- * Использование:
+ * Usage:
  *   const streamer = createMipStreamer({ minMipSize: 4 })
  *   await streamer.streamProgressive(tex, sourceBitmap)
  *   // → tex.uploadMip(N, downsampleTo(source, 4, 4))
@@ -50,7 +49,7 @@ export function createMipStreamer(options: MipStreamerOptions = {}): MipStreamer
   async function streamProgressive(tex: MipTargetTexture, source: ImageBitmap | HTMLCanvasElement | OffscreenCanvas): Promise<void> {
     const w = tex.width
     const h = tex.height
-    // Сколько мипов: floor(log2(min(w,h))) + 1, но не меньше чем до minSize
+    // How many mips: floor(log2(min(w,h))) + 1, but not fewer than down to minSize
     const minDim = Math.min(w, h)
     let levels = 0
     let d = minDim
@@ -60,7 +59,7 @@ export function createMipStreamer(options: MipStreamerOptions = {}): MipStreamer
     }
     levels = Math.max(0, levels)
 
-    // Стримим от самого маленького к самому большому (progressive)
+    // Stream from the smallest to the largest (progressive)
     for (let level = levels; level >= 0; level--) {
       const scale = 1 / Math.pow(2, level)
       const targetW = Math.max(1, Math.round(w * scale))
@@ -87,18 +86,18 @@ async function downsample(
   h: number,
   useImageBitmap: boolean,
 ): Promise<ImageBitmap | TexImageSource> {
-  // createImageBitmap с resizeWidth/Height — нативный, но в некоторых средах
-  // качество даунсэмплинга посредственное. Для тайловых карт это OK.
+  // createImageBitmap with resizeWidth/Height is native, but in some
+  // environments the downsample quality is mediocre. For tiled maps this is OK.
   if (useImageBitmap && source instanceof ImageBitmap) {
     return createImageBitmap(source, { resizeWidth: w, resizeHeight: h, resizeQuality: 'medium' })
   }
-  // Fallback на canvas (в средах без createImageBitmap с resize)
+  // Fallback to canvas (in environments without createImageBitmap resize support)
   const canvas = createCanvas2D(w, h)
-  // getContext('2d') типизируется как RenderingContext (включая WebGL*),
-  // но для '2d' реально приходит CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D.
+  // getContext('2d') is typed as RenderingContext (including WebGL*),
+  // but for '2d' it is really CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D.
   const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null
   if (!ctx) throw new Error('MipStreamer: 2d context unavailable')
-  // drawImage автоматически даунсэмплирует
+  // drawImage downsamples automatically
   ctx.drawImage(source as CanvasImageSource, 0, 0, w, h)
   return canvas
 }
@@ -113,5 +112,5 @@ function createCanvas2D(w: number, h: number): HTMLCanvasElement | OffscreenCanv
     c.height = h
     return c
   }
-  throw new Error('MipStreamer: нет ни OffscreenCanvas, ни document для canvas')
+  throw new Error('MipStreamer: neither OffscreenCanvas nor document for a canvas is available')
 }

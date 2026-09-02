@@ -1,24 +1,24 @@
 /**
- * terrainQuadtree.test.ts — примитив terrain на кваддреве (Task 115).
+ * terrainQuadtree.test.ts — the terrain primitive on a quadtree (Task 115).
  *
- * Система = валидированная квадтри-система FFT-океана (Task 113): мировая
- * фикс-сетка корней (вершины не плывут), дробление по 3D-дистанции с лимитом
- * глубины, юбки, ноль аллокаций на кадр. Здесь — инварианты примитива:
- *  • ПОКРЫТИЕ без дыр: каждая точка диска «камера ± horizon» накрыта листом;
- *  • детерминизм и «неплывучесть» (фикс-сетка): малый сдвиг камеры внутри
- *    листа не меняет набор листьев;
- *  • лимит ближней детализации (minLeafSize — жёсткий потолок);
- *  • монотонность LOD-агрессивности (больше A ⇒ меньше листьев);
- *  • патч-юбка: вершины юбки ПАРАЗИТНО совпадают по (x,z) с кромкой
- *    (побитово — тот же uv ⇒ тот же дисплейс ⇒ нет трещин);
- *  • ноль аллокаций на кадр (синглтон-результат);
- *  • CPU-высота и пресеты.
+ * The system = the validated quadtree system of the FFT ocean (Task 113): a world
+ * fixed grid of roots (vertices do not swim), splitting by 3D distance with a
+ * depth limit, skirts, zero allocations per frame. Here — the invariants of the primitive:
+ *  • COVERAGE without holes: every point of the "camera ± horizon" disk is covered by a leaf;
+ *  • determinism and "no swimming" (a fixed grid): a small camera shift within
+ *    a leaf does not change the set of leaves;
+ *  • near-detail limit (minLeafSize — a hard ceiling);
+ *  • LOD aggressiveness monotonicity (more A ⇒ fewer leaves);
+ *  • patch skirt: skirt vertices PARASITICALLY coincide by (x,z) with the rim
+ *    (bit-for-bit — the same uv ⇒ the same displacement ⇒ no cracks);
+ *  • zero allocations per frame (a singleton result);
+ *  • CPU height and presets.
  */
 import { describe, test, expect } from 'bun:test'
 import { createTerrainQuadtree, terrainQuadtreePresets, terrainHills } from '../src/terrainQuadtree.ts'
 import { selectQuadtreeLeaves, quadtreePatch, PATCH_CELLS, PATCH_TRIANGLE_COUNT, PATCH_VERTEX_COUNT } from '../src/quadtree.ts'
 
-/** Есть ли накрывающий лист для точки (XZ, без высоты — консервативно)? */
+/** Is there a covering leaf for the point (XZ, without height — conservatively)? */
 function covered(sel: { leafCount: number; instanceData: Float32Array }, x: number, z: number): boolean {
   for (let i = 0; i < sel.leafCount; i++) {
     const ox = sel.instanceData[i * 4]!
@@ -29,12 +29,12 @@ function covered(sel: { leafCount: number; instanceData: Float32Array }, x: numb
   return false
 }
 
-describe('prims — terrain на кваддреве (Task 115)', () => {
-  test('покрытие без дыр: точки диска камера±horizon накрыты листами', () => {
+describe('prims — terrain on a quadtree (Task 115)', () => {
+  test('coverage without holes: the points of the camera±horizon disk are covered by leaves', () => {
     const t = createTerrainQuadtree({ horizon: 3000, rootSize: 512 })
     const sel = t.select(0, 100, 0)
     expect(sel.leafCount).toBeGreaterThan(0)
-    // Равномерная сетка точек внутри радиуса (углы диска — самые рискованные).
+    // A uniform grid of points within the radius (the corners of the disk are the riskiest).
     for (let r = 0; r < 6; r++) {
       for (let a = 0; a < 16; a++) {
         const ang = (a / 16) * Math.PI * 2
@@ -45,23 +45,23 @@ describe('prims — terrain на кваддреве (Task 115)', () => {
     }
   })
 
-  test('фикс-сетка мира: истоки листьев выровнены по сетке (вершины не плывут)', () => {
+  test('world fixed grid: leaf origins are aligned to the grid (vertices do not swim)', () => {
     const t = createTerrainQuadtree({ horizon: 2500, rootSize: 512 })
-    const sel = t.select(100.37, 200.91, 0) // «плавающая» позиция камеры
+    const sel = t.select(100.37, 200.91, 0) // a "floating" camera position
     expect(sel.leafCount).toBeGreaterThan(0)
     for (let i = 0; i < sel.leafCount; i++) {
       const ox = sel.instanceData[i * 4]!
       const oz = sel.instanceData[i * 4 + 1]!
       const size = sel.instanceData[i * 4 + 2]!
-      // Исток — всегда кратен размеру листа: мировая сетка ФИКСИРОВАНА,
-      // при движении камеры меняется только НАБОР листьев, не их решётка
-      // (вершины не «плывут» — главный инвариант против шиммера).
+      // The origin — always a multiple of the leaf size: the world grid is FIXED,
+      // when the camera moves only the SET of leaves changes, not their lattice
+      // (vertices do not "swim" — the main invariant against shimmer).
       expect(Math.abs(ox / size - Math.round(ox / size))).toBeLessThan(1e-9)
       expect(Math.abs(oz / size - Math.round(oz / size))).toBeLessThan(1e-9)
       expect(Math.abs(Math.log2(size) - Math.round(Math.log2(size)))).toBeLessThan(1e-9)
     }
-    // LOD-стабильность: малый сдвиг камеры меняет набор МАЛО (гистерезис
-    // не нужен — границы дробления редки; >70% листьев совпадает).
+    // LOD stability: a small camera shift changes the set LITTLE (hysteresis
+    // is not needed — split boundaries are rare; >70% of leaves coincide).
     const a = t.select(100, 200, 0)
     const b = t.select(110, 200, 0)
     const key = (s: { leafCount: number; instanceData: Float32Array }): Set<string> => {
@@ -78,21 +78,21 @@ describe('prims — terrain на кваддреве (Task 115)', () => {
     expect(same / Math.max(ka.size, kb.size)).toBeGreaterThan(0.7)
   })
 
-  test('ноль больших аллокаций: результат лёгкий, буфер инстансов ОБЩИЙ', () => {
+  test('zero large allocations: the result is light, the instance buffer is SHARED', () => {
     const t = createTerrainQuadtree({})
     const a = t.select(0, 100, 0)
     const b = t.select(5000, 100, -3000)
-    // Буфер инстансов — один и тот же (пре-аллоцирован; содержимое
-    // перезаливается на каждый вызов — БЕЗ аллокаций TypedArray).
+    // The instance buffer — one and the same (pre-allocated; the contents
+    // are refilled on every call — WITHOUT TypedArray allocations).
     expect(b.instanceData).toBe(a.instanceData)
-    // Результат-объект свежий на вызов: две выборки живут независимо
-    // (урок: синглтон алиасил — сравнение выборок молча врало).
+    // The result object is fresh per call: two selections live independently
+    // (lesson: a singleton aliased them — comparing selections silently lied).
     expect(b).not.toBe(a)
     expect(a.leafCount).toBeGreaterThan(0)
     expect(b.leafCount).toBeGreaterThan(0)
   })
 
-  test('лимит ближней детализации: minLeafSize — жёсткий потолок', () => {
+  test('near-detail limit: minLeafSize — a hard ceiling', () => {
     for (const a of [1, 2, 3]) {
       const t = createTerrainQuadtree({ aggressiveness: a, rootSize: 4096 })
       const sel = t.select(0, 100, 0)
@@ -101,29 +101,29 @@ describe('prims — terrain на кваддреве (Task 115)', () => {
     }
   })
 
-  test('LOD-агрессивность монотонна: больше A ⇒ меньше листьев и трис', () => {
+  test('LOD aggressiveness is monotonic: more A ⇒ fewer leaves and triangles', () => {
     const s1 = createTerrainQuadtree({ aggressiveness: 1 }).select(0, 100, 0)
     const s3 = createTerrainQuadtree({ aggressiveness: 3 }).select(0, 100, 0)
     expect(s1.leafCount).toBeGreaterThan(s3.leafCount)
     expect(s1.triangles).toBeGreaterThan(s3.triangles)
   })
 
-  test('отсечение по взгляду: forward-сектор режет дальнее кольцо', () => {
+  test('view-based culling: the forward sector cuts the far ring', () => {
     const t = createTerrainQuadtree({ horizon: 4000 })
-    const all = t.select(0, 100, 0) // без forward — всё вокруг
-    const fwd = t.select(0, 100, 0, 1, 0) // смотрим строго в +X
+    const all = t.select(0, 100, 0) // without forward — everything around
+    const fwd = t.select(0, 100, 0, 1, 0) // looking strictly in +X
     expect(fwd.leafCount).toBeLessThan(all.leafCount)
     expect(fwd.leafCount).toBeGreaterThan(0)
   })
 
-  test('патч-юбка: skirt-вершины побитово повторяют (x,z) кромки', () => {
+  test('patch skirt: skirt vertices replicate the (x,z) of the rim bit-for-bit', () => {
     const t = createTerrainQuadtree({})
     const { vertices, triangleIndices, edgeIndices, segments } = t.patch
     expect(segments).toBe(PATCH_CELLS)
     expect(vertices.length).toBe(PATCH_VERTEX_COUNT * 3)
     expect(triangleIndices.length).toBe(PATCH_TRIANGLE_COUNT * 3)
     const side = segments + 3
-    // Для каждой skirt-вершины (skirt=1) есть интерьерная с теми же (x,z).
+    // For every skirt vertex (skirt=1) there is an interior one with the same (x,z).
     let skirtCount = 0
     for (let i = 0; i < vertices.length / 3; i++) {
       if (vertices[i * 3 + 2] !== 1) continue
@@ -136,11 +136,11 @@ describe('prims — terrain на кваддреве (Task 115)', () => {
       expect(has).toBe(true)
     }
     expect(skirtCount).toBe(side * side - (segments + 1) * (segments + 1))
-    // Каркас — только интерьер (юбку не рисуем).
+    // The wireframe — interior only (the skirt is not drawn).
     expect(edgeIndices.length).toBeGreaterThan(0)
   })
 
-  test('CPU-высота: heightAt = heightFn; без heightFn — NaN', () => {
+  test('CPU height: heightAt = heightFn; without heightFn — NaN', () => {
     const fn = (x: number, z: number): number => x + z * 2
     const t = createTerrainQuadtree({ heightFn: fn })
     expect(t.heightAt(3, 4)).toBe(11)
@@ -148,29 +148,29 @@ describe('prims — terrain на кваддреве (Task 115)', () => {
     expect(Number.isNaN(bare.heightAt(0, 0))).toBe(true)
   })
 
-  test('юбка: формула океаны ограничена [8, 300] и растёт с детализацией', () => {
+  test('skirt: the ocean formula is bounded by [8, 300] and grows with detail', () => {
     const t = createTerrainQuadtree({})
     expect(t.skirtDepthFor(4096)).toBe(8)
     expect(t.skirtDepthFor(16)).toBe(300)
     expect(t.skirtDepthFor(256)).toBeGreaterThan(t.skirtDepthFor(1024))
   })
 
-  test('selectView: forward из view-матрицы (колоночно-мажорной)', () => {
+  test('selectView: forward from the (column-major) view matrix', () => {
     const t = createTerrainQuadtree({ horizon: 4000 })
     const view = new Float32Array(16)
     view[0] = view[5] = view[10] = view[15] = 1
-    // Взгляд в +X: view[2] = −1 (rot[0][2]) → forward = (1, 0).
+    // Looking in +X: view[2] = −1 (rot[0][2]) → forward = (1, 0).
     view[2] = -1
     view[10] = 0
     const sel = t.selectView(0, 100, 0, view)
     expect(sel.leafCount).toBeGreaterThan(0)
   })
 
-  test('пресеты рельефа: непрерывные heightFn + разумные амплитуды', () => {
+  test('relief presets: continuous heightFn + sane amplitudes', () => {
     for (const preset of terrainQuadtreePresets) {
       expect(typeof preset.heightFn(0, 0)).toBe('number')
       expect(Number.isFinite(preset.heightFn(123.4, -567.8))).toBe(true)
-      // Непрерывность: близкие точки — близкие высоты.
+      // Continuity: close points — close heights.
       const h1 = preset.heightFn(1000, 1000)
       const h2 = preset.heightFn(1001, 1000)
       expect(Math.abs(h1 - h2)).toBeLessThan(preset.amplitude * 0.2 + 5)
@@ -178,23 +178,23 @@ describe('prims — terrain на кваддреве (Task 115)', () => {
     }
   })
 
-  test('треугольники на лист = патч с юбкой (одна draw-команда)', () => {
+  test('triangles per leaf = the patch with the skirt (one draw command)', () => {
     const t = createTerrainQuadtree({})
     const sel = t.select(0, 100, 0)
     expect(sel.triangles).toBe(sel.leafCount * t.trianglesPerLeaf)
     expect(t.trianglesPerLeaf).toBe(PATCH_TRIANGLE_COUNT)
   })
 
-  test('параметры валидируются: rootSize ≤ 0 — громкий throw', () => {
+  test('parameters are validated: rootSize ≤ 0 — a loud throw', () => {
     expect(() => createTerrainQuadtree({ rootSize: 0 })).toThrow()
     expect(() => createTerrainQuadtree({ rootSize: -8 })).toThrow()
   })
 
-  test('селектор листьев напрямую: горизонта-диск + лимит ёмкости', () => {
+  test('the leaf selector directly: the horizon disk + capacity limit', () => {
     const sel = selectQuadtreeLeaves(0, 0, 100, { horizon: 2000, maxInstances: 64 })
     expect(sel.leafCount).toBeLessThanOrEqual(64)
     expect(sel.leafCount).toBeGreaterThan(0)
-    // Ёмкость выросла лениво — и результат согласован.
+    // The capacity grew lazily — and the result is consistent.
     const big = selectQuadtreeLeaves(0, 0, 100, { horizon: 10000, maxInstances: 2048 })
     expect(big.leafCount).toBeGreaterThan(sel.leafCount)
   })

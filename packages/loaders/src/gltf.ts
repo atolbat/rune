@@ -1,39 +1,39 @@
 /**
- * glTF/GLB loader — полное декодирование с потоковым доступом.
+ * glTF/GLB loader — full decoding with streaming access.
  *
  * ══════════════════════════════════════════════════════════════════════════
- * КОНТРАКТ:
+ * CONTRACT:
  *
- *   parseGlb(assembler, options)      — GLB 2.0 (JSON+BIN чанки)
- *   parseGltfJson(text, external, options) — .gltf + внешние буферы
+ *   parseGlb(assembler, options)      — GLB 2.0 (JSON+BIN chunks)
+ *   parseGltfJson(text, external, options) — .gltf + external buffers
  *
- *   ВЫХОД: GltfModel — { json, meshes, materials, images, nodes,
+ *   OUTPUT: GltfModel — { json, meshes, materials, images, nodes,
  *     sceneRoots, whenImagesDecoded, kind, stats }.
- *     Материалы: PBR-факторы + alphaMode/alphaCutoff/doubleSided/unlit.
- *     Изображения: ленивые — bytes доступны с приходом диапазона,
- *     bitmap (ImageBitmap) — Promise, декод стартует по готовности байт.
- *     Геометрия: positions/normals/uvs/indices как TypedArray.
+ *     Materials: PBR factors + alphaMode/alphaCutoff/doubleSided/unlit.
+ *     Images: lazy — bytes become available when a range arrives,
+ *     bitmap (ImageBitmap) is a Promise, decoding starts when bytes are ready.
+ *     Geometry: positions/normals/uvs/indices as TypedArrays.
  *
- * ОПТИМИЗАЦИИ (why it's fast):
- *   1. GLB-заголовок читается после 20 байт — парсинг стартует до
- *      завершения скачивания (waitFor/onRange Assembler).
- *   2. Zero-copy: при известном Content-Length BIN-срезы указывают
- *      прямо в буфер Assembler (без копий), float-аксессоры без
- *      byteStride отдаются как Float32Array-вид над телом.
- *   3. Примитивы сортируются по смещению в файле — «ранние» данные
- *      парсятся раньше, прогресс честный.
- *   4. Draco (KHR_draco_mesh_compression) — через инъекцию декодера.
+ * OPTIMIZATIONS (why it's fast):
+ *   1. The GLB header is read after 20 bytes — parsing starts before
+ *      the download finishes (Assembler waitFor/onRange).
+ *   2. Zero-copy: with a known Content-Length, BIN slices point
+ *      directly into the Assembler buffer (no copies), float accessors without
+ *      byteStride are returned as a Float32Array view over the body.
+ *   3. Primitives are sorted by offset in the file — "early" data
+ *      is parsed earlier, progress is honest.
+ *   4. Draco (KHR_draco_mesh_compression) — via decoder injection.
  *
- * ОШИБКИ: «не GLB: магик не glTF» / «GLB версии N не поддерживается» /
- *   «GLB без BIN-чанка…» / «glTF требует KHR_…» — все actionable.
+ * ERRORS: "not GLB: magic is not glTF" / "GLB version N is not supported" /
+ *   "GLB without BIN chunk..." / "glTF requires KHR_..." — all actionable.
  *
- * Лоадер НЕ знает про GPU: ImageBitmap → @rune/gl/kit, данные → движок.
+ * The loader does NOT know about the GPU: ImageBitmap → @rune/gl/kit, data → the engine.
  */
 
 import { asciiDecode, align4, nowMs } from './bytes.ts'
 import type { Assembler } from './assembler.ts'
 
-// ─── Магические константы формата ────────────────────────────────────────────
+// ─── Magic constants of the format ────────────────────────────────────────────
 
 const GLB_MAGIC = 1179937895 // 'glTF' LE
 const GLB_CHUNK_JSON = 1313821514 // 'JSON' LE
@@ -42,14 +42,14 @@ const COMPONENT_FLOAT = 5126
 const COMPONENT_UNSIGNED_INT = 5125
 const COMPONENT_UNSIGNED_SHORT = 5123
 
-/** Расширения, которые парсер не поддерживает нативно. */
+/** Extensions the parser does not support natively. */
 const UNSUPPORTED_EXTENSIONS = new Set([
-  'KHR_draco_mesh_compression', // ok при инъекции dracoDecoder
+  'KHR_draco_mesh_compression', // ok with dracoDecoder injection
   'EXT_meshopt_compression',
   'KHR_texture_basisu',
 ])
 
-/** Размер компонента по componentType. */
+/** Component size by componentType. */
 const COMPONENT_SIZE: Record<number, number> = {
   5120: 1,
   5121: 1,
@@ -59,7 +59,7 @@ const COMPONENT_SIZE: Record<number, number> = {
   5126: 4,
 }
 
-/** Число компонентов по типу аксессора. */
+/** Number of components by accessor type. */
 const TYPE_COMPONENTS: Record<string, number> = {
   SCALAR: 1,
   VEC2: 2,
@@ -70,9 +70,9 @@ const TYPE_COMPONENTS: Record<string, number> = {
   MAT4: 16,
 }
 
-// ─── Публичные типы ──────────────────────────────────────────────────────────
+// ─── Public types ──────────────────────────────────────────────────────────
 
-/** Фаза прогресса парсинга (stage: json/bin/geometry/…). */
+/** Parsing progress phase (stage: json/bin/geometry/...). */
 export interface GltfPhase {
   readonly stage: string
   readonly ratio: number
@@ -81,14 +81,14 @@ export interface GltfPhase {
 
 export type OnGltfPhase = (phase: GltfPhase) => void
 
-/** Кастомный декодер изображения (тесты/окружения без createImageBitmap). */
+/** Custom image decoder (tests/environments without createImageBitmap). */
 export type CreateBitmap = (
   bytes: Uint8Array,
   mimeType: string,
   options?: ImageBitmapOptions,
 ) => Promise<ImageBitmap>
 
-/** Кастомный Draco-декодер: байты + атрибуты → распакованная геометрия. */
+/** Custom Draco decoder: bytes + attributes → unpacked geometry. */
 export type DracoDecoder = (
   bytes: Uint8Array,
   attributes: Record<string, number>,
@@ -99,7 +99,7 @@ export type DracoDecoder = (
   indices: Uint16Array | Uint32Array | null
 }>
 
-/** Опции парсинга glTF. */
+/** glTF parsing options. */
 export interface GltfParseOptions {
   readonly signal?: AbortSignal
   readonly onPhase?: OnGltfPhase
@@ -107,7 +107,7 @@ export interface GltfParseOptions {
   readonly dracoDecoder?: DracoDecoder
 }
 
-/** Сэмплер текстуры (значения WebGL/WebGPU констант). */
+/** Texture sampler (WebGL/WebGPU constant values). */
 export interface GltfSampler {
   readonly magFilter: number
   readonly minFilter: number
@@ -115,18 +115,18 @@ export interface GltfSampler {
   readonly wrapT: number
 }
 
-/** Изображение: байты приходят потоком, bitmap декодится лениво. */
+/** Image: bytes arrive as a stream, the bitmap is decoded lazily. */
 export interface GltfImage {
   readonly name: string
   readonly mimeType: string
-  /** Байты изображения (пустой массив, пока диапазон не получен). */
+  /** Image bytes (an empty array until the range is received). */
   readonly bytes: Uint8Array
-  /** Декодированный растр; реджект при отсутствии createImageBitmap. */
+  /** Decoded raster; rejects when createImageBitmap is absent. */
   readonly bitmap: Promise<ImageBitmap>
   readonly sampler: GltfSampler | null
 }
 
-/** PBR-материал (значения — индексы изображений или null). */
+/** PBR material (values are image indices or null). */
 export interface GltfMaterial {
   readonly name: string
   readonly baseColorFactor: readonly number[]
@@ -144,18 +144,18 @@ export interface GltfMaterial {
   readonly unlit: boolean
 }
 
-/** Границы примитива. */
+/** Primitive bounds. */
 export interface GltfBounds {
   readonly min: readonly number[]
   readonly max: readonly number[]
 }
 
-/** Декодированный примитив (меш = список примитивов). */
+/** Decoded primitive (a mesh = a list of primitives). */
 export interface GltfPrimitive {
   readonly positions: Float32Array
   readonly normals: Float32Array | null
   readonly uvs: Float32Array | null
-  /** Uint16/Uint32: zero-copy плотно упакованные индексы остаются как есть. */
+  /** Uint16/Uint32: zero-copy densely packed indices stay as is. */
   readonly indices: Uint16Array | Uint32Array | null
   readonly material: number | null
   readonly vertexCount: number
@@ -167,7 +167,7 @@ export interface GltfMesh {
   readonly primitives: readonly GltfPrimitive[]
 }
 
-/** Узел сцены (TRS или матрица). */
+/** Scene node (TRS or matrix). */
 export interface GltfNode {
   readonly name: string
   readonly children: readonly number[]
@@ -178,7 +178,7 @@ export interface GltfNode {
   readonly scale: readonly number[] | null
 }
 
-/** Статистика загрузки/парсинга. */
+/** Load/parse statistics. */
 export interface GltfStats {
   readonly jsonBytes: number
   readonly binBytes: number
@@ -190,22 +190,22 @@ export interface GltfStats {
   readonly zeroCopyViews: number
 }
 
-/** Полностью декодированный glTF (GLB или .gltf). */
+/** Fully decoded glTF (GLB or .gltf). */
 export interface GltfModel {
   readonly kind: 'glb' | 'gltf'
-  /** Исходный JSON документа (для расширений клиента). */
+  /** Original document JSON (for client extensions). */
   readonly json: unknown
   readonly meshes: readonly GltfMesh[]
   readonly materials: readonly GltfMaterial[]
   readonly images: readonly GltfImage[]
   readonly nodes: readonly GltfNode[]
   readonly sceneRoots: readonly number[]
-  /** Все bitmap-декоды завершены (успех или провал). */
+  /** All bitmap decodes are finished (success or failure). */
   readonly whenImagesDecoded: () => Promise<void>
   readonly stats: GltfStats
 }
 
-/** Источник бинарных данных: BIN-чанк GLB или внешний файл. */
+/** Binary data source: the GLB BIN chunk or an external file. */
 interface BufferSource {
   ready(offset: number, length: number): boolean
   wait(offset: number, length: number): Promise<void>
@@ -214,14 +214,14 @@ interface BufferSource {
   zeroCopy(): void
 }
 
-/** Загрузчик внешних ресурсов для .gltf (байты по uri). */
+/** External resource loader for .gltf (bytes by uri). */
 export interface GltfExternalSource {
   loadExternal(uri: string): Promise<Uint8Array>
 }
 
-// ─── Проверки магики ─────────────────────────────────────────────────────────
+// ─── Magic checks ─────────────────────────────────────────────────────────
 
-/** Первые 4 байта — 'glTF' (JSON-часть GLB). */
+/** First 4 bytes — 'glTF' (the JSON part of GLB). */
 export function isGltfJson(bytes: Uint8Array): boolean {
   return bytes.length >= 4 && asciiDecode(bytes, 0, 4) === 'glTF'
 }
@@ -229,9 +229,9 @@ export function isGltfJson(bytes: Uint8Array): boolean {
 // ─── GLB ─────────────────────────────────────────────────────────────────────
 
 /**
- * Парсинг GLB 2.0 поверх СТРИМИНГА: заголовок — после 20 байт,
- * JSON — после 20+jsonLength, BIN — определяется по выровненному
- * смещению; геометрия парсится в потоке, не дожидаясь хвоста файла.
+ * GLB 2.0 parsing on top of STREAMING: the header — after 20 bytes,
+ * JSON — after 20+jsonLength, BIN — determined by the aligned
+ * offset; geometry is parsed in the stream without waiting for the file tail.
  */
 export async function parseGlb(assembler: Assembler, options: GltfParseOptions = {}): Promise<GltfModel> {
   const startedAt = nowMs()
@@ -240,13 +240,13 @@ export async function parseGlb(assembler: Assembler, options: GltfParseOptions =
 
   await assembler.waitFor(20)
   const header = new DataView(assembler.slice(0, 20).buffer)
-  if (header.getUint32(0, true) !== GLB_MAGIC) throw new Error('не GLB: магик не glTF')
+  if (header.getUint32(0, true) !== GLB_MAGIC) throw new Error('not GLB: magic is not glTF')
   const version = header.getUint32(4, true)
-  if (version !== 2) throw new Error(`GLB версии ${version} не поддерживается (только 2)`)
+  if (version !== 2) throw new Error(`GLB version ${version} is not supported (only 2)`)
   const declaredTotal = header.getUint32(8, true)
   const jsonLength = header.getUint32(12, true)
   if (header.getUint32(16, true) !== GLB_CHUNK_JSON)
-    throw new Error('GLB: первый чанк не JSON')
+    throw new Error('GLB: first chunk is not JSON')
 
   onPhase({ stage: 'json', ratio: 0.05, detail: `${formatBytesRounded(jsonLength)} JSON` })
   await assembler.waitFor(20 + jsonLength)
@@ -254,12 +254,12 @@ export async function parseGlb(assembler: Assembler, options: GltfParseOptions =
   const json = JSON.parse(jsonText) as GltfDocument
   assertRequiredExtensions(json, options.dracoDecoder)
 
-  // Позиция BIN-чанка: сразу за JSON-чанком (выравнивание 4 байта)
+  // BIN chunk position: right after the JSON chunk (4-byte alignment)
   const binHeaderOffset = 20 + align4(jsonLength)
   let binLength = 0
   let binStart = -1
   if (assembler.total === undefined) {
-    // Размер неизвестен: ждём что есть, читаем по факту
+    // Size unknown: wait for what is there, read it as it arrives
     await assembler.completion
     if (assembler.watermark > binHeaderOffset + 8) {
       const binHeader = new DataView(assembler.slice(binHeaderOffset, 8).buffer)
@@ -276,7 +276,7 @@ export async function parseGlb(assembler: Assembler, options: GltfParseOptions =
   onPhase({
     stage: 'bin',
     ratio: 0.15,
-    detail: binStart >= 0 ? `BIN ${formatBytesRounded(binLength)}` : 'без BIN-чанка',
+    detail: binStart >= 0 ? `BIN ${formatBytesRounded(binLength)}` : 'without BIN chunk',
   })
 
   const binReady = (length: number): boolean =>
@@ -290,10 +290,10 @@ export async function parseGlb(assembler: Assembler, options: GltfParseOptions =
     wait: (offset, length) => waitBin(offset + length),
     view: (offset, length) => {
       if (binStart < 0)
-        throw new Error('GLB без BIN-чанка: буферы должны быть внешними uri')
+        throw new Error('GLB without BIN chunk: buffers must be external uri')
       if (!binReady(offset + length))
-        throw new Error(`BIN-диапазон [${offset}, ${offset + length}) не получен`)
-      // Zero-copy: буфер аллоцирован под Content-Length и не двигается
+        throw new Error(`BIN range [${offset}, ${offset + length}) not received`)
+      // Zero-copy: the buffer is allocated for Content-Length and does not move
       if (totalKnown) {
         zeroCopyCount++
         return new Uint8Array(assembler.prefixView(assembler.watermark).buffer, binStart + offset, length)
@@ -316,7 +316,7 @@ export async function parseGlb(assembler: Assembler, options: GltfParseOptions =
 
   await assembler.completion
   if (assembler.total !== undefined && assembler.watermark !== declaredTotal)
-    throw new Error(`GLB неполный: ${assembler.watermark} из ${declaredTotal} байт`)
+    throw new Error(`GLB incomplete: ${assembler.watermark} of ${declaredTotal} bytes`)
 
   return withStats(model, 'glb', {
     jsonBytes: jsonLength,
@@ -326,9 +326,9 @@ export async function parseGlb(assembler: Assembler, options: GltfParseOptions =
   })
 }
 
-// ─── .gltf (JSON + внешние буферы) ───────────────────────────────────────────
+// ─── .gltf (JSON + external buffers) ───────────────────────────────────────────
 
-/** Парсинг .gltf: JSON-текст + загрузчик внешних буферов/изображений. */
+/** Parse .gltf: JSON text + an external buffer/image loader. */
 export async function parseGltfJson(
   text: string,
   external: GltfExternalSource,
@@ -341,7 +341,7 @@ export async function parseGltfJson(
   onPhase({
     stage: 'buffers',
     ratio: 0.1,
-    detail: `${json.buffers?.length ?? 0} внешних буферов`,
+    detail: `${json.buffers?.length ?? 0} external buffers`,
   })
 
   const externals: Uint8Array[] = []
@@ -371,9 +371,9 @@ export async function parseGltfJson(
   })
 }
 
-// ─── Общий обход документа ───────────────────────────────────────────────────
+// ─── General document traversal ───────────────────────────────────────────────────
 
-/** Минимальная типизация glTF-JSON (остальное — raw). */
+/** Minimal typing of glTF-JSON (the rest is raw). */
 interface GltfDocument {
   accessors?: Array<{
     bufferView?: number
@@ -459,7 +459,7 @@ type RawAccessor = NonNullable<GltfDocument['accessors']>[number]
 type RawBufferView = NonNullable<GltfDocument['bufferViews']>[number]
 type RawPrimitive = NonNullable<GltfDocument['meshes']>[number]['primitives'][number]
 
-/** Сборка декодированной модели из JSON-документа. */
+/** Assemble the decoded model from the JSON document. */
 async function parseGltfDocument(json: GltfDocument, ctx: ParseContext): Promise<Omit<GltfModel, 'kind' | 'stats'>> {
   const accessors = json.accessors ?? []
   const bufferViews = json.bufferViews ?? []
@@ -506,7 +506,7 @@ async function parseGltfDocument(json: GltfDocument, ctx: ParseContext): Promise
           createImageBitmap(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: mime }), opts ?? { premultiplyAlpha: 'none' })
       : undefined)
 
-  // Изображения: байты приходят по диапазонам, bitmap декодится лениво
+  // Images: bytes arrive by ranges, the bitmap is decoded lazily
   const imageBitmaps: Array<Promise<void>> = []
   const images: GltfImage[] = []
   const rawImages = json.images ?? []
@@ -541,13 +541,13 @@ async function parseGltfDocument(json: GltfDocument, ctx: ParseContext): Promise
           : null,
     }
     images.push(image)
-    // Прогресс whenImagesDecoded не ломается от одиночных провалов
+    // The whenImagesDecoded progress is not broken by individual failures
     imageBitmaps.push(bitmap.then(() => {}, () => {}))
 
     const startDecode = (): void => {
       try {
         if (createBitmap === undefined) {
-          rejectBitmap(new Error('createImageBitmap недоступен в этой среде'))
+          rejectBitmap(new Error('createImageBitmap is not available in this environment'))
           return
         }
         createBitmap(bytes, mimeType).then(resolveBitmap, rejectBitmap)
@@ -559,21 +559,21 @@ async function parseGltfDocument(json: GltfDocument, ctx: ParseContext): Promise
     if (raw.bufferView !== undefined) {
       const view = bufferViews[raw.bufferView]
       if (view === undefined) {
-        rejectBitmap(new Error(`image ${name}: bufferView ${raw.bufferView} не найден`))
+        rejectBitmap(new Error(`image ${name}: bufferView ${raw.bufferView} not found`))
         continue
       }
       const byteOffset = view.byteOffset ?? 0
       const byteLength = view.byteLength
       const source = ctx.buffers[view.buffer ?? 0]
       if (source === undefined) {
-        rejectBitmap(new Error(`image ${name}: буфер ${view.buffer ?? 0} не найден`))
+        rejectBitmap(new Error(`image ${name}: buffer ${view.buffer ?? 0} not found`))
         continue
       }
       if (source.ready(byteOffset, byteLength)) {
         bytes = source.view(byteOffset, byteLength)
         startDecode()
       } else {
-        // Диапазон ещё качается: декод стартует с приходом байтов
+        // The range is still downloading: decoding starts when bytes arrive
         const unsubscribe = source.onRange((available) => {
           if (available >= byteOffset + byteLength) {
             unsubscribe()
@@ -594,11 +594,11 @@ async function parseGltfDocument(json: GltfDocument, ctx: ParseContext): Promise
         rejectBitmap(error)
       }
     } else {
-      rejectBitmap(new Error(`image ${name}: нет ни bufferView, ни загрузчика uri`))
+      rejectBitmap(new Error(`image ${name}: neither bufferView nor a uri loader`))
     }
   }
 
-  // Порядок парсинга примитивов = порядок данных в файле (progressive)
+  // Primitive parse order = data order in the file (progressive)
   const plans: Array<{ meshIndex: number; primitive: RawPrimitive; minOffset: number }> = []
   const rawMeshes = json.meshes ?? []
   for (let meshIndex = 0; meshIndex < rawMeshes.length; meshIndex++)
@@ -638,13 +638,13 @@ async function parseGltfDocument(json: GltfDocument, ctx: ParseContext): Promise
     if (draco !== undefined) {
       if (ctx.dracoDecoder === undefined)
         throw new Error(
-          'примитив сжат KHR_draco_mesh_compression, но декодер не передан ' +
-            '(GltfParseOptions.dracoDecoder) — сжатая геометрия не читается',
+          'primitive compressed with KHR_draco_mesh_compression, but no decoder passed ' +
+            '(GltfParseOptions.dracoDecoder) — compressed geometry cannot be read',
         )
       const view = bufferViews[draco.bufferView]
-      if (view === undefined) throw new Error(`Draco: bufferView ${draco.bufferView} не найден`)
+      if (view === undefined) throw new Error(`Draco: bufferView ${draco.bufferView} not found`)
       const source = ctx.buffers[view.buffer ?? 0]
-      if (source === undefined) throw new Error(`Draco: буфер ${view.buffer ?? 0} не найден`)
+      if (source === undefined) throw new Error(`Draco: buffer ${view.buffer ?? 0} not found`)
       const byteOffset = view.byteOffset ?? 0
       await source.wait(byteOffset, view.byteLength)
       const dracoBytes = source.view(byteOffset, view.byteLength)
@@ -683,10 +683,10 @@ async function parseGltfDocument(json: GltfDocument, ctx: ParseContext): Promise
     ctx.phase({
       stage: 'geometry',
       ratio: 0.2 + 0.75 * (parsedCount / plans.length),
-      detail: `${parsedCount}/${plans.length} примитивов`,
+      detail: `${parsedCount}/${plans.length} primitives`,
     })
   }
-  ctx.phase({ stage: 'geometry', ratio: 0.95, detail: `${parsedCount} примитивов` })
+  ctx.phase({ stage: 'geometry', ratio: 0.95, detail: `${parsedCount} primitives` })
 
   const meshes: GltfMesh[] = rawMeshes.map((mesh, index) => ({
     name: mesh.name ?? `mesh-${index}`,
@@ -717,9 +717,9 @@ async function parseGltfDocument(json: GltfDocument, ctx: ParseContext): Promise
   }
 }
 
-// ─── Аксессоры ───────────────────────────────────────────────────────────────
+// ─── Accessors ───────────────────────────────────────────────────────────────
 
-/** Чтение float-атрибута (POSITION/NORMAL/TEXCOORD_0) из аксессора. */
+/** Read a float attribute (POSITION/NORMAL/TEXCOORD_0) from an accessor. */
 async function readFloatAttribute(
   accessorIndex: number | undefined,
   semantic: string,
@@ -727,22 +727,22 @@ async function readFloatAttribute(
   bufferViews: RawBufferView[],
   ctx: ParseContext,
 ): Promise<Float32Array> {
-  if (accessorIndex === undefined) throw new Error(`примитив без атрибута ${semantic}`)
+  if (accessorIndex === undefined) throw new Error(`primitive without attribute ${semantic}`)
   const accessor = accessors[accessorIndex]
-  if (accessor === undefined) throw new Error(`аксессор ${semantic} #${accessorIndex} не найден`)
+  if (accessor === undefined) throw new Error(`accessor ${semantic} #${accessorIndex} not found`)
   const numComponents = TYPE_COMPONENTS[accessor.type] ?? 0
-  if (numComponents === 0) throw new Error(`аксессор ${semantic}: тип ${accessor.type} не векторный`)
-  if (accessor.sparse !== undefined) throw new Error(`аксессор ${semantic}: sparse не поддерживается`)
+  if (numComponents === 0) throw new Error(`accessor ${semantic}: type ${accessor.type} is not a vector`)
+  if (accessor.sparse !== undefined) throw new Error(`accessor ${semantic}: sparse is not supported`)
   const count = accessor.count
   if (accessor.bufferView === undefined) return new Float32Array(count * numComponents)
   const view = bufferViews[accessor.bufferView]
-  if (view === undefined) throw new Error(`bufferView ${accessor.bufferView} не найден (${semantic})`)
+  if (view === undefined) throw new Error(`bufferView ${accessor.bufferView} not found (${semantic})`)
   const source = ctx.buffers[view.buffer ?? 0]
-  if (source === undefined) throw new Error(`буфер ${view.buffer ?? 0} не найден (${semantic})`)
+  if (source === undefined) throw new Error(`buffer ${view.buffer ?? 0} not found (${semantic})`)
 
   const componentType = accessor.componentType
   const componentSize = COMPONENT_SIZE[componentType] ?? 0
-  if (componentSize === 0) throw new Error(`componentType ${componentType} не поддержан (${semantic})`)
+  if (componentSize === 0) throw new Error(`componentType ${componentType} is not supported (${semantic})`)
   const byteStride = view.byteStride ?? 0
   const byteOffset = (view.byteOffset ?? 0) + (accessor.byteOffset ?? 0)
   const tightBytes = count * numComponents * componentSize
@@ -750,10 +750,10 @@ async function readFloatAttribute(
   await source.wait(byteOffset, spanBytes)
   const view8 = source.view(byteOffset, spanBytes)
 
-  // Fast-path 1: плотно упакованный FLOAT — отдаём вид над телом (zero-copy)
+  // Fast-path 1: densely packed FLOAT — return a view over the body (zero-copy)
   if (byteStride === 0 && componentType === COMPONENT_FLOAT && view8.byteOffset % 4 === 0)
     return (source.zeroCopy(), new Float32Array(view8.buffer, view8.byteOffset, count * numComponents))
-  // Fast-path 2: FLOAT со stride, кратным 4 — плотним одним проходом
+  // Fast-path 2: FLOAT with stride divisible by 4 — densify in one pass
   if (componentType === COMPONENT_FLOAT && byteStride > 0 && byteStride % 4 === 0 && view8.byteOffset % 4 === 0) {
     const strided = new Float32Array(view8.buffer, view8.byteOffset, view8.byteLength / 4)
     const packed = new Float32Array(count * numComponents)
@@ -763,7 +763,7 @@ async function readFloatAttribute(
     return packed
   }
 
-  // Общий путь: покомпонентное чтение (+ normalized-конверсия)
+  // General path: component-wise reading (+ normalized conversion)
   const dataView = new DataView(view8.buffer, view8.byteOffset, view8.byteLength)
   const out = new Float32Array(count * numComponents)
   const normalized = accessor.normalized ?? false
@@ -798,7 +798,7 @@ async function readFloatAttribute(
           if (normalized) value = Math.max(value / 127, -1)
           break
         default:
-          throw new Error(`componentType ${componentType} не поддержан`)
+          throw new Error(`componentType ${componentType} is not supported`)
       }
       out[outAt++] = value
     }
@@ -806,7 +806,7 @@ async function readFloatAttribute(
   return out
 }
 
-/** Чтение индексов (SCALAR; поддержаны UShort/UInt). */
+/** Read indices (SCALAR; UShort/UInt are supported). */
 async function readIndices(
   accessorIndex: number,
   accessors: RawAccessor[],
@@ -814,14 +814,14 @@ async function readIndices(
   ctx: ParseContext,
 ): Promise<Uint16Array | Uint32Array> {
   const accessor = accessors[accessorIndex]
-  if (accessor === undefined) throw new Error(`аксессор indices #${accessorIndex} не найден`)
-  if (accessor.type !== 'SCALAR') throw new Error('indices: тип не SCALAR')
+  if (accessor === undefined) throw new Error(`accessor indices #${accessorIndex} not found`)
+  if (accessor.type !== 'SCALAR') throw new Error('indices: type is not SCALAR')
   const count = accessor.count
   if (accessor.bufferView === undefined) return new Uint16Array(0)
   const view = bufferViews[accessor.bufferView]
-  if (view === undefined) throw new Error(`bufferView ${accessor.bufferView} не найден (indices)`)
+  if (view === undefined) throw new Error(`bufferView ${accessor.bufferView} not found (indices)`)
   const source = ctx.buffers[view.buffer ?? 0]
-  if (source === undefined) throw new Error(`буфер ${view.buffer ?? 0} не найден (indices)`)
+  if (source === undefined) throw new Error(`buffer ${view.buffer ?? 0} not found (indices)`)
 
   const componentSize = COMPONENT_SIZE[accessor.componentType] ?? 0
   const byteOffset = (view.byteOffset ?? 0) + (accessor.byteOffset ?? 0)
@@ -844,12 +844,12 @@ async function readIndices(
     for (let i = 0; i < count; i++) out[i] = dataView.getUint32(i * 4, true)
     return out
   }
-  throw new Error(`indices componentType ${accessor.componentType} не поддержан`)
+  throw new Error(`indices componentType ${accessor.componentType} is not supported`)
 }
 
-// ─── Вспомогательные ─────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────
 
-/** min/max из метаданных аксессора, иначе проход по позициям. */
+/** min/max from accessor metadata, otherwise a pass over positions. */
 function computeBounds(
   accessor: { min?: number[]; max?: number[] } | undefined,
   positions: Float32Array,
@@ -870,7 +870,7 @@ function computeBounds(
   return { min, max }
 }
 
-/** Сэмплер первого texture, использующего изображение. */
+/** Sampler of the first texture using the image. */
 function findSamplerForImage(json: GltfDocument, imageIndex: number): number | null {
   for (const texture of json.textures ?? [])
     if (
@@ -882,20 +882,20 @@ function findSamplerForImage(json: GltfDocument, imageIndex: number): number | n
   return null
 }
 
-/** extensionsRequired: Draco ок при декодере; meshopt/basisu — честная ошибка. */
+/** extensionsRequired: Draco is ok with a decoder; meshopt/basisu — an honest error. */
 function assertRequiredExtensions(json: GltfDocument, dracoDecoder: DracoDecoder | undefined): void {
   for (const extension of json.extensionsRequired ?? []) {
     if (extension === 'KHR_draco_mesh_compression' && dracoDecoder !== undefined) continue
     if (UNSUPPORTED_EXTENSIONS.has(extension))
       throw new Error(
-        `glTF требует ${extension} — ${extension === 'KHR_draco_mesh_compression' ? 'декодер не передан (GltfParseOptions.dracoDecoder)' : 'сжатие геометрии/текстур не поддерживается парсером (поддерживается EXT_texture_webp — нативно браузером)'}`,
+        `glTF requires ${extension} — ${extension === 'KHR_draco_mesh_compression' ? 'decoder not passed (GltfParseOptions.dracoDecoder)' : 'geometry/texture compression is not supported by the parser (EXT_texture_webp is supported — natively by the browser)'}`,
       )
   }
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted)
-    throw signal.reason instanceof Error ? signal.reason : new DOMException('парсинг отменён', 'AbortError')
+    throw signal.reason instanceof Error ? signal.reason : new DOMException('parsing cancelled', 'AbortError')
 }
 
 interface StatsInput {
@@ -905,7 +905,7 @@ interface StatsInput {
   zeroCopyViews: number
 }
 
-/** Обогащает модель статистикой (kind + stats). */
+/** Enriches the model with statistics (kind + stats). */
 function withStats(model: Omit<GltfModel, 'kind' | 'stats'>, kind: 'glb' | 'gltf', input: StatsInput): GltfModel {
   let vertices = 0
   let triangles = 0
@@ -932,16 +932,16 @@ function withStats(model: Omit<GltfModel, 'kind' | 'stats'>, kind: 'glb' | 'gltf
   }
 }
 
-/** «12.3 MB» / «456 KB» (минимум 1 KB) — для деталей прогресса. */
+/** "12.3 MB" / "456 KB" (minimum 1 KB) — for progress details. */
 function formatBytesRounded(bytes: number): string {
   return bytes >= 1048576
     ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
     : `${Math.max(1, Math.round(bytes / 1024))} KB`
 }
 
-// ─── Мост Task 88 (AssetLibrary ждёт эти имена) ─────────────────────────────
+// ─── Task 88 bridge (AssetLibrary expects these names) ─────────────────────────────
 
-/** GLB-магия «glTF» в первых 4 байтах (снифф для AssetLibrary). */
+/** GLB magic "glTF" in the first 4 bytes (a sniff for AssetLibrary). */
 export function looksLikeGlb(bytes: Uint8Array): boolean {
   return (
     bytes.length >= 4 &&
@@ -949,5 +949,5 @@ export function looksLikeGlb(bytes: Uint8Array): boolean {
   )
 }
 
-/** Draco-декодер как тип-псевдоним (имя слоя AssetLibrary). */
+/** Draco decoder as a type alias (AssetLibrary layer name). */
 export type DracoGeometryDecoder = DracoDecoder

@@ -1,10 +1,10 @@
 /**
- * scripts/serve-demo.mjs — статический сервер для демо (запускать через bun).
+ * scripts/serve-demo.mjs — a static server for the demos (run with bun).
  *
- * Отдаёт корень репозитория: /demo/ — страница демо, /dist/* — собранные
- * бандлы библиотеки. Порт: 8080 (override: PORT=…).
+ * Serves the repository root: /demo/ — the demos page, /dist/* — the built
+ * library bundles. Port: 8080 (override: PORT=…).
  *
- * Использование: bun run demo   (= build + этот сервер)
+ * Usage: bun run demo   (= build + this server)
  */
 import { join, normalize, resolve } from 'node:path'
 
@@ -32,7 +32,7 @@ Bun.serve({
     if (pathname === '/') pathname = '/demo/'
     if (pathname.endsWith('/')) pathname += 'index.html'
 
-    // Только внутри корня репозитория (без ../)
+    // Only inside the repository root (no ../)
     const safe = normalize(pathname).replace(/^([.][.][/\\])+/, '')
     const file = Bun.file(join(root, safe))
 
@@ -45,5 +45,5 @@ Bun.serve({
   },
 })
 
-console.log(`[demo] http://localhost:${port}/demo/          (галерея демо)`)
-console.log(`[demo] http://localhost:${port}/demo/hello-cube/  (бандлы: /dist/)`)
+console.log(`[demo] http://localhost:${port}/demo/          (demo gallery)`)
+console.log(`[demo] http://localhost:${port}/demo/hello-cube/  (bundles: /dist/)`)

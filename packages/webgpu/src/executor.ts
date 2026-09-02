@@ -1,7 +1,7 @@
 /**
- * Исполнитель WG-лент: аплоады слайсов ДО пасса (упорядочено с submit —
- * GPU не читает то, что CPU пишет), затем пасс с dynamic offsets.
- * Порядок кадра: uploadUniforms → beginPass → draw → endPass → submit.
+ * Executor of WG tapes: slice uploads BEFORE the pass (ordered with submit —
+ * the GPU does not read what the CPU writes), then the pass with dynamic offsets.
+ * Frame order: uploadUniforms → beginPass → draw → endPass → submit.
  */
 
 import type { TapeView } from '@rune/core'
@@ -38,15 +38,15 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
     gpu.submit()
   }
 
-  /** Первый проход: грязные слайсы в UBO до открытия пасса. */
+  /** First pass: dirty slices into the UBO before the pass opens. */
   function uploadDirtySlices(view: TapeView): void {
     for (let at = 0; at < view.count; at++) {
       if (view.op[at] !== 2) continue
       const command = commands[view.a[at]] as RichWgpuCommand | undefined
       if (command === undefined || !command.needsUpload) continue
-      // Аплоад — фактические байты юниформов (без хвостовой набивки среза
-      // до dynamic-offset гранулярности): writeBuffer допускает кратный 4
-      // размер, шейдер читает ровно столько, сколько объявлено в struct.
+      // Upload — the actual uniform bytes (without the slice's trailing padding
+      // up to dynamic-offset granularity): writeBuffer allows a multiple-of-4
+      // size, the shader reads exactly as much as declared in the struct.
       const bytes = Math.min(command.uniformBytes ?? command.sliceBytes, command.sliceBytes)
       gpu.uploadUniforms(command.sliceOffset, arena.bytes.subarray(command.sliceOffset, command.sliceOffset + bytes))
       command.needsUpload = false
@@ -60,10 +60,10 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
   function drawCommand(command: RichWgpuCommand | undefined, count: number, instances: number): void {
     if (command === undefined) return
     if (!command.pipelineReady) {
-      // M5 (Task 73): интерливинг фида — rich-слот {size, stride, offset};
-      // tight-атрибуты — число (arrayStride = size*4, offset 0).
-      // Task 75: step='instance' → stepMode пайплайна; desc — blend/depth/
-      // cull/primitive из GpuPipelineDesc (реально применяется в buildPipeline).
+      // M5 (Task 73): feed interleaving — rich slot {size, stride, offset};
+      // tight attributes — a number (arrayStride = size*4, offset 0).
+      // Task 75: step='instance' → pipeline stepMode; desc — blend/depth/
+      // cull/primitive from GpuPipelineDesc (actually applied in buildPipeline).
       gpu.ensurePipeline(
         command.pipelineId,
         command.wgsl,
@@ -85,7 +85,7 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
   return { run }
 }
 
-/** Внутренняя форма команды (компилятор пишет эти поля). */
+/** Internal command shape (the compiler writes these fields). */
 interface RichWgpuCommand extends WgpuCommand {
   readonly pipelineId: number
   readonly wgsl: string
@@ -94,7 +94,7 @@ interface RichWgpuCommand extends WgpuCommand {
   readonly textureIds: readonly number[]
   readonly sliceOffset: number
   readonly sliceBytes: number
-  /** Фактические байты юниформов (аплоад без хвостовой набивки среза). */
+  /** Actual uniform bytes (upload without the slice's trailing padding). */
   readonly uniformBytes?: number
   needsUpload: boolean
   pipelineReady: boolean

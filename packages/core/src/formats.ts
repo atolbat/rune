@@ -1,100 +1,100 @@
 /**
- * Канонический каталог форматов текстур (Task 112).
+ * Canonical texture format catalog (Task 112).
  *
- * Один словарь имён для ОБЕИХ бэкендов: имена — WebGPU-стиль (строчные,
- * 'rgba16float'), как уже принято в журнале (TextureFormat, Task 67) и в
- * caps-матрице (formatMatrix). WebGL2-таблица (packages/webgl2/src/formats.ts)
- * и WebGPU-таблица (packages/webgpu/src/formats.ts) сужают этот каталог до
- * форматов, реально поддерживаемых бэкендом, со своими GLenum/флагами.
+ * One name dictionary for BOTH backends: names are WebGPU-style (lowercase,
+ * 'rgba16float'), as already used in the journal (TextureFormat, Task 67) and in the
+ * caps matrix (formatMatrix). The WebGL2 table (packages/webgl2/src/formats.ts)
+ * and the WebGPU table (packages/webgpu/src/formats.ts) narrow this catalog down to
+ * the formats actually supported by the backend, with their own GLenum/flags.
  *
- * Источники (сверено по первоисточникам, не по памяти):
- *  - OpenGL ES 3.0.6 spec, Table 3.2 (валидные комбинации format/type/
+ * Sources (checked against primary sources, not from memory):
+ *  - OpenGL ES 3.0.6 spec, Table 3.2 (valid format/type/
  *    internalformat), Table 3.13 (color-renderable / texture-filterable),
- *    Table 3.19 (compressed ETC2/EAC) — извлечено из PDF реестра Khronos.
+ *    Table 3.19 (compressed ETC2/EAC) — extracted from the Khronos registry PDF.
  *  - WebGL EXT_color_buffer_float: renderable = R16F, RG16F, RGBA16F, R32F,
- *    RG32F, RGBA32F, R11F_G11F_B10F (RGB16F — НЕ renderable).
+ *    RG32F, RGBA32F, R11F_G11F_B10F (RGB16F — NOT renderable).
  *  - WebGL EXT_color_buffer_half_float (WebGL2): renderable = RGBA16F,
- *    RG16F, R16F (RGB16F — НЕ renderable).
- *  - WebGL2/ES 3.0: 32F форматы НЕ texture-filterable (линейная фильтрация —
+ *    RG16F, R16F (RGB16F — NOT renderable).
+ *  - WebGL2/ES 3.0: 32F formats are NOT texture-filterable (linear filtering —
  *    OES_texture_float_linear); 16F — filterable core.
- *  - WebGPU spec (W3C TR): таблицы plain/depth/packed форматов + фичи
+ *  - WebGPU spec (W3C TR): plain/depth/packed format tables + features
  *    texture-compression-bc/etc2/astc, float32-filterable, float32-blendable,
  *    bgra8unorm-storage, rg11b10ufloat-renderable, texture-formats-tier1/2.
  *
- * Легаси-алиасы (Task 67 GL-фасада): 'rgba8' → 'rgba8unorm',
+ * Legacy aliases (Task 67 GL facade): 'rgba8' → 'rgba8unorm',
  * 'rgba16f' → 'rgba16float', 'rgba32f' → 'rgba32float'.
  */
 
-// ─── Типы каталога ───────────────────────────────────────────────────────────
+// ─── Catalog types ───────────────────────────────────────────────────────────
 
-/** Семейство форматов — для семейной Negotiation (досье §11.1:
- *  «Компрессия текстур … caps.pickFormat — семейная Negotiation»). */
+/** Format family — for family Negotiation (dossier §11.1:
+ *  "Texture compression … caps.pickFormat — family Negotiation"). */
 export type TextureFormatFamily =
   | 'uncompressed'
   | 'bc1' | 'bc2' | 'bc3' | 'bc4' | 'bc5' | 'bc6h' | 'bc7'
   | 'etc2' | 'eac'
   | 'astc'
 
-/** Класс данных формата. */
+/** Format data class. */
 export type TextureFormatKind = 'color' | 'depth' | 'stencil' | 'depth-stencil'
 
-/** Числовая интерпретация компонент (влияет на фильтрацию и блендинг). */
+/** Numeric interpretation of components (affects filtering and blending). */
 export type TextureFormatNumeric =
   | 'unorm'      // unsigned normalized [0,1]
   | 'snorm'      // signed normalized [-1,1]
   | 'float'      // float16/float32/packed-float
-  | 'uint'       // unsigned integer (не фильтруется)
-  | 'sint'       // signed integer (не фильтруется)
+  | 'uint'       // unsigned integer (not filterable)
+  | 'sint'       // signed integer (not filterable)
   | 'ufloat'     // bc6h-rgb-ufloat (unsigned float BC6H)
 
-/** Тип сэмплирования шейдера (единая номенклатура WebGPU sampleType). */
+/** Shader sampling type (unified nomenclature of WebGPU sampleType). */
 export type TextureFormatSampleType =
   | 'float' | 'unfilterable-float' | 'uint' | 'sint' | 'depth'
 
-/** Статические (бэкенд-независимые) свойства формата. */
+/** Static (backend-independent) format properties. */
 export interface TextureFormatInfo {
-  /** Байты на тексель для НЕсжатых форматов; для сжатых — 0
-   *  (используйте blockBytes / blockWidth / blockHeight). */
+  /** Bytes per texel for UNcompressed formats; for compressed — 0
+   *  (use blockBytes / blockWidth / blockHeight). */
   readonly texelBytes: number
-  /** Ширина блока сжатия (текселей); 1 для несжатых. */
+  /** Compression block width (texels); 1 for uncompressed. */
   readonly blockWidth: number
-  /** Высота блока сжатия (текселей); 1 для несжатых. */
+  /** Compression block height (texels); 1 for uncompressed. */
   readonly blockHeight: number
-  /** Байты на блок сжатия; для несжатых = texelBytes. */
+  /** Bytes per compression block; for uncompressed = texelBytes. */
   readonly blockBytes: number
-  /** sRGB-декодирование при сэмплировании (гамма → линейное). */
+  /** sRGB decoding on sampling (gamma → linear). */
   readonly srgb: boolean
-  /** Класс данных. */
+  /** Data class. */
   readonly kind: TextureFormatKind
-  /** Числовая интерпретация. */
+  /** Numeric interpretation. */
   readonly numeric: TextureFormatNumeric
-  /** Число цветовых каналов (0 для depth/stencil). */
+  /** Number of color channels (0 for depth/stencil). */
   readonly channels: number
-  /** Тип сэмплирования шейдера. */
+  /** Shader sampling type. */
   readonly sampleType: TextureFormatSampleType
-  /** Семейство (переговоры семейства компрессии). */
+  /** Family (compression family negotiation). */
   readonly family: TextureFormatFamily
 }
 
-// ─── Канонический union имён ─────────────────────────────────────────────────
+// ─── Canonical name union ─────────────────────────────────────────────────
 
-/** Канонический формат текстуры (WebGPU-имена как канон).
+/** Canonical texture format (WebGPU names as the canon).
  *
- *  'canvas' — псевдо-формат: предпочтительный формат канваса WebGPU
- *  (getPreferredCanvasFormat, обычно bgra8unorm). Для WebGL2 это RGBA8.
- *  Введён Task 67; сохранён для целей рендера на канвас-совместимых
- *  поверхностях. Статические свойства — как у 4-байтового unorm RGBA. */
+ *  'canvas' — a pseudo-format: the preferred WebGPU canvas format
+ *  (getPreferredCanvasFormat, usually bgra8unorm). For WebGL2 this is RGBA8.
+ *  Introduced by Task 67; kept for rendering onto canvas-compatible
+ *  surfaces. Static properties — as for 4-byte unorm RGBA. */
 export type TextureFormatId =
-  // 8-bit на компоненту
+  // 8-bit per component
   | 'r8unorm' | 'r8snorm' | 'r8uint' | 'r8sint'
   | 'rg8unorm' | 'rg8snorm' | 'rg8uint' | 'rg8sint'
   | 'rgba8unorm' | 'rgba8unorm-srgb' | 'rgba8snorm' | 'rgba8uint' | 'rgba8sint'
   | 'bgra8unorm' | 'bgra8unorm-srgb'
-  // GL-only 8-bit (WebGPU не имеет 24-битных RGB-путей)
+  // GL-only 8-bit (WebGPU has no 24-bit RGB paths)
   | 'rgb8unorm' | 'rgb8unorm-srgb' | 'rgb8snorm' | 'rgb8uint' | 'rgb8sint'
   // GL-only legacy packed 16-bit
   | 'rgb565' | 'rgba4' | 'rgb5a1'
-  // 16-bit на компоненту
+  // 16-bit per component
   | 'r16uint' | 'r16sint' | 'r16float'
   | 'rg16uint' | 'rg16sint' | 'rg16float'
   | 'rgba16uint' | 'rgba16sint' | 'rgba16float'
@@ -102,18 +102,18 @@ export type TextureFormatId =
   | 'rgb16uint' | 'rgb16sint' | 'rgb16float'
   // WebGPU V2 (tier1): 16-bit unorm/snorm
   | 'r16unorm' | 'r16snorm' | 'rg16unorm' | 'rg16snorm' | 'rgba16unorm' | 'rgba16snorm'
-  // 32-bit на компоненту
+  // 32-bit per component
   | 'r32uint' | 'r32sint' | 'r32float'
   | 'rg32uint' | 'rg32sint' | 'rg32float'
   | 'rgba32uint' | 'rgba32sint' | 'rgba32float'
   // GL-only 32-bit RGB
   | 'rgb32uint' | 'rgb32sint' | 'rgb32float'
-  // Packed 32-bit на тексель
+  // Packed 32-bit per texel
   | 'rgb10a2uint' | 'rgb10a2unorm' | 'rg11b10ufloat' | 'rgb9e5ufloat'
   // Depth/stencil
   | 'stencil8' | 'depth16unorm' | 'depth24plus' | 'depth24plus-stencil8'
   | 'depth32float' | 'depth32float-stencil8'
-  // BC (desktop; WebGL2 — расширения S3TC/RGTC/BPTC, WebGPU — feature bc)
+  // BC (desktop; WebGL2 — S3TC/RGTC/BPTC extensions, WebGPU — feature bc)
   | 'bc1-rgba-unorm' | 'bc1-rgba-unorm-srgb'
   | 'bc2-rgba-unorm' | 'bc2-rgba-unorm-srgb'
   | 'bc3-rgba-unorm' | 'bc3-rgba-unorm-srgb'
@@ -127,7 +127,7 @@ export type TextureFormatId =
   | 'etc2-rgba8unorm' | 'etc2-rgba8unorm-srgb'
   | 'eac-r11unorm' | 'eac-r11snorm'
   | 'eac-rg11unorm' | 'eac-rg11snorm'
-  // ASTC (WebGL2 — расширение; WebGPU — feature astc)
+  // ASTC (WebGL2 — an extension; WebGPU — feature astc)
   | 'astc-4x4-unorm' | 'astc-4x4-unorm-srgb'
   | 'astc-5x4-unorm' | 'astc-5x4-unorm-srgb'
   | 'astc-5x5-unorm' | 'astc-5x5-unorm-srgb'
@@ -143,17 +143,17 @@ export type TextureFormatId =
   | 'astc-12x10-unorm' | 'astc-12x10-unorm-srgb'
   | 'astc-12x12-unorm' | 'astc-12x12-unorm-srgb'
 
-/** Полный формат текстуры: канонический id ИЛИ псевдо-формат 'canvas'. */
+/** Full texture format: canonical id OR the 'canvas' pseudo-format. */
 export type TextureFormat = TextureFormatId | 'canvas'
 
-/** Легаси-алиасы Task 67 (GL-фасад): нормализуются к каноническим id. */
+/** Task 67 legacy aliases (GL facade): normalized to canonical ids. */
 const LEGACY_ALIASES: Readonly<Record<string, TextureFormatId>> = {
   rgba8: 'rgba8unorm',
   rgba16f: 'rgba16float',
   rgba32f: 'rgba32float',
 }
 
-// ─── Таблица ─────────────────────────────────────────────────────────────────
+// ─── Table ─────────────────────────────────────────────────────────────────
 
 function unorm(channels: number, bytesPerChannel: number, srgb = false): TextureFormatInfo {
   return {
@@ -260,7 +260,7 @@ function depthFormat(kind: TextureFormatKind, texelBytes: number): TextureFormat
   }
 }
 
-/** Каталог: канонический id → статические свойства. */
+/** Catalog: canonical id → static properties. */
 export const TEXTURE_FORMATS: Readonly<Record<TextureFormatId, TextureFormatInfo>> = {
   // 8-bit
   r8unorm: unorm(1, 1), r8snorm: snorm(1, 1), r8uint: intFormat(1, 1, false), r8sint: intFormat(1, 1, true),
@@ -294,7 +294,7 @@ export const TEXTURE_FORMATS: Readonly<Record<TextureFormatId, TextureFormatInfo
   'depth24plus-stencil8': depthFormat('depth-stencil', 4),
   depth32float: depthFormat('depth', 4),
   'depth32float-stencil8': depthFormat('depth-stencil', 4),
-  // BC: блоки 4×4; DXT1/BC4/BC6H?? — bc1/bc4 = 8 байт, bc2/bc3/bc5/bc6h/bc7 = 16
+  // BC: 4×4 blocks; DXT1/BC4/BC6H?? — bc1/bc4 = 8 bytes, bc2/bc3/bc5/bc6h/bc7 = 16
   'bc1-rgba-unorm': compressed('bc1', 4, 4, 8, false, 4),
   'bc1-rgba-unorm-srgb': compressed('bc1', 4, 4, 8, true, 4),
   'bc2-rgba-unorm': compressed('bc2', 4, 4, 16, false, 4),
@@ -309,7 +309,7 @@ export const TEXTURE_FORMATS: Readonly<Record<TextureFormatId, TextureFormatInfo
   'bc6h-rgb-float': compressed('bc6h', 4, 4, 16, false, 3, 'float'),
   'bc7-rgba-unorm': compressed('bc7', 4, 4, 16, false, 4),
   'bc7-rgba-unorm-srgb': compressed('bc7', 4, 4, 16, true, 4),
-  // ETC2/EAC: блоки 4×4
+  // ETC2/EAC: 4×4 blocks
   'etc2-rgb8unorm': compressed('etc2', 4, 4, 8, false, 3),
   'etc2-rgb8unorm-srgb': compressed('etc2', 4, 4, 8, true, 3),
   'etc2-rgb8a1unorm': compressed('etc2', 4, 4, 8, false, 4),
@@ -320,7 +320,7 @@ export const TEXTURE_FORMATS: Readonly<Record<TextureFormatId, TextureFormatInfo
   'eac-r11snorm': compressed('eac', 4, 4, 8, false, 1, 'snorm'),
   'eac-rg11unorm': compressed('eac', 4, 4, 16, false, 2),
   'eac-rg11snorm': compressed('eac', 4, 4, 16, false, 2, 'snorm'),
-  // ASTC: блоки разного размера, все 16 байт
+  // ASTC: blocks of various sizes, all 16 bytes
   'astc-4x4-unorm': compressed('astc', 4, 4, 16, false, 4),
   'astc-4x4-unorm-srgb': compressed('astc', 4, 4, 16, true, 4),
   'astc-5x4-unorm': compressed('astc', 5, 4, 16, false, 4),
@@ -351,19 +351,19 @@ export const TEXTURE_FORMATS: Readonly<Record<TextureFormatId, TextureFormatInfo
   'astc-12x12-unorm-srgb': compressed('astc', 12, 12, 16, true, 4),
 }
 
-// ─── Запросы ─────────────────────────────────────────────────────────────────
+// ─── Queries ─────────────────────────────────────────────────────────────────
 
-/** Свойства канонического формата. 'canvas' — как rgba8unorm (4 байта,
- *  unorm; фактический формат канваса WebGPU — bgra8unorm, но для расчёта
- *  размеров/памяти 4 байта верны на обоих бэкендах). Неизвестное имя —
- *  undefined (честно, без дефолта). */
+/** Canonical format properties. 'canvas' — same as rgba8unorm (4 bytes,
+ *  unorm; the actual WebGPU canvas format is bgra8unorm, but for size/memory
+ *  calculations 4 bytes are correct on both backends). An unknown name —
+ *  undefined (honest, no default). */
 export function textureFormatInfo(format: TextureFormat): TextureFormatInfo | undefined {
   if (format === 'canvas') return TEXTURE_FORMATS.rgba8unorm
   return TEXTURE_FORMATS[format as TextureFormatId]
 }
 
-/** Нормализация имени: легаси-алиасы Task 67 → канонический id.
- *  'canvas' и канонические имена проходят как есть. Неизвестное — undefined. */
+/** Name normalization: Task 67 legacy aliases → canonical id.
+ *  'canvas' and canonical names pass through as is. Unknown — undefined. */
 export function normalizeTextureFormat(name: string): TextureFormat | undefined {
   const legacy = LEGACY_ALIASES[name]
   if (legacy !== undefined) return legacy
@@ -372,20 +372,20 @@ export function normalizeTextureFormat(name: string): TextureFormat | undefined 
   return undefined
 }
 
-/** Сжатый (блочный) формат? */
+/** Compressed (block) format? */
 export function isCompressedTextureFormat(format: TextureFormat): boolean {
   const info = textureFormatInfo(format)
   return info !== undefined && info.family !== 'uncompressed'
 }
 
-/** Семейство формата. */
+/** Format family. */
 export function textureFormatFamily(format: TextureFormat): TextureFormatFamily | undefined {
   return textureFormatInfo(format)?.family
 }
 
-/** Байты на пиксель (Task 67, расширен Task 112 на весь каталог).
- *  Для сжатых форматов — СРЕДНЕЕ по блоку (blockBytes / (bw·bh)): оценка
- *  памяти; точный размер загрузки считайте через textureCompressedSize().
+/** Bytes per pixel (Task 67, extended by Task 112 to the whole catalog).
+ *  For compressed formats — the per-block AVERAGE (blockBytes / (bw·bh)): a memory
+ *  estimate; compute the exact upload size via textureCompressedSize().
  *  'canvas'/undefined — 4 (RGBA8/BGRA8). */
 export function textureFormatBytesPerPixel(format?: TextureFormat): number {
   if (format === undefined) return 4
@@ -397,8 +397,8 @@ export function textureFormatBytesPerPixel(format?: TextureFormat): number {
   return info.texelBytes
 }
 
-/** Размер сжатых данных региона w×h для блочного формата:
- *  ceil(w/bw)·ceil(h/bh)·blockBytes байт. Для несжатых — w·h·texelBytes. */
+/** Compressed data size of a w×h region for a block format:
+ *  ceil(w/bw)·ceil(h/bh)·blockBytes bytes. For uncompressed — w·h·texelBytes. */
 export function textureDataSize(format: TextureFormat, width: number, height: number): number {
   const info = textureFormatInfo(format)
   if (info === undefined) return width * height * 4
@@ -410,18 +410,18 @@ export function textureDataSize(format: TextureFormat, width: number, height: nu
   return width * height * info.texelBytes
 }
 
-/** Список всех канонических id (порядок объявления). */
+/** List of all canonical ids (declaration order). */
 export const TEXTURE_FORMAT_IDS: readonly TextureFormatId[] = Object.keys(TEXTURE_FORMATS) as TextureFormatId[]
 
-/** Семейная Negotiation (досье §11.1 «caps.pickFormat — семейная
- *  Negotiation»): первый ДОСТУПНЫЙ формат из списка предпочтений.
+/** Family Negotiation (dossier §11.1 "caps.pickFormat — family
+ *  Negotiation"): the first AVAILABLE format from the preference list.
  *
- *  available — колбэк фактической доступности на бэкенде (caps-матрица или
- *  format-таблица пакета). Возвращает undefined, если ничего не доступно —
- *  вызывающий решает, фейлиться или брать несжатый fallback (честность
- *  Контракта 5: подмены здесь НЕТ).
+ *  available — a callback for actual backend availability (the caps matrix or the
+ *  package's format table). Returns undefined if nothing is available —
+ *  the caller decides whether to fail or take an uncompressed fallback (Contract 5
+ *  honesty: there is NO substitution here).
  *
- *  Пример: pickTextureFormat(['astc-8x8-unorm','bc7-rgba-unorm',
+ *  Example: pickTextureFormat(['astc-8x8-unorm','bc7-rgba-unorm',
  *  'etc2-rgba8unorm'], f => caps.format(f,'sampled') !== 'none'). */
 export function pickTextureFormat(
   preferences: readonly TextureFormat[],

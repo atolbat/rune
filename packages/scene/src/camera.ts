@@ -1,14 +1,14 @@
 /**
- * camera.ts — камера сцены (Task 81).
+ * camera.ts — the scene camera (Task 81).
  *
- * Камера — НЕ узел сцены: она владеет собственными view/projection/VP и
- * нормированными плоскостями фрустума. Типичный сценарий — «камера на
- * узле»: main каждый кадр берёт world слота узла и вызывает
- * setViewFromWorld (быстрое аффинное обращение) — родительские цепочки
- * камер бесплатны, потому что мир узла уже посчитан сценой.
+ * The camera is NOT a scene node: it owns its own view/projection/VP and
+ * normalized frustum planes. The typical scenario is a "camera on a
+ * node": every frame main takes the node slot's world and calls
+ * setViewFromWorld (a fast affine inversion) — parent chains of cameras
+ * are free because the node's world is already computed by the scene.
  *
- * Все сеттеры сразу пересчитывают VP и плоскости — камера меняется раз
- * в кадр, дешевле не копить грязь.
+ * All setters immediately recompute VP and planes — the camera changes once
+ * per frame, it is not worth accumulating dirt.
  */
 import {
   mat4InvertAffine,
@@ -19,42 +19,42 @@ import {
 } from '@rune/math'
 import { extractFrustumPlanes } from './frustum.ts'
 
-/** Публичный интерфейс камеры. */
+/** The public camera interface. */
 export interface Camera {
-  /** Видовая матрица (мир → камера), колонко-мажор. */
+  /** The view matrix (world → camera), column-major. */
   readonly view: Float32Array
-  /** Проекция (камера → клип), колонко-мажор. */
+  /** The projection (camera → clip), column-major. */
   readonly projection: Float32Array
-  /** view · projection, колонко-мажор. */
+  /** view · projection, column-major. */
   readonly viewProjection: Float32Array
-  /** 6 нормированных плоскостей фрустума (L,R,B,T,N,F). */
+  /** 6 normalized frustum planes (L,R,B,T,N,F). */
   readonly planes: Float32Array
 
-  /** Перспектива (fovy рад, aspect = w/h). */
+  /** Perspective (fovy in radians, aspect = w/h). */
   setPerspective(fovy: number, aspect: number, near: number, far: number): Camera
-  /** Ортография. */
+  /** Orthographic. */
   setOrtho(left: number, right: number, bottom: number, top: number, near: number, far: number): Camera
   /**
-   * Наклонная ближняя плоскость (Lengyel, «Oblique View Frustum Depth
-   * Projection and Clipping»): ближняя плоскость фрустума заменяется
-   * мировой плоскостью (nx, ny, nz, d) — остаётся полупространство
-   * n·x + d ≥ 0. Классика планарных зеркал/воды: всё «под» плоскостью
-   * клипается ближней плоскостью, глубина остаётся корректной.
+   * Oblique near plane (Lengyel, "Oblique View Frustum Depth
+   * Projection and Clipping"): the frustum's near plane is replaced with
+   * a world plane (nx, ny, nz, d) — the half-space
+   * n·x + d ≥ 0 remains. A classic of planar mirrors/water: everything "under" the plane
+   * is clipped by the near plane, the depth stays correct.
    *
-   * ПРЕДУПРЕЖДЕНИЕ: точность буфера глубины снижается (диапазон [−1,1]
-   * сжимается в [−1,1] относительно наклонного объёма) — для зеркальных
-   * камер это приемлемо. Вызывать ПОСЛЕ setPerspective/setOrtho и
-   * setView* — плоскость преобразуется текущей видовой матрицей.
+   * WARNING: depth-buffer precision degrades (the range [−1,1]
+   * is squeezed into [−1,1] relative to the oblique volume) — for mirror
+   * cameras this is acceptable. Call AFTER setPerspective/setOrtho and
+   * setView* — the plane is transformed by the current view matrix.
    */
   setObliqueClipPlane(plane: readonly [number, number, number, number]): Camera
   /**
-   * Пост-умножение проекции слева (P' = m · P) с пересчётом VP и плоскостей.
-   * Назначение — конвенции бэкендов: WebGPU/D3D ждут NDC z ∈ [0,1],
-   * GL-матрицы дают [-1,1]; ремап-матрица z' = (z+w)/2 чинит клип
-   * (и наклонную плоскость тоже) на WebGPU-пути.
+   * Post-multiplication of the projection from the left (P' = m · P) with VP and plane recomputation.
+   * The purpose is backend conventions: WebGPU/D3D expect NDC z ∈ [0,1],
+   * GL matrices give [-1,1]; the z' = (z+w)/2 remap matrix fixes clipping
+   * (and the oblique plane too) on the WebGPU path.
    */
   postMultiplyProjection(m: ArrayLike<number>): Camera
-  /** Вид из мирового трансформа узла (аф. обращение). */
+  /** The view from a node's world transform (an affine inversion). */
   setViewFromWorld(world: ArrayLike<number>): Camera
   /** LookAt (eye → center, up). */
   setViewLookAt(
@@ -67,7 +67,7 @@ export interface Camera {
 const tmpInverse = new Float32Array(16)
 const tmpProjLeft = new Float32Array(16)
 
-/** Создаёт камеру (по умолчанию identity view + перспектива 60°/1/0.1/100). */
+/** Creates a camera (identity view + 60°/1/0.1/100 perspective by default). */
 export function createCamera(): Camera {
   const view = new Float32Array(16)
   const projection = new Float32Array(16)
@@ -102,8 +102,8 @@ export function createCamera(): Camera {
       return camera
     },
     postMultiplyProjection(m) {
-      // P' = m · P (m слева): копии в скретчи — mat4Multiply требует
-      // Float32Array и не любит совпадение out с входом.
+      // P' = m · P (m on the left): copies into scratches — mat4Multiply
+      // requires Float32Array and dislikes out coinciding with an input.
       for (let i = 0; i < 16; i++) tmpProjLeft[i] = m[i]!
       for (let i = 0; i < 16; i++) tmpInverse[i] = projection[i]
       mat4Multiply(projection, tmpProjLeft, tmpInverse)
@@ -127,23 +127,23 @@ export function createCamera(): Camera {
 }
 
 /**
- * Наклонная ближняя плоскость (Lengyel). Модифицирует ПРОЕКЦИЮ in-place:
- * z-строка P (колонко-мажорные индексы 2, 6, 10, 14) заменяется так,
- * чтобы ближняя плоскость фрустума совпала с мировой плоскостью
- * (nx, ny, nz, d) (видимым остаётся полупространство n·x + d ≥ 0).
+ * Oblique near plane (Lengyel). Modifies the PROJECTION in-place:
+ * the z-row of P (column-major indices 2, 6, 10, 14) is replaced so
+ * that the frustum's near plane coincides with the world plane
+ * (nx, ny, nz, d) (the half-space n·x + d ≥ 0 remains visible).
  *
- * Пошагово:
- *   1. Плоскость → видовое пространство: x_view = R·(x_world − e) для
- *      rigid view ⇒ n' = R·n, d' = d − n'·t, где t = перенос вида
- *      (−R·e в колонках 12..14).
- *   2. Стандартный вывод Ленгеля: q — точка на дальней плоскости,
- *      «зеркальная» пересечению плоскости с главной диагональю; новый
- *      z-столбец = плоскость·(2/dot(plane, q)); m[10] += 1 сохраняет
- *      дальнюю плоскость.
+ * Step by step:
+ *   1. The plane → view space: x_view = R·(x_world − e) for
+ *      a rigid view ⇒ n' = R·n, d' = d − n'·t, where t is the view translation
+ *      (−R·e in columns 12..14).
+ *   2. The standard Lengyel derivation: q — a point on the far plane,
+ *      "mirrored" to the intersection of the plane with the main diagonal; the new
+ *      z-column = plane·(2/dot(plane, q)); m[10] += 1 preserves
+ *      the far plane.
  *
- * Контракт: view — rigid (lookAt/fromWorld), projection — GL-конвенция
- * (z_ndc ∈ [−1, 1], m[11] = −1). Для WebGPU добавьте пост-ремап z
- * (postMultiplyProjection), клип по плоскости сохранится.
+ * Contract: view — rigid (lookAt/fromWorld), projection — GL convention
+ * (z_ndc ∈ [−1, 1], m[11] = −1). For WebGPU add the z post-remap
+ * (postMultiplyProjection), the clipping by the plane will survive.
  */
 export function applyObliqueClipPlane(
   projection: Float32Array,
@@ -152,33 +152,33 @@ export function applyObliqueClipPlane(
 ): void {
   const [nx, ny, nz, d] = plane
   const len = Math.hypot(nx, ny, nz)
-  if (len < 1e-9) throw new Error('scene: нулевая нормаль плоскости клипа')
-  // Нормализация (плоскость может приходить ненормированной).
+  if (len < 1e-9) throw new Error('scene: zero normal of the clip plane')
+  // Normalization (the plane may arrive unnormalized).
   const a = nx / len, b = ny / len, c = nz / len, dd = d / len
 
-  // Видовое пространство: n' = R·n (строки 3×3 вида), t = видовой перенос.
+  // View space: n' = R·n (the 3×3 rows of the view), t = the view translation.
   const tx = view[12], ty = view[13], tz = view[14]
   const va = view[0] * a + view[4] * b + view[8] * c
   const vb = view[1] * a + view[5] * b + view[9] * c
   const vc = view[2] * a + view[6] * b + view[10] * c
   const vd = dd - (va * tx + vb * ty + vc * tz)
 
-  // Знак (Ленгель): камера обязана лежать на ОТРИЦАТЕЛЬНОЙ стороне
-  // плоскости (видимое полупространство — положительное). В видовом
-  // пространстве камера — начало координат: p·(0,0,0,1) = d_view.
-  // Плоскость «навстречу» (d_view > 0) — флип; вырожденность (d_view = 0,
-  // камера на плоскости) не лечится флипом — оставляем как есть.
+  // The sign (Lengyel): the camera must lie on the NEGATIVE side
+  // of the plane (the visible half-space is the positive one). In view
+  // space the camera is the origin: p·(0,0,0,1) = d_view.
+  // A plane "facing" us (d_view > 0) — flip; degeneracy (d_view = 0,
+  // the camera on the plane) is not cured by a flip — leave it as is.
   let pa = va, pb = vb, pc = vc, pd = vd
   if (pd > 0) { pa = -pa; pb = -pb; pc = -pc; pd = -pd }
 
   const p = projection
-  // q — вершина «дальнего угла», отвечающего знакам плоскости.
+  // q — the "far corner" vertex answering the plane's signs.
   const qx = (Math.sign(pa) + p[8]) / p[0]
   const qy = (Math.sign(pb) + p[9]) / p[5]
   const qz = -1
   const qw = (1 + p[10]) / p[14]
   const denom = pa * qx + pb * qy + pc * qz + pd * qw
-  if (Math.abs(denom) < 1e-12) throw new Error('scene: наклонная плоскость вырождена (параллельна взгляду)')
+  if (Math.abs(denom) < 1e-12) throw new Error('scene: oblique plane is degenerate (parallel to the view direction)')
   const s = 2 / denom
   p[2] = pa * s
   p[6] = pb * s

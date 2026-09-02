@@ -1,12 +1,12 @@
 /**
- * Расширения mat4 (Task 81, подготовка @rune/scene; восстановлено после
- * утраты оригинала — контракт взят из tests/mat4Ext.test.ts).
+ * mat4 extensions (Task 81, preparing @rune/scene; restored after the
+ * original was lost — the contract is taken from tests/mat4Ext.test.ts).
  *
- * Все функции пишут в `out` (column-major, как gl-matrix) и возвращают его.
- * Эталоны тестов: gl-matrix-совместимые значения + геометрические инварианты.
+ * All functions write into `out` (column-major, like gl-matrix) and return it.
+ * Test reference values: gl-matrix-compatible values + geometric invariants.
  */
 
-/** A·B, но с допущением аффинности нижней строки (0,0,0,1) — без перемножения 4-й строки/столбца. Алиасинг-safe: значения a кэшируются до записи в out. */
+/** A·B, but assuming an affine bottom row (0,0,0,1) — without multiplying the 4th row/column. Aliasing-safe: a's values are cached before writing into out. */
 export function mat4MultiplyAffine(
   out: Float32Array,
   a: Float32Array,
@@ -34,8 +34,8 @@ export function mat4MultiplyAffine(
 }
 
 /**
- * Обращение ОБЩЕЙ матрицы 4×4 (адъюнкатный метод, как gl-matrix invert).
- * Вырожденная (det ~ 0) → в out пишется identity (graceful: не NaN, не throw).
+ * Inversion of a GENERAL 4×4 matrix (the adjugate method, like gl-matrix invert).
+ * Degenerate (det ~ 0) → identity is written into out (graceful: no NaN, no throw).
  */
 export function mat4Invert(out: Float32Array, m: Float32Array): Float32Array {
   const a00 = m[0]!, a01 = m[1]!, a02 = m[2]!, a03 = m[3]!
@@ -58,7 +58,7 @@ export function mat4Invert(out: Float32Array, m: Float32Array): Float32Array {
 
   let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06
   if (!det) {
-    // вырожденная: identity-фолбэк (контракт «не NaN, не throw»)
+    // degenerate: identity fallback (the "no NaN, no throw" contract)
     out.fill(0)
     out[0] = 1; out[5] = 1; out[10] = 1; out[15] = 1
     return out
@@ -85,11 +85,11 @@ export function mat4Invert(out: Float32Array, m: Float32Array): Float32Array {
 }
 
 /**
- * Обращение АФФИННОЙ матрицы (TRS: поворот+масштаб+перенос, нижняя строка 0,0,0,1).
- * Быстрее общего обращения. Вырожденная → identity-фолбэк (контракт mat4Invert).
+ * Inversion of an AFFINE matrix (TRS: rotation+scale+translation, bottom row 0,0,0,1).
+ * Faster than the general inversion. Degenerate → identity fallback (the mat4Invert contract).
  */
 export function mat4InvertAffine(out: Float32Array, m: Float32Array): Float32Array {
-  // column-major: a[row][col] живёт в m[col*4+row]
+  // column-major: a[row][col] lives at m[col*4+row]
   const a00 = m[0]!, a10 = m[1]!, a20 = m[2]!
   const a01 = m[4]!, a11 = m[5]!, a21 = m[6]!
   const a02 = m[8]!, a12 = m[9]!, a22 = m[10]!
@@ -104,7 +104,7 @@ export function mat4InvertAffine(out: Float32Array, m: Float32Array): Float32Arr
   }
   const inv = 1 / det
 
-  // обратная 3×3 (row-major inv[row][col])
+  // inverse 3×3 (row-major inv[row][col])
   const i00 = (a11 * a22 - a12 * a21) * inv
   const i01 = (a02 * a21 - a01 * a22) * inv
   const i02 = (a01 * a12 - a02 * a11) * inv
@@ -115,12 +115,12 @@ export function mat4InvertAffine(out: Float32Array, m: Float32Array): Float32Arr
   const i21 = (a01 * a20 - a00 * a21) * inv
   const i22 = (a00 * a11 - a01 * a10) * inv
 
-  // column-major раскладка: out[col*4+row] = inv[row][col]
+  // column-major layout: out[col*4+row] = inv[row][col]
   out[0] = i00; out[1] = i10; out[2] = i20; out[3] = 0
   out[4] = i01; out[5] = i11; out[6] = i21; out[7] = 0
   out[8] = i02; out[9] = i12; out[10] = i22; out[11] = 0
 
-  // перенос: −R⁻¹·t
+  // translation: −R⁻¹·t
   const tx = m[12]!, ty = m[13]!, tz = m[14]!
   out[12] = -(i00 * tx + i01 * ty + i02 * tz)
   out[13] = -(i10 * tx + i11 * ty + i12 * tz)
@@ -129,14 +129,14 @@ export function mat4InvertAffine(out: Float32Array, m: Float32Array): Float32Arr
   return out
 }
 
-/** Матрица вида «камера смотрит из eye в center, up — вертикаль» (gl-matrix lookAt). */
+/** View matrix "camera looks from eye toward center, up is vertical" (gl-matrix lookAt). */
 export function mat4LookAt(
   out: Float32Array,
   eyeX: number, eyeY: number, eyeZ: number,
   centerX: number, centerY: number, centerZ: number,
   upX: number, upY: number, upZ: number,
 ): Float32Array {
-  // z = normalize(eye − center) — камера смотрит против −Z
+  // z = normalize(eye − center) — the camera looks along −Z
   let zx = eyeX - centerX, zy = eyeY - centerY, zz = eyeZ - centerZ
   let len = Math.hypot(zx, zy, zz) || 1
   zx /= len; zy /= len; zz /= len
@@ -161,7 +161,7 @@ export function mat4LookAt(
   return out
 }
 
-/** Ортографическая проекция (gl-matrix ortho): right/left по X, top/bottom по Y. */
+/** Orthographic projection (gl-matrix ortho): right/left along X, top/bottom along Y. */
 export function mat4Ortho(
   out: Float32Array,
   left: number, right: number, bottom: number, top: number,
@@ -185,7 +185,7 @@ export function mat4Ortho(
   return out
 }
 
-/** Композиция TRS: кватернион (x,y,z,w) развёрнут, затем перенос и масштаб. */
+/** TRS composition: the quaternion (x,y,z,w) is expanded, then translation and scale. */
 export function mat4FromQuatPosScale(
   out: Float32Array,
   x: number, y: number, z: number, w: number,

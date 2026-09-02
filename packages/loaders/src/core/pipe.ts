@@ -1,16 +1,17 @@
 /**
- * core/pipe.ts — пайпы чанков: AsyncIterable-обвязка над ReadableStream,
- * накопление в буфер с прогрессом, композиция трансформов, gzip.
+ * core/pipe.ts — chunk pipes: an AsyncIterable wrapper over ReadableStream,
+ * accumulation into a buffer with progress, transform composition, gzip.
  *
- * Ключевая идея «загрузка и парсинг параллельны»: fetch отдаёт поток,
- * трансформы маппят чанки, стриминговый парсер ест их по ходу. Менеджер
- * строит цепочку и НЕ ждёт полного буфера, если парсер умеет в стриминг.
+ * The key idea is "download and parse in parallel": fetch yields a stream,
+ * transforms map the chunks, a streaming parser eats them as they come. The
+ * manager builds the chain and does NOT wait for a full buffer when the
+ * parser supports streaming.
  */
 
 import type { StreamTransform } from './types.ts'
 import { GrowableBytes } from './util.ts'
 
-/** ReadableStream → AsyncIterable (reader-цикл, без async-iterator-API). */
+/** ReadableStream → AsyncIterable (a reader loop, without the async-iterator API). */
 export function streamToAsyncIterable(stream: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> {
   return {
     [Symbol.asyncIterator]() {
@@ -31,15 +32,15 @@ export function streamToAsyncIterable(stream: ReadableStream<Uint8Array>): Async
 }
 
 export interface ReadAllOptions {
-  /** Общий размер, если известен — для доли прогресса. */
+  /** Total size if known — for the progress fraction. */
   totalBytes?: number | null
-  /** Вызывается на каждом чанке (менеджер сам троттлит). */
+  /** Called on every chunk (the manager throttles itself). */
   onChunk?: (receivedBytes: number, chunk: Uint8Array) => void
-  /** Стартовая ёмкость (хинт от expectedBytes). */
+  /** Initial capacity (a hint from expectedBytes). */
   initialCapacity?: number
 }
 
-/** Выпить поток целиком в один Uint8Array с колбэком прогресса. */
+/** Consume the whole stream into a single Uint8Array with a progress callback. */
 export async function readAllBytes(
   chunks: AsyncIterable<Uint8Array>,
   options: ReadAllOptions = {},
@@ -52,7 +53,7 @@ export async function readAllBytes(
   return acc.take()
 }
 
-/** Слить несколько трансформов в один (порядок: данные идут слева направо). */
+/** Merge several transforms into one (order: data flows left to right). */
 export function composeTransforms(...transforms: StreamTransform[]): StreamTransform | null {
   const list = transforms.filter(t => t !== null && t !== undefined)
   if (list.length === 0) return null
@@ -66,11 +67,11 @@ export function composeTransforms(...transforms: StreamTransform[]): StreamTrans
   return composed as StreamTransform
 }
 
-/** gzip-чанки → распакованные чанки (DecompressionStream). */
+/** gzip chunks → decompressed chunks (DecompressionStream). */
 export function gunzipTransform(): StreamTransform {
   const transform = (chunks: AsyncIterable<Uint8Array>): AsyncIterable<Uint8Array> => {
-    // Обернуть чанки в один поток, прогнать через DecompressionStream,
-    // снова выдать чанками. Реализация через Response — надёжна и в Bun.
+    // Wrap the chunks in a single stream, run them through DecompressionStream,
+    // emit chunks again. The Response-based implementation is reliable in Bun too.
     async function *piped(): AsyncGenerator<Uint8Array> {
       const upstream = new ReadableStream<Uint8Array>({
         async start(controller) {
@@ -94,7 +95,7 @@ export function gunzipTransform(): StreamTransform {
   return transform as StreamTransform
 }
 
-/** Разбить вход на чанки фиксированного размера (для тестов/нарезки). */
+/** Split the input into fixed-size chunks (for tests/slicing). */
 export function chunkerTransform(size: number): StreamTransform {
   const transform = async function *(chunks: AsyncIterable<Uint8Array>): AsyncGenerator<Uint8Array> {
     let pending: Uint8Array | null = null
@@ -113,7 +114,7 @@ export function chunkerTransform(size: number): StreamTransform {
   return transform as unknown as StreamTransform
 }
 
-/** Конкатенация двух байтовых массивов. */
+/** Concatenation of two byte arrays. */
 export function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
   const out = new Uint8Array(a.length + b.length)
   out.set(a, 0)
@@ -121,7 +122,7 @@ export function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
   return out
 }
 
-/** AsyncIterable из статических байтов (для тестов и прямых пайпов). */
+/** AsyncIterable from static bytes (for tests and direct pipes). */
 export function bytesToAsyncIterable(bytes: Uint8Array, chunkSize = 1 << 16): AsyncIterable<Uint8Array> {
   async function *gen(): AsyncGenerator<Uint8Array> {
     for (let i = 0; i < bytes.length; i += chunkSize) {

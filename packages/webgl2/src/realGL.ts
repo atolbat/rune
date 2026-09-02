@@ -1,5 +1,5 @@
-// Настоящий фасад WebGL2: компиляция шейдеров, юниформы по имени,
-// буферы атрибутов, текстуры. Один скрытый класс, ленивые кэши.
+// The real WebGL2 facade: shader compilation, uniforms by name,
+// attribute buffers, textures. One hidden class, lazy caches.
 
 import type { GLFacade, GLImageSource, GLTextureFormat } from './facade.ts'
 
@@ -8,17 +8,17 @@ interface ProgramRecord {
   readonly uniforms: Map<string, WebGLUniformLocation | null>
 }
 
-/** Пара (format, type) для загрузки пикселей в текстуру данного формата
- *  хранения (WebGL2 spec Table 3.2: combination must be compatible with
- *  the sized internal format, иначе GL_INVALID_OPERATION — молча).
- *  RGBA16F принимает (RGBA, HALF_FLOAT) и (RGBA, FLOAT); RGBA32F — (RGBA, FLOAT). */
+/** The (format, type) pair for uploading pixels into a texture of a given
+ *  storage format (WebGL2 spec Table 3.2: the combination must be compatible with
+ *  the sized internal format, otherwise GL_INVALID_OPERATION — silently).
+ *  RGBA16F accepts (RGBA, HALF_FLOAT) and (RGBA, FLOAT); RGBA32F — (RGBA, FLOAT). */
 interface FormatInfo {
   readonly internalFormat: number
   readonly uploadFormat: number
   readonly uploadType: number
 }
 
-/** Спек-фиксированные GLenum (не зависят от контекста, доступны в mock-GL).
+/** Spec-fixed GLenums (context-independent, available in mock-GL).
  *  RGBA8=0x8058, RGBA16F=0x881A, RGBA32F=0x8816, RGBA=0x1908,
  *  UNSIGNED_BYTE=0x1401, HALF_FLOAT=0x140B, FLOAT=0x1406,
  *  NEAREST=0x2600, LINEAR=0x2601, NEAREST_MIPMAP_NEAREST=0x2700,
@@ -37,7 +37,7 @@ const ENUM = {
   LINEAR_MIPMAP_LINEAR: 0x2703,
 } as const
 
-/** internalFormat + (format, type) загрузки по GLTextureFormat (Task 67). */
+/** internalFormat + the upload (format, type) by GLTextureFormat (Task 67). */
 function formatInfo(format: GLTextureFormat): FormatInfo {
   switch (format) {
     case 'rgba16f':
@@ -64,40 +64,40 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
   const buffers = new Map<number, WebGLBuffer>()
   const textures = new Map<number, WebGLTexture>()
   const targets = new Map<number, TargetRecord>()
-  // Per-texture metadata: ключ — textureId. Содержит:
-  //   mipLevels: кол-во уровней в цепи (1 = нет цепи, N = texStorage2D с levels=N)
-  //   maxLoadedLevel: индекс максимального загруженного уровня (для progressive
-  //   streaming — поднимаем TEXTURE_MAX_LEVEL до этого значения, чтобы
-  //   LINEAR_MIPMAP_LINEAR не пытался сэмплить незагруженные мипы → чёрный кадр)
-  //   maxAnisotropy: значение, установленное через TEXTURE_MAX_ANISOTROPY_EXT
-  //   (для расширения EXT_texture_filter_anisotropic).
-  //   format: формат хранения (Task 67 HDR) — из него выводится пара
-  //   (format, type) загрузок, если вызывающий не передал явные GLenum.
+  // Per-texture metadata: keyed by textureId. Contains:
+  //   mipLevels: the number of levels in the chain (1 = no chain, N = texStorage2D with levels=N)
+  //   maxLoadedLevel: the index of the highest uploaded level (for progressive
+  //   streaming — we raise TEXTURE_MAX_LEVEL to this value so that
+  //   LINEAR_MIPMAP_LINEAR does not try to sample unloaded mips → a black frame)
+  //   maxAnisotropy: the value set via TEXTURE_MAX_ANISOTROPY_EXT
+  //   (for the EXT_texture_filter_anisotropic extension).
+  //   format: the storage format (Task 67 HDR) — the upload (format, type) pair
+  //   is derived from it unless the caller passes explicit GLenums.
   const textureMeta = new Map<number, {
     mipLevels: number
     maxLoadedLevel: number
     maxAnisotropy: number
     format: GLTextureFormat
   }>()
-  // Sub-mip views (Task 56): ключ — viewId (≥1M, disjoint namespace с textureId).
-  // Значение — только метаданные диапазона мипов (baseMipLevel + maxMipLevel).
-  // WebGL2 не имеет настоящего GPUTextureView, эмулируем через TEXTURE_BASE_LEVEL
-  // и TEXTURE_MAX_LEVEL при bindTexture. Если view для текстуры удалён через
-  // deleteTexture — все его sub-views тоже сносятся (см. deleteTexture cleanup).
+  // Sub-mip views (Task 56): keyed by viewId (≥1M, a disjoint namespace with textureId).
+  // The value is only mip-range metadata (baseMipLevel + maxMipLevel).
+  // WebGL2 has no real GPUTextureView; we emulate it via TEXTURE_BASE_LEVEL
+  // and TEXTURE_MAX_LEVEL on bindTexture. If a texture is deleted via
+  // deleteTexture — all of its sub-views are torn down too (see the deleteTexture cleanup).
   const textureViews = new Map<number, {
     textureId: number
     baseMipLevel: number
     maxMipLevel: number
   }>()
   let nextTextureViewId = 1_000_000
-  // EXT_texture_filter_anisotropic — пробуем при создании контекста. Сохраняем
-  // в замыкании, используем в createTexture для maxAnisotropy на текстурах с
-  // mip-chain (LINEAR_MIPMAP_LINEAR). Без расширения caps.has('anisotropic')=false,
-  // sampler остаётся без anisotropy.
+  // EXT_texture_filter_anisotropic — probed at context creation. Kept
+  // in a closure, used in createTexture for maxAnisotropy on textures with a
+  // mip-chain (LINEAR_MIPMAP_LINEAR). Without the extension caps.has('anisotropic')=false,
+  // the sampler stays without anisotropy.
   //
-  // В mock-GL окружениях (headless-тесты без GPU) gl.getExtension может быть
-  // undefined — оборачиваем в try/catch, в этом случае anisoExt=null, расширение
-  // недоступно, maxAnisotropy на текстурах не применяется.
+  // In mock-GL environments (headless tests without a GPU) gl.getExtension may be
+  // undefined — wrapped in try/catch, in that case anisoExt=null, the extension
+  // is unavailable, maxAnisotropy is not applied to textures.
   let anisoExt: {
     TEXTURE_MAX_ANISOTROPY_EXT: number
     MAX_TEXTURE_MAX_ANISOTROPY_EXT: number
@@ -112,9 +112,9 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
   } catch {
     anisoExt = null
   }
-  // Максимально поддерживаемое драйвером значение anisotropy. Используем как
-  // default для текстур с mip-chain (если не передано maxAnisotropy в options).
-  // 1 = отключено (стандартный bilinear). 16 = максимум для desktop GPU.
+  // The maximum anisotropy value supported by the driver. Used as the
+  // default for textures with a mip-chain (if maxAnisotropy is not passed in options).
+  // 1 = disabled (plain bilinear). 16 = the maximum for desktop GPUs.
   let anisoMax = 1
   if (anisoExt !== null) {
     try {
@@ -131,14 +131,14 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
   let currentTarget = 0
   let canvasWidth = 1
   let canvasHeight = 1
-  const unitTextures = new Map<number, number>() // юнит → textureId (профилактика feedback-loop)
+  const unitTextures = new Map<number, number>() // unit → textureId (feedback-loop prevention)
 
-  // Task 67: OES_texture_float_linear — линейная фильтрация RGBA32F.
-  // Хранение/NEAREST-сэмплинг RGBA32F — core WebGL2; LINEAR — расширение
-  // (десктопы обычно да, mobile часто нет). Без него LINEAR-фильтр делает
-  // текстуру incomplete → сэмплер вернёт чёрный. Поэтому rgba32f без
-  // расширения деградирует до NEAREST (честный пиксель, не чёрный кадр).
-  // RGBA16F линейно фильтруется core — расширение не нужно.
+  // Task 67: OES_texture_float_linear — linear filtering of RGBA32F.
+  // RGBA32F storage/NEAREST sampling is core WebGL2; LINEAR is an extension
+  // (desktops usually yes, mobile often no). Without it a LINEAR filter makes the
+  // texture incomplete → the sampler returns black. Hence rgba32f without the
+  // extension degrades to NEAREST (an honest pixel, not a black frame).
+  // RGBA16F is linearly filtered by core — the extension is not needed.
   let floatLinearExt = false
   try {
     floatLinearExt = (gl as unknown as {
@@ -147,17 +147,17 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
   } catch {
     floatLinearExt = false
   }
-  /** MAG-фильтр по формату: LINEAR, если формат линейно фильтруется. */
+  /** The MAG filter by format: LINEAR if the format is linearly filterable. */
   function magFilter(format: GLTextureFormat): number {
     return format === 'rgba32f' && !floatLinearExt ? ENUM.NEAREST : ENUM.LINEAR
   }
-  /** MIN-фильтр по формату и наличию mip-цепи. */
+  /** The MIN filter by format and presence of a mip chain. */
   function minFilter(format: GLTextureFormat, mipLevels: number): number {
     const linear = !(format === 'rgba32f' && !floatLinearExt)
     if (mipLevels > 1) return linear ? ENUM.LINEAR_MIPMAP_LINEAR : ENUM.NEAREST_MIPMAP_NEAREST
     return linear ? ENUM.LINEAR : ENUM.NEAREST
   }
-  /** Пара (format, type) загрузки по формату хранения (или явным GLenum). */
+  /** The upload (format, type) pair from the storage format (or explicit GLenums). */
   function uploadPair(textureId: number, explicit?: { format?: number; type?: number }): { format: number; type: number } {
     const meta = textureMeta.get(textureId)
     const fi = meta !== undefined ? formatInfo(meta.format) : formatInfo('rgba8')
@@ -173,7 +173,7 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
     gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragment))
     gl.linkProgram(program)
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      throw new Error(`rune: линковка программы: ${gl.getProgramInfoLog(program)}`)
+      throw new Error(`rune: program linking: ${gl.getProgramInfoLog(program)}`)
     }
     const id = nextProgram++
     programs.set(id, { program, uniforms: new Map() })
@@ -182,13 +182,13 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
 
   function compile(type: number, source: string): WebGLShader {
     const shader = gl.createShader(type)
-    if (shader === null) throw new Error('rune: createShader вернул null')
+    if (shader === null) throw new Error('rune: createShader returned null')
     gl.shaderSource(shader, source)
     gl.compileShader(shader)
     if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
       const log = gl.getShaderInfoLog(shader)
       gl.deleteShader(shader)
-      throw new Error(`rune: компиляция шейдера: ${log}`)
+      throw new Error(`rune: shader compilation: ${log}`)
     }
     return shader
   }
@@ -221,17 +221,17 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
   function bindVertexBuffer(bufferId: number, location: number, size: number, stride?: number, byteOffset?: number, divisor?: number): void {
     gl.bindBuffer(gl.ARRAY_BUFFER, buffers.get(bufferId) ?? null)
     gl.enableVertexAttribArray(location)
-    // M5: интерливинг фида — stride/offset записи (default: tight 0/0).
+    // M5: feed interleaving — the record's stride/offset (default: tight 0/0).
     gl.vertexAttribPointer(location, size, gl.FLOAT, false, stride ?? 0, byteOffset ?? 0)
-    // Task 75: инстанс-шаг (квады-звёзды: одна запись фида = один инстанс).
-    // Вызываем БЕЗУСЛОВНО (и с 0) — сбрасываем делитель после инстансированных
-    // команд, иначе атрибут «залипнет» с divisor=1 для обычной геометрии.
+    // Task 75: the instance step (star quads: one feed record = one instance).
+    // Called UNCONDITIONALLY (and with 0) — resets the divisor after instanced
+    // commands, otherwise the attribute would "stick" with divisor=1 for regular geometry.
     gl.vertexAttribDivisor(location, divisor ?? 0)
   }
 
-  /** M5 (Task 73): динамическое обновление (feed dual-bind) — bufferSubData.
-   *  Хранилище уже выделено createBuffer (bufferData); здесь — только
-   *  содержимое: рендерер фида льёт грязный диапазон одним вызовом. */
+  /** M5 (Task 73): dynamic update (feed dual-bind) — bufferSubData.
+   *  The storage is already allocated by createBuffer (bufferData); here — only
+   *  the content: the feed renderer pours the dirty range in a single call. */
   function updateBuffer(bufferId: number, data: Float32Array, byteOffset = 0): void {
     gl.bindBuffer(gl.ARRAY_BUFFER, buffers.get(bufferId) ?? null)
     gl.bufferSubData(gl.ARRAY_BUFFER, byteOffset, data)
@@ -281,57 +281,57 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
     const texture = gl.createTexture()
     gl.bindTexture(gl.TEXTURE_2D, texture)
     const mipLevels = options?.mipLevels ?? 1
-    // Task 67 HDR: формат хранения — из него internalFormat аллокации и
-    // (format, type) всех последующих загрузок (см. formatInfo).
+    // Task 67 HDR: the storage format — the allocation internalFormat and
+    // the (format, type) of all subsequent uploads come from it (see formatInfo).
     const format = options?.format ?? 'rgba8'
     const fi = formatInfo(format)
     if (mipLevels > 1) {
       // Immutable storage: texStorage2D(target, levels, internalFormat, w, h).
-      // Создаёт mip-цепь за один вызов, фиксируя размер на всех уровнях.
-      // После texStorage2D нельзя вызывать texImage2D с null для создания —
-      // только texImage2D-перегрузку с source для записи пикселей.
-      // MIN_FILTER = LINEAR_MIPMAP_LINEAR: минификация выбирает mip по distance,
-      // давая классический mip-map sampling.
+      // Creates the mip chain in one call, fixing the size at all levels.
+      // After texStorage2D you cannot call texImage2D with null for creation —
+      // only the texImage2D overload with source to write pixels.
+      // MIN_FILTER = LINEAR_MIPMAP_LINEAR: minification picks a mip by distance,
+      // giving the classic mip-map sampling.
       //
-      // Progressive streaming: TEXTURE_MAX_LEVEL=0 сразу после создания, чтобы
-      // sampler использовал только level 0 (пока пустой — WebGL2 возвращает 0 или
-      // мусор, но НЕ падает). texImage2DLevel поднимает MAX_LEVEL по мере загрузки.
-      // Альтернатива (gl.generateMipmap) требует, чтобы level 0 уже был загружен.
+      // Progressive streaming: TEXTURE_MAX_LEVEL=0 right after creation, so the
+      // sampler uses only level 0 (while empty — WebGL2 returns 0 or
+      // garbage, but does NOT crash). texImage2DLevel raises MAX_LEVEL as levels load.
+      // The alternative (gl.generateMipmap) requires level 0 to be already uploaded.
       gl.texStorage2D(gl.TEXTURE_2D, mipLevels, fi.internalFormat, width, height)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minFilter(format, mipLevels))
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magFilter(format))
-      // MAX_LEVEL=0: sampler видит только level 0 (пока streaming не заполнит
-      // остальные). По умолчанию WebGL2 ставит 1000 — тогда sampling нулевых
-      // уровней даёт чёрный кадр. С MAX_LEVEL=0 используем только то, что загружено.
+      // MAX_LEVEL=0: the sampler sees only level 0 (until streaming fills in
+      // the rest). By default WebGL2 sets 1000 — then sampling of null
+      // levels yields a black frame. With MAX_LEVEL=0 we use only what is loaded.
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, 0)
     } else {
-      // Mutable storage: texImage2D с null (как и раньше). Минификация без
-      // mip-цепи → LINEAR (GLFW выбирает texel по bilinear на level=0).
-      // internalFormat/type — по формату хранения (Task 67): для RGBA16F
-      // аллокация с UNSIGNED_BYTE недопустима — пара из formatInfo.
+      // Mutable storage: texImage2D with null (as before). Minification without a
+      // mip chain → LINEAR (GLFW picks the texel bilinearly at level=0).
+      // internalFormat/type — from the storage format (Task 67): for RGBA16F
+      // an allocation with UNSIGNED_BYTE is invalid — the pair from formatInfo.
       gl.texImage2D(gl.TEXTURE_2D, 0, fi.internalFormat, width, height, 0, fi.uploadFormat, fi.uploadType, null)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minFilter(format, mipLevels))
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magFilter(format))
     }
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-    // Anisotropic filtering — только для текстур с mip-chain (mipLevels>1).
-    // На non-mip текстурах anisotropy бесполезна (MIN_FILTER=LINEAR, без
-    // межмиповой интерполяции). caps.has('anisotropic')=true iff расширение
-    // доступно. По умолчанию — максимальное значение драйвера (anisoMax,
-    // обычно 16 на desktop, 2-4 на mobile).
+    // Anisotropic filtering — only for textures with a mip chain (mipLevels>1).
+    // On non-mip textures anisotropy is useless (MIN_FILTER=LINEAR, no
+    // cross-mip interpolation). caps.has('anisotropic')=true iff the extension
+    // is available. By default — the driver's maximum value (anisoMax,
+    // usually 16 on desktop, 2-4 on mobile).
     //
     // maxAnisotropy: 1 = disabled (bilinear/trilinear), 2..maxAnisotropy = enabled.
-    // По умолчанию в этом renderer'е — anisoMax (если расширение есть), или 1
-    // если расширения нет. Пользователь может явно передать maxAnisotropy: 4
-    // для мягкой анизотропии (2x SSAA-equivalent), или maxAnisotropy: 1 для
-    // отключения на конкретной текстуре.
+    // The default in this renderer — anisoMax (if the extension exists), or 1
+    // if there is no extension. The user can explicitly pass maxAnisotropy: 4
+    // for soft anisotropy (2x SSAA-equivalent), or maxAnisotropy: 1 to
+    // disable it on a specific texture.
     let appliedAniso = 1
     if (mipLevels > 1 && anisoExt !== null) {
       const requested = options?.maxAnisotropy ?? anisoMax
-      // WebGPU/спецификация: maxAnisotropy должен быть степенью двойки (1, 2, 4, 8, 16).
-      // WebGL2 не требует степень двойки, но для паритета ограничиваем.
-      // Clamp к [1, anisoMax].
+      // WebGPU/spec: maxAnisotropy must be a power of two (1, 2, 4, 8, 16).
+      // WebGL2 does not require a power of two, but we restrict it for parity.
+      // Clamped to [1, anisoMax].
       const clamped = Math.max(1, Math.min(requested, anisoMax))
       gl.texParameterf(gl.TEXTURE_2D, anisoExt.TEXTURE_MAX_ANISOTROPY_EXT, clamped)
       appliedAniso = clamped
@@ -344,10 +344,10 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
 
   function texSubImage2D(textureId: number, x: number, y: number, width: number, height: number, bytes: Uint8Array): void {
     gl.bindTexture(gl.TEXTURE_2D, textures.get(textureId) ?? null)
-    // Raw-байтовый путь — домен UploadScheduler'а: Uint8Array подразумевает
-    // 8-битные пиксели. Для HDR-текстур (rgba16f/rgba32f) байты будут
-    // интерпретированы по (format, type) формата текстуры — данные должен
-    // готовить вызывающий (scheduler-стриминг в float — отдельная задача).
+    // The raw-byte path — the UploadScheduler's domain: Uint8Array implies
+    // 8-bit pixels. For HDR textures (rgba16f/rgba32f) the bytes will be
+    // interpreted per the texture format's (format, type) — the caller must
+    // prepare the data (scheduler streaming in float is a separate task).
     const pair = uploadPair(textureId)
     gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, width, height, pair.format, pair.type, bytes)
   }
@@ -355,35 +355,35 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
   function texImage2DFromSource(textureId: number, source: GLImageSource, options?: { flipY?: boolean }): void {
     gl.bindTexture(gl.TEXTURE_2D, textures.get(textureId) ?? null)
     // Permalink overload: texImage2D(target, level, internalformat, format, type, source)
-    // — source перезаписывает содержимое текстуры (мип 0). Размер берётся из источника.
-    // Для RGBA8-текстуры это внутренний формат; source-путь сам приводит пиксели.
+    // — source overwrites the texture contents (mip 0). The size is taken from the source.
+    // For an RGBA8 texture this is the internal format; the source path converts the pixels itself.
     //
-    // flipY (default false): UNPACK_FLIP_Y_WEBGL перед вызовом, сброс после.
-    // Паритет с WebGPU: copyExternalImageToTexture принимает flipY в
-    // GPUCopyExternalImageSourceInfo — если передать true, WebGPU также
-    // переворачивает источник по Y. При flipY=false оба бэкенда пишут
-    // source row 0 в texture row 0 — отображение идентично.
-    // Состояние не течёт: всегда возвращаем false после вызова.
+    // flipY (default false): UNPACK_FLIP_Y_WEBGL before the call, reset after.
+    // Parity with WebGPU: copyExternalImageToTexture takes flipY in
+    // GPUCopyExternalImageSourceInfo — if passed true, WebGPU also
+    // flips the source along Y. With flipY=false both backends write
+    // source row 0 into texture row 0 — the mapping is identical.
+    // The state does not leak: we always set it back to false after the call.
     //
-    // IMMUTABLE-текстуры (Task 64 fix): если хранилище выделено через
-    // texStorage2D (mip-chain, mipLevels>1), ЛЮБОЙ texImage2D — включая
-    // перегрузку с source и level=0 — генерирует GL_INVALID_OPERATION и
-    // МОЛЧА игнорируется (GLES3: immutable texture image → TexImage*
-    // недопустим; подтверждено зондом Chromium: err=1282 на texImage2D,
-    // err=0 на texSubImage2D). Единственный легальный путь записи —
-    // texSubImage2D(level, 0, 0, format, type, source). ДО фикса uploadImage
-    // на mip-chain текстурах терял пиксели молча: сцены sub-mip view /
-    // create view рендерились пустыми (прозрачный квад), и восстановление
-    // после loss выглядело «не работающим» — при исправном журнале.
+    // IMMUTABLE textures (Task 64 fix): if the storage was allocated via
+    // texStorage2D (mip-chain, mipLevels>1), ANY texImage2D — including
+    // the overload with source and level=0 — generates GL_INVALID_OPERATION and
+    // is SILENTLY ignored (GLES3: immutable texture image → TexImage*
+    // is invalid; confirmed by a Chromium probe: err=1282 on texImage2D,
+    // err=0 on texSubImage2D). The only legal write path is
+    // texSubImage2D(level, 0, 0, format, type, source). BEFORE the fix uploadImage
+    // silently lost pixels on mip-chain textures: sub-mip view /
+    // create view scenes rendered empty (a transparent quad), and recovery
+    // after loss looked "broken" — with a healthy journal.
     const flipY = options?.flipY ?? false
     if (flipY) gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)
     const meta = textureMeta.get(textureId)
-    // Task 67 HDR: (format, type) — из формата хранения текстуры. Для
-    // RGBA16F/RGBA32F пара (RGBA, UNSIGNED_BYTE) недопустима — texSubImage2D
-    // молча вернёт GL_INVALID_OPERATION и пиксели будут потеряны.
+    // Task 67 HDR: (format, type) — from the texture's storage format. For
+    // RGBA16F/RGBA32F the pair (RGBA, UNSIGNED_BYTE) is invalid — texSubImage2D
+    // silently returns GL_INVALID_OPERATION and the pixels are lost.
     const pair = uploadPair(textureId)
     if (meta !== undefined && meta.mipLevels > 1) {
-      // immutable (texStorage2D): пишем через texSubImage2D level=0
+      // immutable (texStorage2D): write via texSubImage2D level=0
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, pair.format, pair.type, source as TexImageSource)
     } else {
       const internalFormat = meta !== undefined ? formatInfo(meta.format).internalFormat : ENUM.RGBA8
@@ -394,19 +394,19 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
 
   function texSubImage2DFromSource(textureId: number, x: number, y: number, source: GLImageSource, options?: { flipY?: boolean }): void {
     gl.bindTexture(gl.TEXTURE_2D, textures.get(textureId) ?? null)
-    // texSubImage2D overload с TexImageSource: обновляет только регион
-    // [x, y, x+source.width, y+source.height]. Не трогает остальную текстуру.
-    // Размер региона берётся из source (width/height у ImageBitmap/Canvas).
+    // The texSubImage2D overload with TexImageSource: updates only the region
+    // [x, y, x+source.width, y+source.height]. Does not touch the rest of the texture.
+    // The region size is taken from source (width/height on ImageBitmap/Canvas).
     //
-    // flipY (default false) — паритет с WebGPU copyExternalImageToTexture:
-    // оба бэкенда принимают flipY в опциях и при true переворачивают источник
-    // по Y перед копированием. При false — пишут source row 0 в texture row 0.
-    // Квад prims/quad.ts использует UV (0,0) на верхнем-левом вершине —
-    // при flipY=false изображение отображается вертикально честно на обоих бэкендах.
+    // flipY (default false) — parity with WebGPU copyExternalImageToTexture:
+    // both backends take flipY in options and when true flip the source
+    // along Y before copying. When false — they write source row 0 into texture row 0.
+    // The quad in prims/quad.ts uses UV (0,0) on the top-left vertex —
+    // with flipY=false the image displays vertically honestly on both backends.
     const flipY = options?.flipY ?? false
     if (flipY) gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)
-    // Task 67 HDR: (format, type) — из формата хранения (паритет с
-    // texImage2DFromSource: HALF_FLOAT/FLOAT для float-текстур).
+    // Task 67 HDR: (format, type) — from the storage format (parity with
+    // texImage2DFromSource: HALF_FLOAT/FLOAT for float textures).
     const pair = uploadPair(textureId)
     gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, pair.format, pair.type, source as TexImageSource)
     if (flipY) gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
@@ -425,30 +425,30 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
   ): void {
     gl.bindTexture(gl.TEXTURE_2D, textures.get(textureId) ?? null)
     // Permalink overload: texImage2D(target, level, internalFormat, format, type, source).
-    // Загружает конкретный mip-уровень (level=0 — базовый, 1 — 1/2 размера, и т.д.).
-    // Размер source должен быть N/(2^level). WebGL2 сам проверит — если source
-    // не совпадает с ожидаемым размером мипа, будет GL_INVALID_VALUE.
+    // Uploads a specific mip level (level=0 — base, 1 — 1/2 size, etc.).
+    // The source size must be N/(2^level). WebGL2 checks it itself — if the source
+    // does not match the expected mip size, there will be GL_INVALID_VALUE.
     //
-    // Для mipmap текстуры (созданной через texStorage2D с levels>1 в createTexture)
-    // работает progressive streaming: после загрузки level=L поднимаем
-    // TEXTURE_MAX_LEVEL до L (если был ниже). Так LINEAR_MIPMAP_LINEAR видит
-    // только загруженные уровни — незагруженные остаются null, но sampler не
-    // пытается их сэмплить → нет чёрного кадра при частичной загрузке.
+    // For a mipmap texture (created via texStorage2D with levels>1 in createTexture)
+    // progressive streaming works: after uploading level=L we raise
+    // TEXTURE_MAX_LEVEL to L (if it was lower). This way LINEAR_MIPMAP_LINEAR sees
+    // only the uploaded levels — the unloaded ones stay null, but the sampler does not
+    // try to sample them → no black frame under partial loading.
     //
-    // Для non-mip текстуры (mipLevels=1): MAX_LEVEL игнорируется (MIN_FILTER=LINEAR
-    // не использует mips), level>0 не даст видимого эффекта без пересоздания
-    // текстуры с texStorage2D levels.
+    // For a non-mip texture (mipLevels=1): MAX_LEVEL is ignored (MIN_FILTER=LINEAR
+    // does not use mips), level>0 gives no visible effect without recreating
+    // the texture with texStorage2D levels.
     //
-    // flipY (default false) — WebGPU-паритет (см. texImage2DFromSource).
+    // flipY (default false) — WebGPU parity (see texImage2DFromSource).
     //
-    // Строгий формат/тип (Task 55): internalFormat/format/type — опциональные
-    // GLenum-числа. Task 67: БЕЗ явных значений — авто-вывод из формата
-    // ХРАНЕНИЯ текстуры (createTexture(...,{format})): rgba16f →
-    // RGBA16F/RGBA/HALF_FLOAT, rgba32f → RGBA32F/RGBA/FLOAT, иначе —
-    // RGBA8/RGBA/UNSIGNED_BYTE (baseline). Поддержка HDR-форматов: RGBA16F
-    // (0x881A) с RGBA/HALF_FLOAT (0x140B); RGBA32F (0x8816) с RGBA/FLOAT.
-    // Рендер В float-цель требует EXT_color_buffer_float; хранение float-
-    // текстур — core WebGL2 (см. capsProbe: float16/float32-фичи).
+    // Strict format/type (Task 55): internalFormat/format/type — optional
+    // GLenum numbers. Task 67: WITHOUT explicit values — auto-derivation from the
+    // texture's STORAGE format (createTexture(...,{format})): rgba16f →
+    // RGBA16F/RGBA/HALF_FLOAT, rgba32f → RGBA32F/RGBA/FLOAT, otherwise —
+    // RGBA8/RGBA/UNSIGNED_BYTE (baseline). HDR format support: RGBA16F
+    // (0x881A) with RGBA/HALF_FLOAT (0x140B); RGBA32F (0x8816) with RGBA/FLOAT.
+    // Rendering TO a float target requires EXT_color_buffer_float; storing float
+    // textures is core WebGL2 (see capsProbe: the float16/float32 features).
     const flipY = options?.flipY ?? false
     const meta = textureMeta.get(textureId)
     const fi = meta !== undefined ? formatInfo(meta.format) : formatInfo('rgba8')
@@ -457,23 +457,23 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
     const format = pair.format
     const type = pair.type
     if (flipY) gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true)
-    // IMMUTABLE-текстуры (Task 64 fix): texImage2D на любом level хранилища
-    // texStorage2D генерирует GL_INVALID_OPERATION и МОЛЧА игнорируется
-    // (зонд Chromium/SwiftShader: texImage2D(level=4) → err=1282, пиксели
-    // НЕ записаны; texSubImage2D(level=4,0,0) → err=0, пиксели корректны).
-    // Для mip-chain текстур (meta.mipLevels>1) пишем через texSubImage2D —
-    // DOM-source перегрузка выводит width/height из самого источника.
-    // Mutable-путь (mipLevels=1, texImage2D-null аллокация) не тронут:
-    // texImage2D с level>0 там легален и аллоцирует уровень.
+    // IMMUTABLE textures (Task 64 fix): texImage2D at any level of a
+    // texStorage2D storage generates GL_INVALID_OPERATION and is SILENTLY ignored
+    // (Chromium/SwiftShader probe: texImage2D(level=4) → err=1282, pixels
+    // NOT written; texSubImage2D(level=4,0,0) → err=0, pixels correct).
+    // For mip-chain textures (meta.mipLevels>1) we write via texSubImage2D —
+    // the DOM-source overload derives width/height from the source itself.
+    // The mutable path (mipLevels=1, texImage2D-null allocation) is untouched:
+    // texImage2D with level>0 is legal there and allocates the level.
     if (meta !== undefined && meta.mipLevels > 1) {
       gl.texSubImage2D(gl.TEXTURE_2D, level, 0, 0, format, type, source as TexImageSource)
     } else {
       gl.texImage2D(gl.TEXTURE_2D, level, internalFormat, format, type, source as TexImageSource)
     }
     if (flipY) gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
-    // Progressive mip streaming: поднимаем TEXTURE_MAX_LEVEL до текущего level,
-    // чтобы LINEAR_MIPMAP_LINEAR использовал только загруженные мипы. Без этого
-    // WebGL2 по умолчанию MAX_LEVEL=1000 → sampler сэмплит нулевые уровни → чёрный.
+    // Progressive mip streaming: raise TEXTURE_MAX_LEVEL to the current level
+    // so LINEAR_MIPMAP_LINEAR uses only the uploaded mips. Without this
+    // WebGL2 defaults to MAX_LEVEL=1000 → the sampler samples null levels → black.
     if (meta !== undefined && meta.mipLevels > 1 && level > meta.maxLoadedLevel) {
       meta.maxLoadedLevel = level
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, level)
@@ -482,13 +482,13 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
 
   function bindTexture(textureOrViewId: number, unit: number): void {
     // Disjoint id namespace (Task 56): id < 1M = textureId (default view),
-    // id ≥ 1M = viewId (sub-mip view, созданный через createTextureView).
-    // Если это viewId — находим subView, берём его textureId, устанавливаем
-    // TEXTURE_BASE_LEVEL / TEXTURE_MAX_LEVEL под диапазон view. Если это
-    // textureId — сбрасываем базу=0, max=meta.maxLoadedLevel (progressive
-    // streaming). Состояние BASE_LEVEL/MAX_LEVEL не протекает между
-    // вызовами bindTexture: каждый вызов переписывает оба параметра заново
-    // на той текстуре, к которой привязан.
+    // id ≥ 1M = viewId (a sub-mip view created via createTextureView).
+    // If it is a viewId — find the subView, take its textureId, set
+    // TEXTURE_BASE_LEVEL / TEXTURE_MAX_LEVEL for the view's range. If it is a
+    // textureId — reset base=0, max=meta.maxLoadedLevel (progressive
+    // streaming). BASE_LEVEL/MAX_LEVEL state does not leak between
+    // bindTexture calls: every call rewrites both parameters anew
+    // on the texture it binds.
     gl.activeTexture(gl.TEXTURE0 + unit)
     const subView = textureViews.get(textureOrViewId)
     let underlyingTextureId: number
@@ -502,24 +502,24 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
       underlyingTextureId = textureOrViewId
       const meta = textureMeta.get(underlyingTextureId)
       baseLevel = 0
-      // Для mip-chain текстуры: maxLevel = maxLoadedLevel (streaming state).
-      // Для non-mip текстуры: maxLevel = 0 (только level 0, MAX_LEVEL
-      // игнорируется MIN_FILTER=LINEAR без mipmap, но ставим 0 для чистоты).
+      // For a mip-chain texture: maxLevel = maxLoadedLevel (streaming state).
+      // For a non-mip texture: maxLevel = 0 (only level 0, MAX_LEVEL
+      // is ignored by MIN_FILTER=LINEAR without mipmap, but we set 0 for cleanliness).
       maxLevel = meta !== undefined ? meta.maxLoadedLevel : 0
     }
     gl.bindTexture(gl.TEXTURE_2D, textures.get(underlyingTextureId) ?? null)
-    // Базовый/максимальный mip-уровень sampler'а. WebGL2 spec: TEXTURE_BASE_LEVEL
-    // и TEXTURE_MAX_LEVEL — per-texture-object state, НЕ per-bind. Поэтому
-    // всегда переустанавливаем при bindTexture, чтобы предыдущий bind (с
-    // другим view на этой же текстуре) не протёк BASE_LEVEL/MAX_LEVEL.
-    // Это особенно важно при bindTexture(viewId, unit=0) сразу после
-    // bindTexture(textureId, unit=1) — без этой перезаписи unit=0
-    // унаследовал бы диапазон view, который не должен.
+    // The sampler's base/maximum mip level. WebGL2 spec: TEXTURE_BASE_LEVEL
+    // and TEXTURE_MAX_LEVEL are per-texture-object state, NOT per-bind. That is why
+    // we always reset them on bindTexture, so a previous bind (with
+    // a different view on the same texture) does not leak BASE_LEVEL/MAX_LEVEL.
+    // This matters especially for bindTexture(viewId, unit=0) right after
+    // bindTexture(textureId, unit=1) — without this rewrite unit=0
+    // would inherit the view's range, which it must not.
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, baseLevel)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, maxLevel)
-    // unitTextures хранит underlying textureId (НЕ viewId) — это нужно для
-    // feedback-loop профилактики в bindTarget: цель и сэмплер на одной
-    // текстуре = GL undefined behavior, ANGLE/SwiftShader гасят draw.
+    // unitTextures stores the underlying textureId (NOT the viewId) — needed for
+    // feedback-loop prevention in bindTarget: target and sampler on the same
+    // texture = GL undefined behavior, ANGLE/SwiftShader kill the draw.
     unitTextures.set(unit, underlyingTextureId)
   }
 
@@ -532,28 +532,28 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
   ): number {
     const meta = textureMeta.get(textureId)
     if (meta === undefined) {
-      throw new Error(`rune: createTextureView — текстура ${textureId} не найдена`)
+      throw new Error(`rune: createTextureView — texture ${textureId} not found`)
     }
     const mipLevels = meta.mipLevels
     if (mipLevels < 2) {
       throw new Error(
-        `rune: createTextureView — текстура ${textureId} имеет mipLevels=${mipLevels} ` +
-        '(нет mip-chain). Sub-mip view имеет смысл только при mipLevels ≥ 2.',
+        `rune: createTextureView — texture ${textureId} has mipLevels=${mipLevels} ` +
+        '(no mip-chain). A sub-mip view only makes sense with mipLevels ≥ 2.',
       )
     }
     const baseMipLevel = options?.baseMipLevel ?? 0
     if (baseMipLevel < 0 || baseMipLevel >= mipLevels) {
       throw new Error(
-        `rune: createTextureView — baseMipLevel=${baseMipLevel} вне диапазона [0, ${mipLevels - 1}] ` +
+        `rune: createTextureView — baseMipLevel=${baseMipLevel} out of range [0, ${mipLevels - 1}] ` +
         `(textureId=${textureId}, mipLevels=${mipLevels})`,
       )
     }
-    // default mipLevelCount = все оставшиеся мипы до конца цепи
+    // default mipLevelCount = all remaining mips to the end of the chain
     const mipLevelCount = options?.mipLevelCount ?? (mipLevels - baseMipLevel)
     if (mipLevelCount < 1 || baseMipLevel + mipLevelCount > mipLevels) {
       throw new Error(
         `rune: createTextureView — baseMipLevel=${baseMipLevel} + mipLevelCount=${mipLevelCount} ` +
-        `превышает mipLevels=${mipLevels} (textureId=${textureId})`,
+        `exceeds mipLevels=${mipLevels} (textureId=${textureId})`,
       )
     }
     const viewId = nextTextureViewId++
@@ -566,7 +566,7 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
   }
 
   function deleteTextureView(viewId: number): void {
-    // Идемпотентность: нет записи — no-op.
+    // Idempotence: no entry — a no-op.
     textureViews.delete(viewId)
   }
 
@@ -584,25 +584,25 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
     color: readonly [number, number, number, number],
   ): number {
     const fbo = gl.createFramebuffer()
-    if (fbo === null) throw new Error('rune: createFramebuffer вернул null')
+    if (fbo === null) throw new Error('rune: createFramebuffer returned null')
     let depthRenderbuffer: WebGLRenderbuffer | null = null
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, textures.get(textureId) ?? null, 0)
     if (depth) {
       depthRenderbuffer = gl.createRenderbuffer()
-      if (depthRenderbuffer === null) throw new Error('rune: createRenderbuffer вернул null')
+      if (depthRenderbuffer === null) throw new Error('rune: createRenderbuffer returned null')
       gl.bindRenderbuffer(gl.RENDERBUFFER, depthRenderbuffer)
       gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, width, height)
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthRenderbuffer)
     }
     const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER)
-    // Возврат прежней цели до возможного throw: состояние не течёт
+    // Restore the previous target before a possible throw: the state does not leak
     gl.bindFramebuffer(gl.FRAMEBUFFER, currentTarget === 0 ? null : targets.get(currentTarget)?.fbo ?? null)
     if (status !== gl.FRAMEBUFFER_COMPLETE) {
-      // Очистка: созданный FBO и renderbuffer — мусор
+      // Cleanup: the created FBO and renderbuffer are garbage
       if (depthRenderbuffer !== null) gl.deleteRenderbuffer(depthRenderbuffer)
       gl.deleteFramebuffer(fbo)
-      throw new Error(`rune: FBO поверхности неполный (статус ${status}) — размер ${width}x${height}`)
+      throw new Error(`rune: surface FBO incomplete (status ${status}) — size ${width}x${height}`)
     }
     const id = nextTarget++
     targets.set(id, {
@@ -627,9 +627,9 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
     }
     const target = targets.get(targetId)
     if (target === undefined) return
-    // Feedback-loop профилактика: текстуру ЦЕЛИ нельзя держать привязанной к
-    // сэмплер-юнитам, пока она — цветовое прикрепление FBO (GL: undefined;
-    // ANGLE/SwiftShader гасят такие draw). Ровно это убивало кадр 2+.
+    // Feedback-loop prevention: the TARGET texture must not stay bound to
+    // sampler units while it is the FBO's color attachment (GL: undefined;
+    // ANGLE/SwiftShader kill such draws). Exactly this was killing frame 2+.
     for (const [unit, boundId] of unitTextures) {
       if (boundId === target.textureId) {
         gl.activeTexture(gl.TEXTURE0 + unit)
@@ -642,7 +642,7 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
     if (clear) {
       gl.clearColor(target.color[0], target.color[1], target.color[2], target.color[3])
       if (target.depth) {
-        gl.depthMask(true) // clear маскируется depthMask (см. clear())
+        gl.depthMask(true) // clear is masked by depthMask (see clear())
         gl.clearDepth(1)
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
       } else {
@@ -660,22 +660,22 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
     gl.depthMask(write)
   }
 
-  // ─── Task 80: readback (readPixels + флип строк) ───────────────────
-  // Контракт паритета с GPU-фасадом: RGBA8, tight, строки СВЕРХУ ВНИЗ.
-  // GL readPixels: origin — левый-НИЖНИЙ угол, строка 0 — нижняя; WebGPU
-  // copyTextureToBuffer отдаёт строки сверху-вниз. Флип здесь даёт один и
-  // тот же индекс = один и тот же пиксель на обоих бэкендах.
+  // ─── Task 80: readback (readPixels + row flip) ───────────────────
+  // Parity contract with the GPU facade: RGBA8, tight, rows TOP-DOWN.
+  // GL readPixels: origin — the bottom-LEFT corner, row 0 — the bottom; WebGPU
+  // copyTextureToBuffer returns rows top-down. The flip here gives the
+  // same index = the same pixel on both backends.
   function readTargetPixels(targetId: number): Uint8Array {
     if (targetId === 0) {
-      throw new Error('rune: readTargetPixels(0) — канвас не читается (паритет с WebGPU: presented-текстура живёт один кадр). Читайте ПОВЕРХНОСТЬ: renderer.surface(...) → capture/проходы → surface.read()')
+      throw new Error('rune: readTargetPixels(0) — the canvas cannot be read (parity with WebGPU: the presented texture lives for one frame). Read the SURFACE instead: renderer.surface(...) → capture/passes → surface.read()')
     }
     const target = targets.get(targetId)
     if (target === undefined) {
-      throw new Error(`rune: readTargetPixels — цель ${targetId} не найдена (удалена или не создана)`)
+      throw new Error(`rune: readTargetPixels — target ${targetId} not found (deleted or never created)`)
     }
     const w = target.width
     const h = target.height
-    // Привязка FBO не течёт: читаем в своей привязке, возвращаем прежнюю.
+    // The FBO binding does not leak: we read in our own binding, restore the previous one after.
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo)
     const rowBytes = w * 4
     const bottomUp = new Uint8Array(rowBytes * h)
@@ -684,7 +684,7 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
     } finally {
       gl.bindFramebuffer(gl.FRAMEBUFFER, currentTarget === 0 ? null : targets.get(currentTarget)?.fbo ?? null)
     }
-    // Флип: GL row 0 = низ → на выходе row 0 = верх (как texture row 0).
+    // Flip: GL row 0 = bottom → in the output row 0 = top (like texture row 0).
     const out = new Uint8Array(rowBytes * h)
     for (let y = 0; y < h; y++) {
       out.set(bottomUp.subarray((h - 1 - y) * rowBytes, (h - y) * rowBytes), y * rowBytes)
@@ -700,7 +700,7 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
     }
   }
 
-  /** Task 75: BlendFactor-строка фасада → GLenum. */
+  /** Task 75: facade BlendFactor string → GLenum. */
   const BLEND_FACTORS: Record<string, number> = {
     'zero': 0, 'one': 1, 'src-color': 0x0300, 'one-minus-src-color': 0x0301,
     'src-alpha': 0x0302, 'one-minus-src-alpha': 0x0303,
@@ -713,16 +713,16 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
       return
     }
     gl.enable(gl.BLEND)
-    // Премультиплированный вывод шейдера: blendFunc(src, dst) без
-    // разделения RGB/A — альфа-канал канваса непрозрачен (alpha:false).
+    // Premultiplied shader output: blendFunc(src, dst) without
+    // separate RGB/A — the canvas alpha channel is opaque (alpha:false).
     gl.blendFunc(BLEND_FACTORS[src] ?? gl.ONE, BLEND_FACTORS[dst] ?? gl.ZERO)
   }
 
   function clear(color: readonly number[], depth: number | null): void {
     gl.clearColor(color[0], color[1], color[2], color[3])
-    // glClear маскируется depthMask: прошлый кадр мог оставить false
-    // (полноэкранный проход) — глубина молча не чистилась бы (урок демо-10:
-    // кадр 2+ пустой, сцена z-fighting'ит с прошлым кадром)
+    // glClear is masked by depthMask: the previous frame may have left it false
+    // (a fullscreen pass) — the depth would silently not be cleared (the demo-10 lesson:
+    // frame 2+ empty, the scene z-fights with the previous frame)
     if (depth !== null) {
       gl.depthMask(true)
       gl.clearDepth(depth)
@@ -737,14 +737,14 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
     else gl.drawArrays(gl.TRIANGLES, first, count)
   }
 
-  // ─── Disposal: явное освобождение GPU-ресурса ────────────────────────
-  // Идемпотентность: повторный delete того же id — no-op (записи уже нет в Map).
-  // Если id не найден — тоже no-op (ничего не поделаешь, но и не бросаем).
+  // ─── Disposal: explicit release of the GPU resource ───
+  // Idempotence: a repeated delete of the same id — a no-op (the entry is already gone from the Map).
+  // If the id is not found — also a no-op (nothing can be done, but we do not throw either).
 
   function deleteTexture(textureId: number): void {
     const texture = textures.get(textureId)
     if (texture === undefined) return
-    // Снимаем привязку со сэмплер-юнитов (иначе deleteTexture молча игнорируется на некоторых драйверах)
+    // Unbind from sampler units (otherwise deleteTexture is silently ignored on some drivers)
     for (const [unit, boundId] of unitTextures) {
       if (boundId === textureId) {
         gl.activeTexture(gl.TEXTURE0 + unit)
@@ -755,10 +755,10 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
     gl.deleteTexture(texture)
     textures.delete(textureId)
     textureMeta.delete(textureId)
-    // Удалить все sub-mip views этой текстуры (Task 56): они бесполезны без
-    // родительской текстуры — bindTexture(viewId) будет no-op (textureId не
-    // найден в textures Map). Удаляем из textureViews чтобы гарантировать,
-    // что textureViews не накапливает «осиротевшие» записи до конца сессии.
+    // Delete all sub-mip views of this texture (Task 56): they are useless without
+    // the parent texture — bindTexture(viewId) will be a no-op (textureId not
+    // found in the textures Map). We remove them from textureViews to guarantee
+    // that textureViews does not accumulate "orphaned" entries until the end of the session.
     for (const [viewId, sv] of textureViews) {
       if (sv.textureId === textureId) {
         textureViews.delete(viewId)
@@ -769,7 +769,7 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
   function deleteTarget(targetId: number): void {
     const target = targets.get(targetId)
     if (target === undefined) return
-    // Если цель сейчас активна — отцепляем от контекста ДО удаления
+    // If the target is currently active — detach it from the context BEFORE deletion
     if (currentTarget === targetId) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null)
       currentTarget = 0

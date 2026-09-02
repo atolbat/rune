@@ -1,97 +1,97 @@
 /**
- * FBX binary loader — декодирование скелетной анимации из Kaydara FBX Binary.
+ * FBX binary loader — skeletal animation decoding from Kaydara FBX Binary.
  *
  * ══════════════════════════════════════════════════════════════════════════
- * КОНТРАКТ @rune/loaders (интерфейс):
+ * @rune/loaders CONTRACT (interface):
  *
  *   parseFBX(buffer: ArrayBuffer): Promise<FbxModel>
  *
- *   ВХОД:   ArrayBuffer — сырой бинарный FBX (версии 7.1–7.7, «Kaydara FBX
- *           Binary»). ASCII-FBX отвергается с понятной ошибкой.
- *   ВЫХОД:  FbxModel — полностью ДЕКОДИРОВАННЫЙ ассет:
- *             .meshes[]    — позиции/нормали/индексы + скин (4 влияния/вершину)
- *             .skeleton    — кости: иерархия, rest-поза (T + кватернион + S),
- *                            invBind-матрицы (16 float, колоночно-мажорные)
- *             .clips[]     — клипы: треки по костям (translation vec3 / rotation
- *                            quat на ключ), время в СЕКУНДАХ
- *   ОШИБКИ: SyntaxError (не FBX/ASCII/битый узел), RangeError (обрезанный
- *           буфер). Ошибки формата — actionable, с именем проблемного узла.
+ *   INPUT:  ArrayBuffer — raw binary FBX (versions 7.1–7.7, "Kaydara FBX
+ *           Binary"). ASCII-FBX is rejected with a clear error.
+ *   OUTPUT: FbxModel — a fully DECODED asset:
+ *             .meshes[]    — positions/normals/indices + skin (4 influences per vertex)
+ *             .skeleton    — bones: hierarchy, rest pose (T + quaternion + S),
+ *                            invBind matrices (16 floats, column-major)
+ *             .clips[]     — clips: per-bone tracks (translation vec3 / rotation
+ *                            quat per key), time in SECONDS
+ *   ERRORS: SyntaxError (not FBX/ASCII/corrupt node), RangeError (truncated
+ *           buffer). Format errors are actionable, with the offending node's name.
  *
- *   Лоадер НЕ знает про GPU/текстуры/рендерер/материалы. Материалы
- *   сознательно не парсятся (контракт анимационного пакета: «без
- *   материалов»). Никаких промисов о визуале — только данные.
+ *   The loader knows NOTHING about GPU/textures/renderer/materials. Materials
+ *   are deliberately not parsed (the animation package contract: "no
+ *   materials"). No promises about visuals — data only.
  *
  * ══════════════════════════════════════════════════════════════════════════
- * ОПТИМИЗАЦИИ ЛОАДЕРА (why it's fast):
- *   1. Ленивая распаковка zlib-массивов: дерево узлов читается БЕЗ инфляции
- *      (курсор просто прыгает через compressedLength); инфлируются ТОЛЬКО
- *      массивы, которые реально нужны семантической фазой (Vertices,
+ * LOADER OPTIMIZATIONS (why it's fast):
+ *   1. Lazy zlib-array inflation: the node tree is read WITHOUT inflating
+ *      (the cursor simply jumps over compressedLength); ONLY the arrays
+ *      actually needed by the semantic phase are inflated (Vertices,
  *      Normals, PolygonVertexIndex, Indexes, Weights, TransformLink,
- *      KeyTime, KeyValueFloat). Мусорные массивы (Edges, UV, KeyAttr*)
- *      не распаковываются вовсе — для 3.7 МБ Samba Dancing это экономит
- *      ~40% inflate-работы против «распакуй всё».
- *   2. Прямая конвертация в выходные типы: Float64→Float32 однократно при
- *      распаковке нужного массива, без промежуточных Array.
- *   3. Ноль объектов на вершину/ключ: все выходы — плотные TypedArray.
- *   4. Инфляция через нативный DecompressionStream('deflate') — без
- *      JS-реализации zlib; в Bun/Node тестах работает тот же API.
- *   5. Connection-индекс строится за один проход: Map<id, {children,parents}>.
+ *      KeyTime, KeyValueFloat). Garbage arrays (Edges, UV, KeyAttr*)
+ *      are not inflated at all — for the 3.7 MB Samba Dancing this saves
+ *      ~40% of inflate work compared to "inflate everything".
+ *   2. Direct conversion into output types: Float64→Float32 once, when the
+ *      needed array is inflated, without intermediate Arrays.
+ *   3. Zero objects per vertex/key: all outputs are dense TypedArrays.
+ *   4. Inflation via the native DecompressionStream('deflate') — no
+ *      JS zlib implementation; the same API works in Bun/Node tests.
+ *   5. The connection index is built in a single pass: Map<id, {children,parents}>.
  *
- * Поддерживаемое подмножество (проверено на Mixamo Samba Dancing 7.4,
- * покрывает основные binary-экспорты 7.1–7.7):
+ * Supported subset (verified on Mixamo Samba Dancing 7.4,
+ * covers the main binary exports 7.1–7.7):
  *   • Geometry: Vertices / PolygonVertexIndex / LayerElementNormal
- *     (ByPolygonVertex|ByVertice × Direct|IndexToDirect; прочее → расчёт
- *     нормалей из треугольников), триангуляция веером.
+ *     (ByPolygonVertex|ByVertice × Direct|IndexToDirect; anything else →
+ *     compute normals from triangles), fan triangulation.
  *   • Deformer(Skin) → SubDeformer(Cluster): Indexes/Weights/Transform/
- *     TransformLink; топ-4 веса на вершину с нормализацией.
- *   • Model(LimbNode|Limb|Root|Null): кости, иерархия по OO-связям,
- *     rest-поза из Properties70 (Lcl Translation/Rotation/Scaling,
- *     RotationOrder XYZ в конвенции three.js: q = qx⊗qy⊗qz).
- *   • AnimStack → AnimLayer → AnimCurveNode → AnimCurve: ключи KeyTime
- *     (ktime → секунды / 46186158000), KeyValueFloat (градусы/см);
- *     Lcl Rotation → кватернионы на ключе (компиляция эйлеров заранее —
- *     рантайм-сэмплер слерпит без конверсии).
- *   • НЕ парсится (осознанно, вне контракта): материалы, текстуры,
- *     blendshapes, камеры, света, NURBS, инстансинг, ASCII-FBX.
+ *     TransformLink; top-4 weights per vertex with normalization.
+ *   • Model(LimbNode|Limb|Root|Null): bones, hierarchy by OO connections,
+ *     rest pose from Properties70 (Lcl Translation/Rotation/Scaling,
+ *     RotationOrder XYZ in the three.js convention: q = qx⊗qy⊗qz).
+ *   • AnimStack → AnimLayer → AnimCurveNode → AnimCurve: KeyTime keys
+ *     (ktime → seconds / 46186158000), KeyValueFloat (degrees/cm);
+ *     Lcl Rotation → per-key quaternions (Eulers compiled up front —
+ *     the runtime sampler slerps without conversion).
+ *   • NOT parsed (deliberately, out of contract): materials, textures,
+ *     blendshapes, cameras, lights, NURBS, instancing, ASCII-FBX.
  */
 
-// ─── Публичные типы (структурно совместимы с @rune/kit/anim) ─────────────────
+// ─── Public types (structurally compatible with @rune/kit/anim) ─────────────────
 
-/** Кость скелета: rest-поза + обратная bind-матрица. */
+/** A skeleton bone: rest pose + inverse bind matrix. */
 export interface FbxJoint {
   readonly name: string
-  /** Индекс родительской кости (−1 = корень). Индексы топологически отсортированы (родитель раньше). */
+  /** Parent bone index (−1 = root). Indices are topologically sorted (parent first). */
   readonly parent: number
-  /** Rest-трансляция (единицы FBX, обычно см). */
+  /** Rest translation (FBX units, usually cm). */
   readonly restT: readonly [number, number, number]
-  /** Rest-вращение кватернионом (x,y,z,w). */
+  /** Rest rotation as a quaternion (x,y,z,w). */
   readonly restQ: readonly [number, number, number, number]
-  /** Rest-масштаб. */
+  /** Rest scale. */
   readonly restS: readonly [number, number, number]
-  /** inv(bindGlobal) — 16 float, колоночно-мажорная. Из Cluster.TransformLink⁻¹. */
+  /** inv(bindGlobal) — 16 floats, column-major. From Cluster.TransformLink⁻¹. */
   readonly invBind?: Float32Array
 }
 
-/** Скелет как список костей (SoA-совместимый порядок: родитель всегда раньше). */
+/** The skeleton as a list of bones (SoA-compatible order: parent always first). */
 export interface FbxSkeleton {
   readonly joints: readonly FbxJoint[]
 }
 
-/** Трек трансляции: vec3-значения на ключ (values.length === times.length*3). */
+/** Translation track: vec3 values per key (values.length === times.length*3). */
 export interface FbxTrackT {
   readonly joint: number
   readonly times: Float32Array
   readonly values: Float32Array
 }
 
-/** Трек вращения: кватернионы на ключ (quats.length === times.length*4). */
+/** Rotation track: quaternions per key (quats.length === times.length*4). */
 export interface FbxTrackR {
   readonly joint: number
   readonly times: Float32Array
   readonly quats: Float32Array
 }
 
-/** Анимационный клип: набор треков + длительность (сек). */
+/** An animation clip: a set of tracks + duration (sec). */
 export interface FbxClip {
   readonly name: string
   readonly duration: number
@@ -99,27 +99,27 @@ export interface FbxClip {
   readonly tracksR: readonly FbxTrackR[]
 }
 
-/** Скин-влияния: 4 сустава + 4 веса на вершину (параллельные массивы). */
+/** Skin influences: 4 joints + 4 weights per vertex (parallel arrays). */
 export interface FbxSkin {
   /** jointIndices.length === weights.length === 4 * vertexCount. */
   readonly jointIndices: Uint16Array
   readonly jointWeights: Float32Array
 }
 
-/** Меши: декодированная геометрия + опциональный скин. */
+/** Meshes: decoded geometry + optional skin. */
 export interface FbxMesh {
   readonly name: string
   readonly vertexCount: number
-  /** xyz на вершину. */
+  /** xyz per vertex. */
   readonly positions: Float32Array
-  /** xyz на вершину (нормализованные, усреднённые по полигонам). */
+  /** xyz per vertex (normalized, averaged over polygons). */
   readonly normals: Float32Array
-  /** Треугольники (fan-триангуляция полигонов). */
+  /** Triangles (fan triangulation of polygons). */
   readonly indices: Uint32Array
   readonly skin?: FbxSkin
 }
 
-/** Полностью декодированный FBX. */
+/** A fully decoded FBX. */
 export interface FbxModel {
   readonly meshes: readonly FbxMesh[]
   readonly skeleton: FbxSkeleton
@@ -132,7 +132,7 @@ export async function parseFBX(buffer: ArrayBuffer): Promise<FbxModel> {
   return doc.extract()
 }
 
-// ─── Внутренние структуры ─────────────────────────────────────────────────────
+// ─── internal structures ─────────────────────────────────────────────────────
 
 interface RawNode {
   readonly name: string
@@ -140,11 +140,11 @@ interface RawNode {
   readonly children: readonly RawNode[]
 }
 
-/** Ленивый zlib-массив: распаковывается только по требованию. */
+/** A lazy zlib array: inflated only on demand. */
 interface LazyArray {
   readonly kind: 'f64' | 'f32' | 'i32' | 'i64' | 'bytes'
   readonly length: number
-  /** Распакованные сырые байты (инфляция только здесь). */
+  /** The inflated raw bytes (inflation happens only here). */
   raw(): Promise<Uint8Array>
   f64(): Promise<Float64Array>
   f32(): Promise<Float32Array>
@@ -170,24 +170,24 @@ class FbxDocumentReader {
     this.bytes = new Uint8Array(buffer)
     this.view = new DataView(buffer)
     if (this.bytes.length < 32) {
-      throw new SyntaxError('parseFBX: буфер слишком мал для FBX-заголовка')
+      throw new SyntaxError('parseFBX: buffer too small for an FBX header')
     }
     const magic = this.utf8.decode(this.bytes.subarray(0, 20))
     if (magic.startsWith('Kaydara FBX ASCII')) {
-      throw new SyntaxError('parseFBX: ASCII-FBX не поддерживается (нужен бинарный «Kaydara FBX Binary») — экспортируйте Binary FBX')
+      throw new SyntaxError('parseFBX: ASCII-FBX is not supported (binary "Kaydara FBX Binary" required) — export as Binary FBX')
     }
     if (magic !== MAGIC) {
-      throw new SyntaxError(`parseFBX: не FBX Binary (магия: ${JSON.stringify(magic.slice(0, 16))}…)`)
+      throw new SyntaxError(`parseFBX: not FBX Binary (magic: ${JSON.stringify(magic.slice(0, 16))}…)`)
     }
     const version = this.view.getUint32(23, true)
     if (version < 7000 || version > 7999) {
-      throw new SyntaxError(`parseFBX: неподдерживаемая версия FBX ${version} (ожидается 7.1–7.7)`)
+      throw new SyntaxError(`parseFBX: unsupported FBX version ${version} (expected 7.1–7.7)`)
     }
     this.v64 = version >= 7500
     this.cursor = 27
   }
 
-  // ── Низкий уровень: чтение дерева ────────────────────────────────────────
+  // ── Low level: tree reading ────────────────────────────────────────
 
   async readTree(): Promise<void> {
     while (this.cursor < this.bytes.length) {
@@ -195,8 +195,8 @@ class FbxDocumentReader {
       if (node === null) break
       this.root.push(node)
     }
-    if (this.root.length === 0) throw new SyntaxError('parseFBX: пустое дерево узлов (битый файл?)')
-    await Promise.resolve() // точка асинхронности для вызывающего
+    if (this.root.length === 0) throw new SyntaxError('parseFBX: empty node tree (corrupt file?)')
+    await Promise.resolve() // an async checkpoint for the caller
   }
 
   private headerSize(): number { return this.v64 ? 25 : 13 }
@@ -210,9 +210,9 @@ class FbxDocumentReader {
     const propLen = this.v64 ? this.readU64() : this.readU32()
     const nameLen = this.bytes[this.cursor]
     this.cursor += 1
-    if (endOffset === 0 && numProps === 0 && propLen === 0 && nameLen === 0) return null // NULL-терминатор
+    if (endOffset === 0 && numProps === 0 && propLen === 0 && nameLen === 0) return null // NULL terminator
     if (endOffset <= start || endOffset > this.bytes.length) {
-      throw new RangeError(`parseFBX: узел с битым endOffset=${endOffset} @${start} (файл обрезан?)`)
+      throw new RangeError(`parseFBX: node with corrupt endOffset=${endOffset} @${start} (truncated file?)`)
     }
     const name = this.utf8.decode(this.bytes.subarray(this.cursor, this.cursor + nameLen))
     this.cursor += nameLen
@@ -220,7 +220,7 @@ class FbxDocumentReader {
     for (let i = 0; i < numProps; i++) props.push(this.readProp(name))
     const children: RawNode[] = []
     if (this.cursor < endOffset) {
-      // У вложенных узлов ожидается NULL-терминатор в конце — tolerate его отсутствие
+      // Nested nodes are expected to have a NULL terminator at the end — tolerate its absence
       for (;;) {
         if (this.cursor + this.headerSize() > endOffset) break
         const c = this.readNode()
@@ -247,13 +247,13 @@ class FbxDocumentReader {
         const raw = this.bytes.subarray(this.cursor, this.cursor + len)
         this.cursor += len
         if (type === 'S') {
-          // Строки имён объектов содержат «name\u0000\u0001Type» — сохраняем как есть
+          // Object name strings contain "name\u0000\u0001Type" — kept as is
           return this.utf8.decode(raw)
         }
         return raw
       }
       case 'f': case 'd': case 'i': case 'l': case 'b': {
-        // Ленивый массив: НЕ распаковываем здесь (см. шапку «оптимизации»).
+        // Lazy array: do NOT inflate here (see the "optimizations" section above).
         const len = this.readU32()
         const enc = this.readU32()
         const comp = this.readU32()
@@ -263,41 +263,41 @@ class FbxDocumentReader {
         return this.lazyArray(kind, len, enc, start, comp, nodeName)
       }
       default:
-        throw new SyntaxError(`parseFBX: неизвестный тип свойства '${type}' в узле «${nodeName}» @${this.cursor - 1}`)
+        throw new SyntaxError(`parseFBX: unknown property type '${type}' in node "${nodeName}" @${this.cursor - 1}`)
     }
   }
 
   private lazyArray(kind: LazyArray['kind'], len: number, enc: number, start: number, comp: number, nodeName: string): LazyArray {
-    // Инфляция через нативный DecompressionStream('deflate') — zlib (RFC 1950).
+    // Inflation via the native DecompressionStream('deflate') — zlib (RFC 1950).
     return new LazyArrayImpl(kind, len, async () => {
       const raw = this.bytes.subarray(start, start + comp)
       if (enc === 0) {
         if (raw.length < len * scalarOf(kind)) {
-          throw new RangeError(`parseFBX: массив узла «${nodeName}» обрезан (${raw.length} байт < ${len * scalarOf(kind)})`)
+          throw new RangeError(`parseFBX: truncated array of node "${nodeName}" (${raw.length} bytes < ${len * scalarOf(kind)})`)
         }
         return raw
       }
       if (enc !== 1) {
-        throw new SyntaxError(`parseFBX: массив узла «${nodeName}» с неизвестной кодировкой ${enc}`)
+        throw new SyntaxError(`parseFBX: array of node "${nodeName}" with unknown encoding ${enc}`)
       }
       if (typeof DecompressionStream === 'undefined') {
-        throw new SyntaxError('parseFBX: окружение без DecompressionStream — zlib-массивы недоступны')
+        throw new SyntaxError('parseFBX: environment without DecompressionStream — zlib arrays unavailable')
       }
       const stream = new Blob([raw as BlobPart]).stream().pipeThrough(new DecompressionStream('deflate'))
       const out = new Uint8Array(await new Response(stream).arrayBuffer())
       if (out.length < len * scalarOf(kind)) {
-        throw new SyntaxError(`parseFBX: распаковка узла «${nodeName}» дала ${out.length} байт, ожидается ≥ ${len * scalarOf(kind)}`)
+        throw new SyntaxError(`parseFBX: inflating node "${nodeName}" produced ${out.length} bytes, expected ≥ ${len * scalarOf(kind)}`)
       }
       return out
     })
   }
 
-  // ── Семантическая фаза ───────────────────────────────────────────────────
+  // ── Semantic phase ───────────────────────────────────────────────────
 
   async extract(): Promise<FbxModel> {
     const objects = this.find('Objects')
     const connections = this.find('Connections')
-    if (objects === undefined) throw new SyntaxError('parseFBX: нет узла Objects')
+    if (objects === undefined) throw new SyntaxError('parseFBX: no Objects node')
     this.indexObjects(objects)
     if (connections !== undefined) this.indexConnections(connections)
 
@@ -313,10 +313,10 @@ class FbxDocumentReader {
   }
 
   /**
-   * Имя кости кластера SubDeformer. Два пути:
-   *  1. OP/OO-связь Model(кость)→SubDeformer (часть экспортёров);
-   *  2. имя кластера «Cluster <имя кости>» (Mixamo и большинство binary-7.x:
-   *     кость кодируется в имени SubDeformer'a, отдельной связи нет).
+   * The bone name of a SubDeformer cluster. Two paths:
+   *  1. an OP/OO connection Model(bone)→SubDeformer (some exporters);
+   *  2. the cluster name "Cluster <bone name>" (Mixamo and most binary-7.x:
+   *     the bone is encoded in the SubDeformer's name, there is no separate connection).
    */
   private findClusterBoneName(o: RawNode): string | undefined {
     const viaConn = this.parentOf(this.objId(o), 'Model')
@@ -375,17 +375,17 @@ class FbxDocumentReader {
     return undefined
   }
 
-  // ── Скелет ────────────────────────────────────────────────────────────────
+  // ── Skeleton ────────────────────────────────────────────────────────────────
 
   private async extractSkeleton(objects: RawNode): Promise<FbxSkeleton> {
-    // Кости: Model с subtype LimbNode/Limb/Root/Null (mixamo: LimbNode).
+    // Bones: Model with subtype LimbNode/Limb/Root/Null (mixamo: LimbNode).
     const boneNodes: RawNode[] = []
     for (const o of objects.children) {
       if (this.objType(o) !== 'Model') continue
       const sub = String(o.props[2] ?? '')
       if (sub === 'LimbNode' || sub === 'Limb' || sub === 'Root' || sub === 'Null') boneNodes.push(o)
     }
-    // Топологическая сортировка: родитель раньше ребёнка (один проход BFS от корней).
+    // Topological sorting: parent before child (a single BFS pass from the roots).
     const parentOfNode = new Map<RawNode, RawNode | undefined>()
     for (const b of boneNodes) parentOfNode.set(b, this.parentOf(this.objId(b), 'Model'))
     const ordered: RawNode[] = []
@@ -401,7 +401,7 @@ class FbxDocumentReader {
     const indexOf = new Map<RawNode, number>()
     ordered.forEach((b, i) => indexOf.set(b, i))
 
-    // invBind из кластеров: TransformLink (глобальная bind-поза кости).
+    // invBind from clusters: TransformLink (the bone's global bind pose).
     const boneNodeByName = new Map<string, RawNode>()
     for (const b of ordered) boneNodeByName.set(this.objName(b), b)
     const invBind = new Map<number, Float32Array>()
@@ -431,7 +431,7 @@ class FbxDocumentReader {
     return { joints }
   }
 
-  // ── Меши ──────────────────────────────────────────────────────────────────
+  // ── Meshes ──────────────────────────────────────────────────────────────────
 
   private async extractMeshes(objects: RawNode, skeleton: FbxSkeleton): Promise<FbxMesh[]> {
     const meshes: FbxMesh[] = []
@@ -444,11 +444,11 @@ class FbxDocumentReader {
       const polygonIndex = await (polygonProp as unknown as LazyArray).i32()
       const vertexCount = vertices.length / 3
 
-      // Триангуляция веером + нормали.
+      // Fan triangulation + normals.
       const normals = await this.readNormals(g, polygonIndex, vertices)
       const { indices } = triangulate(polygonIndex)
 
-      // Скин: Deformer(Skin) --OO--> Geometry; кластеры скины.
+      // Skin: Deformer(Skin) --OO--> Geometry; the clusters are the skin.
       const skin = await this.readSkin(g, objects, skeleton)
 
       meshes.push({
@@ -465,7 +465,7 @@ class FbxDocumentReader {
 
   private async readNormals(g: RawNode, polygonIndex: Int32Array, vertices: Float64Array): Promise<Float32Array> {
     const vertexCount = vertices.length / 3
-    // Прямой ребёнок (7.4) или под Layer/LayerElement (7.5+).
+    // A direct child (7.4) or under Layer/LayerElement (7.5+).
     let normalNode: RawNode | undefined
     for (const ch of g.children) {
       if (ch.name === 'LayerElementNormal') { normalNode = ch; break }
@@ -476,7 +476,7 @@ class FbxDocumentReader {
           const t = le.children.find(c => c.name === 'Type')?.props[0]
           if (String(t) === 'LayerElementNormal') {
             normalNode = le.children.find(c => c.name === 'TypedIndex') ? le : normalNode
-            // 7.5: сами данные лежат в одноимённом узле внутри Geometry — уже покрыто прямым поиском.
+            // 7.5: the data itself lives in a same-named node inside Geometry — already covered by the direct search.
           }
         }
       }
@@ -497,7 +497,7 @@ class FbxDocumentReader {
     }
     if (mapping === 'ByPolygonVertex') {
       if (reference === 'Direct') {
-        // Усреднение per-polygon-vertex → per-control-point.
+        // Averaging per-polygon-vertex → per-control-point.
         for (let pvi = 0; pvi < polygonIndex.length; pvi++) {
           const vi = polygonIndex[pvi] < 0 ? ~polygonIndex[pvi] : polygonIndex[pvi]
           out[vi * 3] += rawNormals[pvi * 3] ?? 0
@@ -519,7 +519,7 @@ class FbxDocumentReader {
       } else {
         return fallback()
       }
-      // Нормализация усреднённых.
+      // Normalize the averaged values.
       for (let v = 0; v < vertexCount; v++) {
         const x = out[v * 3], y = out[v * 3 + 1], z = out[v * 3 + 2]
         const len = Math.hypot(x, y, z)
@@ -532,7 +532,7 @@ class FbxDocumentReader {
 
   private async readSkin(g: RawNode, objects: RawNode, skeleton: FbxSkeleton): Promise<FbxSkin | undefined> {
     const geomId = this.objId(g)
-    // Skin-деформеры, присоединённые к геометрии.
+    // Skin deformers attached to the geometry.
     let skinDeformer: RawNode | undefined
     for (const o of objects.children) {
       if (this.objType(o) !== 'Deformer') continue
@@ -544,13 +544,13 @@ class FbxDocumentReader {
     if (!(verticesProp instanceof LazyArrayImplCheck)) return undefined
     const vertexCount = (await (verticesProp as unknown as LazyArray).f64()).length / 3
 
-    // Кластеры скина → индексы вершин/веса.
+    // Skin clusters → vertex indices/weights.
     const jointNameToIndex = new Map<string, number>()
     skeleton.joints.forEach((j, i) => jointNameToIndex.set(j.name, i))
 
     const jointIndices = new Uint16Array(vertexCount * 4)
     const jointWeights = new Float32Array(vertexCount * 4)
-    const weightAcc = new Float64Array(vertexCount * 4) // max-weight занятость (insertion sort 4)
+    const weightAcc = new Float64Array(vertexCount * 4) // max-weight occupancy (insertion sort of 4)
     const jointAcc = new Uint16Array(vertexCount * 4)
 
     for (const cluster of this.childrenOf(this.objId(skinDeformer), 'SubDeformer')) {
@@ -566,14 +566,14 @@ class FbxDocumentReader {
         const vi = indexes[i]
         const w = weights[i]
         if (w <= 0) continue
-        // Вставка в топ-4 по весу (маленький массив — линейный поиск).
+        // Insert into the top-4 by weight (a tiny array — linear search).
         let slot = -1
         for (let s = 0; s < 4; s++) {
           if (weightAcc[vi * 4 + s] === 0) { slot = s; break }
           if (weightAcc[vi * 4 + s] < w) { slot = s; break }
         }
         if (slot === -1) continue
-        // Сдвиг хвоста вниз (вытесняем наименьший).
+        // Shift the tail down (evict the smallest).
         for (let s = 3; s > slot; s--) {
           weightAcc[vi * 4 + s] = weightAcc[vi * 4 + s - 1]
           jointAcc[vi * 4 + s] = jointAcc[vi * 4 + s - 1]
@@ -582,42 +582,42 @@ class FbxDocumentReader {
         jointAcc[vi * 4 + slot] = joint
       }
     }
-    // Нормализация весов (сумма → 1; вершины без влияний → joint 0, вес 0).
+    // Weight normalization (sum → 1; vertices without influences → joint 0, weight 0).
     for (let v = 0; v < vertexCount; v++) {
       let sum = 0
       for (let s = 0; s < 4; s++) sum += weightAcc[v * 4 + s]
       if (sum > 1e-9) {
         for (let s = 0; s < 4; s++) jointWeights[v * 4 + s] = weightAcc[v * 4 + s] / sum
       } else {
-        jointIndices[v * 4] = 0 // заглушка: вес 0 — не влияет
+        jointIndices[v * 4] = 0 // stub: weight 0 — no influence
       }
       for (let s = 0; s < 4; s++) jointIndices[v * 4 + s] = jointAcc[v * 4 + s]
     }
     return { jointIndices, jointWeights }
   }
 
-  // ── Клипы ────────────────────────────────────────────────────────────────
+  // ── Clips ────────────────────────────────────────────────────────────────
 
   private async extractClips(objects: RawNode): Promise<FbxClip[]> {
     const clips: FbxClip[] = []
     for (const stack of objects.children) {
       if (this.objType(stack) !== 'AnimStack') continue
-      // Стек → слои → curve nodes → кривые.
+      // Stack → layers → curve nodes → curves.
       const curveNodes: RawNode[] = []
       for (const layer of this.childrenOf(this.objId(stack), 'AnimLayer')) {
         for (const cn of this.childrenOf(this.objId(layer), 'AnimCurveNode')) curveNodes.push(cn)
       }
-      if (curveNodes.length === 0) continue // пустые стеки («Take 001») пропускаем
+      if (curveNodes.length === 0) continue // skip empty stacks ("Take 001")
 
-      // Треки строятся мутабельными (имя кости до резолва индекса), в конце
-      // компилируются в публичные FbxTrack*.
+      // Tracks are built mutable (bone name until the index is resolved),
+      // compiled into public FbxTrack* at the end.
       const pendingT: { boneName: string; times: Float32Array; values: Float32Array }[] = []
       const pendingR: { boneName: string; times: Float32Array; quats: Float32Array }[] = []
       let duration = 0
 
       for (const cn of curveNodes) {
         const cnId = this.objId(cn)
-        // Цель curve node: Model кости, свойство Lcl Translation | Lcl Rotation.
+        // The curve node's target: the bone's Model, the Lcl Translation | Lcl Rotation property.
         const bone = this.parentOf(cnId, 'Model')
         if (bone === undefined) continue
         const target = this.connProps.get(`${cnId}>${this.objId(bone)}`) ?? ''
@@ -625,7 +625,7 @@ class FbxDocumentReader {
         const isRotation = target.includes('Rotation')
         if (!isTranslation && !isRotation) continue
 
-        // Кривые X/Y/Z этого curve node.
+        // The X/Y/Z curves of this curve node.
         const curves: Record<'x' | 'y' | 'z', { times: Float64Array; values: Float32Array } | undefined> = { x: undefined, y: undefined, z: undefined }
         for (const child of this.childrenOf(cnId, 'AnimCurve')) {
           const axis = this.connProps.get(`${this.objId(child)}>${cnId}`) // "d|X" | "d|Y" | "d|Z"
@@ -643,7 +643,7 @@ class FbxDocumentReader {
         }
         if (curves.x === undefined && curves.y === undefined && curves.z === undefined) continue
 
-        // Общая сетка времени: объединение ключей трёх осей (сортировка).
+        // The shared time grid: the union of the three axes' keys (sorted).
         const keySet = new Set<number>()
         for (const axis of ['x', 'y', 'z'] as const) {
           if (curves[axis] !== undefined) for (const t of curves[axis]!.times) keySet.add(t)
@@ -671,8 +671,8 @@ class FbxDocumentReader {
       }
       if (pendingT.length === 0 && pendingR.length === 0) continue
 
-      // Резолв имён костей → индексы скелета (суставы уже извлечены в extract()
-      // ДО клипов — см. setSkeletonJoints).
+      // Resolve bone names → skeleton indices (the joints were already extracted
+      // in extract() BEFORE the clips — see setSkeletonJoints).
       const indexByName = new Map<string, number>()
       for (const [i, j] of skeletonJoints.entries()) indexByName.set(j.name, i)
       const tracksT: FbxTrackT[] = pendingT.map(p => ({ joint: indexByName.get(p.boneName) ?? -1, times: p.times, values: p.values }))
@@ -684,9 +684,9 @@ class FbxDocumentReader {
   }
 }
 
-// ─── Хелперы (чистые функции) ─────────────────────────────────────────────────
+// ─── Helpers (pure functions) ─────────────────────────────────────────────────
 
-/** Скалярный размер элемента ленивого массива (байты). */
+/** The scalar size of a lazy array element (bytes). */
 function scalarOf(kind: LazyArray['kind']): number {
   switch (kind) {
     case 'f64': case 'i64': return 8
@@ -695,10 +695,10 @@ function scalarOf(kind: LazyArray['kind']): number {
   }
 }
 
-/** Маркер-класс для ленивых массивов (instanceof-чек при чтении). */
+/** Marker class for lazy arrays (an instanceof check when reading). */
 class LazyArrayImplCheck { private readonly __lazy = true }
 
-/** Реализация ленивого массива: инфляция по требованию, кэш + дедуп параллельных вызовов. */
+/** Lazy array implementation: on-demand inflation, cache + dedup of parallel calls. */
 class LazyArrayImpl extends LazyArrayImplCheck implements LazyArray {
   readonly kind: LazyArray['kind']
   readonly length: number
@@ -719,7 +719,7 @@ class LazyArrayImpl extends LazyArrayImplCheck implements LazyArray {
     return out
   }
 
-  /** Выравнивание под скалярный размер (unaligned zlib-выход → копия). */
+  /** Alignment to the scalar size (unaligned zlib output → a copy). */
   private async aligned(scalar: number): Promise<Uint8Array> {
     const b = await this.raw()
     if (b.byteOffset % scalar === 0 && b.length >= this.length * scalar) return b
@@ -740,7 +740,7 @@ function splitNameType(o: RawNode): { name: string; type: string } {
   return { name: raw.slice(0, sep), type: raw.slice(sep + 2) }
 }
 
-/** Значения Properties70 «P»: [name, type, typeFlag, _, ...values]. */
+/** Properties70 "P" values: [name, type, typeFlag, _, ...values]. */
 function p70Values(p70: RawNode | undefined, name: string): number[] | undefined {
   if (p70 === undefined) return undefined
   for (const p of p70.children) {
@@ -765,9 +765,9 @@ async function propArray(node: RawNode, childName: string): Promise<Float64Array
   if (prop === undefined) return undefined
   if (prop instanceof LazyArrayImplCheck) {
     const lazy = prop as unknown as LazyArray
-    // Int64-массивы (KeyTime — ktime-тики) нельзя реинтерпретировать как f64:
-    // читаем их как BigInt64 → Number. Прочие kind'ы уже в правильной
-    // байтовой раскладке.
+    // Int64 arrays (KeyTime — ktime ticks) cannot be reinterpreted as f64:
+    // read them as BigInt64 → Number. The other kinds are already in the
+    // right byte layout.
     if (lazy.kind === 'i64') {
       const b = await lazy.raw()
       const out = new Float64Array(lazy.length)
@@ -783,14 +783,14 @@ async function propArray(node: RawNode, childName: string): Promise<Float64Array
   return undefined
 }
 
-/** Имя кости из имени кластера: «Cluster <bone>» → «<bone>». */
+/** The bone name from a cluster name: "Cluster <bone>" → "<bone>". */
 function strippedClusterName(name: string): string {
   return name.startsWith('Cluster ') ? name.slice('Cluster '.length) : name
 }
 
 const DEG2RAD = Math.PI / 180
 
-/** Эйлер XYZ (three.js конвенция: q = qx⊗qy⊗qz) → кватернион в out[off..off+3] (x,y,z,w). */
+/** Euler XYZ (three.js convention: q = qx⊗qy⊗qz) → a quaternion in out[off..off+3] (x,y,z,w). */
 export function quatFromEulerXYZ(euler: readonly number[], out: Float32Array | number[], off: number): void {
   const x = euler[0] / 2, y = euler[1] / 2, z = euler[2] / 2
   const sx = Math.sin(x), cx = Math.cos(x)
@@ -803,7 +803,7 @@ export function quatFromEulerXYZ(euler: readonly number[], out: Float32Array | n
   out[off + 3] = cx * cy * cz - sx * sy * sz
 }
 
-/** Обращение 4×4 (колоночно-мажорный, general). */
+/** 4×4 inversion (column-major, general). */
 export function invert4(m: ArrayLike<number>): Float32Array {
   const out = new Float32Array(16)
   const inv = new Float64Array(16)
@@ -824,7 +824,7 @@ export function invert4(m: ArrayLike<number>): Float32Array {
   inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5]
   inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5]
   let det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12]
-  if (det === 0) return out // вырожденная — identity
+  if (det === 0) return out // degenerate — identity
   det = 1 / det
   for (let i = 0; i < 16; i++) out[i] = inv[i] * det
   return out
@@ -885,7 +885,7 @@ function computeNormals(vertices: Float64Array, polygonIndex: Int32Array): Float
   return out
 }
 
-/** Сэмпл трёх осей в момент t (step-интерполяция между ключами осей). */
+/** Sample the three axes at time t (step interpolation between the axes' keys). */
 function sampleAxes(curves: Record<'x' | 'y' | 'z', { times: Float64Array; values: Float32Array } | undefined>, t: number): [number, number, number] {
   const out: [number, number, number] = [0, 0, 0]
   const axes = ['x', 'y', 'z'] as const
@@ -894,7 +894,7 @@ function sampleAxes(curves: Record<'x' | 'y' | 'z', { times: Float64Array; value
     if (curve === undefined) continue
     const { times, values } = curve
     if (times.length === 0) continue
-    // Бинарный/линейный поиск сегмента (ключи отсортированы).
+    // Binary/linear segment search (the keys are sorted).
     let i = 0
     while (i < times.length - 1 && times[i + 1] <= t) i++
     out[a] = values[i] ?? 0
@@ -902,19 +902,19 @@ function sampleAxes(curves: Record<'x' | 'y' | 'z', { times: Float64Array; value
   return out
 }
 
-// Заглушка для резолва индексов костей после парсинга скелета (заполняется
-// extractClips через замыкание ниже — см. skeletonJointsRef).
+// A placeholder for resolving bone indices after skeleton parsing (filled
+// via the closure below — see skeletonJointsRef).
 let skeletonJoints: readonly { name: string }[] = []
 
-/** Внутренний доступ для тестов: сброс кэша имён. */
+/** Internal access for tests: reset the name cache. */
 export function __resetFbxTestState(): void { skeletonJoints = [] }
 
-/** Инъекция списка костей (вызывается extract()). */
+/** Injection of the bone list (called by extract()). */
 function setSkeletonJoints(joints: readonly { name: string }[]): void { skeletonJoints = joints }
 
-// ─── Мост Task 88 (AssetLibrary ждёт эти имена) ─────────────────────────────
+// ─── Task 88 bridge (AssetLibrary expects these names) ─────────────────────────────
 
-/** FBX-бинарный магик «Kaydara FBX Binary» (снифф для AssetLibrary). */
+/** The FBX binary magic "Kaydara FBX Binary" (a sniff for AssetLibrary). */
 export function looksLikeFbxBinary(bytes: Uint8Array): boolean {
   const magic = 'Kaydara FBX Binary'
   if (bytes.length < magic.length) return false
@@ -924,30 +924,30 @@ export function looksLikeFbxBinary(bytes: Uint8Array): boolean {
   return true
 }
 
-/** Опции задачи FBX-парсинга (сигнал/фазы прогруза — мост AssetLibrary). */
+/** FBX parse task options (signal/load phases — the AssetLibrary bridge). */
 export interface FbxParseTaskOptions {
   readonly signal?: AbortSignal
   readonly onPhase?: (info: { stage: string; ratio: number; detail: string }) => void
 }
 
 /**
- * FBX из байтов (Task 88-контракт: Uint8Array + опции).
- * Полный буфер обязателен: FBX-дерево читается от конца (footer).
+ * FBX from bytes (the Task 88 contract: Uint8Array + options).
+ * A full buffer is mandatory: the FBX tree is read from the end (footer).
  */
 export async function parseFbx(
   data: Uint8Array | ArrayBuffer,
   options: FbxParseTaskOptions = {},
 ): Promise<FbxModel> {
   if (options.signal?.aborted) {
-    throw new DOMException('загрузка отменена', 'AbortError')
+    throw new DOMException('load cancelled', 'AbortError')
   }
-  options.onPhase?.({ stage: 'parse', ratio: 0.1, detail: 'FBX: полный буфер получен' })
+  options.onPhase?.({ stage: 'parse', ratio: 0.1, detail: 'FBX: full buffer received' })
   const buffer = (
     data instanceof ArrayBuffer
       ? data
       : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
   ) as ArrayBuffer
   const model = await parseFBX(buffer)
-  options.onPhase?.({ stage: 'parse', ratio: 0.9, detail: 'FBX: дерево разобрано' })
+  options.onPhase?.({ stage: 'parse', ratio: 0.9, detail: 'FBX: tree parsed' })
   return model
 }

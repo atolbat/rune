@@ -1,10 +1,10 @@
-/** Фикстуры GLB для тестов gltf и registry. */
+/** GLB fixtures for the gltf and registry tests. */
 
 const GLB_MAGIC = 0x46546c67
 const CHUNK_JSON = 0x4e4f534a
 const CHUNK_BIN = 0x004e4942
 
-/** Собирает валидный GLB 2.0 (JSON-чанк с паддингом + BIN-чанк). */
+/** Builds a valid GLB 2.0 (JSON chunk with padding + BIN chunk). */
 export function buildGlb(json: object, bin: Uint8Array): Uint8Array {
   const jsonBytes = new TextEncoder().encode(JSON.stringify(json))
   const pad = (4 - (jsonBytes.length % 4)) % 4
@@ -26,7 +26,7 @@ export function buildGlb(json: object, bin: Uint8Array): Uint8Array {
   return out
 }
 
-/** BIN: 3 позиции VEC3 float + 3 индекса ushort. */
+/** BIN: 3 VEC3 float positions + 3 ushort indices. */
 export function triBin(): Uint8Array {
   const bin = new Uint8Array(42)
   const dv = new DataView(bin.buffer)
@@ -38,7 +38,7 @@ export function triBin(): Uint8Array {
   return bin
 }
 
-/** Минимальный glTF-документ: сцена → узел → меш (треугольник) + материал MASK. */
+/** Minimal glTF document: scene → node → mesh (triangle) + MASK material. */
 export function triDocument(): Record<string, unknown> {
   return {
     asset: { version: '2.0' },

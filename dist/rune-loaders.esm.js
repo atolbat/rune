@@ -1,11 +1,11 @@
 // packages/loaders/src/assembler.ts
 function signalAbortError(signal) {
-  return signal?.reason instanceof Error ? signal.reason : new DOMException("загрузка отменена", "AbortError");
+  return signal?.reason instanceof Error ? signal.reason : new DOMException("load cancelled", "AbortError");
 }
 function toAbortError(reason) {
   if (reason instanceof Error)
     return reason;
-  return new DOMException(typeof reason === "string" ? reason : "загрузка отменена", "AbortError");
+  return new DOMException(typeof reason === "string" ? reason : "load cancelled", "AbortError");
 }
 function isAbortError(error) {
   return error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError");
@@ -68,17 +68,17 @@ class Assembler {
   }
   slice(offset, length) {
     if (this.received < offset + length)
-      throw new Error(`range [${offset}, ${offset + length}) не получен (watermark ${this.received})`);
+      throw new Error(`range [${offset}, ${offset + length}) not received (watermark ${this.received})`);
     return this.buffer.slice(offset, offset + length);
   }
   prefixView(length) {
     if (this.received < length)
-      throw new Error(`prefix ${length} не получен (watermark ${this.received})`);
+      throw new Error(`prefix ${length} not received (watermark ${this.received})`);
     return new Uint8Array(this.buffer.buffer, 0, length);
   }
   fullView() {
     if (!this.finished)
-      throw new Error("тело ещё не получено полностью");
+      throw new Error("body not fully received yet");
     return new Uint8Array(this.buffer.buffer, 0, this.received);
   }
   async pump(body, onBytes) {
@@ -180,7 +180,7 @@ class FetchScheduler {
     }
     const entry = this.running.get(job.id);
     if (entry !== undefined) {
-      entry.controller.abort(new DOMException(reason ?? "загрузка отменена", "AbortError"));
+      entry.controller.abort(new DOMException(reason ?? "load cancelled", "AbortError"));
       return true;
     }
     return false;
@@ -316,11 +316,11 @@ async function fetchStreaming(url, options = {}) {
       throw error;
     }
   }
-  throw lastError ?? new Error(`источник недоступен: ${url}`);
+  throw lastError ?? new Error(`source unavailable: ${url}`);
 }
 function connectTimeoutTimer(controller, ms, _external) {
   const timer = setTimeout(() => {
-    controller.abort(new DOMException("таймаут соединения", "TimeoutError"));
+    controller.abort(new DOMException("connection timeout", "TimeoutError"));
   }, ms);
   return () => clearTimeout(timer);
 }
@@ -357,7 +357,7 @@ function sleepAbortable(ms, signal) {
 }
 async function inflateDeflate(compressed) {
   if (typeof DecompressionStream > "u")
-    throw new Error("DecompressionStream недоступен — бинарный FBX с zlib-сжатием не поддерживается в этой среде");
+    throw new Error("DecompressionStream unavailable — binary FBX with zlib compression is not supported in this environment");
   const reader = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate")).getReader();
   const chunks = [];
   let total = 0;
@@ -511,14 +511,14 @@ async function parseGlb(assembler, options = {}) {
   await assembler.waitFor(20);
   const header = new DataView(assembler.slice(0, 20).buffer);
   if (header.getUint32(0, true) !== GLB_MAGIC)
-    throw new Error("не GLB: магик не glTF");
+    throw new Error("not GLB: magic is not glTF");
   const version = header.getUint32(4, true);
   if (version !== 2)
-    throw new Error(`GLB версии ${version} не поддерживается (только 2)`);
+    throw new Error(`GLB version ${version} is not supported (only 2)`);
   const declaredTotal = header.getUint32(8, true);
   const jsonLength = header.getUint32(12, true);
   if (header.getUint32(16, true) !== GLB_CHUNK_JSON)
-    throw new Error("GLB: первый чанк не JSON");
+    throw new Error("GLB: first chunk is not JSON");
   onPhase({ stage: "json", ratio: 0.05, detail: `${formatBytesRounded(jsonLength)} JSON` });
   await assembler.waitFor(20 + jsonLength);
   const jsonText = new TextDecoder("utf-8").decode(assembler.slice(20, jsonLength));
@@ -544,7 +544,7 @@ async function parseGlb(assembler, options = {}) {
   onPhase({
     stage: "bin",
     ratio: 0.15,
-    detail: binStart >= 0 ? `BIN ${formatBytesRounded(binLength)}` : "без BIN-чанка"
+    detail: binStart >= 0 ? `BIN ${formatBytesRounded(binLength)}` : "without BIN chunk"
   });
   const binReady = (length) => binStart < 0 ? assembler.isDone : assembler.watermark - binStart >= length;
   const waitBin = async (length) => {
@@ -557,9 +557,9 @@ async function parseGlb(assembler, options = {}) {
     wait: (offset, length) => waitBin(offset + length),
     view: (offset, length) => {
       if (binStart < 0)
-        throw new Error("GLB без BIN-чанка: буферы должны быть внешними uri");
+        throw new Error("GLB without BIN chunk: buffers must be external uri");
       if (!binReady(offset + length))
-        throw new Error(`BIN-диапазон [${offset}, ${offset + length}) не получен`);
+        throw new Error(`BIN range [${offset}, ${offset + length}) not received`);
       if (totalKnown) {
         zeroCopyCount++;
         return new Uint8Array(assembler.prefixView(assembler.watermark).buffer, binStart + offset, length);
@@ -580,7 +580,7 @@ async function parseGlb(assembler, options = {}) {
   });
   await assembler.completion;
   if (assembler.total !== undefined && assembler.watermark !== declaredTotal)
-    throw new Error(`GLB неполный: ${assembler.watermark} из ${declaredTotal} байт`);
+    throw new Error(`GLB incomplete: ${assembler.watermark} of ${declaredTotal} bytes`);
   return withStats(model, "glb", {
     jsonBytes: jsonLength,
     binBytes: binStart >= 0 ? binLength : 0,
@@ -596,7 +596,7 @@ async function parseGltfJson(text, external, options = {}) {
   onPhase({
     stage: "buffers",
     ratio: 0.1,
-    detail: `${json.buffers?.length ?? 0} внешних буферов`
+    detail: `${json.buffers?.length ?? 0} external buffers`
   });
   const externals = [];
   for (const buffer of json.buffers ?? [])
@@ -693,7 +693,7 @@ async function parseGltfDocument(json, ctx) {
     const startDecode = () => {
       try {
         if (createBitmap === undefined) {
-          rejectBitmap(new Error("createImageBitmap недоступен в этой среде"));
+          rejectBitmap(new Error("createImageBitmap is not available in this environment"));
           return;
         }
         createBitmap(bytes, mimeType).then(resolveBitmap, rejectBitmap);
@@ -704,14 +704,14 @@ async function parseGltfDocument(json, ctx) {
     if (raw.bufferView !== undefined) {
       const view = bufferViews[raw.bufferView];
       if (view === undefined) {
-        rejectBitmap(new Error(`image ${name}: bufferView ${raw.bufferView} не найден`));
+        rejectBitmap(new Error(`image ${name}: bufferView ${raw.bufferView} not found`));
         continue;
       }
       const byteOffset = view.byteOffset ?? 0;
       const byteLength = view.byteLength;
       const source = ctx.buffers[view.buffer ?? 0];
       if (source === undefined) {
-        rejectBitmap(new Error(`image ${name}: буфер ${view.buffer ?? 0} не найден`));
+        rejectBitmap(new Error(`image ${name}: buffer ${view.buffer ?? 0} not found`));
         continue;
       }
       if (source.ready(byteOffset, byteLength)) {
@@ -738,7 +738,7 @@ async function parseGltfDocument(json, ctx) {
         rejectBitmap(error);
       }
     } else {
-      rejectBitmap(new Error(`image ${name}: нет ни bufferView, ни загрузчика uri`));
+      rejectBitmap(new Error(`image ${name}: neither bufferView nor a uri loader`));
     }
   }
   const plans = [];
@@ -782,13 +782,13 @@ async function parseGltfDocument(json, ctx) {
     const draco = primitive.extensions?.KHR_draco_mesh_compression;
     if (draco !== undefined) {
       if (ctx.dracoDecoder === undefined)
-        throw new Error("примитив сжат KHR_draco_mesh_compression, но декодер не передан " + "(GltfParseOptions.dracoDecoder) — сжатая геометрия не читается");
+        throw new Error("primitive compressed with KHR_draco_mesh_compression, but no decoder passed " + "(GltfParseOptions.dracoDecoder) — compressed geometry cannot be read");
       const view = bufferViews[draco.bufferView];
       if (view === undefined)
-        throw new Error(`Draco: bufferView ${draco.bufferView} не найден`);
+        throw new Error(`Draco: bufferView ${draco.bufferView} not found`);
       const source = ctx.buffers[view.buffer ?? 0];
       if (source === undefined)
-        throw new Error(`Draco: буфер ${view.buffer ?? 0} не найден`);
+        throw new Error(`Draco: buffer ${view.buffer ?? 0} not found`);
       const byteOffset = view.byteOffset ?? 0;
       await source.wait(byteOffset, view.byteLength);
       const dracoBytes = source.view(byteOffset, view.byteLength);
@@ -817,10 +817,10 @@ async function parseGltfDocument(json, ctx) {
     ctx.phase({
       stage: "geometry",
       ratio: 0.2 + 0.75 * (parsedCount / plans.length),
-      detail: `${parsedCount}/${plans.length} примитивов`
+      detail: `${parsedCount}/${plans.length} primitives`
     });
   }
-  ctx.phase({ stage: "geometry", ratio: 0.95, detail: `${parsedCount} примитивов` });
+  ctx.phase({ stage: "geometry", ratio: 0.95, detail: `${parsedCount} primitives` });
   const meshes = rawMeshes.map((mesh, index) => ({
     name: mesh.name ?? `mesh-${index}`,
     primitives: primitivesPerMesh[index] ?? []
@@ -850,28 +850,28 @@ async function parseGltfDocument(json, ctx) {
 }
 async function readFloatAttribute(accessorIndex, semantic, accessors, bufferViews, ctx) {
   if (accessorIndex === undefined)
-    throw new Error(`примитив без атрибута ${semantic}`);
+    throw new Error(`primitive without attribute ${semantic}`);
   const accessor = accessors[accessorIndex];
   if (accessor === undefined)
-    throw new Error(`аксессор ${semantic} #${accessorIndex} не найден`);
+    throw new Error(`accessor ${semantic} #${accessorIndex} not found`);
   const numComponents = TYPE_COMPONENTS[accessor.type] ?? 0;
   if (numComponents === 0)
-    throw new Error(`аксессор ${semantic}: тип ${accessor.type} не векторный`);
+    throw new Error(`accessor ${semantic}: type ${accessor.type} is not a vector`);
   if (accessor.sparse !== undefined)
-    throw new Error(`аксессор ${semantic}: sparse не поддерживается`);
+    throw new Error(`accessor ${semantic}: sparse is not supported`);
   const count = accessor.count;
   if (accessor.bufferView === undefined)
     return new Float32Array(count * numComponents);
   const view = bufferViews[accessor.bufferView];
   if (view === undefined)
-    throw new Error(`bufferView ${accessor.bufferView} не найден (${semantic})`);
+    throw new Error(`bufferView ${accessor.bufferView} not found (${semantic})`);
   const source = ctx.buffers[view.buffer ?? 0];
   if (source === undefined)
-    throw new Error(`буфер ${view.buffer ?? 0} не найден (${semantic})`);
+    throw new Error(`buffer ${view.buffer ?? 0} not found (${semantic})`);
   const componentType = accessor.componentType;
   const componentSize = COMPONENT_SIZE[componentType] ?? 0;
   if (componentSize === 0)
-    throw new Error(`componentType ${componentType} не поддержан (${semantic})`);
+    throw new Error(`componentType ${componentType} is not supported (${semantic})`);
   const byteStride = view.byteStride ?? 0;
   const byteOffset = (view.byteOffset ?? 0) + (accessor.byteOffset ?? 0);
   const tightBytes = count * numComponents * componentSize;
@@ -926,7 +926,7 @@ async function readFloatAttribute(accessorIndex, semantic, accessors, bufferView
             value = Math.max(value / 127, -1);
           break;
         default:
-          throw new Error(`componentType ${componentType} не поддержан`);
+          throw new Error(`componentType ${componentType} is not supported`);
       }
       out[outAt++] = value;
     }
@@ -936,18 +936,18 @@ async function readFloatAttribute(accessorIndex, semantic, accessors, bufferView
 async function readIndices(accessorIndex, accessors, bufferViews, ctx) {
   const accessor = accessors[accessorIndex];
   if (accessor === undefined)
-    throw new Error(`аксессор indices #${accessorIndex} не найден`);
+    throw new Error(`accessor indices #${accessorIndex} not found`);
   if (accessor.type !== "SCALAR")
-    throw new Error("indices: тип не SCALAR");
+    throw new Error("indices: type is not SCALAR");
   const count = accessor.count;
   if (accessor.bufferView === undefined)
     return new Uint16Array(0);
   const view = bufferViews[accessor.bufferView];
   if (view === undefined)
-    throw new Error(`bufferView ${accessor.bufferView} не найден (indices)`);
+    throw new Error(`bufferView ${accessor.bufferView} not found (indices)`);
   const source = ctx.buffers[view.buffer ?? 0];
   if (source === undefined)
-    throw new Error(`буфер ${view.buffer ?? 0} не найден (indices)`);
+    throw new Error(`buffer ${view.buffer ?? 0} not found (indices)`);
   const componentSize = COMPONENT_SIZE[accessor.componentType] ?? 0;
   const byteOffset = (view.byteOffset ?? 0) + (accessor.byteOffset ?? 0);
   const byteLength = count * componentSize;
@@ -970,7 +970,7 @@ async function readIndices(accessorIndex, accessors, bufferViews, ctx) {
       out[i] = dataView.getUint32(i * 4, true);
     return out;
   }
-  throw new Error(`indices componentType ${accessor.componentType} не поддержан`);
+  throw new Error(`indices componentType ${accessor.componentType} is not supported`);
 }
 function computeBounds(accessor, positions) {
   if (accessor?.min !== undefined && accessor.min.length >= 3) {
@@ -1002,12 +1002,12 @@ function assertRequiredExtensions(json, dracoDecoder) {
     if (extension === "KHR_draco_mesh_compression" && dracoDecoder !== undefined)
       continue;
     if (UNSUPPORTED_EXTENSIONS.has(extension))
-      throw new Error(`glTF требует ${extension} — ${extension === "KHR_draco_mesh_compression" ? "декодер не передан (GltfParseOptions.dracoDecoder)" : "сжатие геометрии/текстур не поддерживается парсером (поддерживается EXT_texture_webp — нативно браузером)"}`);
+      throw new Error(`glTF requires ${extension} — ${extension === "KHR_draco_mesh_compression" ? "decoder not passed (GltfParseOptions.dracoDecoder)" : "geometry/texture compression is not supported by the parser (EXT_texture_webp is supported — natively by the browser)"}`);
   }
 }
 function throwIfAborted(signal) {
   if (signal?.aborted)
-    throw signal.reason instanceof Error ? signal.reason : new DOMException("парсинг отменён", "AbortError");
+    throw signal.reason instanceof Error ? signal.reason : new DOMException("parsing cancelled", "AbortError");
 }
 function withStats(model, kind, input) {
   let vertices = 0;
@@ -1166,7 +1166,7 @@ class ObjParser {
       this.onPhase({
         stage: "lines",
         ratio: Math.min(0.9, this.received / this.expectedBytes),
-        detail: `${this.lines} строк · ${Math.floor(this.corners.count / 3)} тр.`
+        detail: `${this.lines} lines · ${Math.floor(this.corners.count / 3)} tris.`
       });
   }
   finish() {
@@ -1567,18 +1567,18 @@ class FbxDocumentReader {
     this.bytes = new Uint8Array(buffer);
     this.view = new DataView(buffer);
     if (this.bytes.length < 32) {
-      throw new SyntaxError("parseFBX: буфер слишком мал для FBX-заголовка");
+      throw new SyntaxError("parseFBX: buffer too small for an FBX header");
     }
     const magic = this.utf8.decode(this.bytes.subarray(0, 20));
     if (magic.startsWith("Kaydara FBX ASCII")) {
-      throw new SyntaxError("parseFBX: ASCII-FBX не поддерживается (нужен бинарный «Kaydara FBX Binary») — экспортируйте Binary FBX");
+      throw new SyntaxError('parseFBX: ASCII-FBX is not supported (binary "Kaydara FBX Binary" required) — export as Binary FBX');
     }
     if (magic !== MAGIC) {
-      throw new SyntaxError(`parseFBX: не FBX Binary (магия: ${JSON.stringify(magic.slice(0, 16))}…)`);
+      throw new SyntaxError(`parseFBX: not FBX Binary (magic: ${JSON.stringify(magic.slice(0, 16))}…)`);
     }
     const version = this.view.getUint32(23, true);
     if (version < 7000 || version > 7999) {
-      throw new SyntaxError(`parseFBX: неподдерживаемая версия FBX ${version} (ожидается 7.1–7.7)`);
+      throw new SyntaxError(`parseFBX: unsupported FBX version ${version} (expected 7.1–7.7)`);
     }
     this.v64 = version >= 7500;
     this.cursor = 27;
@@ -1591,7 +1591,7 @@ class FbxDocumentReader {
       this.root.push(node);
     }
     if (this.root.length === 0)
-      throw new SyntaxError("parseFBX: пустое дерево узлов (битый файл?)");
+      throw new SyntaxError("parseFBX: empty node tree (corrupt file?)");
     await Promise.resolve();
   }
   headerSize() {
@@ -1617,7 +1617,7 @@ class FbxDocumentReader {
     if (endOffset === 0 && numProps === 0 && propLen === 0 && nameLen === 0)
       return null;
     if (endOffset <= start || endOffset > this.bytes.length) {
-      throw new RangeError(`parseFBX: узел с битым endOffset=${endOffset} @${start} (файл обрезан?)`);
+      throw new RangeError(`parseFBX: node with corrupt endOffset=${endOffset} @${start} (truncated file?)`);
     }
     const name = this.utf8.decode(this.bytes.subarray(this.cursor, this.cursor + nameLen));
     this.cursor += nameLen;
@@ -1696,7 +1696,7 @@ class FbxDocumentReader {
         return this.lazyArray(kind, len, enc, start, comp, nodeName);
       }
       default:
-        throw new SyntaxError(`parseFBX: неизвестный тип свойства '${type}' в узле «${nodeName}» @${this.cursor - 1}`);
+        throw new SyntaxError(`parseFBX: unknown property type '${type}' in node "${nodeName}" @${this.cursor - 1}`);
     }
   }
   lazyArray(kind, len, enc, start, comp, nodeName) {
@@ -1704,20 +1704,20 @@ class FbxDocumentReader {
       const raw = this.bytes.subarray(start, start + comp);
       if (enc === 0) {
         if (raw.length < len * scalarOf(kind)) {
-          throw new RangeError(`parseFBX: массив узла «${nodeName}» обрезан (${raw.length} байт < ${len * scalarOf(kind)})`);
+          throw new RangeError(`parseFBX: truncated array of node "${nodeName}" (${raw.length} bytes < ${len * scalarOf(kind)})`);
         }
         return raw;
       }
       if (enc !== 1) {
-        throw new SyntaxError(`parseFBX: массив узла «${nodeName}» с неизвестной кодировкой ${enc}`);
+        throw new SyntaxError(`parseFBX: array of node "${nodeName}" with unknown encoding ${enc}`);
       }
       if (typeof DecompressionStream === "undefined") {
-        throw new SyntaxError("parseFBX: окружение без DecompressionStream — zlib-массивы недоступны");
+        throw new SyntaxError("parseFBX: environment without DecompressionStream — zlib arrays unavailable");
       }
       const stream = new Blob([raw]).stream().pipeThrough(new DecompressionStream("deflate"));
       const out = new Uint8Array(await new Response(stream).arrayBuffer());
       if (out.length < len * scalarOf(kind)) {
-        throw new SyntaxError(`parseFBX: распаковка узла «${nodeName}» дала ${out.length} байт, ожидается ≥ ${len * scalarOf(kind)}`);
+        throw new SyntaxError(`parseFBX: inflating node "${nodeName}" produced ${out.length} bytes, expected ≥ ${len * scalarOf(kind)}`);
       }
       return out;
     });
@@ -1726,7 +1726,7 @@ class FbxDocumentReader {
     const objects = this.find("Objects");
     const connections = this.find("Connections");
     if (objects === undefined)
-      throw new SyntaxError("parseFBX: нет узла Objects");
+      throw new SyntaxError("parseFBX: no Objects node");
     this.indexObjects(objects);
     if (connections !== undefined)
       this.indexConnections(connections);
@@ -2376,12 +2376,12 @@ function looksLikeFbxBinary(bytes) {
 }
 async function parseFbx(data, options = {}) {
   if (options.signal?.aborted) {
-    throw new DOMException("загрузка отменена", "AbortError");
+    throw new DOMException("load cancelled", "AbortError");
   }
-  options.onPhase?.({ stage: "parse", ratio: 0.1, detail: "FBX: полный буфер получен" });
+  options.onPhase?.({ stage: "parse", ratio: 0.1, detail: "FBX: full buffer received" });
   const buffer = data instanceof ArrayBuffer ? data : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
   const model = await parseFBX(buffer);
-  options.onPhase?.({ stage: "parse", ratio: 0.9, detail: "FBX: дерево разобрано" });
+  options.onPhase?.({ stage: "parse", ratio: 0.9, detail: "FBX: tree parsed" });
   return model;
 }
 // packages/loaders/src/image.ts
@@ -2389,11 +2389,11 @@ var defaultCreateBitmap = typeof createImageBitmap === "function" ? (bytes, mime
 async function parseImage(assembler, options = {}) {
   const onPhase = options.onPhase ?? (() => {});
   await assembler.completion;
-  onPhase({ stage: "decode", ratio: 0.9, detail: `${assembler.watermark} байт` });
+  onPhase({ stage: "decode", ratio: 0.9, detail: `${assembler.watermark} bytes` });
   const bytes = assembler.fullView();
   const createBitmap = options.createBitmap ?? defaultCreateBitmap;
   if (createBitmap === undefined)
-    throw new Error("createImageBitmap недоступен в этой среде (нужен браузер или инъекция)");
+    throw new Error("createImageBitmap is not available in this environment (a browser or injection is needed)");
   const mimeType = sniffImageMime(bytes);
   const bitmap = await createBitmap(bytes, mimeType, options.imageBitmapOptions);
   onPhase({ stage: "decode", ratio: 1, detail: `${bitmap.width}×${bitmap.height}` });
@@ -2446,7 +2446,7 @@ function configParserOf(extension) {
 async function parseConfig(assembler, extension, options = {}) {
   const parser = configParserOf(extension);
   if (parser === undefined)
-    throw new Error(`нет парсера конфигов «${extension}» — подключите registerConfigParser('${extension}', fn)`);
+    throw new Error(`no config parser for "${extension}" — plug in registerConfigParser('${extension}', fn)`);
   await assembler.completion;
   options.onPhase?.({ stage: "parse", ratio: 0.5, detail: extension });
   const result = await parser(assembler.fullView());
@@ -2846,7 +2846,7 @@ var defaultInflate = typeof DecompressionStream === "function" ? async (bytes) =
 var defaultDecodeImage = (bytes, mimeType, options) => {
   const fn = globalThis.createImageBitmap;
   if (typeof fn !== "function") {
-    return Promise.reject(new UnsupportedError("createImageBitmap недоступен на этой платформе — передайте decodeImage"));
+    return Promise.reject(new UnsupportedError("createImageBitmap unavailable on this platform — pass decodeImage"));
   }
   return fn(new Blob([bytes], mimeType ? { type: mimeType } : undefined), {
     premultiplyAlpha: options.premultiplyAlpha ?? "default",
@@ -2983,13 +2983,13 @@ function isGlbMagic(bytes) {
 function parseGlbContainer(bytes, ctx) {
   const url = ctx?.sourceUrl ?? null;
   if (bytes.length < 12)
-    throw new ParseError("GLB: файл короче заголовка", 0, url);
+    throw new ParseError("GLB: file shorter than the header", 0, url);
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (dv.getUint32(0, true) !== GLB_MAGIC2)
-    throw new ParseError("GLB: неверная магика", 0, url);
+    throw new ParseError("GLB: wrong magic", 0, url);
   const version = dv.getUint32(4, true);
   if (version !== 1 && version !== 2) {
-    throw new ParseError(`GLB: версия ${version} не поддерживается (нужна 2)`, 4, url);
+    throw new ParseError(`GLB: version ${version} is not supported (2 required)`, 4, url);
   }
   let pos = 12;
   let gltf = null;
@@ -2999,14 +2999,14 @@ function parseGlbContainer(bytes, ctx) {
     const type = dv.getUint32(pos + 4, true);
     const dataStart = pos + 8;
     if (dataStart + len > bytes.length) {
-      throw new ParseError("GLB: чанк вылезает за конец файла", pos, url);
+      throw new ParseError("GLB: chunk runs past the end of the file", pos, url);
     }
     if (type === CHUNK_JSON) {
       const jsonText = new TextDecoder("utf-8").decode(bytes.subarray(dataStart, dataStart + len));
       try {
         gltf = JSON.parse(jsonText);
       } catch (err) {
-        throw new ParseError(`GLB: битый JSON-чанк: ${err.message}`, dataStart, url);
+        throw new ParseError(`GLB: corrupt JSON chunk: ${err.message}`, dataStart, url);
       }
     } else if (type === CHUNK_BIN) {
       bin = bytes.subarray(dataStart, dataStart + len);
@@ -3015,7 +3015,7 @@ function parseGlbContainer(bytes, ctx) {
     pos = dataStart + padded;
   }
   if (gltf === null)
-    throw new ParseError("GLB: нет JSON-чанка", 0, url);
+    throw new ParseError("GLB: no JSON chunk", 0, url);
   return { gltf, bin };
 }
 var COMPONENTS = {
@@ -3039,7 +3039,7 @@ function componentSize(componentType) {
     case 5126:
       return 4;
     default:
-      throw new ParseError(`accessor: неизвестный componentType ${componentType}`);
+      throw new ParseError(`accessor: unknown componentType ${componentType}`);
   }
 }
 function makeRaw(componentType, length) {
@@ -3057,7 +3057,7 @@ function makeRaw(componentType, length) {
     case 5126:
       return new Float32Array(length);
     default:
-      throw new ParseError(`accessor: неизвестный componentType ${componentType}`);
+      throw new ParseError(`accessor: unknown componentType ${componentType}`);
   }
 }
 function typedView(componentType, buffer, byteOffset, length) {
@@ -3084,7 +3084,7 @@ function readElements(bytes, byteOffset, byteStride, compSize, count, comps, com
   if (tight) {
     const need = total * compSize;
     if (byteOffset + need > bytes.length) {
-      throw new ParseError("accessor: данные за границей bufferView");
+      throw new ParseError("accessor: data outside the bufferView bounds");
     }
     const view = typedView(componentType, bytes.buffer, bytes.byteOffset + byteOffset, total);
     if (view !== null)
@@ -3102,7 +3102,7 @@ function readElements(bytes, byteOffset, byteStride, compSize, count, comps, com
     for (let c = 0;c < comps; c++) {
       const at = src + c * compSize;
       if (at + compSize > bytes.length)
-        throw new ParseError("accessor: данные за границей bufferView");
+        throw new ParseError("accessor: data outside the bufferView bounds");
       const i = v * comps + c;
       switch (componentType) {
         case 5126:
@@ -3135,10 +3135,10 @@ function decodeAccessor(gltf, accIndex, buffers, ctx) {
   const acc = accessors[accIndex];
   const url = ctx.sourceUrl;
   if (acc === undefined)
-    throw new ParseError(`accessor ${accIndex}: нет в gltf`, -1, url);
+    throw new ParseError(`accessor ${accIndex}: missing in gltf`, -1, url);
   const comps = COMPONENTS[acc.type];
   if (comps === undefined)
-    throw new ParseError(`accessor: тип ${acc.type} не поддерживается`, -1, url);
+    throw new ParseError(`accessor: type ${acc.type} is not supported`, -1, url);
   throwIfAborted2(ctx.signal, "gltf parse");
   const count = acc.count;
   const compSize = componentSize(acc.componentType);
@@ -3149,10 +3149,10 @@ function decodeAccessor(gltf, accIndex, buffers, ctx) {
   } else {
     const bv = (gltf.bufferViews ?? [])[acc.bufferView];
     if (bv === undefined)
-      throw new ParseError(`bufferView ${acc.bufferView}: нет в gltf`, -1, url);
+      throw new ParseError(`bufferView ${acc.bufferView}: missing in gltf`, -1, url);
     const buffer = buffers[bv.buffer];
     if (buffer === undefined)
-      throw new ParseError(`buffer ${bv.buffer}: не загружен`, -1, url);
+      throw new ParseError(`buffer ${bv.buffer}: not loaded`, -1, url);
     const byteOffset = (bv.byteOffset ?? 0) + (acc.byteOffset ?? 0);
     raw = readElements(buffer, byteOffset, bv.byteStride ?? 0, compSize, count, comps, acc.componentType, ctx);
   }
@@ -3161,18 +3161,18 @@ function decodeAccessor(gltf, accIndex, buffers, ctx) {
     const idxBv = (gltf.bufferViews ?? [])[sparse.indices.bufferView];
     const valBv = (gltf.bufferViews ?? [])[sparse.values.bufferView];
     if (idxBv === undefined || valBv === undefined)
-      throw new ParseError("sparse: нет bufferView", -1, url);
+      throw new ParseError("sparse: missing bufferView", -1, url);
     const idxBuffer = buffers[idxBv.buffer];
     const valBuffer = buffers[valBv.buffer];
     if (idxBuffer === undefined || valBuffer === undefined)
-      throw new ParseError("sparse: буфер не загружен", -1, url);
+      throw new ParseError("sparse: buffer not loaded", -1, url);
     const idxCompSize = componentSize(sparse.indices.componentType);
     const idxRaw = readElements(idxBuffer, (idxBv.byteOffset ?? 0) + (sparse.indices.byteOffset ?? 0), idxBv.byteStride ?? 0, idxCompSize, sparse.count, 1, sparse.indices.componentType, ctx);
     const valRaw = readElements(valBuffer, (valBv.byteOffset ?? 0) + (sparse.values.byteOffset ?? 0), valBv.byteStride ?? 0, compSize, sparse.count, comps, acc.componentType, ctx);
     for (let i = 0;i < sparse.count; i++) {
       const vertexIndex = idxRaw[i];
       if (vertexIndex >= count)
-        throw new ParseError("sparse: индекс вне count", -1, url);
+        throw new ParseError("sparse: index out of count", -1, url);
       for (let c = 0;c < comps; c++) {
         raw[vertexIndex * comps + c] = valRaw[i * comps + c];
       }
@@ -3222,12 +3222,12 @@ async function loadBuffers(gltf, bin, ctx) {
         out.push(bin);
         continue;
       }
-      throw new ParseError(`buffer ${i}: нет uri и это не GLB BIN`, -1, ctx.sourceUrl);
+      throw new ParseError(`buffer ${i}: no uri and this is not the GLB BIN`, -1, ctx.sourceUrl);
     }
     if (uri.startsWith("data:")) {
       const parsed = parseDataUri(uri);
       if (parsed === null)
-        throw new ParseError(`buffer ${i}: битый data: URI`, -1, ctx.sourceUrl);
+        throw new ParseError(`buffer ${i}: corrupt data: URI`, -1, ctx.sourceUrl);
       out.push(parsed.bytes);
       continue;
     }
@@ -3241,10 +3241,10 @@ function buildMeshDocument(gltf, buffers, ctx) {
     if (img.bufferView !== undefined) {
       const bv = (gltf.bufferViews ?? [])[img.bufferView];
       if (bv === undefined)
-        throw new ParseError(`image: bufferView ${img.bufferView} нет`, -1, url);
+        throw new ParseError(`image: bufferView ${img.bufferView} missing`, -1, url);
       const buffer = buffers[bv.buffer];
       if (buffer === undefined)
-        throw new ParseError("image: буфер не загружен", -1, url);
+        throw new ParseError("image: buffer not loaded", -1, url);
       const off = bv.byteOffset ?? 0;
       return {
         name: img.name ?? null,
@@ -3315,22 +3315,22 @@ function buildMeshDocument(gltf, buffers, ctx) {
     for (const prim of mesh.primitives ?? []) {
       const ext = prim.extensions ?? {};
       if (ext["KHR_draco_mesh_compression"] !== undefined) {
-        throw new UnsupportedError("glTF: меш сжат KHR_draco_mesh_compression — прогоните через конвертер или подключите Draco-декодер отдельным transform", url);
+        throw new UnsupportedError("glTF: mesh compressed with KHR_draco_mesh_compression — run it through a converter or plug in a Draco decoder as a separate transform", url);
       }
       if (prim.targets !== undefined && prim.targets.length > 0) {
-        throw new UnsupportedError("glTF: morph targets не поддерживаются в v1", url);
+        throw new UnsupportedError("glTF: morph targets are not supported in v1", url);
       }
       if (ext["EXT_mesh_gpu_instancing"] !== undefined) {
-        throw new UnsupportedError("glTF: EXT_mesh_gpu_instancing не поддерживается в v1", url);
+        throw new UnsupportedError("glTF: EXT_mesh_gpu_instancing is not supported in v1", url);
       }
       const attrs = prim.attributes ?? {};
       const positionIndex = attrs["POSITION"];
       if (positionIndex === undefined) {
-        throw new ParseError("glTF: примитив без POSITION", -1, url);
+        throw new ParseError("glTF: primitive without POSITION", -1, url);
       }
       const position = decodeAccessor(gltf, positionIndex, buffers, ctx);
       if (position.f32 === null)
-        throw new ParseError("glTF: POSITION не float/normalized", -1, url);
+        throw new ParseError("glTF: POSITION is not float/normalized", -1, url);
       const readF32 = (key) => {
         const idx = attrs[key];
         if (idx === undefined)
@@ -3450,7 +3450,7 @@ function buildMeshDocument(gltf, buffers, ctx) {
     if (s.inverseBindMatrices !== undefined) {
       const acc = decodeAccessor(gltf, s.inverseBindMatrices, buffers, ctx);
       if (acc.f32 === null || acc.comps !== 16) {
-        throw new ParseError("skin: inverseBindMatrices не MAT4/float", -1, url);
+        throw new ParseError("skin: inverseBindMatrices is not MAT4/float", -1, url);
       }
       ibm = acc.f32;
     }
@@ -3512,7 +3512,7 @@ async function parseGltfJsonBytes(bytes, ctx) {
   try {
     gltf = JSON.parse(new TextDecoder("utf-8").decode(bytes));
   } catch (err) {
-    throw new ParseError(`glTF: битый JSON: ${err.message}`, 0, url);
+    throw new ParseError(`glTF: corrupt JSON: ${err.message}`, 0, url);
   }
   const buffers = await loadBuffers(gltf, null, ctx);
   return buildMeshDocument(gltf, buffers, ctx);
@@ -3563,7 +3563,7 @@ class GlbStreamSink {
           try {
             this.json = JSON.parse(text);
           } catch (err) {
-            throw new ParseError(`GLB: битый JSON-чанк: ${err.message}`, 20, this.ctx.sourceUrl);
+            throw new ParseError(`GLB: corrupt JSON chunk: ${err.message}`, 20, this.ctx.sourceUrl);
           }
         }
         this.jsonDone = true;
@@ -3572,7 +3572,7 @@ class GlbStreamSink {
   }
   async finish() {
     if (this.finished)
-      throw new ParseError("GLB: finish() уже вызван");
+      throw new ParseError("GLB: finish() already called");
     this.finished = true;
     this.tryAdvance();
     const bytes = this.acc.take();
@@ -3773,7 +3773,7 @@ function processLine(bytes, start, end, state) {
   }
   if (c === 108 || c === 112) {
     if (state.warnings.length < 16) {
-      state.warnings.push(`OBJ: ${c === 108 ? "l (lines)" : "p (points)"} не поддержаны — пропущено`);
+      state.warnings.push(`OBJ: ${c === 108 ? "l (lines)" : "p (points)"} not supported — skipped`);
     }
   }
 }
@@ -3852,7 +3852,7 @@ function processFace(bytes, start, end, state) {
       p -= 1;
     if (p < 0 || p >= posCount) {
       if (state.warnings.length < 16)
-        state.warnings.push("OBJ: индекс позиции вне диапазона — угол пропущен");
+        state.warnings.push("OBJ: position index out of range — corner skipped");
       cornerIndex++;
       continue;
     }
@@ -4150,7 +4150,7 @@ async function finalizeObj(state, opts) {
         materials.push(...converted);
       } catch (err) {
         if (state.warnings.length < 16) {
-          state.warnings.push(`OBJ: mtllib "${lib}" не загрузился: ${String(err?.message ?? err)}`);
+          state.warnings.push(`OBJ: mtllib "${lib}" failed to load: ${String(err?.message ?? err)}`);
         }
       }
     }
@@ -4236,7 +4236,7 @@ class ObjStreamSink {
   }
   async finish() {
     if (this.finished)
-      throw new Error("obj: finish() уже вызван");
+      throw new Error("obj: finish() already called");
     this.finished = true;
     if (this.pending !== null) {
       processLine(this.pending, 0, this.pending.length, this.state);
@@ -4277,20 +4277,20 @@ var FBX_MIN_VERSION = 7000;
 async function parseFbxTree(bytes, ctx) {
   const url = ctx.sourceUrl;
   if (bytes.length < 27)
-    throw new ParseError("FBX: файл короче заголовка", 0, url);
+    throw new ParseError("FBX: file shorter than the header", 0, url);
   for (let i = 0;i < FBX_MAGIC.length; i++) {
     if (bytes[i] !== FBX_MAGIC.charCodeAt(i)) {
       const head = String.fromCharCode(...bytes.subarray(0, Math.min(64, bytes.length)));
       if (head.includes("FBXHeaderExtension") || head.startsWith(";")) {
-        throw new UnsupportedError("FBX: ASCII-формат не поддерживается — конвертируйте в Binary (FBX SDK/Blender: «FBX binary»)", url);
+        throw new UnsupportedError('FBX: ASCII format is not supported — convert to Binary (FBX SDK/Blender: "FBX binary")', url);
       }
-      throw new ParseError("FBX: неверная магика (не бинарный FBX)", 0, url);
+      throw new ParseError("FBX: wrong magic (not a binary FBX)", 0, url);
     }
   }
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const version = dv.getUint32(23, true);
   if (version < FBX_MIN_VERSION) {
-    throw new UnsupportedError(`FBX: версия ${version} (6.x и старше) не поддерживается`, url);
+    throw new UnsupportedError(`FBX: version ${version} (6.x and older) is not supported`, url);
   }
   const u64 = version >= 7500;
   const pos = 27;
@@ -4317,7 +4317,7 @@ async function parseNode(dv, start, fileEnd, u64, ctx, url) {
   const nameLen = dv.getUint8(start + (u64 ? 24 : 12));
   const nameStart = start + (u64 ? 25 : 13);
   if (endOffset > fileEnd || endOffset <= nameStart) {
-    throw new ParseError(`FBX: кривой endOffset у ноды на ${start}`, start, url);
+    throw new ParseError(`FBX: corrupt endOffset of the node at ${start}`, start, url);
   }
   const name = String.fromCharCode(...new Uint8Array(dv.buffer, dv.byteOffset + nameStart, nameLen));
   let cursor = nameStart + nameLen;
@@ -4378,7 +4378,7 @@ async function parseProp(dv, at, u64, ctx, url) {
       let bytes = new Uint8Array(dv.buffer, dv.byteOffset + dataStart, byteLen);
       if (encoding === 1) {
         if (ctx.inflate === null) {
-          throw new UnsupportedError("FBX: zlib-массивы требуют inflate (DecompressionStream) — недоступен", url);
+          throw new UnsupportedError("FBX: zlib arrays require inflate (DecompressionStream) — unavailable", url);
         }
         bytes = await ctx.inflate(bytes);
       }
@@ -4386,7 +4386,7 @@ async function parseProp(dv, at, u64, ctx, url) {
       return { prop: { type: t, value }, end: dataStart + byteLen };
     }
     default:
-      throw new ParseError(`FBX: неизвестный тип свойства "${t}" на ${at}`, at, url);
+      throw new ParseError(`FBX: unknown property type "${t}" at ${at}`, at, url);
   }
 }
 function fbxString(bytes) {
@@ -4435,7 +4435,7 @@ function decodeFbxArray(t, bytes, count) {
       return bytes.subarray(0, count);
     }
     default:
-      throw new ParseError(`FBX: массив типа ${t}?`);
+      throw new ParseError(`FBX: array of type ${t}?`);
   }
 }
 function fbxTreeToMeshDocument(doc, ctx) {
@@ -4670,7 +4670,7 @@ function parseFbxGeometry(node, ctx) {
   const verticesNode = findChild(node, "Vertices");
   const pviNode = findChild(node, "PolygonVertexIndex");
   if (verticesNode === null || pviNode === null) {
-    throw new ParseError(`FBX Geometry "${node.name}": нет Vertices/PolygonVertexIndex`, -1, url);
+    throw new ParseError(`FBX Geometry "${node.name}": no Vertices/PolygonVertexIndex`, -1, url);
   }
   const controlPoints = propNumbers(verticesNode.props[0]);
   const polyIndex = propInts(pviNode.props[0]);
@@ -5004,7 +5004,7 @@ function createImageParser(options) {
     extensions: [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif"],
     async parse(input, decodeOptions = {}) {
       if (options.decodeImage === null) {
-        throw new UnsupportedError("image: платформенный декодер недоступен (нет createImageBitmap) — передайте decodeImage в менеджер", input.ctx.sourceUrl);
+        throw new UnsupportedError("image: platform decoder unavailable (no createImageBitmap) — pass decodeImage to the manager", input.ctx.sourceUrl);
       }
       const mime = sniffKind(input.bytes, input.ctx.sourceUrl).mimeType;
       return options.decodeImage(input.bytes, mime, decodeOptions);
@@ -5024,12 +5024,12 @@ function parseHdrBytes(bytes, ctx) {
   };
   const magic = readLine();
   if (!magic.startsWith("#?RADIANCE") && !magic.startsWith("#?RGBE")) {
-    throw new ParseError("HDR: не Radiance-файл", 0, url);
+    throw new ParseError("HDR: not a Radiance file", 0, url);
   }
   let format = "";
   for (;; ) {
     if (pos >= bytes.length)
-      throw new ParseError("HDR: внезапный конец заголовка", pos, url);
+      throw new ParseError("HDR: unexpected end of the header", pos, url);
     const line = readLine();
     if (line === "")
       break;
@@ -5037,7 +5037,7 @@ function parseHdrBytes(bytes, ctx) {
       format = line.slice(7).trim();
   }
   if (!format.includes("32-bit_rle_rgbe")) {
-    throw new ParseError(`HDR: формат ${format} не поддерживается (нужен 32-bit_rle_rgbe)`, pos, url);
+    throw new ParseError(`HDR: format ${format} is not supported (32-bit_rle_rgbe required)`, pos, url);
   }
   const resLine = readLine();
   const resParts = resLine.trim().split(/\s+/);
@@ -5048,7 +5048,7 @@ function parseHdrBytes(bytes, ctx) {
     width = parseInt(resParts[3], 10);
   }
   if (!width || !height)
-    throw new ParseError(`HDR: битая строка разрешения "${resLine}"`, pos, url);
+    throw new ParseError(`HDR: corrupt resolution line "${resLine}"`, pos, url);
   const out = new Float32Array(width * height * 3);
   for (let y = 0;y < height; y++) {
     throwIfAborted2(ctx.signal, "hdr parse");
@@ -5056,7 +5056,7 @@ function parseHdrBytes(bytes, ctx) {
     if (!isNewStyle) {
       for (let x = 0;x < width; x++) {
         if (pos + 4 > bytes.length)
-          throw new ParseError("HDR: обрезанный flat-сканлайн", pos, url);
+          throw new ParseError("HDR: truncated flat scanline", pos, url);
         const r = bytes[pos], g = bytes[pos + 1], b = bytes[pos + 2], e = bytes[pos + 3];
         pos += 4;
         const scale = e !== 0 ? Math.pow(2, e - 136) : 0;
@@ -5105,7 +5105,7 @@ function parseHdrBytes(bytes, ctx) {
       }
     }
     if (!ok)
-      throw new ParseError("HDR: обрезанные RLE-данные", pos, url);
+      throw new ParseError("HDR: truncated RLE data", pos, url);
     for (let x = 0;x < width; x++) {
       const e = ch[3][x];
       const scale = e !== 0 ? Math.pow(2, e - 136) : 0;
@@ -5171,7 +5171,7 @@ var jsonParser = {
     try {
       return JSON.parse(text);
     } catch (err) {
-      throw new ParseError(`невалидный JSON: ${err.message}`, 0, input.ctx.sourceUrl ?? undefined);
+      throw new ParseError(`invalid JSON: ${err.message}`, 0, input.ctx.sourceUrl ?? undefined);
     }
   }
 };
@@ -5209,7 +5209,7 @@ class ZmlScanner {
     const root = this.parseElement(url);
     this.skipMisc();
     if (this.pos < this.bytes.length) {
-      throw new ParseError("ZML: мусор после корневого элемента", this.pos, url);
+      throw new ParseError("ZML: garbage after the root element", this.pos, url);
     }
     return root;
   }
@@ -5217,15 +5217,15 @@ class ZmlScanner {
     for (;; ) {
       this.skipWs();
       if (this.match("<?")) {
-        this.skipUntil("?>", "ZML: незакрытый <? ... ?>");
+        this.skipUntil("?>", "ZML: unclosed <? ... ?>");
         continue;
       }
       if (this.match("<!--")) {
-        this.skipUntil("-->", "ZML: незакрытый комментарий");
+        this.skipUntil("-->", "ZML: unclosed comment");
         continue;
       }
       if (this.match("<!DOCTYPE")) {
-        this.skipUntil(">", "ZML: незакрытый DOCTYPE");
+        this.skipUntil(">", "ZML: unclosed DOCTYPE");
         continue;
       }
       return;
@@ -5235,7 +5235,7 @@ class ZmlScanner {
     for (;; ) {
       this.skipWs();
       if (this.match("<!--")) {
-        this.skipUntil("-->", "ZML: незакрытый комментарий");
+        this.skipUntil("-->", "ZML: unclosed comment");
         continue;
       }
       return;
@@ -5243,7 +5243,7 @@ class ZmlScanner {
   }
   parseElement(url) {
     if (this.peek() !== 60) {
-      throw new ParseError("ZML: ожидался <", this.pos, url);
+      throw new ParseError("ZML: expected <", this.pos, url);
     }
     this.pos++;
     const name = this.parseName(url);
@@ -5252,7 +5252,7 @@ class ZmlScanner {
       return { name, attrs, children: [], text: null };
     }
     if (this.peek() !== 62) {
-      throw new ParseError(`ZML: ожидался > после <${name}`, this.pos, url);
+      throw new ParseError(`ZML: expected > after <${name}`, this.pos, url);
     }
     this.pos++;
     let text = null;
@@ -5262,7 +5262,7 @@ class ZmlScanner {
     for (;; ) {
       const next = this.indexOfByteFrom(60);
       if (next === -1) {
-        throw new ParseError(`ZML: нет закрывающего </${name}>`, this.pos, url);
+        throw new ParseError(`ZML: missing closing </${name}>`, this.pos, url);
       }
       if (textStart === -1 && next > this.pos) {
         textStart = this.pos;
@@ -5274,7 +5274,7 @@ class ZmlScanner {
       if (this.match(`</${name}`)) {
         this.skipWs();
         if (this.peek() !== 62) {
-          throw new ParseError(`ZML: кривой закрывающий тег </${name}`, this.pos, url);
+          throw new ParseError(`ZML: malformed closing tag </${name}`, this.pos, url);
         }
         this.pos++;
         const raw = textStart === -1 ? null : this.bytes.subarray(textStart, textEnd);
@@ -5287,13 +5287,13 @@ class ZmlScanner {
         return { name, attrs, children, text };
       }
       if (this.match("<!--")) {
-        this.skipUntil("-->", "ZML: незакрытый комментарий");
+        this.skipUntil("-->", "ZML: unclosed comment");
         continue;
       }
       if (this.match("<![CDATA[")) {
         const end = this.indexOfAscii("]]>");
         if (end === -1)
-          throw new ParseError("ZML: незакрытый CDATA", this.pos, url);
+          throw new ParseError("ZML: unclosed CDATA", this.pos, url);
         const cdata = decodeUtf82(this.bytes.subarray(this.pos, end));
         text = (text ?? "") + cdata;
         this.pos = end + 3;
@@ -5308,7 +5308,7 @@ class ZmlScanner {
   parseName(url) {
     const start = this.pos;
     if (this.pos >= this.bytes.length || !isNameStart(this.bytes[this.pos])) {
-      throw new ParseError("ZML: кривое имя тега", this.pos, url);
+      throw new ParseError("ZML: malformed tag name", this.pos, url);
     }
     this.pos++;
     while (this.pos < this.bytes.length && isNameChar(this.bytes[this.pos]))
@@ -5323,22 +5323,22 @@ class ZmlScanner {
       if (c === 62 || c === 47)
         return attrs;
       if (c === -1)
-        throw new ParseError("ZML: внезапный конец в атрибутах", this.pos, url);
+        throw new ParseError("ZML: unexpected end in attributes", this.pos, url);
       const name = this.parseName(url);
       this.skipWs();
       if (this.peek() !== 61) {
-        throw new ParseError(`ZML: у атрибута ${name} нет =`, this.pos, url);
+        throw new ParseError(`ZML: attribute ${name} has no =`, this.pos, url);
       }
       this.pos++;
       this.skipWs();
       const quote = this.peek();
       if (quote !== 39 && quote !== 34) {
-        throw new ParseError(`ZML: значение ${name} без кавычек`, this.pos, url);
+        throw new ParseError(`ZML: value of ${name} without quotes`, this.pos, url);
       }
       this.pos++;
       const end = this.indexOfByteFrom(quote);
       if (end === -1)
-        throw new ParseError(`ZML: значение ${name} не закрыто`, this.pos, url);
+        throw new ParseError(`ZML: value of ${name} not closed`, this.pos, url);
       const value = decodeEntities(decodeUtf82(this.bytes.subarray(this.pos, end)), this.pos, url);
       this.pos = end + 1;
       attrs[name] = value;
@@ -5427,7 +5427,7 @@ function decodeEntities(text, offset, url) {
       if (mapped !== undefined)
         out += mapped;
       else
-        throw new ParseError(`ZML: неизвестная entity &${entity};`, offset + next, url);
+        throw new ParseError(`ZML: unknown entity &${entity};`, offset + next, url);
     }
     i = semi + 1;
   }
@@ -5590,7 +5590,7 @@ class AssetLoader {
         ratio: 1,
         url,
         cached: true,
-        detail: "из кэша"
+        detail: "from cache"
       }, () => false, () => false);
       handle2.markSettled();
       opts.onProgress?.(handle2.progress);
@@ -5605,7 +5605,7 @@ class AssetLoader {
     let loaded = 0;
     let total = 0;
     let phaseRatio = 0;
-    let detail = "в очереди";
+    let detail = "queued";
     let resolveAsset;
     let rejectAsset;
     const assetPromise = new Promise((resolve, reject) => {
@@ -5643,7 +5643,7 @@ class AssetLoader {
       start: async (schedulerSignal) => {
         const startedAt = nowMs();
         phase = "fetching";
-        reportProgress("соединение");
+        reportProgress("connecting");
         const controller = new AbortController;
         const external = opts.signal;
         if (external?.aborted)
@@ -5683,7 +5683,7 @@ class AssetLoader {
           const parse = await this.resolveParser(url, opts, response.assembler);
           phase = "parsing";
           phaseRatio = 0;
-          reportProgress("парсинг");
+          reportProgress("parsing");
           const parseStartedAt = nowMs();
           const asset = await parse({
             url,
@@ -5721,7 +5721,7 @@ class AssetLoader {
           this.downloadBytes += loaded;
           phase = "done";
           phaseRatio = 1;
-          reportProgress(`готово за ${formatDuration(nowMs() - startedAt)}`);
+          reportProgress(`done in ${formatDuration(nowMs() - startedAt)}`);
           forgetJob();
           resolveAsset(result);
           handle.markSettled();
@@ -5750,7 +5750,7 @@ class AssetLoader {
       ratio: 0,
       url,
       cached: false,
-      detail: "в очереди"
+      detail: "queued"
     }, (reason) => {
       if (handle.isSettled)
         return false;
@@ -5823,14 +5823,14 @@ class AssetLoader {
           }
         }
         const groupRatio = weightSum > 0 ? ratioWeighted / weightSum : 0;
-        const text = `${doneCount}/${handles.length} готово · ` + (worstPhase === "fetching" ? `${formatBytes(loadedSum)}${totalSum > 0 ? ` / ${formatBytes(totalSum)}` : ""}` : worstPhase);
+        const text = `${doneCount}/${handles.length} done · ` + (worstPhase === "fetching" ? `${formatBytes(loadedSum)}${totalSum > 0 ? ` / ${formatBytes(totalSum)}` : ""}` : worstPhase);
         return {
           phase: worstPhase,
           loaded: loadedSum,
           total: totalSum,
           phaseRatio: groupRatio,
           ratio: groupRatio,
-          url: entries.length === 1 ? entries[0].url : `${handles.length} ассетов`,
+          url: entries.length === 1 ? entries[0].url : `${handles.length} assets`,
           cached: false,
           detail: text
         };
@@ -5899,7 +5899,7 @@ class AssetLoader {
       const format = this.formats.find((f) => f.id === options.parser);
       if (format !== undefined)
         return format.parse;
-      throw new Error(`парсер «${options.parser}» не зарегистрирован`);
+      throw new Error(`parser "${options.parser}" is not registered`);
     }
     const extension = extensionOf2(url);
     if (extension !== "") {
@@ -5992,7 +5992,7 @@ function formatBytes(bytes) {
   return `${bytes} B`;
 }
 function formatDuration(ms) {
-  return ms >= 1000 ? `${(ms / 1000).toFixed(1)} с` : `${Math.round(ms)} мс`;
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms)} ms`;
 }
 var mtlParserAdapter = {
   kind: "mtl",
@@ -6059,7 +6059,7 @@ class LoadScheduler {
     }
     const run = this.running.get(job.id);
     if (run !== undefined) {
-      run.controller.abort(new DOMException(reason ?? "загрузка отменена", "AbortError"));
+      run.controller.abort(new DOMException(reason ?? "loading cancelled", "AbortError"));
       return true;
     }
     return false;
@@ -6207,11 +6207,11 @@ async function openByteSource(url, options = {}) {
       throw error;
     }
   }
-  throw lastError ?? new Error(`источник недоступен: ${url}`);
+  throw lastError ?? new Error(`source unavailable: ${url}`);
 }
 function connectTimeout(controller, ms, _external) {
   const timer = setTimeout(() => {
-    controller.abort(new DOMException("таймаут соединения", "TimeoutError"));
+    controller.abort(new DOMException("connection timeout", "TimeoutError"));
   }, ms);
   return () => clearTimeout(timer);
 }
@@ -6247,7 +6247,7 @@ function sleepAbortable2(ms, signal) {
   });
 }
 function abortError2(signal) {
-  return signal?.reason instanceof Error ? signal.reason : new DOMException("загрузка отменена", "AbortError");
+  return signal?.reason instanceof Error ? signal.reason : new DOMException("loading cancelled", "AbortError");
 }
 function isAbort(error) {
   return error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError");
@@ -6396,7 +6396,7 @@ class AssetLibrary {
     if (cached !== undefined) {
       cached.lastAccess = now();
       this.cacheHits++;
-      const handle2 = new AssetHandleImpl(url, key, Promise.resolve(cached.asset), { phase: "done", loaded: cached.bytes, total: cached.bytes, phaseRatio: 1, ratio: 1, url, cached: true, detail: "из кэша" }, () => false, () => false);
+      const handle2 = new AssetHandleImpl(url, key, Promise.resolve(cached.asset), { phase: "done", loaded: cached.bytes, total: cached.bytes, phaseRatio: 1, ratio: 1, url, cached: true, detail: "from cache" }, () => false, () => false);
       handle2.markSettled();
       options.onProgress?.(handle2.progress);
       this.emit({ type: "done", handle: handle2 });
@@ -6411,7 +6411,7 @@ class AssetLibrary {
     let loaded = 0;
     let total = 0;
     let phaseRatio = 0;
-    let detail = "в очереди";
+    let detail = "queued";
     let resolveAsset;
     let rejectAsset;
     const promise = new Promise((resolve, reject) => {
@@ -6449,7 +6449,7 @@ class AssetLibrary {
       start: async (signal) => {
         const startedAt = now();
         phase = "fetching";
-        pushProgress("соединение");
+        pushProgress("connecting");
         const controller = new AbortController;
         const external = merged.signal;
         if (external?.aborted)
@@ -6485,7 +6485,7 @@ class AssetLibrary {
           const parser = await this.resolveParser(url, merged, source.assembler);
           phase = "parsing";
           phaseRatio = 0;
-          pushProgress("парсинг");
+          pushProgress("parsing");
           const parseStartedAt = now();
           const asset = await parser({
             url,
@@ -6523,7 +6523,7 @@ class AssetLibrary {
           this.downloadBytes += loaded;
           phase = "done";
           phaseRatio = 1;
-          pushProgress(`готово за ${fmtMs(now() - startedAt)}`);
+          pushProgress(`done in ${fmtMs(now() - startedAt)}`);
           finishJob();
           resolveAsset(value);
           handle.markSettled();
@@ -6544,7 +6544,7 @@ class AssetLibrary {
         }
       }
     };
-    const handle = new AssetHandleImpl(url, key, promise, { phase: "queued", loaded: 0, total: 0, phaseRatio: 0, ratio: 0, url, cached: false, detail: "в очереди" }, (reason) => {
+    const handle = new AssetHandleImpl(url, key, promise, { phase: "queued", loaded: 0, total: 0, phaseRatio: 0, ratio: 0, url, cached: false, detail: "queued" }, (reason) => {
       if (handle.isSettled)
         return false;
       const job = this.jobs.get(key);
@@ -6623,14 +6623,14 @@ class AssetLibrary {
           }
         }
         const ratio = weightSum > 0 ? weighted / weightSum : 0;
-        const detail = `${doneCount}/${handles.length} готово · ` + (label === "fetching" ? `${fmtBytes(loaded)}${total > 0 ? ` / ${fmtBytes(total)}` : ""}` : label);
+        const detail = `${doneCount}/${handles.length} done · ` + (label === "fetching" ? `${fmtBytes(loaded)}${total > 0 ? ` / ${fmtBytes(total)}` : ""}` : label);
         return {
           phase: label,
           loaded,
           total,
           phaseRatio: ratio,
           ratio,
-          url: entries.length === 1 ? entries[0].url : `${handles.length} ассетов`,
+          url: entries.length === 1 ? entries[0].url : `${handles.length} assets`,
           cached: false,
           detail
         };
@@ -6691,7 +6691,7 @@ class AssetLibrary {
       const byId = this.formats.find((format) => format.id === options.parser);
       if (byId !== undefined)
         return byId.parse;
-      throw new Error(`парсер «${options.parser}» не зарегистрирован`);
+      throw new Error(`parser "${options.parser}" is not registered`);
     }
     const extension = extensionOf3(url);
     if (extension !== "") {
@@ -6772,7 +6772,7 @@ function asymptotic(loaded) {
 function cancelError(reason) {
   if (reason instanceof Error)
     return reason;
-  const message = typeof reason === "string" ? reason : "загрузка отменена";
+  const message = typeof reason === "string" ? reason : "loading cancelled";
   return new DOMException(message, "AbortError");
 }
 function isAbortError3(error) {
@@ -6789,7 +6789,7 @@ function fmtBytes(n) {
   return `${n} B`;
 }
 function fmtMs(n) {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)} с` : `${Math.round(n)} мс`;
+  return n >= 1000 ? `${(n / 1000).toFixed(1)} s` : `${Math.round(n)} ms`;
 }
 // packages/loaders/src/core/types.ts
 var Priority = {
@@ -6804,7 +6804,7 @@ var Priority = {
 function normalizeSource(source) {
   if (typeof source === "string") {
     if (source.length === 0)
-      throw new LoadError("source", "пустой URL");
+      throw new LoadError("source", "empty URL");
     return { url: source, totalBytes: null, fetchUrl: source, fetchRequest: null };
   }
   if (source instanceof URL) {
@@ -6838,7 +6838,7 @@ function normalizeSource(source) {
   if (typeof source[Symbol.asyncIterator] === "function") {
     return { url: null, stream: source, totalBytes: null, fetchUrl: null, fetchRequest: null };
   }
-  throw new LoadError("source", `normalizeSource: неизвестный тип источника ${Object.prototype.toString.call(source)}`);
+  throw new LoadError("source", `normalizeSource: unknown source type ${Object.prototype.toString.call(source)}`);
 }
 function emptyIterable() {
   async function* gen() {}
@@ -7083,7 +7083,7 @@ function createLoadManager(options = {}) {
               await delayRetry(task);
               continue;
             }
-            throw new LoadError("timeout", `fetch timeout после ${task.timeoutMs}мс`, {
+            throw new LoadError("timeout", `fetch timeout after ${task.timeoutMs}ms`, {
               url: task.url
             });
           }
@@ -7317,7 +7317,7 @@ function createLoadManager(options = {}) {
     if (opts?.kind !== undefined) {
       const p = parsers.get(opts.kind);
       if (p === undefined)
-        throw new LoadError("source", `нет парсера для kind="${opts.kind}"`);
+        throw new LoadError("source", `no parser for kind="${opts.kind}"`);
       return p;
     }
     const url = normalized.url ?? normalized.fetchUrl;
@@ -7329,7 +7329,7 @@ function createLoadManager(options = {}) {
           return p;
       }
     }
-    throw new LoadError("source", "не удалось выбрать парсер: укажите kind или parser");
+    throw new LoadError("source", "failed to pick a parser: specify kind or parser");
   }
   function createTaskFromOptions(source, opts, group) {
     let normalized;
@@ -7487,7 +7487,7 @@ function createLoadManager(options = {}) {
             const settled = impl.tasks.filter((t) => t.state === "done" || t.state === "failed" || t.state === "cancelled");
             if (settled.length === impl.tasks.length) {
               impl.enoughNotifiers.delete(notify);
-              reject(new AggregateError(impl.tasks.filter((t) => t.state !== "done").map((t) => t.settledError), `enough(${count}): кворум недостижим (готово ${doneTasks.length} из ${impl.tasks.length})`));
+              reject(new AggregateError(impl.tasks.filter((t) => t.state !== "done").map((t) => t.settledError), `enough(${count}): quorum unreachable (done ${doneTasks.length} of ${impl.tasks.length})`));
             }
           };
           impl.enoughNotifiers.add(notify);
@@ -7505,7 +7505,7 @@ function createLoadManager(options = {}) {
           }
         }));
         if (errors.length > 0) {
-          throw new AggregateError(errors, `group "${name}": упало ${errors.length} из ${impl.tasks.length}`);
+          throw new AggregateError(errors, `group "${name}": ${errors.length} of ${impl.tasks.length} failed`);
         }
         return values;
       },
@@ -7648,7 +7648,7 @@ async function loadJSON(url, options = {}) {
   try {
     return JSON.parse(text);
   } catch (err) {
-    throw new SyntaxError(`loadJSON: ${url} — невалидный JSON: ${err.message}`, { cause: err });
+    throw new SyntaxError(`loadJSON: ${url} — invalid JSON: ${err.message}`, { cause: err });
   }
 }
 async function loadArrayBuffer(url, options = {}) {

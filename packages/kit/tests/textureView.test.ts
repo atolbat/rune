@@ -59,6 +59,6 @@ test('clamps size to at least 1x1', () => {
 test('dispose is idempotent no-op', () => {
   const v = createTextureView(parent, { size: { width: 64, height: 64 } })
   v.dispose()
-  v.dispose() // не должно бросать
-  expect(v.textureId).toBe(1) // на WebGL2 — тот же textureId
+  v.dispose() // must not throw
+  expect(v.textureId).toBe(1) // on WebGL2 — the same textureId
 })

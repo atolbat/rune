@@ -3,9 +3,9 @@ import { createWebGL2Renderer } from '../src/index.ts'
 import { createRecordingGL } from '@rune/webgl2'
 
 /**
- * Surface + pass — единая структура полноэкранных проходов (WebGL2-путь).
- * Порядок вызовов на рекордере: цепочка постпроцессинга
- * capture(сцена → surface) → pass(surface → канвас).
+ * Surface + pass — a unified structure of fullscreen passes (the WebGL2 path).
+ * Call order on the recorder: the post-processing chain
+ * capture(scene → surface) → pass(surface → canvas).
  */
 
 function fakeCanvas(): HTMLCanvasElement {
@@ -36,7 +36,7 @@ void main() { o_color = vec4(0.4, 0.6, 0.9, 1.0); }`
 
 const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
 
-/** Фрагмент прохода-показа: вход-сэмплер (бывший image()). */
+/** Present-pass fragment: an input sampler (the former image()). */
 const PRESENT_FRAG = `#version 300 es
 precision mediump float;
 uniform sampler2D u_src;
@@ -44,7 +44,7 @@ in vec2 v_uv;
 out vec4 o_color;
 void main() { o_color = texture(u_src, v_uv); }`
 
-/** Фрагмент генератора: без входов (бывший frag()). */
+/** Generator fragment: no inputs (the former frag()). */
 const GEN_FRAG = `#version 300 es
 precision mediump float;
 uniform float u_time;
@@ -57,7 +57,7 @@ void main() {
 }`
 
 describe('surface/pass — WebGL2', () => {
-  it('полная цепочка постпроцессинга: capture → present, порядок целей верен', () => {
+  it('the full post-processing chain: capture → present, target order is correct', () => {
     const { renderer, calls } = setup()
     const scene = renderer.command({
       shader: { glsl: { vertex: SCENE_VERT, fragment: SCENE_FRAG } },
@@ -74,12 +74,12 @@ describe('surface/pass — WebGL2', () => {
     })
     renderer.step(16)
 
-    // Поверхность создана: текстура + цель с глубиной
+    // The surface is created: texture + target with depth
     expect(calls).toContain('createTexture(256,256)')
     expect(calls).toContain('createTarget(1,256,256,depth)')
 
-    // Порядок кадра: clear канваса → bindTarget(surface,clear) → сцена →
-    // bindTarget(канвас) → полноэкранный проход
+    // Frame order: clear the canvas → bindTarget(surface,clear) → scene →
+    // bindTarget(canvas) → fullscreen pass
     const clearAt = calls.findIndex(call => call.startsWith('clear('))
     const intoSurfaceAt = calls.indexOf('bindTarget(1,1)')
     const sceneDrawAt = calls.indexOf('drawArrays(triangles,0,3,1)')
@@ -93,42 +93,42 @@ describe('surface/pass — WebGL2', () => {
     renderer.stop()
   })
 
-  it('present (image-случай): вход-сэмплер на юните 0, квад 6 вершин, без bindTarget', () => {
+  it('present (image case): input sampler on unit 0, a quad of 6 vertices, no bindTarget', () => {
     const { renderer, calls } = setup()
     const texture = renderer.texture(64, 64)
     const present = renderer.pass(PRESENT_FRAG, { inputs: { u_src: texture } })
     renderer.frame((_ctx, record) => record(present))
     renderer.step(16)
 
-    expect(calls).toContain('bindTexture(1,0)') // textureId 1, юнит 0
+    expect(calls).toContain('bindTexture(1,0)') // textureId 1, unit 0
     expect(calls).toContain('uniform1i(u_src,0)')
     expect(calls).toContain('drawArrays(triangles,0,6,1)')
-    // Чисто канвасный кадр: переключений цели нет (skip в фасаде)
+    // A pure canvas frame: no target switches (skip in the facade)
     expect(calls.filter(call => call.startsWith('bindTarget(')).length).toBe(0)
     renderer.stop()
   })
 
-  it('генерация (frag-случай): проход В поверхность, билтин u_time обновляется', () => {
+  it('generation (frag case): a pass INTO a surface, the builtin u_time updates', () => {
     const { renderer, calls } = setup()
     const surface = renderer.surface({ width: 128, height: 128 })
     const gen = surface.pass(GEN_FRAG)
     renderer.frame((_ctx, record) => record(gen))
     renderer.step(500)
 
-    // Цель — поверхность, без очистки (квад перекрывает всё)
+    // The target is the surface, no clear (the quad covers everything)
     expect(calls).toContain('bindTarget(1,0)')
     expect(calls).toContain('drawArrays(triangles,0,6,1)')
-    // Билтин u_time подставлен и получил время кадра (500 мс = 0.5 с,
-    // точно представимо во float32 — без округлений в строке вызова)
+    // The builtin u_time is substituted and received the frame time (500 ms = 0.5 s,
+    // exactly representable in float32 — no rounding in the call string)
     const timeCalls = calls.filter(call => call.startsWith('uniform1f(u_time,'))
     expect(timeCalls.length).toBeGreaterThan(0)
     expect(timeCalls[0]).toBe('uniform1f(u_time,0.5)')
-    // Билтин u_resolution — размер ЦЕЛИ (поверхности, не канваса)
+    // The builtin u_resolution — the TARGET size (the surface's, not the canvas's)
     expect(calls).toContain('uniform2fv(u_resolution)')
     renderer.stop()
   })
 
-  it('capture(clear: false) не чистит поверхность; по умолчанию — чистит', () => {
+  it('capture(clear: false) does not clear the surface; by default it does', () => {
     const { renderer, calls } = setup()
     const scene = renderer.command({
       shader: { glsl: { vertex: SCENE_VERT, fragment: SCENE_FRAG } },
@@ -146,7 +146,7 @@ describe('surface/pass — WebGL2', () => {
     renderer.stop()
   })
 
-  it('pingpong из двух поверхностей: A → B → канвас, цели чередуются без чтения цели', () => {
+  it('pingpong of two surfaces: A → B → canvas, targets alternate without reading the target', () => {
     const { renderer, calls } = setup()
     const a = renderer.surface({ width: 64, height: 64 })
     const b = renderer.surface({ width: 64, height: 64 })
@@ -161,14 +161,14 @@ describe('surface/pass — WebGL2', () => {
     renderer.step(16)
 
     const order = calls.filter(call => call.startsWith('bindTarget('))
-    // Поверхности получили targetId 1 и 2; порядок: A → B → канвас
+    // The surfaces got targetId 1 and 2; order: A → B → canvas
     expect(order).toEqual(['bindTarget(1,0)', 'bindTarget(2,0)', 'bindTarget(0,0)'])
-    // Вход второго прохода — текстура первой поверхности
+    // The input of the second pass is the first surface's texture
     expect(calls).toContain('bindTexture(1,0)')
     renderer.stop()
   })
 
-  it('второй кадр: возврат на канвас гарантирован (BeginPass), сцена снова в поверхность', () => {
+  it('second frame: the return to the canvas is guaranteed (BeginPass), the scene goes into the surface again', () => {
     const { renderer, calls } = setup()
     const scene = renderer.command({
       shader: { glsl: { vertex: SCENE_VERT, fragment: SCENE_FRAG } },
@@ -185,7 +185,7 @@ describe('surface/pass — WebGL2', () => {
     renderer.step(16)
     renderer.step(32)
 
-    // Кадр 2: clear канваса после возврата с поверхности — до новой записи сцены
+    // Frame 2: clear the canvas after returning from the surface — before the new scene recording
     const clears = calls.map((call, at) => ({ call, at })).filter(c => c.call.startsWith('clear('))
     expect(clears.length).toBe(2)
     const secondClearAt = clears[1].at

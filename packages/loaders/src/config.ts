@@ -1,36 +1,36 @@
 /**
- * Config loader — JSON/ZML/INI/TXT + регистрация своих форматов.
+ * Config loader — JSON/ZML/INI/TXT + registration of custom formats.
  *
  * ══════════════════════════════════════════════════════════════════════════
- * КОНТРАКТ:
+ * CONTRACT:
  *
- *   parseConfig(assembler, extension, options) → распарсенное значение
- *   registerConfigParser(extension, fn)   — свой формат (yaml/toml/…)
- *   configParserOf(extension)             — чтение реестра
+ *   parseConfig(assembler, extension, options) → parsed value
+ *   registerConfigParser(extension, fn)   — custom format (yaml/toml/…)
+ *   configParserOf(extension)             — registry lookup
  *
- * ZML — компактный indentation-формат движка (для сцен/пресетов):
+ * ZML — a compact indentation format of the engine (for scenes/presets):
  *
  *   scene
- *     title "Заголовок"
+ *     title "Heading"
  *     gravity -9.81
  *     layers
  *       sky
  *         color 0.1 0.2 0.3
  *       fog on
  *
- * Значения: строки в кавычках, true/false, числа; повтор ключей —
- * массив; повтор «блока» — массив секций {key, values, children}.
+ * Values: quoted strings, true/false, numbers; a repeated key becomes an
+ * array; a repeated "block" becomes an array of {key, values, children} sections.
  *
- * INI: [section] key = value; комментарии # и ;. Кастомные форматы
- * (yaml/yml/toml) зарегистрированы в реестре форматов загрузчика,
- * но без парсера по умолчанию — ошибка подсказывает registerConfigParser.
+ * INI: [section] key = value; comments # and ;. Custom formats
+ * (yaml/yml/toml) are registered in the loader's format registry, but
+ * without a default parser — the error hints at registerConfigParser.
  */
 
 import { CHAR, isWhitespace, parseDecimal } from './bytes.ts'
 import type { Assembler } from './assembler.ts'
 import type { GltfPhase } from './gltf.ts'
 
-/** Значение конфига: скаляр / вложенный объект / массив. */
+/** A config value: scalar / nested object / array. */
 export type ConfigValue = string | number | boolean | ConfigSection | ConfigValue[]
 export type ConfigSection = { [key: string]: ConfigValue }
 
@@ -47,17 +47,17 @@ const configParsers = new Map<string, ConfigParser>([
   ['ini', parseIni],
 ])
 
-/** Регистрация парсера конфига (yaml/toml/свой формат). */
+/** Register a config parser (yaml/toml/custom format). */
 export function registerConfigParser(extension: string, parser: ConfigParser): void {
   configParsers.set(extension.toLowerCase(), parser)
 }
 
-/** Текущий парсер расширения (для интроспекции). */
+/** Current parser for an extension (for introspection). */
 export function configParserOf(extension: string): ConfigParser | undefined {
   return configParsers.get(extension.toLowerCase())
 }
 
-/** Парсинг конфига по расширению; extensions без парсера — ошибка с подсказкой. */
+/** Parse a config by extension; extensions without a parser — an error with a hint. */
 export async function parseConfig(
   assembler: Assembler,
   extension: string,
@@ -66,7 +66,7 @@ export async function parseConfig(
   const parser = configParserOf(extension)
   if (parser === undefined)
     throw new Error(
-      `нет парсера конфигов «${extension}» — подключите registerConfigParser('${extension}', fn)`,
+      `no config parser for "${extension}" — plug in registerConfigParser('${extension}', fn)`,
     )
   await assembler.completion
   options.onPhase?.({ stage: 'parse', ratio: 0.5, detail: extension })
@@ -81,7 +81,7 @@ function decodeUtf8(bytes: Uint8Array): string {
 
 // ─── ZML ─────────────────────────────────────────────────────────────────────
 
-/** Маркер блочной секции в массиве (повтор одноимённых блоков). */
+/** Block section marker in an array (repeated same-named blocks). */
 interface ZmlSectionMarker {
   readonly key: string
   readonly values: ConfigValue[]
@@ -98,7 +98,7 @@ function isPlainObject(value: unknown): value is ConfigSection {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-/** Разбор ZML: строки → (indent, key, values) → дерево. */
+/** ZML parsing: lines → (indent, key, values) → tree. */
 export function parseZml(bytes: Uint8Array): ConfigSection {
   const root: ConfigSection = {}
   const stack: Array<{ indent: number; children: ConfigSection }> = [{ indent: -1, children: root }]
@@ -121,7 +121,7 @@ export function parseZml(bytes: Uint8Array): ConfigSection {
     }
     const keyStart = cursor
     while (cursor < contentEnd && !isWhitespace(bytes[cursor])) cursor++
-    // UTF-8: ключи могут быть не-ASCII (значения — тоже, см. parseZmlValue)
+    // UTF-8: keys may be non-ASCII (values too, see parseZmlValue)
     const key = decodeUtf8(bytes.subarray(keyStart, cursor))
     const values: ConfigValue[] = []
     while (cursor < contentEnd) {
@@ -131,12 +131,12 @@ export function parseZml(bytes: Uint8Array): ConfigSection {
       while (cursor < contentEnd && !isWhitespace(bytes[cursor])) cursor++
       values.push(parseZmlValue(bytes, valueStart, cursor))
     }
-    // Возврат на уровень отступа
+    // Return to the indent level
     while (stack.length > 1 && indent <= stack[stack.length - 1].indent) stack.pop()
     const siblings = stack[stack.length - 1].children
     const existing = siblings[key]
     if (values.length === 0) {
-      // Блок: key без значений
+      // Block: key without values
       const section: ConfigSection = {}
       if (existing === undefined) siblings[key] = section
       else if (isPlainObject(existing))
@@ -160,11 +160,11 @@ export function parseZml(bytes: Uint8Array): ConfigSection {
   return root
 }
 
-/** Скаляр: «строка», true/false, число — иначе сырая строка. */
+/** Scalar: "string", true/false, number — otherwise the raw string. */
 function parseZmlValue(bytes: Uint8Array, start: number, end: number): ConfigValue {
-  // UTF-8-декодирование: байты → символы через asciiDecode дают mojibake
-  // для не-ASCII значений (восстановлено из минифицированной версии, где
-  // стоял byte→char цикл — починено осознанно)
+  // UTF-8 decoding: bytes → characters via asciiDecode produce mojibake
+  // for non-ASCII values (restored from the minified version, which had a
+  // byte→char loop — deliberately fixed)
   const raw = decodeUtf8(bytes.subarray(start, end))
   if (raw.length >= 2 && raw.charCodeAt(0) === 34 && raw.charCodeAt(raw.length - 1) === 34)
     return raw.slice(1, -1)
@@ -177,7 +177,7 @@ function parseZmlValue(bytes: Uint8Array, start: number, end: number): ConfigVal
 
 // ─── INI ─────────────────────────────────────────────────────────────────────
 
-/** INI: секции [name], пары key = value, комментарии #/;. */
+/** INI: [name] sections, key = value pairs, #/; comments. */
 export function parseIni(bytes: Uint8Array): ConfigSection {
   const root: Record<string, ConfigSection> = { '': {} }
   let section = ''
@@ -204,8 +204,8 @@ export function parseIni(bytes: Uint8Array): ConfigSection {
       const keyStart = cursor
       let keyEnd = cursor
       while (keyEnd < contentEnd && bytes[keyEnd] !== 61 /* '=' */) keyEnd++
-      // INI-спека: пробелы вокруг «=» не входят ни в ключ, ни в значение
-      // (в минифицированной версии они оставались в ключе — починено)
+      // INI spec: spaces around "=" belong neither to the key nor to the value
+      // (in the minified version they remained in the key — fixed)
       let keyEndTrimmed = keyEnd
       while (keyEndTrimmed > keyStart && isWhitespace(bytes[keyEndTrimmed - 1])) keyEndTrimmed--
       const key = decodeUtf8(bytes.subarray(keyStart, keyEndTrimmed))
@@ -220,9 +220,9 @@ export function parseIni(bytes: Uint8Array): ConfigSection {
   return root
 }
 
-// ─── Мост Task 88: текст из байтов (для .gltf/.txt/.zml) ────────────────────
+// ─── Task 88 bridge: text from bytes (for .gltf/.txt/.zml) ────────────────────
 
-/** Декодировать UTF-8 текст из байтов (AssetLibrary: gltf-json и тексты). */
+/** Decode UTF-8 text from bytes (AssetLibrary: gltf-json and texts). */
 export function parseTextBytes(bytes: Uint8Array): string {
   return new TextDecoder('utf-8', { fatal: false }).decode(bytes)
 }

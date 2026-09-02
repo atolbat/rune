@@ -7,50 +7,50 @@ import { mat4Multiply, mat4Perspective, mat4RotationX, mat4RotationY, mat4Transl
 import { cube } from '@rune/prims'
 
 /**
- * show(): показать куб в одну строку — сахар из дизайн-досье.
- * Намерение, а не механизм: «покажи это». Текстура (опционально) —
- * стримингом с превью и прогрессом.
+ * show(): display a cube in one line — sugar from the design dossier.
+ * Intent, not mechanism: "show this". Texture (optional) —
+ * streamed with preview and progress.
  */
 
-/** Опции сцены; всё со значениями по умолчанию. */
+/** Scene options; everything has defaults. */
 export interface ShowOptions {
-  /** Скорость вращения (радиан/сек по Y; default 0.7). */
+  /** Rotation speed (radians/sec around Y; default 0.7). */
   readonly spin?: number
-  /** Цвет фона (default тёмно-синий). */
+  /** Background color (default dark blue). */
   readonly background?: readonly [number, number, number, number]
-  /** Цвет куба при отсутствии текстуры (default синий). */
+  /** Cube color when no texture (default blue). */
   readonly albedo?: readonly [number, number, number]
-  /** Текстура RGBA: стриминг 1024² с превью и прогрессом. */
+  /** RGBA texture: 1024² streaming with preview and progress. */
   readonly texture?: Uint8Array
   readonly textureSize?: number
-  /** Подпись под канвасом. */
+  /** Caption under the canvas. */
   readonly label?: string
-  /** Колбэк прогресса текстуры 0..1. */
+  /** Texture progress callback 0..1. */
   readonly onProgress?: (fraction: number) => void
-  /** Селектор элемента бейджа бэкенда (default '#backend') —
-   * для страниц с несколькими рендерерами (табы, сравнение). */
+  /** Selector of the backend badge element (default '#backend') —
+   * for pages with several renderers (tabs, comparison). */
   readonly badge?: string
-  /** Инъекции для headless-тестов. */
+  /** Injections for headless tests. */
   readonly createGL?: () => RecordingGL['gl']
-  /** Инъекция GPU-фасада: рекордер-паттерн для headless-тестов webgpu-пути. */
+  /** GPU facade injection: recorder pattern for headless tests of the webgpu path. */
   readonly createGPU?: (canvas: AnyCanvas, onError?: (message: string) => void) => Promise<GPUFacade>
   readonly requestFrame?: (callback: (timestamp: number) => void) => () => void
   readonly now?: () => number
   readonly observeResize?: boolean
 }
 
-/** Показ: живой рендер с управлением. Пауза — для табов/переключений. */
+/** A showing: live render with controls. Pause — for tabs/switching. */
 export interface Show {
   readonly renderer: WebGL2Renderer
-  /** Остановить цикл кадров (канвас и контекст живы). */
+  /** Stop the frame loop (canvas and context stay alive). */
   stop(): void
-  /** Пауза: цикл молчит, ресурсы не освобождаются. */
+  /** Pause: the loop goes quiet, resources are not released. */
   pause(): void
-  /** Продолжить после паузы. */
+  /** Continue after a pause. */
   resume(): void
 }
 
-/** Показать куб в одну строку: show('#canvas', { texture }). */
+/** Show a cube in one line: show('#canvas', { texture }). */
 export function show(target: string | HTMLCanvasElement, options: ShowOptions = {}): Show {
   const spin = options.spin ?? 0.7
   const background = options.background ?? [0.07, 0.08, 0.11, 1]
@@ -95,7 +95,7 @@ void main() {
     : 'o_color = vec4(u_albedo * (0.3 + lambert * 0.7), 1.0);'}
 }`
 
-  // Атрибуты: uv — только текстурному варианту (шейдер ждёт @location(2))
+  // Attributes: uv — only for the textured variant (shader expects @location(2))
   const attributes: Record<string, { data: Float32Array; size: number }> = {
     position: { data: geometry.positions, size: 3 },
     normal: { data: geometry.normals, size: 3 },
@@ -108,7 +108,7 @@ void main() {
     u_albedo: albedo,
   }
   let texture: ReturnType<WebGL2Renderer['texture']> | undefined
-  // Текстура создаётся до команды: спек ссылается на хэндл
+  // Texture is created before the command: the spec references the handle
   if (hasTexture && options.texture !== undefined) {
     const size = options.textureSize ?? 1024
     texture = renderer.texture(size, size)
@@ -169,14 +169,14 @@ void main() {
 }
 
 function setBackendLabel(text: string, selector = '#backend'): void {
-  if (typeof document === 'undefined') return // headless-тесты без DOM
+  if (typeof document === 'undefined') return // headless tests without DOM
   const label = document.querySelector(selector)
   if (label !== null) label.textContent = text
 }
 
-/** Подпись сцены: только если страница оставила место (#scene-label). */
+/** Scene caption: only if the page reserved a slot (#scene-label). */
 function setSceneLabel(text: string): void {
-  if (typeof document === 'undefined') return // headless-тесты без DOM
+  if (typeof document === 'undefined') return // headless tests without DOM
   const label = document.querySelector('#scene-label')
   if (label !== null) label.textContent = text
 }

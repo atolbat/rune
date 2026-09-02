@@ -6,8 +6,8 @@ import { createTapeWriter, writerView } from '../src/tape/index.ts'
 import { OpCode } from '../src/tape/opcodes.ts'
 import { signal } from '../src/signal/signal.ts'
 
-describe('live-команды и сегментный кэш', () => {
-  it('чистый кадр реплеит кэш без повторного record', () => {
+describe('live commands and the segment cache', () => {
+  it('a clean frame replays the cache without a repeated record', () => {
     const segments = createSegmentStore(16)
     let records = 0
     const live = createLiveCommand(segments, writer => {
@@ -21,13 +21,13 @@ describe('live-команды и сегментный кэш', () => {
     expect(writerView(writer).count).toBe(1)
 
     writer.reset()
-    buildFrame([live], writer) // чистый: реплей сегмента
+    buildFrame([live], writer) // clean: segment replay
     expect(records).toBe(1)
     expect(writerView(writer).count).toBe(1)
     expect(segments.hits).toBe(1)
   })
 
-  it('every(2): половина кадров без эмита', () => {
+  it('every(2): half of the frames without an emit', () => {
     const segments = createSegmentStore(16)
     const live = createLiveCommand(segments, writer => writer.emit(OpCode.Draw, 1, 0, 3, 1)).every(2)
     const writer = createTapeWriter(8)
@@ -40,7 +40,7 @@ describe('live-команды и сегментный кэш', () => {
     expect(emitted).toBe(5)
   })
 
-  it('грязная зависимость заставляет перезаписать сегмент', () => {
+  it('a dirty dependency forces a segment rewrite', () => {
     const segments = createSegmentStore(16)
     const spin = signal(0)
     let records = 0
@@ -52,15 +52,15 @@ describe('live-команды и сегментный кэш', () => {
     const writer = createTapeWriter(8)
     buildFrame([live], writer)
     buildFrame([live], writer)
-    expect(records).toBe(1) // чисто
+    expect(records).toBe(1) // clean
     spin.value = 5
     writer.reset()
     buildFrame([live], writer)
-    expect(records).toBe(2) // перезапись
+    expect(records).toBe(2) // rewrite
     expect(writerView(writer).a[0]).toBe(5)
   })
 
-  it('инвалидация руками тоже перезаписывает', () => {
+  it('manual invalidation also rewrites', () => {
     const segments = createSegmentStore(16)
     let records = 0
     const live = createLiveCommand(segments, writer => { records++; writer.emit(OpCode.Draw, 1, 0, 3, 1) })
@@ -71,9 +71,9 @@ describe('live-команды и сегментный кэш', () => {
     expect(records).toBe(2)
   })
 
-  it('длинная команда (>64 опов) не обрезается: сегмент целиком', () => {
-    // Регрессия: скретч-писатель молча выбрасывал операции после 64-й —
-    // «команда без сегмента» теряла хвост без всякой диагностики.
+  it('a long command (>64 ops) is not truncated: the segment in full', () => {
+    // Regression: the scratch writer silently dropped ops after the 64th —
+    // a "command without a segment" lost its tail without any diagnostics.
     const segments = createSegmentStore(16)
     const OPS = 200
     const live = createLiveCommand(segments, writer => {
@@ -84,7 +84,7 @@ describe('live-команды и сегментный кэш', () => {
     expect(writerView(writer).count).toBe(OPS)
 
     writer.reset()
-    buildFrame([live], writer) // чистый кадр: реплей полного сегмента
+    buildFrame([live], writer) // clean frame: replay of the full segment
     expect(writerView(writer).count).toBe(OPS)
     expect(writerView(writer).a[OPS - 1]).toBe(OPS - 1)
   })

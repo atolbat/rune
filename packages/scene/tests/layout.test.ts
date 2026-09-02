@@ -1,4 +1,4 @@
-/** Тесты раскладки буфера сцены (Task 81). */
+/** Scene buffer layout tests (Task 81). */
 import { describe, expect, it } from 'bun:test'
 import {
   buildSceneViews,
@@ -14,7 +14,7 @@ import {
 } from '../src/index.ts'
 
 describe('createSceneBuffer / buildSceneViews', () => {
-  it('заголовок согласован с опциями', () => {
+  it('the header is consistent with the options', () => {
     const buffer = createSceneBuffer({ capacity: 100, cameraMax: 2, groupMax: 8, maxInstances: 50 })
     const views = buildSceneViews(buffer)
     expect(views.capacity).toBe(100)
@@ -26,14 +26,14 @@ describe('createSceneBuffer / buildSceneViews', () => {
     expect(views.bits.length).toBe(2 * 2 * sceneBitsWords(100))
   })
 
-  it('размер буфера = int-регион + float-регион', () => {
+  it('buffer size = int region + float region', () => {
     const buffer = createSceneBuffer({ capacity: 64, cameraMax: 1, groupMax: 4, maxInstances: 64 })
     const views = buildSceneViews(buffer)
     expect(buffer.byteLength).toBeGreaterThanOrEqual((views.headerI[H_INT_WORDS] + 0) * 4)
     expect(views.instPool.length).toBe(2 * 1 * 64 * 16)
   })
 
-  it('SAB-режим: один буфер — два набора views (main и воркер)', () => {
+  it('SAB mode: one buffer — two sets of views (main and worker)', () => {
     const buffer = createSceneBuffer({ capacity: 16, shared: true })
     expect(buffer instanceof SharedArrayBuffer).toBe(true)
     const a = buildSceneViews(buffer)
@@ -42,20 +42,20 @@ describe('createSceneBuffer / buildSceneViews', () => {
     expect(b.pos[0]).toBe(42)
   })
 
-  it('чужой буфер отклоняется по магии', () => {
-    const bad = new ArrayBuffer(256) // нули — магия не совпадёт
-    expect(() => buildSceneViews(bad)).toThrow('магия')
+  it('a foreign buffer is rejected by magic', () => {
+    const bad = new ArrayBuffer(256) // zeros — magic will not match
+    expect(() => buildSceneViews(bad)).toThrow('magic')
   })
 
-  it('усечённый буфер отклоняется', () => {
+  it('a truncated buffer is rejected', () => {
     const buffer = createSceneBuffer({ capacity: 128 })
-    // Копия заголовка, но буфер меньше требуемого.
+    // A copy of the header, but the buffer is smaller than required.
     const cut = new ArrayBuffer(128)
     new Int32Array(cut).set(new Int32Array(buffer, 0, 32))
     expect(() => buildSceneViews(cut)).toThrow()
   })
 
-  it('слоты начинаются свободными; дефолты TRS — identity', () => {
+  it('slots start free; TRS defaults — identity', () => {
     const buffer = createSceneBuffer({ capacity: 4 })
     const views = buildSceneViews(buffer)
     for (let i = 0; i < 4; i++) {
@@ -63,7 +63,7 @@ describe('createSceneBuffer / buildSceneViews', () => {
       expect(views.scale[i * 3]).toBe(1)
       expect(views.group[i]).toBe(-1)
     }
-    // Свободный список покрывает все слоты (через полный int-вью).
+    // The free list covers all slots (via the full int view).
     const full = new Int32Array(buffer)
     const freeList = freeListWord(views)
     expect(full[freeList]).toBe(0)

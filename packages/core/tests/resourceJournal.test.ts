@@ -2,13 +2,13 @@ import { describe, test, expect } from 'bun:test'
 import { createResourceJournal, selectResidentOps } from '../src/journal/resourceJournal.ts'
 import type { ResOp } from '../src/journal/resourceJournal.ts'
 
-/** Фейковый источник пикселей (ImageBitmap-подобный, без DOM). */
+/** A fake pixel source (ImageBitmap-like, without DOM). */
 function fakeSource(w = 64, h = 64): { width: number; height: number; tag: string } {
   return { width: w, height: h, tag: `src-${Math.random().toString(36).slice(2, 8)}` }
 }
 
-describe('ResourceJournal v2 — базовый контракт', () => {
-  test('record/replay/entries/size: append-only в порядке записи', () => {
+describe('ResourceJournal v2 — basic contract', () => {
+  test('record/replay/entries/size: append-only in record order', () => {
     const j = createResourceJournal()
     const ref = j.storeSource(fakeSource(), 'ImageBitmap', 64, 64)
     j.record({ kind: 'texture.create', id: 1, width: 256, height: 256 })
@@ -29,16 +29,16 @@ describe('ResourceJournal v2 — базовый контракт', () => {
     expect(j.isSourceAlive(ref.ref)).toBe(true)
     expect(j.getSource(999)).toBe(null)
     expect(j.isSourceAlive(999)).toBe(false)
-    // worker migration: пере-регистрация под существующий ref
+    // worker migration: re-registration under an existing ref
     const migrated = fakeSource()
     j.attachSource(ref.ref, migrated)
     expect(j.getSource(ref.ref)).toBe(migrated)
-    // второй источник получает следующий ref
+    // the second source gets the next ref
     const ref2 = j.storeSource(fakeSource(), 'OffscreenCanvas', 32, 32)
     expect(ref2.ref).toBe(2)
   })
 
-  test('snapshot: ops клонируются, манифест контента с kind/размерами', () => {
+  test('snapshot: ops are cloned, the content manifest with kind/dimensions', () => {
     const j = createResourceJournal()
     const ref = j.storeSource(fakeSource(64, 64), 'ImageBitmap', 64, 64)
     j.record({ kind: 'texture.create', id: 1, width: 128, height: 128 })
@@ -46,13 +46,13 @@ describe('ResourceJournal v2 — базовый контракт', () => {
     const snap = j.snapshot()
     expect(snap.ops).toHaveLength(2)
     expect(snap.ops[1]).toMatchObject({ kind: 'texture.write', flipY: true })
-    // snapshot — глубокая копия опсов: мутация снапшота не трогает журнал
+    // snapshot — a deep copy of ops: mutating the snapshot does not touch the journal
     ;(snap.ops[1] as { flipY: boolean }).flipY = false
     expect(j.entries()[1]).toMatchObject({ flipY: true })
     expect(snap.content).toContainEqual({ ref: 1, kind: 'ImageBitmap', width: 64, height: 64 })
   })
 
-  test('maxTextureId/maxViewId/maxTargetId: сидирование счётчиков стабильных id', () => {
+  test('maxTextureId/maxViewId/maxTargetId: seeding stable id counters', () => {
     const j = createResourceJournal()
     expect(j.maxTextureId()).toBe(0)
     expect(j.maxViewId()).toBe(1_000_000 - 1)
@@ -65,7 +65,7 @@ describe('ResourceJournal v2 — базовый контракт', () => {
     expect(j.maxTargetId()).toBe(2)
   })
 
-  test('evict/reset: обычная семантика', () => {
+  test('evict/reset: usual semantics', () => {
     const j = createResourceJournal()
     j.record({ kind: 'texture.create', id: 1, width: 64, height: 64 })
     j.record({ kind: 'texture.create', id: 2, width: 64, height: 64 })
@@ -76,8 +76,8 @@ describe('ResourceJournal v2 — базовый контракт', () => {
   })
 })
 
-describe('ResourceJournal v2 — compact: пары и висячие ссылки', () => {
-  test('create→destroy пара удаляется целиком', () => {
+describe('ResourceJournal v2 — compact: pairs and dangling references', () => {
+  test('create→destroy pair is removed entirely', () => {
     const j = createResourceJournal()
     j.record({ kind: 'texture.create', id: 1, width: 64, height: 64 })
     j.record({ kind: 'texture.destroy', id: 1 })
@@ -87,7 +87,7 @@ describe('ResourceJournal v2 — compact: пары и висячие ссылк�
     expect(j.entries()[0]).toMatchObject({ kind: 'texture.create', id: 2 })
   })
 
-  test('контент-опсы уничтоженной текстуры выбрасываются (вместе с парой)', () => {
+  test('content ops of a destroyed texture are dropped (together with the pair)', () => {
     const j = createResourceJournal()
     const ref = j.storeSource(fakeSource(), 'ImageBitmap', 64, 64)
     j.record({ kind: 'texture.create', id: 1, width: 256, height: 256 })
@@ -97,7 +97,7 @@ describe('ResourceJournal v2 — compact: пары и висячие ссылк�
     expect(j.size).toBe(0)
   })
 
-  test('view/target мёртвой текстуры: create и их destroy выбрасываются (без сирот)', () => {
+  test('view/target of a dead texture: their create and destroy are dropped (no orphans)', () => {
     const j = createResourceJournal()
     j.record({ kind: 'texture.create', id: 1, width: 64, height: 64 })
     j.record({ kind: 'view.create', id: 1_000_001, textureId: 1 })
@@ -109,7 +109,7 @@ describe('ResourceJournal v2 — compact: пары и висячие ссылк�
     expect(j.size).toBe(0)
   })
 
-  test('view/target живой текстуры переживают compact', () => {
+  test('view/target of a live texture survive compact', () => {
     const j = createResourceJournal()
     j.record({ kind: 'texture.create', id: 1, width: 64, height: 64 })
     j.record({ kind: 'view.create', id: 1_000_001, textureId: 1 })
@@ -118,7 +118,7 @@ describe('ResourceJournal v2 — compact: пары и висячие ссылк�
     expect(j.size).toBe(3)
   })
 
-  test('пересоздание id: контент мёртвой инкарнации удаляется, новой — выживает', () => {
+  test('id re-creation: dead-incarnation content is removed, the new one survives', () => {
     const j = createResourceJournal()
     const dead = j.storeSource(fakeSource(), 'ImageBitmap', 64, 64)
     const alive = j.storeSource(fakeSource(), 'ImageBitmap', 128, 128)
@@ -128,15 +128,15 @@ describe('ResourceJournal v2 — compact: пары и висячие ссылк�
     j.record({ kind: 'texture.create', id: 5, width: 128, height: 128 })
     j.record({ kind: 'texture.write', id: 5, content: alive, flipY: false })
     j.compact()
-    // выживает: create(новый) + write(alive); create(старый)+write(dead)+destroy удалены
+    // survives: create(new) + write(alive); create(old)+write(dead)+destroy removed
     expect(j.size).toBe(2)
     expect(j.entries()[0]).toMatchObject({ kind: 'texture.create', id: 5, width: 128 })
     expect(j.entries()[1]).toMatchObject({ kind: 'texture.write', content: { ref: alive.ref } })
   })
 })
 
-describe('ResourceJournal v2 — compact: коалесцинг контента', () => {
-  test('texture.write поглощает все предыдущие write/update той же текстуры', () => {
+describe('ResourceJournal v2 — compact: content coalescing', () => {
+  test('texture.write absorbs all previous write/update of the same texture', () => {
     const j = createResourceJournal()
     const ref1 = j.storeSource(fakeSource(64, 64), 'ImageBitmap', 64, 64)
     const ref2 = j.storeSource(fakeSource(256, 256), 'ImageBitmap', 256, 256)
@@ -150,7 +150,7 @@ describe('ResourceJournal v2 — compact: коалесцинг контента'
     expect(contentOps[0]).toMatchObject({ kind: 'texture.write', content: { ref: ref2.ref } })
   })
 
-  test('повторный update того же rect — выживает последний (last-write-wins)', () => {
+  test('a repeat update of the same rect — the last one survives (last-write-wins)', () => {
     const j = createResourceJournal()
     const refA = j.storeSource(fakeSource(), 'ImageBitmap', 64, 64)
     const refB = j.storeSource(fakeSource(), 'ImageBitmap', 64, 64)
@@ -161,11 +161,11 @@ describe('ResourceJournal v2 — compact: коалесцинг контента'
     j.compact()
     const updates = j.entries().filter(op => op.kind === 'texture.update')
     expect(updates).toHaveLength(2)
-    expect(updates[0]).toMatchObject({ content: { ref: refB.ref } }) // (0,0) — последний = B
-    expect(updates[1]).toMatchObject({ x: 64, content: { ref: refA.ref } }) // (64,0) — не тронут
+    expect(updates[0]).toMatchObject({ content: { ref: refB.ref } }) // (0,0) — the last one = B
+    expect(updates[1]).toMatchObject({ x: 64, content: { ref: refA.ref } }) // (64,0) — untouched
   })
 
-  test('writeMip: одинаковый level — последний; write НЕ поглощает writeMip', () => {
+  test('writeMip: same level — the last one wins; write does NOT absorb writeMip', () => {
     const j = createResourceJournal()
     const refFull = j.storeSource(fakeSource(256, 256), 'ImageBitmap', 256, 256)
     const refMip1a = j.storeSource(fakeSource(128, 128), 'ImageBitmap', 128, 128)
@@ -177,7 +177,7 @@ describe('ResourceJournal v2 — compact: коалесцинг контента'
     j.record({ kind: 'texture.writeMip', id: 1, level: 2, content: refMip2, flipY: false })
     j.record({ kind: 'texture.write', id: 1, content: refFull, flipY: false })
     j.compact()
-    // write поглотил все texture.write/update, но writeMip — НЕТ (другие уровни)
+    // write absorbed all texture.write/update, but writeMip — NO (different levels)
     const mips = j.entries().filter(op => op.kind === 'texture.writeMip')
     expect(mips).toHaveLength(2)
     expect(mips[0]).toMatchObject({ level: 1, content: { ref: refMip1b.ref } })
@@ -187,7 +187,7 @@ describe('ResourceJournal v2 — compact: коалесцинг контента'
 })
 
 describe('ResourceJournal v2 — Task 65: selectResidentOps (soft reset)', () => {
-  test('textureIds: create + контент выбранной текстуры; остальное — deferred', () => {
+  test('textureIds: create + content of the selected texture; the rest — deferred', () => {
     const j = createResourceJournal()
     const refScene = j.storeSource(fakeSource(256, 256), 'ImageBitmap', 256, 256)
     const refHidden = j.storeSource(fakeSource(128, 128), 'ImageBitmap', 128, 128)
@@ -204,7 +204,7 @@ describe('ResourceJournal v2 — Task 65: selectResidentOps (soft reset)', () =>
     expect(sel.deferredTargets).toEqual([])
   })
 
-  test('viewIds: замыкание тянет parent-текстуру и ЕЁ контент (view без пикселей бессмыслен)', () => {
+  test('viewIds: the closure pulls in the parent texture and ITS content (a view without pixels is meaningless)', () => {
     const j = createResourceJournal()
     const refBase = j.storeSource(fakeSource(256, 256), 'ImageBitmap', 256, 256)
     const refMip = j.storeSource(fakeSource(16, 16), 'ImageBitmap', 16, 16)
@@ -218,7 +218,7 @@ describe('ResourceJournal v2 — Task 65: selectResidentOps (soft reset)', () =>
     expect(sel.deferredViews).toEqual([])
   })
 
-  test('targetIds: parent create БЕЗ контента (target перезапишется рендером)', () => {
+  test('targetIds: parent create WITHOUT content (the target will be overwritten by rendering)', () => {
     const j = createResourceJournal()
     const ref = j.storeSource(fakeSource(64, 64), 'ImageBitmap', 64, 64)
     j.record({ kind: 'texture.create', id: 3, width: 64, height: 64 })
@@ -229,19 +229,19 @@ describe('ResourceJournal v2 — Task 65: selectResidentOps (soft reset)', () =>
     expect(sel.deferredTextures).toEqual([])
   })
 
-  test('view на НЕ выбранной текстуре — deferred; parent выбранной текстуры view не тянет', () => {
+  test('view on a NOT selected texture — deferred; a selected texture does not pull views in', () => {
     const j = createResourceJournal()
     j.record({ kind: 'texture.create', id: 1, width: 64, height: 64 })
     j.record({ kind: 'texture.create', id: 2, width: 64, height: 64 })
     j.record({ kind: 'view.create', id: 1_000_000, textureId: 2 })
-    // Держим только текстуру 1: view на текстуре 2 — отложен.
+    // Keep only texture 1: the view on texture 2 is deferred.
     const sel = selectResidentOps(j.entries(), { textureIds: [1] })
     expect(sel.ops.map(o => o.kind)).toEqual(['texture.create'])
     expect(sel.deferredTextures).toEqual([2])
     expect(sel.deferredViews).toEqual([1_000_000])
   })
 
-  test('пустое рабочее множество → ops пуст, всё живое deferred (чистый soft reset)', () => {
+  test('empty working set → ops empty, everything alive deferred (a pure soft reset)', () => {
     const j = createResourceJournal()
     j.record({ kind: 'texture.create', id: 1, width: 64, height: 64 })
     j.record({ kind: 'texture.create', id: 2, width: 64, height: 64 })
@@ -252,7 +252,7 @@ describe('ResourceJournal v2 — Task 65: selectResidentOps (soft reset)', () =>
     expect(sel.deferredViews).toEqual([1_000_000])
   })
 
-  test('мёртвая инкарнация: контент до destroy→create НЕ выбирается (семантика compact)', () => {
+  test('dead incarnation: content before destroy→create is NOT selected (compact semantics)', () => {
     const j = createResourceJournal()
     const refDead = j.storeSource(fakeSource(32, 32), 'ImageBitmap', 32, 32)
     const refAlive = j.storeSource(fakeSource(64, 64), 'ImageBitmap', 64, 64)
@@ -267,8 +267,8 @@ describe('ResourceJournal v2 — Task 65: selectResidentOps (soft reset)', () =>
   })
 })
 
-describe('ResourceJournal v2 — Task 65: ContentStore GC в compact()', () => {
-  test('источники уничтоженных текстур освобождаются (CPU-память не течёт)', () => {
+describe('ResourceJournal v2 — Task 65: ContentStore GC in compact()', () => {
+  test('sources of destroyed textures are released (no CPU-memory leak)', () => {
     const j = createResourceJournal()
     const refA = j.storeSource(fakeSource(64, 64), 'ImageBitmap', 64, 64)
     j.record({ kind: 'texture.create', id: 1, width: 64, height: 64 })
@@ -279,7 +279,7 @@ describe('ResourceJournal v2 — Task 65: ContentStore GC в compact()', () => {
     expect(j.getSource(refA.ref)).toBeNull()
   })
 
-  test('живые источники НЕ трогаются; поглощённые write-ом — освобождаются', () => {
+  test('live sources are NOT touched; ones absorbed by a write are released', () => {
     const j = createResourceJournal()
     const refOld = j.storeSource(fakeSource(32, 32), 'ImageBitmap', 32, 32)
     const refNew = j.storeSource(fakeSource(64, 64), 'ImageBitmap', 64, 64)
@@ -288,18 +288,18 @@ describe('ResourceJournal v2 — Task 65: ContentStore GC в compact()', () => {
     j.record({ kind: 'texture.write', id: 1, content: refNew, flipY: false })
     j.compact()
     expect(j.getSource(refNew.ref)).not.toBeNull()
-    expect(j.getSource(refOld.ref)).toBeNull() // поглощён полным write
+    expect(j.getSource(refOld.ref)).toBeNull() // absorbed by the full write
   })
 
-  test('ref-счётчик монотонный: после GC новые ref не коллидируют со старыми', () => {
+  test('ref counter is monotonic: after GC new refs do not collide with old ones', () => {
     const j = createResourceJournal()
     const refA = j.storeSource(fakeSource(), 'ImageBitmap', 64, 64)
     j.record({ kind: 'texture.create', id: 1, width: 64, height: 64 })
     j.record({ kind: 'texture.write', id: 1, content: refA, flipY: false })
     j.record({ kind: 'texture.destroy', id: 1 })
-    j.compact() // refA удалён, sources пуст
+    j.compact() // refA removed, sources empty
     const refB = j.storeSource(fakeSource(), 'ImageBitmap', 64, 64)
-    expect(refB.ref).toBeGreaterThan(refA.ref) // не 1 (иначе перезаписал бы)
+    expect(refB.ref).toBeGreaterThan(refA.ref) // not 1 (otherwise it would overwrite)
     j.record({ kind: 'texture.create', id: 2, width: 64, height: 64 })
     j.record({ kind: 'texture.write', id: 2, content: refB, flipY: false })
     expect(j.getSource(refB.ref)).not.toBeNull()

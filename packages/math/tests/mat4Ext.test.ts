@@ -1,8 +1,8 @@
 /**
- * Тесты расширений mat4 (Task 81 / @rune/scene-подготовка):
- * аффинное произведение, орто, lookAt, обращения, TRS-композиция.
- * Эталон — gl-matrix-совместимые значения, вычисленные независимо
- * (произведение матриц через честную развёртку и геометрические инварианты).
+ * Tests for the mat4 extensions (Task 81 / @rune/scene preparation):
+ * affine product, ortho, lookAt, inversions, TRS composition.
+ * The reference is gl-matrix-compatible values computed independently
+ * (matrix products via an honest expansion and geometric invariants).
  */
 import { describe, expect, it } from 'bun:test'
 import {
@@ -20,7 +20,7 @@ import {
 } from '../src/index.ts'
 import { quatAxisAngle } from '../src/index.ts'
 
-/** Честное произведение через локальную копию (медленный эталон). */
+/** An honest product via a local copy (a slow reference). */
 function refMultiply(a: Float32Array, b: Float32Array): Float32Array {
   const out = new Float32Array(16)
   for (let col = 0; col < 4; col++) {
@@ -40,7 +40,7 @@ function approx(a: Float32Array, b: Float32Array, eps = 1e-5): void {
 }
 
 describe('mat4MultiplyAffine', () => {
-  it('совпадает с общим произведением на TRS-матрицах', () => {
+  it('matches the general product on TRS matrices', () => {
     const a = new Float32Array(16)
     const b = new Float32Array(16)
     const q = new Float32Array(4)
@@ -52,7 +52,7 @@ describe('mat4MultiplyAffine', () => {
     approx(fast, refMultiply(a, b))
   })
 
-  it('алиасинг out === a безопасен', () => {
+  it('aliasing out === a is safe', () => {
     const a = new Float32Array(16)
     const q = new Float32Array(4)
     quatAxisAngle(q, 1, 0, 0, 0.7)
@@ -62,7 +62,7 @@ describe('mat4MultiplyAffine', () => {
     approx(a, refMultiply(copy, copy))
   })
 
-  it('единичные матрицы: identity · identity = identity', () => {
+  it('identity matrices: identity · identity = identity', () => {
     const i = mat4Identity(new Float32Array(16))
     const out = new Float32Array(16)
     mat4MultiplyAffine(out, i, i)
@@ -71,13 +71,13 @@ describe('mat4MultiplyAffine', () => {
 })
 
 describe('mat4Ortho', () => {
-  it('углы AABB маппятся в клип-углы ±1', () => {
+  it('AABB corners map to the clip corners ±1', () => {
     const p = mat4Ortho(new Float32Array(16), -2, 6, -1, 3, 0.5, 10)
-    // Точка (left, bottom, -near) → (-1, -1, -1); (right, top, -far) → (1, 1, 1).
+    // Point (left, bottom, -near) → (-1, -1, -1); (right, top, -far) → (1, 1, 1).
     const corners: Array<[number, number, number, number, number, number]> = [
       [-2, -1, -0.5, -1, -1, -1],
       [6, 3, -10, 1, 1, 1],
-      [2, 1, -5.25, 0, 0, 0], // геометрический центр объёма
+      [2, 1, -5.25, 0, 0, 0], // the geometric center of the volume
     ]
     for (const [x, y, z, ex, ey, ez] of corners) {
       const cx = p[0] * x + p[4] * y + p[8] * z + p[12]
@@ -91,7 +91,7 @@ describe('mat4Ortho', () => {
 })
 
 describe('mat4LookAt', () => {
-  it('камера на +Z смотрит на начало координат: view = translate(0,0,-5)', () => {
+  it('camera at +Z looking at the origin: view = translate(0,0,-5)', () => {
     const v = mat4LookAt(new Float32Array(16), 0, 0, 5, 0, 0, 0, 0, 1, 0)
     expect(v[12]).toBeCloseTo(0, 5)
     expect(v[13]).toBeCloseTo(0, 5)
@@ -99,7 +99,7 @@ describe('mat4LookAt', () => {
     approx(v, mat4Translation(new Float32Array(16), 0, 0, -5))
   })
 
-  it('точка центра видна по −Z вида: view·center = (0, 0, −dist)', () => {
+  it('the center point is seen along view −Z: view·center = (0, 0, −dist)', () => {
     const eye = [3, 4, 5]
     const center = [1, 0.5, -2]
     const v = mat4LookAt(new Float32Array(16), eye[0], eye[1], eye[2], center[0], center[1], center[2], 0, 1, 0)
@@ -112,14 +112,14 @@ describe('mat4LookAt', () => {
     expect(Math.abs(cz + dist)).toBeLessThan(1e-5)
   })
 
-  it('вырожденный up (коллинеарен взгляду) не даёт NaN', () => {
+  it('a degenerate up (collinear with the view direction) yields no NaN', () => {
     const v = mat4LookAt(new Float32Array(16), 0, 5, 0, 0, 0, 0, 0, 1, 0)
     for (let i = 0; i < 16; i++) expect(Number.isNaN(v[i])).toBe(false)
   })
 })
 
 describe('mat4InvertAffine / mat4Invert', () => {
-  it('аффинное обращение: M · M⁻¹ = I', () => {
+  it('affine inversion: M · M⁻¹ = I', () => {
     const m = new Float32Array(16)
     const q = new Float32Array(4)
     quatAxisAngle(q, 0.5, 0.5, 0.7, 2.1)
@@ -129,14 +129,14 @@ describe('mat4InvertAffine / mat4Invert', () => {
     approx(prod, mat4Identity(new Float32Array(16)), 1e-4)
   })
 
-  it('общее обращение: M · M⁻¹ = I (в т.ч. неаффинная перспективная)', () => {
+  it('general inversion: M · M⁻¹ = I (including a non-affine perspective one)', () => {
     const p = mat4Perspective(new Float32Array(16), Math.PI / 3, 16 / 9, 0.1, 100)
     const inv = mat4Invert(new Float32Array(16), p)
     const prod = mat4Multiply(new Float32Array(16), p, inv)
     approx(prod, mat4Identity(new Float32Array(16)), 1e-4)
   })
 
-  it('общее обращение аффинной совпадает с быстрым аффинным', () => {
+  it('general inversion of an affine matrix matches the fast affine one', () => {
     const m = new Float32Array(16)
     const q = new Float32Array(4)
     quatAxisAngle(q, 0.1, -0.4, 0.9, 0.33)
@@ -148,27 +148,27 @@ describe('mat4InvertAffine / mat4Invert', () => {
     )
   })
 
-  it('вырожденная матрица → identity (не NaN, не throw)', () => {
-    const bad = new Float32Array(16) // нулевая
+  it('degenerate matrix → identity (no NaN, no throw)', () => {
+    const bad = new Float32Array(16) // all zeros
     approx(mat4Invert(new Float32Array(16), bad), mat4Identity(new Float32Array(16)))
   })
 })
 
 describe('mat4FromQuatPosScale', () => {
-  it('единичный кватернион + единичный масштаб = чистая трансляция', () => {
+  it('identity quaternion + unit scale = a pure translation', () => {
     const m = mat4FromQuatPosScale(new Float32Array(16), 0, 0, 0, 1, 5, -2, 8, 1, 1, 1)
     approx(m, mat4Translation(new Float32Array(16), 5, -2, 8))
   })
 
-  it('вращение Y на 90° совпадает с mat4RotationY', () => {
+  it('a 90° Y rotation matches mat4RotationY', () => {
     const q = new Float32Array(4)
     quatAxisAngle(q, 0, 1, 0, Math.PI / 2)
     const m = mat4FromQuatPosScale(new Float32Array(16), q[0], q[1], q[2], q[3], 0, 0, 0, 1, 1, 1)
     approx(m, mat4RotationY(new Float32Array(16), Math.PI / 2))
   })
 
-  it('порядок TRS: сначала масштаб, потом вращение, потом трансляция', () => {
-    // scale(2) → rotY(90°): точка (1,0,0) → (2,0,0) → (0,0,-2); +t=(1,0,0) → (1,0,-2).
+  it('TRS order: scale first, then rotation, then translation', () => {
+    // scale(2) → rotY(90°): point (1,0,0) → (2,0,0) → (0,0,-2); +t=(1,0,0) → (1,0,-2).
     const m = mat4FromQuatPosScale(new Float32Array(16), 0, Math.SQRT1_2, 0, Math.SQRT1_2, 1, 0, 0, 2, 1, 1)
     const x = m[0] * 1 + m[4] * 0 + m[8] * 0 + m[12]
     const z = m[2] * 1 + m[6] * 0 + m[10] * 0 + m[14]

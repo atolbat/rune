@@ -1,24 +1,27 @@
 /**
- * formats/gltf.ts — glTF 2.0 (.glb и .gltf) → MeshDocument.
+ * formats/gltf.ts — glTF 2.0 (.glb and .gltf) → MeshDocument.
  *
- * Скорость и память:
- *  - accessors с tight-упаковкой и нужным выравниванием → zero-copy
- *    TypedArray-view в BIN-чанке (никаких поэлементных DataView-циклов);
- *  - интерлив (byteStride) → один цикл копирования на атрибут;
- *  - normalized int8/16/uint8/16 → конверт в f32 лениво и один раз;
- *  - индексы u16 → u32 наружу (единый контракт MeshDocument);
- *  - JSON-чанк GLB парсится ЕЩЁ ДО догрузки BIN-чанка (стрим-синк):
- *    материалы/структура готовы, пока байты геометрии ещё едут.
+ * Speed and memory:
+ *  - accessors with tight packing and the right alignment → a zero-copy
+ *    TypedArray view into the BIN chunk (no per-element DataView loops);
+ *  - interleaving (byteStride) → one copy loop per attribute;
+ *  - normalized int8/16/uint8/16 → converted to f32 lazily and once;
+ *  - u16 indices → u32 on the outside (MeshDocument's single contract);
+ *  - the GLB JSON chunk is parsed BEFORE the BIN chunk finishes downloading
+ *    (stream sink): materials/structure are ready while the geometry bytes
+ *    are still on their way.
  *
- * Поддержка: accessors всех componentType, sparse, интерлив, PBR-материалы,
- * текстуры (webp/basisu-расширения — выбор source), TRS/matrix-ноды, skins
- * (inverseBindMatrices), анимации (linear/step/cubicspline channels),
- * data:-URI буферы, внешние .bin через ctx.resolveExternal (дочерняя задача
- * менеджера — грузится параллельно остальному трафику).
+ * Support: accessors of every componentType, sparse, interleaving, PBR
+ * materials, textures (webp/basisu extensions — source selection),
+ * TRS/matrix nodes, skins (inverseBindMatrices), animations
+ * (linear/step/cubicspline channels), data:-URI buffers, external .bin via
+ * ctx.resolveExternal (a manager child task — loaded in parallel with the
+ * rest of the traffic).
  *
- * НЕ поддержано в v1 (чёткие ошибки): Draco (KHR_draco_mesh_compression),
+ * NOT supported in v1 (clear errors): Draco (KHR_draco_mesh_compression),
  * morph targets (targets/primitives.extensions), EXT_mesh_gpu_instancing.
- * KTX2/DDS-картинки отдаются как bytes+mimeType — декодер вне зоны пакета.
+ * KTX2/DDS images are returned as bytes+mimeType — the decoder is outside
+ * the package's scope.
  */
 
 import type { ParseContext, ParseInput, Parser, StreamSink } from '../core/types.ts'
@@ -40,7 +43,7 @@ import type {
 } from './mesh.ts'
 import { meshStatsOf } from './mesh.ts'
 
-// ─── glTF-JSON схемы (минимум нужного, any-там-где-спека-любит-вариативность) ─
+// ─── glTF-JSON schemas (the minimum needed, any where the spec loves variability) ─
 
 interface GltfAccessor {
   bufferView?: number
@@ -120,13 +123,13 @@ interface GltfRoot {
   animations?: GltfAnimation[]
 }
 
-// ─── контейнер GLB ───────────────────────────────────────────────────────────
+// ─── GLB container ───────────────────────────────────────────────────────────
 
 const GLB_MAGIC = 0x46546c67
 const CHUNK_JSON = 0x4e4f534a
 const CHUNK_BIN = 0x004e4942
 
-/** Магика GLB: ascii «glTF» в первых 4 байтах. */
+/** The GLB magic: ascii "glTF" in the first 4 bytes. */
 function isGlbMagic(bytes: Uint8Array): boolean {
   return (
     bytes.length >= 4 &&
@@ -134,22 +137,22 @@ function isGlbMagic(bytes: Uint8Array): boolean {
   )
 }
 
-/** Распакованный GLB-контейнер. */
+/** An unpacked GLB container. */
 export interface GlbContainer {
   readonly gltf: GltfRoot
-  /** BIN-чанк (view в исходном буфере) или null. */
+  /** The BIN chunk (a view into the original buffer) or null. */
   readonly bin: Uint8Array | null
 }
 
-/** Разбор GLB-контейнера из полного буфера. */
+/** Parse the GLB container from a full buffer. */
 export function parseGlbContainer(bytes: Uint8Array, ctx?: ParseContext): GlbContainer {
   const url = ctx?.sourceUrl ?? null
-  if (bytes.length < 12) throw new ParseError('GLB: файл короче заголовка', 0, url)
+  if (bytes.length < 12) throw new ParseError('GLB: file shorter than the header', 0, url)
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-  if (dv.getUint32(0, true) !== GLB_MAGIC) throw new ParseError('GLB: неверная магика', 0, url)
+  if (dv.getUint32(0, true) !== GLB_MAGIC) throw new ParseError('GLB: wrong magic', 0, url)
   const version = dv.getUint32(4, true)
   if (version !== 1 && version !== 2) {
-    throw new ParseError(`GLB: версия ${version} не поддерживается (нужна 2)`, 4, url)
+    throw new ParseError(`GLB: version ${version} is not supported (2 required)`, 4, url)
   }
   let pos = 12
   let gltf: GltfRoot | null = null
@@ -159,26 +162,26 @@ export function parseGlbContainer(bytes: Uint8Array, ctx?: ParseContext): GlbCon
     const type = dv.getUint32(pos + 4, true)
     const dataStart = pos + 8
     if (dataStart + len > bytes.length) {
-      throw new ParseError('GLB: чанк вылезает за конец файла', pos, url)
+      throw new ParseError('GLB: chunk runs past the end of the file', pos, url)
     }
     if (type === CHUNK_JSON) {
       const jsonText = new TextDecoder('utf-8').decode(bytes.subarray(dataStart, dataStart + len))
       try {
         gltf = JSON.parse(jsonText) as GltfRoot
       } catch (err) {
-        throw new ParseError(`GLB: битый JSON-чанк: ${(err as Error).message}`, dataStart, url)
+        throw new ParseError(`GLB: corrupt JSON chunk: ${(err as Error).message}`, dataStart, url)
       }
     } else if (type === CHUNK_BIN) {
       bin = bytes.subarray(dataStart, dataStart + len)
-    } // прочие чанки — пропускаем (спека разрешает)
+    } // other chunks are skipped (the spec allows them)
     const padded = (len + 3) & ~3
     pos = dataStart + padded
   }
-  if (gltf === null) throw new ParseError('GLB: нет JSON-чанка', 0, url)
+  if (gltf === null) throw new ParseError('GLB: no JSON chunk', 0, url)
   return { gltf, bin }
 }
 
-// ─── декодер accessors ───────────────────────────────────────────────────────
+// ─── accessor decoder ───────────────────────────────────────────────────────
 
 const COMPONENTS: Record<string, number> = {
   SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT2: 4, MAT3: 9, MAT4: 16,
@@ -190,11 +193,11 @@ type RawArray =
 export interface DecodedAccessor {
   readonly count: number
   readonly comps: number
-  /** Сырые элементы (тип по componentType). */
+  /** Raw elements (type per componentType). */
   readonly raw: RawArray
-  /** float-вид (конверт normalized/float); null для индексных. */
+  /** The float view (normalized/float conversion); null for index accessors. */
   readonly f32: Float32Array | null
-  /** u32-вид для индексов (u16/u32 → u32); null для атрибутов. */
+  /** The u32 view for indices (u16/u32 → u32); null for attributes. */
   readonly indices: Uint32Array | null
 }
 
@@ -203,7 +206,7 @@ function componentSize(componentType: number): number {
     case 5120: case 5121: return 1
     case 5122: case 5123: return 2
     case 5125: case 5126: return 4
-    default: throw new ParseError(`accessor: неизвестный componentType ${componentType}`)
+    default: throw new ParseError(`accessor: unknown componentType ${componentType}`)
   }
 }
 
@@ -215,11 +218,11 @@ function makeRaw(componentType: number, length: number): RawArray {
     case 5123: return new Uint16Array(length)
     case 5125: return new Uint32Array(length)
     case 5126: return new Float32Array(length)
-    default: throw new ParseError(`accessor: неизвестный componentType ${componentType}`)
+    default: throw new ParseError(`accessor: unknown componentType ${componentType}`)
   }
 }
 
-/** TypedArray-view нужного типа без копии (null — если выравнивание не подходит). */
+/** A TypedArray view of the needed type without copying (null if the alignment does not fit). */
 function typedView(
   componentType: number,
   buffer: ArrayBuffer,
@@ -237,7 +240,7 @@ function typedView(
   }
 }
 
-/** Достать сырые элементы bufferView с учётом byteStride (zero-copy если можно). */
+/** Extract the raw elements of a bufferView honoring byteStride (zero-copy when possible). */
 function readElements(
   bytes: Uint8Array,
   byteOffset: number,
@@ -253,16 +256,16 @@ function readElements(
   if (tight) {
     const need = total * compSize
     if (byteOffset + need > bytes.length) {
-      throw new ParseError('accessor: данные за границей bufferView')
+      throw new ParseError('accessor: data outside the bufferView bounds')
     }
     const view = typedView(componentType, bytes.buffer as ArrayBuffer, bytes.byteOffset + byteOffset, total)
     if (view !== null) return view
     const out = makeRaw(componentType, total)
-    // плотная, но невыровненная — побайтовое блочное копирование
+    // dense but unaligned — byte-wise block copy
     new Uint8Array(out.buffer, out.byteOffset, need).set(bytes.subarray(byteOffset, byteOffset + need))
     return out
   }
-  // интерлив: поэлементное чтение по типу компонента (+ чекпоинты отмены)
+  // interleaved: per-element reading by component type (+ cancellation checkpoints)
   const out = makeRaw(componentType, total)
   const dvSrc = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   for (let v = 0; v < count; v++) {
@@ -270,7 +273,7 @@ function readElements(
     const src = byteOffset + v * byteStride
     for (let c = 0; c < comps; c++) {
       const at = src + c * compSize
-      if (at + compSize > bytes.length) throw new ParseError('accessor: данные за границей bufferView')
+      if (at + compSize > bytes.length) throw new ParseError('accessor: data outside the bufferView bounds')
       const i = v * comps + c
       switch (componentType) {
         case 5126: (out as Float32Array)[i] = dvSrc.getFloat32(at, true); break
@@ -287,8 +290,8 @@ function readElements(
 }
 
 /**
- * Декод accessor → { raw, f32?, indices? }.
- * f32 конвертит normalized int'ы; indices даёт u32-вид (для index-аксессоров).
+ * Decode an accessor → { raw, f32?, indices? }.
+ * f32 converts normalized ints; indices gives the u32 view (for index accessors).
  */
 export function decodeAccessor(
   gltf: GltfRoot,
@@ -299,23 +302,23 @@ export function decodeAccessor(
   const accessors = gltf.accessors ?? []
   const acc = accessors[accIndex]
   const url = ctx.sourceUrl
-  if (acc === undefined) throw new ParseError(`accessor ${accIndex}: нет в gltf`, -1, url)
+  if (acc === undefined) throw new ParseError(`accessor ${accIndex}: missing in gltf`, -1, url)
   const comps = COMPONENTS[acc.type]
-  if (comps === undefined) throw new ParseError(`accessor: тип ${acc.type} не поддерживается`, -1, url)
+  if (comps === undefined) throw new ParseError(`accessor: type ${acc.type} is not supported`, -1, url)
   throwIfAborted(ctx.signal, 'gltf parse')
   const count = acc.count
   const compSize = componentSize(acc.componentType)
   const total = count * comps
 
-  // base: без bufferView → нулевой буфер + sparse поверх
+  // base: no bufferView → a zero buffer + sparse on top
   let raw: RawArray
   if (acc.bufferView === undefined) {
     raw = makeRaw(acc.componentType, total)
   } else {
     const bv = (gltf.bufferViews ?? [])[acc.bufferView]
-    if (bv === undefined) throw new ParseError(`bufferView ${acc.bufferView}: нет в gltf`, -1, url)
+    if (bv === undefined) throw new ParseError(`bufferView ${acc.bufferView}: missing in gltf`, -1, url)
     const buffer = buffers[bv.buffer]
-    if (buffer === undefined) throw new ParseError(`buffer ${bv.buffer}: не загружен`, -1, url)
+    if (buffer === undefined) throw new ParseError(`buffer ${bv.buffer}: not loaded`, -1, url)
     const byteOffset = (bv.byteOffset ?? 0) + (acc.byteOffset ?? 0)
     raw = readElements(
       buffer,
@@ -329,15 +332,15 @@ export function decodeAccessor(
     )
   }
 
-  // sparse поверх base
+  // sparse on top of base
   if (acc.sparse !== undefined) {
     const sparse = acc.sparse
     const idxBv = (gltf.bufferViews ?? [])[sparse.indices.bufferView]
     const valBv = (gltf.bufferViews ?? [])[sparse.values.bufferView]
-    if (idxBv === undefined || valBv === undefined) throw new ParseError('sparse: нет bufferView', -1, url)
+    if (idxBv === undefined || valBv === undefined) throw new ParseError('sparse: missing bufferView', -1, url)
     const idxBuffer = buffers[idxBv.buffer]
     const valBuffer = buffers[valBv.buffer]
-    if (idxBuffer === undefined || valBuffer === undefined) throw new ParseError('sparse: буфер не загружен', -1, url)
+    if (idxBuffer === undefined || valBuffer === undefined) throw new ParseError('sparse: buffer not loaded', -1, url)
     const idxCompSize = componentSize(sparse.indices.componentType)
     const idxRaw = readElements(
       idxBuffer,
@@ -361,14 +364,14 @@ export function decodeAccessor(
     )
     for (let i = 0; i < sparse.count; i++) {
       const vertexIndex = (idxRaw as Uint32Array)[i]
-      if (vertexIndex >= count) throw new ParseError('sparse: индекс вне count', -1, url)
+      if (vertexIndex >= count) throw new ParseError('sparse: index out of count', -1, url)
       for (let c = 0; c < comps; c++) {
         ;(raw as Uint8Array)[vertexIndex * comps + c] = (valRaw as Uint8Array)[i * comps + c] as never
       }
     }
   }
 
-  // f32-вид
+  // the f32 view
   let f32: Float32Array | null = null
   if (acc.componentType === 5126) {
     f32 = raw as Float32Array
@@ -384,7 +387,7 @@ export function decodeAccessor(
     f32 = out
   }
 
-  // indices-вид (только целочисленные)
+  // the indices view (integers only)
   let indices: Uint32Array | null = null
   if (acc.componentType === 5125 || acc.componentType === 5123) {
     if (raw instanceof Uint32Array) indices = raw
@@ -398,7 +401,7 @@ export function decodeAccessor(
   return { count, comps, raw, f32, indices }
 }
 
-// ─── сборка MeshDocument ─────────────────────────────────────────────────────
+// ─── MeshDocument assembly ─────────────────────────────────────────────────────
 
 const MODE_MAP: Record<number, MeshMode> = {
   0: 'points',
@@ -410,7 +413,7 @@ const MODE_MAP: Record<number, MeshMode> = {
   6: 'triangle-fan',
 }
 
-/** Загрузить все буферы glTF (GLB-bin + data:-URI + внешние .bin). */
+/** Load all glTF buffers (GLB-bin + data:-URI + external .bin). */
 async function loadBuffers(
   gltf: GltfRoot,
   bin: Uint8Array | null,
@@ -426,21 +429,21 @@ async function loadBuffers(
         out.push(bin)
         continue
       }
-      throw new ParseError(`buffer ${i}: нет uri и это не GLB BIN`, -1, ctx.sourceUrl)
+      throw new ParseError(`buffer ${i}: no uri and this is not the GLB BIN`, -1, ctx.sourceUrl)
     }
     if (uri.startsWith('data:')) {
       const parsed = parseDataUri(uri)
-      if (parsed === null) throw new ParseError(`buffer ${i}: битый data: URI`, -1, ctx.sourceUrl)
+      if (parsed === null) throw new ParseError(`buffer ${i}: corrupt data: URI`, -1, ctx.sourceUrl)
       out.push(parsed.bytes)
       continue
     }
-    // внешний .bin — дочерняя задача менеджера (параллельно остальному)
+    // an external .bin — a manager child task (in parallel with the rest)
     out.push(await ctx.resolveExternal(uri))
   }
   return out
 }
 
-/** Собрать MeshDocument из glTF-JSON и загруженных буферов. */
+/** Assemble a MeshDocument from the glTF-JSON and the loaded buffers. */
 export function buildMeshDocument(
   gltf: GltfRoot,
   buffers: readonly Uint8Array[],
@@ -452,9 +455,9 @@ export function buildMeshDocument(
   const images: ImageAsset[] = (gltf.images ?? []).map(img => {
     if (img.bufferView !== undefined) {
       const bv = (gltf.bufferViews ?? [])[img.bufferView]
-      if (bv === undefined) throw new ParseError(`image: bufferView ${img.bufferView} нет`, -1, url)
+      if (bv === undefined) throw new ParseError(`image: bufferView ${img.bufferView} missing`, -1, url)
       const buffer = buffers[bv.buffer]
-      if (buffer === undefined) throw new ParseError('image: буфер не загружен', -1, url)
+      if (buffer === undefined) throw new ParseError('image: buffer not loaded', -1, url)
       const off = bv.byteOffset ?? 0
       return {
         name: img.name ?? null,
@@ -525,7 +528,7 @@ export function buildMeshDocument(
     }
   })
 
-  // meshes → плоские примитивы
+  // meshes → flat primitives
   const meshes: MeshPrimitive[] = []
   const meshNames: (string | null)[] = []
   const meshSpans: Array<[number, number]> = [] // gltf-mesh → [start, count)
@@ -535,23 +538,23 @@ export function buildMeshDocument(
       const ext = prim.extensions ?? {}
       if (ext['KHR_draco_mesh_compression'] !== undefined) {
         throw new UnsupportedError(
-          'glTF: меш сжат KHR_draco_mesh_compression — прогоните через конвертер или подключите Draco-декодер отдельным transform',
+          'glTF: mesh compressed with KHR_draco_mesh_compression — run it through a converter or plug in a Draco decoder as a separate transform',
           url,
         )
       }
       if (prim.targets !== undefined && prim.targets.length > 0) {
-        throw new UnsupportedError('glTF: morph targets не поддерживаются в v1', url)
+        throw new UnsupportedError('glTF: morph targets are not supported in v1', url)
       }
       if (ext['EXT_mesh_gpu_instancing'] !== undefined) {
-        throw new UnsupportedError('glTF: EXT_mesh_gpu_instancing не поддерживается в v1', url)
+        throw new UnsupportedError('glTF: EXT_mesh_gpu_instancing is not supported in v1', url)
       }
       const attrs = prim.attributes ?? {}
       const positionIndex = attrs['POSITION']
       if (positionIndex === undefined) {
-        throw new ParseError('glTF: примитив без POSITION', -1, url)
+        throw new ParseError('glTF: primitive without POSITION', -1, url)
       }
       const position = decodeAccessor(gltf, positionIndex, buffers, ctx)
-      if (position.f32 === null) throw new ParseError('glTF: POSITION не float/normalized', -1, url)
+      if (position.f32 === null) throw new ParseError('glTF: POSITION is not float/normalized', -1, url)
 
       const readF32 = (key: string): Float32Array | null => {
         const idx = attrs[key]
@@ -565,7 +568,7 @@ export function buildMeshDocument(
       const uvs2 = readF32('TEXCOORD_1')
       const tangents = readF32('TANGENT')
 
-      // COLOR_0: f32 или u8norm — приводим к u8-контракту
+      // COLOR_0: f32 or u8norm — reduced to the u8 contract
       let colors: Uint8Array | null = null
       const colorIndex = attrs['COLOR_0']
       if (colorIndex !== undefined) {
@@ -591,7 +594,7 @@ export function buildMeshDocument(
         }
       }
 
-      // скин-атрибуты
+      // skin attributes
       const jointsIndex = attrs['JOINTS_0']
       let joints: Uint16Array | null = null
       if (jointsIndex !== undefined) {
@@ -614,7 +617,7 @@ export function buildMeshDocument(
       if (prim.indices !== undefined) {
         const acc = decodeAccessor(gltf, prim.indices, buffers, ctx)
         if (acc.indices === null) {
-          // u8-индексы — конвертим
+          // u8 indices — convert
           const raw = acc.raw as Uint8Array
           indices = new Uint32Array(acc.count)
           for (let i = 0; i < acc.count; i++) indices[i] = raw[i]
@@ -687,7 +690,7 @@ export function buildMeshDocument(
     if (s.inverseBindMatrices !== undefined) {
       const acc = decodeAccessor(gltf, s.inverseBindMatrices, buffers, ctx)
       if (acc.f32 === null || acc.comps !== 16) {
-        throw new ParseError('skin: inverseBindMatrices не MAT4/float', -1, url)
+        throw new ParseError('skin: inverseBindMatrices is not MAT4/float', -1, url)
       }
       ibm = acc.f32
     }
@@ -742,29 +745,29 @@ function floatToU8(v: number): number {
   return Math.max(0, Math.min(255, Math.round(v * 255)))
 }
 
-// ─── высокоуровневые функции ─────────────────────────────────────────────────
+// ─── high-level functions ─────────────────────────────────────────────────
 
-/** Разобрать GLB из байтов. */
+/** Parse a GLB from bytes. */
 export async function parseGlb(bytes: Uint8Array, ctx: ParseContext): Promise<MeshDocument> {
   const container = parseGlbContainer(bytes, ctx)
   const buffers = await loadBuffers(container.gltf, container.bin, ctx)
   return buildMeshDocument(container.gltf, buffers, ctx)
 }
 
-/** Разобрать .gltf (JSON) из байтов; внешние .bin грузятся через ctx. */
+/** Parse a .gltf (JSON) from bytes; external .bin files load via ctx. */
 export async function parseGltfJsonBytes(bytes: Uint8Array, ctx: ParseContext): Promise<MeshDocument> {
   const url = ctx.sourceUrl
   let gltf: GltfRoot
   try {
     gltf = JSON.parse(new TextDecoder('utf-8').decode(bytes)) as GltfRoot
   } catch (err) {
-    throw new ParseError(`glTF: битый JSON: ${(err as Error).message}`, 0, url)
+    throw new ParseError(`glTF: corrupt JSON: ${(err as Error).message}`, 0, url)
   }
   const buffers = await loadBuffers(gltf, null, ctx)
   return buildMeshDocument(gltf, buffers, ctx)
 }
 
-// ─── Parser для менеджера (буферный + стриминговый) ──────────────────────────
+// ─── Parser for the manager (buffer + streaming) ──────────────────────────
 
 export const gltfParser: Parser<MeshDocument> = {
   kind: 'gltf',
@@ -775,9 +778,10 @@ export const gltfParser: Parser<MeshDocument> = {
     return parseGltfJsonBytes(bytes, input.ctx)
   },
   /**
-   * Стрим-синк GLB: JSON-чанк парсится как только докачан (BIN ещё едет),
-   * разбор геометрии — в finish(). Для .gltf-JSON стриминг бессмыслен —
-   * менеджер вызовет parse() (factory вернёт universal-синк с буфером).
+   * GLB stream sink: the JSON chunk is parsed as soon as it is downloaded
+   * (the BIN is still moving), the geometry is parsed in finish(). For
+   * .gltf-JSON streaming is pointless — the manager will call parse()
+   * (the factory returns a universal sink with a buffer).
    */
   streaming(ctx: ParseContext): StreamSink<MeshDocument> {
     return new GlbStreamSink(ctx)
@@ -785,8 +789,8 @@ export const gltfParser: Parser<MeshDocument> = {
 }
 
 /**
- * Инкрементальный разбор GLB-контейнера по чанкам.
- * Состояния: header → chunk-header → [json|bin] data → ... → finish.
+ * Incremental GLB container parsing, chunk by chunk.
+ * States: header → chunk-header → [json|bin] data → ... → finish.
  */
 class GlbStreamSink implements StreamSink<MeshDocument> {
   private readonly acc = new GrowableBytes(1 << 16)
@@ -807,7 +811,7 @@ class GlbStreamSink implements StreamSink<MeshDocument> {
     const dv = new DataView(view.buffer, view.byteOffset, view.byteLength)
     if (!this.jsonDone && view.length >= 12) {
       if (dv.getUint32(0, true) !== GLB_MAGIC) {
-        // это не GLB — .gltf-JSON; дождёмся конца и отдадим parse-пути
+        // this is not a GLB — .gltf-JSON; wait for the end and hand it to the parse path
         this.jsonDone = true
         this.json = null
         return
@@ -820,7 +824,7 @@ class GlbStreamSink implements StreamSink<MeshDocument> {
           try {
             this.json = JSON.parse(text) as GltfRoot
           } catch (err) {
-            throw new ParseError(`GLB: битый JSON-чанк: ${(err as Error).message}`, 20, this.ctx.sourceUrl)
+            throw new ParseError(`GLB: corrupt JSON chunk: ${(err as Error).message}`, 20, this.ctx.sourceUrl)
           }
         }
         this.jsonDone = true
@@ -829,7 +833,7 @@ class GlbStreamSink implements StreamSink<MeshDocument> {
   }
 
   async finish(): Promise<MeshDocument> {
-    if (this.finished) throw new ParseError('GLB: finish() уже вызван')
+    if (this.finished) throw new ParseError('GLB: finish() already called')
     this.finished = true
     this.tryAdvance()
     const bytes = this.acc.take()

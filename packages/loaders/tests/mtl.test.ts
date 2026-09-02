@@ -1,4 +1,4 @@
-/** mtl.ts — парсер Wavefront MTL: блоки newmtl, цвета, текстуры, опции. */
+/** mtl.ts — the Wavefront MTL parser: newmtl blocks, colors, textures, options. */
 
 import { describe, expect, it } from 'bun:test'
 import { parseMtl, parseMtlBytes } from '../src/mtl.ts'
@@ -30,19 +30,19 @@ newmtl shiny_with_options
 Ns 500
 Kd 1 0.9 0.8
 Tr 0.25
-map_Kd -s 1 1 1 -o 0 0 0 textures/доска.png
+map_Kd -s 1 1 1 -o 0 0 0 textures/board.png
 bump -clamp wood_bump.jpg
 `
 
 describe('parseMtl', () => {
-  it('блоки newmtl: имена нормализуются (пробелы → дефисы)', () => {
+  it('newmtl blocks: names are normalized (spaces → hyphens)', () => {
     const lib = parseMtl(SAMPLE)
     expect(lib.materials.length).toBe(3)
     expect(lib.materials[0]!.name).toBe('_01_-_Default1noCulli__01_-_Default1noCulli')
     expect(lib.materials[1]!.name).toBe('FrontColorNoCullingID_male-02-1noCulling.JP')
   })
 
-  it('Kd/Ka/Ks/Ns/d/illum читаются', () => {
+  it('Kd/Ka/Ks/Ns/d/illum are read', () => {
     const lib = parseMtl(SAMPLE)
     const m = lib.materials[0]!
     expect([...m.diffuse]).toEqual([0.64, 0.64, 0.64])
@@ -53,33 +53,33 @@ describe('parseMtl', () => {
     expect(m.illum).toBe(2)
   })
 
-  it('map_Kd — путь текстуры; опции (-s/-o) отбрасываются; Tr инвертируется', () => {
+  it('map_Kd — the texture path; options (-s/-o) are dropped; Tr is inverted', () => {
     const lib = parseMtl(SAMPLE)
     expect(lib.materials[0]!.mapKd).toBe('01_-_Default1noCulling.JPG')
     const m = lib.materials[2]!
-    expect(m.mapKd).toBe('textures/доска.png') // последний не-опционный токен
+    expect(m.mapKd).toBe('textures/board.png') // the last non-option token
     expect(m.mapBump).toBe('wood_bump.jpg')
     expect(m.opacity).toBe(0.75) // Tr 0.25 → d 0.75
     expect(m.shininess).toBe(500)
   })
 
-  it('get(name) по usemtl-имени; отсутствие — undefined', () => {
+  it('get(name) by usemtl name; absence — undefined', () => {
     const lib = parseMtl(SAMPLE)
     expect(lib.get('FrontColorNoCullingID_male-02-1noCulling.JP')?.mapKd).toBe('male-02-1noCulling.JPG')
-    expect(lib.get('нет-такого')).toBeUndefined()
+    expect(lib.get('no-such-name')).toBeUndefined()
   })
 
-  it('реальный male02.mtl: 5 материалов, все с map_Kd, имена OBJ-групп совпадают', () => {
+  it('real male02.mtl: 5 materials, all with map_Kd, OBJ group names match', () => {
     let bytes: Uint8Array
     try {
       bytes = new Uint8Array(readFileSync('/home/z/my-project/scripts/models-demo/assets/male02.mtl'))
     } catch {
-      return // ассет не обязателен в чистом окружении
+      return // the asset is not required in a clean environment
     }
     const lib = parseMtlBytes(bytes)
     expect(lib.stats.materials).toBe(5)
     expect(lib.stats.withMapKd).toBe(5)
-    // Имя из OBJ usemtl: 'male-02-1noCullingID_male-02-1noCulling.JP'
+    // Name from OBJ usemtl: 'male-02-1noCullingID_male-02-1noCulling.JP'
     const m = lib.get('male-02-1noCullingID_male-02-1noCulling.JP')
     expect(m?.mapKd).toBe('male-02-1noCulling.JPG')
     expect(m?.diffuse[0]).toBeGreaterThan(0)

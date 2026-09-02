@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Один раз выравнивает манифесты всех workspace-пакетов rune. */
+/** One-time alignment of the manifests of all rune workspace packages. */
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -28,8 +28,8 @@ for (const entry of readdirSync(packagesDir)) {
     type: 'module',
     license: 'MIT',
     exports: { '.': './src/index.ts' },
-    // ВНИМАНИЕ: без "sideEffects": false — bun build (1.3.14) перетряхивает
-    // ре-экспортные цепочки в пустой каркас при этом флаге.
+    // NOTE: no "sideEffects": false — bun build (1.3.14) reshuffles
+    // re-export chains into an empty skeleton with that flag.
     ...(Object.keys(deps).length ? { dependencies: sorted(deps) } : {}),
     ...(Object.keys(devDeps).length ? { devDependencies: sorted(devDeps) } : {}),
   }

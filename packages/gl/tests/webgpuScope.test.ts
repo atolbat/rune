@@ -12,24 +12,24 @@ import {
 import { _resetWebgpuScopeForTests } from '../src/webgpuScope.ts'
 
 /**
- * Task 78: скоуп доступности WebGPU — свойство/геттер ДО инициализации.
+ * Task 78: the WebGPU availability scope — a property/getter BEFORE initialization.
  *
- * Контракт:
- *   - webgpuAvailability() — синхронный снимок фактов: main-факт мгновенно,
- *     worker-факт null, пока не выяснен; БЕЗ GPU-инициализации;
- *   - probeWebgpuScope() — микро-проба воркера (blob-Worker, только
- *     navigator.gpu, НИКАКОГО requestAdapter), кэш + дедуп;
- *   - reportWebgpuWorkerFact/MainFact — инъекция внешних фактов;
- *   - скоуп = чистая комбинация фактов, никогда не «додумывается».
+ * Contract:
+ *   - webgpuAvailability() — a synchronous snapshot of facts: the main fact instantly,
+ *     the worker fact null until determined; NO GPU initialization;
+ *   - probeWebgpuScope() — a worker micro-probe (blob-Worker, only
+ *     navigator.gpu, NO requestAdapter whatsoever), cache + dedup;
+ *   - reportWebgpuWorkerFact/MainFact — injection of external facts;
+ *   - the scope = a pure combination of facts, never "guessing".
  *
- * bun-окружение: это НЕ главный поток браузера (document нет, navigator.gpu
- * нет) — как раз честный кейс «снапшот вне main»: main-факт только через
- * reportWebgpuMainFact. Blob-воркеры в bun работают (проверено) — микро-проба
- * исполняется по-настоящему.
+ * The bun environment: this is NOT the browser's main thread (no document, no
+ * navigator.gpu) — exactly the honest "snapshot outside main" case: the main fact
+ * only via reportWebgpuMainFact. Blob workers work in bun (verified) — the micro-probe
+ * is executed for real.
  */
 
-describe('webgpuScope — чистая комбинация фактов', () => {
-  it('combineWebgpuScope: все четыре состояния + null при нехватке фактов', () => {
+describe('webgpuScope — a pure combination of facts', () => {
+  it('combineWebgpuScope: all four states + null when facts are missing', () => {
     expect(combineWebgpuScope(true, true)).toBe('everywhere')
     expect(combineWebgpuScope(true, false)).toBe('main-only')
     expect(combineWebgpuScope(false, true)).toBe('worker-only')
@@ -40,14 +40,14 @@ describe('webgpuScope — чистая комбинация фактов', () =>
   })
 })
 
-describe('webgpuScope — синхронный снимок (до инициализации)', () => {
+describe('webgpuScope — a synchronous snapshot (before initialization)', () => {
   beforeEach(() => _resetWebgpuScopeForTests())
 
-  it('webgpuAvailability(): мгновенно, без GPU-работы, без исключений', () => {
+  it('webgpuAvailability(): instant, no GPU work, no exceptions', () => {
     const a = webgpuAvailability()
     expect(typeof a.here).toBe('boolean')
     expect(typeof a.mainThread).toBe('boolean')
-    // bun — не браузерный main: document нет → факт main неизвестен, пока не сообщат
+    // bun is not the browser main: no document → the main fact is unknown until reported
     expect(a.mainThread).toBe(false)
     expect(a.main).toBe(null)
     expect(a.worker).toBe(null)
@@ -55,11 +55,11 @@ describe('webgpuScope — синхронный снимок (до инициал
     expect(a.workerProbe).toBe('idle')
   })
 
-  it('снапшот в bun: navigator.gpu здесь нет → here=false (без додумываний)', () => {
+  it('snapshot in bun: no navigator.gpu here → here=false (no guessing)', () => {
     expect(webgpuAvailability().here).toBe(false)
   })
 
-  it('инъекция фактов: reportMain + reportWorker → скоуп сразу, синхронно', () => {
+  it('fact injection: reportMain + reportWorker → the scope immediately, synchronously', () => {
     reportWebgpuMainFact(true)
     reportWebgpuWorkerFact(false)
     const a = webgpuAvailability()
@@ -69,19 +69,19 @@ describe('webgpuScope — синхронный снимок (до инициал
     expect(a.workerProbe).toBe('external')
   })
 
-  it('отсутствие WebGPU везде → nowhere (машина без WebGPU)', () => {
+  it('no WebGPU anywhere → nowhere (a machine without WebGPU)', () => {
     reportWebgpuMainFact(false)
     reportWebgpuWorkerFact(false)
     expect(webgpuAvailability().scope).toBe('nowhere')
   })
 
-  it('главный без API + воркер с API → worker-only (редкая, но честная конфигурация)', () => {
+  it('main without the API + worker with the API → worker-only (a rare but honest configuration)', () => {
     reportWebgpuMainFact(false)
     reportWebgpuWorkerFact(true)
     expect(webgpuAvailability().scope).toBe('worker-only')
   })
 
-  it('частичный факт не даёт скоупа: только main', () => {
+  it('a partial fact gives no scope: main only', () => {
     reportWebgpuMainFact(true)
     const a = webgpuAvailability()
     expect(a.scope).toBe(null)
@@ -89,25 +89,25 @@ describe('webgpuScope — синхронный снимок (до инициал
   })
 })
 
-describe('webgpuScope — микро-проба воркера', () => {
+describe('webgpuScope — the worker micro-probe', () => {
   beforeEach(() => _resetWebgpuScopeForTests())
 
-  it('probeWebgpuScope(): настоящий blob-воркер, факт boolean, кэш навсегда', async () => {
+  it('probeWebgpuScope(): a real blob worker, a boolean fact, the cache forever', async () => {
     reportWebgpuMainFact(true)
     const a = await probeWebgpuScope()
-    // bun-воркер: navigator.gpu отсутствует → worker=false → main-only
+    // a bun worker: navigator.gpu is absent → worker=false → main-only
     expect(a.worker).toBe(false)
     expect(a.scope).toBe('main-only')
     expect(a.workerProbe).toBe('done')
-    // Кэш: повторный вызов синхронно-мгновенный, тот же факт
+    // Cache: a repeated call is synchronous-instant, the same fact
     const again = await probeWebgpuScope()
     expect(again.worker).toBe(false)
     expect(again.scope).toBe('main-only')
-    // Кэш виден и в синхронном снимке (свойство-геттер)
+    // The cache is also visible in the synchronous snapshot (the property getter)
     expect(webgpuAvailability().scope).toBe('main-only')
   })
 
-  it('параллельные вызовы дедупятся (один воркер, одинаковый вердикт)', async () => {
+  it('parallel calls are deduplicated (one worker, the same verdict)', async () => {
     reportWebgpuMainFact(false)
     const [a, b] = await Promise.all([probeWebgpuScope(), probeWebgpuScope()])
     expect(a.worker).toBe(false)
@@ -116,7 +116,7 @@ describe('webgpuScope — микро-проба воркера', () => {
     expect(b.scope).toBe('nowhere')
   })
 
-  it('проба после внешнего факта — мгновенный возврат без воркера', async () => {
+  it('a probe after an external fact — an instant return without a worker', async () => {
     reportWebgpuMainFact(true)
     reportWebgpuWorkerFact(true)
     const a = await probeWebgpuScope()
@@ -124,10 +124,10 @@ describe('webgpuScope — микро-проба воркера', () => {
     expect(a.workerProbe).toBe('external')
   })
 
-  it('таймаут: проба с 0мс не виснет, вердикт честно «неизвестен»', async () => {
+  it('timeout: a probe with 0ms does not hang, the verdict is honestly "unknown"', async () => {
     reportWebgpuMainFact(true)
     const a = await probeWebgpuScope({ timeoutMs: 0 })
-    // 0мс: таймер срабатывает до/вместо ответа воркера — факт не выдуман
+    // 0ms: the timer fires before/instead of the worker's answer — the fact is not invented
     expect(a.main).toBe(true)
     if (a.worker === null) {
       expect(a.scope).toBe(null)
@@ -138,35 +138,35 @@ describe('webgpuScope — микро-проба воркера', () => {
   })
 })
 
-describe('webgpuScope — честные формулировки', () => {
+describe('webgpuScope — honest wording', () => {
   beforeEach(() => _resetWebgpuScopeForTests())
 
-  it('описания различают потоки и не экстраполируют (урок Task 77)', () => {
+  it('descriptions distinguish threads and do not extrapolate (the Task 77 lesson)', () => {
     reportWebgpuMainFact(true)
     reportWebgpuWorkerFact(false)
     const text = describeWebgpuScope(webgpuAvailability())
-    expect(text).toContain('только в главном потоке')
-    expect(text).toContain('воркерам navigator.gpu не выдан')
+    expect(text).toContain('only in the main thread')
+    expect(text).toContain('workers are not granted navigator.gpu')
 
     _resetWebgpuScopeForTests()
     reportWebgpuMainFact(false)
     reportWebgpuWorkerFact(false)
-    expect(describeWebgpuScope(webgpuAvailability())).toContain('отсутствует и в главном потоке')
+    expect(describeWebgpuScope(webgpuAvailability())).toContain('missing both in the main thread')
 
     _resetWebgpuScopeForTests()
     reportWebgpuMainFact(true)
     reportWebgpuWorkerFact(true)
-    expect(describeWebgpuScope(webgpuAvailability())).toContain('и в главном потоке, и в воркерах')
+    expect(describeWebgpuScope(webgpuAvailability())).toContain('both in the main thread and in workers')
   })
 
-  it('неизвестный скоуп объясняет, ЧЕГО не хватает', () => {
+  it('an unknown scope explains WHAT is missing', () => {
     const text = describeWebgpuScope(webgpuAvailability())
-    expect(text.includes('неизвестен')).toBe(true)
+    expect(text.includes('unknown')).toBe(true)
   })
 })
 
-describe('webgpuScope — исходник микро-пробы', () => {
-  it('не содержит GPU-инициализации (никакого requestAdapter)', () => {
+describe('webgpuScope — the micro-probe source', () => {
+  it('contains no GPU initialization (no requestAdapter at all)', () => {
     expect(WEBUGPU_PROBE_SRC).not.toContain('requestAdapter')
     expect(WEBUGPU_PROBE_SRC).toContain(WEBUGPU_PROBE_MARKER)
     expect(WEBUGPU_PROBE_SRC).toContain('navigator.gpu')

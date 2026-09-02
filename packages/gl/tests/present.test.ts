@@ -1,11 +1,11 @@
 /**
- * Task 102 (§8-5/§8-6): present.ts — юнит-тесты машины present-путей.
+ * Task 102 (§8-5/§8-6): present.ts — unit tests of the present-path machine.
  *
- * Decay/PathRegistry/PathState — чистая логика: окна сэмплов, перцентили,
- * ratio-переходы, каскад селекции, pressure-гейт, фильтры. Реестр
- * канонических путей (§9.7) проверяется на fake-caps (createCaps с
- * paths-картой). Исполнение run-ов — браузерное (e2e smoke-present);
- * здесь — машина состояний и регистрация.
+ * Decay/PathRegistry/PathState — pure logic: sample windows, percentiles,
+ * ratio transitions, the selection cascade, the pressure gate, filters. The
+ * canonical path registry (§9.7) is tested on fake-caps (createCaps with a
+ * paths map). The execution of runs — browser (e2e smoke-present);
+ * here — the state machine and registration.
  */
 
 import { describe, expect, it } from 'bun:test'
@@ -25,7 +25,7 @@ import {
   DEGRADATION_ABSOLUTE_MS,
 } from '../src/present.ts'
 
-/** Caps с заданной картой present-путей (всё остальное — пустое). */
+/** Caps with a given present-path map (everything else — empty). */
 function fakeCaps(paths: Record<string, PathSupport>): Caps {
   return createCaps({
     features: new Set(),
@@ -37,7 +37,7 @@ function fakeCaps(paths: Record<string, PathSupport>): Caps {
   })
 }
 
-/** Полный набор ключей, нужный каноническим путям (все supported). */
+/** The full set of keys needed by the canonical paths (all supported). */
 function richCaps(): Caps {
   return fakeCaps({
     'canvas-direct': 'supported',
@@ -54,7 +54,7 @@ function richCaps(): Caps {
   })
 }
 
-/** Мелкий реестр с быстрыми порогами (не ждать 30 сэмплов). */
+/** A small registry with fast thresholds (no waiting for 30 samples). */
 function smallRegistry() {
   return createPathRegistry({ window: 30, minSamples: 10, warnRatio: 1.2, disableRatio: 1.5 })
 }
@@ -62,7 +62,7 @@ function smallRegistry() {
 // ─── DecayWindow ─────────────────────────────────────────────────────────────
 
 describe('createDecayWindow', () => {
-  it('равномерные сэмплы → p50 = p95, ratio 1', () => {
+  it('uniform samples → p50 = p95, ratio 1', () => {
     const w = createDecayWindow(120)
     for (let i = 0; i < 50; i++) w.push(2)
     const s = w.stats()
@@ -72,23 +72,23 @@ describe('createDecayWindow', () => {
     expect(s.ratio).toBe(1)
   })
 
-  it('шумовой порог: суб-миллисекундные колебания — НЕ деградация', () => {
-    // Замер Task 102 (SwiftShader): draw2d p50 0.1 / p95 0.5 мс — «ratio 5»
-    // на ничтожных абсолютах. p95 ниже порога → ratio честно 1.
+  it('noise floor: sub-millisecond fluctuations — NOT degradation', () => {
+    // Task 102 measurement (SwiftShader): draw2d p50 0.1 / p95 0.5 ms — "ratio 5"
+    // on negligible absolutes. p95 below the threshold → ratio honestly 1.
     const w = createDecayWindow(120)
     for (let i = 0; i < 100; i++) w.push(0.1)
     for (let i = 0; i < 20; i++) w.push(0.5)
     const s = w.stats()
     expect(s.p95).toBe(0.5)
     expect(s.ratio).toBe(1)
-    // настраиваемый порог: приложение, ищущее деградацию на 120 Гц, снижает его
+    // a configurable threshold: an application looking for degradation at 120 Hz lowers it
     const hi = createDecayWindow(120, 0.2)
     for (let i = 0; i < 100; i++) hi.push(0.1)
     for (let i = 0; i < 20; i++) hi.push(0.5)
     expect(hi.stats().ratio).toBe(5)
   })
 
-  it('спайки дают ratio ≥ 1.5 (p95/p50 = 30)', () => {
+  it('spikes give ratio ≥ 1.5 (p95/p50 = 30)', () => {
     const w = createDecayWindow(120)
     for (let i = 0; i < 100; i++) w.push(1)
     for (let i = 0; i < 20; i++) w.push(30)
@@ -98,7 +98,7 @@ describe('createDecayWindow', () => {
     expect(s.ratio).toBe(30)
   })
 
-  it('окно вытесняет старые спайки (выздоровление статистики)', () => {
+  it('the window evicts old spikes (statistics recovery)', () => {
     const w = createDecayWindow(10)
     for (let i = 0; i < 10; i++) w.push(100)
     for (let i = 0; i < 10; i++) w.push(1)
@@ -109,10 +109,10 @@ describe('createDecayWindow', () => {
     expect(s.ratio).toBe(1)
   })
 
-  it('дельта-гард (Task 104): спайк p95 − p50 < порога — шум планировщика, не деградация', () => {
-    // Замер Mali: живой путь p50 6 / p95 7.4 мс — «ratio 1.23» на джиттере
-    // асинхронного планировщика; дельта 1.4 мс не съедает бюджет кадра ни на
-    // 60, ни на 120 Гц → ratio 1, путь жив.
+  it('delta guard (Task 104): a p95 − p50 spike below the threshold — scheduler noise, not degradation', () => {
+    // Mali measurement: a live path p50 6 / p95 7.4 ms — "ratio 1.23" on the
+    // async scheduler jitter; the 1.4 ms delta does not eat the frame budget at
+    // 60 or 120 Hz → ratio 1, the path is alive.
     const w = createDecayWindow(120)
     for (let i = 0; i < 100; i++) w.push(6)
     for (let i = 0; i < 20; i++) w.push(7.4)
@@ -120,52 +120,52 @@ describe('createDecayWindow', () => {
     expect(s.p50).toBe(6)
     expect(s.p95).toBe(7.4)
     expect(s.ratio).toBe(1)
-    // настоящий спайк (дельта 9 мс ≥ 2) — честный ratio 2.5
+    // a real spike (delta 9 ms ≥ 2) — an honest ratio 2.5
     const real = createDecayWindow(120)
     for (let i = 0; i < 100; i++) real.push(6)
     for (let i = 0; i < 20; i++) real.push(15)
     expect(real.stats().ratio).toBe(2.5)
-    // порог настраиваем: приложение с 120 Гц-бюджетом ловит и мелкие дельты
+    // the threshold is configurable: an app with a 120 Hz budget catches small deltas too
     const fine = createDecayWindow(120, 0.5)
     for (let i = 0; i < 100; i++) fine.push(6)
     for (let i = 0; i < 20; i++) fine.push(7.4)
     expect(fine.stats().ratio).toBeCloseTo(7.4 / 6, 5)
   })
 
-  it('p50 = 0 (квантование таймера): знаменатель — 1 мс', () => {
+  it('p50 = 0 (timer quantization): the denominator — 1 ms', () => {
     const w = createDecayWindow(120)
     for (let i = 0; i < 100; i++) w.push(0)
     for (let i = 0; i < 10; i++) w.push(8)
-    expect(w.stats().ratio).toBe(8) // спайк над нулевым полом — сигнал
+    expect(w.stats().ratio).toBe(8) // a spike over the zero floor — a signal
     const q = createDecayWindow(120)
     for (let i = 0; i < 100; i++) q.push(0)
     for (let i = 0; i < 10; i++) q.push(1)
-    expect(q.stats().ratio).toBe(1) // шум квантования — не деградация
+    expect(q.stats().ratio).toBe(1) // quantization noise — not degradation
   })
 })
 
-// ─── PathRegistry: селекция ──────────────────────────────────────────────────
+// ─── PathRegistry: selection ──────────────────────────────────────────────────
 
 describe('PathRegistry.select', () => {
-  it('пустой реестр → null', () => {
+  it('an empty registry → null', () => {
     expect(createPathRegistry().select(richCaps())).toBeNull()
   })
 
-  it('ранг решает: меньший ранг выбирается первым', () => {
+  it('rank decides: the smaller rank is chosen first', () => {
     const r = createPathRegistry()
     r.add('a', { rank: 20, run: () => {} })
     r.add('b', { rank: 10, run: () => {} })
     expect(r.select(richCaps())?.name).toBe('b')
   })
 
-  it('без явного ранга — порядок добавления', () => {
+  it('without an explicit rank — insertion order', () => {
     const r = createPathRegistry()
     r.add('first', { run: () => {} })
     r.add('second', { run: () => {} })
     expect(r.select(richCaps())?.name).toBe('first')
   })
 
-  it('requires строкой: ключ не supported → unavailable, каскад дальше', () => {
+  it('requires as a string: a key not supported → unavailable, the cascade moves on', () => {
     const caps = richCaps()
     const r = createPathRegistry()
     r.add('gated', { requires: 'Canvas2D', rank: 10, run: () => {} })
@@ -178,7 +178,7 @@ describe('PathRegistry.select', () => {
     expect(r.select(caps)?.name).toBe('gated') // predicate not needed: same caps object family
   })
 
-  it('requires списком: один мёртвый ключ → unavailable', () => {
+  it('requires as a list: one dead key → unavailable', () => {
     const r = createPathRegistry()
     r.add('bitmap-like', { requires: ['OffscreenCanvas', 'transferToImageBitmap', 'bitmaprenderer'], rank: 10, run: () => {} })
     const caps = fakeCaps({ 'OffscreenCanvas': 'supported', 'transferToImageBitmap': 'unsupported', 'bitmaprenderer': 'supported' })
@@ -186,7 +186,7 @@ describe('PathRegistry.select', () => {
     expect(r.status('bitmap-like').reason).toContain('transferToImageBitmap')
   })
 
-  it('requires предикатом: полный контроль', () => {
+  it('requires as a predicate: full control', () => {
     const r = createPathRegistry()
     const calls: string[] = []
     r.add('pred', { requires: caps => { calls.push(caps.backend); return caps.path('blit') === 'supported' }, rank: 10, run: () => {} })
@@ -195,24 +195,24 @@ describe('PathRegistry.select', () => {
     expect(calls.length).toBeGreaterThanOrEqual(2)
   })
 
-  it('путь без run не выбирается; includeRunless разрешает', () => {
+  it('a path without run is not chosen; includeRunless allows it', () => {
     const r = createPathRegistry()
-    r.add('runless', { rank: 1, note: 'знание реестра' })
+    r.add('runless', { rank: 1, note: 'registry knowledge' })
     r.add('runner', { rank: 2, run: () => {} })
     expect(r.select(richCaps())?.name).toBe('runner')
     expect(r.select(richCaps(), 0, { includeRunless: true })?.name).toBe('runless')
   })
 
-  it('pressureMax: путь отпадает при давлении, возвращается без', () => {
+  it('pressureMax: the path drops out under pressure, returns without it', () => {
     const r = createPathRegistry()
     r.add('cheap-under-pressure', { rank: 10, pressureMax: 0.6, run: () => {} })
     r.add('always', { rank: 20, run: () => {} })
     expect(r.select(richCaps(), 0.7)?.name).toBe('always')
     expect(r.select(richCaps(), 0)?.name).toBe('cheap-under-pressure')
-    expect(r.select(richCaps(), 0.6)?.name).toBe('cheap-under-pressure') // граница включительно
+    expect(r.select(richCaps(), 0.6)?.name).toBe('cheap-under-pressure') // the boundary inclusive
   })
 
-  it('filter — структурное исключение (сценарий приложения)', () => {
+  it('filter — a structural exclusion (an application scenario)', () => {
     const r = createPathRegistry()
     r.add('direct', { rank: 10, run: () => {} })
     r.add('bitmap', { rank: 50, run: () => {} })
@@ -220,7 +220,7 @@ describe('PathRegistry.select', () => {
     expect(r.select(richCaps(), 0, { filter: offscreenScenario })?.name).toBe('bitmap')
   })
 
-  it('unavailable оживает, когда caps улучшается (invalidate → re-probe)', () => {
+  it('unavailable comes alive when caps improve (invalidate → re-probe)', () => {
     const r = createPathRegistry()
     r.add('draw2d', { requires: 'Canvas2D', rank: 10, run: () => {} })
     r.add('any', { rank: 20, run: () => {} })
@@ -230,7 +230,7 @@ describe('PathRegistry.select', () => {
     expect(r.status('draw2d').status).toBe('healthy')
   })
 
-  it('remove убирает путь из селекции', () => {
+  it('remove takes the path out of selection', () => {
     const r = createPathRegistry()
     r.add('a', { rank: 10, run: () => {} })
     r.add('b', { rank: 20, run: () => {} })
@@ -239,7 +239,7 @@ describe('PathRegistry.select', () => {
     expect(r.names).toEqual(['b'])
   })
 
-  it('add-замена сбрасывает состояние и ранг', () => {
+  it('an add-replacement resets the state and rank', () => {
     const r = createPathRegistry()
     r.add('x', { rank: 1, run: () => {} })
     r.disable('x')
@@ -250,7 +250,7 @@ describe('PathRegistry.select', () => {
   })
 })
 
-// ─── PathRegistry.select: последний рубеж (Task 104) ──────────────────────
+// ─── PathRegistry.select: the last resort (Task 104) ──────────────────────
 
 describe('PathRegistry.select — lastResort', () => {
   function allDead(): ReturnType<typeof createPathRegistry> {
@@ -264,44 +264,44 @@ describe('PathRegistry.select — lastResort', () => {
     return r
   }
 
-  it('по умолчанию все отключены → null (прежняя семантика)', () => {
+  it('by default all disabled → null (the previous semantics)', () => {
     expect(allDead().select(richCaps())).toBeNull()
   })
 
-  it('lastResort: лучший disabled вместо null — показ важнее качества', () => {
+  it('lastResort: the best disabled instead of null — showing matters more than quality', () => {
     const sel = allDead().select(richCaps(), 0, { lastResort: true })
-    expect(sel?.name).toBe('best') // меньший ранг даже среди отключённых
-    expect(sel?.state.status).toBe('disabled') // статус честный — потребитель решает
+    expect(sel?.name).toBe('best') // the smaller rank even among the disabled
+    expect(sel?.state.status).toBe('disabled') // the status is honest — the consumer decides
   })
 
-  it('lastResort не обходят unavailable', () => {
+  it('unavailable does not sneak past lastResort', () => {
     const r = allDead()
     r.add('unavail', { rank: 5, requires: 'Canvas2D', run: () => {} })
     const caps = fakeCaps({ 'Canvas2D': 'unsupported' })
     const sel = r.select(caps, 0, { lastResort: true })
-    expect(sel?.name).toBe('best') // недоступный ранг 5 не выбирается даже последним рубежом
+    expect(sel?.name).toBe('best') // an unavailable rank 5 is not chosen even by the last resort
   })
 
-  it('lastResort уважает фильтр и pressure-гейт (с гистерезисом Task 106)', () => {
+  it('lastResort respects the filter and the pressure gate (with the Task 106 hysteresis)', () => {
     const r = allDead()
     expect(r.select(richCaps(), 0, { lastResort: true, filter: n => n !== 'best' })?.name).toBe('middle')
     expect(r.select(richCaps(), 0, { lastResort: true, filter: () => false })).toBeNull()
     const gated = createPathRegistry({ window: 30, minSamples: 10 })
     gated.add('pressured', { rank: 10, pressureMax: 0.6, run: () => {} })
-    gated.disable('pressured', 'оператор')
-    expect(gated.select(richCaps(), 0.7, { lastResort: true })).toBeNull() // давление — политика приложения
-    expect(gated.select(richCaps(), 0.5, { lastResort: true })).toBeNull() // полоса гистерезиса: решение держится
-    expect(gated.select(richCaps(), 0.4, { lastResort: true })?.name).toBe('pressured') // 0.4 ≤ 0.6 − 0.15 — возврат
+    gated.disable('pressured', 'operator')
+    expect(gated.select(richCaps(), 0.7, { lastResort: true })).toBeNull() // pressure — the application's policy
+    expect(gated.select(richCaps(), 0.5, { lastResort: true })).toBeNull() // the hysteresis band: the decision holds
+    expect(gated.select(richCaps(), 0.4, { lastResort: true })?.name).toBe('pressured') // 0.4 ≤ 0.6 − 0.15 — return
   })
 
-  it('lastResort не возвращает путь без run', () => {
+  it('lastResort does not return a path without run', () => {
     const r = createPathRegistry({ window: 30, minSamples: 10 })
     r.add('runless', { rank: 1 })
     r.disable('runless')
     expect(r.select(richCaps(), 0, { lastResort: true })).toBeNull()
   })
 
-  it('живой путь предпочтительнее последнего рубежа (не «выключает» здоровое)', () => {
+  it('a live path is preferable to the last resort (does not "turn off" the healthy one)', () => {
     const r = createPathRegistry({ window: 30, minSamples: 10 })
     r.add('dead', { rank: 5, run: () => {} })
     r.disable('dead')
@@ -310,10 +310,10 @@ describe('PathRegistry.select — lastResort', () => {
   })
 })
 
-// ─── PathState: деградация ───────────────────────────────────────────────────
+// ─── PathState: degradation ───────────────────────────────────────────────────
 
-describe('PathRegistry.report — деградационная машина', () => {
-  it('спайки ratio ≥ 1.5 → disabled, селекция каскадом уходит дальше', () => {
+describe('PathRegistry.report — the degradation machine', () => {
+  it('ratio spikes ≥ 1.5 → disabled, the selection cascades on', () => {
     const r = smallRegistry()
     r.add('best', { rank: 10, run: () => {} })
     r.add('next', { rank: 20, run: () => {} })
@@ -327,17 +327,17 @@ describe('PathRegistry.report — деградационная машина', ()
     expect(r.select(richCaps())?.name).toBe('next')
   })
 
-  it('degraded-зона (1.2 ≤ ratio < 1.5): healthy-путь предпочтительнее', () => {
+  it('degraded zone (1.2 ≤ ratio < 1.5): a healthy path is preferable', () => {
     const r = smallRegistry()
     r.add('wobbly', { rank: 10, run: () => {} })
     r.add('stable', { rank: 20, run: () => {} })
     for (let i = 0; i < 20; i++) r.report('wobbly', 10)
     for (let i = 0; i < 10; i++) r.report('wobbly', 13) // p50=10, p95=13 → 1.3
     expect(r.status('wobbly').status).toBe('degraded')
-    expect(r.select(richCaps())?.name).toBe('stable') // healthy优先
+    expect(r.select(richCaps())?.name).toBe('stable') // healthy preferred
   })
 
-  it('degraded выбирается, когда healthy нет (последний шанс)', () => {
+  it('degraded is chosen when there is no healthy one (last chance)', () => {
     const r = smallRegistry()
     r.add('only', { rank: 10, run: () => {} })
     for (let i = 0; i < 20; i++) r.report('only', 10)
@@ -346,57 +346,57 @@ describe('PathRegistry.report — деградационная машина', ()
     expect(r.select(richCaps())?.name).toBe('only')
   })
 
-  it('до minSamples переходов нет (ранняя статистика шумная)', () => {
+  it('no transitions before minSamples (early statistics are noisy)', () => {
     const r = smallRegistry() // minSamples 10
     r.add('early', { rank: 10, run: () => {} })
     for (let i = 0; i < 9; i++) r.report('early', 50)
     expect(r.status('early').status).toBe('healthy')
   })
 
-  it('sub-noise-floor отчёты не отключают путь, даже «ratio» велик', () => {
+  it('sub-noise-floor reports do not disable the path, even if the "ratio" is large', () => {
     const r = smallRegistry()
     r.add('cheap', { rank: 10, run: () => {} })
     for (let i = 0; i < 40; i++) r.report('cheap', 0.1)
-    for (let i = 0; i < 20; i++) r.report('cheap', 0.9) // p95 0.9 < 2 мс
+    for (let i = 0; i < 20; i++) r.report('cheap', 0.9) // p95 0.9 < 2 ms
     expect(r.status('cheap').status).toBe('healthy')
   })
 
-  it('disabled sticky на уровне report(): чистые кадры не лечат — лечат срок/reset', () => {
+  it('disabled is sticky at the report() level: clean frames do not cure — the probation period/reset does', () => {
     const r = smallRegistry()
     r.add('a', { rank: 10, run: () => {} })
     r.add('b', { rank: 20, run: () => {} })
     for (let i = 0; i < 20; i++) r.report('a', 1)
     for (let i = 0; i < 10; i++) r.report('a', 30)
     expect(r.status('a').status).toBe('disabled')
-    for (let i = 0; i < 30; i++) r.report('a', 1) // чистые кадры
-    expect(r.status('a').status).toBe('disabled') // sticky: вердикт меняют только испытательный срок (select + время) и reset()
+    for (let i = 0; i < 30; i++) r.report('a', 1) // clean frames
+    expect(r.status('a').status).toBe('disabled') // sticky: only the probation period (select + time) and reset() change the verdict
     r.reset('a')
     expect(r.status('a').status).toBe('healthy')
     expect(r.status('a').samples).toBe(0)
     expect(r.select(richCaps())?.name).toBe('a')
   })
 
-  it('ручной disable с причиной + полный reset()', () => {
+  it('manual disable with a reason + a full reset()', () => {
     const r = smallRegistry()
     r.add('a', { rank: 10, run: () => {} })
     r.add('b', { rank: 20, run: () => {} })
-    r.disable('a', 'оператор: артефакты композитора')
+    r.disable('a', 'operator: compositor artifacts')
     expect(r.status('a').status).toBe('disabled')
-    expect(r.status('a').reason).toContain('оператор')
+    expect(r.status('a').reason).toContain('operator')
     expect(r.select(richCaps())?.name).toBe('b')
     r.reset()
     expect(r.status('a').status).toBe('healthy')
     expect(r.select(richCaps())?.name).toBe('a')
   })
 
-  it('report/status/disable на незарегистрированном пути — throw', () => {
+  it('report/status/disable on an unregistered path — throw', () => {
     const r = createPathRegistry()
     expect(() => r.report('ghost', 1)).toThrow()
     expect(() => r.status('ghost')).toThrow()
     expect(() => r.disable('ghost')).toThrow()
   })
 
-  it('snapshot: все пути по рангу с полной статистикой', () => {
+  it('snapshot: all paths by rank with full statistics', () => {
     const r = smallRegistry()
     r.add('b', { rank: 20, run: () => {}, group: 'G2', note: 'n2' })
     r.add('a', { rank: 10, run: () => {}, group: 'G1', pressureMax: 0.6 })
@@ -411,12 +411,12 @@ describe('PathRegistry.report — деградационная машина', ()
   })
 })
 
-// ─── onTransition: телеметрия переходов (Task 104) ─────────────────────
+// ─── onTransition: transition telemetry (Task 104) ─────────────────────
 
 describe('PathRegistry — onTransition', () => {
   interface Mark { readonly name: string; readonly from: string; readonly to: string }
 
-  it('report: healthy → degraded → disabled с полной статистикой перехода', () => {
+  it('report: healthy → degraded → disabled with full transition statistics', () => {
     const marks: Mark[] = []
     const r = createPathRegistry({
       window: 30,
@@ -427,16 +427,16 @@ describe('PathRegistry — onTransition', () => {
     for (let i = 0; i < 10; i++) r.report('p', 10)
     for (let i = 0; i < 10; i++) r.report('p', 13) // ratio 1.3 → degraded
     for (let i = 0; i < 10; i++) r.report('p', 30) // ratio → disabled
-    // Машина честна к переходному процессу окна: на 21-м кадре p95 ещё «не
-    // дотянулся» до единственного нового спайка (13/13 → ratio 1 → здоров),
-    // на 22-м спайк входит в p95 (30/13 = 2.31 ≥ 1.5) — сразу disabled.
-    // Журнал переходов показывает и этот миг — телеметрия без прикрас.
+    // The machine is honest about the window transient: at frame 21 p95 "has
+    // not yet reached" the single new spike (13/13 → ratio 1 → healthy),
+    // at 22 the spike enters p95 (30/13 = 2.31 ≥ 1.5) — disabled at once.
+    // The transition journal shows this moment too — telemetry without embellishment.
     expect(marks).toEqual([
       { name: 'p', from: 'healthy', to: 'degraded' },
       { name: 'p', from: 'degraded', to: 'healthy' },
       { name: 'p', from: 'healthy', to: 'disabled' },
     ])
-    // состояние в переходе — на момент ПОСЛЕ (disabled уже виден)
+    // the state in the transition — as of the moment AFTER (disabled is already visible)
     const r2 = createPathRegistry({
       window: 30,
       minSamples: 10,
@@ -453,23 +453,23 @@ describe('PathRegistry — onTransition', () => {
     for (let i = 0; i < 10; i++) r2.report('q', 30)
   })
 
-  it('повторный report без смены статуса — НЕ событие (только reason освежается)', () => {
+  it('a repeated report without a status change — NOT an event (only the reason refreshes)', () => {
     let fired = 0
     const r = createPathRegistry({ window: 30, minSamples: 10, onTransition: () => { fired++ } })
     r.add('p', { rank: 1, run: () => {} })
-    for (let i = 0; i < 40; i++) r.report('p', 5) // здоровые кадры — ноль переходов
+    for (let i = 0; i < 40; i++) r.report('p', 5) // healthy frames — zero transitions
     expect(fired).toBe(0)
   })
 
-  it('disable/reset/select-доступность тоже дают переходы', () => {
+  it('disable/reset/select-availability also produce transitions', () => {
     const marks: Mark[] = []
     const r = createPathRegistry({ onTransition: t => { marks.push({ name: t.name, from: t.from, to: t.to }) } })
     r.add('a', { requires: 'Canvas2D', rank: 1, run: () => {} })
     const capsOff = fakeCaps({ 'Canvas2D': 'unsupported' })
     const capsOn = fakeCaps({ 'Canvas2D': 'supported' })
     r.select(capsOff) // → unavailable
-    r.select(capsOn) // → healthy (ожил)
-    r.disable('a', 'оператор')
+    r.select(capsOn) // → healthy (revived)
+    r.disable('a', 'operator')
     r.reset('a') // → healthy
     expect(marks).toEqual([
       { name: 'a', from: 'healthy', to: 'unavailable' },
@@ -480,12 +480,12 @@ describe('PathRegistry — onTransition', () => {
   })
 })
 
-// ─── Испытательный срок (Task 105: полевой фидбек «отсеклись навсегда») ─────
+// ─── The probation period (Task 105: field feedback "cut off forever") ─────
 
-describe('PathRegistry — испытательный срок (авто-восстановление)', () => {
+describe('PathRegistry — the probation period (auto-recovery)', () => {
   interface Mark { readonly name: string; readonly from: string; readonly to: string; readonly reason: string | null }
 
-  /** Реестр с фейковыми часами: отключение → ход времени → select(). */
+  /** A registry with fake clocks: disable → time passes → select(). */
   function rig(opts?: { recoveryMs?: number; recoveryMaxMs?: number; recoveryBackoff?: number }) {
     let t = 0
     const marks: Mark[] = []
@@ -502,90 +502,90 @@ describe('PathRegistry — испытательный срок (авто-вос�
       r,
       marks,
       advance: (ms: number) => { t += ms },
-      /** ratio 30 (10×1 + 10×30) → disabled на текущих фейковых часах. */
+      /** ratio 30 (10×1 + 10×30) → disabled at the current fake clock. */
       kill: (name: string) => {
         for (let i = 0; i < 10; i++) r.report(name, 1)
         for (let i = 0; i < 10; i++) r.report(name, 30)
-        if (r.status(name).status !== 'disabled') throw new Error(`rig: ${name} не отключился`)
+        if (r.status(name).status !== 'disabled') throw new Error(`rig: ${name} did not get disabled`)
       },
     }
   }
 
-  it('degradation-отключение лечится временем: прошедший cooldown select() ре-армит путь', () => {
+  it('a degradation-disable is cured by time: after the cooldown select() re-arms the path', () => {
     const { r, advance, kill, marks } = rig()
     r.add('a', { rank: 10, run: () => {} })
     kill('a')
-    advance(4999) // мс — на секунду раньше срока
-    expect(r.select(richCaps())).toBeNull() // ещё disabled, живых нет
+    advance(4999) // ms — a second before the deadline
+    expect(r.select(richCaps())).toBeNull() // still disabled, no live ones
     advance(2) // 5001 ≥ 5000
     const sel = r.select(richCaps())
     expect(sel?.name).toBe('a')
     expect(sel?.state.status).toBe('healthy')
-    expect(sel?.state.samples).toBe(0) // окно свежее — старый джанк не тянется
-    expect(sel?.state.reason).toContain('испытательный срок')
+    expect(sel?.state.samples).toBe(0) // the window is fresh — the old jank does not carry over
+    expect(sel?.state.reason).toContain('probation')
     const last = marks[marks.length - 1]!
     expect(`${last.from} → ${last.to}`).toBe('disabled → healthy')
-    expect(last.reason).toContain('повторная проба после 5 с')
+    expect(last.reason).toContain('re-probe after 5 s')
   })
 
-  it('лестница ожидания: рецидив удваивает cooldown (анти-флаппер)', () => {
+  it('the waiting ladder: a relapse doubles the cooldown (anti-flapper)', () => {
     const { r, advance, kill } = rig()
     r.add('a', { rank: 10, run: () => {} })
-    kill('a') // cooldown 5 с
+    kill('a') // cooldown 5 s
     advance(5000)
-    expect(r.select(richCaps())?.name).toBe('a') // испытательный срок №1
-    kill('a') // рецидив → cooldown 10 с
+    expect(r.select(richCaps())?.name).toBe('a') // probation period #1
+    kill('a') // relapse → cooldown 10 s
     advance(5000)
-    expect(r.select(richCaps())).toBeNull() // рано: ждал 5 из 10 с
+    expect(r.select(richCaps())).toBeNull() // too early: waited 5 of 10 s
     advance(5000)
-    expect(r.select(richCaps())?.name).toBe('a') // испытательный срок №2
+    expect(r.select(richCaps())?.name).toBe('a') // probation period #2
   })
 
-  it('потолок лестницы: ожидание не растёт бесконечно', () => {
-    const { r, advance, kill } = rig({ recoveryMs: 40000 }) // рецидив: 80 с → потолок 60 с
+  it('the ladder ceiling: the wait does not grow indefinitely', () => {
+    const { r, advance, kill } = rig({ recoveryMs: 40000 }) // relapse: 80 s → ceiling 60 s
     r.add('a', { rank: 10, run: () => {} })
     kill('a')
     advance(40000)
     expect(r.select(richCaps())?.name).toBe('a')
-    kill('a') // 40000 × 2 = 80000, но потолок 60000
+    kill('a') // 40000 × 2 = 80000, but the ceiling is 60000
     advance(59999)
     expect(r.select(richCaps())).toBeNull()
-    advance(1) // ровно 60000
+    advance(1) // exactly 60000
     expect(r.select(richCaps())?.name).toBe('a')
   })
 
-  it('чистое полное окно после срока — лестница начинается заново', () => {
+  it('a clean full window after the period — the ladder starts over', () => {
     const { r, advance, kill } = rig()
     r.add('a', { rank: 10, run: () => {} })
     kill('a')
     advance(5000)
     expect(r.select(richCaps())?.name).toBe('a') // probations = 1
-    for (let i = 0; i < 30; i++) r.report('a', 1) // полное чистое окно → репутация чиста
-    kill('a') // если бы лестница помнила рецидив — cooldown 10 с
+    for (let i = 0; i < 30; i++) r.report('a', 1) // a full clean window → the reputation is clean
+    kill('a') // if the ladder remembered the relapse — cooldown 10 s
     advance(5000)
-    expect(r.select(richCaps())?.name).toBe('a') // а он снова 5 с
+    expect(r.select(richCaps())?.name).toBe('a') // but it is 5 s again
   })
 
-  it('ручной disable() — навсегда: время не лечит решение оператора', () => {
+  it('manual disable() — forever: time does not cure the operator decision', () => {
     const { r, advance, marks } = rig()
     r.add('a', { rank: 10, run: () => {} })
-    r.disable('a') // без причины = manual
-    advance(10_000_000) // хоть три месяца
+    r.disable('a') // without a reason = manual
+    advance(10_000_000) // even three months
     expect(r.select(richCaps())).toBeNull()
     expect(r.status('a').status).toBe('disabled')
-    expect(marks.filter(m => m.to === 'healthy')).toHaveLength(0) // ни одного испытательного срока
-    expect(r.select(richCaps(), 0, { lastResort: true })?.name).toBe('a') // но последний рубеж его даёт
+    expect(marks.filter(m => m.to === 'healthy')).toHaveLength(0) // not a single probation period
+    expect(r.select(richCaps(), 0, { lastResort: true })?.name).toBe('a') // but the last resort gives it
   })
 
-  it('disable с причиной (ошибка исполнения) — временный вердикт: срок оживит', () => {
+  it('disable with a reason (an execution error) — a temporary verdict: the period will revive it', () => {
     const { r, advance } = rig()
     r.add('a', { rank: 10, run: () => {} })
-    r.disable('a', 'ошибка исполнения: createImageBitmap отказал под давлением памяти')
+    r.disable('a', 'execution error: createImageBitmap failed under memory pressure')
     advance(5000)
-    expect(r.select(richCaps())?.name).toBe('a') // транзитная ошибка могла пройти
+    expect(r.select(richCaps())?.name).toBe('a') // a transient error could have passed
   })
 
-  it('recoveryMs: Infinity — прежняя sticky-семантика (отключён навсегда до reset)', () => {
+  it('recoveryMs: Infinity — the previous sticky semantics (disabled forever until reset)', () => {
     const { r, advance, kill } = rig({ recoveryMs: Number.POSITIVE_INFINITY })
     r.add('a', { rank: 10, run: () => {} })
     kill('a')
@@ -596,47 +596,47 @@ describe('PathRegistry — испытательный срок (авто-вос�
     expect(r.select(richCaps())?.name).toBe('a')
   })
 
-  it('статистика последнего рубежа живая: сэмплы пишутся и отключённому', () => {
+  it('the last resort statistics stay live: samples are written even to the disabled one', () => {
     const { r, kill } = rig()
     r.add('a', { rank: 10, run: () => {} })
-    kill('a') // в окне 10×1 + 10×30
-    for (let i = 0; i < 30; i++) r.report('a', 1) // джанк давно кончился — путь-то быстрый
+    kill('a') // the window has 10×1 + 10×30
+    for (let i = 0; i < 30; i++) r.report('a', 1) // the jank ended long ago — the path is fast
     const st = r.status('a')
-    expect(st.status).toBe('disabled') // вердикт sticky…
-    expect(st.samples).toBe(30) // …но статистика живая: окно уже чистое
+    expect(st.status).toBe('disabled') // the verdict is sticky…
+    expect(st.samples).toBe(30) // …but the statistics are live: the window is already clean
     expect(st.p50).toBe(1)
     expect(st.p95).toBe(1)
   })
 
-  it('испытательный срок не обходит фильтр/давление: путь healthy, но не выбирается', () => {
+  it('the probation period does not bypass the filter/pressure: the path is healthy but not chosen', () => {
     const { r, advance, kill } = rig()
     r.add('a', { rank: 10, pressureMax: 0.6, run: () => {} })
     r.add('b', { rank: 20, run: () => {} })
     kill('a')
     advance(5000)
-    const sel = r.select(richCaps(), 0.7) // давление режет и здорового
+    const sel = r.select(richCaps(), 0.7) // pressure cuts even the healthy one
     expect(sel?.name).toBe('b')
-    expect(r.status('a').status).toBe('healthy') // срок отработал — путь готов вернуться
-    expect(r.select(richCaps(), 0.5)?.name).toBe('b') // полоса гистерезиса — решение держится (Task 106)
-    expect(r.select(richCaps(), 0.4)?.name).toBe('a') // 0.4 ≤ 0.45 — лучший ранг снова в деле
+    expect(r.status('a').status).toBe('healthy') // the period has served — the path is ready to return
+    expect(r.select(richCaps(), 0.5)?.name).toBe('b') // the hysteresis band — the decision holds (Task 106)
+    expect(r.select(richCaps(), 0.4)?.name).toBe('a') // 0.4 ≤ 0.45 — the best rank is back in the game
   })
 
-  it('reset() чистит и лестницу: после сброса первое отключение снова ждёт базу', () => {
+  it('reset() cleans the ladder too: after the reset the first disable waits for the base again', () => {
     const { r, advance, kill } = rig()
     r.add('a', { rank: 10, run: () => {} })
     kill('a')
     advance(5000)
     expect(r.select(richCaps())?.name).toBe('a')
-    kill('a') // рецидив: 10 с
+    kill('a') // relapse: 10 s
     r.reset()
     expect(r.status('a').status).toBe('healthy')
-    kill('a') // после reset — снова базовые 5 с
+    kill('a') // after reset — the base 5 s again
     advance(5000)
     expect(r.select(richCaps())?.name).toBe('a')
   })
 })
 
-// ─── Канонический реестр (§9.7) ──────────────────────────────────────────────
+// ─── The canonical registry (§9.7) ──────────────────────────────────────────────
 
 describe('createPresentRegistry', () => {
   const CANONICAL = [
@@ -645,26 +645,26 @@ describe('createPresentRegistry', () => {
     'preserve', 'draw2d-half', 'scaled-half',
   ] as const
 
-  it('все 15 путей §9.7 по рангу; GL-внутренние без run', () => {
+  it('all 15 §9.7 paths by rank; GL-internal without run', () => {
     const r = createPresentRegistry()
     expect(r.names).toEqual([...CANONICAL])
     const runless = r.snapshot().filter(s => !s.hasRun).map(s => s.name)
     expect(runless).toEqual(['blit', 'quadcopy', 'quadpass', 'uvremap'])
   })
 
-  it('полный caps → direct (ранг 10, ноль копий)', () => {
+  it('full caps → direct (rank 10, zero copies)', () => {
     const r = createPresentRegistry()
     expect(r.select(richCaps())?.name).toBe('direct')
   })
 
-  it('сценарий «офскрин-источник → зрители»: GL-внутренние отфильтрованы → bitmap', () => {
+  it('the "offscreen source → viewers" scenario: GL-internal filtered out → bitmap', () => {
     const r = createPresentRegistry()
     const offscreenOnly = (name: string): boolean =>
       !['direct', 'wgpu-direct', 'blit', 'wgpu-copy', 'quadcopy', 'quadpass', 'uvremap'].includes(name)
     expect(r.select(richCaps(), 0, { filter: offscreenOnly })?.name).toBe('bitmap')
   })
 
-  it('среда без OffscreenCanvas: bitmap/asyncbmp/scaled-half unavailable → draw2d', () => {
+  it('an environment without OffscreenCanvas: bitmap/asyncbmp/scaled-half unavailable → draw2d', () => {
     const r = createPresentRegistry()
     const caps = fakeCaps({
       'canvas-direct': 'supported',
@@ -686,16 +686,16 @@ describe('createPresentRegistry', () => {
     expect(r.status('scaled-half').status).toBe('unavailable')
   })
 
-  it('давление 0.7 отрезает multibmp4/multi4 (pressureMax 0.6) — выбор ниже по рангу', () => {
+  it('pressure 0.7 cuts off multibmp4/multi4 (pressureMax 0.6) — the choice goes lower by rank', () => {
     const r = createPresentRegistry()
     const onlyMulti = (name: string): boolean => name === 'multibmp4' || name === 'multi4' || name === 'draw2d'
     expect(r.select(richCaps(), 0, { filter: onlyMulti })?.name).toBe('multibmp4')
     expect(r.select(richCaps(), 0.7, { filter: onlyMulti })?.name).toBe('draw2d')
   })
 
-  it('пример §9.7 (Mali): preserve с p95/p50 = 3.0 → disabled, выбор уходит в draw2d', () => {
+  it('the §9.7 example (Mali): preserve with p95/p50 = 3.0 → disabled, the choice goes to draw2d', () => {
     const r = createPathRegistry({ window: 30, minSamples: 10, warnRatio: 1.2, disableRatio: 1.5 })
-    // воспроизводим два конкурирующих пути канона: preserve (ранг 80) против draw2d (ранг 70)
+    // reproduce two competing canonical paths: preserve (rank 80) vs draw2d (rank 70)
     r.add('draw2d', { requires: 'Canvas2D', rank: 70, run: () => {} })
     r.add('preserve', { requires: ['preserve', 'Canvas2D'], rank: 80, run: () => {} })
     for (let i = 0; i < 20; i++) r.report('preserve', 1)
@@ -706,7 +706,7 @@ describe('createPresentRegistry', () => {
     expect(r.select(caps)?.name).toBe('draw2d')
   })
 
-  it('константы Контракта 1 на месте (§7-уточнение 1 + испытательный срок + Task 106)', () => {
+  it('the Contract 1 constants are in place (§7-clarification 1 + the probation period + Task 106)', () => {
     expect(DEGRADATION_RATIO).toBe(1.5)
     expect(DEGRADE_WARN_RATIO).toBe(1.2)
     expect(DEGRADATION_NOISE_FLOOR_MS).toBe(2)
@@ -718,21 +718,21 @@ describe('createPresentRegistry', () => {
   })
 })
 
-// ─── Гистерезис давления (Task 106: полевой журнал Mali — дребезг границы 0.6) ─
+// ─── Pressure hysteresis (Task 106: the Mali field journal — boundary chatter at 0.6) ─
 
-describe('PathRegistry — гистерезис давления (Task 106)', () => {
-  it('отсечение > max, в полосе [max−hyst, max] решение держится, возврат ≤ max−hyst', () => {
+describe('PathRegistry — pressure hysteresis (Task 106)', () => {
+  it('cut above max, in the band [max−hyst, max] the decision holds, return at ≤ max−hyst', () => {
     const r = createPathRegistry()
     r.add('dear', { rank: 10, pressureMax: 0.6, run: () => {} })
     r.add('cheap', { rank: 20, run: () => {} })
-    expect(r.select(richCaps(), 0.7)?.name).toBe('cheap') // отсечён
-    expect(r.select(richCaps(), 0.6)?.name).toBe('cheap') // полоса: держим (прежде — мгновенный возврат)
-    expect(r.select(richCaps(), 0.5)?.name).toBe('cheap') // полоса: держим
-    expect(r.select(richCaps(), 0.44)?.name).toBe('dear') // ниже возвратной границы 0.6 − 0.15 ≈ 0.45
-    expect(r.select(richCaps(), 0.55)?.name).toBe('dear') // снова не режем до > 0.6
+    expect(r.select(richCaps(), 0.7)?.name).toBe('cheap') // cut off
+    expect(r.select(richCaps(), 0.6)?.name).toBe('cheap') // band: hold (before — an instant return)
+    expect(r.select(richCaps(), 0.5)?.name).toBe('cheap') // band: hold
+    expect(r.select(richCaps(), 0.44)?.name).toBe('dear') // below the return boundary 0.6 − 0.15 ≈ 0.45
+    expect(r.select(richCaps(), 0.55)?.name).toBe('dear') // do not cut again until > 0.6
   })
 
-  it('дребезг границы 0.6↔0.7 больше не мечет селекцию (жалоба Mali дословно)', () => {
+  it('boundary chatter 0.6↔0.7 no longer jitters the selection (the Mali complaint verbatim)', () => {
     const r = createPathRegistry()
     r.add('dear', { rank: 10, pressureMax: 0.6, run: () => {} })
     r.add('cheap', { rank: 20, run: () => {} })
@@ -743,89 +743,89 @@ describe('PathRegistry — гистерезис давления (Task 106)', ()
     expect(picks).toEqual(['cheap', 'cheap', 'cheap', 'cheap', 'cheap', 'cheap'])
   })
 
-  it('applyPressure — авторитетные переходы cut/returned (idempotent)', () => {
+  it('applyPressure — authoritative cut/returned transitions (idempotent)', () => {
     const r = createPathRegistry()
     r.add('dear', { rank: 10, pressureMax: 0.6, run: () => {} })
     r.add('mid', { rank: 15, pressureMax: 0.8, run: () => {} })
     expect(r.applyPressure(0.7).map(t => `${t.name}:${t.to}`)).toEqual(['dear:cut'])
-    expect(r.applyPressure(0.7)).toEqual([]) // тот же pressure — без событий
+    expect(r.applyPressure(0.7)).toEqual([]) // the same pressure — no events
     expect(r.applyPressure(0.85).map(t => `${t.name}:${t.to}`)).toEqual(['mid:cut'])
-    // 0.6: dear в полосе [0.45, 0.6] — держит отсечение; mid уже ниже своей
-    // возвратной границы 0.8 − 0.15 = 0.65 — возвращается (у каждого пути СВОЯ полоса)
+    // 0.6: dear in the band [0.45, 0.6] — holds the cut; mid is already below its
+    // own return boundary 0.8 − 0.15 = 0.65 — returns (each path has ITS OWN band)
     expect(r.applyPressure(0.6).map(t => `${t.name}:${t.to}`)).toEqual(['mid:returned'])
     expect(r.applyPressure(0.4).map(t => `${t.name}:${t.to}`)).toEqual(['dear:returned'])
     expect(r.status('dear').pressureCut).toBe(false)
     expect(r.status('mid').pressureCut).toBe(false)
   })
 
-  it('ignorePressure (форс оператора): гейт не применяется к выбору, флаги живут', () => {
+  it('ignorePressure (an operator force): the gate is not applied to the choice, the flags live on', () => {
     const r = createPathRegistry()
     r.add('dear', { rank: 10, pressureMax: 0.6, run: () => {} })
-    r.select(richCaps(), 0.7) // отсечён
+    r.select(richCaps(), 0.7) // cut off
     expect(r.status('dear').pressureCut).toBe(true)
     const sel = r.select(richCaps(), 0.7, { filter: n => n === 'dear', ignorePressure: true })
-    expect(sel?.name).toBe('dear') // оператор важнее гейта
-    expect(r.status('dear').pressureCut).toBe(true) // флаг продолжает жить по реальному давлению
-    expect(r.select(richCaps(), 0.7, { filter: n => n === 'dear' })).toBeNull() // без ignore — гейт снова действует
+    expect(sel?.name).toBe('dear') // the operator outweighs the gate
+    expect(r.status('dear').pressureCut).toBe(true) // the flag keeps living by the real pressure
+    expect(r.select(richCaps(), 0.7, { filter: n => n === 'dear' })).toBeNull() // without ignore — the gate acts again
   })
 
-  it('pressureHysteresis: 0 — прежняя мгновенная семантика возврата', () => {
+  it('pressureHysteresis: 0 — the previous instant-return semantics', () => {
     const r = createPathRegistry({ pressureHysteresis: 0 })
     r.add('dear', { rank: 10, pressureMax: 0.6, run: () => {} })
     r.add('cheap', { rank: 20, run: () => {} })
     expect(r.select(richCaps(), 0.7)?.name).toBe('cheap')
-    expect(r.select(richCaps(), 0.6)?.name).toBe('dear') // мгновенный возврат (0.6 ≤ 0.6 − 0)
+    expect(r.select(richCaps(), 0.6)?.name).toBe('dear') // instant return (0.6 ≤ 0.6 − 0)
   })
 
-  it('lastResort + ignorePressure: форс отключённого пути под давлением — показ важнее', () => {
+  it('lastResort + ignorePressure: forcing a disabled path under pressure — showing matters more', () => {
     const r = createPathRegistry({ window: 30, minSamples: 10 })
     r.add('forced', { rank: 10, pressureMax: 0.6, run: () => {} })
-    r.disable('forced', 'оператор')
+    r.disable('forced', 'operator')
     expect(r.select(richCaps(), 0.9, { filter: n => n === 'forced', lastResort: true, ignorePressure: true })?.name).toBe('forced')
   })
 })
 
-// ─── Абсолютная медленность (Task 106: ratio слеп к равномерно-медленному) ────
+// ─── Absolute slowness (Task 106: ratio is blind to the uniformly slow) ────
 
-describe('PathRegistry — абсолютная медленность (Task 106)', () => {
-  it('равномерно медленный p50 ≥ 50 мс → disabled, хотя ratio 1.00 (полевой кадр multi4)', () => {
+describe('PathRegistry — absolute slowness (Task 106)', () => {
+  it('uniformly slow p50 ≥ 50 ms → disabled, even though ratio 1.00 (a multi4 field frame)', () => {
     const r = createPathRegistry({ window: 30, minSamples: 10 })
     r.add('slowborn', { rank: 10, run: () => {} })
     r.add('fast', { rank: 20, run: () => {} })
-    for (let i = 0; i < 30; i++) r.report('slowborn', 70) // путь родился в джанке — чистой базы нет
+    for (let i = 0; i < 30; i++) r.report('slowborn', 70) // the path was born in jank — no clean baseline
     const st = r.status('slowborn')
     expect(st.status).toBe('disabled')
-    expect(st.reason).toContain('абсолютная медленность')
+    expect(st.reason).toContain('absolute slowness')
     expect(st.ratio).toBe(1)
     expect(st.p50).toBe(70)
-    expect(r.select(richCaps())?.name).toBe('fast') // каскад ушёл к быстрым
+    expect(r.select(richCaps())?.name).toBe('fast') // the cascade moved to the fast ones
   })
 
-  it('равномерно медленный, но в пределах потолка (40 мс) — терпим', () => {
+  it('uniformly slow, but within the ceiling (40 ms) — tolerated', () => {
     const r = createPathRegistry({ window: 30, minSamples: 10 })
     r.add('ok', { rank: 10, run: () => {} })
     for (let i = 0; i < 30; i++) r.report('ok', 40)
-    expect(r.status('ok').status).toBe('healthy') // ниже потолка; переход (если будет) ловит ratio
+    expect(r.status('ok').status).toBe('healthy') // below the ceiling; a transition (if any) is caught by ratio
   })
 
-  it('смешанное окно (чистый p50 + джанковый p95) — ведёт ratio, не абсолют', () => {
+  it('a mixed window (clean p50 + janky p95) — ratio leads, not the absolute', () => {
     const r = createPathRegistry({ window: 30, minSamples: 10 })
     r.add('drain', { rank: 10, run: () => {} })
     for (let i = 0; i < 25; i++) r.report('drain', 0.2)
     for (let i = 0; i < 5; i++) r.report('drain', 200)
     const st = r.status('drain')
     expect(st.status).toBe('disabled')
-    expect(st.reason).toContain('degradation') // p50 чистый — абсолют молчит, ведёт ratio
+    expect(st.reason).toContain('degradation') // p50 is clean — the absolute stays silent, ratio leads
   })
 
-  it('absoluteMaxMs: Infinity — вердикт выключен', () => {
+  it('absoluteMaxMs: Infinity — the verdict is off', () => {
     const r = createPathRegistry({ window: 30, minSamples: 10, absoluteMaxMs: Number.POSITIVE_INFINITY })
     r.add('slow', { rank: 10, run: () => {} })
     for (let i = 0; i < 30; i++) r.report('slow', 70)
     expect(r.status('slow').status).toBe('healthy')
   })
 
-  it('абсолютный вердикт лечится испытательным сроком: среда нормализовалась — путь вернулся', () => {
+  it('the absolute verdict is cured by the probation period: the environment normalized — the path returned', () => {
     let t = 0
     const r = createPathRegistry({ window: 30, minSamples: 10, recoveryMs: 5000, now: () => t })
     r.add('slow', { rank: 10, run: () => {} })
@@ -834,9 +834,9 @@ describe('PathRegistry — абсолютная медленность (Task 106
     expect(r.status('slow').status).toBe('disabled')
     t = 5000
     const sel = r.select(richCaps())
-    expect(sel?.name).toBe('slow') // испытательный срок — свежее окно
-    expect(sel?.state.reason).toContain('испытательный срок')
-    for (let i = 0; i < 10; i++) r.report('slow', 1) // среда нормализовалась
+    expect(sel?.name).toBe('slow') // the probation period — a fresh window
+    expect(sel?.state.reason).toContain('probation')
+    for (let i = 0; i < 10; i++) r.report('slow', 1) // the environment normalized
     expect(r.status('slow').status).toBe('healthy')
     expect(r.status('slow').reason).toBeNull()
   })

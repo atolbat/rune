@@ -9,14 +9,14 @@ import type { GPUFacade } from '@rune/webgpu'
 import type { Journal } from '@rune/core'
 
 /**
- * Task 80: readback — surface.read() на обоих бэкендах.
+ * Task 80: readback — surface.read() on both backends.
  *
- * Контракт (parity!): SurfaceRead { width, height, data } — RGBA8, tight,
- * строки СВЕРХУ ВНИЗ. GL-фасад: readPixels + флип; WebGPU-фасад:
- * copyTextureToBuffer → submit → mapAsync + уплотнение + BGRA→RGBA.
- * Юнит-уровень (recording-фасады) проверяет ВЫЗОВ и форму; реальное
- * чтение пикселей (флип/свиззл/ориентация) — e2e на живом WebGL2/WebGPU
- * (smoke-readback: градиент, верх-красный/низ-синий на обоих бэкендах).
+ * Contract (parity!): SurfaceRead { width, height, data } — RGBA8, tight,
+ * rows TOP-DOWN. GL facade: readPixels + flip; WebGPU facade:
+ * copyTextureToBuffer → submit → mapAsync + compaction + BGRA→RGBA.
+ * The unit level (recording facades) checks the CALL and the shape; real
+ * pixel reading (flip/swizzle/orientation) is e2e on live WebGL2/WebGPU
+ * (smoke-readback: gradient, top-red/bottom-blue on both backends).
  */
 
 function fakeCanvas(): HTMLCanvasElement {
@@ -35,7 +35,7 @@ fn fsMain(@location(0) uv : vec2<f32>) -> @location(0) vec4<f32> {
 }`
 
 describe('surface.read() — WebGL2', () => {
-  it('читает цель: вызов readTargetPixels(targetId), форма SurfaceRead', async () => {
+  it('reads the target: a readTargetPixels(targetId) call, SurfaceRead shape', async () => {
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
       canvas: fakeCanvas(),
@@ -52,13 +52,13 @@ describe('surface.read() — WebGL2', () => {
     const read = await surface.read()
     expect(read.width).toBe(128)
     expect(read.height).toBe(64)
-    // recording-фасад отдаёт пустой массив — важна ФОРМА и сам вызов:
+    // the recording facade returns an empty array — the SHAPE and the call itself matter:
     expect(read.data).toBeInstanceOf(Uint8Array)
     expect(recording.calls).toContain('readTargetPixels(1)')
     renderer.stop()
   })
 
-  it('после dispose — honest reject', async () => {
+  it('after dispose — honest reject', async () => {
     const recording = createRecordingGL()
     const renderer = createWebGL2Renderer({
       canvas: fakeCanvas(),
@@ -69,13 +69,13 @@ describe('surface.read() — WebGL2', () => {
     })
     const surface = renderer.surface({ width: 32, height: 32 })
     surface.dispose()
-    await expect(surface.read()).rejects.toThrow('после dispose')
+    await expect(surface.read()).rejects.toThrow('after dispose')
     renderer.stop()
   })
 
-  it('канвас (targetId 0) не читается — честная ошибка паритета', async () => {
+  it('canvas (targetId 0) cannot be read — an honest parity error', async () => {
     const gl = createRecordingGL().gl
-    expect(() => gl.readTargetPixels(0)).toThrow('канвас не читается')
+    expect(() => gl.readTargetPixels(0)).toThrow('canvas cannot be read')
   })
 })
 
@@ -92,7 +92,7 @@ describe('surface.read() — WebGPU', () => {
     return { renderer, calls: recording.calls }
   }
 
-  it('читает цель: вызов readTargetPixels(targetId), форма SurfaceRead', async () => {
+  it('reads the target: a readTargetPixels(targetId) call, SurfaceRead shape', async () => {
     const { renderer, calls } = await setupGpu()
     const surface = renderer.surface({ width: 128, height: 64 })
     const gen = surface.pass(WGSL_PASS)
@@ -107,22 +107,22 @@ describe('surface.read() — WebGPU', () => {
     renderer.stop()
   })
 
-  it('после dispose — honest reject', async () => {
+  it('after dispose — honest reject', async () => {
     const { renderer } = await setupGpu()
     const surface = renderer.surface({ width: 32, height: 32 })
     surface.dispose()
-    await expect(surface.read()).rejects.toThrow('после dispose')
+    await expect(surface.read()).rejects.toThrow('after dispose')
     renderer.stop()
   })
 
-  it('канвас (targetId 0) не читается — честная ошибка паритета', async () => {
+  it('canvas (targetId 0) cannot be read — an honest parity error', async () => {
     const { gpu } = createRecordingGPU()
-    await expect(gpu.readTargetPixels(0)).rejects.toThrow('канвас не читается')
+    await expect(gpu.readTargetPixels(0)).rejects.toThrow('canvas cannot be read')
   })
 })
 
-describe('surface.read() — декораторы фасадов', () => {
-  it('withJournal (GL): пробрасывает чтение, НЕ пишет опс в журнал', () => {
+describe('surface.read() — facade decorators', () => {
+  it('withJournal (GL): passes the read through, does NOT write an op to the journal', () => {
     const recording = createRecordingGL()
     const journal = createJournal() as Journal
     const wrapped: GLFacade = withJournal(recording.gl, journal)
@@ -131,11 +131,11 @@ describe('surface.read() — декораторы фасадов', () => {
     wrapped.readTargetPixels(surfaceTarget)
 
     expect(recording.calls).toContain(`readTargetPixels(${surfaceTarget})`)
-    // Чтение — не декларация: журнал пуст (никаких record-опсов)
+    // A read is not a declaration: the journal is empty (no record ops)
     expect(journal.entries().length).toBe(0)
   })
 
-  it('withJournalGpu (GPU): пробрасывает чтение, НЕ пишет опс в журнал', async () => {
+  it('withJournalGpu (GPU): passes the read through, does NOT write an op to the journal', async () => {
     const recording = createRecordingGPU()
     const journal = createJournal() as Journal
     const wrapped: GPUFacade = withJournalGpu(recording.gpu, journal)

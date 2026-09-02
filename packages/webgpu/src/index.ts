@@ -1,5 +1,5 @@
-// @rune/webgpu — бэкенд WebGPU: WGSL-рефлексия, slice-арена, компилятор,
-// исполнитель лент, настоящий и рекордерный фасады.
+// @rune/webgpu — the WebGPU backend: WGSL reflection, slice arena,
+// compiler, tape executor, real and recording facades.
 
 /// <reference types="@webgpu/types" />
 
@@ -9,9 +9,9 @@ export type { WgslReflection, WgslUniformInfo, WgslAttributeInfo, WgslTextureInf
 export { createSliceArena } from './sliceArena.ts'
 export type { SliceArena, SliceHandle, SliceSlot, SliceRange } from './sliceArena.ts'
 
-// Task 68 (легаси-восстановление): lint WGSL и кэш пайплайнов — публичные
-// инструменты пакета (использовались тестами и внешним кодом до сброса
-// окружения Task 43).
+// Task 68 (legacy restoration): WGSL lint and pipeline cache — the package's
+// public tools (they were used by tests and external code before the Task 43
+// environment reset).
 export { lintWgsl } from './shader/wgslLint.ts'
 export type { WgslLintProblem } from './shader/wgslLint.ts'
 export { createPipelineCache, structuralKey } from './pipeline/pipelineCache.ts'

@@ -1,7 +1,7 @@
 /**
- * Компилятор WgpuDrawSpec → WgpuCommand. Юниформы пишутся в слайс арены
- (256-выровнен — dynamic offsets), value-compare помечает слайс грязным.
- * Пайплайн — лениво: executor вызывает ensurePipeline при первом draw.
+ * Compiler WgpuDrawSpec → WgpuCommand. Uniforms are written into an arena
+ * slice (256-aligned — dynamic offsets), value-compare marks the slice dirty.
+ * The pipeline is lazy: the executor calls ensurePipeline on first draw.
  */
 
 import type { TapeWriter, ReadableSignal } from '@rune/core'
@@ -17,19 +17,19 @@ export interface TextureHandle {
   readonly textureId: number
 }
 
-/** Динамическое значение: число | (props, ctx) => число | сигнал. */
+/** Dynamic value: number | (props, ctx) => number | signal. */
 export type WgpuDynamic<T> = T | ((props: unknown, frameCtx: unknown) => T) | ReadableSignal<T>
 
-/** Привязка команды: имя поля struct + std140-слот в срезе. */
+/** Command binding: struct field name + std140 slot in the slice. */
 export interface WgpuBinding {
   readonly name: string
-  /** Форма значения: m4 / f4 / f3 / f2 / f. */
+  /** Value shape: m4 / f4 / f3 / f2 / f. */
   readonly shape: string
-  /** Слот в срезе (байтовое смещение внутри struct). */
+  /** Slot in the slice (byte offset within the struct). */
   readonly slot: { readonly offset: number; readonly size: number }
 }
 
-/** Срез команды в арене (dynamic-offset гранулярность). */
+/** Command slice in the arena (dynamic-offset granularity). */
 export interface WgpuSliceRef {
   readonly base: number
   readonly size: number
@@ -39,10 +39,10 @@ export interface WgpuDrawSpec {
   readonly shader: { readonly wgsl: string }
   readonly pipeline?: GpuPipelineDesc
   readonly uniforms?: Record<string, unknown>
-  /** M5 (Task 73): атрибут фида — stride/offset интерливинга записи
-   *  (пайплайн строит arrayStride= stride, attribute offset= offset).
-   *  Task 75: step='instance' — запись читается один раз на инстанс
-   *  (квады-звёзды из фида). */
+  /** M5 (Task 73): feed attribute — stride/offset of record interleaving
+   *  (the pipeline builds arrayStride = stride, attribute offset = offset).
+   *  Task 75: step='instance' — the record is read once per instance
+   *  (quad-stars from the feed). */
   readonly attributes?: Record<string, { readonly data: Float32Array; readonly size: number; readonly stride?: number; readonly offset?: number; readonly step?: 'vertex' | 'instance' }>
   readonly textures?: Record<string, TextureHandle>
   readonly count: WgpuDynamic<number>
@@ -53,18 +53,18 @@ export interface WgpuCommand {
   readonly id: number
   record(props: unknown, frameCtx: { time: number; dt: number; aspect: number }, writer: TapeWriter): void
   lastProps: unknown
-  /** Привязки uniform-полей: имена + std140-слоты (портативность/диагностика). */
+  /** Uniform field bindings: names + std140 slots (portability/diagnostics). */
   readonly bindings: readonly WgpuBinding[]
-  /** Срез в арене: база (dynamic-offset) + выровненный размер. */
+  /** Slice in the arena: base (dynamic-offset) + aligned size. */
   readonly slice: WgpuSliceRef
-  /** Идентификатор пайплайна (структурный кэш: одинаковые спеки — один id). */
+  /** Pipeline identifier (structural cache: identical specs — one id). */
   readonly pipelineId: number
 }
 
 export interface WgpuCompileContext {
   readonly arena: SliceArena
   readonly commands: WgpuCommand[]
-  /** Структурный кэш пайплайнов: (дескриптор, шейдер) → стабильный id. */
+  /** Structural pipeline cache: (descriptor, shader) → stable id. */
   pipelineOf(desc: GpuPipelineDesc | undefined, wgsl: string): number
   nextPipelineId(): number
 }
@@ -97,7 +97,7 @@ interface RichCommand extends WgpuCommand {
   readonly fields: readonly WgslUniformInfo[]
   readonly sliceOffset: number
   readonly sliceBytes: number
-  /** Фактические байты юниформов (аплоад — без хвостовой набивки). */
+  /** Actual uniform bytes (upload — without trailing padding). */
   readonly uniformBytes: number
   needsUpload: boolean
   pipelineReady: boolean
@@ -115,8 +115,8 @@ export function compileWgslSpec(spec: WgpuDrawSpec, ctx: WgpuCompileContext): Wg
     shape: shapeOf(field.type ?? ''),
     slot: { offset: field.offset, size: field.size },
   }))
-  // Фактические использованные байты (конец последнего поля): аплоад
-  // не тянет хвостовую набивку struct до выравнивания.
+  // Actually used bytes (end of the last field): the upload does not
+  // drag the struct's trailing padding up to alignment.
   const usedBytes = reflection.uniforms.length > 0
     ? reflection.uniforms[reflection.uniforms.length - 1].offset + reflection.uniforms[reflection.uniforms.length - 1].size
     : 0
@@ -150,7 +150,7 @@ export function compileWgslSpec(spec: WgpuDrawSpec, ctx: WgpuCompileContext): Wg
   return command
 }
 
-/** Форма значения по WGSL-типу (диагностика привязок). */
+/** Value shape from the WGSL type (binding diagnostics). */
 function shapeOf(type: string): string {
   if (type.startsWith('mat4x4')) return 'm4'
   if (type.startsWith('mat3x3')) return 'm3'
@@ -161,7 +161,7 @@ function shapeOf(type: string): string {
   return 'f'
 }
 
-/** Значение: функция (props, ctx) | сигнал (peek) | массив | число. */
+/** Value: function (props, ctx) | signal (peek) | array | number. */
 function resolve(declared: unknown, props: unknown, frameCtx: unknown): unknown {
   if (declared === undefined) return undefined
   if (typeof declared === 'function') return (declared as (p: unknown, c: unknown) => unknown)(props, frameCtx)
@@ -171,15 +171,15 @@ function resolve(declared: unknown, props: unknown, frameCtx: unknown): unknown 
   return declared
 }
 
-/** Числовое поле: статическое число, функция или сигнал. */
+/** Numeric field: static number, function, or signal. */
 function resolveNumber(declared: WgpuDynamic<number>, props: unknown, frameCtx: unknown): number {
   const value = resolve(declared, props, frameCtx)
   return typeof value === 'number' ? value : 0
 }
 
-/** Атрибуты по возрастанию @location (порядок буферов пайплайна).
- *  M5: stride/offset фида пробрасываются в пайплайн (интерливинг).
- *  Task 75: step='instance' → stepMode пайплайна (инстансирование). */
+/** Attributes in ascending @location order (pipeline buffer order).
+ *  M5: the feed's stride/offset are passed through to the pipeline (interleaving).
+ *  Task 75: step='instance' → pipeline stepMode (instancing). */
 function orderedAttributes(reflection: WgslReflection, spec: WgpuDrawSpec): { data: Float32Array; size: number; stride?: number; offset?: number; step?: 'vertex' | 'instance' }[] {
   return reflection.attributes.map((attr: WgslAttributeInfo) => ({
     data: spec.attributes?.[attr.name]?.data ?? new Float32Array(attr.size),
@@ -190,7 +190,7 @@ function orderedAttributes(reflection: WgslReflection, spec: WgpuDrawSpec): { da
   }))
 }
 
-/** Текстуры: имена texture_2d из рефлексии → textureId из спека. */
+/** Textures: texture_2d names from reflection → textureId from the spec. */
 function boundTextures(reflection: WgslReflection, spec: WgpuDrawSpec): number[] {
   const ids: number[] = []
   for (const texture of reflection.textures) {
@@ -201,7 +201,7 @@ function boundTextures(reflection: WgslReflection, spec: WgpuDrawSpec): number[]
   return ids
 }
 
-/** Запись юниформов в слайс со сравнением; любое изменение = грязный слайс. */
+/** Writes uniforms into the slice with comparison; any change = dirty slice. */
 function writeUniforms(
   command: RichCommand,
   arena: SliceArena,
@@ -214,8 +214,8 @@ function writeUniforms(
     if (declared === undefined) continue
     const value = resolve(declared, props, frameCtx)
     if (value === undefined) continue
-    // Скаляр f32 — тоже валидное значение (паритет с GL-ареной: write
-    // принимает number и ArrayLike; раньше number[0] давал undefined → 0)
+    // A scalar f32 is also a valid value (parity with the GL arena: write
+    // accepts number and ArrayLike; previously number[0] gave undefined → 0)
     const numbers: ArrayLike<number> = typeof value === 'number' ? [value] : (value as ArrayLike<number>)
     const base = (command.sliceOffset + field.offset) / 4
     let changed = false

@@ -1,17 +1,17 @@
 /**
- * core/util.ts — байтовые примитивы: быстрый float-парсер без строк,
- * growable-буфер, base64, дефолтные платформенные возможности, sniffing.
+ * core/util.ts — byte primitives: a fast string-free float parser,
+ * a growable buffer, base64, default platform capabilities, sniffing.
  *
- * Здесь нет ни одной DOM-специфичной конструкции, кроме guarded-доступов к
- * глобалям (DecompressionStream/createImageBitmap) — headless/воркер-safe.
+ * There is not a single DOM-specific construct here, apart from guarded
+ * accesses to globals (DecompressionStream/createImageBitmap) — headless/worker-safe.
  */
 
 import type { ImageBitmapLike, ImageDecode, PlatformCaps, UrlResolver } from './types.ts'
 import { UnsupportedError } from './errors.ts'
 
-// ─── growable-буфер байтов ───────────────────────────────────────────────────
+// ─── growable byte buffer ───────────────────────────────────────────────────
 
-/** Накопитель чанков с амортизированным ростом (без конкатенаций на чанк). */
+/** Chunk accumulator with amortized growth (no per-chunk concatenations). */
 export class GrowableBytes {
   private buf: Uint8Array
   private len = 0
@@ -25,7 +25,7 @@ export class GrowableBytes {
     return this.len
   }
 
-  /** Прилить чанк. Возвращает новый размер. */
+  /** Append a chunk. Returns the new size. */
   push(chunk: Uint8Array): number {
     this.ensure(chunk.length)
     this.buf.set(chunk, this.len)
@@ -33,12 +33,12 @@ export class GrowableBytes {
     return this.len
   }
 
-  /** Смотреть накопленное без копии (обрезано до length). */
+  /** View the accumulated data without a copy (truncated to length). */
   view(): Uint8Array {
     return this.buf.subarray(0, this.len)
   }
 
-  /** Забрать копию и очиститься (буфер переиспользуется). */
+  /** Take a copy and reset (the buffer is reused). */
   take(): Uint8Array {
     const out = this.buf.slice(0, this.len)
     this.len = 0
@@ -56,20 +56,20 @@ export class GrowableBytes {
   }
 }
 
-// ─── быстрый float-парсер по байтам ──────────────────────────────────────────
+// ─── fast byte-level float parser ──────────────────────────────────────────
 
 /**
- * Разбор числа из ASCII-байтов [start, end) без создания строки.
- * Понимает: [-+]?digits[.digits][eE[-+]digits] и ведущую точку ".5".
- * Возвращает { value, next } — next = индекс первого непотреблённого байта.
- * value = NaN, если числа нет (тогда next = start).
+ * Parse a number from ASCII bytes [start, end) without creating a string.
+ * Understands: [-+]?digits[.digits][eE[-+]digits] and a leading dot ".5".
+ * Returns { value, next } — next = the index of the first unconsumed byte.
+ * value = NaN if there is no number (then next = start).
  *
- * Зачем: OBJ/MTL на 500k вершин — String.fromCharCode + parseFloat
- * аллоцирует миллионы строк; этот парсер — чистая арифметика по байтам.
+ * Why: OBJ/MTL with 500k vertices — String.fromCharCode + parseFloat
+ * allocates millions of strings; this parser is pure arithmetic over bytes.
  */
 export function parseFastFloat(bytes: Uint8Array, start: number, end: number): { value: number; next: number } {
   let i = start
-  // ведущий пробел (обычно уже съеден токенайзером, но безопасно)
+  // leading whitespace (usually already eaten by the tokenizer, but safe)
   while (i < end && (bytes[i] === 32 || bytes[i] === 9 || bytes[i] === 13)) i++
   let sign = 1
   if (i < end && (bytes[i] === 45 || bytes[i] === 43)) {
@@ -103,7 +103,7 @@ export function parseFastFloat(bytes: Uint8Array, start: number, end: number): {
   }
   if (!sawDigit && !sawFracDigit) return { value: NaN, next: start }
   let value = sign * (intPart + (sawFracDigit ? frac / fracScale : 0))
-  // экспонента
+  // exponent
   if (i < end && (bytes[i] === 101 || bytes[i] === 69)) {
     let j = i + 1
     let esign = 1
@@ -129,7 +129,7 @@ export function parseFastFloat(bytes: Uint8Array, start: number, end: number): {
   return { value, next: i }
 }
 
-/** Разбор целого из байтов [start, end) — для индексов f 1/2/3. */
+/** Parse an integer from bytes [start, end) — for f 1/2/3 indices. */
 export function parseFastInt(bytes: Uint8Array, start: number, end: number): { value: number; next: number } {
   let i = start
   while (i < end && (bytes[i] === 32 || bytes[i] === 9 || bytes[i] === 13)) i++
@@ -151,12 +151,12 @@ export function parseFastInt(bytes: Uint8Array, start: number, end: number): { v
   return { value: saw ? sign * v : NaN, next: saw ? i : start }
 }
 
-// ─── ascii-хелперы ───────────────────────────────────────────────────────────
+// ─── ascii helpers ───────────────────────────────────────────────────────────
 
-/** ASCII-строка из байтов (для имён/ключевых слов — короткие, аллокация ок). */
+/** ASCII string from bytes (for names/keywords — short, an allocation is fine). */
 export function asciiFromBytes(bytes: Uint8Array, start = 0, end = bytes.length): string {
   let out = ''
-  // chunked String.fromCharCode — избегаем stack overflow на длинных кусках
+  // chunked String.fromCharCode — avoid stack overflow on long runs
   const CHUNK = 4096
   for (let i = start; i < end; i += CHUNK) {
     out += String.fromCharCode(...bytes.subarray(i, Math.min(i + CHUNK, end)))
@@ -164,7 +164,7 @@ export function asciiFromBytes(bytes: Uint8Array, start = 0, end = bytes.length)
   return out
 }
 
-/** Сравнить байты с ASCII-константой (без аллокаций). */
+/** Compare bytes with an ASCII constant (no allocations). */
 export function bytesEqualAscii(bytes: Uint8Array, start: number, end: number, ascii: string): boolean {
   if (end - start !== ascii.length) return false
   for (let i = 0; i < ascii.length; i++) {
@@ -173,13 +173,13 @@ export function bytesEqualAscii(bytes: Uint8Array, start: number, end: number, a
   return true
 }
 
-/** Индекс байта c начиная с from; -1 если нет. */
+/** Index of byte c starting from from; -1 if absent. */
 export function indexOfByte(bytes: Uint8Array, c: number, from = 0, end = bytes.length): number {
   for (let i = from; i < end; i++) if (bytes[i] === c) return i
   return -1
 }
 
-// ─── base64 (data: URI у glTF) ───────────────────────────────────────────────
+// ─── base64 (data: URI in glTF) ───────────────────────────────────────────────
 
 const B64_TABLE = (() => {
   const t = new Int8Array(256).fill(-1)
@@ -188,7 +188,7 @@ const B64_TABLE = (() => {
   return t
 })()
 
-/** Декод base64 → байты. Строгий к паддингу (кроме игнора whitespace). */
+/** Decode base64 → bytes. Strict about padding (apart from ignoring whitespace). */
 export function base64Decode(text: string): Uint8Array {
   let len = 0
   for (let i = 0; i < text.length; i++) {
@@ -199,7 +199,7 @@ export function base64Decode(text: string): Uint8Array {
   let padding = 0
   if (len % 4 === 0 && text.endsWith('==')) padding = 2
   else if (len % 4 === 0 && text.endsWith('=')) padding = 1
-  // NB: '=' внутри текста тоже пропускается ниже (len его уже посчитал)
+  // NB: '=' inside the text is also skipped below (len already counted it)
   const outLen = (len / 4) * 3 - padding
   const out = new Uint8Array(outLen)
   let o = 0
@@ -208,7 +208,7 @@ export function base64Decode(text: string): Uint8Array {
   for (let i = 0; i < text.length; i++) {
     const code = text.charCodeAt(i)
     if (code === 32 || code === 9 || code === 10 || code === 13) continue
-    if (code === 61 /* = */) continue // паддинг
+    if (code === 61 /* = */) continue // padding
     const v = B64_TABLE[code]
     if (v < 0) throw new Error(`base64Decode: invalid char ${String.fromCharCode(code)}`)
     acc = (acc << 6) | v
@@ -221,9 +221,9 @@ export function base64Decode(text: string): Uint8Array {
   return out
 }
 
-// ─── дефолтные платформенные возможности ─────────────────────────────────────
+// ─── default platform capabilities ─────────────────────────────────────
 
-/** Резолвинг относительного URL без DOM: new URL(rel, base). */
+/** Relative URL resolution without the DOM: new URL(rel, base). */
 export const defaultResolveUrl: UrlResolver = (base, rel) => {
   if (base === null) return rel
   try {
@@ -233,28 +233,28 @@ export const defaultResolveUrl: UrlResolver = (base, rel) => {
   }
 }
 
-/** zlib/gzip/deflate через DecompressionStream, если платформа даёт. */
+/** zlib/gzip/deflate via DecompressionStream, if the platform provides it. */
 export const defaultInflate: ((bytes: Uint8Array) => Promise<Uint8Array>) | null =
   typeof DecompressionStream === 'function'
     ? async (bytes) => {
-        // Формат zlib (FBX encoding=1) = 'deflate'; для gzip-чанков есть
-        // отдельный transform. Здесь — именно zlib-wrap.
+        // The zlib format (FBX encoding=1) is 'deflate'; gzip chunks have a
+        // separate transform. This one is specifically the zlib wrap.
         const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new DecompressionStream('deflate'))
         return new Uint8Array(await new Response(stream).arrayBuffer())
       }
     : null
 
 /**
- * Картинка через createImageBitmap — ЛЕНИВО: платформа проверяется в момент
- * вызова (SSR/гидратация может доставить глобаль позже загрузки модуля).
- * Blob-обёртка — чтобы не копировать байты в строку; браузер сам выберет
- * декодер по содержимому (mime — подсказка).
+ * Image via createImageBitmap — LAZILY: the platform is checked at call time
+ * (SSR/hydration may deliver the global after module load). The Blob wrapper
+ * avoids copying bytes into a string; the browser picks the decoder by
+ * content (mime is a hint).
  */
 export const defaultDecodeImage: ImageDecode = (bytes, mimeType, options) => {
   const fn = (globalThis as { createImageBitmap?: typeof createImageBitmap }).createImageBitmap
   if (typeof fn !== 'function') {
     return Promise.reject(
-      new UnsupportedError('createImageBitmap недоступен на этой платформе — передайте decodeImage'),
+      new UnsupportedError('createImageBitmap unavailable on this platform — pass decodeImage'),
     )
   }
   return fn(
@@ -270,7 +270,7 @@ export const defaultDecodeImage: ImageDecode = (bytes, mimeType, options) => {
   ).then(bitmap => bitmap as ImageBitmapLike)
 }
 
-/** Собрать PlatformCaps из инъекций + глобалей. */
+/** Assemble PlatformCaps from injections + globals. */
 export function resolvePlatformCaps(overrides: Partial<PlatformCaps> = {}): PlatformCaps {
   return {
     fetchImpl: overrides.fetchImpl ?? (globalThis.fetch as typeof fetch),
@@ -280,20 +280,20 @@ export function resolvePlatformCaps(overrides: Partial<PlatformCaps> = {}): Plat
   }
 }
 
-// ─── sniffing: магические байты ──────────────────────────────────────────────
+// ─── sniffing: magic bytes ──────────────────────────────────────────────
 
 export interface SniffResult {
-  /** Имя формата ('glb' | 'fbx' | 'png' | ...) либо null. */
+  /** Format name ('glb' | 'fbx' | 'png' | ...) or null. */
   readonly kind: string | null
-  /** mime, если известен. */
+  /** mime, if known. */
   readonly mimeType: string | null
 }
 
-/** Распознать формат по первым байтам. URL — для расширений-подсказок. */
+/** Recognize the format by the first bytes. The URL is for extension hints. */
 export function sniffKind(bytes: Uint8Array, url?: string | null): SniffResult {
   if (bytes.length >= 4) {
     const m = (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]
-    // GLB: ascii «glTF» (u32 LE 0x46546c67)
+    // GLB: ascii "glTF" (u32 LE 0x46546c67)
     if (bytes[0] === 0x67 && bytes[1] === 0x6c && bytes[2] === 0x54 && bytes[3] === 0x46)
       return { kind: 'glb', mimeType: 'model/gltf-binary' }
     if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47)
@@ -313,7 +313,7 @@ export function sniffKind(bytes: Uint8Array, url?: string | null): SniffResult {
   if (bytes.length >= 10 && (bytesEqualAscii(bytes, 0, 10, '#?RADIANCE') || bytesEqualAscii(bytes, 0, 5, '#?RGBE'))) {
     return { kind: 'hdr', mimeType: 'image/vnd.radiance' }
   }
-  // расширение как слабый сигнал
+  // the extension as a weak signal
   if (url !== null && url !== undefined) {
     const ext = extensionOf(url)
     if (ext !== null) {
@@ -335,7 +335,7 @@ export function sniffKind(bytes: Uint8Array, url?: string | null): SniffResult {
   return { kind: null, mimeType: null }
 }
 
-/** Расширение файла из URL (без точки, lowercase, без query). */
+/** File extension from a URL (no dot, lowercase, no query). */
 export function extensionOf(url: string): string | null {
   try {
     const clean = url.split('?')[0].split('#')[0]
@@ -348,7 +348,7 @@ export function extensionOf(url: string): string | null {
   }
 }
 
-/** Достать «сырые байты» из data: URI; null — если это не data: URI. */
+/** Extract "raw bytes" from a data: URI; null if it is not a data: URI. */
 export function parseDataUri(uri: string): { mimeType: string | null; bytes: Uint8Array } | null {
   if (!uri.startsWith('data:')) return null
   const comma = uri.indexOf(',')
@@ -364,10 +364,10 @@ export function parseDataUri(uri: string): { mimeType: string | null; bytes: Uin
   return { mimeType, bytes }
 }
 
-/** Гвард: платформенная возможность должна быть, иначе UnsupportedError. */
+/** Guard: a platform capability must be present, otherwise UnsupportedError. */
 export function requireCap<T>(cap: T | null | undefined, what: string): T {
   if (cap === null || cap === undefined) {
-    throw new UnsupportedError(`${what} недоступен на этой платформе/конфигурации`)
+    throw new UnsupportedError(`${what} unavailable on this platform/configuration`)
   }
   return cap
 }

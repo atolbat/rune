@@ -1,89 +1,89 @@
 /**
- * webgpuScope — скоуп доступности WebGPU ДО всякой инициализации (Task 78).
+ * webgpuScope — WebGPU availability scope BEFORE any initialization (Task 78).
  *
- * Проблема (репорт пользователя, Task 77): «navigator.gpu отсутствует» —
- * вердикт РЕНДЕР-ВОРКЕРА ложно экстраполировался на браузер. На Chrome/Android
- * WebGPU есть в главном потоке, но воркерам navigator.gpu не выдаётся. Приложению
- * нужен ответ на вопрос «где есть WebGPU» — СРАЗУ, до спавна воркеров, до
- * создания рендереров, до requestAdapter.
+ * The problem (user report, Task 77): "navigator.gpu is missing" —
+ * the RENDER WORKER's verdict was falsely extrapolated to the browser. On Chrome/Android
+ * WebGPU exists in the main thread, but workers are not given navigator.gpu. The app
+ * needs an answer to "where is WebGPU available" — IMMEDIATELY, before spawning workers, before
+ * creating renderers, before requestAdapter.
  *
- * Три состояния, которые хочет юзер:
- *   'main-only'  — WebGPU API есть только в главном потоке (Chrome/Android,
- *                  Safari, Firefox: воркерам navigator.gpu не выдают);
- *   'everywhere' — и в главном потоке, и в воркерах (Chrome/Edge desktop);
- *   'nowhere'    — нет нигде (браузер без WebGPU);
- *   'worker-only'— есть только в воркерах (редкая конфигурация; для полноты).
+ * The three states the user wants:
+ *   'main-only'  — the WebGPU API exists only in the main thread (Chrome/Android,
+ *                  Safari, Firefox: workers are not given navigator.gpu);
+ *   'everywhere' — both in the main thread and in workers (Chrome/Edge desktop);
+ *   'nowhere'    — nowhere (a browser without WebGPU);
+ *   'worker-only'— only in workers (a rare configuration; for completeness).
  *
- * Два яруса API:
- *   1. webgpuAvailability() — СИНХРОННЫЙ снимок фактов: main-факт мгновенно
- *      ('gpu' in navigator текущего потока), worker-факт — null, пока не
- *      выяснен. Никакой GPU-работы, безопасно на самом старте страницы.
- *   2. probeWebgpuScope() — микро-проба воркера: крошечный blob-Worker
- *      проверяет navigator.gpu и постит факт (~миллисекунды). НИКАКОЙ
- *      GPU-инициализации: ни requestAdapter, ни канвасов, ни контекстов.
- *      Результат кэшируется навсегда (окружение внутри жизни страницы не меняется).
+ * Two API tiers:
+ *   1. webgpuAvailability() — a SYNCHRONOUS snapshot of facts: the main fact instantly
+ *      ('gpu' in navigator of the current thread), the worker fact — null until
+ *      determined. No GPU work, safe at the very start of the page.
+ *   2. probeWebgpuScope() — a worker micro-probe: a tiny blob-Worker
+ *      checks navigator.gpu and posts the fact (~milliseconds). NO
+ *      GPU initialization: no requestAdapter, no canvases, no contexts.
+ *      The result is cached forever (the environment does not change within a page's lifetime).
  *
- * Скоуп — про НАЛИЧИЕ API (navigator.gpu), не про адаптер: requestAdapter →
- * null возможен и при наличии API (блок-лист GPU/драйвера, софт-рендер).
- * Проверка адаптера — отдельная история (probeWebGpu() из showOn.ts, после
- * решения о скоупе): она асинхронная и может занять секунды на SwiftShader.
+ * The scope is about API PRESENCE (navigator.gpu), not about the adapter: requestAdapter →
+ * null is possible even with the API present (GPU/driver blocklist, software rendering).
+ * Checking the adapter is a separate story (probeWebGpu() from showOn.ts, after the
+ * scope decision): it is asynchronous and can take seconds on SwiftShader.
  *
- * Инъекция внешних фактов: reportWebgpuWorkerFact() — когда НАСТОЯЩИЙ рендер-
- * воркер отчитался о себе (например, сообщение webgpuEnv); reportWebgpuMainFact()
- * — когда факт главного потока известен вызывающему коду (вызов из воркера/теста).
- * Факты — не догадки: скоуп никогда не додумывается за окружение.
+ * Injecting external facts: reportWebgpuWorkerFact() — when a REAL render
+ * worker has reported about itself (e.g., a webgpuEnv message); reportWebgpuMainFact()
+ * — when the main-thread fact is known to the calling code (called from a worker/test).
+ * Facts, not guesses: the scope never invents facts about the environment.
  */
 
-/** Где WebGPU API (navigator.gpu) фактически выдан. */
+/** Where the WebGPU API (navigator.gpu) is actually granted. */
 export type WebgpuScope = 'nowhere' | 'main-only' | 'worker-only' | 'everywhere'
 
-/** Состояние микро-пробы воркера. */
+/** State of the worker micro-probe. */
 export type WebgpuWorkerProbeState =
-  | 'idle'        // ещё не вызывали
-  | 'pending'     // воркер-проба в полёте
-  | 'done'        // проба завершилась фактом
-  | 'external'    // факт сообщил внешний код (reportWebgpuWorkerFact)
-  | 'unsupported' // воркер не поднялся (нет Worker / Blob / CSP)
-  | 'timeout'     // воркер не ответил вовремя
+  | 'idle'        // not called yet
+  | 'pending'     // worker probe in flight
+  | 'done'        // probe finished with a fact
+  | 'external'    // the fact was reported by external code (reportWebgpuWorkerFact)
+  | 'unsupported' // the worker did not start (no Worker / Blob / CSP)
+  | 'timeout'     // the worker did not answer in time
 
-/** Снимок фактов о WebGPU API. Все поля — факты или null («неизвестно»). */
+/** Snapshot of WebGPU API facts. Every field is a fact or null ("unknown"). */
 export interface WebgpuAvailability {
-  /** navigator.gpu в главном потоке браузера; null — факт не известен
-   *  (снапшот взят не в main и факт не сообщали через reportWebgpuMainFact). */
+  /** navigator.gpu in the browser's main thread; null — the fact is unknown
+   *  (the snapshot was not taken in main and no fact was reported via reportWebgpuMainFact). */
   readonly main: boolean | null
-  /** navigator.gpu в DedicatedWorker'е; null — ещё не выяснен. */
+  /** navigator.gpu in a DedicatedWorker; null — not determined yet. */
   readonly worker: boolean | null
-  /** Итоговый скоуп; null — недостаточно фактов (worker или main неизвестен). */
+  /** The resulting scope; null — not enough facts (worker or main unknown). */
   readonly scope: WebgpuScope | null
-  /** Состояние микро-пробы воркера (диагностика честности). */
+  /** State of the worker micro-probe (honesty diagnostics). */
   readonly workerProbe: WebgpuWorkerProbeState
-  /** Снапшот взят в главном потоке браузера? (document есть только в main.) */
+  /** Was the snapshot taken in the browser's main thread? (document exists only in main.) */
   readonly mainThread: boolean
-  /** navigator.gpu в потоке ВЫЗОВА — мгновенный факт этого контекста. */
+  /** navigator.gpu in the CALLING thread — an instant fact of this context. */
   readonly here: boolean
 }
 
-/** Маркер сообщения микро-пробы (по нему e2e/диагностика отличает пробу). */
+/** Marker of the micro-probe message (e2e/diagnostics use it to tell the probe apart). */
 export const WEBUGPU_PROBE_MARKER = '__runeWebgpuProbe'
 
-/** Исходник микро-пробы: только факт navigator.gpu, НИКАКОЙ GPU-инициализации. */
+/** Source of the micro-probe: only the navigator.gpu fact, NO GPU initialization. */
 export const WEBUGPU_PROBE_SRC =
   `self.postMessage({ ${WEBUGPU_PROBE_MARKER}: typeof navigator !== 'undefined' && navigator.gpu !== undefined })`
 
-// ─── Факты (мгновенно, синхронно) ──────────────────────────────────────────────
+// ─── Facts (instant, synchronous) ──────────────────────────────────────────────
 
-/** navigator.gpu в текущем потоке. Мгновенно; согласовано с m5-render/demos:
- *  проверяем ЗНАЧЕНИЕ (gpu !== undefined), а не только наличие свойства. */
+/** navigator.gpu in the current thread. Instant; consistent with m5-render/demos:
+ *  we check the VALUE (gpu !== undefined), not just the property's presence. */
 function hasGpuApiHere(): boolean {
   return typeof navigator !== 'undefined' && (navigator as { gpu?: unknown }).gpu !== undefined
 }
 
-/** Главный поток браузера? document есть только в main (воркеры — нет). */
+/** The browser's main thread? document exists only in main (workers have none). */
 function isMainThreadLike(): boolean {
   return typeof document !== 'undefined'
 }
 
-// ─── Модульный кэш фактов ─────────────────────────────────────────────────────
+// ─── Module-level fact cache ─────────────────────────────────────────────────────
 
 const facts = {
   main: null as boolean | null,
@@ -92,7 +92,7 @@ const facts = {
   pending: null as Promise<WebgpuAvailability> | null,
 }
 
-/** Чистая комбинация фактов → скоуп. null = фактов не хватает. */
+/** Pure combination of facts → scope. null = not enough facts. */
 export function combineWebgpuScope(main: boolean | null, worker: boolean | null): WebgpuScope | null {
   if (main === null || worker === null) return null
   if (main && worker) return 'everywhere'
@@ -102,15 +102,15 @@ export function combineWebgpuScope(main: boolean | null, worker: boolean | null)
 }
 
 /**
- * Синхронный снимок фактов — свойство-геттер скоупа. Мгновенно, без побочных
- * эффектов, безопасно до/без всякой инициализации. В главном потоке браузера
- * main-факт известен сразу; worker-факт появляется после probeWebgpuScope()
- * или reportWebgpuWorkerFact().
+ * A synchronous snapshot of facts — the scope property getter. Instant, no side
+ * effects, safe before/without any initialization. In the browser's main thread
+ * the main fact is known right away; the worker fact appears after probeWebgpuScope()
+ * or reportWebgpuWorkerFact().
  */
 export function webgpuAvailability(): WebgpuAvailability {
   const here = hasGpuApiHere()
   const mainThread = isMainThreadLike()
-  // В main факт main известен из первых рук; вне main — из кэша (null, если не сообщали).
+  // In main, the main fact is known first-hand; outside main — from the cache (null if never reported).
   const main = mainThread ? here : facts.main
   return {
     main,
@@ -122,30 +122,30 @@ export function webgpuAvailability(): WebgpuAvailability {
   }
 }
 
-/** Сообщить факт ГЛАВНОГО потока (для вызовов вне main и для тестов). */
+/** Report the MAIN thread's fact (for calls outside main and for tests). */
 export function reportWebgpuMainFact(hasApi: boolean): void {
   facts.main = hasApi
 }
 
 /**
- * Сообщить факт ВОРКЕРА извне — например, когда настоящий рендер-воркер
- * отчитался о себе сообщением. Кэшируется; следующий webgpuAvailability()
- * сразу даст скоуп без пробы. Последний факт побеждает (все источники —
- * реальные воркеры, расходиться не должны).
+ * Report the WORKER fact from outside — e.g., when a real render worker
+ * has reported about itself with a message. Cached; the next webgpuAvailability()
+ * gives the scope immediately without a probe. The last fact wins (all sources are
+ * real workers, they should not disagree).
  */
 export function reportWebgpuWorkerFact(hasApi: boolean): void {
   facts.worker = hasApi
   facts.probe = 'external'
 }
 
-// ─── Микро-проба воркера ───────────────────────────────────────────────────────
+// ─── Worker micro-probe ───────────────────────────────────────────────────────
 
 /**
- * Полный вердикт скоупа: микро-проба воркера (blob-Worker ~миллисекунды,
- * БЕЗ GPU-инициализации — только navigator.gpu) + main-факт. Идемпотентна:
- * повторные вызовы отдают кэш; параллельные — дедупятся в один воркер.
- * Неудачная проба (unsupported/timeout) не кэшируется навсегда — повторный
- * вызов может подняться.
+ * The full scope verdict: a worker micro-probe (blob-Worker ~milliseconds,
+ * NO GPU initialization — only navigator.gpu) + the main fact. Idempotent:
+ * repeated calls return the cache; parallel ones are deduplicated into a single worker.
+ * A failed probe (unsupported/timeout) is not cached forever — a repeated
+ * call may succeed.
  */
 export function probeWebgpuScope(options: { readonly timeoutMs?: number } = {}): Promise<WebgpuAvailability> {
   if (facts.worker !== null) return Promise.resolve(webgpuAvailability())
@@ -165,7 +165,7 @@ export function probeWebgpuScope(options: { readonly timeoutMs?: number } = {}):
       if (settled) return
       settled = true
       clearTimeout(timer)
-      try { worker?.terminate() } catch { /* уже мёртв */ }
+      try { worker?.terminate() } catch { /* already dead */ }
       if (url !== null) { try { URL.revokeObjectURL(url) } catch { /* best effort */ } }
     }
 
@@ -191,14 +191,14 @@ export function probeWebgpuScope(options: { readonly timeoutMs?: number } = {}):
         facts.worker = value
         facts.probe = 'done'
       } else {
-        // Воркер ответил не тем сообщением — факт не получен, честно «unsupported».
+        // The worker answered with the wrong message — no fact obtained, honestly "unsupported".
         facts.probe = 'unsupported'
       }
       finish()
       resolve(webgpuAvailability())
     }
     worker.onerror = () => {
-      // Ошибка воркера ≠ «нет API» (CSP, квота blob-URL…) — не выдумываем факт.
+      // A worker error ≠ "no API" (CSP, blob-URL quota…) — we do not invent facts.
       facts.probe = 'unsupported'
       finish()
       resolve(webgpuAvailability())
@@ -206,45 +206,45 @@ export function probeWebgpuScope(options: { readonly timeoutMs?: number } = {}):
   })
 
   facts.pending = promise
-  // Успешная проба остаётся фактом навсегда (worker !== null — ранний выход выше);
-  // неудачная освобождает слот: следующий вызов попробует снова.
+  // A successful probe stays a fact forever (worker !== null — early exit above);
+  // a failed one frees the slot: the next call will try again.
   void promise.then(() => {
     if (facts.worker === null) facts.pending = null
   })
   return promise
 }
 
-// ─── Честные формулировки ─────────────────────────────────────────────────────
+// ─── Honest wording ─────────────────────────────────────────────────────
 
-/** Человекочитаемое объяснение скоупа/фактов — от имени фактов, без экстраполяций
- *  (урок Task 77: «воркеру не выдан» ≠ «в браузере нет»). */
+/** A human-readable explanation of the scope/facts — on behalf of the facts, no extrapolation
+ *  (the Task 77 lesson: "not granted to the worker" ≠ "absent in the browser"). */
 export function describeWebgpuScope(a: WebgpuAvailability): string {
   switch (a.scope) {
     case 'everywhere':
-      return 'WebGPU API выдан везде: navigator.gpu есть и в главном потоке, и в воркерах.'
+      return 'WebGPU API is granted everywhere: navigator.gpu exists both in the main thread and in workers.'
     case 'main-only':
-      return 'WebGPU API только в главном потоке: воркерам navigator.gpu не выдан (Chrome на Android, Safari, Firefox). Рендер в воркере на WebGPU невозможен — там только WebGL2.'
+      return 'WebGPU API only in the main thread: workers are not granted navigator.gpu (Chrome on Android, Safari, Firefox). WebGPU rendering in a worker is impossible — only WebGL2 there.'
     case 'worker-only':
-      return 'WebGPU API только в воркерах: в главном потоке navigator.gpu отсутствует (редкая конфигурация).'
+      return 'WebGPU API only in workers: navigator.gpu is missing in the main thread (a rare configuration).'
     case 'nowhere':
-      return 'WebGPU API отсутствует и в главном потоке, и в воркерах — WebGPU в этом окружении нет.'
+      return 'WebGPU API is missing both in the main thread and in workers — there is no WebGPU in this environment.'
   }
   if (a.workerProbe === 'unsupported') {
-    return 'WebGPU-скоуп неизвестен: микро-проба воркера не поднялась (Worker/Blob недоступны или CSP).'
+    return 'WebGPU scope unknown: the worker micro-probe did not start (Worker/Blob unavailable or CSP).'
   }
   if (a.workerProbe === 'timeout') {
-    return 'WebGPU-скоуп неизвестен: микро-проба воркера не ответила вовремя.'
+    return 'WebGPU scope unknown: the worker micro-probe did not answer in time.'
   }
   if (a.workerProbe === 'pending') {
-    return 'WebGPU-скоуп выясняется: микро-проба воркера в полёте (миллисекунды, без GPU-инициализации).'
+    return 'WebGPU scope is being determined: the worker micro-probe is in flight (milliseconds, no GPU initialization).'
   }
   if (a.main === null) {
-    return `WebGPU-скоуп неизвестен: факт главного потока не сообщён (снапшот взят вне main; факт текущего потока: navigator.gpu ${a.here ? 'есть' : 'нет'}).`
+    return `WebGPU scope unknown: the main-thread fact was not reported (the snapshot was taken outside main; the current thread's fact: navigator.gpu ${a.here ? 'present' : 'absent'}).`
   }
-  return `WebGPU-скоуп выяснен частично: main=${a.main ? 'yes' : 'no'}, воркер неизвестен — вызовите probeWebgpuScope().`
+  return `WebGPU scope determined partially: main=${a.main ? 'yes' : 'no'}, worker unknown — call probeWebgpuScope().`
 }
 
-/** Сброс кэша фактов. ТОЛЬКО для тестов: продакшн-код окружение не «передумывает». */
+/** Resets the fact cache. ONLY for tests: production code does not "change its mind" about the environment. */
 export function _resetWebgpuScopeForTests(): void {
   facts.main = null
   facts.worker = null

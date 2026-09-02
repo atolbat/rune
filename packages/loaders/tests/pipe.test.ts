@@ -20,18 +20,18 @@ async function* threeChunks(): AsyncGenerator<Uint8Array> {
   yield enc('fgh')
 }
 
-test('readAllBytes — конкатенация чанков', async () => {
+test('readAllBytes — concatenation of chunks', async () => {
   const bytes = await readAllBytes(threeChunks())
   expect(dec(bytes)).toBe('abcdefgh')
 })
 
-test('readAllBytes — прогресс по чанкам', async () => {
+test('readAllBytes — progress by chunks', async () => {
   const seen: number[] = []
   await readAllBytes(threeChunks(), { onChunk: received => seen.push(received) })
   expect(seen).toEqual([3, 5, 8])
 })
 
-test('composeTransforms — последовательное применение', async () => {
+test('composeTransforms — sequential application', async () => {
   function plusOne(chunks: AsyncIterable<Uint8Array>): AsyncIterable<Uint8Array> {
     return (async function* () {
       for await (const c of chunks) yield new Uint8Array(Array.from(c, b => b + 1))
@@ -43,41 +43,41 @@ test('composeTransforms — последовательное применени�
   )
   expect(composed).not.toBeNull()
   const out = await readAllBytes(composed!(threeChunks()))
-  expect(dec(out)).toBe('cdefghij') // каждый байт +2
+  expect(dec(out)).toBe('cdefghij') // every byte +2
 })
 
-test('chunkerTransform — нарезка фиксированными кусками', async () => {
+test('chunkerTransform — slicing into fixed pieces', async () => {
   const src = bytesToAsyncIterable(enc('abcdefghij'), 7) // [7, 3]
   const out: number[] = []
   for await (const chunk of chunkerTransform(3)(src)) out.push(chunk.length)
   expect(out).toEqual([3, 3, 3, 1])
 })
 
-test('chunkerTransform — остаток выдаётся целиком', async () => {
+test('chunkerTransform — the remainder is emitted whole', async () => {
   const src = bytesToAsyncIterable(enc('abcde'), 5)
   const collected: Uint8Array[] = []
   for await (const chunk of chunkerTransform(4)(src)) collected.push(chunk)
   expect(collected.map(c => dec(c))).toEqual(['abcd', 'e'])
 })
 
-test('gunzipTransform — распаковка gzip-чанков', async () => {
+test('gunzipTransform — decompression of gzip chunks', async () => {
   const data = enc('hello loaders, hello loaders, hello loaders')
   const gzipped = gzipSync(data)
-  // кормим сжатые байты кусками по 8
+  // feed compressed bytes in pieces of 8
   const src = bytesToAsyncIterable(new Uint8Array(gzipped), 8)
   const out = await readAllBytes(gunzipTransform()(src))
   expect(dec(out)).toBe(dec(data))
 })
 
 test('defaultInflate — zlib-wrap (deflateSync)', async () => {
-  if (defaultInflate === null) return // платформа без DecompressionStream — пропускаем
+  if (defaultInflate === null) return // a platform without DecompressionStream — skipping
   const data = enc('fbx zlib array payload')
   const deflated = deflateSync(data)
   const out = await defaultInflate(new Uint8Array(deflated))
   expect(dec(out)).toBe('fbx zlib array payload')
 })
 
-test('streamToAsyncIterable — reader-цикл', async () => {
+test('streamToAsyncIterable — reader loop', async () => {
   const stream = new ReadableStream<Uint8Array>({
     start(c) {
       c.enqueue(enc('aa'))
@@ -89,6 +89,6 @@ test('streamToAsyncIterable — reader-цикл', async () => {
   expect(dec(out)).toBe('aabb')
 })
 
-test('concatBytes — простая конкатенация', () => {
+test('concatBytes — simple concatenation', () => {
   expect(dec(concatBytes(enc('ab'), enc('cd')))).toBe('abcd')
 })

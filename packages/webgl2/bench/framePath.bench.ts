@@ -13,10 +13,10 @@ import {
 import type { SignalCell, TapeWriter, LiveCommand, SegmentStore } from '@rune/core'
 
 /**
- * Теория H: путь кадра рендерера — per-frame record против live-сегментов.
- * Оба пути через весь конвейер: запись ленты → zero-copy writerView →
- * executor → GL. Гипотеза: live с 2% грязных команд радикально дешевле
- * полного перезаписывания даже с учётом replay-сегментов.
+ * Theory H: renderer frame path — per-frame record versus live segments.
+ * Both paths go through the full pipeline: tape write → zero-copy writerView →
+ * executor → GL. Hypothesis: live with 2% dirty commands is radically cheaper
+ * than a full rewrite even accounting for replay segments.
  */
 
 const VERT = `#version 300 es
@@ -49,7 +49,7 @@ function makeSpec(index: number): DrawSpec {
   }
 }
 
-/** Путь A: каждый кадр заново record() всех команд. */
+/** Path A: re-record() all commands every frame. */
 function makeRecordWorld(): { runFrame(): void } {
   const arena = createUniformArena(1 << 20)
   const ctx = createCompileContext(arena, 'codegen')
@@ -71,7 +71,7 @@ function makeRecordWorld(): { runFrame(): void } {
   }
 }
 
-/** Путь B: live-команды; чистые эмитятся кэш-сегментом, грязные перезаписываются. */
+/** Path B: live commands; clean ones are emitted from a cache segment, dirty ones are rewritten. */
 function makeLiveWorld(): { runFrame(): void } {
   const arena = createUniformArena(1 << 20)
   const ctx = createCompileContext(arena, 'codegen')
@@ -128,7 +128,7 @@ for (let i = 0; i < 30; i++) { recordWorld.runFrame(); liveWorld.runFrame() }
 const recordMs = bestOf(15, () => recordWorld.runFrame())
 const liveMs = bestOf(15, () => liveWorld.runFrame())
 
-console.log('── Теория H: путь кадра рендерера (1000 команд, 20 грязных, полный конвейер) ──')
-console.log(`per-frame record : ${recordMs.toFixed(3)} мс/кадр`)
-console.log(`live-сегменты    : ${liveMs.toFixed(3)} мс/кадр`)
-console.log(`live быстрее в ${(recordMs / liveMs).toFixed(1)} раза`)
+console.log('── Theory H: renderer frame path (1000 commands, 20 dirty, full pipeline) ──')
+console.log(`per-frame record : ${recordMs.toFixed(3)} ms/frame`)
+console.log(`live segments    : ${liveMs.toFixed(3)} ms/frame`)
+console.log(`live is ${(recordMs / liveMs).toFixed(1)}x faster`)

@@ -4,10 +4,10 @@ import type { CompiledCommand, GLCompileContext } from '@rune/webgl2'
 import type { TapeWriter, UniformArena } from '@rune/core'
 import { createUniformArena, serializeTape } from '@rune/core'
 
-/** Режим доставки кадров: вся использованная арена или только грязное. */
+/** Frame delivery mode: the whole used arena or only the dirty part. */
 export type ShipMode = 'full' | 'dirty'
 
-/** Кадр, готовый к передаче между мирами (оба буфера transferable). */
+/** A frame ready for transfer between worlds (both buffers transferable). */
 export interface RemoteFrame {
   readonly tape: ArrayBuffer
   readonly arena: ArrayBuffer
@@ -15,17 +15,17 @@ export interface RemoteFrame {
   readonly mode: ShipMode
 }
 
-/** Stub-рендерер: тот же компилятор и слоты, никакого GPU. */
+/** Stub renderer: the same compiler and slots, no GPU at all. */
 export interface TapeStub {
   readonly arena: UniformArena
   readonly ctx: GLCompileContext
-  /** Компилирует спек — layout слотов идентичен главному миру. */
+  /** Compiles a spec — the slot layout is identical to the main world. */
   command(spec: DrawSpec): CompiledCommand
-  /** Снимает кадр: лента + байты арены (режим выбирает теория G). */
+  /** Captures a frame: the tape + arena bytes (the mode is chosen by theory G). */
   ship(writer: TapeWriter, mode?: ShipMode): RemoteFrame
 }
 
-/** Создаёт stub для записи лент в воркере (DOM-free, GPU-free). */
+/** Creates a stub for recording tapes in a worker (DOM-free, GPU-free). */
 export function createStub(arenaBytes: number = 1 << 18): TapeStub {
   const arena = createUniformArena(arenaBytes)
   const ctx = createCompileContext(arena, 'codegen')
@@ -42,7 +42,7 @@ function shipFrame(arena: UniformArena, writer: TapeWriter, mode: ShipMode): Rem
   const payload = mode === 'full'
     ? copyRange(arena.bytes, 0, arena.usedBytes)
     : copyDirtyRanges(arena)
-  arena.clearDirty() // доставка = потребление: кадр уехал, слоты чисты
+  arena.clearDirty() // delivery = consumption: the frame is gone, the slots are clean
   return { tape, arena: payload.buffer, arenaFrom: payload.from, mode }
 }
 

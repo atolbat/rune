@@ -1,19 +1,22 @@
 /**
- * terrainQuadtree.ts — примитив terrain «до горизонта» на кваддреве (Task 115).
+ * terrainQuadtree.ts — a "to the horizon" terrain primitive on a quadtree
+ * (Task 115).
  *
- * СИСТЕМА, ВАЛИДИРОВАННАЯ ОКЕАНОМ (Task 113): мировая фикс-сетка корней
- * (вершины не плывут при движении камеры), дробление по 3D-дистанции с
- * жёстким лимитом глубины, юбки против T-трещин, инстансированный патч
- * (одна draw-команда), ноль аллокаций на кадр. Здесь она обёрнута в
- * примитив рельефа: CPU-функция высоты (камера/коллизии) + пресеты.
+ * A system VALIDATED BY THE OCEAN (Task 113): a world fixed grid of roots
+ * (vertices do not drift as the camera moves), subdivision by 3D distance
+ * with a hard depth limit, skirts against T-cracks, an instanced patch
+ * (one draw command), zero allocations per frame. Here it is wrapped into
+ * a relief primitive: a CPU height function (camera/collisions) + presets.
  *
- * GPU-дисплейс: патч (x, z, skirt) инстансится листами; вершины сэмплируют
- * карту высот в шейдере по МИРОВОЙ позиции (как океан — карту БПФ). Юбка
- * повторяет (x,z) кромки ⇒ побитово та же высота ⇒ шов невидим.
+ * GPU displacement: the patch (x, z, skirt) is instanced by leaves; the
+ * vertices sample the height map in the shader by WORLD position (like
+ * the ocean — the FFT map). The skirt repeats the edge's (x,z) ⇒ a
+ * bit-identical height ⇒ the seam is invisible.
  *
- * КОНТРАСТ с adaptive.ts: та — CPU-пересборка буферов вокруг камеры
- * (кольца LOD, ~десятки тысяч вершин, rebuild при движении); эта —
- * статичный патч + инстансы (пересборки НЕТ, меняется только набор листьев).
+ * CONTRAST with adaptive.ts: that one — a CPU rebuild of buffers around
+ * the camera (LOD rings, ~tens of thousands of vertices, a rebuild on
+ * movement); this one — a static patch + instances (NO rebuild, only the
+ * set of leaves changes).
  */
 
 import { fbm2D, ridged2D } from './noise.ts'
@@ -33,43 +36,44 @@ import {
 import type { LodParams, QuadtreePatch, QuadtreeLeavesSelection } from './quadtree.ts'
 
 export interface TerrainQuadtreeParams {
-  /** Рельеф в МИРОВЫХ координатах (непрерывен на всей плоскости).
-   *  Не обязателен, если дисплейс целиком на GPU (карта высот в шейдере):
-   *  тогда heightAt() вернёт NaN — используйте только select(). */
+  /** Relief in WORLD coordinates (continuous over the whole plane).
+   *  Not required when displacement is entirely on the GPU (a height map
+   *  in the shader): then heightAt() returns NaN — use only select(). */
   readonly heightFn?: WorldHeightFn
-  /** Амплитуда высоты (для юбок и пресетов; default 30). */
+  /** Height amplitude (for skirts and presets; default 30). */
   readonly amplitude?: number
-  /** Корневой тайл фикс-сетки мира, м — степень двойки (default 4096). */
+  /** Root tile of the world fixed grid, m — a power of two (default 4096). */
   readonly rootSize?: number
-  /** Радиус покрытия от камеры, м (default 10000 — «до горизонта»). */
+  /** Coverage radius from the camera, m (default 10000 — "to the horizon"). */
   readonly horizon?: number
-  /** LOD-агрессивность 1..3 (default 2 — «агрессивно изначально»:
-   *  больше ⇒ крупнее листья ⇒ меньше треугольников). */
+  /** LOD aggressiveness 1..3 (default 2 — "aggressive by default":
+   *  larger ⇒ bigger leaves ⇒ fewer triangles). */
   readonly aggressiveness?: number
-  /** Потолок листьев — ёмкость инстанс-буфера (default 2048). */
+  /** Leaf cap — the instance buffer capacity (default 2048). */
   readonly maxInstances?: number
-  /** Ячеек патча в стороне (default 32; вершин (N+3)² с юбкой). */
+  /** Patch cells per side (default 32; (N+3)² vertices with a skirt). */
   readonly segments?: number
-  /** Глубина юбки: число или функция от размера листа, м.
-   *  Default — формула океана: clamp(12·period/leaf, 8, 300), где period =
-   *  период карты высот (для бесшовного CPU-рельефа передайте amplitude·2). */
+  /** Skirt depth: a number or a function of the leaf size, m.
+   *  Default — the ocean formula: clamp(12·period/leaf, 8, 300), where
+   *  period = the height map period (for a seamless CPU relief pass
+   *  amplitude·2). */
   readonly skirtDepth?: number | ((leafSize: number) => number)
 }
 
 export interface TerrainQuadtree {
-  /** Листья на кадр (СИНГЛТОН — ноль аллокаций; instanceData стриде 4:
-   *  originX, originZ, size, —). */
+  /** Leaves per frame (a SINGLETON — zero allocations; instanceData
+   *  stride 4: originX, originZ, size, —). */
   select(camX: number, camY: number, camZ: number, forwardX?: number, forwardZ?: number): QuadtreeLeavesSelection
-  /** Листья по view-матрице (колоночно-мажорной) — forward извлекается сам. */
+  /** Leaves by view matrix (column-major) — forward is extracted automatically. */
   selectView(camX: number, camY: number, camZ: number, view: Float32Array): QuadtreeLeavesSelection
-  /** CPU-высота рельефа (камера/коллизии); NaN если heightFn не задан. */
+  /** CPU relief height (camera/collisions); NaN if heightFn is not set. */
   heightAt(x: number, z: number): number
-  /** Глубина юбки для листа, м. */
+  /** Skirt depth for a leaf, m. */
   skirtDepthFor(leafSize: number): number
-  /** Статичный патч-грид с юбкой (загрузить в вершинный буфер ОДИН раз). */
+  /** A static patch grid with a skirt (upload to the vertex buffer ONCE). */
   readonly patch: QuadtreePatch
   readonly lod: LodParams
-  /** Треугольников на лист (патч с юбкой). */
+  /** Triangles per leaf (the patch with a skirt). */
   readonly trianglesPerLeaf: number
   readonly rootSize: number
   readonly horizon: number
@@ -78,7 +82,7 @@ export interface TerrainQuadtree {
 export function createTerrainQuadtree(params: TerrainQuadtreeParams = {}): TerrainQuadtree {
   const rootSize = params.rootSize ?? ROOT_SIZE
   if (!Number.isFinite(rootSize) || rootSize <= 0) {
-    throw new Error(`terrainQuadtree: rootSize должен быть > 0, получено ${rootSize}`)
+    throw new Error(`terrainQuadtree: rootSize must be > 0, got ${rootSize}`)
   }
   const amplitude = params.amplitude ?? 30
   const heightFn = params.heightFn
@@ -119,7 +123,7 @@ export function createTerrainQuadtree(params: TerrainQuadtreeParams = {}): Terra
   }
 }
 
-// ─── Пресеты рельефа (мировые координаты, непрерывные) ────────────────────────
+// ─── Relief presets (world coordinates, continuous) ─────────────────────
 
 export interface TerrainQuadtreePreset {
   readonly id: string
@@ -129,30 +133,30 @@ export interface TerrainQuadtreePreset {
   readonly amplitude: number
 }
 
-/** Холмы: мягкий fBm. */
+/** Hills: soft fBm. */
 export function terrainHills(seed = 7): WorldHeightFn {
   return (x, z) => fbm2D(x / 900, z / 900, seed, 5) * 34
 }
 
-/** Хребты: остроконечный ridged fBm. */
+/** Ridges: sharp-peaked ridged fBm. */
 export function terrainRidges(seed = 11): WorldHeightFn {
   return (x, z) => ridged2D(x / 1100, z / 1100, seed, 5) * 90
 }
 
-/** Дюны: анизотропные |sin|-гряды + лёгкий шум. */
+/** Dunes: anisotropic |sin| ridges + light noise. */
 export function terrainDunes(seed = 5): WorldHeightFn {
   return (x, z) => (Math.abs(Math.sin(x / 260 + fbm2D(x / 2000, z / 2000, seed, 2) * 2)) * 14 + fbm2D(x / 700, z / 700, seed + 1, 3) * 5)
 }
 
-/** Каньон: террасы с обрывами. */
+/** Canyon: terraces with cliffs. */
 export function terrainCanyon(seed = 9): WorldHeightFn {
   const terrace = (v: number): number => Math.round(v * 6) / 6
   return (x, z) => terrace(fbm2D(x / 1500, z / 1500, seed, 4)) * 120 + fbm2D(x / 300, z / 300, seed + 2, 3) * 6
 }
 
 export const terrainQuadtreePresets: readonly TerrainQuadtreePreset[] = [
-  { id: 'hills', label: 'Холмы', note: 'fBm 5 октав, амплитуда 34 м', heightFn: terrainHills(), amplitude: 34 },
-  { id: 'ridges', label: 'Хребты', note: 'ridged fBm, амплитуда 90 м', heightFn: terrainRidges(), amplitude: 90 },
-  { id: 'dunes', label: 'Дюны', note: 'анизотропные гряды, амплитуда 19 м', heightFn: terrainDunes(), amplitude: 19 },
-  { id: 'canyon', label: 'Каньон', note: 'террасы с обрывами', heightFn: terrainCanyon(), amplitude: 126 },
+  { id: 'hills', label: 'Hills', note: 'fBm 5 octaves, amplitude 34 m', heightFn: terrainHills(), amplitude: 34 },
+  { id: 'ridges', label: 'Ridges', note: 'ridged fBm, amplitude 90 m', heightFn: terrainRidges(), amplitude: 90 },
+  { id: 'dunes', label: 'Dunes', note: 'anisotropic ridges, amplitude 19 m', heightFn: terrainDunes(), amplitude: 19 },
+  { id: 'canyon', label: 'Canyon', note: 'terraces with cliffs', heightFn: terrainCanyon(), amplitude: 126 },
 ]

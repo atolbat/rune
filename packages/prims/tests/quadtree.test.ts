@@ -4,10 +4,10 @@ import {
   selectQuadtreeTiles,
 } from '../src/quadtree.ts'
 
-// ─── Выборка: инварианты покрытия ───────────────────────────────────────────
+// ─── Selection: coverage invariants ─────────────────────────────────────────
 
 describe('selectQuadtreeTiles', () => {
-  test('уровень 1 = только корень', () => {
+  test('level 1 = only the root', () => {
     const sel = selectQuadtreeTiles({ centerX: 0, centerZ: 0, rootSize: 100, levels: 1 })
     expect(sel.count).toBe(1)
     expect(sel.instances[0]).toBe(0) // cx
@@ -18,8 +18,8 @@ describe('selectQuadtreeTiles', () => {
     expect(sel.maxLevel).toBe(0)
   })
 
-  test('полное покрытие без перекрытий: сумма площадей == площади корня', () => {
-    // Центр ВНЕ центра корня — худший случай для перекрытий/дыр.
+  test('full coverage without overlaps: the sum of areas == the root area', () => {
+    // The center is OUTSIDE the root's center — the worst case for overlaps/holes.
     for (const [cx, cz] of [[0, 0], [37.3, -11.9], [500, 500]] as const) {
       const sel = selectQuadtreeTiles({
         centerX: cx,
@@ -37,7 +37,7 @@ describe('selectQuadtreeTiles', () => {
     }
   })
 
-  test('размеры тайлов — только степени двойки от rootSize', () => {
+  test('tile sizes — only powers of two of rootSize', () => {
     const sel = selectQuadtreeTiles({
       centerX: 12, centerZ: -5, rootSize: 512, levels: 8, splitFactor: 0.25,
     })
@@ -52,11 +52,11 @@ describe('selectQuadtreeTiles', () => {
     }
   })
 
-  test('близко к центру — мелкие тайлы, далеко — крупные (LOD)', () => {
+  test('near the center — small tiles, far — large (LOD)', () => {
     const sel = selectQuadtreeTiles({
       centerX: 0, centerZ: 0, rootSize: 2048, levels: 8, splitFactor: 0.2,
     })
-    expect(sel.maxLevel).toBe(7) // под камерой — максимальный уровень
+    expect(sel.maxLevel).toBe(7) // under the camera — the maximum level
     let nearSize = Infinity
     let farSize = 0
     for (let i = 0; i < sel.count; i++) {
@@ -64,40 +64,40 @@ describe('selectQuadtreeTiles', () => {
       if (d < 100) nearSize = Math.min(nearSize, sel.instances[i * 4 + 2])
       if (d > 800) farSize = Math.max(farSize, sel.instances[i * 4 + 2])
     }
-    expect(nearSize).toBe(2048 / 128) // 16 — самый мелкий
+    expect(nearSize).toBe(2048 / 128) // 16 — the smallest
     expect(farSize).toBeGreaterThan(nearSize * 4)
   })
 
-  test('число тайлов ограничено: плотный фактор не взрывает счёт', () => {
+  test('the tile count is bounded: a dense factor does not blow up the count', () => {
     const sel = selectQuadtreeTiles({
       centerX: 0, centerZ: 0, rootSize: 16384, levels: 10,
       splitFactor: 0.17, maxTiles: 512,
     })
     expect(sel.count).toBeLessThanOrEqual(512)
     expect(sel.count).toBeGreaterThan(16)
-    // БЕЗ кэпа плотный фактор даёт ~2К тайлов (замер Task 113 — тюнинг
-    // параметров демо): предохранитель обязателен для дешёвых устройств.
+    // WITHOUT the cap the dense factor yields ~2K tiles (a Task 113 measurement —
+    // demo parameter tuning): the fuse is mandatory for cheap devices.
     const uncapped = selectQuadtreeTiles({
       centerX: 0, centerZ: 0, rootSize: 16384, levels: 10, splitFactor: 0.17,
     })
     expect(uncapped.count).toBeGreaterThan(512)
   })
 
-  test('повторное использование out: без аллокаций на тёплом кадре', () => {
+  test('out reuse: no allocations on a warm frame', () => {
     const out = selectQuadtreeTiles({ centerX: 0, centerZ: 0, rootSize: 256, levels: 4 })
     const first = out.instances
     const again = selectQuadtreeTiles({
       centerX: 3, centerZ: 4, rootSize: 256, levels: 4, out,
     })
     expect(again).toBe(out)
-    expect(again.instances).toBe(first) // тот же буфер (рост не понадобился)
+    expect(again.instances).toBe(first) // the same buffer (no growth was needed)
     expect(again.count).toBeGreaterThan(0)
-    // Хвост за count не читается как мусор — count честный
+    // The tail past count is not read as garbage — count is honest
     expect(again.instances.length).toBeGreaterThanOrEqual(again.count * 4)
   })
 
-  test('фрустум-куллинг: корень целиком снаружи плоскости отсекается', () => {
-    // Внутри = полуплоскость x ≥ -100. Корень [-350..-250] целиком левее.
+  test('frustum culling: a root entirely outside a plane is cut away', () => {
+    // Inside = the half-space x ≥ -100. The root [-350..-250] is entirely to the left.
     const planes = new Float32Array([
       0, 0, 1, 16384,
       0, 0, -1, 16384,
@@ -112,7 +112,7 @@ describe('selectQuadtreeTiles', () => {
     })
     expect(sel.count).toBe(0)
 
-    // Тот же корень, но пересекающий границу — остаётся (консервативность).
+    // The same root, but straddling the boundary — stays (conservativeness).
     const straddling = selectQuadtreeTiles({
       centerX: -60, centerZ: 0, rootSize: 100, levels: 4, splitFactor: 0.5,
       frustum: planes,
@@ -120,8 +120,8 @@ describe('selectQuadtreeTiles', () => {
     expect(straddling.count).toBeGreaterThan(0)
   })
 
-  test('фрустум-куллинг: узкий коридор оставляет полосу тайлов', () => {
-    // Внутри = узкая полоса |x| ≤ 50 вокруг центра.
+  test('frustum culling: a narrow corridor leaves a strip of tiles', () => {
+    // Inside = a narrow strip |x| ≤ 50 around the center.
     const planes = new Float32Array([
       0, 0, 1, 16384,
       0, 0, -1, 16384,
@@ -135,8 +135,8 @@ describe('selectQuadtreeTiles', () => {
       frustum: planes,
     })
     expect(sel.count).toBeGreaterThan(0)
-    // Каждый оставшийся тайл либо внутри полосы, либо задевает её
-    // (консервативность: не должно быть тайлов ЦЕЛИКОМО снаружи).
+    // Every remaining tile is either inside the strip or touches it
+    // (conservativeness: there must be no tiles entirely outside).
     for (let i = 0; i < sel.count; i++) {
       const cx = sel.instances[i * 4]
       const size = sel.instances[i * 4 + 2]
@@ -145,9 +145,9 @@ describe('selectQuadtreeTiles', () => {
     }
   })
 
-  test('снап центра не ломает инварианты (стабильность тесселяции)', () => {
-    // Снап к 2·(rootSize/2^levels): выборка на снапнутой сетке меняется
-    // только при пересечении границы — проверяем что покрытие остаётся полным.
+  test('center snapping does not break the invariants (tessellation stability)', () => {
+    // Snap to 2·(rootSize/2^levels): the selection on the snapped grid changes
+    // only when crossing a boundary — we check that the coverage stays full.
     for (let s = 0; s < 8; s++) {
       const snap = (2 * 1024) / 128
       const cx = s * snap - 3.5 * snap
@@ -164,7 +164,7 @@ describe('selectQuadtreeTiles', () => {
     }
   })
 
-  test('ошибки валидации аргументов', () => {
+  test('argument validation errors', () => {
     expect(() =>
       selectQuadtreeTiles({ centerX: 0, centerZ: 0, rootSize: -1, levels: 4 }),
     ).toThrow()
@@ -183,35 +183,35 @@ describe('selectQuadtreeTiles', () => {
   })
 })
 
-// ─── Тайл-меш ───────────────────────────────────────────────────────────────
+// ─── Tile mesh ─────────────────────────────────────────────────────────────
 
 describe('quadtreeTileMesh', () => {
-  test('сетка 4×4: размеры и счётчики', () => {
+  test('a 4×4 grid: sizes and counters', () => {
     const mesh = quadtreeTileMesh({ segments: 4, skirt: false })
     expect(mesh.vertexCount).toBe(25)
     expect(mesh.skirtVertexCount).toBe(0)
     expect(mesh.indices.length).toBe(4 * 4 * 6)
-    // edge-сетка 4×4: 5·4·2 (гор+верт) + 16 (диагонали) = 56 рёбер
+    // edge grid 4×4: 5·4·2 (horiz+vert) + 16 (diagonals) = 56 edges
     expect(mesh.edgeIndices.length).toBe(56 * 2)
     expect(mesh.positions.length).toBe(25 * 3)
     expect(mesh.uvs.length).toBe(25 * 2)
   })
 
-  test('юбка: +4·(segments+1) вершин и стенки по периметру', () => {
+  test('skirt: +4·(segments+1) vertices and walls along the perimeter', () => {
     const segments = 8
     const mesh = quadtreeTileMesh({ segments, skirt: true })
     expect(mesh.vertexCount).toBe(9 * 9 + 4 * 9)
     expect(mesh.skirtVertexCount).toBe(4 * 9)
-    // треугольники: сетка + 4 стенки × segments квадов × 2
+    // triangles: grid + 4 walls × segments quads × 2
     expect(mesh.indices.length).toBe((8 * 8 * 2 + 8 * 8) * 3)
-    // юбка-вершины: те же UV, флаг 1
+    // skirt vertices: the same UVs, flag 1
     let skirtVerts = 0
     for (let i = 0; i < mesh.vertexCount; i++) {
       const skirt = mesh.positions[i * 3 + 2]
       expect(skirt === 0 || skirt === 1).toBe(true)
       if (skirt === 1) {
         skirtVerts++
-        // юбка-вершина лежит на кромке [0..1]
+        // a skirt vertex lies on the rim [0..1]
         const u = mesh.positions[i * 3]
         const v = mesh.positions[i * 3 + 1]
         const onEdge = u === 0 || u === 1 || v === 0 || v === 1
@@ -219,39 +219,39 @@ describe('quadtreeTileMesh', () => {
       }
     }
     expect(skirtVerts).toBe(4 * 9)
-    // все индексы в диапазоне
+    // all indices in range
     for (const idx of mesh.indices) expect(idx).toBeLessThan(mesh.vertexCount)
   })
 
-  test('дефолт: 32 сегмента, юбка включена', () => {
+  test('default: 32 segments, skirt enabled', () => {
     const mesh = quadtreeTileMesh()
     expect(mesh.segments).toBe(32)
     expect(mesh.skirtVertexCount).toBe(4 * 33)
     expect(mesh.vertexCount).toBe(33 * 33 + 4 * 33)
-    // производительность: ~1.1К вершин, ~2.6К треугольников — копейки
+    // performance: ~1.1K vertices, ~2.6K triangles — peanuts
     expect(mesh.indices.length).toBe((32 * 32 * 2 + 32 * 8) * 3)
   })
 
-  test('edge-индексы не включают юбку (LOD-структура читается чисто)', () => {
+  test('edge indices do not include the skirt (the LOD structure reads cleanly)', () => {
     const mesh = quadtreeTileMesh({ segments: 4 })
     const gridCount = 25
     for (const idx of mesh.edgeIndices) expect(idx).toBeLessThan(gridCount)
   })
 
-  test('треугольники сетки CCW при взгляде сверху (+Y)', () => {
+  test('grid triangles are CCW when viewed from above (+Y)', () => {
     const mesh = quadtreeTileMesh({ segments: 2, skirt: false })
-    // (topLeft, bottomLeft, bottomRight): нормаль по правилу правой руки
-    // смотрит ВВЕРХ (+Y) — та же ориентация, что prims/grid и david.li/waves.
+    // (topLeft, bottomLeft, bottomRight): the right-hand-rule normal
+    // points UP (+Y) — the same orientation as prims/grid and david.li/waves.
     const [a, b, c] = [mesh.indices[0], mesh.indices[1], mesh.indices[2]]
     const ax = mesh.positions[a * 3], az = mesh.positions[a * 3 + 1]
     const bx = mesh.positions[b * 3], bz = mesh.positions[b * 3 + 1]
     const cx2 = mesh.positions[c * 3], cz2 = mesh.positions[c * 3 + 1]
-    // y-компонента 3D-креста (b−a)×(c−a) для векторов в плоскости y=0.
+    // the y component of the 3D cross (b−a)×(c−a) for vectors in the y=0 plane.
     const uy = (bz - az) * (cx2 - ax) - (bx - ax) * (cz2 - az)
     expect(uy).toBeGreaterThan(0)
   })
 
-  test('ошибки валидации', () => {
+  test('validation errors', () => {
     expect(() => quadtreeTileMesh({ segments: 0 })).toThrow()
     expect(() => quadtreeTileMesh({ segments: 1.5 })).toThrow()
     expect(() => quadtreeTileMesh({ segments: 1000 })).toThrow()

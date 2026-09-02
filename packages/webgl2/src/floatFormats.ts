@@ -1,54 +1,54 @@
 /**
- * Task 81: функциональная проба float-форматов текстур WebGL2.
+ * Task 81: a functional probe of WebGL2 float texture formats.
  *
- * Уроки, зашитые в дизайн (все — из реальных репортов):
+ * Lessons baked into the design (all — from real reports):
  *
- *  1. РАСШИРЕНИЕ ≠ РАБОТОСПОСОБНОСТЬ. OES_texture_float — WebGL1-артефакт:
- *     в WebGL2-контексте он НЕ экспонируется (хранение float — core), поэтому
- *     проверять «feature по расширению» нельзя вовсе. И наоборот: SwiftShader
- *     (headless) МОЛЧА принимает texStorage2D/texImage2D с RGBA32F (err=0!),
- *     но сэмплинг возвращает чёрное — единственная честная проверка это
- *     НАРИСОВАТЬ и ПРОЧИТАТЬ пиксели.
+ *  1. EXTENSION ≠ CAPABILITY. OES_texture_float is a WebGL1 artifact:
+ *     in a WebGL2 context it is NOT exposed (float storage is core), so
+ *     checking "a feature by its extension" is not possible at all. And vice versa: SwiftShader
+ *     (headless) SILENTLY accepts texStorage2D/texImage2D with RGBA32F (err=0!),
+ *     but sampling returns black — the only honest check is to
+ *     DRAW and READ pixels.
  *
- *  2. ОДИН ПУТЬ ≠ ВТОРОЙ. Драйвер может уметь mutable-аллокацию
- *     (texImage2D-null) и не уметь immutable (texStorage2D) — и наоборот.
- *     Движок использует ОБА (mipLevels>1 → texStorage2D; mipLevels=1 →
- *     texImage2D), поэтому проба проходит оба пути ОТДЕЛЬНО, и фасад
- *     выбирает рабочий (degrade внутри одного формата, §9.2 P1).
+ *  2. ONE PATH ≠ THE OTHER. A driver may support mutable allocation
+ *     (texImage2D-null) and not immutable (texStorage2D) — and vice versa.
+ *     The engine uses BOTH (mipLevels>1 → texStorage2D; mipLevels=1 →
+ *     texImage2D), so the probe walks both paths SEPARATELY, and the facade
+ *     picks the working one (degrade within a single format, §9.2 P1).
  *
- *  3. КАЛИБРОВКА. Проба сама может сломаться (шейдер не скомпилировался,
- *     FBO неполный, readPixels запрещён). RGBA8-контроль: если «базовый»
- *     формат через нашу же машинерию не читается — вердиктам верить нельзя
- *     → fail-open (деградации не делаем, поведение как до пробы).
+ *  3. CALIBRATION. The probe itself may break (shader failed to compile,
+ *     incomplete FBO, readPixels forbidden). RGBA8 control: if the "basic"
+ *     format cannot be read through our own machinery — the verdicts cannot be trusted
+ *     → fail-open (no degradation, the behavior as before the probe).
  *
- *  4. ЧИСТОТА СОСТОЯНИЯ. Проба работает на живом контексте ДО первого
- *     кадра: сохраняет/восстанавливает viewport/program/VAO/FBO/текстуры,
- *     дреинит очередь ошибок ДО и ПОСЛЕ, удаляет все скретч-объекты.
- *     Синхронная (OffscreenCanvas — воркер-безопасный источник), без
- *     requestAdapter/канвасов/GPU-инициализации.
+ *  4. STATE PURITY. The probe runs on a live context BEFORE the first
+ *     frame: saves/restores viewport/program/VAO/FBO/textures,
+ *     drains the error queue BEFORE and AFTER, deletes all scratch objects.
+ *     Synchronous (OffscreenCanvas — a worker-safe source), no
+ *     requestAdapter/canvases/GPU initialization.
  */
 
-/** Вердикт по одному float-формату: какие пути аллокации живы. */
+/** Verdict for a single float format: which allocation paths are alive. */
 export interface FloatFormatPaths {
-  /** immutable-путь: texStorage2D + source-загрузка + НЕ-чёрный сэмплинг. */
+  /** immutable path: texStorage2D + source upload + NON-black sampling. */
   readonly immutable: boolean
-  /** mutable-путь: texImage2D(null) + source-загрузка + НЕ-чёрный сэмплинг. */
+  /** mutable path: texImage2D(null) + source upload + NON-black sampling. */
   readonly mutable: boolean
 }
 
-/** Полный вердикт пробы float-форматов контекста. */
+/** The full verdict of the context's float-format probe. */
 export interface FloatFormatsProbe {
   readonly rgba16f: FloatFormatPaths
   readonly rgba32f: FloatFormatPaths
   /**
-   * Калибровка: RGBA8-контроль через ту же машинерию прочитался НЕ-чёрным.
-   * false → пробе верить нельзя (среда сломана) — фасад НЕ деградирует
-   * пути, а caps НЕ отключает фичи (fail-open, как до Task 81).
+   * Calibration: the RGBA8 control read NON-black through the same machinery.
+   * false → the probe cannot be trusted (the environment is broken) — the facade does NOT degrade
+   * paths, and caps does NOT disable features (fail-open, as before Task 81).
    */
   readonly calibrated: boolean
 }
 
-/** Fail-open вердикт: «всё работает» (проба не смогла выполниться). */
+/** Fail-open verdict: "everything works" (the probe could not run). */
 export function floatFormatsAllSupported(): FloatFormatsProbe {
   return {
     rgba16f: { immutable: true, mutable: true },
@@ -57,12 +57,12 @@ export function floatFormatsAllSupported(): FloatFormatsProbe {
   }
 }
 
-/** Формат жив хотя бы на одном пути? (для caps-фич). */
+/** Is the format alive on at least one path? (for caps features). */
 export function floatFormatUsable(paths: FloatFormatPaths): boolean {
   return paths.immutable || paths.mutable
 }
 
-// ─── Спек-фиксированные GLenum (доступны и в урезанных mock-GL) ──────────────
+// ─── Spec-fixed GLenums (also available in cut-down mock GLs) ──────────────
 const GL = {
   TEXTURE_2D: 0x0de1,
   RGBA: 0x1908,
@@ -100,9 +100,9 @@ precision highp float; in vec2 v_uv; out vec4 o;
 uniform sampler2D u_tex;
 void main(){ o = texture(u_tex, v_uv); }`
 
-/** Скретч-источник 8×8: левая половина красная, правая зелёная.
- *  OffscreenCanvas — синхронный и воркер-безопасный; в окружениях без него
- *  (нет ни OffscreenCanvas, ни document) проба честно откалибруется в false. */
+/** Scratch source 8×8: the left half red, the right half green.
+ *  OffscreenCanvas — synchronous and worker-safe; in environments without it
+ *  (neither OffscreenCanvas nor document) the probe honestly calibrates to false. */
 function makeProbeSource(): unknown | null {
   try {
     if (typeof OffscreenCanvas !== 'undefined') {
@@ -128,7 +128,7 @@ function makeProbeSource(): unknown | null {
   return null
 }
 
-/** Дреин очереди ошибок (с защитой от бесконечного цикла). */
+/** Drain the error queue (with protection against an infinite loop). */
 function drainErrors(gl: WebGL2RenderingContext): void {
   for (let i = 0; i < 32; i++) {
     if (gl.getError() === GL.NO_ERROR) return
@@ -143,10 +143,10 @@ interface ProbeMachinery {
   fs: WebGLShader
 }
 
-/** Сэмплинг-проверка: рисуем квад с текстурой в RGBA8-FBO 8×8, читаем центр
- *  каждой половины. Возвращает true, если ХОТЯ БЫ один пиксель не чёрный
- *  (канал > 32). Именно «нарисуй и прочитай» ловит класс SwiftShader-багов
- *  «аллокация OK, сэмплинг чёрный». */
+/** Sampling check: draw a quad with the texture into an 8×8 RGBA8-FBO, read the center
+ *  of each half. Returns true if AT LEAST one pixel is not black
+ *  (channel > 32). It is precisely "draw and read" that catches the class of SwiftShader bugs
+ *  "allocation OK, sampling black". */
 function sampleIsColored(
   gl: WebGL2RenderingContext,
   m: ProbeMachinery,
@@ -189,8 +189,8 @@ function sampleIsColored(
   return colored(0) || colored(4)
 }
 
-/** Один путь × один формат: аллокация → source-загрузка → сэмплинг.
- *  Каждый шаг — ТЕМ ЖЕ вызовом GL, каким его делает realGL:
+/** One path × one format: allocation → source upload → sampling.
+ *  Every step — with THE SAME GL call realGL makes:
  *   immutable → texStorage2D + texSubImage2D(0,0,0,fmt,type,src)
  *   mutable   → texImage2D(null) + texImage2D(0,ifmt,fmt,type,src) */
 function probePath(
@@ -225,15 +225,15 @@ function probePath(
   return ok
 }
 
-/** Кэш вердиктов per-context: проба выполняется ОДИН раз на контекст
- *  (createRealGL и makeGLProbe делят один результат). */
+/** Cache of verdicts per context: the probe runs ONCE per context
+ *  (createRealGL and makeGLProbe share one result). */
 const probeCache = new WeakMap<WebGL2RenderingContext, FloatFormatsProbe>()
 
 /**
- * Функциональная проба float-форматов. Синхронная, безопасна на самом старте
- * (до первого кадра). Любая авария самой пробы → fail-open вердикт
- * (всё «работает», calibrated=false) — окружениям без настоящей GL
- * (mock-тесты, headless-инъекции) не отказываем в float-форматах.
+ * Functional probe of float formats. Synchronous, safe at the very startup
+ * (before the first frame). Any failure of the probe itself → a fail-open verdict
+ * (everything "works", calibrated=false) — environments without a real GL
+ * (mock tests, headless injections) are not denied float formats.
  */
 export function probeFloatFormats(gl: WebGL2RenderingContext): FloatFormatsProbe {
   const cached = probeCache.get(gl)
@@ -243,7 +243,7 @@ export function probeFloatFormats(gl: WebGL2RenderingContext): FloatFormatsProbe
   return verdict
 }
 
-/** Список GL-методов, без которых проба невозможна → fail-open. */
+/** The list of GL methods without which the probe is impossible → fail-open. */
 const REQUIRED_GL_METHODS = [
   'getError', 'getParameter', 'createTexture', 'deleteTexture', 'bindTexture',
   'texStorage2D', 'texImage2D', 'texSubImage2D', 'texParameteri', 'createShader',
@@ -269,7 +269,7 @@ function probeFloatFormatsUncached(gl: WebGL2RenderingContext): FloatFormatsProb
     const source = makeProbeSource()
     if (source === null) return floatFormatsAllSupported()
 
-    // ── Сохраняем состояние контекста (проба идёт до первого кадра) ──
+    // ── Save the context state (the probe runs before the first frame) ──
     const prevViewport = gl.getParameter(gl.VIEWPORT) as Int32Array | null
     const prevProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null
     const prevVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING) as WebGLVertexArrayObject | null
@@ -290,10 +290,10 @@ function probeFloatFormatsUncached(gl: WebGL2RenderingContext): FloatFormatsProb
       drainErrors(gl)
     }
 
-    // Дреин ошибок ДО: чужие висячие ошибки не должны инкриминироваться пробе.
+    // Drain errors BEFORE: someone else's hanging errors must not be attributed to the probe.
     drainErrors(gl)
 
-    // ── Пробная машинерия: шейдер + квад ──
+    // ── Probe machinery: shader + quad ──
     const compile = (type: number, src: string): WebGLShader | null => {
       const sh = gl.createShader(type)
       if (sh === null) return null
@@ -330,7 +330,7 @@ function probeFloatFormatsUncached(gl: WebGL2RenderingContext): FloatFormatsProb
 
     const m: ProbeMachinery = { program, vao, vbo, vs, fs }
 
-    // ── Калибровка: RGBA8 через оба пути обязан сэмплиться цветом ──
+    // ── Calibration: RGBA8 via both paths must sample as color ──
     const controlOk = probePath(gl, m, source, GL.RGBA8, GL.UNSIGNED_BYTE, true)
       && probePath(gl, m, source, GL.RGBA8, GL.UNSIGNED_BYTE, false)
 
@@ -348,7 +348,7 @@ function probeFloatFormatsUncached(gl: WebGL2RenderingContext): FloatFormatsProb
         }
       : floatFormatsAllSupported()
 
-    // ── Чистим машинерию и восстанавливаем состояние ──
+    // ── Clean up the machinery and restore the state ──
     gl.deleteBuffer(vbo)
     gl.deleteVertexArray(vao)
     gl.deleteProgram(program)
@@ -357,8 +357,8 @@ function probeFloatFormatsUncached(gl: WebGL2RenderingContext): FloatFormatsProb
     restore()
     return result
   } catch {
-    // Авария самой пробы — окружению нельзя доверять, но и отказывать
-    // в форматах нельзя: fail-open (поведение как до Task 81).
+    // A failure of the probe itself — the environment cannot be trusted, but denying
+    // the formats is also wrong: fail-open (the behavior as before Task 81).
     return floatFormatsAllSupported()
   }
 }

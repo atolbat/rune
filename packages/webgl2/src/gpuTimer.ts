@@ -1,36 +1,36 @@
 /**
- * GpuTimer — WebGL2 реализация через EXT_disjoint_timer_query_webgl2.
+ * GpuTimer — a WebGL2 implementation via EXT_disjoint_timer_query_webgl2.
  *
- * Контракт (GpuTimer из @rune/core):
- *  - begin(): gl.beginQuery(TIME_ELAPSED_EXT, query). Помечает что query запущен.
- *  - end(): gl.endQuery(TIME_ELAPSED_EXT). Закрывает query.
+ * Contract (GpuTimer from @rune/core):
+ *  - begin(): gl.beginQuery(TIME_ELAPSED_EXT, query). Marks the query as started.
+ *  - end(): gl.endQuery(TIME_ELAPSED_EXT). Closes the query.
  *  - result(): gl.getQueryObject(query, QUERY_RESULT_EXT) — nanoseconds.
- *    null если: query ещё не готов (AVAILABLE=false), GPU disjoint (reset),
- *    или расширение недоступно.
+ *    null if: the query is not ready yet (AVAILABLE=false), the GPU is disjoint (reset),
+ *    or the extension is unavailable.
  *
- * Асинхронность: result() возвращает результат ПРЕДЫДУЩЕГО кадра. Типичный паттерн:
+ * Asynchrony: result() returns the result of the PREVIOUS frame. Typical pattern:
  *   frame N: begin() → ...draw... → end()
- *   frame N+1: result() // читает N-й кадр
+ *   frame N+1: result() // reads frame N
  *
- * Disjoint: GPU reset (driver crash, power state). Если disjoint=true —
- * результат невалиден, отбрасываем, пере-запускаем в следующем кадре.
+ * Disjoint: GPU reset (driver crash, power state). If disjoint=true —
+ * the result is invalid, we discard it and restart in the next frame.
  *
- * Ограничения:
- *  - Расширение НЕ доступно на iOS Safari (ограничение Apple). caps.has
- *    ('timestamp-query') → false → renderer не подключает timer.
- *  - В headless-тестах (mock GL) — расширения нет, createGLGpuTimer вернёт null.
+ * Limitations:
+ *  - The extension is NOT available on iOS Safari (an Apple restriction). caps.has
+ *    ('timestamp-query') → false → the renderer does not attach a timer.
+ *  - In headless tests (mock GL) there is no extension, createGLGpuTimer returns null.
  *
- * Безопасность: даже если расширение доступно, в некоторых окружениях
- * (Safari, Mali mobile drivers) расширение может вернуться из getExtension
- * но бросать на beginQuery. Поэтому обёрнуто в try/catch — на любую ошибку
- * timer деактивируется (setGpuTimer(null) вызывается рендерером).
+ * Safety: even if the extension is available, in some environments
+ * (Safari, Mali mobile drivers) the extension may be returned by getExtension
+ * but throw on beginQuery. Hence it is wrapped in try/catch — on any error
+ * the timer is deactivated (setGpuTimer(null) is called by the renderer).
  */
 
 import type { GpuTimer } from '@rune/core'
 
-// Тип расширения EXT_disjoint_timer_query_webgl2. Реальный объект WebGL
-// предоставляет методы: createQueryEXT, deleteQueryEXT, beginQueryEXT,
-// endQueryEXT, getQueryObjectEXT, isQueryEXT. Все с суффиксом EXT.
+// The type of the EXT_disjoint_timer_query_webgl2 extension. The real WebGL object
+// provides the methods: createQueryEXT, deleteQueryEXT, beginQueryEXT,
+// endQueryEXT, getQueryObjectEXT, isQueryEXT. All with the EXT suffix.
 interface ExtDisjointTimerQuery {
   QUERY_COUNTER_BITS_EXT: number
   TIME_ELAPSED_EXT: number
@@ -47,22 +47,22 @@ interface ExtDisjointTimerQuery {
 }
 
 /**
- * Создаёт WebGL2 GpuTimer если расширение EXT_disjoint_timer_query_webgl2
- * доступно. Иначе возвращает null — caps.has('timestamp-query') будет false,
- * renderer не подключает timer, gpuMs = null в stats.
+ * Creates a WebGL2 GpuTimer if the EXT_disjoint_timer_query_webgl2 extension
+ * is available. Otherwise returns null — caps.has('timestamp-query') will be false,
+ * the renderer does not attach a timer, gpuMs = null in stats.
  *
- * @param gl — реальный WebGL2RenderingContext (не mock; mock вернёт null).
+ * @param gl — a real WebGL2RenderingContext (not a mock; a mock returns null).
  */
 export function createGLGpuTimer(gl: WebGL2RenderingContext): GpuTimer | null {
   const extOrNull = gl.getExtension('EXT_disjoint_timer_query_webgl2') as ExtDisjointTimerQuery | null
   if (extOrNull === null) return null
-  // const с не-null типом: замыкания ниже (safeBegin/safeEnd/safeResult)
-  // сохраняют narrowing (иначе TS видит `ext` как | null внутри колбэков).
+  // const with a non-null type: the closures below (safeBegin/safeEnd/safeResult)
+  // keep the narrowing (otherwise TS sees `ext` as | null inside callbacks).
   const ext: ExtDisjointTimerQuery = extOrNull
-  // 2 query: один активный (текущий кадр), один завершённый (предыдущий кадр).
-  // Ping-pong нужен потому что getQueryObject блокирует до AVAILABLE=true —
-  // а это занимает минимум 1 кадр. С 2 query: в begin() создаём новый если
-  // предыдущий end()'нут; в result() читаем завершённый, swap.
+  // 2 queries: one active (the current frame), one completed (the previous frame).
+  // Ping-pong is needed because getQueryObject blocks until AVAILABLE=true —
+  // and that takes at least 1 frame. With 2 queries: in begin() we create a new one if
+  // the previous one was end()'ed; in result() we read the completed one and swap.
   let active: WebGLQuery | null = null
   let pending: WebGLQuery | null = null
   let lastResult: number | null = null
@@ -72,7 +72,7 @@ export function createGLGpuTimer(gl: WebGL2RenderingContext): GpuTimer | null {
     if (!alive) return
     try {
       if (active !== null) {
-        // Уже начат в этом кадре — ничего не делаем (повтор begin = GL error)
+        // Already started in this frame — do nothing (a repeated begin = a GL error)
         return
       }
       active = ext.createQueryEXT()
@@ -91,7 +91,7 @@ export function createGLGpuTimer(gl: WebGL2RenderingContext): GpuTimer | null {
     try {
       if (active === null) return
       ext.endQueryEXT(ext.TIME_ELAPSED_EXT)
-      // pending → освобождаем (если был); active → становится pending
+      // pending → free it (if any); active → becomes pending
       if (pending !== null) {
         ext.deleteQueryEXT(pending)
       }
@@ -105,10 +105,10 @@ export function createGLGpuTimer(gl: WebGL2RenderingContext): GpuTimer | null {
   function safeResult(): number | null {
     if (!alive || pending === null) return lastResult
     try {
-      // disjoint=true → GPU reset, результат невалиден
+      // disjoint=true → GPU reset, the result is invalid
       const disjoint = gl.getParameter(ext.GPU_DISJOINT_EXT) as number
       if (disjoint !== 0) {
-        // Сбрасываем — в следующем кадре начнётся заново
+        // Reset — it will start anew in the next frame
         ext.deleteQueryEXT(pending)
         pending = null
         lastResult = null
@@ -116,10 +116,10 @@ export function createGLGpuTimer(gl: WebGL2RenderingContext): GpuTimer | null {
       }
       const available = ext.getQueryObjectEXT(pending, ext.QUERY_RESULT_AVAILABLE_EXT) as number
       if (!available) {
-        // Результат ещё не готов — отдаём предыдущее значение (или null)
+        // The result is not ready yet — return the previous value (or null)
         return lastResult
       }
-      // Результат готов — наносекунды → миллисекунды
+      // The result is ready — nanoseconds → milliseconds
       const ns = ext.getQueryObjectEXT(pending, ext.QUERY_RESULT_EXT) as number
       lastResult = typeof ns === 'number' && Number.isFinite(ns) ? ns / 1e6 : null
       return lastResult

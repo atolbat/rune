@@ -3,11 +3,11 @@ import type { PortableSpec } from '../src/index.ts'
 import { reflectGlsl } from '@rune/core'
 
 /**
- * Теория F: кэш рефлексии шейдеров.
- * Гипотеза: команды массово делят шейдеры (материалы, инстансинг) — парсинг
- * исходника на каждую компиляцию лишний; кэш по исходнику превращает повторную
- * компиляцию в чтение карты. Сравниваем компиляцию N команд с уникальными
- * шейдерами (промахи) против N команд с общим шейдером (попадания).
+ * Theory F: shader reflection cache.
+ * Hypothesis: commands massively share shaders (materials, instancing) — parsing
+ * the source on every compilation is redundant; a source-keyed cache turns
+ * recompilation into a map lookup. We compare compiling N commands with unique
+ * shaders (misses) vs N commands with a shared shader (hits).
  */
 
 const BASE_VERT = `#version 300 es
@@ -38,7 +38,7 @@ function compileBatch(unique: boolean, salt: number): void {
   const adapter = webgl2Adapter()
   const context = adapter.create()
   for (let i = 0; i < COMMANDS; i++) {
-    // salt гарантирует: прогоны «уникальных» партий не попадают в кэш повторно
+    // salt guarantees: "unique" batch runs do not hit the cache again
     const variant = unique ? `variant ${i}-${salt}` : 'shared'
     adapter.compile(context, specWith(variant))
   }
@@ -55,13 +55,13 @@ function bestOfBatch(unique: boolean, repeats: number): number {
   return best
 }
 
-for (let i = 0; i < 30; i++) { compileBatch(true, 1000 + i); compileBatch(false, 0) } // прогрев
+for (let i = 0; i < 30; i++) { compileBatch(true, 1000 + i); compileBatch(false, 0) } // warmup
 
 const missMs = bestOfBatch(true, 9)
 const hitMs = bestOfBatch(false, 9)
 
-console.log('── Теория F: кэш рефлексии, компиляция 400 команд ──')
-console.log(`компиляция с уникальными шейдерами : ${missMs.toFixed(2)} мс`)
-console.log(`компиляция с общим шейдером        : ${hitMs.toFixed(2)} мс`)
-console.log(`кэш ускоряет компиляцию в ${(missMs / hitMs).toFixed(1)} раза`)
-console.log('выгодоприобретатель — replay (switchBackend/loss): повторная компиляция без парсинга')
+console.log('── Theory F: shader reflection cache, compiling 400 commands ──')
+console.log(`compilation with unique shaders    : ${missMs.toFixed(2)} ms`)
+console.log(`compilation with a shared shader   : ${hitMs.toFixed(2)} ms`)
+console.log(`the cache speeds up compilation by a factor of ${(missMs / hitMs).toFixed(1)}`)
+console.log('the beneficiary is replay (switchBackend/loss): recompilation without parsing')

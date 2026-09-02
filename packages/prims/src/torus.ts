@@ -1,27 +1,27 @@
 /**
- * Тор и тороидальный узел (Task 109: options-API, имена сегментов — как
- * TorusGeometry/TorusKnotGeometry в three.js: tubularSegments — вокруг
- * большой оси, radialSegments — вокруг сечения трубки).
+ * Torus and torus knot (Task 109: options-API, segment names — like
+ * TorusGeometry/TorusKnotGeometry in three.js: tubularSegments — around
+ * the major axis, radialSegments — around the tube cross-section).
  *
- * Тор: параметрическая поверхность (θ — вокруг большой оси, φ — вокруг
- * трубки), нормали аналитические. (x,z) лежит на радиусе R+|r·cosφ|:
- * (R + r·cosφ)·(sinθ, cosθ) по горизонтали, y = r·sinφ.
+ * Torus: a parametric surface (θ — around the major axis, φ — around
+ * the tube), analytical normals. (x,z) lies at radius R+|r·cosφ|:
+ * (R + r·cosφ)·(sinθ, cosθ) horizontally, y = r·sinφ.
  *
- * Тороидальный узел (p, q): трубка радиуса tube вокруг кривой
- * t ↦ (cos(p·t)·(2+cos(q·t)), sin(p·t)·(2+cos(q·t)), sin(q·t)) — кривая
- * узла на торе; рамы — приближённый параллельный транспорт.
+ * Torus knot (p, q): a tube of radius tube around the curve
+ * t ↦ (cos(p·t)·(2+cos(q·t)), sin(p·t)·(2+cos(q·t)), sin(q·t)) — the knot
+ * curve on a torus; frames use approximate parallel transport.
  */
 
 import type { Geometry } from './types.ts'
 
 export interface TorusParams {
-  /** Радиус кольца (default 1). */
+  /** Radius of the ring (default 1). */
   readonly radius?: number
-  /** Радиус трубки (default 0.35). */
+  /** Radius of the tube (default 0.35). */
   readonly tube?: number
-  /** Сегментов вокруг оси трубки (default 24). */
+  /** Segments around the tube axis (default 24). */
   readonly radialSegments?: number
-  /** Сегментов вокруг большой оси (default 64). */
+  /** Segments around the major axis (default 64). */
   readonly tubularSegments?: number
 }
 
@@ -57,7 +57,7 @@ export function torus(params: TorusParams = {}): Geometry {
       const u1 = (i + 1) / tub
       const w0 = j / rad
       const w1 = (j + 1) / rad
-      // CCW снаружи трубки
+      // CCW outside the tube
       emit(t0, p0, u0, w0)
       emit(t0, p1, u0, w1)
       emit(t1, p1, u1, w1)
@@ -69,24 +69,24 @@ export function torus(params: TorusParams = {}): Geometry {
   return { positions, normals, uvs, vertexCount: v }
 }
 
-/** Точка кривой (p,q)-узла на торе радиуса 2·scale (t ∈ [0, 2π]). */
+/** A point of the (p,q)-knot curve on a torus of radius 2·scale (t ∈ [0, 2π]). */
 function knotPoint(p: number, q: number, t: number, scale: number): [number, number, number] {
   const r = 2 + Math.cos(q * t)
   return [Math.cos(p * t) * r * scale, Math.sin(q * t) * scale, Math.sin(p * t) * r * scale]
 }
 
 export interface TorusKnotParams {
-  /** Витков p (default 2). */
+  /** Windings p (default 2). */
   readonly p?: number
-  /** Захлёстов q (default 3). */
+  /** Loops q (default 3). */
   readonly q?: number
-  /** Радиус трубки (default 0.3). */
+  /** Radius of the tube (default 0.3). */
   readonly tube?: number
-  /** Сегментов вдоль кривой (default 220). */
+  /** Segments along the curve (default 220). */
   readonly tubularSegments?: number
-  /** Сегментов вокруг трубки (default 14). */
+  /** Segments around the tube (default 14). */
   readonly radialSegments?: number
-  /** Общий масштаб кривой (default 0.45 — узел радиуса ~2·масштаб). */
+  /** Overall curve scale (default 0.45 — a knot of radius ~2·scale). */
   readonly scale?: number
 }
 
@@ -100,9 +100,9 @@ export function torusKnot(params: TorusKnotParams = {}): Geometry {
   const positions: number[] = []
   const normals: number[] = []
   const uvs: number[] = []
-  // Параллельный транспорт: нормаль переносится вдоль кривой, ре-
-  // ортогонализуется к тангенсу каждый шаг (устойчиво; замыкание шва
-  // слегка скашивает UV — визуально незаметно)
+  // Parallel transport: the normal is carried along the curve and re-
+  // orthogonalized against the tangent each step (stable; closing the seam
+  // slightly skews the UVs — visually imperceptible)
   let prevNormal: [number, number, number] | null = null
   const frames: Array<{ tangent: [number, number, number]; normal: [number, number, number]; binormal: [number, number, number] }> = []
   for (let i = 0; i < seg; i++) {
@@ -117,7 +117,7 @@ export function torusKnot(params: TorusKnotParams = {}): Geometry {
     tangent[2] /= tl
     let normal: [number, number, number]
     if (prevNormal === null) {
-      // Стартовая нормаль: любой вектор ⊥ тангенсу
+      // Starting normal: any vector ⊥ the tangent
       const up: [number, number, number] = Math.abs(tangent[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0]
       const d = up[1] * tangent[2] - up[2] * tangent[1]
       const e = up[2] * tangent[0] - up[0] * tangent[2]
@@ -125,7 +125,7 @@ export function torusKnot(params: TorusKnotParams = {}): Geometry {
       const nl = Math.hypot(d, e, f) || 1
       normal = [d / nl, e / nl, f / nl]
     } else {
-      // Транспорт: проекция прошлой нормали на плоскость ⊥ тангенсу
+      // Transport: projection of the previous normal onto the plane ⊥ the tangent
       const dot = prevNormal[0] * tangent[0] + prevNormal[1] * tangent[1] + prevNormal[2] * tangent[2]
       const nx = prevNormal[0] - dot * tangent[0]
       const ny = prevNormal[1] - dot * tangent[1]
@@ -178,7 +178,7 @@ export function torusKnot(params: TorusKnotParams = {}): Geometry {
       const v01 = ring0(f0, a1, c0)
       const v11 = ring0(f1, a1, c1)
       const v10 = ring0(f1, a0, c1)
-      // CCW снаружи трубки
+      // CCW outside the tube
       emit(v00.pos[0], v00.pos[1], v00.pos[2], v00.n[0], v00.n[1], v00.n[2], u0, w0)
       emit(v01.pos[0], v01.pos[1], v01.pos[2], v01.n[0], v01.n[1], v01.n[2], u0, w1)
       emit(v11.pos[0], v11.pos[1], v11.pos[2], v11.n[0], v11.n[1], v11.n[2], u1, w1)

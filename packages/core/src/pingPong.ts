@@ -1,34 +1,34 @@
 /**
- * Ping-pong — паттерн двойного буфера (Task 112).
+ * Ping-pong — a double-buffering pattern (Task 112).
  *
- * Полезный паттерн GPU-симуляций, вынесенный из FFT-океана в ядро
- * (пользовательское решение Task 112: FFT — в kit, паттерны — в core).
- * Пользователи: эволюция фаз океана (ping-pong текстур), проходы БПФ
- * Стокхэма (ping-pong спектра), пост-процесс цепочки, feedback-эффекты —
- * везде «читаем из одного буфера, пишем в другой, меняем местами».
+ * A useful GPU-simulation pattern, extracted from the FFT ocean into the core
+ * (user decision for Task 112: FFT goes to kit, patterns go to core).
+ * Users: ocean phase evolution (ping-pong textures), Stockham FFT passes
+ * (ping-pong spectrum), post-process chains, feedback effects — everywhere
+ * it's "read from one buffer, write to the other, swap them".
  *
- * Семантика:
- *  • current — тот, из которого ЧИТАЮТ на текущем шаге;
- *  • previous — тот, в который ПИСАЛИ на предыдущем шаге (куда писать
- *    обычно решает сам вызывающий через swap());
- *  • swap() — атомарно (одним присваиванием каждой ссылки) меняет пары
- *    местами и возвращает НОВЫЙ current (удобно в цикле проходов).
+ * Semantics:
+ *  • current — the one READ from on the current step;
+ *  • previous — the one WRITTEN to on the previous step (where to write
+ *    is usually decided by the caller via swap());
+ *  • swap() — atomically (with a single assignment of each reference) swaps
+ *    the pairs and returns the NEW current (handy in a pass loop).
  */
 
 export interface PingPong<A, B = A> {
-  /** Буфер текущего шага (источник чтения). */
+  /** Current-step buffer (read source). */
   readonly current: A
-  /** Буфер предыдущего шага. */
+  /** Previous-step buffer. */
   readonly previous: B
-  /** Поменять местами; возвращает новый current (пост-swap). */
+  /** Swap the two; returns the new (post-swap) current. */
   swap(): A
-  /** Индекс шага (число swap-ов по модулю 2): 0 = начальная раскладка,
-   *  1 = после первого swap. Для parity-логики (как в БПФ: вход/выход
-   *  зависит от чётности номера прохода). */
+  /** Step index (number of swaps modulo 2): 0 = initial layout,
+   *  1 = after the first swap. For parity logic (as in FFT: input/output
+   *  depends on the pass number's parity). */
   readonly parity: 0 | 1
 }
 
-/** Создать ping-pong пару из двух буферов. */
+/** Create a ping-pong pair from two buffers. */
 export function createPingPong<A, B = A>(initial: A, other: B): PingPong<A, B> {
   let current: A = initial
   let previous: B = other

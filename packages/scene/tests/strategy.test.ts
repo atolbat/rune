@@ -1,58 +1,58 @@
-/** Тесты стратегии выноса в воркер (Task 81). */
+/** Worker offload strategy tests (Task 81). */
 import { describe, expect, it } from 'bun:test'
 import { createCamera, createScene, estimatePipelineMs, measureScenePipeline, recommendSceneStrategy } from '../src/index.ts'
 
 describe('recommendSceneStrategy', () => {
-  it('без SAB/воркера — честный T0', () => {
+  it('without SAB/worker — honest T0', () => {
     const s = recommendSceneStrategy({ nodeCount: 500_000, animatedNodes: 1000, cameraCount: 1, workerAvailable: false })
     expect(s.offloadToWorker).toBe(false)
     expect(s.reason).toContain('T0')
   })
 
-  it('маленькая сцена — дешевле локально (конвейер ниже порога)', () => {
+  it('small scene — cheaper locally (pipeline below threshold)', () => {
     const s = recommendSceneStrategy({ nodeCount: 1000, animatedNodes: 50, cameraCount: 1, workerAvailable: true })
     expect(s.estimatedPipelineMs).toBeLessThan(1)
     expect(s.offloadToWorker).toBe(false)
-    expect(s.reason).toContain('дешевле')
+    expect(s.reason).toContain('cheaper')
   })
 
-  it('тяжёлая анимация средней сцены — воркер окупается', () => {
-    // 100k узлов, 40k анимируемых: ~0.54 + ~6.4 = ~7 мс main — освобождаем.
+  it('heavy animation of a mid-size scene — the worker pays off', () => {
+    // 100k nodes, 40k animated: ~0.54 + ~6.4 = ~7 ms of main — free it.
     const s = recommendSceneStrategy({ nodeCount: 100_000, animatedNodes: 40_000, cameraCount: 1, workerAvailable: true })
     expect(s.estimatedPipelineMs).toBeGreaterThan(5)
-    // Воркер: 7×2.5+1.3 ≈ 18.8 > 16.7 — не влезает в бюджет на этом железе.
-    // Проверяем просто согласованность оценок.
+    // Worker: 7×2.5+1.3 ≈ 18.8 > 16.7 — does not fit the budget on this hardware.
+    // We just check that the estimates are consistent.
     expect(s.estimatedWorkerMs).toBeGreaterThan(s.estimatedPipelineMs)
   })
 
-  it('воркер не рекомендуется, если не успевает в бюджет кадра', () => {
+  it('the worker is not recommended when it cannot fit the frame budget', () => {
     const s = recommendSceneStrategy({ nodeCount: 1_000_000, animatedNodes: 1_000_000, cameraCount: 1, workerAvailable: true })
     expect(s.estimatedWorkerMs).toBeGreaterThan(16.7)
     expect(s.offloadToWorker).toBe(false)
-    expect(s.reason).toContain('бюджет')
+    expect(s.reason).toContain('budget')
   })
 
-  it('золотая середина: конвейер 1–5 мс и воркер успевает — оверлап', () => {
-    // ~30k анимируемых: ~4.8+0.16 = ~5 мс main; воркер ~13.7 мс < 16.7.
+  it('sweet spot: pipeline 1–5 ms and the worker makes it — overlap', () => {
+    // ~30k animated: ~4.8+0.16 = ~5 ms main; worker ~13.7 ms < 16.7.
     const s = recommendSceneStrategy({ nodeCount: 30_000, animatedNodes: 30_000, cameraCount: 1, workerAvailable: true })
     expect(s.estimatedPipelineMs).toBeGreaterThan(4)
     expect(s.offloadToWorker).toBe(true)
   })
 
-  it('мультикамера дорожает, но решение устойчиво', () => {
+  it('multi-camera costs more, but the decision is stable', () => {
     const one = recommendSceneStrategy({ nodeCount: 100_000, animatedNodes: 20_000, cameraCount: 1, workerAvailable: true })
     const four = recommendSceneStrategy({ nodeCount: 100_000, animatedNodes: 20_000, cameraCount: 4, workerAvailable: true })
     expect(four.estimatedPipelineMs).toBeGreaterThan(one.estimatedPipelineMs)
   })
 
-  it('оценка согласуется с измеренной моделью (нс/узел)', () => {
+  it('the estimate matches the measured model (ns/node)', () => {
     const ms = estimatePipelineMs({ nodeCount: 100_000, animatedNodes: 0, cameraCount: 1, workerAvailable: false })
     expect(ms).toBeCloseTo(100_000 * 5.4 / 1e6, 5)
   })
 })
 
 describe('measureScenePipeline', () => {
-  it('возвращает положительное время на живой сцене', () => {
+  it('returns a positive time on a live scene', () => {
     const scene = createScene({ capacity: 2048, cameraMax: 1, groupMax: 2, maxInstances: 2048 })
     for (let i = 0; i < 1000; i++) {
       scene.create({

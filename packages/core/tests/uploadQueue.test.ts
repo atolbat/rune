@@ -2,8 +2,8 @@ import { describe, expect, it } from 'bun:test'
 import { createUploadQueue } from '../src/index.ts'
 import type { UploadJob } from '../src/index.ts'
 
-describe('upload queue (двоичная куча)', () => {
-  it('pop отдаёт задачи по возрастанию приоритета', () => {
+describe('upload queue (binary heap)', () => {
+  it('pop hands out tasks by ascending priority', () => {
     const queue = createUploadQueue()
     queue.push(job(5))
     queue.push(job(1))
@@ -19,7 +19,7 @@ describe('upload queue (двоичная куча)', () => {
     expect(priorities).toEqual([1, 2, 3, 4, 5])
   })
 
-  it('size и clear работают', () => {
+  it('size and clear work', () => {
     const queue = createUploadQueue()
     queue.push(job(1))
     queue.push(job(2))
@@ -29,7 +29,7 @@ describe('upload queue (двоичная куча)', () => {
     expect(queue.pop()).toBeNull()
   })
 
-  it('куча выдерживает большой перемешанный набор', () => {
+  it('the heap survives a large shuffled set', () => {
     const queue = createUploadQueue()
     const priorities: number[] = []
     for (let i = 0; i < 1000; i++) priorities.push((i * 7919) % 1000)

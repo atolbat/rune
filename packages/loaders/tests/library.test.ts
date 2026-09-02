@@ -1,6 +1,6 @@
 /**
- * library.test.ts — AssetLibrary: прогресс, кэш, dedup, отмена,
- * приоритеты, группы, preload, LRU, сниффинг, форматы.
+ * library.test.ts — AssetLibrary: progress, cache, dedup, cancel,
+ * priorities, groups, preload, LRU, sniffing, formats.
  */
 
 import { describe, expect, test } from 'bun:test'
@@ -24,7 +24,7 @@ function chunkedBody(bytes: Uint8Array, chunks = 4, delay = 1): ReadableStream<U
   })
 }
 
-/** Фейковый fetch: url → тело (со стримингом), ведёт журнал вызовов. */
+/** A fake fetch: url → body (with streaming), keeps a call log. */
 function fakeFetch(map: Record<string, Uint8Array | Error>, log: string[] = []): typeof fetch {
   return (async (url: string) => {
     const key = String(url)
@@ -76,7 +76,7 @@ function buildGlbBytes(): Uint8Array {
 }
 
 describe('AssetLibrary', () => {
-  test('load GLB: фазы, прогресс до 1, результат — модель', async () => {
+  test('load GLB: phases, progress up to 1, the result is a model', async () => {
     const glb = buildGlbBytes()
     const library = new AssetLibrary({ fetchImpl: fakeFetch({ 'https://x/m.glb': glb }) })
     const phases: string[] = []
@@ -98,7 +98,7 @@ describe('AssetLibrary', () => {
     expect(handle.state).toBe('done')
   })
 
-  test('кэш: второй load — мгновенно, без сети', async () => {
+  test('cache: the second load — instantly, no network', async () => {
     const glb = buildGlbBytes()
     const log: string[] = []
     const library = new AssetLibrary({ fetchImpl: fakeFetch({ 'https://x/m.glb': glb }, log) })
@@ -112,7 +112,7 @@ describe('AssetLibrary', () => {
     expect(library.stats().cacheHits).toBe(1)
   })
 
-  test('dedup: параллельные load одного URL — один fetch', async () => {
+  test('dedup: parallel loads of one URL — a single fetch', async () => {
     const glb = buildGlbBytes()
     const log: string[] = []
     const library = new AssetLibrary({ fetchImpl: fakeFetch({ 'https://x/m.glb': glb }, log) })
@@ -125,7 +125,7 @@ describe('AssetLibrary', () => {
     expect(log.length).toBe(1)
   })
 
-  test('отмена running: fetch abort → rejects, сеть чистится', async () => {
+  test('cancelling running: fetch abort → rejects, the network cleans up', async () => {
     const glb = buildGlbBytes()
     let aborted = false
     const fetchImpl: typeof fetch = (async (_url: string, init?: { signal?: AbortSignal }) => {
@@ -151,7 +151,7 @@ describe('AssetLibrary', () => {
     const library = new AssetLibrary({ fetchImpl })
     const handle = library.load('https://x/slow.glb')
     await new Promise(resolve => setTimeout(resolve, 10))
-    expect(handle.cancel('хватит')).toBe(true)
+    expect(handle.cancel('stop')).toBe(true)
     const outcome = await handle.then(
       () => ({ resolved: true as const }),
       (error: unknown) => ({ resolved: false as const, error }),
@@ -160,13 +160,13 @@ describe('AssetLibrary', () => {
     if (!outcome.resolved) {
       expect((outcome.error as DOMException).name).toBe('AbortError')
     }
-    // Сеть сворачивается: либо стрим отменён (cancel), либо заметил abort.
+    // The network winds down: either the stream is cancelled (cancel), or it noticed the abort.
     expect(aborted || handle.state === 'cancelled').toBe(true)
     expect(handle.state).toBe('cancelled')
     expect(library.scheduler.stats().running).toBe(0)
   })
 
-  test('приоритеты: priority 0 стартует раньше 5 при maxConcurrent=1', async () => {
+  test('priorities: priority 0 starts before 5 with maxConcurrent=1', async () => {
     const glbA = buildGlbBytes()
     const objB = enc('v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n')
     const log: string[] = []
@@ -179,7 +179,7 @@ describe('AssetLibrary', () => {
         return new Response(chunkedBody(body, 2, 5), { status: 200, headers: { 'content-length': String(body.length) } })
       }) as never,
     })
-    // Блокировщик занимает единственный слот.
+    // A blocker occupies the only slot.
     const swallow = (h: AssetHandle<unknown>): Promise<void> => h.then(
       () => undefined,
       () => undefined,
@@ -189,12 +189,12 @@ describe('AssetLibrary', () => {
     const low = library.load('https://x/low.obj', { priority: 5 })
     const high = library.load('https://x/hi.glb', { priority: 0 })
     await Promise.all([swallow(blocker), swallow(low), swallow(high)])
-    // Первый стартовавший — блокировщик; следующим — высокий приоритет.
+    // The first to start is the blocker; next is the high priority.
     expect(log[1]).toBe('https://x/hi.glb')
     expect(log.indexOf('https://x/low.obj')).toBeGreaterThan(log.indexOf('https://x/hi.glb'))
   })
 
-  test('loadGroup: агрегатный прогресс и отмена', async () => {
+  test('loadGroup: aggregated progress and cancellation', async () => {
     const glb = buildGlbBytes()
     const config = enc('{"a":1}')
     const library = new AssetLibrary({
@@ -213,7 +213,7 @@ describe('AssetLibrary', () => {
     expect(p.phase).toBe('done')
   })
 
-  test('preload: прогрев кэша, ошибки в отчёте', async () => {
+  test('preload: cache warm-up, errors in the report', async () => {
     const glb = buildGlbBytes()
     const library = new AssetLibrary({
       fetchImpl: fakeFetch({ 'https://x/m.glb': glb, 'https://x/bad.glb': enc('not glb') }),
@@ -224,11 +224,11 @@ describe('AssetLibrary', () => {
     expect(library.get('https://x/m.glb')).toBeDefined()
   })
 
-  test('LRU-вытеснение по cacheBytesLimit', async () => {
+  test('LRU eviction by cacheBytesLimit', async () => {
     const glb = buildGlbBytes()
     let counter = 0
     const library = new AssetLibrary({
-      cacheBytesLimit: glb.byteLength, // ровно один ассет
+      cacheBytesLimit: glb.byteLength, // exactly one asset
       fetchImpl: (async () => {
         counter++
         return new Response(chunkedBody(glb, 2), { status: 200, headers: { 'content-length': String(glb.byteLength) } })
@@ -243,7 +243,7 @@ describe('AssetLibrary', () => {
     expect(counter).toBe(2)
   })
 
-  test('noCache: повторная загрузка идёт в сеть', async () => {
+  test('noCache: a repeated load goes to the network', async () => {
     const glb = buildGlbBytes()
     const log: string[] = []
     const library = new AssetLibrary({ fetchImpl: fakeFetch({ 'https://x/m.glb': glb }, log) })
@@ -252,7 +252,7 @@ describe('AssetLibrary', () => {
     expect(log.length).toBe(2)
   })
 
-  test('transform-пайп: пост-обработка ассета', async () => {
+  test('transform pipe: asset post-processing', async () => {
     const config = enc('{"n": 5}')
     const library = new AssetLibrary({ fetchImpl: fakeFetch({ 'https://x/c.json': config }) })
     const result = await library.load('https://x/c.json', {
@@ -261,14 +261,14 @@ describe('AssetLibrary', () => {
     expect(result).toEqual({ doubled: 10 })
   })
 
-  test('сниффинг: без расширения GLB распознаётся по магике', async () => {
+  test('sniffing: without an extension GLB is recognized by its magic', async () => {
     const glb = buildGlbBytes()
     const library = new AssetLibrary({ fetchImpl: fakeFetch({ 'https://x/unknown': glb }) })
     const model = (await library.load('https://x/unknown')) as { kind: string }
     expect(model.kind).toBe('glb')
   })
 
-  test('registerFormat: свой парсер', async () => {
+  test('registerFormat: a custom parser', async () => {
     const library = new AssetLibrary({ fetchImpl: fakeFetch({ 'https://x/roll.dice': enc('1 2 3') }) })
     library.registerFormat('dice', ['dice'], async ctx => {
       await ctx.assembler.completion
@@ -279,7 +279,7 @@ describe('AssetLibrary', () => {
     expect(result).toEqual([1, 2, 3])
   })
 
-  test('события done/progress/error', async () => {
+  test('done/progress/error events', async () => {
     const glb = buildGlbBytes()
     const library = new AssetLibrary({ fetchImpl: fakeFetch({ 'https://x/ok.glb': glb }) })
     const events: string[] = []
@@ -291,10 +291,10 @@ describe('AssetLibrary', () => {
   })
 })
 
-describe('config-парсеры', () => {
-  test('ZML: вложенность, числа, булевы, массивы, повторы', () => {
+describe('config parsers', () => {
+  test('ZML: nesting, numbers, booleans, arrays, repeats', () => {
     const zml = enc(`
-# камера
+# camera
 camera
   fov 50
   orbit
@@ -331,9 +331,9 @@ spawn
     expect(spawns[1].children.point).toEqual([4, 5, 6])
   })
 
-  test('INI: секции и значения', () => {
+  test('INI: sections and values', () => {
     const ini = enc(`
-# комментарий
+# comment
 [render]
 backend=webgl2
 fps=60
@@ -348,6 +348,6 @@ base=./data
   })
 
   test('parseTextBytes', () => {
-    expect(parseTextBytes(enc('привет'))).toBe('привет')
+    expect(parseTextBytes(enc('hello'))).toBe('hello')
   })
 })

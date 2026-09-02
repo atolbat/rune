@@ -14,9 +14,9 @@ function assemblerOf(bytes: Uint8Array, total?: number): Assembler {
   return new Assembler(stream, { total })
 }
 
-// ─── GLB: счастливый путь (content-length известен → zero-copy) ─────────────
+// ─── GLB: happy path (content-length known → zero-copy) ─────────────
 
-test('parseGlb: треугольник + материал MASK + статистика', async () => {
+test('parseGlb: triangle + MASK material + statistics', async () => {
   const glb = buildGlb(triDocument(), triBin())
   const model: GltfModel = await parseGlb(assemblerOf(glb, glb.length))
   expect(model.kind).toBe('glb')
@@ -27,7 +27,7 @@ test('parseGlb: треугольник + материал MASK + статист�
   expect(Array.from(primitive.indices as Uint16Array)).toEqual([0, 1, 2])
   expect(primitive.vertexCount).toBe(3)
   expect(primitive.material).toBe(0)
-  // bounds из метаданных аксессора
+  // bounds from accessor metadata
   expect(primitive.bounds.min).toEqual([-1, -1, 0])
   expect(primitive.bounds.max).toEqual([1, 1, 0])
 
@@ -48,11 +48,11 @@ test('parseGlb: треугольник + материал MASK + статист�
   expect(model.stats.triangles).toBe(1)
   expect(model.stats.primitives).toBe(1)
   expect(model.stats.binBytes).toBe(42)
-  // zero-copy: плотный FLOAT-аксессор и ushort-индексы — виды над телом
+  // zero-copy: a dense FLOAT accessor and ushort indices — views over the body
   expect(model.stats.zeroCopyViews).toBeGreaterThanOrEqual(2)
 })
 
-test('parseGlb: без content-length — тот же результат через копии', async () => {
+test('parseGlb: without content-length — the same result via copies', async () => {
   const glb = buildGlb(triDocument(), triBin())
   const model = await parseGlb(assemblerOf(glb))
   const primitive = model.meshes[0].primitives[0]
@@ -60,11 +60,11 @@ test('parseGlb: без content-length — тот же результат чер�
   expect(Array.from(primitive.indices as Uint16Array)).toEqual([0, 1, 2])
 })
 
-test('parseGlb: чанки по кусочкам — стриминг не ломается', async () => {
+test('parseGlb: chunks in pieces — streaming does not break', async () => {
   const glb = buildGlb(triDocument(), triBin())
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      // режем на мелкие куски: заголовок/JSON/BIN вперемешку
+      // cut into small pieces: header/JSON/BIN mixed together
       for (let at = 0; at < glb.length; at += 7) controller.enqueue(glb.subarray(at, at + 7))
       controller.close()
     },
@@ -74,36 +74,36 @@ test('parseGlb: чанки по кусочкам — стриминг не ло�
   expect(model.meshes[0].primitives[0].vertexCount).toBe(3)
 })
 
-// ─── GLB: ошибки ──────────────────────────────────────────────────────────────
+// ─── GLB: errors ──────────────────────────────────────────────────────────────
 
-test('parseGlb: не-GLB магик — понятная ошибка', async () => {
+test('parseGlb: non-GLB magic — a clear error', async () => {
   const garbage = new Uint8Array(64)
-  expect(parseGlb(assemblerOf(garbage, garbage.length))).rejects.toThrow('не GLB')
+  expect(parseGlb(assemblerOf(garbage, garbage.length))).rejects.toThrow('not GLB')
 })
 
-test('parseGlb: версия 3 не поддерживается', async () => {
+test('parseGlb: version 3 is not supported', async () => {
   const glb = buildGlb(triDocument(), triBin())
   new DataView(glb.buffer).setUint32(4, 3, true)
-  expect(parseGlb(assemblerOf(glb, glb.length))).rejects.toThrow('GLB версии 3')
+  expect(parseGlb(assemblerOf(glb, glb.length))).rejects.toThrow('GLB version 3')
 })
 
-test('parseGlb: extensionsRequired с meshopt — честный отказ', async () => {
+test('parseGlb: extensionsRequired with meshopt — an honest refusal', async () => {
   const doc = triDocument()
   doc['extensionsRequired'] = ['EXT_meshopt_compression']
   const glb = buildGlb(doc, triBin())
-  expect(parseGlb(assemblerOf(glb, glb.length))).rejects.toThrow('glTF требует EXT_meshopt_compression')
+  expect(parseGlb(assemblerOf(glb, glb.length))).rejects.toThrow('glTF requires EXT_meshopt_compression')
 })
 
-test('parseGlb: Draco без декодера — подсказка в ошибке', async () => {
+test('parseGlb: Draco without a decoder — a hint in the error', async () => {
   const doc = triDocument()
   doc['extensionsRequired'] = ['KHR_draco_mesh_compression']
   const glb = buildGlb(doc, triBin())
   expect(parseGlb(assemblerOf(glb, glb.length))).rejects.toThrow('dracoDecoder')
 })
 
-// ─── Изображения: ленивый декод ──────────────────────────────────────────────
+// ─── Images: lazy decode ──────────────────────────────────────────────
 
-test('parseGlb: изображение в BIN декодится createBitmap-ом', async () => {
+test('parseGlb: an image in BIN is decoded by createBitmap', async () => {
   const pngMagic = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])
   const bin = new Uint8Array(42 + pngMagic.length)
   bin.set(triBin())
@@ -134,9 +134,9 @@ test('parseGlb: изображение в BIN декодится createBitmap-о
   expect(model.images[0].name).toBe('tex')
 })
 
-// ─── .gltf (JSON + внешние буферы) ───────────────────────────────────────────
+// ─── .gltf (JSON + external buffers) ───────────────────────────────────────────
 
-test('parseGltfJson: внешний буфер + внешняя текстура', async () => {
+test('parseGltfJson: an external buffer + an external texture', async () => {
   const doc = JSON.parse(JSON.stringify(triDocument())) as Record<string, unknown>
   ;(doc['buffers'] as Array<Record<string, unknown>>)[0] = { uri: 'tri.bin' }
   doc['images'] = [{ name: 'ext', mimeType: 'image/png', uri: 'tex.png' }]
@@ -168,7 +168,7 @@ test('parseGltfJson: внешний буфер + внешняя текстура
   expect(await model.images[0].bitmap).toBe(fakeBitmap)
 })
 
-test('isGltfJson: магика JSON-чанка GLB', () => {
+test('isGltfJson: the magic of the GLB JSON chunk', () => {
   expect(isGltfJson(new TextEncoder().encode('glTF 2.0...'))).toBe(true)
   expect(isGltfJson(new TextEncoder().encode('{"a":1}'))).toBe(false)
   expect(isGltfJson(new Uint8Array(2))).toBe(false)

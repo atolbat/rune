@@ -5,29 +5,29 @@ import { showOnWebGpu } from './showWebgpu.ts'
 import type { BackendId } from './autoBackend.ts'
 
 /**
- * showOn(): показать на ВЫБРАННОМ бэкенде — без фолбэка.
- * Для страниц сравнения (табы WebGL2/WebGPU): каждый рендерер на своём
- * канвасе, отказ виден как причина, а не тихое переключение.
+ * showOn(): show on the CHOSEN backend — no fallback.
+ * For comparison pages (WebGL2/WebGPU tabs): each renderer on its own
+ * canvas, failure surfaces as a reason, not a silent switch.
  */
 
 export type { BackendId } from './autoBackend.ts'
 
-/** Показ на форсированном бэкенде. */
+/** A showing on a forced backend. */
 export interface BackendShow {
-  /** Запрошенный бэкенд. */
+  /** The requested backend. */
   readonly backend: BackendId
-  /** Что реально работает; null — бэкенд недоступен (см. failureReason). */
+  /** What is actually running; null — the backend is unavailable (see failureReason). */
   readonly active: BackendId | null
   readonly webgl2?: Show
   readonly webgpu?: WebGpuShow
-  /** Причина отказа, когда active === null. */
+  /** Failure reason when active === null. */
   readonly failureReason?: string
   pause(): void
   resume(): void
   stop(): void
 }
 
-/** Показать куб на выбранном бэкенде: showOn('#canvas', 'webgpu', { texture }). */
+/** Show a cube on the chosen backend: showOn('#canvas', 'webgpu', { texture }). */
 export async function showOn(
   target: string | HTMLCanvasElement,
   backend: BackendId,
@@ -50,7 +50,7 @@ async function bootWebGl2(target: string | HTMLCanvasElement, options: ShowOptio
 async function bootWebGpu(target: string | HTMLCanvasElement, options: ShowOptions): Promise<BackendShow> {
   const canvas = resolveCanvas(target)
   if (!await probeWebGpu()) {
-    return dead('webgpu', new Error('WebGPU недоступен: navigator.gpu отсутствует или адаптер не получен'))
+    return dead('webgpu', new Error('WebGPU unavailable: navigator.gpu is missing or no adapter was obtained'))
   }
   try {
     const webgpu = await showOnWebGpu(canvas, options)
@@ -84,7 +84,7 @@ function dead(backend: BackendId, error: unknown): BackendShow {
   }
 }
 
-/** Проба WebGPU без захвата канваса (общая для showOn/showAny). */
+/** Probe WebGPU without acquiring the canvas (shared by showOn/showAny). */
 export async function probeWebGpu(): Promise<boolean> {
   if (typeof navigator === 'undefined' || !('gpu' in navigator)) return false
   try {
@@ -97,9 +97,9 @@ export async function probeWebGpu(): Promise<boolean> {
 
 function resolveCanvas(target: string | HTMLCanvasElement): HTMLCanvasElement {
   if (typeof target !== 'string') return target
-  if (typeof document === 'undefined') throw new Error('rune: showOn без DOM требует элемент')
+  if (typeof document === 'undefined') throw new Error('rune: showOn without DOM requires an element')
   const canvas = document.querySelector<HTMLCanvasElement>(target)
-  if (canvas === null) throw new Error(`rune: канвас "${target}" не найден`)
+  if (canvas === null) throw new Error(`rune: canvas "${target}" not found`)
   return canvas
 }
 

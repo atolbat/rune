@@ -1,14 +1,14 @@
 /**
- * binary.ts — буферные примитивы парсинга: DataView-reader, ASCII-сканер,
- * быстрый parseFloat из байтов (без аллокации подстрок).
+ * binary.ts — buffer parsing primitives: DataView-reader, ASCII scanner,
+ * fast parseFloat from bytes (without substring allocations).
  *
- * Принцип «парсить буферами, а не текстом»: все границы токенов ищутся
- * по кодам байтов (charCode), числа собираются поразрядно в number.
- * Строки (имена/значения-слова) материализуются только там, где без них
- * нельзя (ключи JSON, имена узлов) — через Latin-1 декодер один раз.
+ * The principle is "parse with buffers, not text": all token boundaries are
+ * found by byte codes (charCode), numbers are assembled digit by digit into
+ * a number. Strings (names/word values) are materialized only where
+ * unavoidable (JSON keys, node names) — via a Latin-1 decoder, once.
  */
 
-/** Reader над Uint8Array с курсором; все чтения — little-endian по умолчанию. */
+/** Reader over a Uint8Array with a cursor; all reads are little-endian by default. */
 export class ByteReader {
   readonly view: DataView
   pos = 0
@@ -56,7 +56,7 @@ export class ByteReader {
   u64(): number {
     const v = this.view.getBigUint64(this.pos, true)
     this.pos += 8
-    // Диапазон FBX/GLB далёк от 2^53 — safe.
+    // The FBX/GLB range is far below 2^53 — safe.
     return Number(v)
   }
 
@@ -78,21 +78,21 @@ export class ByteReader {
     return v
   }
 
-  /** Чтение N байт как подстрока (копия). */
+  /** Reads N bytes as a subarray (copy). */
   raw(length: number): Uint8Array {
     const out = this.bytes.subarray(this.pos, this.pos + length)
     this.pos += length
     return out
   }
 
-  /** ASCII/UTF-8 строка длиной length. */
+  /** ASCII/UTF-8 string of the given length. */
   str(length: number): string {
     const out = latin1(this.bytes, this.pos, length)
     this.pos += length
     return out
   }
 
-  /** Пропустить до выравнивания boundary (GLB 4-байтовое). */
+  /** Skip to a boundary alignment (GLB is 4-byte). */
   align(boundary: number): void {
     const rem = this.pos % boundary
     if (rem !== 0) this.pos += boundary - rem
@@ -103,9 +103,9 @@ export class ByteReader {
   }
 }
 
-/** Latin-1 (байтовая) строка — для магиков, имён, бинарных заголовков. */
+/** Latin-1 (byte) string — for magics, names, binary headers. */
 export function latin1(bytes: Uint8Array, start: number, length: number): string {
-  // String.fromCharCode.apply чанками по 8192 — быстро и без переполнения стека.
+  // String.fromCharCode.apply in chunks of 8192 — fast and without stack overflow.
   let out = ''
   const CHUNK = 8192
   for (let at = start; at < start + length; at += CHUNK) {
@@ -115,7 +115,7 @@ export function latin1(bytes: Uint8Array, start: number, length: number): string
   return out
 }
 
-// ─── ASCII-сканер по байтам ─────────────────────────────────────────────────
+// ─── ASCII scanner over bytes ─────────────────────────────────────────────────
 
 export const BYTE = {
   CR: 13,
@@ -142,9 +142,9 @@ export function isDigit(byte: number): boolean {
 }
 
 /**
- * Быстрый parseFloat из байтов [start, end): цифры, знак, точка, экспонента.
- * Возвращает NaN при пустом/мусорном вводе. Выделяет подстроку ТОЛЬКО
- * для экспоненты (редкий случай в 3D-данных); обычные числа — поразрядно.
+ * Fast parseFloat from bytes [start, end): digits, sign, dot, exponent.
+ * Returns NaN on empty/garbage input. Allocates a substring ONLY for the
+ * exponent (a rare case in 3D data); regular numbers are handled digit by digit.
  */
 export function parseByteFloat(bytes: Uint8Array, start: number, end: number): number {
   if (start >= end) return NaN
@@ -198,15 +198,15 @@ export function parseByteFloat(bytes: Uint8Array, start: number, end: number): n
 }
 
 /**
- * Токенайзер строк OBJ/конфигов прямо по байтам: находит границы
- * «слова» (по whitespace), возвращает [start, end) пары без аллокаций.
+ * Tokenizer for OBJ/config lines directly over bytes: finds "word"
+ * boundaries (by whitespace), returns [start, end) pairs without allocations.
  */
 export class AsciiTokenScanner {
   pos = 0
 
   constructor(readonly bytes: Uint8Array, readonly length = bytes.length) {}
 
-  /** Следующий токен как диапазон [start, end); null в конце. */
+  /** Next token as a [start, end) range; null at the end. */
   nextToken(): [number, number] | null {
     let i = this.pos
     while (i < this.length && isWhitespace(this.bytes[i])) i++
@@ -220,13 +220,13 @@ export class AsciiTokenScanner {
     return [start, i]
   }
 
-  /** Токен строкой (копия; для ключей). */
+  /** Token as a string (copy; for keys). */
   nextWord(): string | null {
     const token = this.nextToken()
     return token === null ? null : latin1(this.bytes, token[0], token[1] - token[0])
   }
 
-  /** Токен числом (NaN, если не число). */
+  /** Token as a number (NaN if not a number). */
   nextFloat(): number {
     const token = this.nextToken()
     return token === null ? NaN : parseByteFloat(this.bytes, token[0], token[1])
@@ -240,10 +240,10 @@ export class AsciiTokenScanner {
   }
 }
 
-/** Инфлейт zlib через DecompressionStream (FBX-массивы, encoding=1). */
+/** Inflate zlib via DecompressionStream (FBX arrays, encoding=1). */
 export async function inflateZlib(data: Uint8Array): Promise<Uint8Array> {
   if (typeof DecompressionStream === 'undefined') {
-    throw new Error('DecompressionStream недоступен — бинарный FBX с zlib-сжатием не поддерживается в этой среде')
+    throw new Error('DecompressionStream unavailable — binary FBX with zlib compression is not supported in this environment')
   }
   const stream = new Blob([data as BlobPart]).stream().pipeThrough(new DecompressionStream('deflate'))
   const reader = stream.getReader()

@@ -1,52 +1,53 @@
 /**
- * transforms.ts — распространение мировых трансформаций (Task 81).
+ * transforms.ts — propagation of world transforms (Task 81).
  *
- * Ключевая оптимизация плоской раскладки: order[] — обход в глубину,
- * родитель ВСЕГДА раньше ребёнка → один проход по рангам сверху вниз
- * без рекурсии и без стека; world родителя уже свежий, когда доходит
- * очередь ребёнка (и обычно ещё в L1 — 64 байта матрицы).
+ * The key optimization of the flat layout: order[] is a depth-first
+ * traversal, the parent is ALWAYS before the child → one pass over ranks
+ * top-down without recursion and without a stack; the parent's world is
+ * already fresh when the child's turn comes (and usually still in L1 —
+ * 64 bytes of matrix).
  *
- * Грязь — u32-штампы монотонных часов (H_CLOCK):
- *   localStamp[i]  — когда меняли локальный TRS узла;
- *   worldStamp[i]  — когда писали его мир.
- * Узел пересчитывается ⟺ localStamp > worldStamp (сам менялся) ИЛИ
- * worldStamp[parent] > worldStamp[i] (мир родителя стал новее моего мира).
- * Обнуление штампов — нулевые значения, нетрогнутый узел = identity.
+ * Dirt — u32 stamps of a monotonic clock (H_CLOCK):
+ *   localStamp[i]  — when the node's local TRS was changed;
+ *   worldStamp[i]  — when its world was written.
+ * A node is recomputed ⟺ localStamp > worldStamp (changed itself) OR
+ * worldStamp[parent] > worldStamp[i] (the parent's world became newer than mine).
+ * Stamps are zero-initialized; an untouched node = identity.
  *
- * refitGroupBounds — «восходящий» проход по order[] С КОНЦА только по
- * ГРЯЗЫМ поддеревьям (Task 85): дети позже по рангу — обработаны раньше.
- * Грязь — битсет dirtyBounds (по слотам): updateWorld помечает рекомпьютный
- * узел И ВСЕХ предков (подъём по цепочке, ранний выход по уже-поставленному
- * биту — инвариант «метки всегда до корня»). Внутренние узлы без
- * пользовательской сферы получают sphereW как объединение сфер детей
- * (bottom-up BVH-refit). Статичные поддеревья не обходятся ВООБЩЕ —
- * на покое/малой анимации refit деградирует с O(n) до O(изменённого).
+ * refitGroupBounds — an "ascending" pass over order[] FROM THE END, only over
+ * DIRTY subtrees (Task 85): children later by rank are processed earlier.
+ * Dirt — the dirtyBounds bitset (by slots): updateWorld marks the recomputed
+ * node AND ALL its ancestors (climb up the chain, early exit on an
+ * already-set bit — the invariant "marks always reach the root"). Internal
+ * nodes without a user sphere get sphereW as the union of the children's
+ * spheres (bottom-up BVH-refit). Static subtrees are not traversed AT ALL —
+ * at rest/with little animation refit degrades from O(n) to O(changed).
  */
 import type { SceneViews } from './layout.ts'
 import { H_CLOCK, H_GROUP_COUNT, H_NODE_COUNT } from './layout.ts'
 
-/** Метка «поддерево требует refit»: узел + все предки (по слотам). */
+/** "Subtree needs refit" mark: the node + all ancestors (by slots). */
 function markDirtyUp(views: SceneViews, slot: number): void {
   const { parent, dirtyBounds } = views
   let a = slot
   while (a >= 0) {
     const w = a >>> 5
     const m = 1 << (a & 31)
-    if ((dirtyBounds[w] & m) !== 0) break // цепочка до корня уже помечена
+    if ((dirtyBounds[w] & m) !== 0) break // the chain to the root is already marked
     dirtyBounds[w] |= m
     a = parent[a]
   }
 }
 
-/** Штамп группы: контент её инстансов изменился (мир узла пересчитан). */
+/** Group stamp: its instances' content changed (the node's world was recomputed). */
 function touchGroup(views: SceneViews, group: number, stamp: number): void {
   if (group >= 0 && group < views.groupMax) views.groupTouch[group] = stamp
 }
 
-/** Скретч на 16 float — вне горячих циклов не аллоцируется. */
+/** Scratch of 16 floats — not allocated in hot loops. */
 const scratch = new Float32Array(16)
 
-/** Композиция TRS с базовым смещением (без аллокаций). */
+/** TRS composition with a base offset (without allocations). */
 function composeAt(
   out: Float32Array, o: number,
   qx: number, qy: number, qz: number, qw: number,
@@ -76,7 +77,7 @@ function composeAt(
   out[o + 15] = 1
 }
 
-/** Аффинное произведение world[aBase] · local[bBase] → out[oBase]. */
+/** Affine product world[aBase] · local[bBase] → out[oBase]. */
 function mulAffineAt(
   out: Float32Array, o: number,
   a: Float32Array, aBase: number,
@@ -104,7 +105,7 @@ function mulAffineAt(
   out[o + 15] = 1
 }
 
-/** Пересчёт мировой сферы узла из локальной (сдвиг + макс. масштаб). */
+/** Recompute a node's world sphere from the local one (offset + max scale). */
 function sphereWorldAt(views: SceneViews, i: number): void {
   const w = views.world
   const w16 = i * 16
@@ -131,10 +132,10 @@ function sphereWorldAt(views: SceneViews, i: number): void {
 }
 
 /**
- * Пересчёт миров (грязевые штампы). Возвращает число пересчитанных узлов.
- * Требует свежий order[] (pack); порядок родитель-раньше-ребёнка — инвариант
- * раскладки. Попутно (Task 85): помечает dirtyBounds (узел + предки) и
- * ставит штампы групп — их едят грязевой refit и скип аплоада инстансов.
+ * Recompute worlds (dirty stamps). Returns the number of recomputed nodes.
+ * Requires a fresh order[] (pack); parent-before-child order is an invariant
+ * of the layout. Along the way (Task 85): marks dirtyBounds (node + ancestors)
+ * and sets group stamps — consumed by the dirty refit and the instance upload skip.
  */
 export function updateWorldViews(views: SceneViews): number {
   const n = views.headerI[H_NODE_COUNT]
@@ -173,8 +174,8 @@ export function updateWorldViews(views: SceneViews): number {
 }
 
 /**
- * Принудительный пересчёт всех миров (без проверки штампов) — эталон для
- * бенчмарков «dirty vs full» и восстановление после ручных правок world.
+ * Forced recomputation of all worlds (without stamp checks) — the reference for
+ * "dirty vs full" benchmarks and recovery after manual world edits.
  */
 export function updateWorldForcedViews(views: SceneViews): number {
   const n = views.headerI[H_NODE_COUNT]
@@ -203,7 +204,7 @@ export function updateWorldForcedViews(views: SceneViews): number {
     worldStamp[i] = clock
   }
   headerU[H_CLOCK] = clock
-  // Все миры переписаны — все поддеревья и группы «изменились».
+  // All worlds rewritten — all subtrees and groups "changed".
   views.dirtyBounds.fill(0xffffffff)
   const groupsAll = Math.min(views.headerI[H_GROUP_COUNT], views.groupMax)
   for (let g = 0; g < groupsAll; g++) views.groupTouch[g] = clock
@@ -211,9 +212,9 @@ export function updateWorldForcedViews(views: SceneViews): number {
 }
 
 /**
- * Грязевой refit (Task 85): обратный проход ТОЛЬКО по узлам с битом
- * dirtyBounds (узел сам менялся — его пересчитал updateWorld — или потомок).
- * Возвращает число пересобранных узлов. Требует updateWorld до вызова.
+ * Dirty refit (Task 85): a reverse pass ONLY over nodes with a
+ * dirtyBounds bit (the node itself changed — recomputed by updateWorld — or a descendant).
+ * Returns the number of rebuilt nodes. Requires updateWorld before the call.
  */
 export function refitGroupBoundsViews(views: SceneViews): number {
   const n = views.headerI[H_NODE_COUNT]
@@ -223,12 +224,12 @@ export function refitGroupBoundsViews(views: SceneViews): number {
     const i = order[r]
     const w = i >>> 5
     const m = 1 << (i & 31)
-    if ((dirtyBounds[w] & m) === 0) continue // статичное поддерево — сфера валидна
+    if ((dirtyBounds[w] & m) === 0) continue // static subtree — sphere is valid
     dirtyBounds[w] &= ~m
     const e = subtreeEnd[i]
-    if (e <= r + 1) continue // лист — его сферу ведёт updateWorld
-    if (sphereL[i * 4 + 3] > 0) continue // пользовательская сфера — не трогаем
-    // Обход детей (каждый — свой поддиапазон рангов сразу за родителем).
+    if (e <= r + 1) continue // leaf — its sphere is handled by updateWorld
+    if (sphereL[i * 4 + 3] > 0) continue // user sphere — do not touch
+    // Iterate children (each is its own rank subrange right after the parent).
     let minx = 0, miny = 0, minz = 0, maxx = 0, maxy = 0, maxz = 0
     let r2 = r + 1
     let first = true
@@ -256,11 +257,11 @@ export function refitGroupBoundsViews(views: SceneViews): number {
       singleChild = child
       r2 = subtreeEnd[child]
     }
-    if (first) continue // детей нет (не должно случаться после pack)
+    if (first) continue // no children (should not happen after pack)
     const o4 = i * 4
     if (childCount === 1) {
-      // Единственный ребёнок: его сфера и есть минимальный охват
-      // (цепочки — обычное дело, AABB переоценивал бы каждый раз).
+      // Single child: its sphere is the minimal bound
+      // (chains are common, AABB would overestimate every time).
       const c4 = singleChild * 4
       sphereW[o4] = sphereW[c4]
       sphereW[o4 + 1] = sphereW[c4 + 1]
@@ -283,9 +284,9 @@ export function refitGroupBoundsViews(views: SceneViews): number {
 }
 
 /**
- * Полный refit ВСЕХ автограниц (Task 81-бейзлайн; Task 85 — эталон паритета
- * и бенчмарк-сравнение). O(n) всегда; эквивалентен refitGroupBoundsViews
- * при корректной грязи. Снимает всю грязь (всё пересчитано).
+ * Full refit of ALL auto-bounds (Task 81 baseline; Task 85 — parity reference
+ * and benchmark comparison). Always O(n); equivalent to refitGroupBoundsViews
+ * with correct dirt. Clears all dirt (everything recomputed).
  */
 export function refitGroupBoundsForcedViews(views: SceneViews): number {
   const n = views.headerI[H_NODE_COUNT]
@@ -294,8 +295,8 @@ export function refitGroupBoundsForcedViews(views: SceneViews): number {
   for (let r = n - 1; r >= 0; r--) {
     const i = order[r]
     const e = subtreeEnd[i]
-    if (e <= r + 1) continue // лист — его сферу ведёт updateWorld
-    if (sphereL[i * 4 + 3] > 0) continue // пользовательская сфера — не трогаем
+    if (e <= r + 1) continue // leaf — its sphere is handled by updateWorld
+    if (sphereL[i * 4 + 3] > 0) continue // user sphere — do not touch
     let minx = 0, miny = 0, minz = 0, maxx = 0, maxy = 0, maxz = 0
     let r2 = r + 1
     let first = true

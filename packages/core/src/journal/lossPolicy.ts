@@ -1,45 +1,45 @@
 /**
- * LossPolicy — классификация потери GPU-контекста + решение «восстанавливать?».
+ * LossPolicy — classification of a GPU context loss + the "recover?" decision.
  *
- * Задача (Task 62): не всякая потеря устройства стоит восстановления.
- * Task 65 (soft reset): решение стало ТРЁХзначным — не только «восстанавливать
- * или нет», но и «НАСКОЛЬКО восстанавливать»:
+ * Task (Task 62): not every device loss is worth recovering.
+ * Task 65 (soft reset): the decision became THREE-valued — not only "recover
+ * or not", but also "HOW MUCH to recover":
  *
- *   • strategy='full' — обычная потеря (webglcontextlost, device.lost
- *     'destroyed'/'unknown') → replay всего журнала: ресурсы + контент.
- *   • strategy='soft' — out-of-memory → SOFT RESET: полный replay повторил
- *     бы те же аллокации и упал снова, НО восстановление ≠ «всё или ничего».
- *     Восстанавливаем ТОЛЬКО рабочее множество сцены (restore(workingSet));
- *     остальные ресурсы остаются декларациями в журнале и возвращаются
- *     ЛЕНИВО по требованию (ensureResident). На экране одна текстура —
- *     в GPU-памяти после сброса одна текстура. Если OOM повторится даже
- *     на минимальном множестве — сработает бюджет шторма (abort).
- *   • strategy='abort' — восстановление бессмысленно:
- *     - сверхтяжёлый шейдер (watchdog убил контекст): replay/ленивый путь
- *       всё равно перекомпилирует тот же шейдер при первом draw;
- *     - шторм потерь (N за окно M мс): система деградировала.
+ *   • strategy='full' — an ordinary loss (webglcontextlost, device.lost
+ *     'destroyed'/'unknown') → replay of the whole journal: resources + content.
+ *   • strategy='soft' — out-of-memory → SOFT RESET: a full replay would repeat
+ *     the same allocations and crash again, BUT recovery is not "all or nothing".
+ *     We restore ONLY the scene's working set (restore(workingSet));
+ *     the other resources remain declarations in the journal and return
+ *     LAZILY on demand (ensureResident). One texture on screen —
+ *     one texture in GPU memory after the reset. If OOM repeats even
+ *     on the minimal set — the storm budget fires (abort).
+ *   • strategy='abort' — recovery is pointless:
+ *     - an ultra-heavy shader (the watchdog killed the context): the replay/lazy path
+ *       would still recompile the same shader on the first draw;
+ *     - a loss storm (N within an M ms window): the system has degraded.
  *
- * Решение принимает decideRecovery(event, history) — чистая функция без
- * состояния; окно шторма считает createLossBudget().
+ * The decision is made by decideRecovery(event, history) — a pure stateless
+ * function; the storm window is counted by createLossBudget().
  *
- * Интеграция: приложение слушает реальные события (canvas 'webglcontextlost',
- * device.lost, uncapturederror с GPUOutOfMemoryError) → формирует LossEvent →
- * decideRecovery → recover ? replay-путь (full/soft по strategy) : fatal-путь.
+ * Integration: the application listens to real events (canvas 'webglcontextlost',
+ * device.lost, uncapturederror with GPUOutOfMemoryError) → builds a LossEvent →
+ * decideRecovery → recover ? the replay path (full/soft by strategy) : the fatal path.
  */
 
-/** Класс потери. */
+/** Loss class. */
 export type LossKind =
-  | 'context-lost'      // WebGL2: webglcontextlost (обычная, восстановимая)
-  | 'device-destroyed'  // WebGPU: device.lost reason='destroyed' (ожидаемая: сами уничтожили при switch)
-  | 'device-unknown'    // WebGPU: device.lost reason='unknown' (драйвер/ОС/reset)
-  | 'out-of-memory'     // GL_OUT_OF_MEMORY / GPUOutOfMemoryError — аллокации не выдержит
-  | 'shader-compile'    // контекст убит компиляцией сверхтяжёлого шейдера (watchdog)
-  | 'loss-storm'        // слишком много потерь за короткое окно
+  | 'context-lost'      // WebGL2: webglcontextlost (ordinary, recoverable)
+  | 'device-destroyed'  // WebGPU: device.lost reason='destroyed' (expected: we destroyed it ourselves on switch)
+  | 'device-unknown'    // WebGPU: device.lost reason='unknown' (driver/OS/reset)
+  | 'out-of-memory'     // GL_OUT_OF_MEMORY / GPUOutOfMemoryError — allocations will not survive
+  | 'shader-compile'    // the context was killed by compiling an ultra-heavy shader (watchdog)
+  | 'loss-storm'        // too many losses within a short window
   | 'unknown'
 
 export type LossBackend = 'webgl2' | 'webgpu'
 
-/** Факт потери. at — epoch ms (Date.now()). */
+/** A loss fact. at — epoch ms (Date.now()). */
 export interface LossEvent {
   readonly kind: LossKind
   readonly backend: LossBackend
@@ -47,121 +47,121 @@ export interface LossEvent {
   readonly at: number
 }
 
-/** Стратегия восстановления (Task 65).
- *  full — replay всего журнала; soft — только рабочее множество сцены
- *  (остальное лениво через ensureResident); abort — не восстанавливать. */
+/** Recovery strategy (Task 65).
+ *  full — replay of the whole journal; soft — only the scene's working set
+ *  (the rest lazily via ensureResident); abort — do not recover. */
 export type RecoveryStrategy = 'full' | 'soft' | 'abort'
 
-/** Вердикт: восстанавливать ли контекст/устройство и как именно. */
+/** The verdict: whether to recover the context/device and how exactly. */
 export interface LossDecision {
-  /** false ТОЛЬКО для strategy='abort'. Эквивалент strategy !== 'abort'. */
+  /** false ONLY for strategy='abort'. Equivalent to strategy !== 'abort'. */
   readonly recover: boolean
-  /** Как восстанавливать (full/soft) или отказ (abort). */
+  /** How to recover (full/soft) or refusal (abort). */
   readonly strategy: RecoveryStrategy
   readonly kind: LossKind
   readonly message: string
 }
 
-/** Порог шторма: столько потерь за окно → loss-storm. */
+/** Storm threshold: this many losses within the window → loss-storm. */
 export const LOSS_STORM_WINDOW_MS = 10_000
 export const LOSS_STORM_MAX = 3
 
 /**
- * Решить: восстанавливаться после потери или фаталиться.
- * history — предыдущие потери (включая текущую не передаётся сюда).
+ * Decide: recover after the loss or go fatal.
+ * history — previous losses (the current one is not passed here).
  */
 export function decideRecovery(event: LossEvent, history: readonly LossEvent[] = []): LossDecision {
-  // Шторм: N потерь (включая текущую) за окно.
+  // Storm: N losses (including the current one) within the window.
   const recent = [...history, event].filter(e => event.at - e.at <= LOSS_STORM_WINDOW_MS)
   if (recent.length >= LOSS_STORM_MAX) {
     return {
       recover: false,
       strategy: 'abort',
       kind: 'loss-storm',
-      message: `Шторм потерь: ${recent.length} потерь за ${LOSS_STORM_WINDOW_MS / 1000} с — ` +
-        `система деградировала (драйвер/GPU/память). Восстановление замаскирует проблему и уйдёт в цикл. ` +
-        `Останавливаем рендер; перезапусти страницу или освободи память.`,
+      message: `Loss storm: ${recent.length} losses within ${LOSS_STORM_WINDOW_MS / 1000} s — ` +
+        `the system has degraded (driver/GPU/memory). Recovery would mask the problem and loop forever. ` +
+        `We stop rendering; restart the page or free up memory.`,
     }
   }
   switch (event.kind) {
     case 'out-of-memory':
-      // Task 65 soft reset: полный replay повторил бы аллокации — но нам и не
-      // нужен полный. Восстанавливаем ТОЛЬКО рабочее множество сцены; всё
-      // остальное живёт в журнале декларациями и возвращается лениво
-      // (ensureResident). Повторный OOM даже на минимальном множестве поймает
-      // бюджет шторма выше.
+      // Task 65 soft reset: a full replay would repeat the allocations — but we do not
+      // need a full one either. We restore ONLY the scene's working set; everything
+      // else lives in the journal as declarations and returns lazily
+      // (ensureResident). A repeated OOM even on the minimal set will be caught by
+      // the storm budget above.
       return {
         recover: true,
         strategy: 'soft',
         kind: event.kind,
-        message: 'Контекст упал из-за нехватки GPU-памяти (out-of-memory). ' +
-          'Полный replay повторил бы те же аллокации — вместо него SOFT RESET: ' +
-          'восстанавливаю только рабочее множество сцены, остальные ресурсы ' +
-          'остаются в журнале и вернутся в GPU-память лениво по требованию ' +
-          '(ensureResident). Если памяти не хватает даже сцене — уменьши размер ' +
-          'текстур/атласов, число целей рендера или разрешение канваса.',
+        message: 'The context was lost due to a GPU memory shortage (out-of-memory). ' +
+          'A full replay would repeat the same allocations — instead we do a SOFT RESET: ' +
+          'restoring only the scene working set, the remaining resources ' +
+          'stay in the journal and will return to GPU memory lazily on demand ' +
+          '(ensureResident). If memory is not enough even for the scene — reduce the size of ' +
+          'textures/atlas pages, the number of render targets, or the canvas resolution.',
       }
     case 'shader-compile':
       return {
         recover: false,
         strategy: 'abort',
         kind: event.kind,
-        message: 'Контекст убит, по-видимому, компиляцией сверхтяжёлого шейдера ' +
-          '(driver watchdog / переполнение). Ленивое восстановление не спасёт: ' +
-          'первый же draw перекомпилирует тот же шейдер — потеря повторится. ' +
-          'Упрости шейдер (меньше инструкций/циклов/семплов) и перезапусти.',
+        message: 'The context was killed, apparently by compiling an ultra-heavy shader ' +
+          '(driver watchdog / overflow). Lazy recovery will not help: ' +
+          'the very first draw will recompile the same shader — the loss will repeat. ' +
+          'Simplify the shader (fewer instructions/loops/samples) and restart.',
       }
     case 'context-lost':
       return {
         recover: true,
         strategy: 'full',
         kind: event.kind,
-        message: 'WebGL2-контекст потерян (обычная потеря). Восстанавливаем: replay журнала ' +
-          'первичных ресурсов вернёт текстуры/цели/views и их контент.',
+        message: 'The WebGL2 context was lost (an ordinary loss). Recovering: a replay of the journal ' +
+          'of primary resources will restore textures/targets/views and their content.',
       }
     case 'device-destroyed':
       return {
         recover: true,
         strategy: 'full',
         kind: event.kind,
-        message: 'GPU-устройство уничтожено (ожидаемо при смене бэкенда/dispose). ' +
-          'Восстанавливаем replay-ем журнала на новом устройстве.',
+        message: 'The GPU device was destroyed (expected on backend switch/dispose). ' +
+          'Recovering by replaying the journal on the new device.',
       }
     case 'device-unknown':
       return {
         recover: true,
         strategy: 'full',
         kind: event.kind,
-        message: 'GPU-устройство потеряно по неизвестной причине (драйвер/ОС/reset). ' +
-          'Пробуем восстановить replay-ем журнала; при повторе сработает бюджет шторма.',
+        message: 'The GPU device was lost for an unknown reason (driver/OS/reset). ' +
+          'We try to recover by replaying the journal; if it repeats, the storm budget will fire.',
       }
     case 'loss-storm':
       return {
         recover: false,
         strategy: 'abort',
         kind: event.kind,
-        message: 'Шторм потерь устройства. Восстановление отменено.',
+        message: 'Device loss storm. Recovery cancelled.',
       }
     default:
       return {
         recover: true,
         strategy: 'full',
         kind: 'unknown',
-        message: 'Потеря устройства неизвестного типа. Пробуем восстановить replay-ем журнала.',
+        message: 'Device loss of an unknown type. We try to recover by replaying the journal.',
       }
   }
 }
 
 /**
- * Бюджет шторма: скользящее окно потерь. note() фиксирует потерю,
- * storm() отвечает, достигнут ли порог. Проще, чем таскать history руками.
+ * Storm budget: a sliding window of losses. note() records a loss,
+ * storm() answers whether the threshold has been reached. Simpler than carrying history by hand.
  */
 export interface LossBudget {
   note(event: LossEvent): void
   storm(): boolean
   events(): readonly LossEvent[]
-  /** Сбросить окно (например, после успешного восстановления вручную
-   *  или когда симуляция кнопкой не должна считаться штормом). */
+  /** Reset the window (e.g., after a successful manual recovery
+   *  or when a button-triggered simulation must not count as a storm). */
   reset(): void
 }
 
@@ -170,7 +170,7 @@ export function createLossBudget(windowMs: number = LOSS_STORM_WINDOW_MS, maxLos
   return {
     note(event) {
       events.push(event)
-      // выкидываем всё за пределами окна (окно считаем от последнего события)
+      // drop everything outside the window (the window is counted from the last event)
       while (events.length > 0 && event.at - events[0]!.at > windowMs) events.shift()
     },
     storm() {
@@ -186,17 +186,17 @@ export function createLossBudget(windowMs: number = LOSS_STORM_WINDOW_MS, maxLos
 }
 
 /**
- * Классификация WebGPU uncapturederror (GPUUncapturedErrorEvent.error):
+ * Classification of a WebGPU uncapturederror (GPUUncapturedErrorEvent.error):
  * GPUOutOfMemoryError → 'out-of-memory'; GPUValidationError → 'unknown'
- * (валидация — баг кода, не фатальна для устройства; но если контекст уже
- * умер — классифицирует вызывающий по device.lost).
+ * (validation — a code bug, not fatal for the device; but if the context is already
+ * dead — the caller classifies by device.lost).
  */
 export function classifyGpuError(error: unknown): LossKind {
   if (typeof GPUOutOfMemoryError !== 'undefined' && error instanceof GPUOutOfMemoryError) return 'out-of-memory'
   return 'unknown'
 }
 
-/** Классификация device.lost (GPUDeviceLostInfo.reason). */
+/** Classification of device.lost (GPUDeviceLostInfo.reason). */
 export function classifyDeviceLost(reason: string | undefined): LossKind {
   if (reason === 'destroyed') return 'device-destroyed'
   return 'device-unknown'

@@ -1,23 +1,23 @@
 /**
- * core/library.ts — AssetLibrary: именованная библиотека ассетов поверх
- * LoadManager — прелоадинг, refcount, TTL, байтовый бюджет (LRU).
+ * core/library.ts — AssetLibrary: a named asset library on top of
+ * LoadManager — preloading, refcount, TTL, byte budget (LRU).
  *
- * Сценарий:
+ * Scenario:
  *   const lib = createAssetLibrary({ manager, maxBytes: 256 << 20 })
  *   lib.define([{ id: 'hero', url: 'hero.glb', kind: 'gltf' },
  *               { id: 'env', url: 'quarry.hdr', kind: 'hdr', tags: ['env'] }])
- *   lib.preload(['hero'])                  // prefetch-приоритетом, в фоне
+ *   lib.preload(['hero'])                  // at prefetch priority, in the background
  *   const h = lib.acquire<MeshDocument>('hero'); const doc = await h.ready
- *   ... h.release()                        // refcount 0 → кандидат на TTL
- *   lib.preload(e => e.tags?.includes('env')) // прелоад «следующего уровня»
+ *   ... h.release()                        // refcount 0 → TTL candidate
+ *   lib.preload(e => e.tags?.includes('env')) // "next level" preload
  *
- * Бюджет: байты ассета считает estimateBytes (эвристика по типу данных);
- * при превышении maxBytes выталкиваются LRU-записи с refcount=0. TTL
- * (время жизни нулевого refcount) защищает от «загрузил-выгрузил».
+ * Budget: asset bytes are counted by estimateBytes (a heuristic by data
+ * type); when maxBytes is exceeded, LRU entries with refcount=0 are evicted.
+ * TTL (the lifetime of a zero refcount) protects against "load-evict" thrashing.
  *
- * GPU-резидентность — НЕ здесь: @rune/kit AssetCache делает то же для
- * текстур по кадрам; библиотека — про сеть/парсинг. Мост: acquire → upload
- * → kit-кэш, release по уходу со сцены.
+ * GPU residency is NOT here: @rune/kit AssetCache does the same for textures
+ * per frame; the library is about network/parsing. The bridge: acquire →
+ * upload → kit cache, release when leaving the scene.
  */
 
 import type { LoadHandle, LoadOptions, Parser } from './types.ts'
@@ -26,25 +26,25 @@ import { createLoadManager } from './manager.ts'
 import { Priority } from './types.ts'
 import { LoadError } from './errors.ts'
 
-// ─── типы ────────────────────────────────────────────────────────────────────
+// ─── types ────────────────────────────────────────────────────────────────────
 
-/** Описание ассета в библиотеке/манифесте. */
+/** Asset description in a library/manifest. */
 export interface AssetEntrySpec {
-  /** Уникальный id, по которому acquire/preload. */
+  /** Unique id for acquire/preload. */
   readonly id: string
-  /** URL (или data:) источника. */
+  /** Source URL (or data:). */
   readonly url: string
-  /** Формат из реестра менеджера; sniffing, если не задан. */
+  /** Format from the manager's registry; sniffing if not specified. */
   readonly kind?: string
-  /** Приоритет для acquire (default normal). Preload всегда prefetch. */
+  /** Priority for acquire (default normal). Preload is always prefetch. */
   readonly priority?: number
-  /** Теги для фильтров прелоадинга («next-level», «env», ...). */
+  /** Tags for preload filters ("next-level", "env", ...). */
   readonly tags?: readonly string[]
-  /** Опции парсера (resize картинок и т.п.). */
+  /** Parser options (image resize etc.). */
   readonly parserOptions?: unknown
-  /** Хэндл парсера напрямую (переопределяет kind). */
+  /** Parser handle directly (overrides kind). */
   readonly parser?: Parser<any, any>
-  /** Прелоадить сразу после define. */
+  /** Preload immediately after define. */
   readonly preload?: boolean
 }
 
@@ -55,9 +55,9 @@ export interface AssetManifest {
 export interface LibraryHandle<T = unknown> {
   readonly id: string
   readonly ready: Promise<T>
-  /** undefined, пока не загружен. */
+  /** undefined until loaded. */
   readonly value: T | undefined
-  /** Декремент refcount; идемпотентно. */
+  /** Decrements the refcount; idempotent. */
   release(): void
 }
 
@@ -70,51 +70,51 @@ export interface LibraryStats {
 }
 
 export interface AssetLibraryOptions {
-  /** Менеджер; создаётся свой (default fetch), если не передан. */
+  /** Manager; a private one is created (default fetch) if not passed. */
   manager?: LoadManager
-  /** Байтовый бюджет (default ∞). */
+  /** Byte budget (default ∞). */
   maxBytes?: number
-  /** Время жизни нулевого refcount, мс (default 30_000). */
+  /** Lifetime of a zero refcount, ms (default 30_000). */
   ttlMs?: number
   now?: () => number
-  /** Оценка веса ассета в байтах (эвристика по умолчанию). */
+  /** Asset weight estimate in bytes (default heuristic). */
   estimateBytes?: (asset: unknown) => number
-  /** Диспозер (например, bitmap.close()). */
+  /** Disposer (e.g. bitmap.close()). */
   disposeAsset?: (asset: unknown) => void
 }
 
 export interface PreloadOptions {
-  /** Приоритет прелоада (default Priority.prefetch). */
+  /** Preload priority (default Priority.prefetch). */
   priority?: number
-  /** Прогресс/сигнал/мета — в LoadOptions менеджера. */
+  /** Progress/signal/meta — into the manager's LoadOptions. */
   onProgress?: LoadOptions['onProgress']
   signal?: LoadOptions['signal']
 }
 
 export interface AssetLibrary {
-  /** Зарегистрировать/обновить описания ассетов. */
+  /** Register/update asset descriptions. */
   define(entries: AssetEntrySpec | readonly AssetEntrySpec[]): void
-  /** Прелоад в фоне: грузит по prefetch-приоритету, refcount остаётся 0. */
+  /** Background preload: loads at prefetch priority, refcount stays 0. */
   preload(
     filter: string | readonly string[] | ((spec: AssetEntrySpec) => boolean),
     options?: PreloadOptions,
   ): readonly LoadHandle<unknown>[]
-  /** Взять ассет: resident → сразу, иначе загрузка через менеджер. */
+  /** Take an asset: resident → immediately, otherwise load via the manager. */
   acquire<T = unknown>(id: string, options?: { priority?: number }): LibraryHandle<T>
-  /** Значение, если резидентно (не грузит). */
+  /** The value if resident (does not load). */
   peek(id: string): unknown | undefined
-  /** Ошибка последней загрузки, если была. */
+  /** The last load error, if any. */
   errorOf(id: string): unknown | undefined
-  /** Вытолкнуть запись (идемпотентно). */
+  /** Evict an entry (idempotent). */
   evict(id?: string): boolean
-  /** Снапшот состояния. */
+  /** State snapshot. */
   stats(): LibraryStats
-  /** Всё выгрузить и закрыть. */
+  /** Unload everything and close. */
   dispose(): void
   readonly manager: LoadManager
 }
 
-// ─── реализация ──────────────────────────────────────────────────────────────
+// ─── implementation ──────────────────────────────────────────────────────────────
 
 interface Entry {
   spec: AssetEntrySpec
@@ -141,7 +141,7 @@ export function createAssetLibrary(options: AssetLibraryOptions = {}): AssetLibr
     const list = Array.isArray(input) ? input : [input]
     for (const spec of list) {
       if (typeof spec.id !== 'string' || spec.id.length === 0) {
-        throw new LoadError('source', 'define: id обязателен')
+        throw new LoadError('source', 'define: id is required')
       }
       entries.set(spec.id, {
         spec,
@@ -221,10 +221,10 @@ export function createAssetLibrary(options: AssetLibraryOptions = {}): AssetLibr
     sweep()
     const entry = entries.get(id)
     if (entry === undefined) {
-      throw new LoadError('source', `AssetLibrary: ассет "${id}" не определён (define primero)`)
+      throw new LoadError('source', `AssetLibrary: asset "${id}" is not defined (define primero)`)
     }
     if (entry.hasError && entry.inflight === null && entry.value === undefined) {
-      // предыдущая попытка упала — перегружаем
+      // the previous attempt failed — reload
       entry.hasError = false
     }
     entry.refcount++
@@ -267,7 +267,7 @@ export function createAssetLibrary(options: AssetLibraryOptions = {}): AssetLibr
     return handle
   }
 
-  /** Ленивая уборка: TTL истёк → dispose; байтовый бюджет → LRU. */
+  /** Lazy sweeping: TTL expired → dispose; byte budget → LRU. */
   function sweep(): void {
     const t = now()
     for (const [id, entry] of entries) {
@@ -286,7 +286,7 @@ export function createAssetLibrary(options: AssetLibraryOptions = {}): AssetLibr
     let total = 0
     for (const entry of entries.values()) total += entry.bytes
     if (total <= maxBytes) return
-    // кандидаты: refcount 0 и value есть — LRU по lastTouched
+    // candidates: refcount 0 and a value — LRU by lastTouched
     const candidates = [...entries.values()]
       .filter(e => e.refcount === 0 && e.value !== undefined)
       .sort((a, b) => a.lastTouched - b.lastTouched)
@@ -303,7 +303,7 @@ export function createAssetLibrary(options: AssetLibraryOptions = {}): AssetLibr
       try {
         disposeAsset(entry.value)
       } catch {
-        // диспозер не должен ронять библиотеку
+        // the disposer must not bring down the library
       }
     }
     entry.value = undefined
@@ -366,7 +366,7 @@ export function createAssetLibrary(options: AssetLibraryOptions = {}): AssetLibr
   }
 }
 
-/** Эвристика веса: TypedArray → byteLength; bitmap → w*h*4; иначе 0. */
+/** Weight heuristic: TypedArray → byteLength; bitmap → w*h*4; otherwise 0. */
 function defaultEstimateBytes(asset: unknown): number {
   if (asset === null || asset === undefined) return 0
   if (asset instanceof Uint8Array) return asset.byteLength

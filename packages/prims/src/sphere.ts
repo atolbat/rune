@@ -1,24 +1,24 @@
 /**
- * UV-сфера (широта/долгота): widthSegments × heightSegments квадов
- * (Task 109: имена параметров — как SphereGeometry в three.js; прежде
- * segments/rings), нормали аналитические (радиальные). Пояс j=0 (φ=0,
- * север) и j=bands−1 (φ=π, юг) схлопнуты в полюс: их полквада с ДВУМЯ
- * полюсными вершинами (нулевая площадь) отбрасывается, второй эмитится —
- * полюсные веера без вырожденных треугольников.
+ * UV sphere (latitude/longitude): widthSegments × heightSegments quads
+ * (Task 109: parameter names — like SphereGeometry in three.js; previously
+ * segments/rings), analytical (radial) normals. The bands j=0 (φ=0, north)
+ * and j=bands−1 (φ=π, south) are collapsed into a pole: their half-quad
+ * with TWO pole vertices (zero area) is discarded, the second one is
+ * emitted — pole fans without degenerate triangles.
  *
- * БАГ Task 108 (дыра у полюса): цикл шел до bands−1 — последний пояс
- * (до φ=π) НЕ эмитился вовсе. Фикс: полный цикл j < bands, полюс —
- * ровно крайние пояса.
+ * Task 108 BUG (hole at the pole): the loop went to bands−1 — the last
+ * band (up to φ=π) was NOT emitted at all. Fix: full loop j < bands, the
+ * pole is exactly the extreme bands.
  */
 
 import type { Geometry } from './types.ts'
 
 export interface SphereParams {
-  /** Радиус (default 1). */
+  /** Radius (default 1). */
   readonly radius?: number
-  /** Сегментов по долготе (вокруг оси Y, default 48). */
+  /** Segments along longitude (around the Y axis, default 48). */
   readonly widthSegments?: number
-  /** Поясов по широте (полюс → полюс, default 32). */
+  /** Bands along latitude (pole → pole, default 32). */
   readonly heightSegments?: number
 }
 
@@ -26,8 +26,8 @@ export function sphere(params: SphereParams = {}): Geometry {
   const radius = params.radius ?? 1
   const radial = Math.max(3, Math.floor(params.widthSegments ?? 48))
   const bands = Math.max(2, Math.floor(params.heightSegments ?? 32))
-  // Полных поясов (bands−2) по 2 треугольника + 2 полюсных по radial —
-  // ровно (bands−1)·radial квад-эквивалентов (prealloc точный)
+  // Full bands (bands−2) with 2 triangles each + 2 pole fans of radial —
+  // exactly (bands−1)·radial quad equivalents (exact prealloc)
   const quads = (bands - 1) * radial
   const positions = new Float32Array(quads * 6 * 3)
   const normals = new Float32Array(quads * 6 * 3)
@@ -49,17 +49,17 @@ export function sphere(params: SphereParams = {}): Geometry {
     v++
   }
   for (let j = 0; j < bands; j++) {
-    const phi0 = (j / bands) * Math.PI // 0 = северный полюс (+Y)
+    const phi0 = (j / bands) * Math.PI // 0 = north pole (+Y)
     const phi1 = ((j + 1) / bands) * Math.PI
-    const northPole = j === 0 // phi0 = 0: весь полюсный ряд — ОДНА точка
-    const southPole = j === bands - 1 // phi1 = π: нижний ряд схлопнут
+    const northPole = j === 0 // phi0 = 0: the entire pole row is ONE point
+    const southPole = j === bands - 1 // phi1 = π: the bottom row collapses
     for (let i = 0; i < radial; i++) {
       const t0 = (i / radial) * Math.PI * 2
       const t1 = ((i + 1) / radial) * Math.PI * 2
       const u0 = i / radial
       const u1 = (i + 1) / radial
-      // CCW снаружи; половины квада, схлопывающиеся в полюсную точку
-      // (обе вершины на полюсе — нулевая площадь), пропускаем
+      // CCW from outside; half-quads collapsing into a pole point
+      // (both vertices at the pole — zero area) are skipped
       if (!southPole) {
         emit(phi1, t0, u0, (j + 1) / bands)
         emit(phi1, t1, u1, (j + 1) / bands)

@@ -5,8 +5,8 @@ import { createRecordingGL } from '@rune/webgl2'
 import { createRecordingGPU } from '@rune/webgpu'
 
 /**
- * createAutoRenderer — интеграционный путь: probe → resolveBackend → inner.
- * Late-reject: r.command(spec) с неподходящим шейдером кидает actionable-ошибку.
+ * createAutoRenderer — the integration path: probe → resolveBackend → inner.
+ * Late-reject: r.command(spec) with an unsuitable shader throws an actionable error.
  */
 
 function fakeCanvas(): HTMLCanvasElement {
@@ -39,8 +39,8 @@ const WGSL_ONLY: AutoDrawSpec = {
 
 const COMMON = { observeResize: false, requestFrame: () => () => {}, now: () => 0 }
 
-describe('createAutoRenderer — late-reject + интеграция', () => {
-  it('GLSL-only спек, оба бэкенда доступны → тихий фолбэк на WebGL2 с reason', async () => {
+describe('createAutoRenderer — late-reject + integration', () => {
+  it('GLSL-only spec, both backends available → silent fallback to WebGL2 with a reason', async () => {
     const recording = createRecordingGL()
     const r = await createAutoRenderer({
       canvas: fakeCanvas(),
@@ -51,14 +51,14 @@ describe('createAutoRenderer — late-reject + интеграция', () => {
     expect(r.backend).toBe('webgl2')
     expect(r.decision.chosen).toBe('webgl2')
     expect(r.decision.message).toContain('WebGL2')
-    expect(r.decision.message).toContain('спекы без WGSL')
+    expect(r.decision.message).toContain('specs without WGSL')
     r.stop()
   })
 
-  it('dual-source без инъекций → BackendResolutionError (нет navigator.gpu в node)', async () => {
-    // В node: navigator.gpu отсутствует → probe возвращает false
-    // WebGL2-проба через canvas.cloneNode тоже упадёт (нет getContext в fake)
-    // → нет ни одного hardware → конфликт
+  it('dual-source without injections → BackendResolutionError (no navigator.gpu in node)', async () => {
+    // In node: navigator.gpu is missing → the probe returns false
+    // The WebGL2 probe via canvas.cloneNode will also fail (no getContext in the fake)
+    // → no hardware at all → conflict
     await expect(createAutoRenderer({
       canvas: fakeCanvas(),
       specs: [DUAL],
@@ -66,7 +66,7 @@ describe('createAutoRenderer — late-reject + интеграция', () => {
     })).rejects.toThrow()
   })
 
-  it('strict order=["webgl2"] → WebGL2, даже если спек dual-source', async () => {
+  it('strict order=["webgl2"] → WebGL2, even if the spec is dual-source', async () => {
     const recording = createRecordingGL()
     const r = await createAutoRenderer({
       canvas: fakeCanvas(),
@@ -76,11 +76,11 @@ describe('createAutoRenderer — late-reject + интеграция', () => {
       ...COMMON,
     })
     expect(r.backend).toBe('webgl2')
-    expect(r.decision.message).toContain('Принудительный')
+    expect(r.decision.message).toContain('Forced')
     r.stop()
   })
 
-  it('late-reject: GLSL-only command на WebGL2 работает', async () => {
+  it('late-reject: a GLSL-only command on WebGL2 works', async () => {
     const recording = createRecordingGL()
     const r = await createAutoRenderer({
       canvas: fakeCanvas(),
@@ -93,7 +93,7 @@ describe('createAutoRenderer — late-reject + интеграция', () => {
     r.stop()
   })
 
-  it('late-reject: WGSL-only command на WebGL2 кидает actionable-ошибку', async () => {
+  it('late-reject: a WGSL-only command on WebGL2 throws an actionable error', async () => {
     const recording = createRecordingGL()
     const r = await createAutoRenderer({
       canvas: fakeCanvas(),
@@ -102,12 +102,12 @@ describe('createAutoRenderer — late-reject + интеграция', () => {
       createGL: () => recording.gl,
       ...COMMON,
     })
-    expect(() => r.command(WGSL_ONLY)).toThrow(/только WGSL.*activ.*WebGL2|activ.*back.*WebGL2|перЗапустите|перезапустите/i)
+    expect(() => r.command(WGSL_ONLY)).toThrow(/only WGSL.*activ.*WebGL2|activ.*back.*WebGL2|Restart|restart/i)
     r.stop()
   })
 
-  it('strict order=["webgpu"], инжекция createGPU → WebGPU работает', async () => {
-    // Стаб navigator.gpu для probeGpu по умолчанию
+  it('strict order=["webgpu"], createGPU injection → WebGPU works', async () => {
+    // A navigator.gpu stub for the default probeGpu
     const original = (globalThis as { navigator?: unknown }).navigator
     ;(globalThis as { navigator?: unknown }).navigator = { gpu: { requestAdapter: async () => ({}) } }
     try {
@@ -120,28 +120,28 @@ describe('createAutoRenderer — late-reject + интеграция', () => {
         ...COMMON,
       })
       expect(r.backend).toBe('webgpu')
-      expect(r.decision.message).toContain('Принудительный')
+      expect(r.decision.message).toContain('Forced')
       r.stop()
     } finally {
       ;(globalThis as { navigator?: unknown }).navigator = original
     }
   })
 
-  it('BackendResolutionError несёт структурированный decision', async () => {
+  it('BackendResolutionError carries a structured decision', async () => {
     try {
       await createAutoRenderer({
         canvas: fakeCanvas(),
-        order: ['webgpu'], // strict WebGPU, в node недоступен
+        order: ['webgpu'], // strict WebGPU, unavailable in node
         specs: [DUAL],
         ...COMMON,
       })
-      expect.unreachable('должна бросить')
+      expect.unreachable('must throw')
     } catch (e) {
       expect(e).toBeInstanceOf(BackendResolutionError)
       const err = e as BackendResolutionError
       expect(err.decision.chosen).toBeNull()
       expect(err.decision.verdicts.webgpu.available).toBe(false)
-      expect(err.decision.message).toContain('недоступен')
+      expect(err.decision.message).toContain('unavailable')
     }
   })
 })

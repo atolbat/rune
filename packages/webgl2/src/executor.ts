@@ -1,8 +1,8 @@
 /**
- * Исполнитель ленты WebGL2: интерпретация опкодов поверх фасада.
- * Юниформы — ПО ИМЕНИ (ленивые location-кэши), value-compare в арене
- * подавляет повторные загрузки; state-кэш пропускает бесполезные
- * переключения глубины/куллинга между командами.
+ * WebGL2 tape executor: interprets opcodes on top of the facade.
+ * Uniforms — BY NAME (lazy location caches), value-compare in the arena
+ * suppresses redundant uploads; the state cache skips useless
+ * depth/culling switches between commands.
  */
 
 import type { SegmentStore, TapeView, UniformArena } from '@rune/core'
@@ -42,13 +42,13 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
       if (op === 1) beginPass()
       else if (op === 2) drawCommand(commands[view.a[at]], view.c[at], view.d[at])
       else if (op === 4) gl.bindTarget(view.a[at], view.b[at] === 1)
-      // EndPass (3): кадровая скобка, GL-очистки не требует
+      // EndPass (3): a frame bracket, requires no GL cleanup
     }
   }
 
   function beginPass(): void {
-    // Гарантированный возврат на канвас: прошлый кадр мог закончиться
-    // на поверхности (skip внутри фасада, если уже канвас)
+    // Guaranteed return to the canvas: the previous frame may have ended
+    // on a surface (skip inside the facade if already on the canvas)
     gl.bindTarget(0, false)
     const clear = clears[0] ?? DEFAULT_CLEAR
     gl.clear(clear.color, clear.depth)
@@ -77,10 +77,10 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
       gl.setUniform1i(rich.programId!, sampler.name, sampler.unit)
     }
     for (const attribute of rich.attributes) {
-      // M5 (Task 73): feed dual-bind — внешний буфер рендерера фида с
-      // интерливингом (stride/offset); свой буфер — tight-раскладка.
-      // Task 75: instance-атрибут — divisor 1 (одна запись фида на инстанс,
-      // углы квада разворачиваются из gl_VertexID).
+      // M5 (Task 73): feed dual-bind — the feed renderer's external buffer with
+      // interleaving (stride/offset); our own buffer — a tight layout.
+      // Task 75: an instance attribute — divisor 1 (one feed record per instance,
+      // the quad corners are unfolded from gl_VertexID).
       const divisor = attribute.instance === true ? 1 : 0
       if (attribute.bufferId !== undefined) {
         gl.bindVertexBuffer(attribute.bufferId, attribute.location, attribute.size, attribute.stride, attribute.offset, divisor)
@@ -100,7 +100,7 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
     }
     if (rich.programId === undefined) {
       rich.programId = gl.createProgram(rich.glsl.vertex, rich.glsl.fragment)
-      // M5: атрибут фида живёт во внешнем буфере рендерера — свой не создаём.
+      // M5: a feed attribute lives in the feed renderer's external buffer — we do not create our own.
       rich.bufferIds = rich.attributes.map(attribute => attribute.bufferId !== undefined ? -1 : gl.createBuffer(attribute.data))
     }
   }
@@ -116,7 +116,7 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
       gl.setCull(state.cull)
       lastCull = state.cull
     }
-    // Task 75: блендинг пайплайна (аддитив/прозрачность для квадов-звёзд).
+    // Task 75: pipeline blending (additive/transparency for star quads).
     const blendKey = state.blend === null ? 'off' : `${state.blend.src}/${state.blend.dst}`
     if (blendKey !== lastBlend) {
       gl.setBlend(state.blend === null ? null : state.blend.src, state.blend === null ? null : state.blend.dst)

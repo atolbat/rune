@@ -1,34 +1,34 @@
 /**
- * withJournal — декоратор GLFacade: пишет create/destroy-опсы в Journal.
+ * withJournal — a GLFacade decorator: writes create/destroy ops to the Journal.
  *
- * Контракт §9.5 P3: журнал делает switchBackend = device-loss recovery =
- * = worker migration одним механизмом replay.
+ * Contract §9.5 P3: the journal makes switchBackend = device-loss recovery =
+ * = worker migration one replay mechanism.
  *
- * Что журналируется автоматически:
+ * What is journaled automatically:
  *   - createTexture(w,h) → {kind:'createTexture', id, width, height}
  *   - createProgram(v,f) → {kind:'createProgram', id, vertex, fragment}
  *   - createBuffer(data) → {kind:'createBuffer', id, data}
  *   - createTarget(...)  → {kind:'createTarget', id, textureId, w, h, depth, color}
  *   - texImage2DFromSource(tex, src, opt) → {kind:'texImage2DFromSource', textureId, sourceKind, flipY}
  *
- * Чего в журнале НЕТ (намеренно):
- *   - Frame-опсы (useProgram, setUniform*, bindTexture, bindTarget, drawArrays,
- *     setViewport, clear, setDepthMode, setCull, texSubImage2D-стриминг) —
- *     это per-frame, идут в Tape, а не в Journal.
- *   - Источник texImage2DFromSource не сериализуется (ImageBitmap может быть
- *     закрыт, HTMLCanvasElement — DOM-зависим). Журнал хранит только kind+flipY;
- *     при replay пользователь предоставляет источник через sourceFor(kind).
+ * What is NOT in the journal (deliberately):
+ *   - Frame ops (useProgram, setUniform*, bindTexture, bindTarget, drawArrays,
+ *     setViewport, clear, setDepthMode, setCull, texSubImage2D streaming) —
+ *     these are per-frame, they go to the Tape, not the Journal.
+ *   - The texImage2DFromSource source is not serialized (an ImageBitmap may be
+ *     closed, HTMLCanvasElement is DOM-dependent). The journal stores only kind+flipY;
+ *     on replay the user provides the source via sourceFor(kind).
  *
- * Replay на новом фасаде: journal.replay(op => applyOp(op, targetGL, sourceFor?))
- *   — см. replayJournalOn в этом же файле. Все create-опсы выполняются в
- *   порядке записи; destroy-опсы пока no-op на новом фасаде (ресурсов ещё нет).
+ * Replay on a new facade: journal.replay(op => applyOp(op, targetGL, sourceFor?))
+ *   — see replayJournalOn in this same file. All create ops are executed in
+ *   record order; destroy ops are a no-op on a new facade for now (the resources do not exist yet).
  */
 
 import type { Journal, DeclOp, ClearColor } from '@rune/core'
 import { toFloat32Array } from '@rune/core'
 import type { GLFacade, GLImageSource } from '@rune/webgl2'
 
-/** Декорирует GLFacade так, что create/destroy-опсы пишутся в Journal. */
+/** Decorates GLFacade so that create/destroy ops are written to the Journal. */
 export function withJournal(gl: GLFacade, journal: Journal): GLFacade {
   return {
     createProgram: (vertex, fragment) => {
@@ -43,7 +43,7 @@ export function withJournal(gl: GLFacade, journal: Journal): GLFacade {
       return id
     },
     bindVertexBuffer: (bufferId, location, size, stride, byteOffset, divisor) => gl.bindVertexBuffer(bufferId, location, size, stride, byteOffset, divisor),
-    // M5 (Task 73): feed dual-bind — frame-op (per-frame dirty range), не журналируется.
+    // M5 (Task 73): feed dual-bind — a frame op (per-frame dirty range), not journaled.
     updateBuffer: (bufferId, data, byteOffset) => gl.updateBuffer(bufferId, data, byteOffset),
     setUniformMatrix4: (programId, name, values) => gl.setUniformMatrix4(programId, name, values),
     setUniform4fv: (programId, name, values) => gl.setUniform4fv(programId, name, values),
@@ -53,8 +53,8 @@ export function withJournal(gl: GLFacade, journal: Journal): GLFacade {
     setUniform1i: (programId, name, value) => gl.setUniform1i(programId, name, value),
     createTexture: (width, height, options) => {
       const id = gl.createTexture(width, height, options)
-      // Task 67: формат хранения — в v1-опс (журнальное имя 'rgba16float'),
-      // чтобы replay/switch-backend пересоздал текстуру тем же форматом.
+      // Task 67: the storage format goes into the v1 op (journal name 'rgba16float'),
+      // so that replay/switch-backend recreates the texture with the same format.
       const format = options?.format === 'rgba16f' ? 'rgba16float' as const
         : options?.format === 'rgba32f' ? 'rgba32float' as const
         : undefined
@@ -72,22 +72,22 @@ export function withJournal(gl: GLFacade, journal: Journal): GLFacade {
         flipY: options?.flipY ?? false,
       })
     },
-    // Frame-опсы (per-frame): texSubImage2DFromSource + texImage2DLevel —
-    // progressive mip streaming / sub-region upload. Не журналируются
-    // (как и другие frame-опсы — см. контракт §9.5 P3: frame-опсы в Tape).
-    // Pass-through без journal.record().
+    // Frame ops (per-frame): texSubImage2DFromSource + texImage2DLevel —
+    // progressive mip streaming / sub-region upload. Not journaled
+    // (like other frame ops — see the contract §9.5 P3: frame ops go to the Tape).
+    // Pass-through without journal.record().
     texSubImage2DFromSource: (textureId, x, y, source, options) =>
       gl.texSubImage2DFromSource(textureId, x, y, source, options),
     texImage2DLevel: (textureId, level, source, options) =>
       gl.texImage2DLevel(textureId, level, source, options),
     bindTexture: (textureOrViewId, unit) => gl.bindTexture(textureOrViewId, unit),
     // Sub-mip views (Task 56): createTextureView/destroyTextureView —
-    // долгоживущие декларации (как createTexture). Журналируем для device-loss
-    // recovery: при replay на новом backend'е вид воссоздаётся через
+    // long-lived declarations (like createTexture). Journaled for device-loss
+    // recovery: on replay on a new backend the view is recreated via
     // target.createTextureView(textureId, { baseMipLevel, mipLevelCount }).
-    // ВАЖНО: textureId в записи — это id на ТЕКУЩЕМ backend'е. При replay
-    // caller должен замапить его на новый id (через registerIdMap или
-    // подобный механизм) — applyOp ниже делегирует это вызывающему коду.
+    // IMPORTANT: textureId in the record is the id on the CURRENT backend. On replay
+    // the caller must map it to the new id (via registerIdMap or
+    // a similar mechanism) — applyOp below delegates this to the calling code.
     createTextureView: (textureId, options) => {
       const viewId = gl.createTextureView(textureId, options)
       journal.record({
@@ -115,11 +115,11 @@ export function withJournal(gl: GLFacade, journal: Journal): GLFacade {
       return id
     },
     bindTarget: (targetId, clear) => gl.bindTarget(targetId, clear),
-    // Task 80: readback — ЧТЕНИЕ, не декларация: не журналируется (как
-    // frame-опсы §9.5 P3 — replay не нужен, результат живёт один вызов).
+    // Task 80: readback — a READ, not a declaration: not journaled (like
+    // frame ops §9.5 P3 — no replay needed, the result lives for one call).
     readTargetPixels: targetId => gl.readTargetPixels(targetId),
-    // destroy-опсы: пишем в журнал, чтобы Journal.compact() мог спаривать
-    // create+destroy. Replay на новом фасаде — destroy no-op (см. applyOp).
+    // destroy ops: written to the journal so that Journal.compact() can pair
+    // create+destroy. On replay on a new facade — destroy is a no-op (see applyOp).
     deleteTexture: textureId => {
       gl.deleteTexture(textureId)
       journal.record({ kind: 'destroyTexture', id: textureId })
@@ -140,14 +140,14 @@ export function withJournal(gl: GLFacade, journal: Journal): GLFacade {
 }
 
 /**
- * Replay журнала на целевом GLFacade — для device-loss recovery.
+ * Replay the journal onto a target GLFacade — for device-loss recovery.
  *
- * sourceFor — callback для texImage2DFromSource: возвращает источник по kind
- * (например, 'ImageBitmap' → подготовленный битмап). Если callback не передан
- * или вернул null — опс пропускается (ресурс остаётся «пустой текстурой»).
+ * sourceFor — a callback for texImage2DFromSource: returns the source by kind
+ * (e.g. 'ImageBitmap' → a prepared bitmap). If the callback is not passed
+ * or returns null — the op is skipped (the resource remains an "empty texture").
  *
- * Идемпотентность: повторный replay создаст ДУБЛИКАТЫ ресурсов (realGL
- * всегда выдаёт новый id). Правильное использование — на СВЕЖЕМ backend'е.
+ * Idempotence: a repeated replay will create DUPLICATES of resources (realGL
+ * always issues a new id). The correct usage is on a FRESH backend.
  */
 export function replayJournalOn(
   journal: Journal,
@@ -157,14 +157,14 @@ export function replayJournalOn(
   journal.replay(op => applyOp(op, target, sourceFor))
 }
 
-/** Применить один DeclOp к целевому GLFacade. */
+/** Apply one DeclOp to the target GLFacade. */
 function applyOp(op: DeclOp, gl: GLFacade, sourceFor?: (kind: string) => GLImageSource | null): void {
   switch (op.kind) {
     case 'createTexture':
-      // Игнорируем возвращаемый id: на новом фасаде id будет другим.
-      // Порядок важен: texture 1 → createTexture 1, texture 2 → createTexture 2,
-      // mapping id'шников на стороне пользователя.
-      // Task 67: формат из опса → GL-имя ('rgba16float' → 'rgba16f').
+      // The returned id is ignored: on a new facade the id will be different.
+      // Order matters: texture 1 → createTexture 1, texture 2 → createTexture 2,
+      // id mapping is on the user's side.
+      // Task 67: format from the op → GL name ('rgba16float' → 'rgba16f').
       gl.createTexture(op.width, op.height, {
         ...op.options,
         ...(op.format === 'rgba16float' || op.format === 'rgba32float'
@@ -176,10 +176,10 @@ function applyOp(op: DeclOp, gl: GLFacade, sourceFor?: (kind: string) => GLImage
       gl.createProgram(op.vertex, op.fragment)
       break
     case 'createBuffer':
-      // Task 61: после JSON round-trip (worker migration) data может быть
-      // plain-object {"0":v0,...} или number[]. Коэрсим к Float32Array ДО
-      // передачи фасаду — gl.bufferData с plain object несовместим, а
-      // withJournal-декоратор записал бы протухший опс в журнал.
+      // Task 61: after a JSON round-trip (worker migration) data can be a
+      // plain-object {"0":v0,...} or number[]. Coerce to Float32Array BEFORE
+      // passing to the facade — gl.bufferData with a plain object is incompatible, and
+      // the withJournal decorator would have written a stale op into the journal.
       gl.createBuffer(op.data instanceof Float32Array ? op.data : toFloat32Array(op.data))
       break
     case 'createTarget':
@@ -187,36 +187,36 @@ function applyOp(op: DeclOp, gl: GLFacade, sourceFor?: (kind: string) => GLImage
       break
     case 'texImage2DFromSource': {
       const source = sourceFor?.(op.sourceKind) ?? null
-      if (source === null) break // нет источника — пропускаем (текстура остаётся пустой)
+      if (source === null) break // no source — skip (the texture remains empty)
       gl.texImage2DFromSource(op.textureId, source, { flipY: op.flipY })
       break
     }
-    // Sub-mip views (Task 56): при replay создаём view на новом backend'е.
-    // ВАЖНО: op.textureId — это id на исходном backend'е. На новом backend'е
-    // textureId будет ДРУГИМ. Caller должен замапить id'шники перед replay
-    // (это ответственность пользовательского кода, т.к. только он знает
-    // соответствие старых и новых id'шников).
+    // Sub-mip views (Task 56): on replay we create the view on the new backend.
+    // IMPORTANT: op.textureId is the id on the source backend. On the new backend
+    // textureId will be DIFFERENT. The caller must map the ids before replay
+    // (this is the user code's responsibility, since only it knows
+    // the correspondence of old and new ids).
     //
-    // В этой реализации мы передаём op.textureId напрямую — это безопасно
-    // только если textureId на новом backend'е совпадает с исходным (например,
-    // при replay в порядке всех createTexture, id'шники генерируются в том же
-    // порядке и совпадают). Иначе caller должен конвертировать id'шники в
-    // journal.entries() перед вызовом replayJournalOn.
+    // In this implementation we pass op.textureId directly — this is safe
+    // only if textureId on the new backend matches the original (e.g.
+    // when replaying in the order of all createTexture, ids are generated in the same
+    // order and match). Otherwise the caller must convert the ids in
+    // journal.entries() before calling replayJournalOn.
     case 'createTextureView':
       gl.createTextureView(op.textureId, {
         baseMipLevel: op.baseMipLevel,
         mipLevelCount: op.mipLevelCount,
       })
       break
-    // destroy-опсы на новом фасаде — no-op (ресурсов ещё нет)
-    // На том же фасаде (сверка идемпотентности) —
-    // ответственность лежит на фасаде: игнорировать или бросать.
+    // destroy ops on a new facade — no-op (the resources do not exist yet)
+    // On the same facade (idempotence check) —
+    // the responsibility lies with the facade: ignore or throw.
     default:
       break
   }
 }
 
-/** Имя типа источника для записи в журнал. */
+/** Source type name for the journal record. */
 function describeSourceKind(source: GLImageSource): string {
   if (typeof ImageBitmap !== 'undefined' && source instanceof ImageBitmap) return 'ImageBitmap'
   if (typeof OffscreenCanvas !== 'undefined' && source instanceof OffscreenCanvas) return 'OffscreenCanvas'

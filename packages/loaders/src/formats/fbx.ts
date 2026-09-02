@@ -1,36 +1,36 @@
 /**
  * formats/fbx.ts — Autodesk FBX binary 7.x → MeshDocument.
  *
- * Разбор контейнера: заголовок «Kaydara FBX Binary» + u32 версия; далее
- * вложенные записи: [endOffset, numProps, propListLen, nameLen, name,
- * props..., children..., NULL-запись]. Версии ≥ 7500 хранят три первых
- * поля как u64 (NULL-запись 25 байт вместо 13). Всё по DataView,
- * little-endian, без строк до имён.
+ * Container parsing: the "Kaydara FBX Binary" header + a u32 version; then
+ * nested records: [endOffset, numProps, propListLen, nameLen, name,
+ * props..., children..., NULL record]. Versions ≥ 7500 store the first
+ * three fields as u64 (a 25-byte NULL record instead of 13). Everything
+ * goes through DataView, little-endian, no strings until the names.
  *
- * Свойства: 'Y' i16, 'C' bool, 'I' i32, 'F' f32, 'D' f64, 'L' i64,
- * 'S' строка, 'R' raw, массивы 'f' 'd' 'l' 'i' 'b' (count, encoding
- * 0=raw / 1=zlib, byteLen). zlib-массивы распаковываются через
- * ctx.inflate (DecompressionStream) — поэтому parse асинхронный.
+ * Properties: 'Y' i16, 'C' bool, 'I' i32, 'F' f32, 'D' f64, 'L' i64,
+ * 'S' string, 'R' raw, arrays 'f' 'd' 'l' 'i' 'b' (count, encoding
+ * 0=raw / 1=zlib, byteLen). zlib arrays are inflated via
+ * ctx.inflate (DecompressionStream) — hence the async parse.
  *
- * Геометрия: Vertices (контроль-точки), PolygonVertexIndex (конец полигона
- * кодируется как ~i), LayerElementNormal (ByVertice/ByPolygonVertex/
+ * Geometry: Vertices (control points), PolygonVertexIndex (a polygon end
+ * is encoded as ~i), LayerElementNormal (ByVertice/ByPolygonVertex/
  * ByPolygon/AllSame × Direct/IndexToDirect), LayerElementUV (UV+UVIndex),
- * LayerElementMaterial (ByPolygon → сплиты сабмешей). Стратегия вывода:
- * ByVertice+Direct-нормали и по-вершинные UV → индексированный примитив;
- * любое face-varying → развёрнутый (non-indexed) с угловыми атрибутами.
+ * LayerElementMaterial (ByPolygon → submesh splits). Output strategy:
+ * ByVertice+Direct normals and per-vertex UVs → an indexed primitive;
+ * any face-varying → an expanded (non-indexed) one with per-corner attributes.
  *
- * Модели: Properties70 → Lcl Translation/Rotation(deg)/Scaling +
- * RotationOrder (default 0 = 'ZYX' по конвенции FBX). PreRotation и
- * Geometric-смещения v1 НЕ применяются (документированное ограничение —
- * файлы с не-нулевыми pivot'ами дадут сдвиг). Иерархия — из Connections
- * «OO» Model→Model; Geometry→Model; Material→Geometry (по слою или один
- * на геометрию); Texture→Material через «OP» c propName (DiffuseColor →
- * baseColor, NormalMap → normal).
+ * Models: Properties70 → Lcl Translation/Rotation(deg)/Scaling +
+ * RotationOrder (default 0 = 'ZYX' per the FBX convention). PreRotation
+ * and Geometric offsets are NOT applied in v1 (a documented limitation —
+ * files with non-zero pivots will be shifted). The hierarchy comes from
+ * Connections: "OO" Model→Model; Geometry→Model; Material→Geometry (by
+ * layer or one per geometry); Texture→Material via "OP" with propName
+ * (DiffuseColor → baseColor, NormalMap → normal).
  *
- * НЕ поддержано в v1: ASCII-FBX (чёткая ошибка), FBX 6.x (u32-структура
- * Kaydara v6), skins/Deformer, анимационные стеки, blendshapes,
- * NURBS/камеры/свет. Пивоты PreRotation/GeometricTranslation не
- * применяются.
+ * NOT supported in v1: ASCII-FBX (a clear error), FBX 6.x (the u32
+ * Kaydara v6 structure), skins/Deformer, animation stacks, blendshapes,
+ * NURBS/cameras/lights. PreRotation/GeometricTranslation pivots are not
+ * applied.
  */
 
 import type { ParseContext, ParseInput, Parser } from '../core/types.ts'
@@ -46,7 +46,7 @@ import type {
 } from './mesh.ts'
 import { meshStatsOf } from './mesh.ts'
 
-// ─── дерево нод ──────────────────────────────────────────────────────────────
+// ─── node tree ──────────────────────────────────────────────────────────────
 
 export type FbxValue =
   | number
@@ -71,9 +71,9 @@ export interface FbxNode {
   readonly children: readonly FbxNode[]
 }
 
-// ─── контейнер ───────────────────────────────────────────────────────────────
+// ─── container ───────────────────────────────────────────────────────────────
 
-const FBX_MAGIC = 'Kaydara FBX Binary  \x00\x1a\x00' // 23 байта
+const FBX_MAGIC = 'Kaydara FBX Binary  \x00\x1a\x00' // 23 bytes
 const FBX_MIN_VERSION = 7000
 
 export interface FbxDocument {
@@ -81,24 +81,24 @@ export interface FbxDocument {
   readonly root: FbxNode
 }
 
-/** Разбор FBX-дерева из байтов (async из-за zlib-массивов). */
+/** Parse the FBX tree from bytes (async because of zlib arrays). */
 export async function parseFbxTree(bytes: Uint8Array, ctx: ParseContext): Promise<FbxDocument> {
   const url = ctx.sourceUrl
-  if (bytes.length < 27) throw new ParseError('FBX: файл короче заголовка', 0, url)
+  if (bytes.length < 27) throw new ParseError('FBX: file shorter than the header', 0, url)
   for (let i = 0; i < FBX_MAGIC.length; i++) {
     if (bytes[i] !== FBX_MAGIC.charCodeAt(i)) {
-      // ASCII-вариант начинается с ';' или текста
+      // the ASCII variant starts with ';' or text
       const head = String.fromCharCode(...bytes.subarray(0, Math.min(64, bytes.length)))
       if (head.includes('FBXHeaderExtension') || head.startsWith(';')) {
-        throw new UnsupportedError('FBX: ASCII-формат не поддерживается — конвертируйте в Binary (FBX SDK/Blender: «FBX binary»)', url)
+        throw new UnsupportedError('FBX: ASCII format is not supported — convert to Binary (FBX SDK/Blender: "FBX binary")', url)
       }
-      throw new ParseError('FBX: неверная магика (не бинарный FBX)', 0, url)
+      throw new ParseError('FBX: wrong magic (not a binary FBX)', 0, url)
     }
   }
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const version = dv.getUint32(23, true)
   if (version < FBX_MIN_VERSION) {
-    throw new UnsupportedError(`FBX: версия ${version} (6.x и старше) не поддерживается`, url)
+    throw new UnsupportedError(`FBX: version ${version} (6.x and older) is not supported`, url)
   }
   const u64 = version >= 7500
   const pos = 27
@@ -127,13 +127,13 @@ async function parseNode(
   url: string | null,
 ): Promise<ParsedNode | null> {
   if (start >= fileEnd) return null
-  // NULL-запись: нулевые поля
+  // NULL record: zero fields
   const isNull =
     isZeroField(dv, start, u64) &&
     isZeroField(dv, start + (u64 ? 8 : 4), u64) &&
     isZeroField(dv, start + (u64 ? 16 : 8), u64)
   if (isNull) {
-    // + nameLen (0) — просто выходим (children закончились на уровне выше)
+    // + nameLen (0) — simply exit (children ended at the level above)
     return null
   }
   const endOffset = u64 ? Number(dv.getBigUint64(start, true)) : dv.getUint32(start, true)
@@ -141,7 +141,7 @@ async function parseNode(
   const nameLen = dv.getUint8(start + (u64 ? 24 : 12))
   const nameStart = start + (u64 ? 25 : 13)
   if (endOffset > fileEnd || endOffset <= nameStart) {
-    throw new ParseError(`FBX: кривой endOffset у ноды на ${start}`, start, url)
+    throw new ParseError(`FBX: corrupt endOffset of the node at ${start}`, start, url)
   }
   const name = String.fromCharCode(...new Uint8Array(dv.buffer, dv.byteOffset + nameStart, nameLen))
   let cursor = nameStart + nameLen
@@ -151,12 +151,12 @@ async function parseNode(
     props.push(parsed.prop)
     cursor = parsed.end
   }
-  // дети до endOffset (с учётом NULL-записей)
+  // children up to endOffset (accounting for NULL records)
   const children: FbxNode[] = []
   while (cursor + (u64 ? 25 : 13) <= endOffset) {
     const child = await parseNode(dv, cursor, endOffset, u64, ctx, url)
     if (child === null) {
-      break // NULL-запись (25/13 байт) — дальше детей нет
+      break // NULL record (25/13 bytes) — no more children
     }
     children.push(child.node)
     cursor = child.end
@@ -205,7 +205,7 @@ async function parseProp(
       let bytes = new Uint8Array(dv.buffer, dv.byteOffset + dataStart, byteLen)
       if (encoding === 1) {
         if (ctx.inflate === null) {
-          throw new UnsupportedError('FBX: zlib-массивы требуют inflate (DecompressionStream) — недоступен', url)
+          throw new UnsupportedError('FBX: zlib arrays require inflate (DecompressionStream) — unavailable', url)
         }
         bytes = await ctx.inflate(bytes)
       }
@@ -213,16 +213,16 @@ async function parseProp(
       return { prop: { type: t, value }, end: dataStart + byteLen }
     }
     default:
-      throw new ParseError(`FBX: неизвестный тип свойства "${t}" на ${at}`, at, url)
+      throw new ParseError(`FBX: unknown property type "${t}" at ${at}`, at, url)
   }
 }
 
-/** FBX-строки содержат \x00\x01-разделители имён («Model::Cube»). */
+/** FBX strings contain \x00\x01 name separators ("Model::Cube"). */
 function fbxString(bytes: Uint8Array): string {
   let out = ''
   for (let i = 0; i < bytes.length; i++) {
     const c = bytes[i]
-    if (c === 0x00 && i === bytes.length - 1) continue // терминатор
+    if (c === 0x00 && i === bytes.length - 1) continue // terminator
     out += c === 0x00 || c === 0x01 ? ':' : String.fromCharCode(c)
   }
   return out
@@ -263,17 +263,17 @@ function decodeFbxArray(t: string, bytes: Uint8Array, count: number): FbxValue {
       return bytes.subarray(0, count)
     }
     default:
-      throw new ParseError(`FBX: массив типа ${t}?`)
+      throw new ParseError(`FBX: array of type ${t}?`)
   }
 }
 
-// ─── документ из дерева ──────────────────────────────────────────────────────
+// ─── document from the tree ──────────────────────────────────────────────────────
 
 interface FbxGeometry {
   id: number
   name: string
   primitive: MeshPrimitive
-  materialIds: number[] // connection-attached materials (может быть пуст)
+  materialIds: number[] // connection-attached materials (may be empty)
 }
 
 interface FbxObject {
@@ -290,11 +290,11 @@ interface FbxConnection {
   propName: string | null
 }
 
-/** Собрать MeshDocument из FBX-дерева. */
+/** Assemble a MeshDocument from the FBX tree. */
 export function fbxTreeToMeshDocument(doc: FbxDocument, ctx: ParseContext): MeshDocument {
   const root = doc.root
 
-  // индексирование объектов и связей
+  // index the objects and connections
   const objects = new Map<number, FbxObject>()
   const connections: FbxConnection[] = []
   for (const top of root.children) {
@@ -319,7 +319,7 @@ export function fbxTreeToMeshDocument(doc: FbxDocument, ctx: ParseContext): Mesh
     }
   }
 
-  // материалы: сначала объекты, текстуры — вторым проходом
+  // materials: objects first, textures in a second pass
   interface MatBuilder {
     id: number
     data: Omit<MaterialData, 'baseColorTexture' | 'normalTexture'>
@@ -363,7 +363,7 @@ export function fbxTreeToMeshDocument(doc: FbxDocument, ctx: ParseContext): Mesh
     })
   }
 
-  // текстуры: Texture-объекты + OP-коннекты к материалам
+  // textures: Texture objects + OP connections to materials
   const images: ImageAsset[] = []
   const imageIndexCache = new Map<string, number>()
   for (const conn of connections) {
@@ -372,7 +372,7 @@ export function fbxTreeToMeshDocument(doc: FbxDocument, ctx: ParseContext): Mesh
     if (matIdx === undefined) continue
     const texObj = objects.get(conn.childId)
     if (texObj === undefined || texObj.kind !== 'Texture') continue
-    // путь к файлу: RelativeFilename/FileName (значение — последний проп)
+    // file path: RelativeFilename/FileName (the value is the last prop)
     const rel = findChild(texObj.node, 'RelativeFilename') ?? findChild(texObj.node, 'FileName')
     let file: string | null = null
     if (rel !== null && rel.props.length > 0) {
@@ -401,7 +401,7 @@ export function fbxTreeToMeshDocument(doc: FbxDocument, ctx: ParseContext): Mesh
     normalTexture: b.normalTex,
   }))
 
-  // геометрии
+  // geometries
   const geometries: FbxGeometry[] = []
   const geometryIndexById = new Map<number, number>()
   for (const obj of objects.values()) {
@@ -415,7 +415,7 @@ export function fbxTreeToMeshDocument(doc: FbxDocument, ctx: ParseContext): Mesh
       materialIds: [],
     })
   }
-  // материалы → геометрии (OO-коннекты)
+  // materials → geometries (OO connections)
   for (const conn of connections) {
     if (conn.type !== 'OO') continue
     const gIdx = geometryIndexById.get(conn.parentId)
@@ -425,7 +425,7 @@ export function fbxTreeToMeshDocument(doc: FbxDocument, ctx: ParseContext): Mesh
     }
   }
 
-  // модели → NodeData
+  // models → NodeData
   const modelIds: number[] = []
   const nodes: NodeData[] = []
   const nodeIndexByModel = new Map<number, number>()
@@ -456,7 +456,7 @@ export function fbxTreeToMeshDocument(doc: FbxDocument, ctx: ParseContext): Mesh
     })
   }
 
-  // иерархия + привязка геометрий
+  // hierarchy + geometry binding
   const roots: number[] = []
   for (const modelId of modelIds) {
     const nodeIdx = nodeIndexByModel.get(modelId) as number
@@ -464,21 +464,21 @@ export function fbxTreeToMeshDocument(doc: FbxDocument, ctx: ParseContext): Mesh
     for (const conn of connections) {
       if (conn.type !== 'OO' || conn.childId !== modelId) continue
       if (conn.parentId === 0) continue
-      // родитель — модель?
+      // is the parent a model?
       const parentIdx = nodeIndexByModel.get(conn.parentId)
       if (parentIdx !== undefined) {
         nodes[parentIdx].children.push(nodeIdx)
         hasParent = true
         continue
       }
-      // родитель — геометрия? (коннект Geometry→Model — ребёнок геометрия)
+      // is the parent a geometry? (Geometry→Model connection — the child is the geometry)
       const gIdx = geometryIndexById.get(conn.childId)
       if (gIdx !== undefined && conn.parentId === modelId) {
         nodes[nodeIdx].primitives.push(gIdx)
         hasParent = true
       }
     }
-    // геометрии, привязанные как «ребёнок = geometry, родитель = модель»
+    // geometries attached as "child = geometry, parent = model"
     for (const conn of connections) {
       if (conn.type !== 'OO') continue
       const gIdx = geometryIndexById.get(conn.childId)
@@ -490,12 +490,12 @@ export function fbxTreeToMeshDocument(doc: FbxDocument, ctx: ParseContext): Mesh
     }
     if (!hasParent) roots.push(nodeIdx)
   }
-  // если корней нет (нет коннектов) — все модели корневые
+  // if there are no roots (no connections) — all models are root
   if (roots.length === 0 && nodes.length > 0) {
     for (let i = 0; i < nodes.length; i++) roots.push(i)
   }
 
-  // материалы геометрий без слоёв → единственный submesh c этим материалом
+  // materials of geometries without layers → a single submesh with that material
   for (const geometry of geometries) {
     const prim = geometry.primitive
     if (prim.submeshes.length === 0 && geometry.materialIds.length > 0) {
@@ -508,7 +508,7 @@ export function fbxTreeToMeshDocument(doc: FbxDocument, ctx: ParseContext): Mesh
       }
       prim.submeshes.push(sub)
     } else if (prim.submeshes.length > 1 && geometry.materialIds.length > 0) {
-      // слоёв может не быть с корректными материалами — заменить -1 на первый
+      // there may be no layers with correct materials — replace -1 with the first
       for (const sub of prim.submeshes) {
         if (sub.material < 0) sub.material = geometry.materialIds[0]
       }
@@ -533,20 +533,20 @@ export function fbxTreeToMeshDocument(doc: FbxDocument, ctx: ParseContext): Mesh
   }
 }
 
-// ─── геометрия ───────────────────────────────────────────────────────────────
+// ─── geometry ───────────────────────────────────────────────────────────────
 
 function parseFbxGeometry(node: FbxNode, ctx: ParseContext): MeshPrimitive {
   const url = ctx.sourceUrl
   const verticesNode = findChild(node, 'Vertices')
   const pviNode = findChild(node, 'PolygonVertexIndex')
   if (verticesNode === null || pviNode === null) {
-    throw new ParseError(`FBX Geometry "${node.name}": нет Vertices/PolygonVertexIndex`, -1, url)
+    throw new ParseError(`FBX Geometry "${node.name}": no Vertices/PolygonVertexIndex`, -1, url)
   }
-  // массивы лежат в первом пропе ноды (Vertices: 'd' [...])
+  // the arrays live in the node's first prop (Vertices: 'd' [...])
   const controlPoints = propNumbers(verticesNode.props[0])
   const polyIndex = propInts(pviNode.props[0])
 
-  // полигоны: [start, len] по маркерам ~i
+  // polygons: [start, len] by ~i markers
   const polygons: Array<[number, number]> = []
   let polyStart = 0
   for (let i = 0; i < polyIndex.length; i++) {
@@ -556,7 +556,7 @@ function parseFbxGeometry(node: FbxNode, ctx: ParseContext): MeshPrimitive {
     }
   }
 
-  // слои
+  // layers
   const layerNormal = findDescendant(node, 'LayerElementNormal')
   const layerUv = findDescendant(node, 'LayerElementUV')
   const layerMaterial = findDescendant(node, 'LayerElementMaterial')
@@ -565,7 +565,7 @@ function parseFbxGeometry(node: FbxNode, ctx: ParseContext): MeshPrimitive {
   const uvData = layerUv !== null ? parseLayerElement(layerUv, 2) : null
   const materialData = layerMaterial !== null ? parseLayerElement(layerMaterial, 1) : null
 
-  // per-polygon материал
+  // per-polygon material
   let polyMaterials: Int32Array | null = null
   if (materialData !== null) {
     if (
@@ -578,15 +578,15 @@ function parseFbxGeometry(node: FbxNode, ctx: ParseContext): MeshPrimitive {
     }
   }
 
-  // индексированный путь возможен, если нормали/UV по вершинам
+  // the indexed path is possible when normals/UVs are per-vertex
   const normalsPerVertex =
     normalData !== null && (normalData.mapping === 'ByVertice' || normalData.mapping === 'ByVertex') && normalData.indexed === null
   const uvPerVertex =
     uvData === null || ((uvData.mapping === 'ByVertice' || uvData.mapping === 'ByVertex') && uvData.indexed === null)
 
   if (normalsPerVertex && uvPerVertex) {
-    // ── индексированный примитив ──
-    // точное число треугольников после веерной триангуляции
+    // ── indexed primitive ──
+    // the exact triangle count after fan triangulation
     const triCount = polygons.reduce((acc, [, len]) => acc + Math.max(0, len - 2), 0)
     const indices = new Uint32Array(triCount * 3)
     let w = 0
@@ -599,7 +599,7 @@ function parseFbxGeometry(node: FbxNode, ctx: ParseContext): MeshPrimitive {
     }
     const normals = normalData !== null ? toF32(normalData.values) : null
     const uvs = uvData !== null ? toF32(uvData.values) : null
-    // submesh по материалам полигонов
+    // submeshes by polygon materials
     const submeshes: SubMesh[] = buildPolygonSubmeshes(polygons, polyMaterials, indices, null)
     return {
       positions: toF32(controlPoints),
@@ -616,7 +616,7 @@ function parseFbxGeometry(node: FbxNode, ctx: ParseContext): MeshPrimitive {
     }
   }
 
-  // ── развёрнутый (face-varying) примитив ──
+  // ── expanded (face-varying) primitive ──
   const triCount = polygons.reduce((acc, [, len]) => acc + Math.max(0, len - 2), 0)
   const positions = new Float32Array(triCount * 9)
   const normals = normalData !== null ? new Float32Array(triCount * 9) : null
@@ -629,7 +629,7 @@ function parseFbxGeometry(node: FbxNode, ctx: ParseContext): MeshPrimitive {
     for (let k = 1; k + 1 < len; k++, tri++) {
       const corners = [start, start + k, start + k + 1]
       for (let ci = 0; ci < 3; ci++) {
-        const corner = corners[ci]        // индекс в polyIndex (по углам)
+        const corner = corners[ci]        // index into polyIndex (per corner)
         const cp = absIndex(polyIndex[corner])
         positions.set(controlPoints.subarray(cp * 3, cp * 3 + 3), tri * 9 + ci * 3)
         if (normals !== null && normalData !== null) {
@@ -676,7 +676,7 @@ function parseFbxGeometry(node: FbxNode, ctx: ParseContext): MeshPrimitive {
   }
 }
 
-/** Диапазоны индексов по материалам полигонов (для indexed-пути). */
+/** Index ranges by polygon materials (for the indexed path). */
 function buildPolygonSubmeshes(
   polygons: Array<[number, number]>,
   polyMaterials: Int32Array | null,
@@ -684,7 +684,7 @@ function buildPolygonSubmeshes(
   _cornerBase: null,
 ): SubMesh[] {
   if (polyMaterials === null) return []
-  // сколько треугольников до каждого полигона
+  // how many triangles before each polygon
   let triBase = 0
   const ranges: Array<{ material: number; triStart: number; triEnd: number }> = []
   for (let pi = 0; pi < polygons.length; pi++) {
@@ -716,18 +716,18 @@ function buildPolygonSubmeshes(
 interface LayerData {
   mapping: string          // ByVertice/ByPolygonVertex/ByPolygon/AllSame
   values: Float64Array | Int32Array
-  /** IndexToDirect: индексы (по углам или по полигонам); null = Direct. */
+  /** IndexToDirect: indices (per corner or per polygon); null = Direct. */
   indexed: Int32Array | null
   valueStride: number
 }
 
 function parseLayerElement(node: FbxNode, stride: number): LayerData {
   const mapping = findChildString(node, 'MappingInformationType') ?? 'ByPolygonVertex'
-  // values: первый числовой массив-ребёнок с нужным stride (Normals/UV/Materials)
+  // values: the first numeric child array with the right stride (Normals/UV/Materials)
   let values: Float64Array | Int32Array = new Float64Array(0)
   let indexed: Int32Array | null = null
   for (const child of node.children) {
-    // значения слоя лежат в первом пропе дочерней ноды (Normals: 'd' [...])
+    // the layer's values live in the child node's first prop (Normals: 'd' [...])
     const arr = propArray(child.props[0])
     if (arr === null) continue
     if (child.name === 'Normals' || child.name === 'UV' || child.name === 'Materials') {
@@ -739,7 +739,7 @@ function parseLayerElement(node: FbxNode, stride: number): LayerData {
   return { mapping, values, indexed, valueStride: stride }
 }
 
-/** Выборка значения слоя для угла corner / контроль-точки cp / полигона pi. */
+/** Pick a layer value for the corner / control point cp / polygon pi. */
 function sampleLayer(layer: LayerData, corner: number, cp: number, poly: number): Float64Array | Int32Array {
   const stride = layer.valueStride
   if (layer.mapping === 'ByVertice' || layer.mapping === 'ByVertex') {
@@ -780,7 +780,7 @@ function toF32(values: Float64Array | Int32Array): Float32Array {
   return out
 }
 
-// ─── хелперы свойств/нодов ───────────────────────────────────────────────────
+// ─── property/node helpers ───────────────────────────────────────────────────
 
 function findChild(node: FbxNode, name: string): FbxNode | null {
   for (const c of node.children) if (c.name === name) return c
@@ -844,7 +844,7 @@ function clamp01(v: number): number {
   return Math.max(0, Math.min(1, v))
 }
 
-/** Properties70 → Map имя → значения (числа). */
+/** Properties70 → a Map of name → values (numbers). */
 function readP70(props70: FbxNode): Map<string, number[]> {
   const out = new Map<string, number[]>()
   for (const p of props70.children) {
@@ -860,7 +860,7 @@ function readP70(props70: FbxNode): Map<string, number[]> {
   return out
 }
 
-/** FBX RotationOrder-enum → порядок Эйлера (конвенция three.js FBXLoader). */
+/** The FBX RotationOrder enum → the Euler order (the three.js FBXLoader convention). */
 export function fbxEulerOrder(order: number): 'XYZ' | 'YZX' | 'XZY' | 'ZXY' | 'YXZ' | 'ZYX' {
   switch (order) {
     case 1: return 'YZX'
@@ -868,11 +868,11 @@ export function fbxEulerOrder(order: number): 'XYZ' | 'YZX' | 'XZY' | 'ZXY' | 'Y
     case 3: return 'ZXY'
     case 4: return 'YXZ'
     case 5: return 'ZYX'
-    default: return 'ZYX' // 0 — FBX-дефолт
+    default: return 'ZYX' // 0 — the FBX default
   }
 }
 
-/** Градусы FBX → кватернион xyzw в заданном порядке (R = R1*R2*R3). */
+/** FBX degrees → an xyzw quaternion in the given order (R = R1*R2*R3). */
 export function eulerDegToQuat(
   degX: number, degY: number, degZ: number,
   order: 'XYZ' | 'YZX' | 'XZY' | 'ZXY' | 'YXZ' | 'ZYX',
@@ -883,7 +883,7 @@ export function eulerDegToQuat(
   const cx = Math.cos(x / 2), sx = Math.sin(x / 2)
   const cy = Math.cos(y / 2), sy = Math.sin(y / 2)
   const cz = Math.cos(z / 2), sz = Math.sin(z / 2)
-  // кваты осей
+  // axis quaternions
   const qx: [number, number, number, number] = [sx, 0, 0, cx]
   const qy: [number, number, number, number] = [0, sy, 0, cy]
   const qz: [number, number, number, number] = [0, 0, sz, cz]
@@ -893,7 +893,7 @@ export function eulerDegToQuat(
     a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
     a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
   ]
-  // R = R_first * R_second * R_third (как матричная композиция порядка)
+  // R = R_first * R_second * R_third (like the matrix composition of the order)
   const parts = order.split('') as Array<'X' | 'Y' | 'Z'>
   const byAxis = { X: qx, Y: qy, Z: qz }
   let q = byAxis[parts[0]]
@@ -913,7 +913,7 @@ export const fbxParser: Parser<MeshDocument> = {
   },
 }
 
-/** Разбор FBX из готовых байтов (вне менеджера). */
+/** Parse FBX from ready bytes (outside the manager). */
 export async function parseFbx(bytes: Uint8Array, ctx: ParseContext): Promise<MeshDocument> {
   return fbxParser.parse({ bytes, ctx }, undefined)
 }
