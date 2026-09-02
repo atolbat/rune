@@ -56,5 +56,37 @@ try {
 }
 console.log(viewerOk ? 'model-viewer LIVE OK' : 'model-viewer LIVE FAIL')
 
+// ─── samba: the skinned FBX path on the LIVE page (stats + animation +
+// a clean GPU log — no binding/storm errors) ─────────────────────────────
+let sambaOk = false
+try {
+  await page.click('.mv-pill') // open the model sheet (auto-hidden after the first load)
+  await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('.mv-row')]
+    rows.find(r => r.textContent.includes('Samba'))?.dispatchEvent(new Event('click', { bubbles: true }))
+  })
+  await page.waitForTimeout(300)
+  await page.click('.mv-load')
+  await page.waitForFunction(
+    () => (document.querySelector('.mv-stats')?.textContent ?? '').includes('joints'),
+    null,
+    { timeout: 120_000 },
+  )
+  await page.waitForTimeout(2000)
+  const shotA = await page.locator('#canvas').screenshot()
+  await page.waitForTimeout(1200)
+  const shotB = await page.locator('#canvas').screenshot()
+  const stats = await page.textContent('.mv-stats')
+  const logText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
+  const gpuClean = !/too small|Invalid CommandBuffer|storm|rendering stopped/i.test(logText)
+  await page.screenshot({ path: join(OUT, 'live-samba.png') })
+  console.log(`samba scene: ${stats}`)
+  console.log(`samba GPU log: ${gpuClean ? 'clean' : 'ERRORS'}`)
+  sambaOk = stats.includes('joints') && !shotA.equals(shotB) && gpuClean
+} catch (error) {
+  console.log(`samba check failed: ${error instanceof Error ? error.message : String(error)}`)
+}
+console.log(sambaOk ? 'SAMBA LIVE OK' : 'SAMBA LIVE FAIL')
+
 await browser.close()
-process.exit(cubeOk && viewerOk && errors.length === 0 ? 0 : 1)
+process.exit(cubeOk && viewerOk && sambaOk && errors.length === 0 ? 0 : 1)
