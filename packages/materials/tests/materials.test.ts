@@ -427,11 +427,14 @@ describe('pbr: the sub-model catalog', () => {
     expect(mat.glsl.fragment).toContain('vec3 v = normalize(u_camPos - v_worldPos);')
     expect(mat.wgsl).toContain('let v = normalize(params.u_camPos.xyz - frag.worldPos);')
     expect(mat.uniforms.map(u => u.name)).toEqual(
-      ['u_albedo', 'u_lightDir', 'u_lightColor', 'u_camPos', 'u_roughness', 'u_metallic'],
+      ['u_albedo', 'u_lightDir', 'u_lightColor', 'u_ambient', 'u_camPos', 'u_roughness', 'u_metallic'],
     )
-    // energy conservation + the final combine
+    // energy conservation + the final combine (direct sun + the sky fill)
     expect(mat.glsl.fragment).toContain('vec3 kd = (1.0 - metal) * (vec3(1.0) - F);')
-    expect(mat.glsl.fragment).toContain('vec3 lit = (diffuse + (D * vis) * F) * u_lightColor * nDotL;')
+    expect(mat.glsl.fragment).toContain(
+      'vec3 lit = (diffuse + (D * vis) * F) * u_lightColor * nDotL + kd * base.rgb * u_ambient;',
+    )
+    expect(mat.wgsl).toContain('kd * base.rgb * params.u_ambient.rgb')
   })
 
   it('each distribution emits its own formula — and ONLY it', () => {
@@ -661,6 +664,7 @@ describe('pbr backend integration (the real compilers)', () => {
         u_mvp: MAT4,
         u_lightDir: [0.5, 0.8, 0.6],
         u_lightColor: [1, 1, 1],
+        u_ambient: [0.3, 0.3, 0.34],
         u_camPos: [0, 0.55, 3.2],
         u_roughness: 0.9,
         u_metallic: 0,
@@ -686,6 +690,6 @@ describe('pbr backend integration (the real compilers)', () => {
     // 2 mat4 (128 B) + 3 vec4 (48) + 2 f32 (8, padded to 16) >= 192
     expect(reflection.uniformBytes).toBeGreaterThanOrEqual(192)
     const names = reflection.uniforms.map(u => u.name)
-    expect(names).toEqual(['u_mvp', 'u_model', 'u_albedo', 'u_lightDir', 'u_lightColor', 'u_camPos', 'u_roughness', 'u_metallic'])
+    expect(names).toEqual(['u_mvp', 'u_model', 'u_albedo', 'u_lightDir', 'u_lightColor', 'u_ambient', 'u_camPos', 'u_roughness', 'u_metallic'])
   })
 })

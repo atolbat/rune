@@ -143,7 +143,11 @@ export const MATCAP: FeatureBit = 1 << 9
  *
  *  Uniforms: u_lightDir + u_lightColor, the camera position u_camPos (the
  *  view vector), u_roughness / u_metallic (or the glTF metallicRoughness
- *  texture via PBR_MR_TEXTURE, multiplied by the uniform factors). */
+ *  texture via PBR_MR_TEXTURE, multiplied by the uniform factors), and
+ *  u_ambient — the constant sky/IBL fill of the diffuse lobe
+ *  (kd·base·u_ambient; black = pure direct light, the pre-ambient look).
+ *  A single directional + ambient fill is the two-light outdoor model; a
+ *  real environment map is a future feature of its own. */
 export const PBR: FeatureBit = 1 << 10
 
 // ── the PBR sub-model bits: parameters OF PBR, not standalone features ──────
@@ -361,7 +365,8 @@ function nWgsl(ctx: AsmCtx): string[] {
 // Emission contract (both languages, same statement order):
 //   n (from the map or the varying) → v, l, h, the dots → rough/metal
 //   (uniforms × the optional MR texture) → α, F0 → D → V (folded G) → F →
-//   kd → the diffuse lobe → `lit` = (diffuse + D·V·F)·u_lightColor·nDotL.
+//   kd → the diffuse lobe → `lit` = (diffuse + D·V·F)·u_lightColor·nDotL
+//   + kd·base·u_ambient (the sky fill — the IBL stand-in).
 // The roughness is clamped to [0.045, 1] (Filament's guard): α = 0 makes
 // the Smith/Beckmann denominators degenerate (0/0 NaNs on mirrored surfaces).
 
@@ -369,6 +374,7 @@ function pbrUniforms(ctx: AsmCtx): UniformDecl[] {
   const uniforms: UniformDecl[] = [
     { name: 'u_lightDir', glsl: 'uniform vec3 u_lightDir;', wgsl: 'u_lightDir : vec4<f32>,' },
     { name: 'u_lightColor', glsl: 'uniform vec3 u_lightColor;', wgsl: 'u_lightColor : vec4<f32>,' },
+    { name: 'u_ambient', glsl: 'uniform vec3 u_ambient;', wgsl: 'u_ambient : vec4<f32>,' },
     { name: 'u_camPos', glsl: 'uniform vec3 u_camPos;', wgsl: 'u_camPos : vec4<f32>,' },
     { name: 'u_roughness', glsl: 'uniform float u_roughness;', wgsl: 'u_roughness : f32,' },
     { name: 'u_metallic', glsl: 'uniform float u_metallic;', wgsl: 'u_metallic : f32,' },
@@ -893,7 +899,7 @@ export const CATALOG: readonly FeatureDef[] = [
         ...pbrVGlsl(ctx),
         ...pbrFGlsl(ctx),
         ...pbrDiffuseGlsl(ctx),
-        'vec3 lit = (diffuse + (D * vis) * F) * u_lightColor * nDotL;',
+        'vec3 lit = (diffuse + (D * vis) * F) * u_lightColor * nDotL + kd * base.rgb * u_ambient;',
       ],
       wgslBody: [
         ...nWgsl(ctx),
@@ -902,7 +908,7 @@ export const CATALOG: readonly FeatureDef[] = [
         ...pbrVWgsl(ctx),
         ...pbrFWgsl(ctx),
         ...pbrDiffuseWgsl(ctx),
-        `${mutKw(ctx)} lit = (diffuse + (D * vis) * F) * params.u_lightColor.rgb * nDotL;`,
+        `${mutKw(ctx)} lit = (diffuse + (D * vis) * F) * params.u_lightColor.rgb * nDotL + kd * base.rgb * params.u_ambient.rgb;`,
       ],
     }),
   },

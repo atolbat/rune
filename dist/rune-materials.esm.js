@@ -98,6 +98,7 @@ function pbrUniforms(ctx) {
   const uniforms = [
     { name: "u_lightDir", glsl: "uniform vec3 u_lightDir;", wgsl: "u_lightDir : vec4<f32>," },
     { name: "u_lightColor", glsl: "uniform vec3 u_lightColor;", wgsl: "u_lightColor : vec4<f32>," },
+    { name: "u_ambient", glsl: "uniform vec3 u_ambient;", wgsl: "u_ambient : vec4<f32>," },
     { name: "u_camPos", glsl: "uniform vec3 u_camPos;", wgsl: "u_camPos : vec4<f32>," },
     { name: "u_roughness", glsl: "uniform float u_roughness;", wgsl: "u_roughness : f32," },
     { name: "u_metallic", glsl: "uniform float u_metallic;", wgsl: "u_metallic : f32," }
@@ -545,7 +546,7 @@ var CATALOG = [
         ...pbrVGlsl(ctx),
         ...pbrFGlsl(ctx),
         ...pbrDiffuseGlsl(ctx),
-        "vec3 lit = (diffuse + (D * vis) * F) * u_lightColor * nDotL;"
+        "vec3 lit = (diffuse + (D * vis) * F) * u_lightColor * nDotL + kd * base.rgb * u_ambient;"
       ],
       wgslBody: [
         ...nWgsl(ctx),
@@ -554,7 +555,7 @@ var CATALOG = [
         ...pbrVWgsl(ctx),
         ...pbrFWgsl(ctx),
         ...pbrDiffuseWgsl(ctx),
-        `${mutKw(ctx)} lit = (diffuse + (D * vis) * F) * params.u_lightColor.rgb * nDotL;`
+        `${mutKw(ctx)} lit = (diffuse + (D * vis) * F) * params.u_lightColor.rgb * nDotL + kd * base.rgb * params.u_ambient.rgb;`
       ]
     })
   },

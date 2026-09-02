@@ -68,9 +68,16 @@ const MODELS = [
 
 const MODE_NAMES = { auto: 'Auto (WebGPU → WebGL2 fallback)', webgl2: 'WebGL2', webgpu: 'WebGPU' }
 const LIGHT_DIR = [0.5, 0.8, 0.6]
-// The direct-light radiance for the PBR model (the sun; the Lambert path
-// bakes its level into the ambient terms instead).
-const LIGHT_COLOR = [4.0, 4.0, 4.0]
+// The direct-light radiance for the PBR model (the sun). 2.2 ≈ 0.7π: with
+// the 1/π of the Lambert diffuse the lit face lands at ≈0.85 of the albedo
+// (headroom for the specular lobe) — 4.0 overexposed every sun-facing
+// pixel by 27% and clipped it to a flat washed-out white. The Lambert path
+// bakes its level into the ambient terms instead.
+const LIGHT_COLOR = [2.2, 2.2, 2.2]
+// The sky fill (the u_ambient IBL stand-in): ≈0.3 of the albedo in the
+// shadow, slightly cool. Without it the shadow side fell to pitch black —
+// the “the house changed” look; the pre-PBR Lambert carried a 0.35 ambient.
+const AMBIENT_COLOR = [0.28, 0.3, 0.34]
 
 /* ─── Materials (the @rune/materials assembly pipeline) ───────────────── */
 
@@ -861,6 +868,7 @@ async function attachScene(id) {
       attributes.normal = { data: mesh.normals, size: 3 }
       attributes.uv = { data: mesh.uvs, size: 2 }
       uniforms.u_lightColor = LIGHT_COLOR
+      uniforms.u_ambient = AMBIENT_COLOR
       uniforms.u_camPos = (p) => p.camPos
       uniforms.u_roughness = mesh.roughness
       uniforms.u_metallic = mesh.metallic
