@@ -14,9 +14,9 @@
  * worldStamp[parent] > worldStamp[i] (the parent's world became newer than mine).
  * Stamps are zero-initialized; an untouched node = identity.
  *
- * refitGroupBounds — an "ascending" pass over order[] FROM THE END, only over
- * DIRTY subtrees (Task 85): children later by rank are processed earlier.
- * Dirt — the dirtyBounds bitset (by slots): updateWorld marks the recomputed
+ * refitGroupBounds — descending from the forest roots, only over DIRTY
+ * subtrees (Task 85; Task 113 — the stack descent instead of the full reverse
+ * scan). Dirt — the dirtyBounds bitset (by slots): updateWorld marks the recomputed
  * node AND ALL its ancestors (climb up the chain, early exit on an
  * already-set bit — the invariant "marks always reach the root"). Internal
  * nodes without a user sphere get sphereW as the union of the children's
@@ -46,6 +46,24 @@ function touchGroup(views: SceneViews, group: number, stamp: number): void {
 
 /** Scratch of 16 floats — not allocated in hot loops. */
 const scratch = new Float32Array(16)
+
+/** Refit descent stack: triples (rankStart, rankEnd, phase; 0 = descend,
+ * 1 = combine the parent from the children). Module-level, grows geometrically
+ * — a SEPARATE stack from culling's (refit never runs inside cull; sharing
+ * would couple two passes for no gain). */
+let refitStack = new Int32Array(8192)
+
+function pushRefit(s: number, e: number, phase: number, sp: number): number {
+  if (sp + 3 > refitStack.length) {
+    const grown = new Int32Array(refitStack.length * 2)
+    grown.set(refitStack)
+    refitStack = grown
+  }
+  refitStack[sp] = s
+  refitStack[sp + 1] = e
+  refitStack[sp + 2] = phase
+  return sp + 3
+}
 
 /** TRS composition with a base offset (without allocations). */
 function composeAt(
@@ -212,26 +230,70 @@ export function updateWorldForcedViews(views: SceneViews): number {
 }
 
 /**
- * Dirty refit (Task 85): a reverse pass ONLY over nodes with a
- * dirtyBounds bit (the node itself changed — recomputed by updateWorld — or a descendant).
- * Returns the number of rebuilt nodes. Requires updateWorld before the call.
+ * Dirty refit (Task 85): descending ONLY into dirty subtrees. Returns the
+ * number of rebuilt nodes. Requires updateWorld before the call.
+ *
+ * Task 113 — from a full reverse scan to a stack descent: the old pass walked
+ * ALL n ranks testing a bit each (O(n) even at rest). markDirtyUp guarantees
+ * "a dirty node's ancestors are ALL dirty" — the contrapositive: a CLEAN
+ * node's subtree is entirely clean. So the descent from the forest roots
+ * skips a clean node's whole range without a single bit test inside it:
+ *   • a static frame costs #roots pops (roots clean — nothing is touched);
+ *   • sparse animation costs the dirty root-chains + their sibling reads.
+ * A dirty internal node pushes itself back (phase 1) AFTER its children —
+ * LIFO pops children first, so the bottom-up union order of the old reverse
+ * pass is preserved exactly (children's spheres are fresh when read).
  */
 export function refitGroupBoundsViews(views: SceneViews): number {
   const n = views.headerI[H_NODE_COUNT]
-  const { order, subtreeEnd, sphereL, sphereW, dirtyBounds } = views
+  const { order, parent, subtreeEnd, sphereL, sphereW, dirtyBounds } = views
+
+  // Forest roots: subtree ranges, phase 0 (descend). Non-root ranks are
+  // unreachable in a packed DFS forest — the defensive r++ only guards a
+  // corrupt layout (degrades to the old full walk, never wrong).
+  let sp = 0
+  for (let r = 0; r < n; ) {
+    const slot = order[r]
+    const end = subtreeEnd[slot]
+    if (parent[slot] < 0) {
+      sp = pushRefit(r, end, 0, sp)
+      r = end
+    } else {
+      r++
+    }
+  }
+
   let refit = 0
-  for (let r = n - 1; r >= 0; r--) {
-    const i = order[r]
+  while (sp > 0) {
+    sp -= 3
+    const s = refitStack[sp]
+    const e = refitStack[sp + 1]
+    const phase = refitStack[sp + 2]
+    const i = order[s]
     const w = i >>> 5
     const m = 1 << (i & 31)
-    if ((dirtyBounds[w] & m) === 0) continue // static subtree — sphere is valid
-    dirtyBounds[w] &= ~m
-    const e = subtreeEnd[i]
-    if (e <= r + 1) continue // leaf — its sphere is handled by updateWorld
-    if (sphereL[i * 4 + 3] > 0) continue // user sphere — do not touch
-    // Iterate children (each is its own rank subrange right after the parent).
+    if (phase === 0) {
+      if ((dirtyBounds[w] & m) === 0) continue // clean node ⟹ clean subtree — skip wholesale
+      dirtyBounds[w] &= ~m
+      if (e <= s + 1) continue // leaf — its sphere is handled by updateWorld
+      // A dirty internal node: descend into the children either way — their own
+      // bits are independent (markDirtyUp climbs UP only). A user sphere only
+      // spares the node's OWN combine, not the children's processing.
+      if (sphereL[i * 4 + 3] <= 0) sp = pushRefit(s, e, 1, sp)
+      let cr = s + 1
+      while (cr < e) {
+        const child = order[cr]
+        const childEnd = subtreeEnd[child]
+        const end = childEnd > cr ? childEnd : cr + 1
+        sp = pushRefit(cr, end, 0, sp)
+        cr = end
+      }
+      continue
+    }
+    // phase 1 — combine: the children's spheres into the parent's (the union
+    // body of the old reverse pass, verbatim).
     let minx = 0, miny = 0, minz = 0, maxx = 0, maxy = 0, maxz = 0
-    let r2 = r + 1
+    let r2 = s + 1
     let first = true
     let singleChild = -1
     let childCount = 0

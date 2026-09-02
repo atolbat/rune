@@ -119,12 +119,19 @@ export interface Scene {
   /** Cull by cameras; writes planes and bitsets into buffer bufferIndex.
    *  masks=false — disable plane-mask inheritance (A/B "before Task 85":
    *  identical result, ~×2.6 more tests). out — reusable stats
-   *  records (zero allocations per frame). */
+   *  records (zero allocations per frame). reuse — a scene-owned result,
+   *  zero steady-state allocations (Task 113; see the opts field). */
   cull(cameras: readonly Camera[], opts?: {
     brute?: boolean
     bufferIndex?: number
     masks?: boolean
     out?: readonly MutableCullStats[]
+    /** Task 113 — zero steady-state allocations: return a scene-owned
+     *  (reused) result. INVALIDATED by the next reuse call — copy out what
+     *  must survive a frame. The default mode returns independent objects
+     *  (held results stay valid). `out` (caller-owned records) wins over
+     *  `reuse` when both are given. */
+    reuse?: boolean
   }): SceneCullResult
 
   /** Collect instances of all groups for a camera (into buffer bufferIndex). */
@@ -163,6 +170,18 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
   const fullWords = new Int32Array(buffer)
   const shared = typeof SharedArrayBuffer !== 'undefined' && buffer instanceof SharedArrayBuffer
   let layoutDirty = true
+
+  // ─── Task 113: cull reuse scratch ─────────────────────────────────
+  /** One record pool + one result wrapper, reused per call in the reuse mode.
+ * Records are pre-filled to cameraMax once; per cameraCount a VIEW array
+ * (records.slice(0, count)) is cached lazily — one allocation per distinct
+ * count EVER, zero in steady state (trimming by `length =` would DELETE
+ * the records — a JS trap this cache sidesteps).
+ * The DEFAULT mode still allocates independent results — callers holding
+ * them across frames keep that contract (pinned by zeroAlloc.test). */
+  let cullReuseStats: MutableCullStats[] | null = null
+  let cullReuseViews: (readonly CullStats[] | undefined)[] | null = null
+  let cullReuseResult: { cameraCount: number; stats: readonly CullStats[]; bufferIndex: number } | null = null
 
   function ensurePacked(): void {
     if (layoutDirty) packInternal()
@@ -482,6 +501,34 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
       }
       views.headerI[H_CAMERA_COUNT] = count
       const out = opts.out
+      if (opts.reuse === true && out === undefined) {
+        // Task 113: the scene-owned scratch — zero allocations per call.
+        if (cullReuseResult === null) {
+          const records: MutableCullStats[] = []
+          for (let k = 0; k < views.cameraMax; k++) {
+            records.push({ tested: 0, visible: 0, trivialRejects: 0, trivialAccepts: 0, planeTests: 0 })
+          }
+          cullReuseStats = records
+          cullReuseViews = []
+          cullReuseResult = { cameraCount: 0, stats: records, bufferIndex: 0 }
+        }
+        for (let k = 0; k < count; k++) {
+          const rec = cullReuseStats![k]!
+          if (opts.brute === true) cullViewsBrute(views, k, bufferIndex, rec)
+          else cullViewsHierarchical(views, k, bufferIndex, rec, masks)
+        }
+        const viewsByCount = cullReuseViews!
+        let statsView = count < viewsByCount.length ? viewsByCount[count] : undefined
+        if (statsView === undefined) {
+          statsView = cullReuseStats!.slice(0, count)
+          viewsByCount[count] = statsView
+        }
+        const reused = cullReuseResult
+        reused.cameraCount = count
+        reused.stats = statsView
+        reused.bufferIndex = bufferIndex
+        return reused
+      }
       const stats: CullStats[] = []
       for (let k = 0; k < count; k++) {
         const reuse = out !== undefined && k < out.length ? out[k] : undefined

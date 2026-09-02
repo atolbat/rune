@@ -156,6 +156,41 @@ describe('Task 85: dirty refit — parity with full', () => {
     scene.updateWorld()
     expect(scene.views.sphereW[root * 4 + 3]).toBeCloseTo(5, 5)
   })
+
+  it('user-sphere node: its own sphere spared, descendants still refit (Task 113 regression)', () => {
+    // The stack descent must NOT skip a dirty user-sphere node's subtree —
+    // only its own combine. The flat reverse pass processed the children
+    // regardless; the first stack version lost them (residue + stale bounds).
+    const scene = createScene({ capacity: 16 })
+    const root = scene.create({})
+    const mid = scene.create({ parent: root, sphere: [0, 0, 0, 2] }) // user sphere
+    const inner = scene.create({ parent: mid }) // auto-bound under the user sphere
+    const leafA = scene.create({ parent: inner, position: [10, 0, 0] })
+    const leafB = scene.create({ parent: inner, position: [-12, 0, 0] })
+    scene.updateWorld()
+    scene.refitGroupBounds()
+
+    scene.setLocal(leafA, { position: [12, 0, 0] })
+    scene.updateWorld()
+    const refitted = scene.refitGroupBounds()
+    expect(refitted).toBeGreaterThan(0)
+    const spheresDirty = scene.views.sphereW.slice()
+
+    // inner (auto-bound) rebuilt from the +12 move and the static -12 leaf;
+    // mid keeps its user sphere untouched.
+    expect(spheresDirty[inner * 4 + 3]!).toBeCloseTo(12, 3)
+    expect(spheresDirty[mid * 4 + 3]!).toBeCloseTo(2, 5)
+    // Dirt fully consumed.
+    for (let w = 0; w < scene.views.dirtyBounds.length; w++) {
+      expect(scene.views.dirtyBounds[w]).toBe(0)
+    }
+    // Byte-for-byte parity with the forced reference.
+    refitGroupBoundsForcedViews(scene.views)
+    for (let i = 0; i < spheresDirty.length; i++) {
+      expect(spheresDirty[i]).toBe(scene.views.sphereW[i])
+    }
+    expect(scene.views.sphereW[mid * 4 + 3]!).toBeCloseTo(2, 5)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -161,3 +161,52 @@ describe('Task 87: numeric instance accesses (without subarray)', () => {
     expect(base1).not.toBe(base)
   })
 })
+
+describe('Task 113: cull reuse — the scene-owned result', () => {
+  it('numbers equal the default mode; the wrapper is stable; stats.length follows cameraCount', () => {
+    const scene = buildTree(37, 300)
+    const camA = createCamera()
+    camA.setPerspective(1.1, 1.5, 0.5, 300)
+    camA.setViewLookAt(25, 20, 25, 0, 0, 0, 0, 1, 0)
+    const camB = createCamera()
+    camB.setPerspective(0.9, 1.6, 0.5, 300)
+    camB.setViewLookAt(-25, 20, -25, 0, 0, 0, 0, 1, 0)
+    scene.updateWorld()
+    scene.refitGroupBounds()
+
+    // Reference numbers from the default (independent) mode.
+    const ref1 = scene.cull([camA], { bufferIndex: 0 })
+    const ref2 = scene.cull([camA, camB], { bufferIndex: 1 })
+    const held = { ...ref2.stats[1]! } // survives the reuse calls below
+
+    const r1 = scene.cull([camA], { bufferIndex: 0, reuse: true })
+    expect(r1.cameraCount).toBe(1)
+    expect(r1.stats.length).toBe(1)
+    expect(r1.stats[0]!.tested).toBe(ref1.stats[0]!.tested)
+    expect(r1.stats[0]!.visible).toBe(ref1.stats[0]!.visible)
+    expect(r1.stats[0]!.planeTests).toBe(ref1.stats[0]!.planeTests)
+
+    const r2 = scene.cull([camA, camB], { bufferIndex: 1, reuse: true })
+    expect(r2.cameraCount).toBe(2)
+    expect(r2.stats.length).toBe(2)
+    expect(r2.stats[1]!.tested).toBe(held.tested)
+    expect(r2.stats[1]!.visible).toBe(held.visible)
+    expect(r2.bufferIndex).toBe(1)
+
+    // The contract: ONE wrapper — r1 is invalidated by the r2 call.
+    expect(r2).toBe(r1)
+    // stats.length shrinks back without re-allocating (the record is retained).
+    const r3 = scene.cull([camA], { reuse: true })
+    expect(r3.stats.length).toBe(1)
+    expect(r3.stats[0]).toBe(r2.stats[0])
+
+    // out still wins over reuse (the caller owns the records).
+    const out: MutableCullStats[] = [
+      { tested: -1, visible: -1, trivialRejects: -1, trivialAccepts: -1, planeTests: -1 },
+    ]
+    const ro = scene.cull([camA], { reuse: true, out })
+    expect(out[0]!.tested).toBe(ref1.stats[0]!.tested)
+    expect(ro.stats[0]).toBe(out[0])
+    expect(ro).not.toBe(r3)
+  })
+})

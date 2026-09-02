@@ -87,3 +87,35 @@ describe('feed', () => {
     expect(new Float32Array(feed.buffer, 64)[0]).toBe(3.25)
   })
 })
+
+describe('Task 114: the reused feed writer', () => {
+  it('ONE writer object, re-aimed by push()/view() — identity is stable, writes land in the new window', () => {
+    const layout = { value: 'float32' } as const
+    const feed = createFeed({ layout, capacity: 8, backing: 'local' })
+    const w1 = feed.push(2)
+    w1.setFloat('value', 0, 11)
+    w1.setFloat('value', 1, 22)
+    const w2 = feed.push(2)
+    // The contract: the same object, the previous window is re-aimed.
+    expect(w2).toBe(w1)
+    w2.setFloat('value', 0, 33)
+    w2.setFloat('value', 1, 44)
+    feed.publish()
+    const f32 = new Float32Array(feed.buffer, 64)
+    expect(f32[0]).toBe(11)
+    expect(f32[1]).toBe(22)
+    expect(f32[2]).toBe(33)
+    expect(f32[3]).toBe(44)
+    // view() re-aims the same writer.
+    const w3 = feed.view(1, 1)
+    expect(w3).toBe(w1)
+    w3.setFloat('value', 0, 99)
+    expect(f32[1]).toBe(99)
+  })
+
+  it('field offsets are resolved once — a bogus field still throws (validation is not cached away)', () => {
+    const feed = createFeed({ layout: { value: 'float32' }, capacity: 4, backing: 'local' })
+    const batch = feed.push(1)
+    expect(() => batch.setFloat('nope', 0, 1)).toThrow(/not declared/)
+  })
+})

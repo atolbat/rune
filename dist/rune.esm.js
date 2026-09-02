@@ -92,6 +92,8 @@ function signal(initial, _options = {}) {
         return;
       current = next;
       version++;
+      if (subscribers.size === 0)
+        return;
       const snapshot = current;
       schedule(() => {
         for (const fn of [...subscribers])
@@ -120,6 +122,10 @@ function derive(compute) {
   let revision = 0;
   const subscribers = new Set;
   let unsubscribes = [];
+  const onDepChange = () => {
+    if (subscribers.size > 0)
+      revalidate();
+  };
   function collect() {
     deps = [];
     pushCollector(deps);
@@ -139,13 +145,23 @@ function derive(compute) {
     }
     return false;
   }
+  let boundDeps = [];
   function rebind() {
+    if (deps.length === boundDeps.length) {
+      let same = true;
+      for (let at = 0;at < deps.length; at++) {
+        if (deps[at] !== boundDeps[at]) {
+          same = false;
+          break;
+        }
+      }
+      if (same)
+        return;
+    }
     for (const unsubscribe of unsubscribes)
       unsubscribe();
-    unsubscribes = deps.map((dep) => dep.subscribe(() => {
-      if (subscribers.size > 0)
-        revalidate();
-    }));
+    unsubscribes = deps.map((dep) => dep.subscribe(onDepChange));
+    boundDeps = deps.slice();
   }
   function revalidate() {
     if (!dirty())
@@ -203,8 +219,12 @@ function effect(run) {
 class EffectCell {
   run;
   subscriptions = [];
+  boundDeps = [];
   disposed = false;
   rerunQueued = false;
+  onDepChange = () => {
+    this.queueRerun();
+  };
   constructor(run) {
     this.run = run;
     this.rerun();
@@ -212,6 +232,8 @@ class EffectCell {
   dispose() {
     this.disposed = true;
     detachAll(this.subscriptions);
+    this.subscriptions = [];
+    this.boundDeps = [];
   }
   rerun() {
     if (this.disposed)
@@ -229,8 +251,20 @@ class EffectCell {
     }
   }
   rebind(next) {
+    if (next.length === this.boundDeps.length) {
+      let same = true;
+      for (let at = 0;at < next.length; at++) {
+        if (next[at] !== this.boundDeps[at]) {
+          same = false;
+          break;
+        }
+      }
+      if (same)
+        return;
+    }
     detachAll(this.subscriptions);
-    this.subscriptions = next.map((dep) => dep.subscribe(() => this.queueRerun()));
+    this.subscriptions = next.map((dep) => dep.subscribe(this.onDepChange));
+    this.boundDeps = next;
   }
   queueRerun() {
     if (this.rerunQueued || this.disposed)
@@ -523,7 +557,7 @@ function createSegmentStore(capacity) {
 function createLiveCommand(segments, record, deps = []) {
   const id = nextLiveId++;
   const versions = deps.map(() => -1);
-  const scratch = createScratchWriter();
+  const scratch = createTapeWriter(64);
   let frameStride = 1;
   let framePhase = 0;
   let frameCounter = 0;
@@ -539,16 +573,16 @@ function createLiveCommand(segments, record, deps = []) {
   function tickFrame() {
     frameCounter++;
     active = frameCounter % frameStride === framePhase;
-    dirty = depsChanged();
+    pollDeps();
   }
-  function depsChanged() {
+  function pollDeps() {
     for (let at = 0;at < deps.length; at++) {
-      if (deps[at].version !== versions[at]) {
-        versions[at] = deps[at].version;
+      const version = deps[at].version;
+      if (version !== versions[at]) {
+        versions[at] = version;
         dirty = true;
       }
     }
-    return dirty;
   }
   function emit(writer, force = false) {
     if (!active)
@@ -602,71 +636,8 @@ function packRows(columns, count) {
   }
   return rows;
 }
-function createScratchWriter() {
-  let capacity = 64;
-  let op = new Int32Array(capacity);
-  let a = new Int32Array(capacity);
-  let b = new Int32Array(capacity);
-  let c = new Int32Array(capacity);
-  let d = new Int32Array(capacity);
-  let count = 0;
-  function reset() {
-    count = 0;
-  }
-  function emit(code, pa, pb, pc, pd) {
-    if (count === capacity)
-      grow();
-    op[count] = code;
-    a[count] = pa;
-    b[count] = pb;
-    c[count] = pc;
-    d[count] = pd;
-    count++;
-  }
-  function emitPacked(rows, packed) {
-    if (packed === 0)
-      return;
-    while (count + packed > capacity)
-      grow();
-    const base = count;
-    for (let at = 0;at < packed; at++)
-      op[base + at] = rows[at * 5];
-    for (let at = 0;at < packed; at++)
-      a[base + at] = rows[at * 5 + 1];
-    for (let at = 0;at < packed; at++)
-      b[base + at] = rows[at * 5 + 2];
-    for (let at = 0;at < packed; at++)
-      c[base + at] = rows[at * 5 + 3];
-    for (let at = 0;at < packed; at++)
-      d[base + at] = rows[at * 5 + 4];
-    count = base + packed;
-  }
-  function grow() {
-    capacity *= 2;
-    op = growColumn(op);
-    a = growColumn(a);
-    b = growColumn(b);
-    c = growColumn(c);
-    d = growColumn(d);
-  }
-  function growColumn(column) {
-    const next = new Int32Array(capacity);
-    next.set(column);
-    return next;
-  }
-  return {
-    reset,
-    emit,
-    emitPacked,
-    get count() {
-      return count;
-    },
-    get columns() {
-      return { op, a, b, c, d };
-    }
-  };
-}
 var nextLiveId = 1;
+var init_liveCommand = () => {};
 
 // packages/core/src/live/frameBuilder.ts
 function buildFrame(lives, writer) {
@@ -854,9 +825,20 @@ function createUniformArena(floats = 1 << 16) {
     bytes.set(source, from);
     const fromFloat = from >> 2;
     const toFloat = from + source.byteLength + 3 >> 2;
-    for (const slot of slots) {
-      if (slot.base + slot.size > fromFloat && slot.base < toFloat)
-        slot.dirty = true;
+    let low = 0;
+    let high = slots.length;
+    while (low < high) {
+      const mid = low + high >>> 1;
+      if (bases[mid] + slots[mid].size > fromFloat)
+        high = mid;
+      else
+        low = mid + 1;
+    }
+    for (let at = low;at < slots.length; at++) {
+      const slot = slots[at];
+      if (slot.base >= toFloat)
+        break;
+      slot.dirty = true;
     }
   }
   function clearDirty() {
@@ -1256,6 +1238,20 @@ function readSeqlock(data, versionAt, valueAt) {
   }
   throw new Error("rune: seqlock did not close within the attempt limit — the writer holds the slot (livelock)");
 }
+function readSeqlockValue(data, versionAt, valueAt) {
+  const i32 = atomicsView(data);
+  const at = versionIndex(versionAt);
+  for (let attempt = 0;attempt < MAX_READ_ATTEMPTS; attempt++) {
+    const before = Atomics.load(i32, at);
+    if ((before & 1) === 0) {
+      const value = data.getFloat64(valueAt, true);
+      const after = Atomics.load(i32, at);
+      if (before === after)
+        return value;
+    }
+  }
+  throw new Error("rune: seqlock did not close within the attempt limit — the writer holds the slot (livelock)");
+}
 function writeSeqlock(data, versionAt, valueAt, value) {
   const i32 = atomicsView(data);
   const at = versionIndex(versionAt);
@@ -1305,11 +1301,30 @@ function attachSharedRegistry(buffer, names) {
   checkSchema(view, names);
   const slots = indexSlots(view, names);
   const watchers = new Map;
-  const seen = captureVersions(view, names, slots);
+  const plan = [];
+  const seen = [];
+  for (const name of names) {
+    const offset = requireSlot(slots, name);
+    const versionAt = offset + VERSION_OFFSET;
+    plan.push({ offset, versionAt });
+    seen.push(seqlockVersion(view, versionAt));
+  }
   return {
     transport: "sab",
     signal: (name) => mirrorSignal(view, slots, watchers, name),
-    sampleAll: () => sampleChanged(view, names, slots, seen, watchers)
+    sampleAll: () => {
+      let changed = 0;
+      for (let at = 0;at < plan.length; at++) {
+        const slot = plan[at];
+        const version = seqlockVersion(view, slot.versionAt);
+        if (version === seen[at])
+          continue;
+        seen[at] = version;
+        changed++;
+        fireWatchers(view, slot.offset, watchers.get(slot.offset));
+      }
+      return changed;
+    }
   };
 }
 function headerBytes() {
@@ -1354,10 +1369,10 @@ function mirrorSignal(view, slots, watchers, name) {
   const listeners = [];
   watchers.set(offset, listeners);
   return {
-    peek: () => readSeqlock(view, offset + VERSION_OFFSET, offset + VALUE_OFFSET).value,
+    peek: () => readSeqlockValue(view, offset + VERSION_OFFSET, offset + VALUE_OFFSET),
     subscribe: (subscriber) => subscribeListener(listeners, subscriber),
     get value() {
-      return readSeqlock(view, offset + VERSION_OFFSET, offset + VALUE_OFFSET).value;
+      return readSeqlockValue(view, offset + VERSION_OFFSET, offset + VALUE_OFFSET);
     },
     get version() {
       return seqlockVersion(view, offset + VERSION_OFFSET);
@@ -1378,28 +1393,6 @@ function requireSlot(slots, name) {
   if (offset === undefined)
     throw new Error(`rune: signal "${name}" is not registered`);
   return offset;
-}
-function captureVersions(view, names, slots) {
-  const seen = new Map;
-  for (const name of names) {
-    const offset = requireSlot(slots, name);
-    seen.set(nameHash(name), seqlockVersion(view, offset + VERSION_OFFSET));
-  }
-  return seen;
-}
-function sampleChanged(view, names, slots, seen, watchers) {
-  let changed = 0;
-  for (const name of names) {
-    const hash = nameHash(name);
-    const offset = requireSlot(slots, name);
-    const version = seqlockVersion(view, offset + VERSION_OFFSET);
-    if (version === seen.get(hash))
-      continue;
-    seen.set(hash, version);
-    changed++;
-    fireWatchers(view, offset, watchers.get(offset));
-  }
-  return changed;
 }
 function fireWatchers(view, offset, listeners) {
   if (listeners === undefined || listeners.length === 0)
@@ -1451,21 +1444,65 @@ function attachFeed(buffer, layout, capacity) {
 function makeFeed(buffer, layout, capacity, policy) {
   const stride = feedStride(layout);
   const u32 = new Uint32Array(buffer);
+  const f32 = new Float32Array(buffer, HEADER_BYTES2);
+  const u8 = new Uint8Array(buffer, HEADER_BYTES2);
+  const offsets = fieldOffsets(layout);
   u32[0] = 0;
   u32[1] = 0;
   u32[2] = 0;
+  let wFrom = 0;
+  const writer = {
+    setFloat: (name, index, value) => {
+      const offset = requireOffset(offsets, name);
+      f32[(wFrom + index) * stride + offset >> 2] = value;
+    },
+    setVec2: (name, index, x, y) => {
+      const offset = requireOffset(offsets, name);
+      const at = (wFrom + index) * stride + offset >> 2;
+      f32[at] = x;
+      f32[at + 1] = y;
+    },
+    setVec3: (name, index, x, y, z) => {
+      const offset = requireOffset(offsets, name);
+      const at = (wFrom + index) * stride + offset >> 2;
+      f32[at] = x;
+      f32[at + 1] = y;
+      f32[at + 2] = z;
+    },
+    setVec4: (name, index, x, y, z, w) => {
+      const offset = requireOffset(offsets, name);
+      const at = (wFrom + index) * stride + offset >> 2;
+      f32[at] = x;
+      f32[at + 1] = y;
+      f32[at + 2] = z;
+      f32[at + 3] = w;
+    },
+    setVec4Bytes: (name, index, r, g, b, a) => {
+      const offset = requireOffset(offsets, name);
+      const at = (wFrom + index) * stride + offset;
+      u8[at] = r;
+      u8[at + 1] = g;
+      u8[at + 2] = b;
+      u8[at + 3] = a;
+    }
+  };
   return {
     buffer,
     capacity,
     stride,
-    view: (from, count) => feedWriter(buffer, stride, layout, from, count, policy),
-    push: (count) => feedWriter(buffer, stride, layout, reserve(buffer, capacity, count, policy), count, policy),
+    view: (from, count) => {
+      wFrom = from;
+      return writer;
+    },
+    push: (count) => {
+      wFrom = reserve(u32, capacity, count, policy);
+      return writer;
+    },
     publish: () => publishCount(u32),
     publishedCount: () => Atomics.load(u32, 1)
   };
 }
-function reserve(buffer, capacity, count, _policy) {
-  const u32 = new Uint32Array(buffer);
+function reserve(u32, capacity, count, _policy) {
   const from = Atomics.load(u32, 0);
   if (from + count > capacity) {
     Atomics.add(u32, 2, count);
@@ -1476,46 +1513,6 @@ function reserve(buffer, capacity, count, _policy) {
 }
 function publishCount(u32) {
   Atomics.store(u32, 1, Atomics.load(u32, 0));
-}
-function feedWriter(buffer, stride, layout, from, _count, _policy) {
-  const f32 = new Float32Array(buffer, HEADER_BYTES2);
-  const u8 = new Uint8Array(buffer, HEADER_BYTES2);
-  const offsets = fieldOffsets(layout);
-  return {
-    setFloat: (name, index, value) => {
-      const offset = requireOffset(offsets, name);
-      f32[(from + index) * stride + offset >> 2] = value;
-    },
-    setVec2: (name, index, x, y) => {
-      const offset = requireOffset(offsets, name);
-      const at = (from + index) * stride + offset >> 2;
-      f32[at] = x;
-      f32[at + 1] = y;
-    },
-    setVec3: (name, index, x, y, z) => {
-      const offset = requireOffset(offsets, name);
-      const at = (from + index) * stride + offset >> 2;
-      f32[at] = x;
-      f32[at + 1] = y;
-      f32[at + 2] = z;
-    },
-    setVec4: (name, index, x, y, z, w) => {
-      const offset = requireOffset(offsets, name);
-      const at = (from + index) * stride + offset >> 2;
-      f32[at] = x;
-      f32[at + 1] = y;
-      f32[at + 2] = z;
-      f32[at + 3] = w;
-    },
-    setVec4Bytes: (name, index, r, g, b, a) => {
-      const offset = requireOffset(offsets, name);
-      const at = (from + index) * stride + offset;
-      u8[at] = r;
-      u8[at + 1] = g;
-      u8[at + 2] = b;
-      u8[at + 3] = a;
-    }
-  };
 }
 function fieldOffsets(layout) {
   const offsets = new Map;
@@ -1780,9 +1777,17 @@ function msgHost(state) {
 function msgClient(state) {
   const cells = new Map;
   const versions = new Map;
+  const hashIndex = new Map;
   for (const name of state.names) {
-    cells.set(name, signal(0));
+    const cell = signal(0);
+    cells.set(name, cell);
     versions.set(name, 0);
+    const hash = nameHash(name);
+    const bucket = hashIndex.get(hash);
+    if (bucket === undefined)
+      hashIndex.set(hash, [cell]);
+    else
+      bucket.push(cell);
   }
   const views = new Map;
   for (const [id, entry] of state.mirrors)
@@ -1810,24 +1815,17 @@ function msgClient(state) {
       if (message?.kind !== "rune.transport.frame")
         return;
       for (const [hash, value] of message.deltas) {
-        for (const name of state.names) {
-          if (nameHash(name) !== hash)
-            continue;
-          cells.get(name).value = value;
-        }
+        const targets = hashIndex.get(hash);
+        if (targets === undefined)
+          continue;
+        for (const cell of targets)
+          cell.value = value;
       }
       for (const chunk of message.chunks) {
         const entry = state.mirrors.get(chunk.feedId);
         if (entry === undefined)
           continue;
-        const src = new Float32Array(chunk.bytes);
-        const strideF = entry.stride / 4;
-        for (let i = 0;i < chunk.count; i++) {
-          const srcAt = i * strideF;
-          const dstAt = (chunk.from + i) * strideF;
-          for (let c = 0;c < strideF; c++)
-            entry.mirror[dstAt + c] = src[srcAt + c];
-        }
+        applyChunkBytes(entry, chunk);
         entry.count = Math.max(entry.count, chunk.from + chunk.count);
         entry.pending.push(chunk);
       }
@@ -1895,6 +1893,8 @@ function flushMsg(state) {
       continue;
     chunks.push({ feedId: id, from: core.base, count: core.written, bytes: core.current });
     core.current = core.pool.pop() ?? new ArrayBuffer(core.capacity * core.stride);
+    core.f32 = new Float32Array(core.current);
+    core.u8 = new Uint8Array(core.current);
     core.base += core.written;
     core.shipped += core.written;
     core.written = 0;
@@ -1910,87 +1910,114 @@ function msgFeedFacade(state, feedOptions, forcedId) {
   else
     state.nextFeedId = Math.max(state.nextFeedId, forcedId + 1);
   const stride = feedStride(feedOptions.layout);
-  state.feeds.set(id, {
+  const current = new ArrayBuffer(feedOptions.capacity * stride);
+  const core = {
     layout: feedOptions.layout,
     capacity: feedOptions.capacity,
     stride,
     pool: [],
-    current: new ArrayBuffer(feedOptions.capacity * stride),
+    current,
+    f32: new Float32Array(current),
+    u8: new Uint8Array(current),
     written: 0,
     base: 0,
     shipped: 0,
     published: 0
-  });
-  const core = () => state.feeds.get(id);
+  };
+  state.feeds.set(id, core);
+  let wFrom = 0;
+  const writer = {
+    setFloat: (name, index, value) => {
+      const c = core;
+      const at = msgFieldAt(c, name, wFrom + index);
+      c.f32[at >> 2] = value;
+    },
+    setVec2: (name, index, x, y) => {
+      const c = core;
+      const at = msgFieldAt(c, name, wFrom + index);
+      const f = at >> 2;
+      c.f32[f] = x;
+      c.f32[f + 1] = y;
+    },
+    setVec3: (name, index, x, y, z) => {
+      const c = core;
+      const at = msgFieldAt(c, name, wFrom + index);
+      const f = at >> 2;
+      c.f32[f] = x;
+      c.f32[f + 1] = y;
+      c.f32[f + 2] = z;
+    },
+    setVec4: (name, index, x, y, z, w) => {
+      const c = core;
+      const at = msgFieldAt(c, name, wFrom + index);
+      const f = at >> 2;
+      c.f32[f] = x;
+      c.f32[f + 1] = y;
+      c.f32[f + 2] = z;
+      c.f32[f + 3] = w;
+    },
+    setVec4Bytes: (name, index, r, g, b, a) => {
+      const c = core;
+      const at = msgFieldAt(c, name, wFrom + index);
+      c.u8[at] = r;
+      c.u8[at + 1] = g;
+      c.u8[at + 2] = b;
+      c.u8[at + 3] = a;
+    }
+  };
   return {
     get buffer() {
-      return core().current;
+      return core.current;
     },
     get capacity() {
-      return core().capacity;
+      return core.capacity;
     },
     get stride() {
       return stride;
     },
     view: (from, count) => {
-      const c = core();
-      const local = from - c.base;
-      if (local < 0 || from + count > c.base + c.capacity) {
-        throw new Error(`rune: T3 feed is append-only — view(${from},${count}) is outside the window [${c.base}, ${c.base + c.capacity})`);
+      const local = from - core.base;
+      if (local < 0 || from + count > core.base + core.capacity) {
+        throw new Error(`rune: T3 feed is append-only — view(${from},${count}) is outside the window [${core.base}, ${core.base + core.capacity})`);
       }
-      if (local + count > c.written)
-        c.written = local + count;
-      return msgWriter(core, from, count);
+      if (local + count > core.written)
+        core.written = local + count;
+      wFrom = from;
+      return writer;
     },
     push: (count) => {
-      const c = core();
-      const from = c.base + c.written;
-      if (c.base + c.written + count > c.capacity)
-        return msgWriter(core, from, 0);
-      c.written += count;
-      return msgWriter(core, from, count);
+      const from = core.base + core.written;
+      if (core.base + core.written + count > core.capacity) {
+        wFrom = from;
+        return writer;
+      }
+      core.written += count;
+      wFrom = from;
+      return writer;
     },
     publish: () => {
-      const c = core();
-      c.published = c.base + c.written;
+      core.published = core.base + core.written;
     },
-    publishedCount: () => core().published
+    publishedCount: () => core.published
   };
 }
-function msgWriter(core, from, _count) {
-  return {
-    setFloat: (name, index, value) => writeMsg(core, from + index, name, [value]),
-    setVec2: (name, index, x, y) => writeMsg(core, from + index, name, [x, y]),
-    setVec3: (name, index, x, y, z) => writeMsg(core, from + index, name, [x, y, z]),
-    setVec4: (name, index, x, y, z, w) => writeMsg(core, from + index, name, [x, y, z, w]),
-    setVec4Bytes: (name, index, r, g, b, a) => {
-      const c = core();
-      const offsets = byteOffsets(c.layout);
-      const at = (from + index) * c.stride + (offsets.get(name) ?? -1);
-      if (at < 0)
-        throw new Error(`rune: feed field "${name}" is not declared`);
-      const u8 = new Uint8Array(c.current);
-      u8[at] = r;
-      u8[at + 1] = g;
-      u8[at + 2] = b;
-      u8[at + 3] = a;
-    }
-  };
-}
-function writeMsg(core, logicalIndex, name, values) {
-  const c = core();
-  const offsets = byteOffsets(c.layout);
-  const fieldAt = offsets.get(name);
+function msgFieldAt(c, name, logicalIndex) {
+  const fieldAt = byteOffsets(c.layout).get(name);
   if (fieldAt === undefined)
     throw new Error(`rune: feed field "${name}" is not declared`);
   const local = logicalIndex - c.base;
   if (local < 0 || local >= c.capacity) {
     throw new Error(`rune: T3 feed is append-only — index ${logicalIndex} is outside the window [${c.base}, ${c.base + c.capacity})`);
   }
-  const f32 = new Float32Array(c.current);
-  const at = local * c.stride + fieldAt >> 2;
-  for (let i = 0;i < values.length; i++)
-    f32[at + i] = values[i];
+  return local * c.stride + fieldAt;
+}
+function applyChunkBytes(entry, chunk) {
+  const src = new Float32Array(chunk.bytes);
+  const strideF = entry.stride / 4;
+  const dstAt = chunk.from * strideF;
+  const fitF = Math.min(chunk.count * strideF, src.length, Math.max(0, entry.mirror.length - dstAt));
+  if (fitF > 0)
+    entry.mirror.set(src.subarray(0, fitF), dstAt);
 }
 function byteOffsets(layout) {
   const cached = byteOffsetCache.get(layout);
@@ -2047,14 +2074,7 @@ function createMsgFeedReader(feedId, options) {
       for (const chunk of chunks) {
         if (chunk.feedId !== feedId)
           continue;
-        const src = new Float32Array(chunk.bytes);
-        const strideF = stride / 4;
-        for (let i = 0;i < chunk.count; i++) {
-          const srcAt = i * strideF;
-          const dstAt = (chunk.from + i) * strideF;
-          for (let c = 0;c < strideF; c++)
-            mirror[dstAt + c] = src[srcAt + c];
-        }
+        applyChunkBytes(entry, chunk);
         entry.count = Math.min(Math.max(entry.count, chunk.from + chunk.count), options.capacity);
         entry.pending.push(chunk);
       }
@@ -3554,6 +3574,7 @@ var init_src = __esm(() => {
   init_epoch();
   init_transientPool();
   init_opcodes();
+  init_liveCommand();
   init_arena();
   init_frequencyArena();
   init_textureUpload();

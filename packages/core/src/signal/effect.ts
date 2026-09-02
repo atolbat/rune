@@ -13,8 +13,16 @@ export function effect(run: () => void): Unsubscribe {
 class EffectCell {
   private readonly run: () => void
   private subscriptions: Unsubscribe[] = []
+  /** The dependency list of the LAST bind — rebind compares against it. */
+  private boundDeps: ReadableSignal<any>[] = []
   private disposed = false
   private rerunQueued = false
+
+  /** ONE hoisted callback for every dependency (the derive.ts pattern):
+ *  a rerun rebinds N deps without allocating N closures per rerun. */
+  private readonly onDepChange = (): void => {
+    this.queueRerun()
+  }
 
   constructor(run: () => void) {
     this.run = run
@@ -24,6 +32,8 @@ class EffectCell {
   dispose(): void {
     this.disposed = true
     detachAll(this.subscriptions)
+    this.subscriptions = []
+    this.boundDeps = []
   }
 
   private rerun(): void {
@@ -45,8 +55,19 @@ class EffectCell {
   }
 
   private rebind(next: ReadableSignal<any>[]): void {
+    // An unchanged dependency list (the common case — a rerun reads the same
+    // cells in the same order) keeps the existing subscriptions instead of
+    // churning N closures + an array per rerun.
+    if (next.length === this.boundDeps.length) {
+      let same = true
+      for (let at = 0; at < next.length; at++) {
+        if (next[at] !== this.boundDeps[at]) { same = false; break }
+      }
+      if (same) return
+    }
     detachAll(this.subscriptions)
-    this.subscriptions = next.map(dep => dep.subscribe(() => this.queueRerun()))
+    this.subscriptions = next.map(dep => dep.subscribe(this.onDepChange))
+    this.boundDeps = next
   }
 
   private queueRerun(): void {

@@ -29,8 +29,15 @@ import {
   H_OUTPUT_EPOCH,
 } from './layout.ts'
 import { cullViewsHierarchical } from './culling.ts'
+import type { MutableCullStats } from './culling.ts'
 import { collectInstancesViews } from './instances.ts'
 import { refitGroupBoundsViews, updateWorldViews } from './transforms.ts'
+
+/** Cull stats scratch for the pipeline: the numbers are never read here —
+ * an allocated result object per camera per frame was pure garbage (Task 113). */
+const pipelineCullStats: MutableCullStats = {
+  tested: 0, visible: 0, trivialRejects: 0, trivialAccepts: 0, planeTests: 0,
+}
 
 /**
  * One scene pipeline frame into buffer bufferIndex (0/1).
@@ -44,7 +51,7 @@ export function runScenePipeline(views: SceneViews, bufferIndex: number): number
   if ((cmd & CMD_REFIT) !== 0) refitGroupBoundsViews(views)
   if ((cmd & CMD_CULL) !== 0) {
     const cameras = headerI[H_CAMERA_COUNT]
-    for (let k = 0; k < cameras; k++) cullViewsHierarchical(views, k, bufferIndex)
+    for (let k = 0; k < cameras; k++) cullViewsHierarchical(views, k, bufferIndex, pipelineCullStats)
   }
   if ((cmd & CMD_INSTANCES) !== 0) {
     const cameras = headerI[H_CAMERA_COUNT]

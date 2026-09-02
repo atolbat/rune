@@ -127,11 +127,12 @@ export function measureScenePipeline(
 ): number {
   const runs = opts.runs ?? 7
   scene.pack()
-  // JIT + dirt warm-up.
+  // JIT + dirt warm-up. cull(reuse): the numbers are not read here — the
+  // scratch result keeps the measured frames allocation-free (Task 113).
   for (let i = 0; i < runs; i++) {
     scene.updateWorld()
     scene.refitGroupBounds()
-    scene.cull(cameras)
+    scene.cull(cameras, { reuse: true })
     for (let k = 0; k < cameras.length; k++) scene.collectInstances(k)
   }
   const times: number[] = []
@@ -139,7 +140,7 @@ export function measureScenePipeline(
     const t0 = performance.now()
     scene.updateWorld()
     scene.refitGroupBounds()
-    scene.cull(cameras)
+    scene.cull(cameras, { reuse: true })
     for (let k = 0; k < cameras.length; k++) scene.collectInstances(k)
     times.push(performance.now() - t0)
   }

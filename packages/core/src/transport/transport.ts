@@ -388,6 +388,10 @@ interface MsgFeedCore {
   pool: ArrayBuffer[]
   /** Current write buffer (leaves as a chunk on flush). */
   current: ArrayBuffer
+  /** f32/u8 views of `current` — refreshed on the flush swap, so a field
+ *  write NEVER allocates a view (Task 114). */
+  f32: Float32Array
+  u8: Uint8Array
   /** Records written into current. */
   written: number
   /** Logical offset of current's first record. */
@@ -469,9 +473,19 @@ function msgHost(state: MsgState): TransportHost {
 function msgClient(state: MsgState): TransportClient {
   const cells = new Map<string, SignalCell<number>>()
   const versions = new Map<string, number>()
+  // Task 114 — hash index: a delta applies through ONE Map lookup instead
+  // of re-hashing every registered name per delta (D×N string hashes/frame).
+  // A bucket holds every cell whose name hashes to the key — the old scan
+  // set ALL of them on a match, collisions included; the bucket keeps that.
+  const hashIndex = new Map<number, SignalCell<number>[]>()
   for (const name of state.names) {
-    cells.set(name, signal(0))
+    const cell = signal(0)
+    cells.set(name, cell)
     versions.set(name, 0)
+    const hash = nameHash(name)
+    const bucket = hashIndex.get(hash)
+    if (bucket === undefined) hashIndex.set(hash, [cell])
+    else bucket.push(cell)
   }
   const views = new Map<number, TransportFeedView>()
   for (const [id, entry] of state.mirrors) views.set(id, mirrorFeedView(state, id, entry))
@@ -495,21 +509,14 @@ function msgClient(state: MsgState): TransportClient {
     apply: message => {
       if (message?.kind !== 'rune.transport.frame') return
       for (const [hash, value] of message.deltas) {
-        for (const name of state.names) {
-          if (nameHash(name) !== hash) continue
-          cells.get(name)!.value = value
-        }
+        const targets = hashIndex.get(hash)
+        if (targets === undefined) continue
+        for (const cell of targets) cell.value = value
       }
       for (const chunk of message.chunks) {
         const entry = state.mirrors.get(chunk.feedId)
         if (entry === undefined) continue
-        const src = new Float32Array(chunk.bytes)
-        const strideF = entry.stride / 4
-        for (let i = 0; i < chunk.count; i++) {
-          const srcAt = i * strideF
-          const dstAt = (chunk.from + i) * strideF
-          for (let c = 0; c < strideF; c++) entry.mirror[dstAt + c] = src[srcAt + c]
-        }
+        applyChunkBytes(entry, chunk)
         entry.count = Math.max(entry.count, chunk.from + chunk.count)
         entry.pending.push(chunk)
       }
@@ -578,6 +585,10 @@ function flushMsg(state: MsgState): TransportFrameMessage | null {
     if (core.written === 0) continue
     chunks.push({ feedId: id, from: core.base, count: core.written, bytes: core.current })
     core.current = core.pool.pop() ?? new ArrayBuffer(core.capacity * core.stride)
+    // The buffer swapped — refresh the writer's views (Task 114: the views
+    // live on the core, not per write).
+    core.f32 = new Float32Array(core.current)
+    core.u8 = new Uint8Array(core.current)
     core.base += core.written
     core.shipped += core.written
     core.written = 0
@@ -592,82 +603,126 @@ function msgFeedFacade(state: MsgState, feedOptions: { layout: FeedLayout; capac
   if (forcedId === undefined) state.nextFeedId++
   else state.nextFeedId = Math.max(state.nextFeedId, forcedId + 1)
   const stride = feedStride(feedOptions.layout)
-  state.feeds.set(id, {
+  const current = new ArrayBuffer(feedOptions.capacity * stride)
+  const core: MsgFeedCore = {
     layout: feedOptions.layout,
     capacity: feedOptions.capacity,
     stride,
     pool: [],
-    current: new ArrayBuffer(feedOptions.capacity * stride),
+    current,
+    f32: new Float32Array(current),
+    u8: new Uint8Array(current),
     written: 0,
     base: 0,
     shipped: 0,
     published: 0,
-  })
-  const core = () => state.feeds.get(id)!
+  }
+  state.feeds.set(id, core)
+  // Task 114 — ONE writer per feed, re-aimed by view()/push() (the same
+  // contract as feed.ts): `wFrom` is mutable closure state, the entry object
+  // is stable for the feed's lifetime (only its buffer swaps on flush), so
+  // every set* is a direct scalar write — no boxed [x,y,z,w] array, no fresh
+  // Float32Array/Uint8Array view, no Map lookup for the core (previously
+  // PER FIELD WRITE: 2 allocations + a feeds.get(id) round-trip).
+  let wFrom = 0
+  const writer: FeedWriter = {
+    setFloat: (name, index, value) => {
+      const c = core
+      const at = msgFieldAt(c, name, wFrom + index)
+      c.f32[at >> 2] = value
+    },
+    setVec2: (name, index, x, y) => {
+      const c = core
+      const at = msgFieldAt(c, name, wFrom + index)
+      const f = at >> 2
+      c.f32[f] = x
+      c.f32[f + 1] = y
+    },
+    setVec3: (name, index, x, y, z) => {
+      const c = core
+      const at = msgFieldAt(c, name, wFrom + index)
+      const f = at >> 2
+      c.f32[f] = x
+      c.f32[f + 1] = y
+      c.f32[f + 2] = z
+    },
+    setVec4: (name, index, x, y, z, w) => {
+      const c = core
+      const at = msgFieldAt(c, name, wFrom + index)
+      const f = at >> 2
+      c.f32[f] = x
+      c.f32[f + 1] = y
+      c.f32[f + 2] = z
+      c.f32[f + 3] = w
+    },
+    setVec4Bytes: (name, index, r, g, b, a) => {
+      const c = core
+      const at = msgFieldAt(c, name, wFrom + index)
+      c.u8[at] = r
+      c.u8[at + 1] = g
+      c.u8[at + 2] = b
+      c.u8[at + 3] = a
+    },
+  }
   return {
-    get buffer() { return core().current },
-    get capacity() { return core().capacity },
+    get buffer() { return core.current },
+    get capacity() { return core.capacity },
     get stride() { return stride },
     view: (from, count) => {
-      const c = core()
-      const local = from - c.base
-      if (local < 0 || from + count > c.base + c.capacity) {
-        throw new Error(`rune: T3 feed is append-only — view(${from},${count}) is outside the window [${c.base}, ${c.base + c.capacity})`)
+      const local = from - core.base
+      if (local < 0 || from + count > core.base + core.capacity) {
+        throw new Error(`rune: T3 feed is append-only — view(${from},${count}) is outside the window [${core.base}, ${core.base + core.capacity})`)
       }
       // The write window expands to cover it (parity with the SAB view).
-      if (local + count > c.written) c.written = local + count
-      return msgWriter(core, from, count)
+      if (local + count > core.written) core.written = local + count
+      wFrom = from
+      return writer
     },
     push: count => {
-      const c = core()
-      const from = c.base + c.written
+      const from = core.base + core.written
       // Task 75: the logical window boundary — base+written never goes past
       // capacity (the reader's mirror is physically capacity*stride bytes).
       // Previously only the written window was checked — the logical index
       // grew past the mirror's boundary, the reader's count exceeded capacity
       // → writeBuffer larger than the buffer. Now drop-new is conservative
       // by LOGICAL index.
-      if (c.base + c.written + count > c.capacity) return msgWriter(core, from, 0)
-      c.written += count
-      return msgWriter(core, from, count)
+      if (core.base + core.written + count > core.capacity) {
+        wFrom = from
+        return writer
+      }
+      core.written += count
+      wFrom = from
+      return writer
     },
     publish: () => {
-      const c = core()
-      c.published = c.base + c.written
+      core.published = core.base + core.written
     },
-    publishedCount: () => core().published,
+    publishedCount: () => core.published,
   }
 }
 
-function msgWriter(core: () => MsgFeedCore, from: number, _count: number): FeedWriter {
-  return {
-    setFloat: (name, index, value) => writeMsg(core, from + index, name, [value]),
-    setVec2: (name, index, x, y) => writeMsg(core, from + index, name, [x, y]),
-    setVec3: (name, index, x, y, z) => writeMsg(core, from + index, name, [x, y, z]),
-    setVec4: (name, index, x, y, z, w) => writeMsg(core, from + index, name, [x, y, z, w]),
-    setVec4Bytes: (name, index, r, g, b, a) => {
-      const c = core()
-      const offsets = byteOffsets(c.layout)
-      const at = (from + index) * c.stride + (offsets.get(name) ?? -1)
-      if (at < 0) throw new Error(`rune: feed field "${name}" is not declared`)
-      const u8 = new Uint8Array(c.current)
-      u8[at] = r; u8[at + 1] = g; u8[at + 2] = b; u8[at + 3] = a
-    },
-  }
-}
-
-function writeMsg(core: () => MsgFeedCore, logicalIndex: number, name: string, values: number[]): void {
-  const c = core()
-  const offsets = byteOffsets(c.layout)
-  const fieldAt = offsets.get(name)
+/** Byte offset of a field inside the core's current buffer, with the window
+ *  check (the only shared validation of a T3 field write). */
+function msgFieldAt(c: MsgFeedCore, name: string, logicalIndex: number): number {
+  const fieldAt = byteOffsets(c.layout).get(name)
   if (fieldAt === undefined) throw new Error(`rune: feed field "${name}" is not declared`)
   const local = logicalIndex - c.base
   if (local < 0 || local >= c.capacity) {
     throw new Error(`rune: T3 feed is append-only — index ${logicalIndex} is outside the window [${c.base}, ${c.base + c.capacity})`)
   }
-  const f32 = new Float32Array(c.current)
-  const at = (local * c.stride + fieldAt) >> 2
-  for (let i = 0; i < values.length; i++) f32[at + i] = values[i]
+  return local * c.stride + fieldAt
+}
+
+/** Copies a delivered chunk's bytes into a mirror — ONE memcpy (set) instead
+ *  of the per-element triple loop. Bounds are clamped defensively: in-tree
+ *  the Task 75 window invariant guarantees a full fit, out-of-tree a hostile
+ *  chunk silently truncates (the old loop's OOB semantics were NaN garbage). */
+function applyChunkBytes(entry: MsgMirror, chunk: TransportFeedChunk): void {
+  const src = new Float32Array(chunk.bytes)
+  const strideF = entry.stride / 4
+  const dstAt = chunk.from * strideF
+  const fitF = Math.min(chunk.count * strideF, src.length, Math.max(0, entry.mirror.length - dstAt))
+  if (fitF > 0) entry.mirror.set(src.subarray(0, fitF), dstAt)
 }
 
 const byteOffsetCache = new WeakMap<FeedLayout, Map<string, number>>()
@@ -687,8 +742,6 @@ function byteOffsets(layout: FeedLayout): Map<string, number> {
 
 /** T3 mirror view: count moves via apply, recycle returns the buffers. */
 function mirrorFeedView(state: MsgState, feedId: number, entry: MsgMirror): TransportFeedView {
-  void state
-  void feedId
   return {
     feedId,
     stride: entry.stride,
@@ -727,7 +780,6 @@ export interface MsgFeedReaderHandle {
 export function createMsgFeedWriter(feedId: number, options: { layout: FeedLayout; capacity: number; policy?: FeedPolicy }): MsgFeedWriterHandle {
   const state = createMsgState([])
   const facade = msgFeedFacade(state, options, feedId)
-  void facade
   return {
     feed: facade,
     ship: () => {
@@ -752,13 +804,7 @@ export function createMsgFeedReader(feedId: number, options: { layout: FeedLayou
     apply: chunks => {
       for (const chunk of chunks) {
         if (chunk.feedId !== feedId) continue
-        const src = new Float32Array(chunk.bytes)
-        const strideF = stride / 4
-        for (let i = 0; i < chunk.count; i++) {
-          const srcAt = i * strideF
-          const dstAt = (chunk.from + i) * strideF
-          for (let c = 0; c < strideF; c++) mirror[dstAt + c] = src[srcAt + c]
-        }
+        applyChunkBytes(entry, chunk)
         // Task 75: the mirror's count cannot exceed capacity (records past
         // the mirror's physical limit are ignored by TypedArray semantics,
         // the counter must follow).

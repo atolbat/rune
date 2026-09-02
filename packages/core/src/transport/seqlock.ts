@@ -58,6 +58,22 @@ export function readSeqlock(data: DataView, versionAt: number, valueAt: number):
   throw new Error('rune: seqlock did not close within the attempt limit — the writer holds the slot (livelock)')
 }
 
+/** Value-only read: the hot path (the mirror's .value/peek) — the retry loop
+ *  needs no result object, so a stable read allocates nothing (Task 114). */
+export function readSeqlockValue(data: DataView, versionAt: number, valueAt: number): number {
+  const i32 = atomicsView(data)
+  const at = versionIndex(versionAt)
+  for (let attempt = 0; attempt < MAX_READ_ATTEMPTS; attempt++) {
+    const before = Atomics.load(i32, at)
+    if ((before & 1) === 0) {
+      const value = data.getFloat64(valueAt, true)
+      const after = Atomics.load(i32, at)
+      if (before === after) return value
+    }
+  }
+  throw new Error('rune: seqlock did not close within the attempt limit — the writer holds the slot (livelock)')
+}
+
 /** Writes the slot: version odd → value → version even. */
 export function writeSeqlock(data: DataView, versionAt: number, valueAt: number, value: number): void {
   const i32 = atomicsView(data)

@@ -17,7 +17,11 @@ export interface Feed {
   readonly buffer: ArrayBufferLike
   readonly capacity: number
   readonly stride: number
-  /** Writes n records starting at index `from` (locally, without publish). */
+  /** Writes n records starting at index `from` (locally, without publish).
+ *  The returned writer is REUSED by the feed: the next view()/push() call
+ *  RE-AIMS it — consume the batch before requesting the next (Task 114,
+ *  zero steady-state allocations; previously every call rebuilt the views,
+ *  the offsets map and five writer closures). */
   view(from: number, count: number): FeedWriter
   /** Sugar: appends to the tail, returns the starting index. */
   push(count: number): FeedWriter
@@ -93,22 +97,68 @@ function makeFeed(
 ): Feed {
   const stride = feedStride(layout)
   const u32 = new Uint32Array(buffer)
+  const f32 = new Float32Array(buffer, HEADER_BYTES)
+  const u8 = new Uint8Array(buffer, HEADER_BYTES)
+  // Offsets are resolved ONCE per feed — the layout never changes after
+  // creation (Task 114: previously every view()/push() re-parsed it).
+  const offsets = fieldOffsets(layout)
   u32[0] = 0 // written
   u32[1] = 0 // published
   u32[2] = 0 // dropped
+  // Task 114 — ONE writer per feed, re-aimed by view()/push(): the write
+  // window is closure state (mutable `wFrom`), the methods never allocate.
+  let wFrom = 0
+  const writer: FeedWriter = {
+    setFloat: (name, index, value) => {
+      const offset = requireOffset(offsets, name)
+      f32[((wFrom + index) * stride + offset) >> 2] = value
+    },
+    setVec2: (name, index, x, y) => {
+      const offset = requireOffset(offsets, name)
+      const at = ((wFrom + index) * stride + offset) >> 2
+      f32[at] = x
+      f32[at + 1] = y
+    },
+    setVec3: (name, index, x, y, z) => {
+      const offset = requireOffset(offsets, name)
+      const at = ((wFrom + index) * stride + offset) >> 2
+      f32[at] = x
+      f32[at + 1] = y
+      f32[at + 2] = z
+    },
+    setVec4: (name, index, x, y, z, w) => {
+      const offset = requireOffset(offsets, name)
+      const at = ((wFrom + index) * stride + offset) >> 2
+      f32[at] = x
+      f32[at + 1] = y
+      f32[at + 2] = z
+      f32[at + 3] = w
+    },
+    setVec4Bytes: (name, index, r, g, b, a) => {
+      const offset = requireOffset(offsets, name)
+      const at = (wFrom + index) * stride + offset
+      u8[at] = r; u8[at + 1] = g; u8[at + 2] = b; u8[at + 3] = a
+    },
+  }
   return {
     buffer,
     capacity,
     stride,
-    view: (from, count) => feedWriter(buffer, stride, layout, from, count, policy),
-    push: count => feedWriter(buffer, stride, layout, reserve(buffer, capacity, count, policy), count, policy),
+    view: (from, count) => {
+      void count
+      wFrom = from
+      return writer
+    },
+    push: count => {
+      wFrom = reserve(u32, capacity, count, policy)
+      return writer
+    },
     publish: () => publishCount(u32),
     publishedCount: () => Atomics.load(u32, 1),
   }
 }
 
-function reserve(buffer: ArrayBufferLike, capacity: number, count: number, _policy: FeedPolicy): number {
-  const u32 = new Uint32Array(buffer)
+function reserve(u32: Uint32Array, capacity: number, count: number, _policy: FeedPolicy): number {
   const from = Atomics.load(u32, 0)
   // Task 75 (fix for "Number of bytes to write is too large"): written NEVER
   // goes past capacity. Previously the reserve went unconditionally (written went past
@@ -127,51 +177,6 @@ function reserve(buffer: ArrayBufferLike, capacity: number, count: number, _poli
 
 function publishCount(u32: Uint32Array): void {
   Atomics.store(u32, 1, Atomics.load(u32, 0))
-}
-
-function feedWriter(
-  buffer: ArrayBufferLike,
-  stride: number,
-  layout: FeedLayout,
-  from: number,
-  _count: number,
-  _policy: FeedPolicy,
-): FeedWriter {
-  const f32 = new Float32Array(buffer, HEADER_BYTES)
-  const u8 = new Uint8Array(buffer, HEADER_BYTES)
-  const offsets = fieldOffsets(layout)
-  return {
-    setFloat: (name, index, value) => {
-      const offset = requireOffset(offsets, name)
-      f32[((from + index) * stride + offset) >> 2] = value
-    },
-    setVec2: (name, index, x, y) => {
-      const offset = requireOffset(offsets, name)
-      const at = ((from + index) * stride + offset) >> 2
-      f32[at] = x
-      f32[at + 1] = y
-    },
-    setVec3: (name, index, x, y, z) => {
-      const offset = requireOffset(offsets, name)
-      const at = ((from + index) * stride + offset) >> 2
-      f32[at] = x
-      f32[at + 1] = y
-      f32[at + 2] = z
-    },
-    setVec4: (name, index, x, y, z, w) => {
-      const offset = requireOffset(offsets, name)
-      const at = ((from + index) * stride + offset) >> 2
-      f32[at] = x
-      f32[at + 1] = y
-      f32[at + 2] = z
-      f32[at + 3] = w
-    },
-    setVec4Bytes: (name, index, r, g, b, a) => {
-      const offset = requireOffset(offsets, name)
-      const at = (from + index) * stride + offset
-      u8[at] = r; u8[at + 1] = g; u8[at + 2] = b; u8[at + 3] = a
-    },
-  }
 }
 
 function fieldOffsets(layout: FeedLayout): Map<string, number> {

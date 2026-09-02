@@ -1,5 +1,5 @@
 import type { ReadableSignal, Subscriber, Unsubscribe } from '../signal/types.ts'
-import { readSeqlock, writeSeqlock, seqlockVersion } from './seqlock.ts'
+import { readSeqlock, readSeqlockValue, writeSeqlock, seqlockVersion } from './seqlock.ts'
 
 const VERSION_OFFSET = 4
 const VALUE_OFFSET = 8
@@ -67,11 +67,32 @@ export function attachSharedRegistry(buffer: SharedArrayBuffer, names: readonly 
   checkSchema(view, names)
   const slots = indexSlots(view, names)
   const watchers = new Map<number, Subscriber<number>[]>()
-  const seen = captureVersions(view, names, slots)
+  // Task 114 — the FROZEN sampling plan: names are fixed at attach, so the
+  // per-epoch loop does zero string hashing and zero Map lookups (the old
+  // path re-hashed every name and resolved its slot on every sampleAll).
+  const plan: Array<{ offset: number; versionAt: number }> = []
+  const seen: number[] = []
+  for (const name of names) {
+    const offset = requireSlot(slots, name)
+    const versionAt = offset + VERSION_OFFSET
+    plan.push({ offset, versionAt })
+    seen.push(seqlockVersion(view, versionAt))
+  }
   return {
     transport: 'sab',
     signal: name => mirrorSignal(view, slots, watchers, name),
-    sampleAll: () => sampleChanged(view, names, slots, seen, watchers),
+    sampleAll: () => {
+      let changed = 0
+      for (let at = 0; at < plan.length; at++) {
+        const slot = plan[at]
+        const version = seqlockVersion(view, slot.versionAt)
+        if (version === seen[at]) continue
+        seen[at] = version
+        changed++
+        fireWatchers(view, slot.offset, watchers.get(slot.offset))
+      }
+      return changed
+    },
   }
 }
 
@@ -135,9 +156,9 @@ function mirrorSignal(
   const listeners: Subscriber<number>[] = []
   watchers.set(offset, listeners)
   return {
-    peek: () => readSeqlock(view, offset + VERSION_OFFSET, offset + VALUE_OFFSET).value,
+    peek: () => readSeqlockValue(view, offset + VERSION_OFFSET, offset + VALUE_OFFSET),
     subscribe: subscriber => subscribeListener(listeners, subscriber),
-    get value() { return readSeqlock(view, offset + VERSION_OFFSET, offset + VALUE_OFFSET).value },
+    get value() { return readSeqlockValue(view, offset + VERSION_OFFSET, offset + VALUE_OFFSET) },
     get version() { return seqlockVersion(view, offset + VERSION_OFFSET) },
   }
 }
@@ -156,36 +177,6 @@ function requireSlot(slots: Map<number, number>, name: string): number {
   const offset = slots.get(nameHash(name))
   if (offset === undefined) throw new Error(`rune: signal "${name}" is not registered`)
   return offset
-}
-
-function captureVersions(view: DataView, names: readonly string[], slots: Map<number, number>): Map<number, number> {
-  const seen = new Map<number, number>()
-  for (const name of names) {
-    const offset = requireSlot(slots, name)
-    seen.set(nameHash(name), seqlockVersion(view, offset + VERSION_OFFSET))
-  }
-  return seen
-}
-
-/** Epoch: fires subscribers of changed slots; the return value is their count. */
-function sampleChanged(
-  view: DataView,
-  names: readonly string[],
-  slots: Map<number, number>,
-  seen: Map<number, number>,
-  watchers: Map<number, Subscriber<number>[]>,
-): number {
-  let changed = 0
-  for (const name of names) {
-    const hash = nameHash(name)
-    const offset = requireSlot(slots, name)
-    const version = seqlockVersion(view, offset + VERSION_OFFSET)
-    if (version === seen.get(hash)) continue
-    seen.set(hash, version)
-    changed++
-    fireWatchers(view, offset, watchers.get(offset))
-  }
-  return changed
 }
 
 function fireWatchers(view: DataView, offset: number, listeners: Subscriber<number>[] | undefined): void {

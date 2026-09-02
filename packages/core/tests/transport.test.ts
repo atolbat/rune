@@ -313,3 +313,41 @@ describe('T1: futex waiting (rare waits)', () => {
     expect(await client.waitForChange('game.hp')).toBe(false)
   })
 })
+
+describe('Task 114: the T3 feed writer', () => {
+  const L = { position: 'float32x3', radius: 'float32' } as const
+
+  it('writes AFTER a flush land in the SWAPPED buffer (the writer views follow the core)', () => {
+    const { host, client } = createTransport({ mode: 'msg', names: [] })
+    const feed = host.createFeed({ layout: L, capacity: 8 })
+    const view = client.attachFeed(1, L, 8)
+
+    // Frame 1: write + flush — the core's buffer swaps.
+    const b1 = feed.push(2)
+    b1.setVec3('position', 0, 1, 2, 3)
+    b1.setFloat('radius', 1, 0.5)
+    const firstBuffer = feed.buffer
+    const msg1 = host.flush()
+    expect(msg1!.chunks[0]!.bytes).toBe(firstBuffer)
+
+    // Frame 2: the writer handle from frame 1 is REUSED (Task 114) — a new
+    // push re-aims it; the writes must land in the NEW current buffer, not
+    // the shipped one (a stale view would corrupt the reader's copy source).
+    const b2 = feed.push(2)
+    expect(b2).toBe(b1)
+    b2.setVec3('position', 0, 7, 8, 9)
+    b2.setFloat('radius', 1, 1.5)
+    const secondBuffer = feed.buffer
+    expect(secondBuffer).not.toBe(firstBuffer)
+    const msg2 = host.flush()
+    expect(msg2!.chunks[0]!.bytes).toBe(secondBuffer)
+
+    client.apply(msg1!)
+    client.apply(msg2!)
+    // Mirror: logical positions — frame 2's records are logical 2..4.
+    expect(view.bytes()[0]).toBe(1)
+    expect(view.bytes()[2 * 4]).toBe(7) // record 2, position.x (stride 4 float)
+    expect(view.bytes()[3 * 4 + 3]).toBe(1.5) // record 3, radius
+    expect(view.count()).toBe(4)
+  })
+})

@@ -258,8 +258,22 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
     bytes.set(source, from)
     const fromFloat = from >> 2
     const toFloat = (from + source.byteLength + 3) >> 2
-    for (const slot of slots) {
-      if (slot.base + slot.size > fromFloat && slot.base < toFloat) slot.dirty = true
+    // The bump allocator guarantee: bases ascending, ranges DISJOINT — so the
+    // intersecting slots form a contiguous rank range. Lower-bound by "the
+    // slot ends after fromFloat" (ends are ascending for disjoint ranges),
+    // then walk while the slot starts before toFloat: O(log S + k) instead of
+    // the full O(S) scan per delivered frame (tape delivery, worker frames).
+    let low = 0
+    let high = slots.length
+    while (low < high) {
+      const mid = (low + high) >>> 1
+      if (bases[mid] + slots[mid].size > fromFloat) high = mid
+      else low = mid + 1
+    }
+    for (let at = low; at < slots.length; at++) {
+      const slot = slots[at]
+      if (slot.base >= toFloat) break
+      slot.dirty = true
     }
   }
 
