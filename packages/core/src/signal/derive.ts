@@ -32,6 +32,14 @@ export function derive<T>(compute: () => T): DerivedSignal<T> {
   const subscribers = new Set<(value: T) => void>()
   let unsubscribes: Unsubscribe[] = []
 
+  /** ONE hoisted callback for every dependency — a recompute rebinds N
+   *  deps without allocating N closures (the audit's "derive rebind
+   *  allocations" finding: recomputes are per-frame, the closures were too). */
+  const onDepChange = () => {
+    // The push path is only enabled when subscribers exist; otherwise lazy.
+    if (subscribers.size > 0) revalidate()
+  }
+
   /** Recompute, collecting dependencies via the tracking stack. */
   function collect(): T {
     deps = []
@@ -55,15 +63,25 @@ export function derive<T>(compute: () => T): DerivedSignal<T> {
     return false
   }
 
-  /** Subscribe to each current dependency (after collect). */
+  /** The dependency list of the LAST bind — rebind compares against it. */
+  let boundDeps: SignalCell<unknown>[] = []
+
+  /** Subscribe to each current dependency (after collect). An unchanged
+   *  dependency list (the common case — a recompute reads the same cells in
+   *  the same order) keeps the existing subscriptions instead of churning
+   *  N closures + an array per recompute (the audit's "derive rebind
+   *  allocations" finding). */
   function rebind(): void {
+    if (deps.length === boundDeps.length) {
+      let same = true
+      for (let at = 0; at < deps.length; at++) {
+        if (deps[at] !== boundDeps[at]) { same = false; break }
+      }
+      if (same) return
+    }
     for (const unsubscribe of unsubscribes) unsubscribe()
-    unsubscribes = deps.map(dep =>
-      dep.subscribe(() => {
-        // The push path is only enabled when subscribers exist; otherwise lazy.
-        if (subscribers.size > 0) revalidate()
-      }),
-    )
+    unsubscribes = deps.map(dep => dep.subscribe(onDepChange))
+    boundDeps = deps.slice()
   }
 
   function revalidate(): boolean {

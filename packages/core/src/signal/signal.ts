@@ -39,6 +39,10 @@ export function signal<T>(initial: T, _options: SignalOptions = {}): SignalCell<
       if (next === current) return
       current = next
       version++
+      // No subscribers → nothing to notify: skip the closure + the batch
+      // queue entry entirely (polled cells — the version/dirty-check path —
+      // pay zero allocations per write).
+      if (subscribers.size === 0) return
       // The value is fixed at the moment of the write: a subscriber sees
       // what was written, even if the cell is overwritten again during the
       // batch (each write schedules its own notification — effects are
