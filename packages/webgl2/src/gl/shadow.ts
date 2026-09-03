@@ -1,4 +1,4 @@
-import type { BlendFactor, CullFace, DepthFunc, FrontFace } from './facade.ts'
+import type { BlendEquation, BlendFactor, CullFace, DepthFunc, FrontFace } from './facade.ts'
 
 /** The minimal structural target of state actions: raw-state methods +
  *  useProgram. Satisfied both by the full legacy facade and by the extended
@@ -11,6 +11,7 @@ export interface StateProgramGL {
   enableBlend(): void
   disableBlend(): void
   blendFunc(src: BlendFactor, dst: BlendFactor): void
+  blendEquation(eq: BlendEquation): void
   enableCull(): void
   disableCull(): void
   cullFace(face: CullFace): void
@@ -26,6 +27,7 @@ export interface GLShadow {
   blend: 0 | 1
   blendSrc: BlendFactor | ''
   blendDst: BlendFactor | ''
+  blendEq: BlendEquation | ''
   cull: 0 | 1
   cullFace: CullFace | ''
   frontFace: FrontFace | ''
@@ -36,7 +38,7 @@ export interface GLShadow {
 export function createGLShadow(): GLShadow {
   return {
     depthTest: 0, depthMask: 0, depthFunc: '',
-    blend: 0, blendSrc: '', blendDst: '',
+    blend: 0, blendSrc: '', blendDst: '', blendEq: '',
     cull: 0, cullFace: '', frontFace: '',
     program: -1,
   }
@@ -49,6 +51,7 @@ export type StateAction =
   | { readonly call: 'depthFunc'; readonly fn: DepthFunc }
   | { readonly call: 'blend'; readonly on: boolean }
   | { readonly call: 'blendFunc'; readonly src: BlendFactor; readonly dst: BlendFactor }
+  | { readonly call: 'blendEquation'; readonly eq: BlendEquation }
   | { readonly call: 'cull'; readonly on: boolean }
   | { readonly call: 'cullFace'; readonly face: CullFace }
   | { readonly call: 'frontFace'; readonly order: FrontFace }
@@ -86,6 +89,12 @@ export function applyAction(action: StateAction, shadow: GLShadow, gl: StateProg
         shadow.blendSrc = action.src
         shadow.blendDst = action.dst
         gl.blendFunc(action.src, action.dst)
+      }
+      break
+    case 'blendEquation':
+      if (shadow.blendEq !== action.eq) {
+        shadow.blendEq = action.eq
+        gl.blendEquation(action.eq)
       }
       break
     case 'cull':

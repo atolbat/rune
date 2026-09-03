@@ -71,7 +71,7 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
   function drawCommand(command: CompiledCommand | undefined, count: number, instances: number): void {
     if (command === undefined) return
     const rich = command as CompiledCommand & {
-      state: { depthTest: string; depthWrite: boolean; cull: string; blend: { src: string; dst: string } | null }
+      state: { depthTest: string; depthWrite: boolean; cull: string; blend: { src: string; dst: string; equation: string } | null }
       fields: Array<{ name: string; type: string; slot: { base: number; size: number; dirty: boolean } }>
       samplers: Array<{ name: string; unit: number; textureId: number }>
       attributes: Array<{ location: number; size: number; data: Float32Array; stride?: number; offset?: number; bufferId?: number; instance?: boolean }>
@@ -119,7 +119,7 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
     }
   }
 
-  function applyState(command: CompiledCommand & { state: { depthTest: string; depthWrite: boolean; cull: string; blend: { src: string; dst: string } | null } }): void {
+  function applyState(command: CompiledCommand & { state: { depthTest: string; depthWrite: boolean; cull: string; blend: { src: string; dst: string; equation: string } | null } }): void {
     const state = command.state
     const depthKey = `${state.depthTest}/${state.depthWrite}`
     if (depthKey !== lastDepthTest) {
@@ -131,9 +131,15 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
       lastCull = state.cull
     }
     // Task 75: pipeline blending (additive/transparency for star quads).
-    const blendKey = state.blend === null ? 'off' : `${state.blend.src}/${state.blend.dst}`
+    // Task 122: the equation joins the state key — a MAX pipeline next to
+    // an ADD pipeline with the same factors must still re-assert.
+    const blendKey = state.blend === null ? 'off' : `${state.blend.src}/${state.blend.dst}/${state.blend.equation}`
     if (blendKey !== lastBlend) {
-      gl.setBlend(state.blend === null ? null : state.blend.src, state.blend === null ? null : state.blend.dst)
+      gl.setBlend(
+        state.blend === null ? null : state.blend.src,
+        state.blend === null ? null : state.blend.dst,
+        state.blend === null ? undefined : state.blend.equation,
+      )
       lastBlend = blendKey
     }
   }

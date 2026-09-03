@@ -108,13 +108,13 @@ describe('webgl2 tape path', () => {
     // the GL context between frames (a context loss+restore, an extension,
     // another library), a stale cache would silently skip the state and the
     // particles would draw WITHOUT blending — the reported regression class.
-    const blends = calls.filter(call => call.startsWith('setBlend(src-alpha,one)')).length
+    const blends = calls.filter(call => call.startsWith('setBlend(src-alpha,one,add)')).length
     const depths = calls.filter(call => call.startsWith('setDepthMode(less,false)')).length
     expect(blends).toBe(3)
     expect(depths).toBe(3)
     // the state lands BEFORE every draw of every frame
     const firstDraw = calls.indexOf('drawArrays(triangles,0,3,1)')
-    expect(calls.indexOf('setBlend(src-alpha,one)')).toBeLessThan(firstDraw)
+    expect(calls.indexOf('setBlend(src-alpha,one,add)')).toBeLessThan(firstDraw)
   })
 
   it('textures: bindTexture + uniform1i of the unit before draw', () => {

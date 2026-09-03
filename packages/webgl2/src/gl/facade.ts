@@ -4,6 +4,12 @@ export type FrontFace = 'ccw' | 'cw'
 export type BlendFactor =
   | 'zero' | 'one' | 'src-color' | 'one-minus-src-color'
   | 'src-alpha' | 'one-minus-src-alpha' | 'dst-color' | 'one-minus-dst-color'
+  | 'dst-alpha' | 'one-minus-dst-alpha' | 'src-alpha-saturated'
+/** The blend equation (Task 122 — three.quarks' customBlending): how the
+ *  scaled source and destination combine. 'add' is the default (the
+ *  classic transparency/additive); 'max'/'subtract' make the
+ *  CustomBlending demos. WebGPU's GPUBlendOperation names map 1:1. */
+export type BlendEquation = 'add' | 'subtract' | 'reverse-subtract' | 'min' | 'max'
 export type PrimitiveKind = 'triangles' | 'triangle-strip' | 'lines' | 'points'
 
 /**
@@ -20,6 +26,7 @@ export interface GLFacade {
   enableBlend(): void
   disableBlend(): void
   blendFunc(src: BlendFactor, dst: BlendFactor): void
+  blendEquation(eq: BlendEquation): void
   enableCull(): void
   disableCull(): void
   cullFace(face: CullFace): void
@@ -65,6 +72,7 @@ function recordEveryCall(calls: string[]): GLFacade {
     enableBlend: () => calls.push('enableBlend'),
     disableBlend: () => calls.push('disableBlend'),
     blendFunc: (src, dst) => calls.push(`blendFunc(${src},${dst})`),
+    blendEquation: (eq) => calls.push(`blendEquation(${eq})`),
     enableCull: () => calls.push('enableCull'),
     disableCull: () => calls.push('disableCull'),
     cullFace: face => calls.push(`cullFace(${face})`),
@@ -133,7 +141,7 @@ export function createCountingGL(): CountingGLFacade {
     // Legacy state surface (state programs, M2).
     ensureProgram: () => {}, // preparation does not count as a frame
     enableDepthTest: bump, disableDepthTest: bump, depthMask: bump, depthFunc: bump,
-    enableBlend: bump, disableBlend: bump, blendFunc: bump,
+    enableBlend: bump, disableBlend: bump, blendFunc: bump, blendEquation: bump,
     enableCull: bump, disableCull: bump, cullFace: bump, frontFace: bump,
     uniform1f: bump, uniform2f: bump, uniform3f: bump, uniform4f: bump, uniformMatrix4fv: bump,
     createVertexBuffer: alloc,
@@ -168,7 +176,7 @@ export interface CountingGLFacade {
   setViewport(width: number, height: number): void
   setDepthMode(test: string, write: boolean): void
   setCull(mode: string): void
-  setBlend(src: string | null, dst: string | null): void
+  setBlend(src: string | null, dst: string | null, equation?: string): void
   clear(color: readonly number[], depth: number | null): void
   drawArrays(mode: string, first: number, count: number, instances: number): void
   createTarget(textureId: number, width: number, height: number, depth: boolean, color?: unknown): number
@@ -186,6 +194,7 @@ export interface CountingGLFacade {
   enableBlend(): void
   disableBlend(): void
   blendFunc(src: BlendFactor, dst: BlendFactor): void
+  blendEquation(eq: BlendEquation): void
   enableCull(): void
   disableCull(): void
   cullFace(face: CullFace): void

@@ -50,6 +50,7 @@ import {
   PBR_MR_TEXTURE,
   PBR_SUB_MODELS,
   SKIN,
+  SOFT_PARTICLES,
   TEXTURE,
   type AsmCtx,
   type AttrDecl,
@@ -129,6 +130,7 @@ export function assemble(mask: number, jointCount: number): AssembledMaterial {
     if (f.glslBody !== undefined) sc.fragGlsl.push(...f.glslBody)
     if (f.wgslBody !== undefined) sc.fragWgsl.push(...f.wgslBody)
     if (f.frontFacing === true) frontFacing = true
+    if (f.fragPosition === true) fragPosition = true
   }
 
   // The default position expression: SKIN declares its own position4; every
@@ -178,9 +180,13 @@ export function assemble(mask: number, jointCount: number): AssembledMaterial {
 
 /** front-facing request flag (DOUBLE_SIDED) — reset per assembly. */
 let frontFacing = false
+/** window-position request flag (SOFT_PARTICLES — Task 122) — reset per
+ *  assembly: the WGSL fragment input gains @builtin(position). */
+let fragPosition = false
 
 function resetScratch(): void {
   frontFacing = false
+  fragPosition = false
   for (const list of [
     sc.vertUniforms, sc.fragUniforms, sc.attrs, sc.varyings,
     sc.vertGlsl, sc.vertWgslPre, sc.vertWgslOut, sc.fragGlsl, sc.fragWgsl,
@@ -303,7 +309,7 @@ function buildGlsl(
   // GLES3/WebGL2, so this is free correctness. The plain light models stay
   // mediump (the mobile win the demo tuning relies on). WGSL has no
   // precision qualifiers (f32 IS highp there), so this is GLSL-only.
-  const highp = (mask & (PBR | TEXTURE)) !== 0
+  const highp = (mask & (PBR | TEXTURE | SOFT_PARTICLES)) !== 0
   frag.push('#version 300 es', highp ? 'precision highp float;' : 'precision mediump float;')
   // NORMALMAP reads u_model in the fragment (object-space → world).
   if ((mask & NORMALMAP) !== 0) frag.push('uniform mat4 u_model;')
@@ -311,6 +317,7 @@ function buildGlsl(
   if ((mask & NORMALMAP) !== 0) frag.push('uniform sampler2D u_normalMap;')
   if ((mask & MATCAP) !== 0) frag.push('uniform sampler2D u_matcap;')
   if ((mask & PBR_MR_TEXTURE) !== 0) frag.push('uniform sampler2D u_mrTex;')
+  if ((mask & SOFT_PARTICLES) !== 0) frag.push('uniform sampler2D u_depth;')
   for (const varying of sc.varyings) frag.push(`in ${varying.glslType} ${varying.glslName};`)
   for (const uniform of fragUniforms) frag.push(uniform.glsl)
   frag.push('out vec4 o_color;')
@@ -333,6 +340,7 @@ function buildWgsl(mask: number, pos: string): string {
   if ((mask & NORMALMAP) !== 0) lines.push('@group(1) @binding(2) var nrmTexture : texture_2d<f32>;')
   if ((mask & MATCAP) !== 0) lines.push('@group(1) @binding(3) var matTexture : texture_2d<f32>;')
   if ((mask & PBR_MR_TEXTURE) !== 0) lines.push('@group(1) @binding(4) var mrTexture : texture_2d<f32>;')
+  if ((mask & SOFT_PARTICLES) !== 0) lines.push('@group(1) @binding(5) var depthTexture : texture_2d<f32>;')
 
   lines.push('struct VSOut {', '  @builtin(position) pos : vec4<f32>,')
   sc.varyings.forEach((varying, at) =>
@@ -351,15 +359,16 @@ function buildWgsl(mask: number, pos: string): string {
   body.push('return out;')
   pushBody(lines, ') -> VSOut {', body, '}')
 
-  if (frontFacing) {
+  if (frontFacing || fragPosition) {
     lines.push('struct FSIn {')
     sc.varyings.forEach((varying, at) =>
       lines.push(`  @location(${at}) ${varying.wgslName} : ${varying.wgslType},`))
-    lines.push('  @builtin(front_facing) ff : bool,')
+    if (frontFacing) lines.push('  @builtin(front_facing) ff : bool,')
+    if (fragPosition) lines.push('  @builtin(position) pos : vec4<f32>,')
     lines.push('}')
   }
   lines.push('@fragment')
-  lines.push(`fn fsMain(frag : ${frontFacing ? 'FSIn' : 'VSOut'}) -> @location(0) vec4<f32> {`)
+  lines.push(`fn fsMain(frag : ${frontFacing || fragPosition ? 'FSIn' : 'VSOut'}) -> @location(0) vec4<f32> {`)
   if (sc.fragWgsl.length > 0) lines.push('  ' + sc.fragWgsl.join('\n  '))
   lines.push('}')
 

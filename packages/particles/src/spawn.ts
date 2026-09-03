@@ -29,7 +29,12 @@ export function hash01(seed: number, index: number, salt: number): number {
  *  Task 117 — the disc's SPIRAL ARMS (the galaxy-maker): `arms` angular
  *  sectors, `twist` radians of winding swept from radius[0] to radius[1],
  *  `armSpread` radians of uniform scatter within an arm. Omitted arms →
- *  the uniform annulus (the previous behavior, bit-identical). */
+ *  the uniform annulus (the previous behavior, bit-identical).
+ *
+ *  Task 122 — the three.quarks emitter family: `hemisphere` (the upper
+ *  dome around the axis), `donut` (a torus: the ring + the tube circle),
+ *  `rectangle` (a plane patch ⊥ axis), `grid` (a lattice — 'random' cells
+ *  like theirs, or 'lattice' index→cell for perfect full-grid bursts). */
 export type SpawnShape =
   | { readonly kind: 'point'; readonly origin: readonly number[] }
   | { readonly kind: 'sphere'; readonly origin: readonly number[]; readonly radius: readonly [number, number] }
@@ -44,6 +49,23 @@ export type SpawnShape =
        *  straight radial arms). Negative = the opposite winding direction:
        *  match the sign to the orbit direction so the arms TRAIL (real galaxies). */
       readonly twist?: number }
+  | { readonly kind: 'hemisphere'; readonly origin: readonly number[]; readonly axis: readonly number[]; readonly radius: readonly [number, number]
+      /** Azimuth span, radians (default τ — the full dome). */
+      readonly arc?: number }
+  | { readonly kind: 'donut'; readonly origin: readonly number[]; readonly axis: readonly number[]
+      /** The ring radius (the donut's centerline). */
+      readonly radius: number
+      /** The tube radius range [min, max] (the donut's thickness). */
+      readonly tube: readonly [number, number]
+      /** Azimuth span around the axis, radians (default τ). */
+      readonly arc?: number }
+  | { readonly kind: 'rectangle'; readonly origin: readonly number[]; readonly axis: readonly number[]; readonly width: number; readonly height: number }
+  | { readonly kind: 'grid'; readonly origin: readonly number[]; readonly axis: readonly number[]; readonly width: number; readonly height: number
+      readonly rows: number; readonly columns: number
+      /** 'random' — a random cell per particle (three.quarks' GridEmitter).
+       *  'lattice' — index → cell (col = i % columns): one burst of
+       *  rows×columns fills the grid PERFECTLY, deterministically. */
+      readonly mode?: 'random' | 'lattice' }
   | { readonly kind: 'line'; readonly from: readonly number[]; readonly to: readonly number[] }
 
 /** How the spawn velocity is directed.
@@ -60,6 +82,33 @@ export type VelocityMode =
   | { readonly mode: 'tangential' }
   | { readonly mode: 'fixed'; readonly dir: readonly number[] }
 
+/** The seek TARGET source (Task 122 — three.quarks' TextureSequencer/
+ *  ApplySequences): where a newborn particle is HEADING (see forces.seek
+ *  in system.ts). Omitted → NaN → the store defaults the target to the
+ *  spawn position (a particle that holds still). */
+export type TargetDesc =
+  | { readonly mode: 'point'; readonly point: readonly number[] }
+  | { readonly mode: 'image'
+      /** The plane center (world space). */
+      readonly origin: readonly number[]
+      /** The plane normal (the image faces this way). */
+      readonly axis: readonly number[]
+      /** The world-space width/height the mask maps onto. */
+      readonly width: number
+      readonly height: number
+      /** The mask: {width, height, data} — data is ONE byte per pixel
+       *  (the alpha channel); ≥ 128 = a lit pixel. Sampled UNIFORMLY over
+       *  the lit pixels (a cumulated index built once at spawner creation —
+       *  O(1) per particle, deterministic). */
+      readonly mask: ImageMask }
+
+/** The image mask (one byte per pixel, row-major, top row first). */
+export interface ImageMask {
+  readonly width: number
+  readonly height: number
+  readonly data: Uint8Array | Uint8ClampedArray
+}
+
 /** The full spawner description: shape + velocity + per-particle ranges.
  *  Ranges are [min, max] — a constant is [v, v]. Colors interpolate
  *  linearly between two rgba endpoints.
@@ -70,7 +119,9 @@ export type VelocityMode =
  *     develop real differential rotation instead of a rigid donut);
  *   • colorByRadius — the color mix follows the radius (color[0] at the
  *     core → color[1] at the rim) instead of the per-particle hash —
- *     a warm core with cool arms, no random speckle. */
+ *     a warm core with cool arms, no random speckle.
+ *
+ *  Task 122 — `target`: the newborn's seek target (see TargetDesc). */
 export interface SpawnerDesc {
   readonly shape: SpawnShape
   readonly velocity: VelocityMode
@@ -90,6 +141,9 @@ export interface SpawnerDesc {
   readonly size: readonly [number, number]
   /** Tint endpoints, rgba. */
   readonly color: readonly [readonly number[], readonly number[]]
+  /** The seek target of a newborn (Task 122 — the sequencers). Omitted →
+   *  the spawn position (a hold-still particle). */
+  readonly target?: TargetDesc
   /** The RNG stream seed (0..2^31); different seeds = different bursts. */
   readonly seed?: number
 }
@@ -99,7 +153,7 @@ export type Spawner = (index: number, out: SpawnRecord) => void
 
 const TAU = 6.283185307179586
 // The salt streams: decorrelated per property (any distinct constants).
-const S_DIR = 1, S_SPD = 2, S_LIFE = 3, S_SIZE = 4, S_COL = 5, S_SEED = 6, S_P0 = 7, S_P1 = 8, S_P2 = 9
+const S_DIR = 1, S_SPD = 2, S_LIFE = 3, S_SIZE = 4, S_COL = 5, S_SEED = 6, S_P0 = 7, S_P1 = 8, S_P2 = 9, S_TARGET = 10
 
 /** Validates the description and compiles it into a flat spawner closure
  *  (all vectors normalized / precomputed ONCE, here). */
@@ -120,6 +174,7 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
   const oz = shape.kind === 'line' ? shape.from[2] : shape.origin[2]
   let ax = 0, ay = 0, az = 1
   const hasAxis = shape.kind === 'cone' || shape.kind === 'disc' || shape.kind === 'line'
+    || shape.kind === 'hemisphere' || shape.kind === 'donut' || shape.kind === 'rectangle' || shape.kind === 'grid'
   if (hasAxis) {
     const vx = shape.kind === 'line' ? shape.to[0] - ox : shape.axis[0]
     const vy = shape.kind === 'line' ? shape.to[1] - oy : shape.axis[1]
@@ -129,7 +184,7 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
     ax = vx / l; ay = vy / l; az = vz / l
   }
   let rMin = 0, rMax = 0
-  if (shape.kind === 'sphere' || shape.kind === 'disc') {
+  if (shape.kind === 'sphere' || shape.kind === 'disc' || shape.kind === 'hemisphere') {
     ;[rMin, rMax] = rangeOf(shape.radius, 'radius')
     if (rMin < 0) throw new Error('rune/particles: shape radius must be >= 0')
   }
@@ -140,6 +195,40 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
     baseRadius = shape.baseRadius
     if (baseRadius < 0) throw new Error('rune/particles: cone baseRadius must be >= 0')
     ;[lenMin, lenMax] = rangeOf(shape.length, 'length')
+  }
+  // Task 122 — hemisphere/donut/rectangle/grid constants, flat scalars.
+  let hemArc = TAU
+  if (shape.kind === 'hemisphere') {
+    hemArc = shape.arc ?? TAU
+    if (!Number.isFinite(hemArc) || hemArc <= 0) throw new Error(`rune/particles: hemisphere arc must be a finite > 0 (got ${hemArc})`)
+  }
+  let donR = 0, tubeMin = 0, tubeMax = 0, donArc = TAU
+  if (shape.kind === 'donut') {
+    donR = shape.radius
+    if (!Number.isFinite(donR) || donR <= 0) throw new Error(`rune/particles: donut radius must be a finite > 0 (got ${donR})`)
+    ;[tubeMin, tubeMax] = rangeOf(shape.tube, 'tube')
+    if (tubeMin < 0) throw new Error('rune/particles: donut tube must be >= 0')
+    donArc = shape.arc ?? TAU
+    if (!Number.isFinite(donArc) || donArc <= 0) throw new Error(`rune/particles: donut arc must be a finite > 0 (got ${donArc})`)
+  }
+  let rectW = 0, rectH = 0
+  if (shape.kind === 'rectangle') {
+    rectW = shape.width; rectH = shape.height
+    if (!Number.isFinite(rectW) || rectW < 0 || !Number.isFinite(rectH) || rectH < 0) {
+      throw new Error(`rune/particles: rectangle width/height must be finite >= 0 (got ${rectW}×${rectH})`)
+    }
+  }
+  let gridW = 0, gridH = 0, gridRows = 0, gridCols = 0, gridLattice = false
+  if (shape.kind === 'grid') {
+    gridW = shape.width; gridH = shape.height
+    gridRows = Math.floor(shape.rows); gridCols = Math.floor(shape.columns)
+    gridLattice = shape.mode === 'lattice'
+    if (!Number.isFinite(gridW) || gridW <= 0 || !Number.isFinite(gridH) || gridH <= 0) {
+      throw new Error(`rune/particles: grid width/height must be finite > 0 (got ${gridW}×${gridH})`)
+    }
+    if (!Number.isInteger(gridRows) || gridRows < 1 || !Number.isInteger(gridCols) || gridCols < 1) {
+      throw new Error(`rune/particles: grid rows/columns must be integers >= 1 (got ${gridRows}×${gridCols})`)
+    }
   }
   // Task 117: the disc's spiral arms — compiled ONCE into flat scalars.
   let arms = 0, armSpread = 0.35, twist = 0
@@ -161,8 +250,8 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
     if (!Number.isFinite(speedPower)) throw new Error(`rune/particles: speedByRadius.power must be finite (got ${speedPower})`)
   }
   const colorByRadius = desc.colorByRadius === true
-  if (colorByRadius && shape.kind !== 'disc' && shape.kind !== 'sphere') {
-    throw new Error("rune/particles: colorByRadius needs the sphere or disc shape (the radius range drives the mix)")
+  if (colorByRadius && shape.kind !== 'disc' && shape.kind !== 'sphere' && shape.kind !== 'hemisphere') {
+    throw new Error("rune/particles: colorByRadius needs the sphere, disc or hemisphere shape (the radius range drives the mix)")
   }
 
   // ── the velocity mode validation (an honest pairing, no silent traps) ──
@@ -174,9 +263,9 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
   } else if (velocity.mode === 'lobe' && shape.kind !== 'cone') {
     throw new Error("rune/particles: velocity mode 'lobe' needs the cone shape (its halfAngle defines the fan)")
   } else if (velocity.mode === 'axis' && !hasAxis) {
-    throw new Error("rune/particles: velocity mode 'axis' needs a shape with an axis (cone/disc/line)")
-  } else if (velocity.mode === 'tangential' && shape.kind !== 'disc' && shape.kind !== 'sphere') {
-    throw new Error("rune/particles: velocity mode 'tangential' needs the disc or sphere shape")
+    throw new Error("rune/particles: velocity mode 'axis' needs a shape with an axis (cone/disc/line/hemisphere/donut/rectangle/grid)")
+  } else if (velocity.mode === 'tangential' && shape.kind !== 'disc' && shape.kind !== 'sphere' && shape.kind !== 'donut' && shape.kind !== 'hemisphere') {
+    throw new Error("rune/particles: velocity mode 'tangential' needs the disc, sphere, donut or hemisphere shape")
   }
 
   // The orthonormal frame around the axis: t1, t2 (both ⊥ axis, ⊥ each other).
@@ -186,6 +275,65 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
   if (tl < 1e-6) { t1x = 1; t1y = 0; t1z = 0; tl = 1 }
   t1x /= tl; t1y /= tl; t1z /= tl
   const t2x = ay * t1z - az * t1y, t2y = az * t1x - ax * t1z, t2z = ax * t1y - ay * t1x
+
+  // ── Task 122: the seek TARGET (the sequencer machinery) ────────────────
+  // point → the flat target; image → a CUMULATED lit-pixel index built
+  // ONCE here (one pass over the mask — cold), sampled O(1) per particle.
+  let imgLit: Uint32Array | null = null // the packed (y<<16 | x) lit pixels
+  let tgx = 0, tgy = 0, tgz = 0 // 'point': the flat target
+  let imgTx = 0, imgTy = 0, imgTz = 0, imgUx = 0, imgUy = 0, imgUz = 0 // the image frame
+  let imgW = 0, imgH = 0, imgWorldW = 0, imgWorldH = 0
+  let imgOx = 0, imgOy = 0, imgOz = 0
+  if (desc.target !== undefined) {
+    const target = desc.target
+    if (target.mode === 'point') {
+      tgx = target.point[0]; tgy = target.point[1]; tgz = target.point[2]
+      if (!Number.isFinite(tgx + tgy + tgz)) throw new Error('rune/particles: target point must be three finite numbers')
+    } else {
+      const mask = target.mask
+      imgW = mask.width; imgH = mask.height
+      if (!Number.isInteger(imgW) || imgW < 1 || imgW > 65535 || !Number.isInteger(imgH) || imgH < 1 || imgH > 65535) {
+        throw new Error(`rune/particles: target mask must be 1..65535 per side (got ${imgW}×${imgH})`)
+      }
+      if (mask.data.length < imgW * imgH) {
+        throw new Error(`rune/particles: target mask data is ${mask.data.length} bytes — the ${imgW}×${imgH} mask needs ${imgW * imgH}`)
+      }
+      if (!Number.isFinite(target.width) || target.width <= 0 || !Number.isFinite(target.height) || target.height <= 0) {
+        throw new Error(`rune/particles: target width/height must be finite > 0 (got ${target.width}×${target.height})`)
+      }
+      if (!Number.isFinite(target.origin[0] + target.origin[1] + target.origin[2])) {
+        throw new Error('rune/particles: target origin must be three finite numbers')
+      }
+      // The image frame: an orthonormal basis around the target axis with
+      // the CORRECT CHIRALITY — viewed from +axis, the mask's x walks RIGHT
+      // (u = cross(worldUp, axis)) and the TOP row points UP (v =
+      // cross(axis, u)). (A left-handed pick mirrors the text — the bug
+      // this shipped with on its first cut: RUNE read as ENUR.)
+      let tax = target.axis[0], tay = target.axis[1], taz = target.axis[2]
+      const tal = Math.hypot(tax, tay, taz)
+      if (tal === 0 || !Number.isFinite(tal)) throw new Error('rune/particles: target axis must be a finite non-zero vector')
+      tax /= tal; tay /= tal; taz /= tal
+      let utx = taz, uty = 0, utz = -tax // cross(worldUp, axis)
+      let utl = Math.hypot(utx, uty, utz)
+      if (utl < 1e-6) { utx = 1; uty = 0; utz = 0; utl = 1 } // axis ∥ Y — the fallback keeps u horizontal
+      utx /= utl; uty /= utl; utz /= utl
+      imgUx = tay * utz - taz * uty; imgUy = taz * utx - tax * utz; imgUz = tax * uty - tay * utx
+      imgTx = utx; imgTy = uty; imgTz = utz
+      imgOx = target.origin[0]; imgOy = target.origin[1]; imgOz = target.origin[2]
+      imgWorldW = target.width; imgWorldH = target.height
+      // The lit-pixel index (the cumulated list — uniform sampling = O(1)
+      // per particle, deterministic via the hash stream).
+      const lit: number[] = []
+      const data = mask.data
+      for (let y = 0; y < imgH; y++) {
+        for (let x = 0; x < imgW; x++) {
+          if ((data[y * imgW + x] as number) >= 128) lit.push((y << 16) | x)
+        }
+      }
+      if (lit.length === 0) throw new Error('rune/particles: target mask has no lit pixels (≥ 128) — nothing to seek')
+      imgLit = new Uint32Array(lit)
+    }
+  }
 
   return function spawner(index, out) {
     // Independent streams per decision — position and velocity stay
@@ -242,6 +390,54 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
       px = ox + (t1x * Math.cos(phi) + t2x * Math.sin(phi)) * rr
       py = oy + (t1y * Math.cos(phi) + t2y * Math.sin(phi)) * rr
       pz = oz + (t1z * Math.cos(phi) + t2z * Math.sin(phi)) * rr
+    } else if (shape.kind === 'hemisphere') {
+      // The upper dome around the axis: polar θ ∈ [0, π/2] (cosθ uniform
+      // on [0, 1] — the area-correct dome), φ over the arc; r in the band.
+      const cosTheta = u // uniform on [0,1] = area-uniform on the dome
+      const sinTheta = Math.sqrt(Math.max(0, 1 - cosTheta * cosTheta))
+      const phi = hemArc * v
+      const r = rMin + (rMax - rMin) * hash01(seed, index, S_P0)
+      dx = ax * cosTheta + (t1x * Math.cos(phi) + t2x * Math.sin(phi)) * sinTheta
+      dy = ay * cosTheta + (t1y * Math.cos(phi) + t2y * Math.sin(phi)) * sinTheta
+      dz = az * cosTheta + (t1z * Math.cos(phi) + t2z * Math.sin(phi)) * sinTheta
+      px = ox + dx * r; py = oy + dy * r; pz = oz + dz * r
+    } else if (shape.kind === 'donut') {
+      // The torus: a ring of radius `donR` at angle φ (arc-limited), plus a
+      // tube circle of radius `tr` around the ring point (ψ uniform).
+      const phi = donArc * u
+      const tr = tubeMin + (tubeMax - tubeMin) * hash01(seed, index, S_P0)
+      const psi = TAU * hash01(seed, index, S_P1)
+      const cphi = Math.cos(phi), sphi = Math.sin(phi)
+      const cpsi = Math.cos(psi), spsi = Math.sin(psi)
+      // The ring's radial direction and the axis — the tube circles in the
+      // plane spanned by them: offset = tr·(cosψ·radial + sinψ·axis).
+      const rrx = t1x * cphi + t2x * sphi, rry = t1y * cphi + t2y * sphi, rrz = t1z * cphi + t2z * sphi
+      px = ox + rrx * (donR + tr * cpsi) + ax * (tr * spsi)
+      py = oy + rry * (donR + tr * cpsi) + ay * (tr * spsi)
+      pz = oz + rrz * (donR + tr * cpsi) + az * (tr * spsi)
+    } else if (shape.kind === 'rectangle') {
+      // A plane patch ⊥ axis: u along t1 (width), v along t2 (height),
+      // centered at the origin.
+      const hx = (u - 0.5) * rectW, hy = (v - 0.5) * rectH
+      px = ox + t1x * hx + t2x * hy
+      py = oy + t1y * hx + t2y * hy
+      pz = oz + t1z * hx + t2z * hy
+    } else if (shape.kind === 'grid') {
+      // The lattice: 'random' — a hash-picked cell (their GridEmitter);
+      // 'lattice' — index → cell, one burst of rows×columns fills it exactly.
+      let col: number, row: number
+      if (gridLattice) {
+        col = index % gridCols
+        row = Math.floor(index / gridCols) % gridRows
+      } else {
+        col = Math.floor(hash01(seed, index, S_P0) * gridCols)
+        row = Math.floor(hash01(seed, index, S_P1) * gridRows)
+      }
+      const gx = ((col + 0.5) / gridCols - 0.5) * gridW
+      const gy = ((row + 0.5) / gridRows - 0.5) * gridH
+      px = ox + t1x * gx + t2x * gy
+      py = oy + t1y * gx + t2y * gy
+      pz = oz + t1z * gx + t2z * gy
     } else if (shape.kind === 'line') {
       px = ox + (shape.to[0] - ox) * u
       py = oy + (shape.to[1] - oy) * u
@@ -281,6 +477,26 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
       const rdx = px - ox, rdy = py - oy, rdz = pz - oz
       const rad = Math.sqrt(rdx * rdx + rdy * rdy + rdz * rdz)
       mix = Math.min(1, Math.max(0, (rad - rMin) / Math.max(1e-6, rMax - rMin)))
+    }
+    // The seek target (Task 122): an explicit target desc fills it, else
+    // NaN (the store defaults NaN → the spawn position — a hold-still
+    // particle under `seek`).
+    if (imgLit !== null) {
+      // The image target: a uniformly-sampled lit pixel, mapped into the
+      // world frame (centered; the PIXEL CENTERS, so the mask fills the
+      // full world rect; the top row points along +v).
+      const lit = imgLit[Math.min(imgLit.length - 1, Math.floor(hash01(seed, index, S_TARGET) * imgLit.length))]
+      const mx = ((lit & 0xffff) + 0.5) / imgW - 0.5
+      const my = ((lit >>> 16) + 0.5) / imgH - 0.5
+      const wx = mx * imgWorldW
+      const wy = -my * imgWorldH // the mask's y grows DOWN; the world's v grows UP
+      out.tx = imgOx + imgTx * wx + imgUx * wy
+      out.ty = imgOy + imgTy * wx + imgUy * wy
+      out.tz = imgOz + imgTz * wx + imgUz * wy
+    } else if (desc.target !== undefined && desc.target.mode === 'point') {
+      out.tx = tgx; out.ty = tgy; out.tz = tgz
+    } else {
+      out.tx = NaN; out.ty = NaN; out.tz = NaN
     }
     out.x = px; out.y = py; out.z = pz
     out.vx = dx * spd; out.vy = dy * spd; out.vz = dz * spd

@@ -509,9 +509,11 @@ export async function createRealGPU(
         // The facade's BlendFactor dictionary matches GPUBlendFactor one-to-one.
         targets: [{
           format,
+          // Task 122: the equation follows the desc (absent = 'add'); the
+          // facade BlendEquation names ARE the GPUBlendOperation names.
           blend: desc.blend === undefined || desc.blend === false ? undefined : {
-            color: { srcFactor: desc.blend.src as GPUBlendFactor, dstFactor: desc.blend.dst as GPUBlendFactor, operation: 'add' },
-            alpha: { srcFactor: desc.blend.src as GPUBlendFactor, dstFactor: desc.blend.dst as GPUBlendFactor, operation: 'add' },
+            color: { srcFactor: desc.blend.src as GPUBlendFactor, dstFactor: desc.blend.dst as GPUBlendFactor, operation: (desc.blend.equation ?? 'add') as GPUBlendOperation },
+            alpha: { srcFactor: desc.blend.src as GPUBlendFactor, dstFactor: desc.blend.dst as GPUBlendFactor, operation: (desc.blend.equation ?? 'add') as GPUBlendOperation },
           },
         }],
       },

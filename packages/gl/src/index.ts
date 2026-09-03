@@ -82,3 +82,13 @@ export { webgl2Adapter, webgpuAdapter } from './adapters.ts'
 export type { PortableSpec, BackendAdapter, CompiledOnBackend } from './adapters.ts'
 export { createPortability } from './harness.ts'
 export type { PortableCommand, ReplaySummary, PortabilityHarness } from './harness.ts'
+
+// @rune/prims — the procedural geometry generators, re-exported for the
+// demos and CDN consumers (the build header always promised "prims
+// inside"): the basic solids the particle/mesh demos bake into soups.
+export { cube, box } from '@rune/prims'
+export type { CubeGeometry, BoxParams } from '@rune/prims'
+export { quad, plane } from '@rune/prims'
+export type { QuadGeometry, PlaneParams } from '@rune/prims'
+export { sphere, capsule, torus, torusKnot } from '@rune/prims'
+export type { SphereParams, CapsuleParams, TorusParams, TorusKnotParams } from '@rune/prims'

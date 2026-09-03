@@ -1,4 +1,4 @@
-import type { BlendFactor, CullFace, DepthFunc, FrontFace } from '../gl/facade.ts'
+import type { BlendEquation, BlendFactor, CullFace, DepthFunc, FrontFace } from '../gl/facade.ts'
 import type { StateAction, StateProgramGL } from '../gl/shadow.ts'
 import { applyActions } from '../gl/shadow.ts'
 import type { GLShadow } from '../gl/shadow.ts'
@@ -8,7 +8,7 @@ export type { StateProgramGL } from '../gl/shadow.ts'
 /** Description of the rasterization state of a pipeline (M2 subset). */
 export interface PipelineDesc {
   readonly depth?: { readonly test?: DepthFunc; readonly write?: boolean } | false
-  readonly blend?: { readonly src: BlendFactor; readonly dst: BlendFactor } | false
+  readonly blend?: { readonly src: BlendFactor; readonly dst: BlendFactor; readonly equation?: BlendEquation } | false
   readonly raster?: {
     readonly cull?: CullFace | 'none'
     readonly frontFace?: FrontFace
@@ -54,6 +54,9 @@ function emitBlend(blend: PipelineDesc['blend'], actions: StateAction[]): void {
   if (blend === false || blend === undefined) return
   actions.push({ call: 'blend', on: true })
   actions.push({ call: 'blendFunc', src: blend.src, dst: blend.dst })
+  // Task 122: the equation (absent = 'add', the GL spec default — the
+  // legacy behavior, bit-identical).
+  if (blend.equation !== undefined) actions.push({ call: 'blendEquation', eq: blend.equation })
 }
 
 function emitRaster(raster: PipelineDesc['raster'], actions: StateAction[]): void {
@@ -87,6 +90,8 @@ function emitGuard(action: StateAction): string {
       return `if(S.blend!==${action.on ? 1 : 0}){S.blend=${action.on ? 1 : 0};gl.${action.on ? 'enableBlend' : 'disableBlend'}()}`
     case 'blendFunc':
       return `if(S.blendSrc!=='${action.src}'||S.blendDst!=='${action.dst}'){S.blendSrc='${action.src}';S.blendDst='${action.dst}';gl.blendFunc('${action.src}','${action.dst}')}`
+    case 'blendEquation':
+      return `if(S.blendEq!=='${action.eq}'){S.blendEq='${action.eq}';gl.blendEquation('${action.eq}')}`
     case 'cull':
       return `if(S.cull!==${action.on ? 1 : 0}){S.cull=${action.on ? 1 : 0};gl.${action.on ? 'enableCull' : 'disableCull'}()}`
     case 'cullFace':

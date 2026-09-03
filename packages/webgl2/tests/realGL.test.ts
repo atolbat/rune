@@ -146,6 +146,25 @@ describe('realGL: blend driver-proofing (Task 75b — the particles transparency
     ])
   })
 
+  test('Task 122: setBlend maps the equation — max/subtract follow the pipeline desc', () => {
+    const { calls, gl } = mockGL()
+    const facade = createRealGL(gl)
+    calls.length = 0
+    facade.setBlend('one', 'one', 'max')
+    expect(calls).toEqual([
+      'enable(3042)',
+      'blendEquation(32776)', // MAX (0x8008)
+      'blendFunc(1,1)',
+    ])
+    calls.length = 0
+    facade.setBlend('one', 'one', 'subtract')
+    expect(calls).toEqual([
+      'enable(3042)',
+      'blendEquation(32778)', // FUNC_SUBTRACT (0x800A)
+      'blendFunc(1,1)',
+    ])
+  })
+
   test('setBlend(null) disables BLEND (the opaque pipelines)', () => {
     const { calls, gl } = mockGL()
     const facade = createRealGL(gl)

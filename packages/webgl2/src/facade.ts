@@ -199,7 +199,7 @@ export interface GLFacade {
    *  ('one', 'one-minus-src-alpha', ...); null/null — turn it off.
    *  Premultiplied shader output: additive = ('one','one'),
    *  classic transparency = ('one','one-minus-src-alpha'). */
-  setBlend(src: string | null, dst: string | null): void
+  setBlend(src: string | null, dst: string | null, equation?: string): void
   clear(color: readonly [number, number, number, number] | readonly number[], depth: number | null): void
   drawArrays(mode: string, first: number, count: number, instances: number): void
   /** Render target: an FBO with a color texture (and optional depth).

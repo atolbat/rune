@@ -467,6 +467,81 @@ try {
     !mobileParticles.bodyScrolls
   await page.setViewportSize({ width: 960, height: 720 })
 
+  // ─── quarks: the three.quarks demo suite (Task 122) ─────────────────────
+  await page.goto(`http://localhost:${port}/demo/quarks/`, { waitUntil: 'networkidle' })
+  await page.waitForFunction(
+    () => document.querySelector('.pt-pill')?.textContent.includes('Muzzle'),
+    null,
+    { timeout: 20_000 },
+  )
+  await page.waitForFunction(
+    () => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+    null,
+    { timeout: 20_000 },
+  )
+  const quarksFirst = await framesDiffer(page)
+  const quarksPill1 = await page.textContent('.pt-pill')
+  console.log(`[smoke] quarks first demo: ${quarksPill1} — ${quarksFirst ? 'alive' : 'STATIC'}`)
+
+  // cycle ALL 14 demos via the ▶ arrow; each goes live (particles > 0)
+  await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
+  let quarksAllLive = true
+  const seenDemos = []
+  for (let i = 1; i < 14; i++) {
+    await page.click('.pt-arrow:last-child')
+    await page.waitForFunction(
+      () => / · [1-9][\d,]* particles · [1-9][\d,]* verts/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+      null,
+      { timeout: 20_000 },
+    )
+    const pill = await page.textContent('.pt-pill')
+    seenDemos.push(pill.split(' · ')[0])
+    const live = await framesDiffer(page)
+    if (!live) quarksAllLive = false
+  }
+  console.log(`[smoke] quarks cycle: ${seenDemos.join(' → ')}`)
+  console.log(`[smoke] quarks all 14 live: ${quarksAllLive ? 'yes' : 'SOME STATIC'}`)
+  // the labels overlay (the emitter-shapes demo) projects into the viewport
+  await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('.pt-row')]
+    rows.find(r => r.textContent.includes('Emitter Shapes'))?.dispatchEvent(new Event('click', { bubbles: true }))
+  })
+  await page.waitForFunction(
+    () => document.querySelectorAll('.qk-label').length >= 9,
+    null,
+    { timeout: 10_000 },
+  )
+  const quarksLabels = await page.evaluate(() => {
+    const els = [...document.querySelectorAll('.qk-label')]
+    const visible = els.filter(el => el.style.opacity === '1' && el.style.transform.includes('px'))
+    return { total: els.length, visible: visible.length }
+  })
+  console.log(`[smoke] quarks labels: ${quarksLabels.visible}/${quarksLabels.total} projected`)
+  const quarksLogText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
+  const quarksGpuClean = !/too small|Invalid CommandBuffer|storm|rendering stopped|GL: GL_|GPU: |failed/i.test(quarksLogText)
+  console.log(`[smoke] quarks GPU health: ${quarksGpuClean ? 'clean' : 'GPU ERRORS in the log'}`)
+  if (!quarksGpuClean) console.log(`[smoke] log tail: ${quarksLogText.slice(-600)}`)
+  // mobile: the arrows/pill stay in the viewport
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(`http://localhost:${port}/demo/quarks/`, { waitUntil: 'networkidle' })
+  await page.waitForFunction(
+    () => document.querySelector('.pt-pill')?.textContent.includes('Muzzle'),
+    null,
+    { timeout: 20_000 },
+  )
+  const mobileQuarks = await page.evaluate(() => {
+    const overflow = document.documentElement.scrollWidth - document.documentElement.clientWidth
+    const arrow = document.querySelector('.pt-arrow')?.getBoundingClientRect()
+    const canvas = document.querySelector('#canvas')?.getBoundingClientRect()
+    return { overflow, touchTarget: Math.round(arrow?.height ?? 0), canvasW: Math.round(canvas?.width ?? 0) }
+  })
+  console.log(
+    `[smoke] quarks mobile: overflow ${mobileQuarks.overflow}px, arrow target ${mobileQuarks.touchTarget}px, ` +
+    `canvas width ${mobileQuarks.canvasW}`,
+  )
+  const mobileQuarksOk = mobileQuarks.overflow <= 1 && mobileQuarks.touchTarget >= 40
+  await page.setViewportSize({ width: 960, height: 720 })
+
   if (errors.length) {
     console.error('[smoke] page errors:')
     for (const error of errors) console.error(`  ${error}`)
@@ -494,6 +569,11 @@ try {
     particlesAlive &&
     particlesGpuClean &&
     mobileParticlesOk &&
+    quarksFirst &&
+    quarksAllLive &&
+    quarksLabels.visible >= 9 &&
+    quarksGpuClean &&
+    mobileQuarksOk &&
     viewerLogEntries > 0 &&
     mobileViewerOk &&
     errors.length === 0

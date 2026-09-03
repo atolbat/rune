@@ -59,7 +59,7 @@ export interface DrawSpec {
     /** Task 75: blending (facade BlendFactor strings). Premultiplied
      *  shader output: additive = {src:'one', dst:'one'}, transparency =
      *  {src:'one', dst:'one-minus-src-alpha'}. */
-    readonly blend?: { readonly src: string; readonly dst: string } | false
+    readonly blend?: { readonly src: string; readonly dst: string; readonly equation?: string } | false
     readonly raster?: { readonly cull?: 'none' | 'back' | 'front' }
   }
   readonly attributes?: Record<string, DrawAttribute>
@@ -110,8 +110,9 @@ interface CompiledState {
   readonly depthTest: 'less' | 'lequal' | 'always'
   readonly depthWrite: boolean
   readonly cull: 'none' | 'back' | 'front'
-  /** Task 75: pipeline blending (null — off). */
-  readonly blend: { readonly src: string; readonly dst: string } | null
+  /** Task 75: pipeline blending (null — off). Task 122: the equation
+   *  (absent = 'add' — the classic behavior). */
+  readonly blend: { readonly src: string; readonly dst: string; readonly equation: string } | null
 }
 
 export function compileDrawSpec(spec: DrawSpec, ctx: GLCompileContext): CompiledCommand {
@@ -199,7 +200,7 @@ function readState(spec: DrawSpec): CompiledState {
     depthTest: depthOff ? 'always' : (depth?.test ?? 'less'),
     depthWrite: depthOff ? false : (depth?.write ?? true),
     cull: raster?.cull ?? 'back',
-    blend: blend === undefined || blend === false ? null : { src: blend.src, dst: blend.dst },
+    blend: blend === undefined || blend === false ? null : { src: blend.src, dst: blend.dst, equation: blend.equation ?? 'add' },
   }
 }
 

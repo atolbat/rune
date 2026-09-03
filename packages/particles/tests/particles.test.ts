@@ -274,7 +274,7 @@ describe('the point attractor', () => {
 // ─── the spawners ───────────────────────────────────────────────────────────
 
 describe('createSpawner (the shapes)', () => {
-  const rec: SpawnRecord = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, life: 1, size: 1, r: 1, g: 1, b: 1, a: 1, seed: 0 }
+  const rec: SpawnRecord = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, life: 1, size: 1, r: 1, g: 1, b: 1, a: 1, seed: 0, tx: NaN, ty: NaN, tz: NaN }
 
   it('is bit-identical for the same seed; different seeds differ', () => {
     const s = createSpawner({
@@ -506,8 +506,8 @@ describe('createSpawner (the shapes)', () => {
     })
     const a = galaxy(), b = galaxy()
     for (let i = 0; i < 500; i++) {
-      const ra: SpawnRecord = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, life: 1, size: 1, r: 0, g: 0, b: 0, a: 1, seed: 0 }
-      const rb: SpawnRecord = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, life: 1, size: 1, r: 0, g: 0, b: 0, a: 1, seed: 0 }
+      const ra: SpawnRecord = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, life: 1, size: 1, r: 0, g: 0, b: 0, a: 1, seed: 0, tx: NaN, ty: NaN, tz: NaN }
+      const rb: SpawnRecord = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, life: 1, size: 1, r: 0, g: 0, b: 0, a: 1, seed: 0, tx: NaN, ty: NaN, tz: NaN }
       a(i, ra); b(i, rb)
       expect(ra.x).toBe(rb.x); expect(ra.y).toBe(rb.y); expect(ra.z).toBe(rb.z)
       expect(ra.vx).toBe(rb.vx); expect(ra.vy).toBe(rb.vy); expect(ra.vz).toBe(rb.vz)

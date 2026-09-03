@@ -76,6 +76,9 @@ export interface FragSnippets {
   readonly uniforms?: readonly UniformDecl[]
   /** The fragment needs @builtin(front_facing) — DOUBLE_SIDED. */
   readonly frontFacing?: boolean
+  /** The fragment needs @builtin(position) (the window coordinates) —
+   *  SOFT_PARTICLES (Task 122). GLSL uses gl_FragCoord directly. */
+  readonly fragPosition?: boolean
   /** Lines inside GLSL main(). */
   readonly glslBody?: readonly string[]
   /** Lines inside WGSL fsMain() (the assembler appends the final return). */
@@ -220,6 +223,16 @@ export const EMISSIVE: FeatureBit = 1 << 26
 /** Distance fog: fades `lit` toward u_fogColor between u_fogNear/u_fogFar
  *  (view-space depth — needs the u_view matrix). */
 export const FOG: FeatureBit = 1 << 27
+
+/** Soft particles (Task 122 — three.quarks' softParticles): the fragment
+ *  compares its own window depth against a DEPTH PREPASS texture
+ *  (u_depth — a scene-only pass with the depth packed into RGB) and fades
+ *  base.a to zero within u_softParams.z units of the scene surface — no
+ *  hard quad intersections, occluded fragments vanish smoothly.
+ *  Needs the prepass surface's COLOR texture bound (GLSL name u_depth /
+ *  WGSL name depthTexture @binding(5)) and u_softParams = (1/w, 1/h,
+ *  fadeRange, 0). */
+export const SOFT_PARTICLES: FeatureBit = 1 << 28
 
 /** The light models — exactly one may be present (or none: unlit). */
 export const LIGHT_MODELS: FeatureBit = LAMBERT | MATCAP | PBR
@@ -966,6 +979,30 @@ export const CATALOG: readonly FeatureDef[] = [
       wgslBody: [
         'let fogFactor = clamp((frag.viewZ - params.u_fogNear) / (params.u_fogFar - params.u_fogNear), 0.0, 1.0);',
         'lit = mix(lit, params.u_fogColor.rgb, fogFactor);',
+      ],
+    }),
+  },
+  {
+    id: 'softParticles',
+    bit: SOFT_PARTICLES,
+    vert: (_ctx: AsmCtx): VertSnippets => ({}),
+    frag: (_ctx: AsmCtx): FragSnippets => ({
+      uniforms: [
+        { name: 'u_softParams', glsl: 'uniform vec4 u_softParams;', wgsl: 'u_softParams : vec4<f32>,' },
+      ],
+      // The fragment needs its window position (@builtin(position) in WGSL;
+      // gl_FragCoord in GLSL) to sample the prepass at the SAME screen pixel.
+      fragPosition: true,
+      glslBody: [
+        'float sceneZ = dot(texture(u_depth, gl_FragCoord.xy * u_softParams.xy).rgb, vec3(1.0, 1.0 / 255.0, 1.0 / 65025.0));',
+        'float dz = sceneZ - gl_FragCoord.z;',
+        // dz <= 0: behind the scene (occluded) → 0; dz >= fadeRange: clear.
+        'base.a *= clamp(dz / max(u_softParams.z, 1e-6), 0.0, 1.0);',
+      ],
+      wgslBody: [
+        'let sceneZ = dot(textureSample(depthTexture, texSampler, frag.pos.xy * params.u_softParams.xy).rgb, vec3<f32>(1.0, 1.0 / 255.0, 1.0 / 65025.0));',
+        'let dz = sceneZ - frag.pos.z;',
+        'base.a = base.a * clamp(dz / max(params.u_softParams.z, 1e-6), 0.0, 1.0);',
       ],
     }),
   },

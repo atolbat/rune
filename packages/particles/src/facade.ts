@@ -2,24 +2,60 @@
  * @rune/particles — the facade: the store + the emitter + the soup view
  * behind one chainable object.
  *
- * ════════════════════════════════════════════════════════════════════════
+ * ══════════════════════════════════════════════════════════════════════════
  * MODULE CONTRACT (see the package header in index.ts):
- *   Owns the mechanical core (system.ts) + the GPU view (billboards.ts)
- *   and adds the CONTINUOUS EMISSION (the rate accumulator — the facade
- *   is the only stateful clock piece). The soup buffer and the result
- *   view object are allocated ONCE at creation: advance() + billboards()
- *   never allocate (tests pin the identity across frames).
- * ════════════════════════════════════════════════════════════════════════
+ *   Owns the mechanical core (system.ts) + the GPU views (billboards.ts /
+ *   trails.ts / meshes.ts) and adds the CONTINUOUS EMISSION (the rate
+ *   accumulator) + the declarative BURST SCHEDULE (Task 122) + the emitter
+ *   origin offset (at — the follow/prefab story) + the render kind. The
+ *   soup buffer and the result view object are allocated ONCE at creation:
+ *   advance() + view() never allocate (tests pin the identity across
+ *   frames).
+ *
+ * THE RENDER KINDS (Task 122):
+ *   billboard — the classic soup (mode: camera/vertical/horizontal/
+ *               stretched/oriented + the atlas tiles)
+ *   trail     — the ribbon view (the position history + fillTrails)
+ *   mesh      — a real 3D geometry per particle (fillMeshes — normals,
+ *               the LIT materials)
+ * ══════════════════════════════════════════════════════════════════════════
  */
 
-import { createParticleSystem, NO_FORCES, type Attractor, type ForceFields, type ParticleSystem } from './system.ts'
+import {
+  createParticleSystem, NO_FORCES, MAX_PLANES,
+  type Attractor, type ForceFields, type ParticleFields, type ParticleSystem, type RetireRecord, type Collision, type SeekForce,
+} from './system.ts'
 import { createSpawner, type Spawner, type SpawnerDesc } from './spawn.ts'
 import { CONSTANT_RAMP, type Ramp } from './ramp.ts'
-import { fillBillboards, SOUP_STRIDE, VERTS_PER_PARTICLE, type CameraBasis } from './billboards.ts'
+import { validateNoise, type NoiseField } from './noise.ts'
+import {
+  fillBillboards, SOUP_STRIDE, VERTS_PER_PARTICLE, type CameraBasis, type BillboardOptions,
+} from './billboards.ts'
+import { createTrailHistory, fillTrails, type TrailOptions, type TrailBakeOptions, type TrailHistory } from './trails.ts'
+import { fillMeshes, MESH_STRIDE, type MeshGeometry, type MeshOptions } from './meshes.ts'
+import { hash01 } from './spawn.ts'
+
+/** One scheduled burst (three.quarks' emissionBursts): fires `count`
+ *  particles at `time`, then every `interval` seconds, `cycle` times
+ *  (0 = forever). Each firing passes a `probability` gate (deterministic:
+ *  hash01(seed, burst index, cycle index)). */
+export interface BurstDesc {
+  readonly time: number
+  readonly count: number
+  readonly cycle: number
+  readonly interval: number
+  readonly probability: number
+}
+
+/** The render description — which soup the facade bakes. */
+export type RenderDesc =
+  | ({ readonly kind: 'billboard' } & Omit<BillboardOptions, 'ramp'>)
+  | ({ readonly kind: 'trail' } & TrailOptions & Omit<TrailBakeOptions, 'ramp'>)
+  | ({ readonly kind: 'mesh'; readonly geometry: MeshGeometry } & Omit<MeshOptions, 'ramp'>)
 
 /** The facade configuration. */
 export interface ParticlesDesc {
-  /** The hard particle ceiling (the soup is sized capacity × 6 verts). */
+  /** The hard particle ceiling (the soup is sized by the render kind). */
   readonly capacity: number
   /** The over-life appearance ramp (default: constant white, size 1). */
   readonly ramp?: Ramp
@@ -32,23 +68,53 @@ export interface ParticlesDesc {
   readonly spawner?: SpawnerDesc
   /** The billboard spin speed, radians/second (default 0). */
   readonly spin?: number
+  /** The declarative burst schedule (Task 122) — fired by advance(). */
+  readonly bursts?: readonly BurstDesc[]
+  /** Simulate this many seconds at creation (Task 122 — their prewarm:
+   *  a looping effect opens in its steady state, not empty). Default 0. */
+  readonly prewarm?: number
+  /** The render kind (default: the classic billboard soup). */
+  readonly render?: RenderDesc
+  /** The retire hook (Task 122 — sub-emitters): called per dead particle
+   *  with its final state (a REUSED record — copy what you need). */
+  readonly onRetire?: (record: RetireRecord) => void
 }
 
-/** The billboard soup view — a REUSED result object (the scene.cull
- *  pattern): the same reference every frame, the vertexCount updated. */
+/** The attribute layout of a soup — how a draw command binds it. */
+export interface SoupLayout {
+  readonly position: { readonly size: number; readonly offset: number }
+  readonly uv: { readonly size: number; readonly offset: number }
+  readonly color: { readonly size: number; readonly offset: number }
+  readonly normal?: { readonly size: number; readonly offset: number }
+}
+
+/** The soup view — a REUSED result object (the scene.cull pattern): the
+ *  same reference every frame, the vertexCount updated. */
 export interface SoupView {
-  /** The vertex soup: capacity × 6 verts × 9 floats, valid on [0, vertexCount × 9). */
+  /** The vertex soup, valid on [0, vertexCount × stride). */
   readonly vertices: Float32Array
-  /** Live vertices this frame (6 per live, non-zero-size particle). */
+  /** Live vertices this frame. */
   vertexCount: number
+  /** Floats per vertex of THIS view (36 billboard/trail, 48 mesh). */
+  readonly stride: number
+  /** The attribute layout (byte offsets are stride×4-based: offsets here
+   *  are in FLOATS — multiply by 4 for bytes). */
+  readonly layout: SoupLayout
 }
 
+/** The facade. */
 /** The facade. */
 export interface Particles {
   /** Live particles. */
   readonly count: number
   /** The hard ceiling. */
   readonly capacity: number
+  /** The SoA fields (Task 122 — the composable-core escape hatch):
+   *  READ the live state, WRITE the seek targets (fields.tx/ty/tz = the
+   *  sequencer retarget) or the positions (a custom behavior between
+   *  advance() calls — the "custom plugin" story). The store owns the
+   *  compaction; never reorder the [0, count) range yourself. */
+  readonly fields: ParticleFields
 
   /** Sets the continuous emission: `rate` particles/second through the
    *  spawner (a spawner argument replaces the current one). Chainable. */
@@ -57,23 +123,39 @@ export interface Particles {
    *  argument replaces the current one). Returns the number spawned
    *  (the capacity clips). */
   burst(n: number, spawner?: SpawnerDesc): number
-  /** Integrates the system by dt (seconds) and services the continuous
-   *  rate (the fractional remainder carries over — 60/s at 60 Hz spawns
-   *  exactly 1/frame). Chainable. */
+  /** The live emitter origin offset (Task 122 — the follow/prefab story):
+   *  every spawn position (rate, burst, the schedule) is translated by
+   *  (x, y, z). The VELOCITY is untouched — a moving emitter leaves a
+   *  trail of its spawn cloud. Chainable. */
+  at(x: number, y: number, z: number): this
+  /** Integrates the system by dt (seconds), services the continuous rate
+   *  and the burst schedule, and records the trail history (the trail
+   *  render kind). Chainable. */
   advance(dt: number): this
-  /** Bakes the billboard soup for the camera basis. Returns the REUSED
-   *  view — hold no reference across frames, read it and draw. */
+  /** Bakes the soup for the camera basis (the render kind chooses the
+   *  baker). Returns the REUSED view — hold no reference across frames,
+   *  read it and draw. */
+  view(basis: CameraBasis, options?: RenderBakeOverride): SoupView
+  /** The billboard alias of view() (the classic API — back-compat). */
   billboards(basis: CameraBasis): SoupView
   /** Diagnostics (allocates — a cold path by design): the counters. */
   stats(): { count: number; capacity: number; spawned: number; retired: number; dropped: number }
-  /** Drops everything (the soup zeros out on the next billboards()). */
+  /** Drops everything (the soup zeros out on the next view()). */
   clear(): this
+}
+
+/** Per-call overrides of the render options (rare: a demo switching the
+ *  stretched factors on the fly). */
+export interface RenderBakeOverride {
+  readonly billboard?: Partial<BillboardOptions>
+  readonly trail?: Partial<TrailBakeOptions>
+  readonly mesh?: Partial<MeshOptions>
 }
 
 /** Creates the particle facade. */
 export function createParticles(desc: ParticlesDesc): Particles {
   const capacity = desc.capacity
-  const system: ParticleSystem = createParticleSystem(capacity)
+  const render: RenderDesc = desc.render ?? { kind: 'billboard' }
   const ramp = desc.ramp ?? CONSTANT_RAMP
   const spin = desc.spin ?? 0
   const forces: ForceFields = {
@@ -81,19 +163,84 @@ export function createParticles(desc: ParticlesDesc): Particles {
     drag: desc.forces?.drag ?? NO_FORCES.drag,
     turbulence: desc.forces?.turbulence ?? NO_FORCES.turbulence,
     attract: validateAttractor(desc.forces?.attract),
+    speedCurve: desc.forces?.speedCurve ?? null,
+    collide: validateCollision(desc.forces?.collide),
+    noise: desc.forces?.noise !== undefined && desc.forces?.noise !== null ? validateNoise(desc.forces!.noise as NoiseField) : null,
+    seek: validateSeek(desc.forces?.seek),
   }
+
+  // ── the render kind setup (before the store: trails need onSwap) ──────
+  const kind = render.kind
+  let history: TrailHistory | null = null
+  if (kind === 'trail') {
+    history = createTrailHistory(capacity, render as TrailOptions)
+  }
+  const system: ParticleSystem = createParticleSystem(capacity, {
+    onRetire: desc.onRetire,
+    onSwap: history !== null ? history.handleSwap : undefined,
+  })
 
   let spawner: Spawner = createSpawner(desc.spawner ?? DEFAULT_SPAWNER)
   let ratePerSecond = desc.rate ?? 0
   let carry = 0 // the fractional emission remainder
+  // The live emitter origin (at) — read by the emit wrapper, never rebuilt.
+  const origin = [0, 0, 0]
+  const emitWrap: Spawner = (index, out) => {
+    spawner(index, out)
+    out.x += origin[0]; out.y += origin[1]; out.z += origin[2]
+  }
 
-  // The GPU view — allocated once, reused forever.
-  const vertices = new Float32Array(capacity * VERTS_PER_PARTICLE * SOUP_STRIDE)
-  const view: SoupView = { vertices, vertexCount: 0 }
+  // ── the soup: one array, sized by the render kind ──────────────────────
+  let soupFloats: number
+  let stride: number
+  let layout: SoupLayout
+  if (kind === 'mesh') {
+    const geo = (render as { geometry: MeshGeometry }).geometry
+    const vertsPer = geo.vertexCount
+    if (!Number.isInteger(vertsPer) || vertsPer < 3) {
+      throw new Error(`rune/particles: mesh geometry needs >= 3 vertices (got ${vertsPer})`)
+    }
+    soupFloats = capacity * vertsPer * MESH_STRIDE
+    stride = MESH_STRIDE
+    layout = { position: { size: 3, offset: 0 }, normal: { size: 3, offset: 3 }, uv: { size: 2, offset: 6 }, color: { size: 4, offset: 8 } }
+  } else if (kind === 'trail') {
+    const points = history!.points
+    soupFloats = capacity * points * VERTS_PER_PARTICLE * SOUP_STRIDE
+    stride = SOUP_STRIDE
+    layout = { position: { size: 3, offset: 0 }, uv: { size: 2, offset: 3 }, color: { size: 4, offset: 5 } }
+  } else {
+    soupFloats = capacity * VERTS_PER_PARTICLE * SOUP_STRIDE
+    stride = SOUP_STRIDE
+    layout = { position: { size: 3, offset: 0 }, uv: { size: 2, offset: 3 }, color: { size: 4, offset: 5 } }
+  }
+  const vertices = new Float32Array(soupFloats)
+  const view: SoupView = { vertices, vertexCount: 0, stride, layout }
+
+  // ── the burst schedule state (Task 122) ────────────────────────────────
+  let time = 0 // the facade's own clock (per-facade closure state; the prewarm shares it)
+  const bursts = (desc.bursts ?? []).map(burst => validateBurst(burst))
+  const burstState = bursts.map((burst, index) => ({
+    next: burst.time,
+    firesLeft: burst.cycle === 0 ? Infinity : burst.cycle,
+    cycle: 0,
+    index,
+  }))
+  const scheduleSeed = (desc.spawner?.seed ?? 1) | 0
+
+  // ── the prewarm (Task 122): fixed 1/60 steps before the first frame ────
+  const prewarm = desc.prewarm ?? 0
+  if (prewarm > 0) {
+    if (!Number.isFinite(prewarm) || prewarm > 3600) {
+      throw new Error(`rune/particles: prewarm must be a finite seconds count <= 3600 (got ${prewarm})`)
+    }
+    const steps = Math.ceil(prewarm * 60)
+    for (let i = 0; i < steps; i++) advanceInternal(1 / 60)
+  }
 
   const facade: Particles = {
     get count() { return system.count },
     get capacity() { return capacity },
+    get fields() { return system.fields },
 
     rate(perSecond, sp) {
       if (!Number.isFinite(perSecond) || perSecond < 0) {
@@ -106,27 +253,54 @@ export function createParticles(desc: ParticlesDesc): Particles {
 
     burst(n, sp) {
       if (sp !== undefined) spawner = createSpawner(sp)
-      return system.emit(n, spawner)
+      return system.emit(n, emitWrap)
     },
 
-    advance(dt) {
-      // The rate first (this frame's newborns see the full dt — no
-      // systematic one-frame lag), then the integration + compaction.
-      if (ratePerSecond > 0 && dt > 0) {
-        carry += ratePerSecond * dt
-        const whole = Math.floor(carry)
-        if (whole > 0) {
-          carry -= whole
-          system.emit(whole, spawner)
-        }
+    at(x, y, z) {
+      if (!Number.isFinite(x + y + z)) {
+        throw new Error(`rune/particles: at() needs three finite numbers (got ${x}, ${y}, ${z})`)
       }
-      system.advance(dt, forces)
+      origin[0] = x; origin[1] = y; origin[2] = z
       return facade
     },
 
-    billboards(basis) {
-      view.vertexCount = fillBillboards(system, basis, vertices, { ramp, spin })
+    advance(dt) {
+      advanceInternal(dt)
+      return facade
+    },
+
+    view(basis, options) {
+      if (kind === 'mesh') {
+        const renderOpts = render as MeshOptions
+        const o = options?.mesh ?? {}
+        view.vertexCount = fillMeshes(system, (render as { geometry: MeshGeometry }).geometry, vertices, {
+          ramp, axis: o.axis ?? renderOpts.axis, spin: o.spin ?? renderOpts.spin,
+        })
+      } else if (kind === 'trail') {
+        const renderOpts = render as TrailBakeOptions
+        const o = options?.trail ?? {}
+        view.vertexCount = fillTrails(system, history!, withForward(basis), vertices, {
+          ramp, length: o.length ?? renderOpts.length, width: o.width ?? renderOpts.width,
+        })
+      } else {
+        const renderOpts = render as Omit<BillboardOptions, 'ramp'>
+        const o = options?.billboard ?? {}
+        view.vertexCount = fillBillboards(system, basis, vertices, {
+          ramp,
+          spin,
+          mode: o.mode ?? renderOpts.mode ?? 'camera',
+          tiles: o.tiles ?? renderOpts.tiles,
+          speedFactor: o.speedFactor ?? renderOpts.speedFactor,
+          lengthFactor: o.lengthFactor ?? renderOpts.lengthFactor,
+          axis: o.axis ?? renderOpts.axis,
+          spin3d: o.spin3d ?? renderOpts.spin3d,
+        })
+      }
       return view
+    },
+
+    billboards(basis) {
+      return facade.view(basis)
     },
 
     stats() {
@@ -140,6 +314,55 @@ export function createParticles(desc: ParticlesDesc): Particles {
       return facade
     },
   }
+
+  /** The one advance implementation (the prewarm shares it). */
+  function advanceInternal(dt: number): void {
+    if (!Number.isFinite(dt) || dt <= 0) return
+    // The rate first (this frame's newborns see the full dt — no
+    // systematic one-frame lag), then the burst schedule, then the
+    // integration + compaction, then the trail history.
+    if (ratePerSecond > 0) {
+      carry += ratePerSecond * dt
+      const whole = Math.floor(carry)
+      if (whole > 0) {
+        carry -= whole
+        system.emit(whole, emitWrap)
+      }
+    }
+    for (const state of burstState) {
+      const burst = bursts[state.index]
+      // A while, not an if: a long stall (a hidden tab) fires the missed
+      // bursts — the schedule is time-anchored, not frame-anchored.
+      let guard = 0
+      while (time >= state.next && state.firesLeft > 0 && guard++ < 64) {
+        if (hash01(scheduleSeed, state.index * 7919 + 13, state.cycle) < burst.probability) {
+          system.emit(burst.count, emitWrap)
+        }
+        state.firesLeft--
+        state.cycle++
+        state.next += burst.interval
+      }
+    }
+    system.advance(dt, forces)
+    time += dt
+    if (history !== null) history.record(system, dt)
+  }
+
+  function withForward(basis: CameraBasis): { right: readonly number[]; up: readonly number[]; forward: readonly number[] } {
+    // fillTrails needs the look direction; derive it from right × up when
+    // the caller (the classic two-vector basis) did not supply it:
+    // forward = −(right × up) — the rows of a view matrix form the axes
+    // with z pointing AT the camera, so the negated cross is the look.
+    if (basis.forward !== undefined) {
+      return { right: basis.right, up: basis.up, forward: basis.forward }
+    }
+    const r = basis.right, u = basis.up
+    const cx = r[1] * u[2] - r[2] * u[1]
+    const cy = r[2] * u[0] - r[0] * u[2]
+    const cz = r[0] * u[1] - r[1] * u[0]
+    return { right: r, up: u, forward: [-cx, -cy, -cz] }
+  }
+
   return facade
 }
 
@@ -159,7 +382,7 @@ const DEFAULT_SPAWNER: SpawnerDesc = {
 function validateAttractor(at: Attractor | null | undefined): Attractor | null {
   if (at === undefined || at === null) return null
   const { point, strength, softening } = at
-  if (!Array.isArray(point) || point.length !== 3 || !point.every(v => Number.isFinite(v))) {
+  if (!Array.isArray(point) || point.length !== 3 || !point.every((v: number) => Number.isFinite(v))) {
     throw new Error(`rune/particles: attract.point must be three finite numbers (got ${JSON.stringify(point)})`)
   }
   if (!Number.isFinite(strength)) {
@@ -170,4 +393,66 @@ function validateAttractor(at: Attractor | null | undefined): Attractor | null {
     throw new Error(`rune/particles: attract.softening must be finite > 0 (got ${softening}; it caps the force at the center — without it the integrator NaNs)`)
   }
   return at
+}
+
+/** Collision validation (the planes normalize per frame in the store). */
+function validateCollision(collide: Collision | null | undefined): Collision | null {
+  if (collide === undefined || collide === null) return null
+  if (!Array.isArray(collide.planes) || collide.planes.length === 0) {
+    throw new Error('rune/particles: collide.planes must be a non-empty array (a collision set with no planes is a silent no-op)')
+  }
+  if (collide.planes.length > MAX_PLANES) {
+    throw new Error(`rune/particles: collide.planes is capped at ${MAX_PLANES} (got ${collide.planes.length}) — the flat scratch is sized to the cap`)
+  }
+  for (const plane of collide.planes) {
+    if (!Array.isArray(plane.normal) || plane.normal.length !== 3 || !plane.normal.every((v: number) => Number.isFinite(v))) {
+      throw new Error(`rune/particles: a collision plane normal must be three finite numbers (got ${JSON.stringify(plane.normal)})`)
+    }
+    if (Math.hypot(plane.normal[0], plane.normal[1], plane.normal[2]) < 1e-12) {
+      throw new Error('rune/particles: a collision plane normal must be non-zero')
+    }
+    if (!Array.isArray(plane.point) || plane.point.length !== 3 || !plane.point.every((v: number) => Number.isFinite(v))) {
+      throw new Error(`rune/particles: a collision plane point must be three finite numbers (got ${JSON.stringify(plane.point)})`)
+    }
+    if (!Number.isFinite(plane.restitution) || plane.restitution < 0 || plane.restitution > 1) {
+      throw new Error(`rune/particles: plane restitution must be in [0, 1] (got ${plane.restitution})`)
+    }
+    const fr = plane.friction ?? 0
+    if (!Number.isFinite(fr) || fr < 0 || fr > 1) {
+      throw new Error(`rune/particles: plane friction must be in [0, 1] (got ${fr})`)
+    }
+  }
+  return collide
+}
+
+/** Seek validation. */
+function validateSeek(seek: SeekForce | null | undefined): SeekForce | null {
+  if (seek === undefined || seek === null) return null
+  if (!Number.isFinite(seek.strength) || seek.strength <= 0) {
+    throw new Error(`rune/particles: seek.strength must be a finite > 0 (got ${seek.strength})`)
+  }
+  if (!Number.isFinite(seek.damping) || seek.damping < 0) {
+    throw new Error(`rune/particles: seek.damping must be a finite >= 0 (got ${seek.damping}; ≈ 2·√strength is critically damped)`)
+  }
+  return seek
+}
+
+/** Burst validation. */
+function validateBurst(burst: BurstDesc): BurstDesc {
+  if (!Number.isFinite(burst.time) || burst.time < 0) {
+    throw new Error(`rune/particles: burst time must be a finite >= 0 (got ${burst.time})`)
+  }
+  if (!Number.isInteger(burst.count) || burst.count < 1) {
+    throw new Error(`rune/particles: burst count must be an integer >= 1 (got ${burst.count})`)
+  }
+  if (!Number.isInteger(burst.cycle) || burst.cycle < 0) {
+    throw new Error(`rune/particles: burst cycle must be an integer >= 0 (0 = repeating; got ${burst.cycle})`)
+  }
+  if (!Number.isFinite(burst.interval) || burst.interval <= 0) {
+    throw new Error(`rune/particles: burst interval must be a finite > 0 (got ${burst.interval})`)
+  }
+  if (!Number.isFinite(burst.probability) || burst.probability < 0 || burst.probability > 1) {
+    throw new Error(`rune/particles: burst probability must be in [0, 1] (got ${burst.probability})`)
+  }
+  return burst
 }

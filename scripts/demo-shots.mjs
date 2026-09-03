@@ -3,7 +3,7 @@
  * of desktop and phone, the model sheet in its states, the fullscreen viewer.
  */
 import { join, resolve } from 'node:path'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { chromium } from 'playwright'
 
 const root = resolve(import.meta.dirname, '..')
@@ -325,6 +325,49 @@ async function assertSpriteContour() {
 
 // run the contour gate right after the preset shots
 await assertSpriteContour()
+
+// ─── quarks: the 14-demo suite (Task 122) — a shot per demo + gates ───────
+{
+  const qk = await browser.newPage({ viewport: { width: 1280, height: 800 } })
+  const qkErrors = []
+  qk.on('pageerror', (e) => qkErrors.push(String(e)))
+  await qk.goto(`http://localhost:${port}/demo/quarks/`, { waitUntil: 'networkidle' })
+  await qk.waitForFunction(() => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 20000 })
+  await qk.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
+
+  const QK_NAMES = ['muzzle', 'explosion', 'shapes', 'trail', 'sequencer', 'mesh', 'subemitter',
+    'noise', 'alphatest', 'plugin', 'billboard', 'soft', 'blending', 'follow']
+  const QK_SETTLE = { sequencer: 3500, muzzle: 2500, explosion: 2100 }
+  const shotPills = []
+  for (let i = 0; i < QK_NAMES.length; i++) {
+    if (i > 0) await qk.click('.pt-arrow:last-child')
+    await qk.waitForTimeout(QK_SETTLE[QK_NAMES[i]] ?? 1700)
+    await qk.screenshot({ path: join(out, `quarks-${QK_NAMES[i]}.png`) })
+    shotPills.push(await qk.textContent('.pt-pill'))
+  }
+  if (qkErrors.length > 0) {
+    throw new Error(`[shots] quarks page errors: ${qkErrors.slice(0, 3).join(' | ')}`)
+  }
+
+  // THE GATES (the same class the particles presets use — per-demo pixel
+  // liveness: every demo's shot must carry content above the clear color;
+  // the SOFT shot (the knots) additionally must show the LIT meshes).
+  for (const [i, name] of QK_NAMES.entries()) {
+    const { PNG } = await import('pngjs')
+    const png = PNG.sync.read(readFileSync(join(out, `quarks-${name}.png`)))
+    let bright = 0
+    const { width, height, data } = png
+    for (let p = 0; p < width * height; p++) {
+      if ((data[p * 4] + data[p * 4 + 1] + data[p * 4 + 2]) / 3 > 40) bright++
+    }
+    const pct = (bright / (width * height)) * 100
+    const alive = / · [1-9][\d,]* particles · [1-9][\d,]* verts/.test(shotPills[i])
+    console.log(`[shots] quarks ${name}: bright ${pct.toFixed(2)}% — ${shotPills[i]} (${alive ? 'alive' : 'DEAD'})`)
+    if (!alive) throw new Error(`[shots] quarks ${name}: the pill shows no live particles — ${shotPills[i]}`)
+    if (pct < 0.15) throw new Error(`[shots] quarks ${name}: only ${pct.toFixed(2)}% bright pixels — the demo renders nothing`)
+  }
+  await qk.close()
+}
 
 // phone: the preset sheet as the entry point
 const ptPhone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })

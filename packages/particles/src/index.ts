@@ -7,27 +7,31 @@
  *   Pure CPU-side simulation. The package knows NOTHING about the GPU,
  *   renderers, shaders or loaders:
  *     IN : spawner descriptions (shapes, velocity modes, ranges),
- *          force fields (gravity, drag, turbulence), dt
- *     OUT: a camera-facing billboard SOUP — one Float32Array of
- *          pos3/uv2/color4 vertices, 6 per particle — consumed as plain
- *          vertex attributes by any draw command (the demo binds it to
- *          an unlit TEXTURE + VERTEX_COLOR material with additive
- *          blending; @rune/materials owns that part)
+ *          force fields (gravity, drag, turbulence, attractor, collision,
+ *          noise, seek, the speed curve), dt
+ *     OUT: a GPU view — the billboard soup (pos3/uv2/color4), the trail
+ *          ribbon soup (the same layout), or the MESH soup (pos3/nrm3/
+ *          uv2/color4) — consumed as plain vertex attributes by any draw
+ *          command (the demo binds it to the unlit TEXTURE + VERTEX_COLOR
+ *          material, or LAMBERT/PBR for the mesh kind; @rune/materials
+ *          owns that part)
  *   No instancing, no point sprites, no transform feedback — the soup is
  *   the lowest common denominator of WebGL2 AND WebGPU draw paths.
  *
  *   Two levels of API (the repo's facade + composable core split):
- *     facade : createParticles — rate/burst/advance/billboards, the
- *              ramp, the forces, the spin — one chainable object
+ *     facade : createParticles — rate/burst/at/advance/view, the ramp,
+ *              the forces, the burst schedule, prewarm, the render kinds
+ *              (billboard / trail / mesh) — one chainable object
  *     core   : createParticleSystem (the SoA store) + createSpawner /
- *              createRamp / fillBillboards — composable for custom
- *              emitters, GPU-side reinterpretation, tooling
+ *              createRamp / fillBillboards / fillTrails / fillMeshes —
+ *              composable for custom behaviors (write the fields between
+ *              advance() calls — the "custom plugin" story), tooling
  *
  *   PERFORMANCE discipline (the core's mobile rules):
- *     - zero allocations per frame: flat SoA fields (13 floats +
+ *     - zero allocations per frame: flat SoA fields (16 floats +
  *       the seed), the spawn record and the ramp scratch are reused,
- *       the soup buffer is allocated once at capacity; billboards()
- *       returns a REUSED view object (the scene.cull pattern)
+ *       the soup buffer is allocated once at capacity; view() returns a
+ *       REUSED view object (the scene.cull pattern)
  *     - swap-remove compaction (a reverse walk — nothing processed
  *       twice, nothing skipped); one exp per FRAME for the drag
  *     - stateless integer-hash spawning: emission is a pure function
@@ -36,20 +40,26 @@
  *     - binary-search ramp sampling (the clip-sampling pattern of
  *       @rune/animation)
  *
- *   THE GALAXY KIT (Task 117, the emitter power of three-nebula-style
- *   demos): the disc shape takes `arms` / `armSpread` / `twist` — spiral
- *   arm density; the spawner takes `speedByRadius` (Keplerian shear:
- *   speed·(ref/r)^power — the inner rim outruns the outer) and
- *   `colorByRadius` (the tint follows the radius: a warm core, cool arms).
- *   Together with tangential velocity they make a shearing spiral galaxy
- *   from ONE declarative spawner (see the demo's galaxy preset).
+ *   THE EMITTER FAMILY (Task 122 — three.quarks parity): the shapes
+ *   point/sphere/cone/disc(+arms)/line/hemisphere/donut/rectangle/grid;
+ *   the seek TARGETS (point / image masks — the TextureSequencer);
+ *   declarative bursts {time, count, cycle, interval, probability};
+ *   prewarm; the live emitter origin at().
  *
- *   THE POINT ATTRACTOR (Task 119, three-nebula's Gravity/Attraction
- *   behavior): forces.attract = { point, strength, softening? } — a mass
- *   pulling (or, negative, repelling) every particle with accel
- *   strength/(r²+softening²). Launch particles tangentially and you get an
- *   orbiting cloud; drop them from rest and you get a collapse (see the
- *   demo's orbit preset).
+ *   THE RENDER FAMILY (Task 122): billboard modes camera/vertical/
+ *   horizontal/stretched/oriented + the ATLAS (tiles + the ramp's frame
+ *   channel — FrameOverLife); TRAILS (the decimated position history +
+ *   the ribbon baker); MESH particles (a real geometry with normals —
+ *   the LIT materials shade them).
+ *
+ *   THE FORCE FAMILY (Task 122): gravity, drag, sine turbulence, the
+ *   point attractor, the simplex noise field, collision planes with
+ *   restitution/friction, the target seek spring, the speed-over-life
+ *   curve.
+ *
+ *   THE HOOKS (Task 122): onRetire (the final state of every dead
+ *   particle — sub-emitters) and onSwap (external per-slot state — the
+ *   trails follow it automatically).
  *
  *   DETERMINISM: same inputs → same bits, every time, every backend.
  *   The clock belongs to the caller: advance(dt) is driven from the
@@ -57,13 +67,23 @@
  * ══════════════════════════════════════════════════════════════════════════
  */
 
-export type { ParticleFields, SpawnRecord, ForceFields, Attractor, ParticleSystem } from './system.ts'
-export { createParticleSystem, NO_FORCES } from './system.ts'
-export type { SpawnShape, VelocityMode, SpawnerDesc, Spawner } from './spawn.ts'
+export type {
+  ParticleFields, SpawnRecord, ForceFields, Attractor, ParticleSystem,
+  CollisionPlane, Collision, SeekForce, RetireRecord, StoreOptions,
+} from './system.ts'
+export { createParticleSystem, NO_FORCES, MAX_PLANES } from './system.ts'
+export type { SpawnShape, VelocityMode, SpawnerDesc, Spawner, TargetDesc, ImageMask } from './spawn.ts'
 export { createSpawner, hash01 } from './spawn.ts'
 export type { RampPoint, Ramp } from './ramp.ts'
-export { createRamp, sampleRamp, CONSTANT_RAMP } from './ramp.ts'
+export { createRamp, sampleRamp, CONSTANT_RAMP, RAMP_STRIDE } from './ramp.ts'
+export type { BillboardMode } from './billboards.ts'
 export { fillBillboards, SOUP_STRIDE, VERTS_PER_PARTICLE } from './billboards.ts'
 export type { CameraBasis, BillboardOptions } from './billboards.ts'
-export type { ParticlesDesc, Particles, SoupView } from './facade.ts'
+export type { TrailOptions, TrailHistory, TrailBakeOptions } from './trails.ts'
+export { createTrailHistory, fillTrails } from './trails.ts'
+export type { MeshGeometry, MeshOptions } from './meshes.ts'
+export { fillMeshes, MESH_STRIDE } from './meshes.ts'
+export type { NoiseField } from './noise.ts'
+export { simplex3, validateNoise } from './noise.ts'
+export type { ParticlesDesc, Particles, SoupView, SoupLayout, BurstDesc, RenderDesc, RenderBakeOverride } from './facade.ts'
 export { createParticles } from './facade.ts'

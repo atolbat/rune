@@ -3799,7 +3799,7 @@ function readState(spec) {
     depthTest: depthOff ? "always" : depth2?.test ?? "less",
     depthWrite: depthOff ? false : depth2?.write ?? true,
     cull: raster?.cull ?? "back",
-    blend: blend === undefined || blend === false ? null : { src: blend.src, dst: blend.dst }
+    blend: blend === undefined || blend === false ? null : { src: blend.src, dst: blend.dst, equation: blend.equation ?? "add" }
   };
 }
 function resolve(declared, props, frameCtx) {
@@ -3902,9 +3902,9 @@ function createExecutor(options) {
       gl.setCull(state.cull);
       lastCull = state.cull;
     }
-    const blendKey = state.blend === null ? "off" : `${state.blend.src}/${state.blend.dst}`;
+    const blendKey = state.blend === null ? "off" : `${state.blend.src}/${state.blend.dst}/${state.blend.equation}`;
     if (blendKey !== lastBlend) {
-      gl.setBlend(state.blend === null ? null : state.blend.src, state.blend === null ? null : state.blend.dst);
+      gl.setBlend(state.blend === null ? null : state.blend.src, state.blend === null ? null : state.blend.dst, state.blend === null ? undefined : state.blend.equation);
       lastBlend = blendKey;
     }
   }
@@ -4371,16 +4371,26 @@ function createRealGL(gl) {
     "one-minus-src-color": 769,
     "src-alpha": 770,
     "one-minus-src-alpha": 771,
+    "dst-alpha": 772,
+    "one-minus-dst-alpha": 773,
     "dst-color": 774,
-    "one-minus-dst-color": 775
+    "one-minus-dst-color": 775,
+    "src-alpha-saturated": 776
   };
-  function setBlend(src, dst) {
+  const BLEND_EQUATIONS = {
+    add: 32774,
+    subtract: 32778,
+    "reverse-subtract": 32779,
+    min: 32775,
+    max: 32776
+  };
+  function setBlend(src, dst, equation) {
     if (src === null || dst === null) {
       gl.disable(gl.BLEND);
       return;
     }
     gl.enable(gl.BLEND);
-    gl.blendEquation(gl.FUNC_ADD);
+    gl.blendEquation(BLEND_EQUATIONS[equation ?? "add"] ?? gl.FUNC_ADD);
     gl.blendFunc(BLEND_FACTORS[src] ?? gl.ONE, BLEND_FACTORS[dst] ?? gl.ZERO);
   }
   function clear(color, depth2) {
@@ -6598,7 +6608,7 @@ function withJournal(gl, journal) {
     setViewport: (width, height) => gl.setViewport(width, height),
     setDepthMode: (test, write) => gl.setDepthMode(test, write),
     setCull: (mode) => gl.setCull(mode),
-    setBlend: (src, dst) => gl.setBlend(src, dst),
+    setBlend: (src, dst, equation) => gl.setBlend(src, dst, equation),
     clear: (color, depth2) => gl.clear(color, depth2),
     drawArrays: (mode, first, count, instances) => gl.drawArrays(mode, first, count, instances),
     createTarget: (textureId, width, height, depth2, color) => {
@@ -6858,7 +6868,7 @@ function createResourceSessionGL(raw, journal) {
     setViewport: (width, height) => raw.setViewport(width, height),
     setDepthMode: (test, write) => raw.setDepthMode(test, write),
     setCull: (mode) => raw.setCull(mode),
-    setBlend: (src, dst) => raw.setBlend(src, dst),
+    setBlend: (src, dst, equation) => raw.setBlend(src, dst, equation),
     clear: (color, depth2) => raw.clear(color, depth2),
     drawArrays: (mode, first, count, instances) => raw.drawArrays(mode, first, count, instances),
     deleteProgram: (programId) => raw.deleteProgram(programId),
@@ -8016,7 +8026,7 @@ function depthKey(depth2) {
 function blendKey(blend) {
   if (blend === false || blend === undefined)
     return "off";
-  return `${blend.src}/${blend.dst}`;
+  return `${blend.src}/${blend.dst}/${blend.equation ?? "add"}`;
 }
 function rasterKey(raster) {
   if (raster === undefined)
@@ -8689,8 +8699,8 @@ async function createRealGPU(canvas, onGpuError) {
         targets: [{
           format,
           blend: desc.blend === undefined || desc.blend === false ? undefined : {
-            color: { srcFactor: desc.blend.src, dstFactor: desc.blend.dst, operation: "add" },
-            alpha: { srcFactor: desc.blend.src, dstFactor: desc.blend.dst, operation: "add" }
+            color: { srcFactor: desc.blend.src, dstFactor: desc.blend.dst, operation: desc.blend.equation ?? "add" },
+            alpha: { srcFactor: desc.blend.src, dstFactor: desc.blend.dst, operation: desc.blend.equation ?? "add" }
           }
         }]
       },
@@ -11325,6 +11335,9 @@ export {
   webgpuAvailability,
   webgpuAdapter,
   webgl2Adapter,
+  torusKnot,
+  torus,
+  sphere,
   showOnWebGpu,
   showOn,
   showAny,
@@ -11336,11 +11349,14 @@ export {
   reportWebgpuMainFact,
   replayJournalOnGpu,
   replayJournalOn,
+  quad,
   probeWebgpuScope,
   probeWebGpu,
+  plane,
   isOffscreenCanvas,
   getCanvasCssSize,
   describeWebgpuScope,
+  cube,
   createWebGpuRenderer,
   createWebGL2Renderer,
   createResourceSessionGPU,
@@ -11351,7 +11367,9 @@ export {
   createPortability,
   computeMipLevels,
   combineWebgpuScope,
+  capsule,
   canvasDpr,
+  box,
   applyResOpGL,
   WEBUGPU_PROBE_SRC,
   WEBUGPU_PROBE_MARKER,

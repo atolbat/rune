@@ -106,7 +106,7 @@ export function withJournal(gl: GLFacade, journal: Journal): GLFacade {
     setViewport: (width, height) => gl.setViewport(width, height),
     setDepthMode: (test, write) => gl.setDepthMode(test, write),
     setCull: mode => gl.setCull(mode),
-    setBlend: (src, dst) => gl.setBlend(src, dst),
+    setBlend: (src, dst, equation) => gl.setBlend(src, dst, equation),
     clear: (color, depth) => gl.clear(color, depth),
     drawArrays: (mode, first, count, instances) => gl.drawArrays(mode, first, count, instances),
     createTarget: (textureId, width, height, depth, color) => {

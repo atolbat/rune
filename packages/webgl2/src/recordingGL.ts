@@ -4,7 +4,7 @@
 // state program (state/stateProgram.ts) in both execution modes.
 
 import type { GLFacade, GLImageSource } from './facade.ts'
-import type { DepthFunc, CullFace, FrontFace, BlendFactor } from './gl/facade.ts'
+import type { BlendEquation, BlendFactor, CullFace, DepthFunc, FrontFace } from './gl/facade.ts'
 import type { StateProgramGL } from './gl/shadow.ts'
 
 export interface RecordingGL {
@@ -31,6 +31,7 @@ export function createRecordingGL(): RecordingGL {
     enableBlend(): void
     disableBlend(): void
     blendFunc(src: BlendFactor, dst: BlendFactor): void
+    blendEquation(eq: BlendEquation): void
     enableCull(): void
     disableCull(): void
     cullFace(face: CullFace): void
@@ -120,7 +121,7 @@ export function createRecordingGL(): RecordingGL {
     setDepthMode: (test, write) => calls.push(`setDepthMode(${test},${write})`),
     setCull: mode => calls.push(`setCull(${mode})`),
     // Task 75: pipeline blending (null/null = off).
-    setBlend: (src, dst) => calls.push(`setBlend(${src ?? 'off'},${dst ?? 'off'})`),
+    setBlend: (src, dst, equation) => calls.push(`setBlend(${src ?? 'off'},${dst ?? 'off'},${equation ?? 'add'})`),
     // Raw state surface (state programs, M2 legacy + real scenarios).
     enableDepthTest: () => calls.push('enableDepthTest'),
     disableDepthTest: () => calls.push('disableDepthTest'),
@@ -129,6 +130,7 @@ export function createRecordingGL(): RecordingGL {
     enableBlend: () => calls.push('enableBlend'),
     disableBlend: () => calls.push('disableBlend'),
     blendFunc: (src, dst) => calls.push(`blendFunc(${src},${dst})`),
+    blendEquation: (eq) => calls.push(`blendEquation(${eq})`),
     enableCull: () => calls.push('enableCull'),
     disableCull: () => calls.push('disableCull'),
     cullFace: face => calls.push(`cullFace(${face})`),

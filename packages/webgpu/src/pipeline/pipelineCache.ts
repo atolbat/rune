@@ -1,9 +1,9 @@
-import type { DepthFunc, BlendFactor, CullFace, FrontFace, PrimitiveKind } from '../gpu/facadeTypes.ts'
+import type { DepthFunc, BlendEquation, BlendFactor, CullFace, FrontFace, PrimitiveKind } from '../gpu/facadeTypes.ts'
 
 /** WebGPU pipeline rasterization state (M3 subset). */
 export interface GpuPipelineDesc {
   readonly depth?: { readonly test?: DepthFunc; readonly write?: boolean } | false
-  readonly blend?: { readonly src: BlendFactor; readonly dst: BlendFactor } | false
+  readonly blend?: { readonly src: BlendFactor; readonly dst: BlendFactor; readonly equation?: BlendEquation } | false
   readonly raster?: { readonly cull?: CullFace | 'none'; readonly frontFace?: FrontFace }
   readonly primitive?: PrimitiveKind
 }
@@ -51,7 +51,9 @@ function depthKey(depth: GpuPipelineDesc['depth']): string {
 
 function blendKey(blend: GpuPipelineDesc['blend']): string {
   if (blend === false || blend === undefined) return 'off'
-  return `${blend.src}/${blend.dst}`
+  // Task 122: the equation is part of the identity — same factors with a
+  // different equation is a DIFFERENT pipeline.
+  return `${blend.src}/${blend.dst}/${blend.equation ?? 'add'}`
 }
 
 function rasterKey(raster: GpuPipelineDesc['raster']): string {

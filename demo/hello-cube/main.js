@@ -3,7 +3,7 @@
 //   WebGL2 / WebGPU — showOn(): a forced backend, a refusal is visible in the log.
 // The demo imports the BUILT bundle of the library: run `bun run build` first,
 // then `bun run demo` (or open the GitHub Pages link from demo/README.md).
-import { showAny, showOn, probeWebGpu } from '../../dist/rune.esm.js?v=121'
+import { showAny, showOn, probeWebGpu } from '../../dist/rune.esm.js?v=122'
 
 const OPTS = { spin: 0.8 }
 const MODE_NAMES = { auto: 'Auto (WebGPU → WebGL2 fallback)', webgl2: 'WebGL2', webgpu: 'WebGPU' }

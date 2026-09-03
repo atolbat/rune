@@ -27,6 +27,7 @@ var PBR_DIFF_BURLEY = 1 << 24;
 var PBR_MR_TEXTURE = 1 << 25;
 var EMISSIVE = 1 << 26;
 var FOG = 1 << 27;
+var SOFT_PARTICLES = 1 << 28;
 var LIGHT_MODELS = LAMBERT | MATCAP | PBR;
 var POST_EFFECTS = EMISSIVE | FOG;
 var PBR_D_MODELS = PBR_D_GGX | PBR_D_BECKMANN | PBR_D_BLINN;
@@ -607,6 +608,27 @@ var CATALOG = [
         "lit = mix(lit, params.u_fogColor.rgb, fogFactor);"
       ]
     })
+  },
+  {
+    id: "softParticles",
+    bit: SOFT_PARTICLES,
+    vert: (_ctx) => ({}),
+    frag: (_ctx) => ({
+      uniforms: [
+        { name: "u_softParams", glsl: "uniform vec4 u_softParams;", wgsl: "u_softParams : vec4<f32>," }
+      ],
+      fragPosition: true,
+      glslBody: [
+        "float sceneZ = dot(texture(u_depth, gl_FragCoord.xy * u_softParams.xy).rgb, vec3(1.0, 1.0 / 255.0, 1.0 / 65025.0));",
+        "float dz = sceneZ - gl_FragCoord.z;",
+        "base.a *= clamp(dz / max(u_softParams.z, 1e-6), 0.0, 1.0);"
+      ],
+      wgslBody: [
+        "let sceneZ = dot(textureSample(depthTexture, texSampler, frag.pos.xy * params.u_softParams.xy).rgb, vec3<f32>(1.0, 1.0 / 255.0, 1.0 / 65025.0));",
+        "let dz = sceneZ - frag.pos.z;",
+        "base.a = base.a * clamp(dz / max(params.u_softParams.z, 1e-6), 0.0, 1.0);"
+      ]
+    })
   }
 ];
 // packages/materials/src/assemble.ts
@@ -671,6 +693,8 @@ function assemble(mask, jointCount) {
       sc.fragWgsl.push(...f.wgslBody);
     if (f.frontFacing === true)
       frontFacing = true;
+    if (f.fragPosition === true)
+      fragPosition = true;
   }
   const pos = (mask & INSTANCED) !== 0 ? "position4Inst" : "position4";
   if ((mask & SKIN) === 0) {
@@ -709,8 +733,10 @@ function assemble(mask, jointCount) {
   };
 }
 var frontFacing = false;
+var fragPosition = false;
 function resetScratch() {
   frontFacing = false;
+  fragPosition = false;
   for (const list of [
     sc.vertUniforms,
     sc.fragUniforms,
@@ -809,7 +835,7 @@ function buildGlsl(mask, vertUniforms, fragUniforms) {
     vert.push(`out ${varying.glslType} ${varying.glslName};`);
   pushBody(vert, "void main() {", sc.vertGlsl, "}");
   const frag = sc.fragParts;
-  const highp = (mask & (PBR | TEXTURE)) !== 0;
+  const highp = (mask & (PBR | TEXTURE | SOFT_PARTICLES)) !== 0;
   frag.push("#version 300 es", highp ? "precision highp float;" : "precision mediump float;");
   if ((mask & NORMALMAP) !== 0)
     frag.push("uniform mat4 u_model;");
@@ -821,6 +847,8 @@ function buildGlsl(mask, vertUniforms, fragUniforms) {
     frag.push("uniform sampler2D u_matcap;");
   if ((mask & PBR_MR_TEXTURE) !== 0)
     frag.push("uniform sampler2D u_mrTex;");
+  if ((mask & SOFT_PARTICLES) !== 0)
+    frag.push("uniform sampler2D u_depth;");
   for (const varying of sc.varyings)
     frag.push(`in ${varying.glslType} ${varying.glslName};`);
   for (const uniform of fragUniforms)
@@ -849,6 +877,8 @@ function buildWgsl(mask, pos) {
     lines.push("@group(1) @binding(3) var matTexture : texture_2d<f32>;");
   if ((mask & PBR_MR_TEXTURE) !== 0)
     lines.push("@group(1) @binding(4) var mrTexture : texture_2d<f32>;");
+  if ((mask & SOFT_PARTICLES) !== 0)
+    lines.push("@group(1) @binding(5) var depthTexture : texture_2d<f32>;");
   lines.push("struct VSOut {", "  @builtin(position) pos : vec4<f32>,");
   sc.varyings.forEach((varying, at) => lines.push(`  @location(${at}) ${varying.wgslName} : ${varying.wgslType},`));
   lines.push("}");
@@ -862,14 +892,17 @@ function buildWgsl(mask, pos) {
   body.push(...sc.vertWgslOut);
   body.push("return out;");
   pushBody(lines, ") -> VSOut {", body, "}");
-  if (frontFacing) {
+  if (frontFacing || fragPosition) {
     lines.push("struct FSIn {");
     sc.varyings.forEach((varying, at) => lines.push(`  @location(${at}) ${varying.wgslName} : ${varying.wgslType},`));
-    lines.push("  @builtin(front_facing) ff : bool,");
+    if (frontFacing)
+      lines.push("  @builtin(front_facing) ff : bool,");
+    if (fragPosition)
+      lines.push("  @builtin(position) pos : vec4<f32>,");
     lines.push("}");
   }
   lines.push("@fragment");
-  lines.push(`fn fsMain(frag : ${frontFacing ? "FSIn" : "VSOut"}) -> @location(0) vec4<f32> {`);
+  lines.push(`fn fsMain(frag : ${frontFacing || fragPosition ? "FSIn" : "VSOut"}) -> @location(0) vec4<f32> {`);
   if (sc.fragWgsl.length > 0)
     lines.push("  " + sc.fragWgsl.join(`
   `));
@@ -907,6 +940,7 @@ export {
   assemble,
   VERTEX_COLOR,
   TEXTURE,
+  SOFT_PARTICLES,
   SKIN,
   POST_EFFECTS,
   PBR_SUB_MODELS,

@@ -281,7 +281,7 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
     setViewport: (width, height) => raw.setViewport(width, height),
     setDepthMode: (test, write) => raw.setDepthMode(test, write),
     setCull: mode => raw.setCull(mode),
-    setBlend: (src, dst) => raw.setBlend(src, dst),
+    setBlend: (src, dst, equation) => raw.setBlend(src, dst, equation),
     clear: (color, depth) => raw.clear(color, depth),
     drawArrays: (mode, first, count, instances) => raw.drawArrays(mode, first, count, instances),
     deleteProgram: programId => raw.deleteProgram(programId),

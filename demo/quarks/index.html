@@ -3,13 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>rune — particles</title>
+  <title>rune — quarks demos</title>
   <link rel="stylesheet" href="../shared/demo-shell.css" />
   <style>
-    /* Preset picker: the same compact pill + bottom sheet pattern as the
-       model viewer. The canvas (inside #rd-slot) fills the viewport — the
-       shell mounts with layout: 'fullscreen'; these only layer on top. */
-    .pt-pill {
+    /* The demo picker: the pill + bottom sheet pattern of the particles
+       demo, plus ◀ ▶ arrows (three.quarks' vanilla.html carousel). */
+    .pt-bar {
       position: absolute;
       left: 50%;
       transform: translateX(-50%);
@@ -18,8 +17,26 @@
       display: flex;
       align-items: center;
       gap: 7px;
-      min-height: 40px;
       max-width: calc(100% - 24px);
+    }
+    .pt-arrow {
+      width: 40px;
+      height: 40px;
+      border-radius: 999px;
+      border: 1px solid #2c3855;
+      background: rgb(11 13 19 / 0.78);
+      color: #dfe5f1;
+      font: 16px/1 system-ui, -apple-system, 'Segoe UI', sans-serif;
+      cursor: pointer;
+      touch-action: manipulation;
+      flex: 0 0 auto;
+    }
+    .pt-arrow:hover { border-color: #3b4a70; }
+    .pt-pill {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 40px;
       padding: 6px 14px;
       border-radius: 999px;
       border: 1px solid #2c3855;
@@ -31,19 +48,21 @@
       touch-action: manipulation;
       white-space: nowrap;
       overflow: hidden;
+      flex: 0 1 auto;
     }
     .pt-pill::after { content: '\25BE'; font-size: 10px; color: #6b7691; }
-    .pt-pill[hidden] { display: none; }
     .pt-pill .pt-live { color: #6b7691; }
 
-    /* Bottom sheet: preset list + the note. */
+    /* Bottom sheet: demo list + the note. */
     .pt-sheet {
       position: absolute;
       left: 50%;
       transform: translateX(-50%);
       bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
       z-index: 16;
-      width: min(400px, calc(100% - 16px));
+      width: min(430px, calc(100% - 16px));
+      max-height: min(60vh, 520px);
+      overflow-y: auto;
       display: flex;
       flex-direction: column;
       gap: 8px;
@@ -115,6 +134,24 @@
       transition: opacity 0.5s;
     }
     .pt-hint.pt-gone { opacity: 0; }
+
+    /* World-anchored labels (the emitter-shapes demo): positioned per
+       frame via projection, small monospace chips. */
+    .qk-label {
+      position: absolute;
+      left: 0;
+      top: 0;
+      z-index: 13;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: rgb(11 13 19 / 0.72);
+      border: 1px solid #26304a;
+      color: #9ecbff;
+      font: 11px/1.2 ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+      pointer-events: none;
+      white-space: nowrap;
+      transform: translate(-50%, -140%);
+    }
   </style>
 </head>
 <body>

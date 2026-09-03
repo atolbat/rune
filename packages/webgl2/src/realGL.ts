@@ -736,26 +736,36 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
     }
   }
 
-  /** Task 75: facade BlendFactor string → GLenum. */
+  /** Task 75: facade BlendFactor string → GLenum. Task 122: the
+   *  dst-alpha family + src-alpha-saturated (three.quarks' custom
+   *  blending demos use them). */
   const BLEND_FACTORS: Record<string, number> = {
     'zero': 0, 'one': 1, 'src-color': 0x0300, 'one-minus-src-color': 0x0301,
     'src-alpha': 0x0302, 'one-minus-src-alpha': 0x0303,
+    'dst-alpha': 0x0304, 'one-minus-dst-alpha': 0x0305,
     'dst-color': 0x0306, 'one-minus-dst-color': 0x0307,
+    'src-alpha-saturated': 0x0308,
+  }
+  /** Task 122: the blend equation string → GLenum (FUNC_ADD is the spec
+   *  default; MIN/MAX are core WebGL2). */
+  const BLEND_EQUATIONS: Record<string, number> = {
+    'add': 0x8006, 'subtract': 0x800A, 'reverse-subtract': 0x800B,
+    'min': 0x8007, 'max': 0x8008,
   }
 
-  function setBlend(src: string | null, dst: string | null): void {
+  function setBlend(src: string | null, dst: string | null, equation?: string): void {
     if (src === null || dst === null) {
       gl.disable(gl.BLEND)
       return
     }
     gl.enable(gl.BLEND)
-    // Task 75b (driver-proofing): the equation is re-asserted explicitly.
-    // FUNC_ADD is the spec default — but it is per-context global state like
-    // the factors: anything that left FUNC_SUBTRACT / FUNC_REVERSE_SUBTRACT
-    // on this context would turn every blended draw into a subtraction while
-    // the factors stay "correct" (an invisible-to-trace class: the calls look
-    // right, the pixels get eaten). One extra call per state switch.
-    gl.blendEquation(gl.FUNC_ADD)
+    // Task 75b (driver-proofing): the equation is re-asserted explicitly —
+    // per-context global state like the factors: anything that left
+    // FUNC_SUBTRACT on this context would turn every blended draw into a
+    // subtraction while the factors stay "correct" (an invisible-to-trace
+    // class). Task 122: the equation now follows the pipeline desc
+    // (absent = 'add', the previous pinned constant).
+    gl.blendEquation(BLEND_EQUATIONS[equation ?? 'add'] ?? gl.FUNC_ADD)
     // Premultiplied shader output: blendFunc(src, dst) without
     // separate RGB/A — the canvas alpha channel is opaque (alpha:false).
     gl.blendFunc(BLEND_FACTORS[src] ?? gl.ONE, BLEND_FACTORS[dst] ?? gl.ZERO)
