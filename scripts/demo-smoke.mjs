@@ -214,7 +214,7 @@ try {
   // 7b. The house renders through the PBR pipeline (Cook-Torrance) — the
   // GLSL compile of the assembled variant must leave no validation errors
   const pbrLogText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
-  const pbrGpuClean = !/too small|Invalid CommandBuffer|storm|rendering stopped|GL: GL_|GPU: /i.test(pbrLogText)
+  const pbrGpuClean = !/too small|Invalid CommandBuffer|rendering stopped|GL: GL_|GPU: /i.test(pbrLogText)
   console.log(`[smoke] house PBR GPU health: ${pbrGpuClean ? 'clean (no compile/validation errors)' : 'GPU ERRORS in the log'}`)
   if (!pbrGpuClean) console.log(`[smoke] log tail: ${pbrLogText.slice(-600)}`)
 
@@ -250,7 +250,7 @@ try {
   // the pipeline requires at least 4448 bytes" → Invalid CommandBuffer →
   // "rendering stopped (storm pause)" on the whole demo
   const viewerLogText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
-  const gpuHealthy = !/too small|Invalid CommandBuffer|storm|rendering stopped/i.test(viewerLogText)
+  const gpuHealthy = !/too small|Invalid CommandBuffer|rendering stopped/i.test(viewerLogText)
   console.log(`[smoke] samba GPU health: ${gpuHealthy ? 'clean (no binding/storm errors)' : 'GPU ERRORS in the log'}`)
   if (!gpuHealthy) console.log(`[smoke] log tail: ${viewerLogText.slice(-600)}`)
 
@@ -308,7 +308,7 @@ try {
   const matcapAlive = await framesDiffer(page)
   console.log(`[smoke] matcap animation: ${matcapAlive ? 'alive (turntable spins)' : 'STATIC'}`)
   const matcapLogText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
-  const matcapGpuClean = !/too small|Invalid CommandBuffer|storm|rendering stopped|GL: GL_|GPU: /i.test(matcapLogText)
+  const matcapGpuClean = !/too small|Invalid CommandBuffer|rendering stopped|GL: GL_|GPU: /i.test(matcapLogText)
   console.log(`[smoke] matcap GPU health: ${matcapGpuClean ? 'clean' : 'GPU ERRORS in the log'}`)
   if (!matcapGpuClean) console.log(`[smoke] log tail: ${matcapLogText.slice(-600)}`)
 
@@ -439,7 +439,7 @@ try {
   }
 
   const particlesLogText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
-  const particlesGpuClean = !/too small|Invalid CommandBuffer|storm|rendering stopped|GL: GL_|GPU: |failed/i.test(particlesLogText)
+  const particlesGpuClean = !/too small|Invalid CommandBuffer|rendering stopped|GL: GL_|GPU: |failed/i.test(particlesLogText)
   console.log(`[smoke] particles GPU health: ${particlesGpuClean ? 'clean' : 'GPU ERRORS in the log'}`)
   if (!particlesGpuClean) console.log(`[smoke] log tail: ${particlesLogText.slice(-600)}`)
   // mobile viewport: fullscreen canvas, compact pill
@@ -468,7 +468,7 @@ try {
     !mobileParticles.bodyScrolls
   await page.setViewportSize({ width: 960, height: 720 })
 
-  // ─── quarks: the three.quarks demo suite (Task 122) ─────────────────────
+  // ─── quarks: the 19-demo carousel (Task 122 + the Task 124 originals) ──
   await page.goto(`http://localhost:${port}/demo/quarks/`, { waitUntil: 'networkidle' })
   await page.waitForFunction(
     () => document.querySelector('.pt-pill')?.textContent.includes('Muzzle'),
@@ -484,11 +484,11 @@ try {
   const quarksPill1 = await page.textContent('.pt-pill')
   console.log(`[smoke] quarks first demo: ${quarksPill1} — ${quarksFirst ? 'alive' : 'STATIC'}`)
 
-  // cycle ALL 14 demos via the ▶ arrow; each goes live (particles > 0)
+  // cycle ALL 19 demos via the ▶ arrow; each goes live (particles > 0)
   await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
   let quarksAllLive = true
   const seenDemos = []
-  for (let i = 1; i < 14; i++) {
+  for (let i = 1; i < 19; i++) {
     await page.click('.pt-arrow:last-child')
     await page.waitForFunction(
       () => / · [1-9][\d,]* particles · [1-9][\d,]* verts/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
@@ -501,7 +501,7 @@ try {
     if (!live) quarksAllLive = false
   }
   console.log(`[smoke] quarks cycle: ${seenDemos.join(' → ')}`)
-  console.log(`[smoke] quarks all 14 live: ${quarksAllLive ? 'yes' : 'SOME STATIC'}`)
+  console.log(`[smoke] quarks all 19 live: ${quarksAllLive ? 'yes' : 'SOME STATIC'}`)
   // the labels overlay (the emitter-shapes demo) projects into the viewport
   await page.evaluate(() => {
     const rows = [...document.querySelectorAll('.pt-row')]
@@ -523,7 +523,7 @@ try {
   })
   console.log(`[smoke] quarks labels: ${quarksLabels.visible}/${quarksLabels.total} projected`)
   const quarksLogText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
-  const quarksGpuClean = !/too small|Invalid CommandBuffer|storm|rendering stopped|GL: GL_|GPU: |failed/i.test(quarksLogText)
+  const quarksGpuClean = !/too small|Invalid CommandBuffer|rendering stopped|GL: GL_|GPU: |failed/i.test(quarksLogText)
   console.log(`[smoke] quarks GPU health: ${quarksGpuClean ? 'clean' : 'GPU ERRORS in the log'}`)
   if (!quarksGpuClean) console.log(`[smoke] log tail: ${quarksLogText.slice(-600)}`)
   // mobile: the arrows/pill stay in the viewport

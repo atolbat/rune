@@ -192,7 +192,9 @@ export default {
     })
 
     const layers = [glints, ribbon, shock, sparks, dust]
-    let t = 0
+    // open MID-SLASH (not at the windup): the demo is instantly alive —
+    // a slow CI runner's live-particle gate never races the first swing
+    let t = 0.58
     let hitstop = 0 // seconds of slow-mo left
     let tipFired = false // the ribbon tip particle of THIS swing
     let prevPhase = 'windup' // the slash→settle TRANSITION is the impact
