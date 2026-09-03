@@ -379,6 +379,14 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
     // source row 0 into texture row 0 — the mapping is identical.
     // The state does not leak: we always set it back to false after the call.
     //
+    // ALPHA CONTRACT (Task 116): UNPACK_PREMULTIPLY_ALPHA_WEBGL stays false
+    // (the default) — NO conversion happens here; the texels are the source
+    // bytes as-is. WebGPU's copyExternalImageToTexture, in contrast,
+    // un-premultiplies canvas sources (the tagged destination defaults to
+    // premultipliedAlpha:false). For cross-backend parity the SOURCE must
+    // therefore already carry straight alpha — for canvas-derived bitmaps:
+    // createImageBitmap(canvas, { premultiplyAlpha: 'none' }).
+    //
     // IMMUTABLE textures (Task 64 fix): if the storage was allocated via
     // texStorage2D (mip-chain, mipLevels>1), ANY texImage2D — including
     // the overload with source and level=0 — generates GL_INVALID_OPERATION and

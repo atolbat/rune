@@ -376,7 +376,7 @@ try {
   const particlesOk = particlesPill.includes('Fountain') && particlesPill.includes('verts')
   const particlesAlive = await framesDiffer(page)
   console.log(`[smoke] particles animation: ${particlesAlive ? 'alive (the soup re-bakes per frame)' : 'STATIC'}`)
-  // preset switch: the galaxy (a disc + tangential orbits)
+  // preset switch: the galaxy (spiral arms + tangential orbits)
   await page.evaluate(() => {
     const rows = [...document.querySelectorAll('.pt-row')]
     rows.find(r => r.textContent.includes('Galaxy'))?.dispatchEvent(new Event('click', { bubbles: true }))
@@ -393,6 +393,30 @@ try {
   )
   const galaxyPill = await page.textContent('.pt-pill')
   console.log(`[smoke] particles preset switch: ${galaxyPill}`)
+
+  // Task 117/118: the two new presets — Deep Space (the fly-through with
+  // throttle stops) and Meteor (the directional firework)
+  for (const name of ['Deep Space', 'Meteor']) {
+    await page.evaluate((n) => {
+      const rows = [...document.querySelectorAll('.pt-row')]
+      rows.find(r => r.textContent.includes(n))?.dispatchEvent(new Event('click', { bubbles: true }))
+    }, name)
+    await page.waitForFunction(
+      (n) => (document.querySelector('.pt-pill')?.textContent ?? '').includes(n),
+      name,
+      { timeout: 10_000 },
+    )
+    // the preset goes live: particles appear in the pill (Deep Space ramps
+    // its rate through the throttle; Meteor waits for its first burst tick)
+    await page.waitForFunction(
+      (n) => new RegExp(`${n} · [1-9][\\d,]* /`).test(document.querySelector('.pt-pill')?.textContent ?? ''),
+      name,
+      { timeout: 25_000 },
+    )
+    const presetAlive = await framesDiffer(page)
+    console.log(`[smoke] preset "${name}": ${await page.textContent('.pt-pill')} — ${presetAlive ? 'alive' : 'STATIC'}`)
+  }
+
   const particlesLogText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
   const particlesGpuClean = !/too small|Invalid CommandBuffer|storm|rendering stopped|GL: GL_|GPU: |failed/i.test(particlesLogText)
   console.log(`[smoke] particles GPU health: ${particlesGpuClean ? 'clean' : 'GPU ERRORS in the log'}`)

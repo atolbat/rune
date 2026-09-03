@@ -199,6 +199,23 @@ export interface GPUFacade {
     depth: boolean,
     color: readonly [number, number, number, number],
   ): number
+  /** Sets the CANVAS clear color + depth value (target 0) — what a
+   *  bindTarget(0, clear=true) pass writes before drawing. Renderer-level
+   *  init state (like configure), not a tape op: the unified renderer calls
+   *  it once with the user's `clear` option. Before the first call the
+   *  legacy default {0.07, 0.08, 0.11, 1} / depth 1 applies (parity with
+   *  the GL facade's DEFAULT_CLEAR — the backends' defaults match).
+   *
+   *  Why a setter and not a beginPass argument: on WebGPU the clear is baked
+   *  into the render-pass descriptor (loadOp:'clear' + clearValue) when the
+   *  pass OPENS — there is no separate gl.clear() moment, so the value has
+   *  to live as facade state. Surfaces (targetId > 0) carry their own clear
+   *  color in createTarget — this method is only for the canvas.
+   *
+   *  depth: the depthClearValue (default 1). The WebGPU canvas pass always
+   *  clears depth (GL distinguishes null = "leave depth"; the GPU backend
+   *  has no load-only canvas depth path — documented asymmetry). */
+  setCanvasClearColor(color: readonly [number, number, number, number], depth?: number): void
   /** Switch the target: 0 = canvas (closes the current pass, opens a new one). */
   bindTarget(targetId: number, clear: boolean): void
 

@@ -29,6 +29,7 @@ import { canvasDpr, getCanvasCssSize, isOffscreenCanvas, resolveCanvasAny } from
 import type { AnyCanvas } from './canvasHelpers.ts'
 import { withJournalGpu } from './journalGpu.ts'
 import { createResourceSessionGPU } from './resourceSessionGPU.ts'
+import type { WebGL2RendererOptions } from './webgl2Renderer.ts'
 import type { ResourceJournal, RestoreReport, WorkingSet, EvictionReport, ResidencyStats } from '@rune/core'
 
 /** WebGPU renderer frame context (shape-compatible with the WebGL2 facade). */
@@ -101,6 +102,13 @@ export interface WebGpuRendererOptions {
   readonly canvas: AnyCanvas | string
   readonly dpr?: number
   readonly uploads?: UploadSchedulerOptions
+  /** Task 116: the CANVAS clear (color + depth) — forwarded to
+   *  gpu.setCanvasClearColor and applied by every canvas pass with
+   * loadOp:'clear' (the frame's beginPass). Parity with the WebGL2 path:
+   *  before this option existed the WebGPU canvas cleared to a hardcoded
+   *  {0.07, 0.08, 0.11} — the same demo rendered a noticeably lighter
+   *  background on WebGPU than on WebGL2. Default: DEFAULT_CLEAR. */
+  readonly clear?: WebGL2RendererOptions['clear']
   /** GPU facade injection for headless tests. */
   readonly createGPU?: (canvas: AnyCanvas, onError?: (message: string) => void) => Promise<GPUFacade>
   /** Sink for silent WebGPU validation errors (they throw no exceptions). */
@@ -133,6 +141,11 @@ export interface WebGpuRendererOptions {
 
 /** Storm threshold: after this many GPU errors the renderer is paused. */
 const ERROR_STORM_LIMIT = 3
+
+/** Task 116: the default canvas clear — the SAME values as the GL facade's
+ *  DEFAULT_CLEAR (webgl2Renderer.ts), so the two backends agree before the
+ *  user's `clear` option is applied. */
+const DEFAULT_CLEAR = { color: [0.07, 0.08, 0.11, 1] as const, depth: 1 }
 
 /** Creates a WebGPU renderer: frame = beginPass → callbacks → endPass → submit.
  * Storm protection: after ERROR_STORM_LIMIT GPU errors the loop stops. */
@@ -176,6 +189,11 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
   let lastCssHeight = -1
 
   await gpu.configure(canvas.width, canvas.height)
+  // Task 116: the canvas clear from the `clear` option — the facade state
+  // that bindTarget(0) bakes into every canvas pass descriptor. Applied
+  // AFTER configure (init order: context, then the clear policy).
+  const clear = options.clear ?? DEFAULT_CLEAR
+  gpu.setCanvasClearColor(clear.color, clear.depth ?? 1)
   const [startW, startH] = getCanvasCssSize(canvas)
   resize(startW, startH)
   const resizeObserver = observeSize(canvas, options)

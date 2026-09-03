@@ -52,6 +52,124 @@ const FIREWORKS_SPAWNER = {
   seed: 31,
 }
 
+// The Meteor — a firework with a WIND: the sparks sweep to ONE side (a small
+// isotropic flash + a directed lobe that carries ~80% of the burst). The
+// direction is mostly HORIZONTAL (+X): a side-wind, not another fountain.
+const METEOR_DIR = [0.9, 0.38, 0.12] // normalized by the spawner
+const METEOR_CORE = {
+  shape: { kind: 'sphere', origin: [0, 2, 0], radius: [0.02, 0.09] },
+  velocity: { mode: 'radial' },
+  speed: [0.6, 1.6],
+  life: [0.7, 1.3],
+  size: [0.08, 0.15],
+  color: [[1, 1, 1, 1], [1, 0.85, 0.55, 0.9]],
+}
+const METEOR_PLUME = {
+  shape: { kind: 'cone', origin: [0, 2, 0], axis: METEOR_DIR, halfAngle: 0.22, baseRadius: 0.02, length: [0, 0.04] },
+  velocity: { mode: 'lobe' },
+  speed: [2.6, 6.4],
+  life: [2.2, 3.4],
+  size: [0.055, 0.12],
+  color: [[1, 0.92, 0.65, 1], [1, 0.45, 0.2, 0.9]],
+}
+
+// The Deep Space streaks — comets that whip past 2-3× faster than the stars
+// (only fired while the flight throttle is open).
+const STREAK_SPAWNER = {
+  shape: { kind: 'cone', origin: [0, 0.6, -26], axis: [0, 0, 1], halfAngle: 0.06, baseRadius: 3.5, length: [0, 0.4] },
+  velocity: { mode: 'lobe' },
+  speed: [11, 15],
+  life: [2, 3],
+  size: [0.09, 0.16],
+  color: [[0.6, 0.85, 1, 1], [1, 1, 1, 1]],
+  seed: 404,
+}
+
+/* The per-preset rhythms. `rt` is a fresh {} per preset switch — ticks keep
+ * their timers/throttle state on it (no globals to reset, no allocation per
+ * frame). Default (no tick): plain advance(dt). */
+function fireworksTick(ctx, ps, rt) {
+  ps.advance(ctx.dt)
+  rt.timer = (rt.timer ?? 0.2) - ctx.dt
+  if (rt.timer > 0) return
+  rt.timer = 1.05
+  // a per-burst seed + a shifted origin — the sphere burst pattern and
+  // the color mix both re-roll. This recompiles the spawner (a closure
+  // + one object, ~once per second; the per-frame path stays clean).
+  ps.burst(420, {
+    ...FIREWORKS_SPAWNER,
+    seed: (Math.random() * 0x7fffffff) | 0,
+    shape: {
+      kind: 'sphere',
+      origin: [(Math.random() - 0.5) * 2.4, 1.7 + Math.random() * 0.9, (Math.random() - 0.5) * 2.4],
+      radius: [0.03, 0.1],
+    },
+  })
+}
+
+function meteorTick(ctx, ps, rt) {
+  ps.advance(ctx.dt)
+  rt.timer = (rt.timer ?? 0.3) - ctx.dt
+  if (rt.timer > 0) return
+  rt.timer = 0.95
+  const seed = (Math.random() * 0x7fffffff) | 0
+  // the bursts open left-of-center: the plume then sweeps ACROSS the frame
+  const origin = [-2.4 - Math.random() * 1.2, 0.9 + Math.random() * 0.8, (Math.random() - 0.5) * 1.6]
+  // the flash: a small isotropic core…
+  ps.burst(80, { ...METEOR_CORE, seed, shape: { ...METEOR_CORE.shape, origin } })
+  // …and the plume: the directed lobe — the sparks sweep to ONE side, the
+  // gravity arcs them down as they blow away
+  ps.burst(340, {
+    ...METEOR_PLUME,
+    seed: (seed + 1) | 0,
+    shape: { ...METEOR_PLUME.shape, origin },
+  })
+}
+
+function galaxyTick(ctx, ps, rt) {
+  ps.advance(ctx.dt)
+  // The CORE PULSE — the galactic bulge. The arm disc is area-uniform over
+  // an annulus: it can never put mass at the center (r < rMin), and a real
+  // galaxy reads through its warm dense core. A tangential burst every
+  // ~0.3 s packs the middle with slowly-orbiting warm stars — ~5× the arm
+  // density, so the additive stacking peaks exactly at the center.
+  rt.timer = (rt.timer ?? 0) - ctx.dt
+  if (rt.timer > 0) return
+  rt.timer = 0.32
+  ps.burst(60, {
+    shape: { kind: 'disc', origin: [0, 0.05, 0], axis: [0, 1, 0], radius: [0.01, 0.42] },
+    velocity: { mode: 'tangential' },
+    speed: [0.08, 0.28],
+    life: [3.5, 6.5],
+    size: [0.05, 0.12],
+    color: [[1, 0.87, 0.6, 1], [1, 0.95, 0.82, 1]],
+    seed: (Math.random() * 0x7fffffff) | 0,
+  })
+}
+
+function spaceTick(ctx, ps, rt) {
+  // THE THROTTLE — "we fly, and sometimes stop". One period ≈ 14 s:
+  // ~4.5 s cruising, ~2.3 s decelerating, ~4.5 s FULL STOP (the starfield
+  // hangs frozen — time dilation: the whole simulation is scaled, so the
+  // stars do not age or dissolve while we stand still), ~2.3 s accelerating.
+  // The cos is mapped [0.25, 0.75] → [0, 1] so the ends DWELL, then a
+  // smoothstep softens the ramps.
+  // The phase is anchored to the PRESET SWITCH (rt is fresh per switch):
+  // Deep Space always opens in flight — a global-time phase could land in
+  // the stop, where the newborn stars (alpha 0) would never age in and the
+  // preset would open on a black screen until the throttle opened.
+  const phase = ctx.time - (rt.t0 ??= ctx.time)
+  const base = 0.5 + 0.5 * Math.cos(phase * 0.45)
+  const t = Math.min(1, Math.max(0, (base - 0.25) / 0.5))
+  const throttle = t * t * (3 - 2 * t)
+  ps.advance(ctx.dt * throttle)
+  // comets only while moving (a stopped ship sees no flybys)
+  rt.timer = (rt.timer ?? 1.2) - ctx.dt
+  if (rt.timer > 0) return
+  rt.timer = 0.9 + Math.random() * 1.7
+  if (throttle > 0.35) ps.burst(16, { ...STREAK_SPAWNER, seed: (Math.random() * 0x7fffffff) | 0 })
+}
+
 const PRESETS = {
   fountain: {
     title: 'Fountain',
@@ -59,7 +177,7 @@ const PRESETS = {
     pipeline: ADDITIVE_PIPELINE,
     make: () => createParticles({
       capacity: CAPACITY,
-      rate: 1500,
+      rate: 1700,
       ramp: createRamp([
         { t: 0, size: 1.4, r: 0.85, g: 0.95, b: 1, a: 0 },
         { t: 0.12, size: 1, r: 1, g: 1, b: 1, a: 1 },
@@ -72,7 +190,7 @@ const PRESETS = {
         velocity: { mode: 'lobe' },
         speed: [3.4, 4.4],
         life: [1.3, 2.1],
-        size: [0.06, 0.13],
+        size: [0.08, 0.17],
         color: [[1, 1, 1, 1], [0.6, 0.8, 1, 0.9]],
         seed: 7,
       },
@@ -83,11 +201,11 @@ const PRESETS = {
     title: 'Fireworks',
     sub: 'sphere bursts · gravity · additive',
     pipeline: ADDITIVE_PIPELINE,
-    spawner: FIREWORKS_SPAWNER,
-    // rate 0 — the demo timer fires the bursts
+    camera: { pitch: 0.16, dist: 6.6, orbit: 0.05 },
+    tick: fireworksTick,
     make: () => createParticles({
       capacity: CAPACITY,
-      rate: 0,
+      rate: 0, // the rhythm lives in the tick
       ramp: createRamp([
         { t: 0, size: 1.2, r: 1, g: 1, b: 1, a: 1 },
         { t: 0.55, size: 1, r: 1, g: 0.8, b: 0.4, a: 0.9 },
@@ -97,35 +215,41 @@ const PRESETS = {
       spin: 0,
       spawner: FIREWORKS_SPAWNER,
     }),
-    // the burst rhythm: every ~1 s a shell with a fresh seed (a new shape,
-    // a new color mix)
-    burstEvery: 1.05,
-    burstCount: 420,
   },
 
   galaxy: {
     title: 'Galaxy',
-    sub: 'disc + tangential orbits · drag · additive',
+    sub: '3 spiral arms · Keplerian shear · warm core',
     pipeline: ADDITIVE_PIPELINE,
+    // a high vantage: the arms read best from above, not edge-on
+    camera: { yaw: 0.75, pitch: 0.68, dist: 6.6, orbit: 0.05 },
+    tick: galaxyTick,
     make: () => createParticles({
       capacity: CAPACITY,
-      rate: 900,
+      rate: 660,
+      // a white ramp (size/alpha only): colorByRadius owns the color story
       ramp: createRamp([
-        { t: 0, size: 0.3, r: 1, g: 0.9, b: 1, a: 0 },
-        { t: 0.2, size: 1, r: 1, g: 0.9, b: 1, a: 0.85 },
-        { t: 1, size: 0.6, r: 0.4, g: 0.5, b: 1, a: 0 },
+        { t: 0, size: 0.5, r: 1, g: 1, b: 1, a: 0 },
+        { t: 0.3, size: 1, r: 1, g: 1, b: 1, a: 0.75 },
+        { t: 1, size: 0.7, r: 1, g: 1, b: 1, a: 0 },
       ]),
-      forces: { gravity: [0, 0, 0], drag: 0.22, turbulence: 0 },
+      // almost no drag: the arms keep their shear for a whole lifetime
+      forces: { gravity: [0, 0, 0], drag: 0.06, turbulence: 0 },
       spin: 0,
       spawner: {
-        // the disc + TANGENTIAL velocity: particles are born orbiting,
-        // the drag slowly spirals them inward — a galaxy without forces
-        shape: { kind: 'disc', origin: [0, 0.1, 0], axis: [0, 1, 0], radius: [1.2, 3.1] },
+        // THE GALAXY KIT (Task 117): 3 arms wound ~0.8 turns, born on the
+        // spiral; tangential velocity with a (ref/r)^0.85 falloff — the inner
+        // rim orbits ~1.7× faster, so the arms shear and TRAIL like a real
+        // disc galaxy; colorByRadius: a warm inner rim, cool blue arms (the
+        // bulge itself is the tick's core pulses).
+        shape: { kind: 'disc', origin: [0, 0.05, 0], axis: [0, 1, 0], radius: [0.4, 3.2], arms: 3, armSpread: 0.2, twist: 5.6 },
         velocity: { mode: 'tangential' },
-        speed: [0.55, 0.95],
-        life: [4.5, 7],
-        size: [0.08, 0.16],
-        color: [[1, 0.85, 0.7, 1], [0.55, 0.65, 1, 1]],
+        speed: [0.3, 0.5],
+        speedByRadius: { ref: 2.1, power: 0.85 },
+        colorByRadius: true,
+        life: [7.5, 11.5],
+        size: [0.045, 0.12],
+        color: [[1, 0.87, 0.66, 1], [0.4, 0.55, 1, 0.9]],
         seed: 97,
       },
     }),
@@ -135,6 +259,7 @@ const PRESETS = {
     title: 'Embers',
     sub: 'buoyancy · turbulence · growing smoke · alpha',
     pipeline: ALPHA_PIPELINE,
+    camera: { pitch: 0.1, dist: 5.4, orbit: 0.03 },
     make: () => createParticles({
       capacity: CAPACITY,
       rate: 240,
@@ -157,9 +282,66 @@ const PRESETS = {
       },
     }),
   },
+
+  space: {
+    title: 'Deep Space',
+    sub: 'starfield fly-through · throttle stops · additive',
+    pipeline: ADDITIVE_PIPELINE,
+    // the camera looks straight down the flight axis (the world streams +Z
+    // past a fixed eye); the auto-orbit is nearly off so the flight reads
+    camera: { yaw: 0, pitch: 0.05, dist: 4.4, orbit: 0.004 },
+    tick: spaceTick,
+    make: () => createParticles({
+      capacity: CAPACITY,
+      rate: 850,
+      ramp: createRamp([
+        { t: 0, size: 0.7, r: 1, g: 1, b: 1, a: 0 },
+        { t: 0.5, size: 1, r: 1, g: 1, b: 1, a: 0.9 },
+        { t: 1, size: 1.5, r: 1, g: 1, b: 1, a: 0 },
+      ]),
+      forces: { gravity: [0, 0, 0], drag: 0, turbulence: 0 },
+      spin: 0,
+      spawner: {
+        // a big ball of stars AHEAD (the world flies, the camera rests):
+        // fixed +Z velocity — the throttle scales the whole simulation
+        shape: { kind: 'sphere', origin: [0, 0.4, -20], radius: [3, 20] },
+        velocity: { mode: 'fixed', dir: [0, 0, 1] },
+        speed: [4.5, 7],
+        life: [6.5, 9.5],
+        size: [0.05, 0.12],
+        color: [[0.65, 0.75, 1, 1], [1, 0.92, 0.75, 1]],
+        seed: 202,
+      },
+    }),
+  },
+
+  meteor: {
+    title: 'Meteor',
+    sub: 'directional firework · wind-biased lobe · gravity',
+    pipeline: ADDITIVE_PIPELINE,
+    camera: { yaw: 0.5, pitch: 0.18, dist: 7.2, orbit: 0.07 },
+    tick: meteorTick,
+    make: () => createParticles({
+      capacity: CAPACITY,
+      rate: 0, // the rhythm lives in the tick
+      ramp: createRamp([
+        { t: 0, size: 1.1, r: 1, g: 1, b: 1, a: 1 },
+        { t: 0.5, size: 0.9, r: 1, g: 0.75, b: 0.45, a: 0.9 },
+        { t: 1, size: 0.15, r: 1, g: 0.35, b: 0.15, a: 0 },
+      ]),
+      forces: { gravity: [0, -1.4, 0], drag: 0.06, turbulence: 0.05 },
+      spin: 0,
+      spawner: METEOR_PLUME, // the tick brings its own burst pair
+    }),
+  },
 }
 
-const PRESET_ORDER = ['fountain', 'fireworks', 'galaxy', 'embers']
+const PRESET_ORDER = ['fountain', 'fireworks', 'galaxy', 'embers', 'space', 'meteor']
+
+/* The per-preset camera defaults — applied on every switch so each preset
+ * opens framed (the galaxy from above, space down the axis). */
+const DEFAULT_CAMERA = { yaw: 0.55, pitch: 0.25, dist: 4.6, orbit: 0.08 }
+let presetOrbit = DEFAULT_CAMERA.orbit
 
 /* ─── The sprite: a canvas radial gradient (no download) ───────────────── */
 
@@ -168,8 +350,7 @@ function makeSpriteBitmap() {
   canvas.width = 128
   canvas.height = 128
   const ctx = canvas.getContext('2d')
-  // a soft glow: white core → transparent rim (NON-premultiplied semantics
-  // on upload; the pipeline blends with 'src-alpha')
+  // a soft glow: white core → transparent rim
   const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64)
   g.addColorStop(0, 'rgba(255,255,255,1)')
   g.addColorStop(0.25, 'rgba(255,255,255,0.85)')
@@ -177,7 +358,16 @@ function makeSpriteBitmap() {
   g.addColorStop(1, 'rgba(255,255,255,0)')
   ctx.fillStyle = g
   ctx.fillRect(0, 0, 128, 128)
-  return createImageBitmap(canvas)
+  // premultiplyAlpha: 'none' — THE cross-backend parity point (Task 116).
+  // Canvas 2D stores PREMULTIPLIED pixels; a default createImageBitmap
+  // keeps them premultiplied. WebGPU's copyExternalImageToTexture
+  // un-premultiplies on upload (premultipliedAlpha:false tag), but WebGL2's
+  // texImage2D uploads the bytes AS-IS — so without 'none' the WebGL texture
+  // holds premultiplied rgb while both pipelines blend with 'src-alpha':
+  // the alpha multiplies TWICE → dark "liquid" sprites and a dim fountain
+  // (the reported WebGL-vs-WebGPU mismatch). 'none' makes the browser
+  // un-premultiply at bitmap creation: BOTH backends sample straight alpha.
+  return createImageBitmap(canvas, { premultiplyAlpha: 'none' })
 }
 
 /* ─── Mat4 scratch + helpers (the model-viewer's formulas) ─────────────── */
@@ -239,7 +429,7 @@ let drawCommand = null        // the soup draw command
 let glDyn = null              // WebGL2: { gl, bufferId } for updateBuffer
 let gpuDyn = null             // WebGPU: the GPUFacade for syncVertexBuffer
 let soupTexture = null        // the sprite texture handle
-let burstTimer = 0            // the fireworks rhythm
+let rhythm = {}               // the tick state (timers, throttle) — fresh per preset
 let cachedAspect = -1
 
 // the camera: orbit angles + distance
@@ -333,7 +523,7 @@ function setSheetOpen(open) {
 
 function frameCallback(ctx, record) {
   // auto-orbit: paused while dragging and for 1.5 s after
-  if (!dragging && performance.now() - lastInteraction > 1500) camYaw += ctx.dt * 0.08
+  if (!dragging && performance.now() - lastInteraction > 1500) camYaw += ctx.dt * presetOrbit
 
   if (ctx.aspect !== cachedAspect) {
     cachedAspect = ctx.aspect
@@ -351,27 +541,11 @@ function frameCallback(ctx, record) {
   BASIS.up[0] = view[1]; BASIS.up[1] = view[5]; BASIS.up[2] = view[9]
 
   // ── simulate ──
-  particles.advance(ctx.dt)
-  // the fireworks rhythm: fresh shells with fresh seeds
+  // The preset's rhythm (burst timers, the space throttle) — or the plain
+  // advance. The tick owns EVERYTHING per-frame: pacing, bursts, dt scaling.
   const preset = PRESETS[currentPresetId]
-  if (preset.burstEvery !== undefined) {
-    burstTimer -= ctx.dt
-    if (burstTimer <= 0) {
-      burstTimer = preset.burstEvery
-      // a per-burst seed + a shifted origin — the sphere burst pattern and
-      // the color mix both re-roll. This recompiles the spawner (a closure
-      // + one object, ~once per second; the per-frame path stays clean).
-      particles.burst(preset.burstCount, {
-        ...preset.spawner,
-        seed: (Math.random() * 0x7fffffff) | 0,
-        shape: {
-          kind: 'sphere',
-          origin: [(Math.random() - 0.5) * 2.4, 1.7 + Math.random() * 0.9, (Math.random() - 0.5) * 2.4],
-          radius: [0.03, 0.1],
-        },
-      })
-    }
-  }
+  if (preset.tick !== undefined) preset.tick(ctx, particles, rhythm)
+  else particles.advance(ctx.dt)
 
   // ── bake the billboard soup ──
   const soupView = particles.billboards(BASIS)
@@ -460,7 +634,14 @@ function switchPreset(id) {
   currentPresetId = id
   for (const [rowId, row] of rowById) row.setAttribute('aria-pressed', String(rowId === id))
   particles = PRESETS[id].make()
-  burstTimer = 0
+  rhythm = {} // the fresh tick state (timers, the throttle phase)
+  // the preset's camera: each one opens framed (the galaxy from above,
+  // space looking down the flight axis)
+  const cam = { ...DEFAULT_CAMERA, ...(PRESETS[id].camera ?? {}) }
+  camYaw = cam.yaw
+  camPitch = cam.pitch
+  camDist = cam.dist
+  presetOrbit = cam.orbit
   drawCommand = null // until (re)attached — the soup reference changed
   glDyn = null
   gpuDyn = null

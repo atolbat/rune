@@ -159,8 +159,10 @@ await viewerPhone.click('.mv-pill')
 await viewerPhone.waitForTimeout(400)
 await viewerPhone.screenshot({ path: join(out, 'mobile-mv-sheet.png') })
 
-// ─── particles: the four presets (desktop) + the phone sheet ───────────────
+// ─── particles: the six presets (desktop) + the phone sheet ───────────────
 const pt = await browser.newPage({ viewport: { width: 960, height: 720 } })
+pt.on('pageerror', e => console.log('PT PAGEERROR:', e.message))
+pt.on('console', m => { if (m.type() === 'error') console.log('PT CONSOLE:', m.text()) })
 await pt.goto(`http://localhost:${port}/demo/particles/`, { waitUntil: 'networkidle' })
 await pt.waitForFunction(() => document.querySelector('#backend')?.textContent !== '…', null, { timeout: 15000 })
 await pt.waitForFunction(
@@ -169,9 +171,18 @@ await pt.waitForFunction(
   { timeout: 30_000 },
 )
 await pt.waitForTimeout(1500)
+// the boot opens the preset sheet over the lower-left — close it for a clean
+// full-canvas shot (the pill stays for context)
+await pt.click('.pt-close').catch(() => {})
+await pt.waitForTimeout(300)
 await pt.screenshot({ path: join(out, 'desktop-particles-fountain.png') })
 
-for (const name of ['Fireworks', 'Galaxy', 'Embers']) {
+// Per-preset settle times: burst/ramp presets need several shells or a full
+// fill before their look reads (the galaxy steady state is rate·life ≈ 7k
+// particles — 3 s shows a young sparse disc).
+const SETTLE = { Fireworks: 5000, Galaxy: 10000, Embers: 4000, 'Deep Space': 4000, Meteor: 6000 }
+for (const name of ['Fireworks', 'Galaxy', 'Embers', 'Deep Space', 'Meteor']) {
+  console.log(`[shots] preset → ${name}`)
   await pt.evaluate((n) => {
     const rows = [...document.querySelectorAll('.pt-row')]
     rows.find(r => r.textContent.includes(n))?.dispatchEvent(new Event('click', { bubbles: true }))
@@ -181,9 +192,33 @@ for (const name of ['Fireworks', 'Galaxy', 'Embers']) {
     name,
     { timeout: 10_000 },
   )
-  await pt.waitForTimeout(3000)
-  await pt.screenshot({ path: join(out, `desktop-particles-${name.toLowerCase()}.png`) })
+  await pt.waitForFunction(
+    (n) => new RegExp(`${n} · [1-9][\\d,]* /`).test(document.querySelector('.pt-pill')?.textContent ?? ''),
+    name,
+    { timeout: 25_000 },
+  )
+  await pt.waitForTimeout(SETTLE[name] ?? 3000)
+  await pt.screenshot({ path: join(out, `desktop-particles-${name.toLowerCase().replace(' ', '-')}.png`) })
 }
+
+// Deep Space: the FULL STOP, timed deterministically. The throttle phase is
+// anchored to the preset switch (spaceTick sets rt.t0 on the first tick, a
+// few hundred ms after this click): cruise ≈ 4.65 s, decelerate ≈ 2.3 s,
+// full stop over phase [4.65, 9.3] s. Shooting at +8 s lands ~3.4 s into
+// the stop — margin on both sides; the throttle follows real time, so low
+// headless FPS cannot shift the phase.
+await pt.evaluate(() => {
+  const rows = [...document.querySelectorAll('.pt-row')]
+  rows.find(r => r.textContent.includes('Deep Space'))?.dispatchEvent(new Event('click', { bubbles: true }))
+})
+await pt.waitForFunction(
+  () => (document.querySelector('.pt-pill')?.textContent ?? '').includes('Deep Space'),
+  null,
+  { timeout: 10_000 },
+)
+await pt.waitForTimeout(8000)
+await pt.screenshot({ path: join(out, 'desktop-particles-deep-space-stop.png') })
+console.log('[shots] deep space stop shot at phase ≈ 8 s (the stop window is [4.65, 9.3] s)')
 
 // phone: the preset sheet as the entry point
 const ptPhone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })

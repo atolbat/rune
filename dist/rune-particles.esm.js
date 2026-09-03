@@ -207,6 +207,31 @@ function createSpawner(desc) {
       throw new Error("rune/particles: cone baseRadius must be >= 0");
     [lenMin, lenMax] = rangeOf(shape.length, "length");
   }
+  let arms = 0, armSpread = 0.35, twist = 0;
+  if (shape.kind === "disc" && shape.arms !== undefined) {
+    arms = shape.arms;
+    if (!Number.isInteger(arms) || arms < 1)
+      throw new Error(`rune/particles: disc arms must be an integer >= 1 (got ${arms})`);
+    armSpread = shape.armSpread ?? 0.35;
+    if (!Number.isFinite(armSpread) || armSpread < 0)
+      throw new Error(`rune/particles: disc armSpread must be a finite >= 0 (got ${armSpread})`);
+    twist = shape.twist ?? 0;
+    if (!Number.isFinite(twist))
+      throw new Error(`rune/particles: disc twist must be finite (got ${twist})`);
+  }
+  let speedRef = 0, speedPower = 0;
+  if (desc.speedByRadius !== undefined) {
+    speedRef = desc.speedByRadius.ref;
+    speedPower = desc.speedByRadius.power;
+    if (!Number.isFinite(speedRef) || speedRef <= 0)
+      throw new Error(`rune/particles: speedByRadius.ref must be a finite > 0 (got ${speedRef})`);
+    if (!Number.isFinite(speedPower))
+      throw new Error(`rune/particles: speedByRadius.power must be finite (got ${speedPower})`);
+  }
+  const colorByRadius = desc.colorByRadius === true;
+  if (colorByRadius && shape.kind !== "disc" && shape.kind !== "sphere") {
+    throw new Error("rune/particles: colorByRadius needs the sphere or disc shape (the radius range drives the mix)");
+  }
   let fx = 0, fy = 0, fz = 1;
   if (velocity.mode === "fixed") {
     const l = Math.hypot(velocity.dir[0], velocity.dir[1], velocity.dir[2]);
@@ -268,7 +293,15 @@ function createSpawner(desc) {
     } else if (shape.kind === "disc") {
       const r2 = rMin * rMin + (rMax * rMax - rMin * rMin) * u;
       const rr = Math.sqrt(r2);
-      const phi = TAU * v;
+      let phi;
+      if (arms > 0) {
+        const arm = Math.floor(hash01(seed, index, S_P0) * arms);
+        const scatter = (hash01(seed, index, S_P1) - 0.5) * 2 * armSpread;
+        const tR = (rr - rMin) / Math.max(0.000001, rMax - rMin);
+        phi = arm * (TAU / arms) + twist * tR + scatter;
+      } else {
+        phi = TAU * v;
+      }
       px = ox + (t1x * Math.cos(phi) + t2x * Math.sin(phi)) * rr;
       py = oy + (t1y * Math.cos(phi) + t2y * Math.sin(phi)) * rr;
       pz = oz + (t1z * Math.cos(phi) + t2z * Math.sin(phi)) * rr;
@@ -311,7 +344,18 @@ function createSpawner(desc) {
         dz = az;
       }
     }
-    const spd = speed[0] + (speed[1] - speed[0]) * hash01(seed, index, S_SPD);
+    let spd = speed[0] + (speed[1] - speed[0]) * hash01(seed, index, S_SPD);
+    if (speedRef > 0) {
+      const rdx = px - ox, rdy = py - oy, rdz = pz - oz;
+      const rad = Math.sqrt(rdx * rdx + rdy * rdy + rdz * rdz);
+      spd *= Math.pow(speedRef / Math.max(rad, 0.01), speedPower);
+    }
+    let mix = hash01(seed, index, S_COL);
+    if (colorByRadius) {
+      const rdx = px - ox, rdy = py - oy, rdz = pz - oz;
+      const rad = Math.sqrt(rdx * rdx + rdy * rdy + rdz * rdz);
+      mix = Math.min(1, Math.max(0, (rad - rMin) / Math.max(0.000001, rMax - rMin)));
+    }
     out.x = px;
     out.y = py;
     out.z = pz;
@@ -320,7 +364,6 @@ function createSpawner(desc) {
     out.vz = dz * spd;
     out.life = life[0] + (life[1] - life[0]) * hash01(seed, index, S_LIFE);
     out.size = size[0] + (size[1] - size[0]) * hash01(seed, index, S_SIZE);
-    const mix = hash01(seed, index, S_COL);
     out.r = c0[0] + (c1[0] - c0[0]) * mix;
     out.g = c0[1] + (c1[1] - c0[1]) * mix;
     out.b = c0[2] + (c1[2] - c0[2]) * mix;

@@ -42,6 +42,9 @@ export interface AutoRendererOptions {
   readonly observeResize?: boolean
   readonly now?: () => number
   readonly dpr?: number
+  /** Task 116: the canvas clear — forwarded to the chosen backend (both
+   *  branches honor it; previously the WebGPU branch silently dropped it). */
+  readonly clear?: RendererOptions['clear']
   /** WebGPU probe injection — for tests. */
   readonly probeGpu?: () => Promise<boolean>
   /** WebGL2 probe injection — for tests. Default: typeof WebGL2RenderingContext. */
@@ -98,6 +101,7 @@ export async function createAutoRenderer(options: AutoRendererOptions): Promise<
   if (decision.chosen === 'webgpu') {
     const inner = await createWebGpuRenderer({
       canvas: options.canvas,
+      clear: options.clear,
       createGPU: options.createGPU,
       requestFrame: options.requestFrame,
       observeResize: options.observeResize,
@@ -108,6 +112,7 @@ export async function createAutoRenderer(options: AutoRendererOptions): Promise<
   const inner = createRenderer({
     canvas: options.canvas,
     dpr: options.dpr,
+    clear: options.clear,
     createGL: options.createGL,
     requestFrame: options.requestFrame,
     observeResize: options.observeResize,

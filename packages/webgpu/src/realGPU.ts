@@ -111,6 +111,16 @@ export async function createRealGPU(
   let nextTextureViewId = 1_000_000 // separate the namespace from textureId (1, 2, 3...)
   let width = 0
   let height = 0
+  // The CANVAS clear (target 0): set via setCanvasClearColor (the renderer's
+  // `clear` option). The legacy default matches the GL facade's DEFAULT_CLEAR —
+  // before Task 116 this was hardcoded inline in bindTarget, so the user's
+  // clear color silently never reached the WebGPU canvas (the same demo
+  // rendered a ~4.5× lighter background on WebGPU than on WebGL2).
+  let canvasClearR = 0.07
+  let canvasClearG = 0.08
+  let canvasClearB = 0.11
+  let canvasClearA = 1
+  let canvasDepthClear = 1
   let depthTexture: GPUTexture | null = null
   let depthView: GPUTextureView | null = null
   let ubo: GPUBuffer | null = null
@@ -284,9 +294,20 @@ export async function createRealGPU(
     // GPUCopyExternalImageSourceInfo.flipY. This is exactly the parity with
     // WebGL2 UNPACK_FLIP_Y_WEBGL: flipY=true on both backends gives an
     // identical result — source row 0 pixels land in texture row H-1.
+    //
+    // Task 116 — the ALPHA CONTRACT, pinned explicitly: the destination is
+    // GPUImageCopyTextureTagged with premultipliedAlpha: false (the spec
+    // default, now written out). Canvas/ImageBitmap sources store
+    // PREMULTIPLIED pixels; with this tag the implementation UN-premultiplies
+    // (rgb /= a) during the copy, so the texture holds STRAIGHT alpha.
+    // WebGL2's texImage2DFromSource has no un-premultiply hardware path — it
+    // uploads the source bytes as-is. Cross-backend parity therefore requires
+    // the SOURCE to be straight-alpha: for canvas-derived bitmaps pass
+    // createImageBitmap(canvas, { premultiplyAlpha: 'none' }) — the browser
+    // un-premultiplies at bitmap creation (see the particles demo sprite).
     device.queue.copyExternalImageToTexture(
       { source: source as GPUCopyExternalImageSource, flipY: flipY === true },
-      { texture: record.texture, mipLevel: 0, origin: { x: dstX, y: dstY, z: 0 } },
+      { texture: record.texture, mipLevel: 0, origin: { x: dstX, y: dstY, z: 0 }, premultipliedAlpha: false },
       { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 },
     )
   }
@@ -307,9 +328,11 @@ export async function createRealGPU(
     // The source must have size N/(2^level). WebGPU will check it itself —
     // on mismatch there will be a validation error (asynchronously in onGpuError).
     // flipY — see copyExternalImageToTexture above (GPUCopyExternalImageSourceInfo.flipY).
+    // Task 116: premultipliedAlpha: false — the same straight-alpha contract
+    // as copyExternalImageToTexture (see the comment there).
     device.queue.copyExternalImageToTexture(
       { source: source as GPUCopyExternalImageSource, flipY: flipY === true },
-      { texture: record.texture, mipLevel, origin: { x: dstX, y: dstY, z: 0 } },
+      { texture: record.texture, mipLevel, origin: { x: dstX, y: dstY, z: 0 }, premultipliedAlpha: false },
       { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 },
     )
   }
@@ -743,6 +766,26 @@ export async function createRealGPU(
     bindTarget(0, true)
   }
 
+  function setCanvasClearColor(color: readonly [number, number, number, number], depth?: number): void {
+    // Task 116: the renderer's `clear` option — stored as scalars, read in
+    // bindTarget(0) when the pass descriptor is built. A call with a bad
+    // (NaN / non-finite) color would poison EVERY frame's clear — validate
+    // loudly (the facade's discipline: a silent bad clear is a "why is the
+    // canvas black/white" bug).
+    const [r, g, b, a] = color
+    if (![r, g, b, a].every(v => Number.isFinite(v))) {
+      throw new Error(`rune: setCanvasClearColor — the color must be finite rgba (got [${r}, ${g}, ${b}, ${a}])`)
+    }
+    if (depth !== undefined && !Number.isFinite(depth)) {
+      throw new Error(`rune: setCanvasClearColor — depth must be a finite number (got ${depth})`)
+    }
+    canvasClearR = r
+    canvasClearG = g
+    canvasClearB = b
+    canvasClearA = a
+    canvasDepthClear = depth ?? 1
+  }
+
   function createTarget(
     textureId: number,
     targetWidth: number,
@@ -783,10 +826,12 @@ export async function createRealGPU(
     let clearValue: GPUColor
     if (targetId === 0) {
       colorView = gpuContext.getCurrentTexture().createView()
-      clearValue = { r: 0.07, g: 0.08, b: 0.11, a: 1 }
+      // The canvas clear — setCanvasClearColor state (the renderer's `clear`
+      // option; the legacy default 0.07/0.08/0.11 if never set).
+      clearValue = { r: canvasClearR, g: canvasClearG, b: canvasClearB, a: canvasClearA }
       depthAttachment = depthView !== null ? {
         view: depthView,
-        depthClearValue: 1,
+        depthClearValue: canvasDepthClear,
         depthLoadOp: loadOp,
         depthStoreOp: 'store',
       } : undefined
@@ -1063,6 +1108,7 @@ export async function createRealGPU(
   return {
     configure,
     resize,
+    setCanvasClearColor,
     createTexture,
     texSubImage2D,
     copyExternalImageToTexture,

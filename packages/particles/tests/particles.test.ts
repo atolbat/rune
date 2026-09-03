@@ -30,6 +30,21 @@ function fixedSpawner(over: Partial<SpawnRecord>): (index: number, out: SpawnRec
   }
 }
 
+/** The signed shortest angular distance a→b, wrapped to (-π, π]. */
+function shortestAngleDelta(a: number, b: number): number {
+  let d = (b - a) % (Math.PI * 2)
+  if (d > Math.PI) d -= Math.PI * 2
+  if (d <= -Math.PI) d += Math.PI * 2
+  return d
+}
+
+/** The disc angle in the spawner's t1/t2 frame: for axis (0,1,0) the frame
+ *  is t1 = +X, t2 = −Z (the degenerate-axis fallback), so φ = atan2(−z, x)
+ *  — the SAME angle the disc arm math builds from. */
+function discAngle(x: number, z: number): number {
+  return Math.atan2(-z, x)
+}
+
 // ─── the RNG ────────────────────────────────────────────────────────────────
 
 describe('hash01 (the stateless RNG)', () => {
@@ -287,6 +302,143 @@ describe('createSpawner (the shapes)', () => {
     }
   })
 
+  // ── Task 117: the galaxy-maker kit (arms / speedByRadius / colorByRadius) ──
+
+  it('disc arms: zero spread + zero twist — the angle lands on exactly `arms` spokes', () => {
+    const s = createSpawner({
+      shape: { kind: 'disc', origin: [0, 0, 0], axis: [0, 1, 0], radius: [1, 2], arms: 3, armSpread: 0, twist: 0 },
+      velocity: { mode: 'axis' },
+      speed: [1, 1], life: [1, 1], size: [1, 1],
+      color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 21,
+    })
+    const spokes = [0, 1, 2].map(k => (k * Math.PI * 2) / 3)
+    for (let i = 0; i < 300; i++) {
+      s(i, rec)
+      const angle = discAngle(rec.x, rec.z)
+      const nearest = spokes.map(sp => Math.abs(shortestAngleDelta(angle, sp)))
+      expect(Math.min(...nearest)).toBeLessThan(1e-6)
+    }
+  })
+
+  it('disc arms: the twist winds monotonically with the radius; armSpread bounds the scatter', () => {
+    const twist = 1.9
+    const spread = 0.25
+    const s = createSpawner({
+      shape: { kind: 'disc', origin: [0, 0, 0], axis: [0, 1, 0], radius: [1, 2], arms: 2, armSpread: spread, twist },
+      velocity: { mode: 'axis' },
+      speed: [1, 1], life: [1, 1], size: [1, 1],
+      color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 22,
+    })
+    for (let i = 0; i < 300; i++) {
+      s(i, rec)
+      const r = Math.hypot(rec.x, rec.z)
+      const angle = discAngle(rec.x, rec.z)
+      // φ = arm·(τ/arms) + twist·tR + scatter; the arm index is hidden —
+      // test the UNION: |angle − (k·τ/arms + twist·tR)| ≤ spread for some k.
+      const tR = r - 1 // radius [1, 2] → tR ∈ [0, 1]
+      const centers = [0, Math.PI].map(sp => sp + twist * tR)
+      const dev = Math.min(...centers.map(c => Math.abs(shortestAngleDelta(angle, c))))
+      expect(dev).toBeLessThanOrEqual(spread + 1e-9)
+    }
+  })
+
+  it('disc arms: arms=1 — a single fanned sector (a comet tail / a barred galaxy)', () => {
+    const s = createSpawner({
+      shape: { kind: 'disc', origin: [0, 0, 0], axis: [0, 1, 0], radius: [1, 2], arms: 1, armSpread: 0.3, twist: 2.5 },
+      velocity: { mode: 'axis' },
+      speed: [1, 1], life: [1, 1], size: [1, 1],
+      color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 23,
+    })
+    for (let i = 0; i < 200; i++) {
+      s(i, rec)
+      const r = Math.hypot(rec.x, rec.z)
+      const angle = discAngle(rec.x, rec.z)
+      const center = 2.5 * (r - 1) // twist·tR, tR ∈ [0, 1]
+      expect(Math.abs(shortestAngleDelta(angle, center))).toBeLessThanOrEqual(0.3 + 1e-9)
+    }
+  })
+
+  it('disc without arms stays the uniform annulus (the feature is opt-in)', () => {
+    // bit-parity with the pre-Task-117 behavior: the SAME descriptor (no arm
+    // fields) produces the same values the plain disc always did.
+    const s = createSpawner({
+      shape: { kind: 'disc', origin: [0, 0, 0], axis: [0, 1, 0], radius: [1, 2] },
+      velocity: { mode: 'tangential' },
+      speed: [1, 1], life: [1, 1], size: [1, 1],
+      color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 3,
+    })
+    for (let i = 0; i < 100; i++) {
+      s(i, rec)
+      const r = Math.hypot(rec.x, rec.z)
+      expect(r).toBeGreaterThanOrEqual(0.9999)
+      expect(r).toBeLessThanOrEqual(2.0001)
+    }
+  })
+
+  it('speedByRadius: (ref/r)^power — the inner rim outruns the outer (Keplerian shear)', () => {
+    const s = createSpawner({
+      shape: { kind: 'disc', origin: [0, 0, 0], axis: [0, 1, 0], radius: [1, 4] },
+      velocity: { mode: 'tangential' },
+      speed: [1, 1], speedByRadius: { ref: 2, power: 1 },
+      life: [1, 1], size: [1, 1],
+      color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 24,
+    })
+    let fastest = 0, slowest = Infinity
+    for (let i = 0; i < 400; i++) {
+      s(i, rec)
+      const r = Math.hypot(rec.x, rec.z)
+      const speed = Math.hypot(rec.vx, rec.vy, rec.vz)
+      // power=1, ref=2: speed·r = 2 exactly
+      expect(speed * r).toBeCloseTo(2, 5)
+      fastest = Math.max(fastest, speed)
+      slowest = Math.min(slowest, speed)
+    }
+    // r ∈ [1,4] → speed ∈ [0.5, 2]: a 4× shear across the disc
+    expect(fastest).toBeGreaterThan(1.9)
+    expect(slowest).toBeLessThan(0.6)
+  })
+
+  it('colorByRadius: the mix follows the radius — the warm core, the cool rim', () => {
+    const s = createSpawner({
+      shape: { kind: 'disc', origin: [0, 0, 0], axis: [0, 1, 0], radius: [1, 3] },
+      velocity: { mode: 'tangential' },
+      speed: [1, 1], colorByRadius: true,
+      life: [1, 1], size: [1, 1],
+      color: [[1, 0, 0, 1], [0, 0, 1, 1]], seed: 25,
+    })
+    for (let i = 0; i < 300; i++) {
+      s(i, rec)
+      const r = Math.hypot(rec.x, rec.z)
+      const mix = (r - 1) / 2 // [0, 1] over [1, 3]
+      expect(rec.r).toBeCloseTo(1 - mix, 5)
+      expect(rec.b).toBeCloseTo(mix, 5)
+      // the CORE side is red: closer to r=1 than to r=3 → r > b
+      if (r < 2) expect(rec.r).toBeGreaterThan(rec.b)
+      else expect(rec.b).toBeGreaterThan(rec.r)
+    }
+  })
+
+  it('the galaxy kit composes deterministically: same seed = the same galaxy, bit-exact', () => {
+    const galaxy = () => createSpawner({
+      shape: { kind: 'disc', origin: [0, 0.1, 0], axis: [0, 1, 0], radius: [0.7, 3.1], arms: 3, armSpread: 0.22, twist: 5.2 },
+      velocity: { mode: 'tangential' },
+      speed: [0.35, 0.55], speedByRadius: { ref: 2, power: 0.9 },
+      colorByRadius: true,
+      life: [7, 11], size: [0.05, 0.13],
+      color: [[1, 0.86, 0.62, 1], [0.45, 0.6, 1, 0.9]], seed: 97,
+    })
+    const a = galaxy(), b = galaxy()
+    for (let i = 0; i < 500; i++) {
+      const ra: SpawnRecord = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, life: 1, size: 1, r: 0, g: 0, b: 0, a: 1, seed: 0 }
+      const rb: SpawnRecord = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, life: 1, size: 1, r: 0, g: 0, b: 0, a: 1, seed: 0 }
+      a(i, ra); b(i, rb)
+      expect(ra.x).toBe(rb.x); expect(ra.y).toBe(rb.y); expect(ra.z).toBe(rb.z)
+      expect(ra.vx).toBe(rb.vx); expect(ra.vy).toBe(rb.vy); expect(ra.vz).toBe(rb.vz)
+      expect(ra.life).toBe(rb.life); expect(ra.size).toBe(rb.size)
+      expect(ra.r).toBe(rb.r); expect(ra.g).toBe(rb.g); expect(ra.b).toBe(rb.b); expect(ra.a).toBe(rb.a)
+    }
+  })
+
   it('ranges and colors interpolate within bounds', () => {
     const s = createSpawner({
       shape: { kind: 'point', origin: [0, 0, 0] },
@@ -328,6 +480,23 @@ describe('createSpawner (the shapes)', () => {
       shape: { kind: 'disc', origin: [0, 0, 0], axis: [0, 1, 0], radius: [0, 1] as [number, number] },
       velocity: { mode: 'axis' }, speed: [1, 1] as [number, number], life: [1, 1] as [number, number], size: [1, 1] as [number, number],
       color: [[1, 1, 1, 1], [1, 1, 1, 1]] as [number[], number[]],
+    })).not.toThrow()
+    // Task 117: the galaxy-kit validations
+    const disc = { kind: 'disc' as const, origin: [0, 0, 0], axis: [0, 1, 0], radius: [1, 2] as [number, number] }
+    expect(() => createSpawner({ ...base, shape: { ...disc, arms: 2.5 } })).toThrow('arms')
+    expect(() => createSpawner({ ...base, shape: { ...disc, arms: 0 } })).toThrow('arms')
+    expect(() => createSpawner({ ...base, shape: { ...disc, arms: 3, armSpread: -1 } })).toThrow('armSpread')
+    expect(() => createSpawner({ ...base, shape: { ...disc, arms: 3, twist: Number.NaN } })).toThrow('twist')
+    expect(() => createSpawner({ ...base, shape: disc, speedByRadius: { ref: 0, power: 1 } })).toThrow('ref')
+    expect(() => createSpawner({ ...base, shape: disc, speedByRadius: { ref: 2, power: Number.NaN } })).toThrow('power')
+    expect(() => createSpawner({
+      ...base, shape: { kind: 'cone', origin: [0, 0, 0], axis: [0, 1, 0], halfAngle: 0.3, baseRadius: 0, length: [0, 1] as [number, number] },
+      colorByRadius: true,
+    })).toThrow('colorByRadius')
+    // the valid galaxy kit does not throw
+    expect(() => createSpawner({
+      ...base, shape: { ...disc, arms: 3, armSpread: 0.22, twist: 5.2 },
+      speedByRadius: { ref: 2, power: 0.9 }, colorByRadius: true,
     })).not.toThrow()
   })
 })

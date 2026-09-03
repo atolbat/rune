@@ -52,6 +52,10 @@ export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
   return {
     configure: (w, h) => gpu.configure(w, h),
     resize: (w, h) => gpu.resize(w, h),
+    // Task 116: renderer init state (NOT journaled — the new renderer's
+    // createWebGpuRenderer re-applies it on the fresh facade after recovery;
+    // the clear is policy, not a resource declaration).
+    setCanvasClearColor: (color, depth) => gpu.setCanvasClearColor(color, depth),
     createTexture: (width, height, format, options) => {
       const id = gpu.createTexture(width, height, format, options)
       // Task 57: format is saved in the op — on replay on WebGPU it is passed as

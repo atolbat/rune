@@ -8465,6 +8465,11 @@ async function createRealGPU(canvas, onGpuError) {
   let nextTextureViewId = 1e6;
   let width = 0;
   let height = 0;
+  let canvasClearR = 0.07;
+  let canvasClearG = 0.08;
+  let canvasClearB = 0.11;
+  let canvasClearA = 1;
+  let canvasDepthClear = 1;
   let depthTexture = null;
   let depthView = null;
   let ubo = null;
@@ -8548,13 +8553,13 @@ async function createRealGPU(canvas, onGpuError) {
     const record = textures.get(textureId);
     if (record === undefined)
       return;
-    device.queue.copyExternalImageToTexture({ source, flipY: flipY === true }, { texture: record.texture, mipLevel: 0, origin: { x: dstX, y: dstY, z: 0 } }, { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 });
+    device.queue.copyExternalImageToTexture({ source, flipY: flipY === true }, { texture: record.texture, mipLevel: 0, origin: { x: dstX, y: dstY, z: 0 }, premultipliedAlpha: false }, { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 });
   }
   function copyExternalImageToTextureMip(textureId, mipLevel, source, dstX, dstY, copyWidth, copyHeight, flipY) {
     const record = textures.get(textureId);
     if (record === undefined)
       return;
-    device.queue.copyExternalImageToTexture({ source, flipY: flipY === true }, { texture: record.texture, mipLevel, origin: { x: dstX, y: dstY, z: 0 } }, { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 });
+    device.queue.copyExternalImageToTexture({ source, flipY: flipY === true }, { texture: record.texture, mipLevel, origin: { x: dstX, y: dstY, z: 0 }, premultipliedAlpha: false }, { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 });
   }
   function uploadUniforms(offset, data) {
     const window2 = Math.ceil(data.length / 256) * 256;
@@ -8876,6 +8881,20 @@ async function createRealGPU(canvas, onGpuError) {
   function beginPass(_clearIndex) {
     bindTarget(0, true);
   }
+  function setCanvasClearColor(color, depth2) {
+    const [r, g, b, a] = color;
+    if (![r, g, b, a].every((v) => Number.isFinite(v))) {
+      throw new Error(`rune: setCanvasClearColor — the color must be finite rgba (got [${r}, ${g}, ${b}, ${a}])`);
+    }
+    if (depth2 !== undefined && !Number.isFinite(depth2)) {
+      throw new Error(`rune: setCanvasClearColor — depth must be a finite number (got ${depth2})`);
+    }
+    canvasClearR = r;
+    canvasClearG = g;
+    canvasClearB = b;
+    canvasClearA = a;
+    canvasDepthClear = depth2 ?? 1;
+  }
   function createTarget(textureId, targetWidth, targetHeight, depth2, color) {
     const record = textures.get(textureId);
     if (record === undefined)
@@ -8911,10 +8930,10 @@ async function createRealGPU(canvas, onGpuError) {
     let clearValue;
     if (targetId === 0) {
       colorView = gpuContext.getCurrentTexture().createView();
-      clearValue = { r: 0.07, g: 0.08, b: 0.11, a: 1 };
+      clearValue = { r: canvasClearR, g: canvasClearG, b: canvasClearB, a: canvasClearA };
       depthAttachment = depthView !== null ? {
         view: depthView,
-        depthClearValue: 1,
+        depthClearValue: canvasDepthClear,
         depthLoadOp: loadOp,
         depthStoreOp: "store"
       } : undefined;
@@ -9136,6 +9155,7 @@ async function createRealGPU(canvas, onGpuError) {
   return {
     configure,
     resize,
+    setCanvasClearColor,
     createTexture,
     texSubImage2D,
     copyExternalImageToTexture,
@@ -9397,6 +9417,7 @@ function withJournalGpu(gpu, journal) {
   return {
     configure: (w, h) => gpu.configure(w, h),
     resize: (w, h) => gpu.resize(w, h),
+    setCanvasClearColor: (color, depth2) => gpu.setCanvasClearColor(color, depth2),
     createTexture: (width, height, format, options) => {
       const id = gpu.createTexture(width, height, format, options);
       texSizes.set(id, { w: width, h: height });
@@ -9579,6 +9600,7 @@ function createResourceSessionGPU(raw, journal) {
   const facade = {
     configure: (w, h) => raw.configure(w, h),
     resize: (w, h) => raw.resize(w, h),
+    setCanvasClearColor: (color, depth2) => raw.setCanvasClearColor(color, depth2),
     createTexture: (width, height, format, options) => {
       const rawId = raw.createTexture(width, height, format, options);
       const id = nextTex++;
@@ -9939,6 +9961,7 @@ function gpuSourceAlive(source) {
 
 // packages/gl/src/webgpuRenderer.ts
 var ERROR_STORM_LIMIT = 3;
+var DEFAULT_CLEAR3 = { color: [0.07, 0.08, 0.11, 1], depth: 1 };
 async function createWebGpuRenderer(options) {
   const canvas = resolveCanvasAny(options.canvas);
   const dpr = canvasDpr(canvas, options.dpr);
@@ -9969,6 +9992,8 @@ async function createWebGpuRenderer(options) {
   let lastCssWidth = -1;
   let lastCssHeight = -1;
   await gpu.configure(canvas.width, canvas.height);
+  const clear = options.clear ?? DEFAULT_CLEAR3;
+  gpu.setCanvasClearColor(clear.color, clear.depth ?? 1);
   const [startW, startH] = getCanvasCssSize(canvas);
   resize(startW, startH);
   const resizeObserver = observeSize(canvas, options);
@@ -10326,6 +10351,7 @@ function createRenderer(options) {
       statsCollector = createStatsCollector(options.now ?? (() => performance.now()));
       inner = decision2.chosen === "webgpu" ? await createWebGpuRenderer({
         canvas: options.canvas,
+        clear: options.clear,
         createGPU: options.createGPU,
         onGpuError: options.onGpuError,
         requestFrame: options.requestFrame,

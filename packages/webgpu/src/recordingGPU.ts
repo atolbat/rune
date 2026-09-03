@@ -18,6 +18,13 @@ export function createRecordingGPU(): RecordingGPU {
   const gpu: GPUFacade = {
     configure: (width, height) => calls.push(`configure(${width},${height})`),
     resize: (width, height) => calls.push(`resize(${width},${height})`),
+    // Task 116: the canvas clear state — recorded so tests can pin that the
+    // renderer's `clear` option actually reaches the facade (the background
+    // parity regression).
+    setCanvasClearColor: (color, depth) => {
+      const depthSuffix = depth !== undefined ? `,d=${depth}` : ''
+      calls.push(`setCanvasClearColor(${color[0]},${color[1]},${color[2]},${color[3]}${depthSuffix})`)
+    },
     createTexture: (width, height, format, options) => {
       const mipLevels = options?.mipLevels ?? 1
       const aniso = options?.maxAnisotropy
@@ -148,6 +155,7 @@ export function createCountingGPU(): GPUFacade & { totalCalls: number } {
   return {
     configure: bump,
     resize: bump,
+    setCanvasClearColor: bump,
     createTexture: alloc as never,
     copyExternalImageToTexture: bump,
     copyExternalImageToTextureMip: bump,

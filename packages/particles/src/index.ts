@@ -36,6 +36,14 @@
  *     - binary-search ramp sampling (the clip-sampling pattern of
  *       @rune/animation)
  *
+ *   THE GALAXY KIT (Task 117, the emitter power of three-nebula-style
+ *   demos): the disc shape takes `arms` / `armSpread` / `twist` — spiral
+ *   arm density; the spawner takes `speedByRadius` (Keplerian shear:
+ *   speed·(ref/r)^power — the inner rim outruns the outer) and
+ *   `colorByRadius` (the tint follows the radius: a warm core, cool arms).
+ *   Together with tangential velocity they make a shearing spiral galaxy
+ *   from ONE declarative spawner (see the demo's galaxy preset).
+ *
  *   DETERMINISM: same inputs → same bits, every time, every backend.
  *   The clock belongs to the caller: advance(dt) is driven from the
  *   render loop. The facade owns the rate accumulator, not the frame.

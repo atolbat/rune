@@ -147,7 +147,17 @@ export interface Texture extends TextureHandle {
    *  options.flipY (default false): flip the source along Y. WebGL2 —
    *  via UNPACK_FLIP_Y_WEBGL; WebGPU — via GPUCopyExternalImageSourceInfo.flipY.
    *  Parity: with false both backends write source row 0 into texture row 0
-   *  — the mapping is identical. */
+   *  — the mapping is identical.
+   *
+   *  ALPHA CONTRACT (Task 116): the texture texels are expected to carry
+   *  STRAIGHT (non-premultiplied) alpha. WebGPU's copyExternalImageToTexture
+   *  un-premultiplies premultiplied sources automatically (the tagged
+   *  destination, premultipliedAlpha: false); WebGL2 has NO un-premultiply
+   *  path — it uploads the source bytes as-is. Canvas 2D sources are stored
+   *  premultiplied, so for cross-backend parity create canvas-derived
+   *  bitmaps with createImageBitmap(canvas, { premultiplyAlpha: 'none' }).
+   *  A premultiplied texture + ('src-alpha', …) blending multiplies the
+   *  alpha TWICE — sprites turn dark and muddy (the embers regression). */
   uploadImage(source: GLImageSource, options?: { flipY?: boolean }): void
   /** Upload of a part of a texture (sub-region) from a bitmap/canvas/video.
    *  WebGL2: texSubImage2D overload with TexImageSource (does NOT overwrite

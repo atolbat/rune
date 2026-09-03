@@ -351,6 +351,7 @@ export function createRenderer(options: RendererOptions): Renderer {
       inner = decision.chosen === 'webgpu'
         ? await createWebGpuRenderer({
             canvas: options.canvas,
+            clear: options.clear,
             createGPU: options.createGPU,
             onGpuError: options.onGpuError,
             requestFrame: options.requestFrame,

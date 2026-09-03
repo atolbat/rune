@@ -24,12 +24,26 @@ export function hash01(seed: number, index: number, salt: number): number {
 }
 
 /** The spawn shape. `axis` vectors are normalized ONCE at spawner
- *  creation (the emit path only reads them). */
+ *  creation (the emit path only reads them).
+ *
+ *  Task 117 — the disc's SPIRAL ARMS (the galaxy-maker): `arms` angular
+ *  sectors, `twist` radians of winding swept from radius[0] to radius[1],
+ *  `armSpread` radians of uniform scatter within an arm. Omitted arms →
+ *  the uniform annulus (the previous behavior, bit-identical). */
 export type SpawnShape =
   | { readonly kind: 'point'; readonly origin: readonly number[] }
   | { readonly kind: 'sphere'; readonly origin: readonly number[]; readonly radius: readonly [number, number] }
   | { readonly kind: 'cone'; readonly origin: readonly number[]; readonly axis: readonly number[]; readonly halfAngle: number; readonly baseRadius: number; readonly length: readonly [number, number] }
-  | { readonly kind: 'disc'; readonly origin: readonly number[]; readonly axis: readonly number[]; readonly radius: readonly [number, number] }
+  | { readonly kind: 'disc'; readonly origin: readonly number[]; readonly axis: readonly number[]; readonly radius: readonly [number, number]
+      /** Arm count (integer ≥ 1). arms=1 = a single fanned sector (a comet
+       *  tail / a barred galaxy). Default: no arms — the uniform annulus. */
+      readonly arms?: number
+      /** Angular scatter within an arm, radians (default 0.35). 0 = razor arms. */
+      readonly armSpread?: number
+      /** Total winding from the inner to the outer radius, radians (default 0 —
+       *  straight radial arms). Negative = the opposite winding direction:
+       *  match the sign to the orbit direction so the arms TRAIL (real galaxies). */
+      readonly twist?: number }
   | { readonly kind: 'line'; readonly from: readonly number[]; readonly to: readonly number[] }
 
 /** How the spawn velocity is directed.
@@ -48,12 +62,28 @@ export type VelocityMode =
 
 /** The full spawner description: shape + velocity + per-particle ranges.
  *  Ranges are [min, max] — a constant is [v, v]. Colors interpolate
- *  linearly between two rgba endpoints. */
+ *  linearly between two rgba endpoints.
+ *
+ *  Task 117 — the two radial modulators (the galaxy-maker kit):
+ *   • speedByRadius — speed scales as (ref/r)^power (Keplerian shear at
+ *     power ≈ 0.9: the inner rim visibly outruns the outer — spiral arms
+ *     develop real differential rotation instead of a rigid donut);
+ *   • colorByRadius — the color mix follows the radius (color[0] at the
+ *     core → color[1] at the rim) instead of the per-particle hash —
+ *     a warm core with cool arms, no random speckle. */
 export interface SpawnerDesc {
   readonly shape: SpawnShape
   readonly velocity: VelocityMode
   /** Speed range, units/second. */
   readonly speed: readonly [number, number]
+  /** Radial speed modulation: speed = range · (ref / r)^power, where r is
+   *  the spawn distance from the shape origin (the disc/sphere radius).
+   *  Omit = flat speed. The ref is the radius where the scale is exactly 1. */
+  readonly speedByRadius?: { readonly ref: number; readonly power: number }
+  /** The color mix follows r (the sphere/disc radius range) instead of the
+   *  per-particle hash: color[0] at radius[0] → color[1] at radius[1].
+ *      Requires the sphere or disc shape (they carry the radius range). */
+  readonly colorByRadius?: boolean
   /** Lifetime range, seconds (> 0 — validated). */
   readonly life: readonly [number, number]
   /** Billboard size range, world units (>= 0). */
@@ -110,6 +140,29 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
     baseRadius = shape.baseRadius
     if (baseRadius < 0) throw new Error('rune/particles: cone baseRadius must be >= 0')
     ;[lenMin, lenMax] = rangeOf(shape.length, 'length')
+  }
+  // Task 117: the disc's spiral arms — compiled ONCE into flat scalars.
+  let arms = 0, armSpread = 0.35, twist = 0
+  if (shape.kind === 'disc' && shape.arms !== undefined) {
+    arms = shape.arms
+    if (!Number.isInteger(arms) || arms < 1) throw new Error(`rune/particles: disc arms must be an integer >= 1 (got ${arms})`)
+    armSpread = shape.armSpread ?? 0.35
+    if (!Number.isFinite(armSpread) || armSpread < 0) throw new Error(`rune/particles: disc armSpread must be a finite >= 0 (got ${armSpread})`)
+    twist = shape.twist ?? 0
+    if (!Number.isFinite(twist)) throw new Error(`rune/particles: disc twist must be finite (got ${twist})`)
+  }
+  // Task 117: the radial modulators — speed scaling and the radius-driven
+  // color mix. colorByRadius needs the radius RANGE → sphere/disc only.
+  let speedRef = 0, speedPower = 0
+  if (desc.speedByRadius !== undefined) {
+    speedRef = desc.speedByRadius.ref
+    speedPower = desc.speedByRadius.power
+    if (!Number.isFinite(speedRef) || speedRef <= 0) throw new Error(`rune/particles: speedByRadius.ref must be a finite > 0 (got ${speedRef})`)
+    if (!Number.isFinite(speedPower)) throw new Error(`rune/particles: speedByRadius.power must be finite (got ${speedPower})`)
+  }
+  const colorByRadius = desc.colorByRadius === true
+  if (colorByRadius && shape.kind !== 'disc' && shape.kind !== 'sphere') {
+    throw new Error("rune/particles: colorByRadius needs the sphere or disc shape (the radius range drives the mix)")
   }
 
   // ── the velocity mode validation (an honest pairing, no silent traps) ──
@@ -174,7 +227,18 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
       // Uniform in the annulus: r² = rMin² + u·(rMax² − rMin²).
       const r2 = rMin * rMin + (rMax * rMax - rMin * rMin) * u
       const rr = Math.sqrt(r2)
-      const phi = TAU * v
+      // Task 117: with arms — the angular coordinate is the arm sector + the
+      // radial twist + the uniform scatter (independent salts: S_P0 the arm
+      // pick, S_P1 the scatter). Without arms — the uniform annulus as before.
+      let phi: number
+      if (arms > 0) {
+        const arm = Math.floor(hash01(seed, index, S_P0) * arms)
+        const scatter = (hash01(seed, index, S_P1) - 0.5) * 2 * armSpread
+        const tR = (rr - rMin) / Math.max(1e-6, rMax - rMin)
+        phi = arm * (TAU / arms) + twist * tR + scatter
+      } else {
+        phi = TAU * v
+      }
       px = ox + (t1x * Math.cos(phi) + t2x * Math.sin(phi)) * rr
       py = oy + (t1y * Math.cos(phi) + t2y * Math.sin(phi)) * rr
       pz = oz + (t1z * Math.cos(phi) + t2z * Math.sin(phi)) * rr
@@ -200,12 +264,28 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
     }
     // 'lobe' (cone) and 'fixed' keep the dx/dy/dz computed above.
 
-    const spd = speed[0] + (speed[1] - speed[0]) * hash01(seed, index, S_SPD)
+    // Task 117: the radial speed modulation — (ref / r)^power over the spawn
+    // distance from the shape origin. r is floored at 0.01 (a point/line
+    // spawn at the origin with power > 0 would otherwise explode; the emit
+    // validation still rejects non-finite results loudly).
+    let spd = speed[0] + (speed[1] - speed[0]) * hash01(seed, index, S_SPD)
+    if (speedRef > 0) {
+      const rdx = px - ox, rdy = py - oy, rdz = pz - oz
+      const rad = Math.sqrt(rdx * rdx + rdy * rdy + rdz * rdz)
+      spd *= Math.pow(speedRef / Math.max(rad, 0.01), speedPower)
+    }
+    // Task 117: the radius-driven color mix (color[0] at the core →
+    // color[1] at the rim) — otherwise the per-particle hash.
+    let mix = hash01(seed, index, S_COL)
+    if (colorByRadius) {
+      const rdx = px - ox, rdy = py - oy, rdz = pz - oz
+      const rad = Math.sqrt(rdx * rdx + rdy * rdy + rdz * rdz)
+      mix = Math.min(1, Math.max(0, (rad - rMin) / Math.max(1e-6, rMax - rMin)))
+    }
     out.x = px; out.y = py; out.z = pz
     out.vx = dx * spd; out.vy = dy * spd; out.vz = dz * spd
     out.life = life[0] + (life[1] - life[0]) * hash01(seed, index, S_LIFE)
     out.size = size[0] + (size[1] - size[0]) * hash01(seed, index, S_SIZE)
-    const mix = hash01(seed, index, S_COL)
     out.r = c0[0] + (c1[0] - c0[0]) * mix
     out.g = c0[1] + (c1[1] - c0[1]) * mix
     out.b = c0[2] + (c1[2] - c0[2]) * mix

@@ -143,6 +143,26 @@ describe('GPUFacade public adapter/preferredFormat', () => {
   })
 })
 
+describe('GPUFacade setCanvasClearColor (Task 116)', () => {
+  it('recorded with the rgba values + the optional depth suffix', () => {
+    const { gpu, calls } = createRecordingGPU()
+    gpu.setCanvasClearColor([0.015, 0.02, 0.035, 1], 1)
+    gpu.setCanvasClearColor([0.1, 0.2, 0.3, 0.5])
+    expect(calls).toContain('setCanvasClearColor(0.015,0.02,0.035,1,d=1)')
+    expect(calls).toContain('setCanvasClearColor(0.1,0.2,0.3,0.5)')
+  })
+
+  it('beginPass stays beginPass(clearIndex) — the clear is facade STATE, not a tape-op argument', () => {
+    const { gpu, calls } = createRecordingGPU()
+    gpu.setCanvasClearColor([0, 0, 0, 1])
+    gpu.beginPass(0)
+    // the recorded frame vocabulary is unchanged (the existing tape tests
+    // pin these exact strings)
+    expect(calls).toContain('beginPass(0)')
+    expect(calls.some(call => /^beginPass\(0,/.test(call))).toBe(false)
+  })
+})
+
 describe('GPUFacade dispose', () => {
   it('dispose — recorded in calls', () => {
     const { gpu, calls } = createRecordingGPU()

@@ -86,4 +86,39 @@ describe('webgpuRenderer tape path', () => {
     expect(uploadsAfterSecond).toBe(uploadsAfterFirst) // value-compare: clean
     renderer.stop()
   })
+
+  // ── Task 116: the `clear` option reaches the WebGPU facade ──────────────
+
+  it('REGRESSION: options.clear is forwarded — setCanvasClearColor lands on the facade after configure', async () => {
+    const { gpu, calls } = createRecordingGPU()
+    const renderer = await createWebGpuRenderer({
+      canvas: fakeCanvas(),
+      clear: { color: [0.015, 0.02, 0.035, 1], depth: 1 },
+      createGPU: async () => gpu,
+      observeResize: false,
+      now: () => 0,
+      requestFrame: () => () => {},
+    })
+    // Before Task 116 WebGpuRendererOptions had no `clear` field at all: the
+    // option was silently dropped and the canvas cleared to a hardcoded
+    // {0.07, 0.08, 0.11} — a ~4.5× lighter background than the WebGL2 path.
+    expect(calls).toContain('setCanvasClearColor(0.015,0.02,0.035,1,d=1)')
+    const setAt = calls.indexOf('setCanvasClearColor(0.015,0.02,0.035,1,d=1)')
+    const configureAt = calls.findIndex(call => call.startsWith('configure('))
+    expect(setAt).toBeGreaterThan(configureAt) // after configure: context first, then the clear policy
+    renderer.stop()
+  })
+
+  it('no options.clear — the facade gets the DEFAULT_CLEAR (the GL facade numbers)', async () => {
+    const { gpu, calls } = createRecordingGPU()
+    const renderer = await createWebGpuRenderer({
+      canvas: fakeCanvas(),
+      createGPU: async () => gpu,
+      observeResize: false,
+      now: () => 0,
+      requestFrame: () => () => {},
+    })
+    expect(calls).toContain('setCanvasClearColor(0.07,0.08,0.11,1,d=1)')
+    renderer.stop()
+  })
 })

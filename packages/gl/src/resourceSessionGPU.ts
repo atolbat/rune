@@ -113,6 +113,10 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
   const facade: GPUFacade = {
     configure: (w, h) => raw.configure(w, h),
     resize: (w, h) => raw.resize(w, h),
+    // Task 116: renderer init state — a pass-through (the clear is policy,
+    // not a resource; the journal does not model it, the renderer re-applies
+    // it after recovery).
+    setCanvasClearColor: (color, depth) => raw.setCanvasClearColor(color, depth),
 
     createTexture: (width, height, format, options) => {
       const rawId = raw.createTexture(width, height, format, options)
