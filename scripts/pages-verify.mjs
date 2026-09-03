@@ -151,5 +151,42 @@ try {
 }
 console.log(particlesLiveOk ? 'PARTICLES LIVE OK' : 'PARTICLES LIVE FAIL')
 
+// ─── quarks: the 14-demo carousel on the LIVE page (Task 122) ─────────────
+let quarksLiveOk = false
+try {
+  await page.goto(`${BASE}/demo/quarks/`, { waitUntil: 'networkidle' })
+  await page.waitForFunction(() => document.querySelector('#backend')?.textContent !== '…', null, { timeout: 20_000 })
+  await page.waitForFunction(
+    () => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+    null,
+    { timeout: 30_000 },
+  )
+  await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
+  // cycle through ALL 14 demos; each must go live
+  let allLive = true
+  const names = []
+  for (let i = 1; i < 14; i++) {
+    await page.click('.pt-arrow:last-child')
+    await page.waitForFunction(
+      () => / · [1-9][\d,]* particles · [1-9][\d,]* verts/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+      null,
+      { timeout: 30_000 },
+    )
+    names.push((await page.textContent('.pt-pill')).split(' · ')[0])
+  }
+  const shotA = await page.locator('#canvas').screenshot()
+  await page.waitForTimeout(900)
+  const shotB = await page.locator('#canvas').screenshot()
+  const logText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
+  const gpuClean = !/too small|Invalid CommandBuffer|storm|rendering stopped|GL: GL_|GPU: |failed/i.test(logText)
+  await page.screenshot({ path: join(OUT, 'live-quarks.png'), fullPage: true })
+  console.log(`quarks cycle: ${names.join(' → ')}`)
+  console.log(`quarks GPU log: ${gpuClean ? 'clean' : 'ERRORS'}`)
+  quarksLiveOk = names.length === 13 && !shotA.equals(shotB) && gpuClean
+} catch (error) {
+  console.log(`quarks check failed: ${error instanceof Error ? error.message : String(error)}`)
+}
+console.log(quarksLiveOk ? 'QUARKS LIVE OK' : 'QUARKS LIVE FAIL')
+
 await browser.close()
-process.exit(cubeOk && viewerOk && sambaOk && matcapOk && particlesLiveOk && errors.length === 0 ? 0 : 1)
+process.exit(cubeOk && viewerOk && sambaOk && matcapOk && particlesLiveOk && quarksLiveOk && errors.length === 0 ? 0 : 1)
