@@ -59,19 +59,31 @@ export interface SpawnRecord {
   seed: number
 }
 
+/** A point attractor — three-nebula's Gravity/Attraction behavior.
+ *  accel = strength / (r² + softening²), pointing at `point`; a NEGATIVE
+ *  strength repels (a repulsor). `softening` (default 0.25) caps the force
+ *  at the center: no singularity, no NaN, no slingshot through the origin. */
+export interface Attractor {
+  readonly point: readonly number[]
+  readonly strength: number
+  readonly softening?: number
+}
+
 /** The force fields of the integrator.
  *  gravity — a constant acceleration [x, y, z] (units/s²);
  *  drag — exponential velocity damping per second (v *= e^(−drag·dt));
  *  turbulence — the strength of the deterministic per-particle wander
- *  (units/s² of hash-phased sine drift — cheap, allocation-free). */
+ *  (units/s² of hash-phased sine drift — cheap, allocation-free);
+ *  attract — an optional point attractor/repulsor (see Attractor). */
 export interface ForceFields {
   readonly gravity: readonly number[]
   readonly drag: number
   readonly turbulence: number
+  readonly attract?: Attractor | null
 }
 
 /** The default force fields (all zero — a ballistic void). */
-export const NO_FORCES: ForceFields = { gravity: [0, 0, 0], drag: 0, turbulence: 0 }
+export const NO_FORCES: ForceFields = { gravity: [0, 0, 0], drag: 0, turbulence: 0, attract: null }
 
 /** The mechanical particle store. */
 export interface ParticleSystem {
@@ -172,6 +184,17 @@ export function createParticleSystem(capacity: number): ParticleSystem {
       // One exp per FRAME, not per particle (the drag factor is shared).
       const dragFactor = drag > 0 ? Math.exp(-drag * dt) : 1
       const hasTurb = turbulence !== 0 && Number.isFinite(turbulence)
+      // The point attractor, hoisted out of the loop: the accel is
+      // strength / (r² + softening²) toward the point — one sqrt per particle.
+      // The facade validated the fields once at creation; here we only
+      // de-hoist (a missing attract keeps the loop clean).
+      const at = forces.attract
+      const hasAttract = at !== undefined && at !== null
+      const atx = hasAttract ? (at.point[0] ?? 0) : 0
+      const aty = hasAttract ? (at.point[1] ?? 0) : 0
+      const atz = hasAttract ? (at.point[2] ?? 0) : 0
+      const atS = hasAttract ? at.strength : 0
+      const soft2 = hasAttract ? (at.softening ?? 0.25) ** 2 : 1
 
       // Reverse walk + swap-remove from the tail: particles beyond i are
       // already integrated (or dead), so the survivor lands in a slot that
@@ -182,6 +205,18 @@ export function createParticleSystem(capacity: number): ParticleSystem {
         let vx = f.vx[i], vy = f.vy[i], vz = f.vz[i]
         if (dragFactor !== 1) { vx *= dragFactor; vy *= dragFactor; vz *= dragFactor }
         vx += gx * dt; vy += gy * dt; vz += gz * dt
+        if (hasAttract) {
+          // Δv = strength·dt·dir / (r·(r² + soft²)): normalized direction,
+          // softened magnitude. r→0 is guarded (the force at the exact
+          // point is undefined — we hold the velocity instead of NaN-ing).
+          const dx = atx - f.px[i], dy = aty - f.py[i], dz = atz - f.pz[i]
+          const r2 = dx * dx + dy * dy + dz * dz
+          const r = Math.sqrt(r2)
+          if (r > 1e-6) {
+            const k = atS * dt / (r * (r2 + soft2))
+            vx += dx * k; vy += dy * k; vz += dz * k
+          }
+        }
         if (hasTurb) {
           // The deterministic wander: three hash-phased sines of the
           // particle's own seed + age. Cheap (3 sin), stable (the phase

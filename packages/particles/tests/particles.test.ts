@@ -194,6 +194,83 @@ describe('createParticleSystem (the SoA store)', () => {
   })
 })
 
+// ─── the point attractor (Task 119 — three-nebula's Gravity behavior) ───────
+
+describe('the point attractor', () => {
+  it('pulls toward the point: accel = strength / (r² + soft²), direction = dir/r', () => {
+    const ps = createParticleSystem(1)
+    ps.emit(1, fixedSpawner({ x: 1, y: 0, z: 0, life: 10 }))
+    // strength 2, softening 0.5: at r=1 → a = 2/(1+0.25) = 1.6 toward origin
+    ps.advance(0.1, { gravity: [0, 0, 0], drag: 0, turbulence: 0, attract: { point: [0, 0, 0], strength: 2, softening: 0.5 } })
+    expect(ps.fields.vx[0]).toBeCloseTo(-0.16, 5) // a·dt = 1.6·0.1
+    expect(ps.fields.vy[0]).toBe(0)
+    expect(ps.fields.vz[0]).toBe(0)
+    expect(ps.fields.px[0]).toBeCloseTo(1 - 0.016, 5)
+  })
+
+  it('a negative strength repels (a repulsor)', () => {
+    const ps = createParticleSystem(1)
+    ps.emit(1, fixedSpawner({ x: 1, y: 0, z: 0, life: 10 }))
+    ps.advance(0.1, { gravity: [0, 0, 0], drag: 0, turbulence: 0, attract: { point: [0, 0, 0], strength: -2, softening: 0.5 } })
+    expect(ps.fields.vx[0]).toBeCloseTo(0.16, 5)
+  })
+
+  it('softening caps the force at the center — no NaN, no slingshot', () => {
+    const ps = createParticleSystem(2)
+    ps.emit(2, fixedSpawner({ x: 0.5, life: 10 }))
+    ps.fields.px[1] = 1e-9 // effectively AT the point
+    ps.advance(0.1, { gravity: [0, 0, 0], drag: 0, turbulence: 0, attract: { point: [0, 0, 0], strength: 5, softening: 0.25 } })
+    // the r→0 guard holds the velocity instead of dividing by ~0
+    expect(ps.fields.vx[1]).toBe(0)
+    expect(Number.isFinite(ps.fields.px[0] + ps.fields.px[1])).toBe(true)
+    // |Δv| at any r is bounded by strength·dt/softening²
+    expect(Math.abs(ps.fields.vx[0])).toBeLessThanOrEqual((5 * 0.1) / (0.25 * 0.25) + 1e-9)
+  })
+
+  it('composes with gravity and drag, deterministically', () => {
+    const run = () => {
+      const ps = createParticleSystem(8)
+      ps.emit(8, fixedSpawner({ x: 2, y: 3, z: 0, vy: 1, life: 100 }))
+      for (let k = 0; k < 30; k++) {
+        ps.advance(1 / 60, {
+          gravity: [0, -1, 0],
+          drag: 0.4,
+          turbulence: 0.3,
+          attract: { point: [0, 0.5, 0], strength: 1.4 },
+        })
+      }
+      return Array.from(ps.fields.px.subarray(0, ps.count))
+    }
+    expect(run()).toEqual(run())
+  })
+
+  it('a tangential launch near v_circ stays on the ring (an orbit, not a collapse)', () => {
+    // v_circ at r=2 for strength 1.2, soft 0.25: sqrt(1.2·2/(4+0.0625)) ≈ 0.768
+    const ps = createParticleSystem(1)
+    ps.emit(1, fixedSpawner({ x: 2, y: 0, z: 0, vz: 0.768, life: 1000 }))
+    for (let k = 0; k < 600; k++) {
+      ps.advance(1 / 60, { gravity: [0, 0, 0], drag: 0, turbulence: 0, attract: { point: [0, 0, 0], strength: 1.2, softening: 0.25 } })
+    }
+    // 10 s of free flight: the radius may breathe but must not collapse or escape
+    const r = Math.hypot(ps.fields.px[0], ps.fields.py[0], ps.fields.pz[0])
+    expect(r).toBeGreaterThan(1)
+    expect(r).toBeLessThan(3.2)
+    expect(ps.count).toBe(1)
+  })
+
+  it('the facade validates the attractor loudly', () => {
+    const base = { capacity: 4, rate: 0 }
+    expect(() => createParticles({ ...base, forces: { attract: { point: [0, NaN, 0], strength: 1 } } })).toThrow(/attract\.point/)
+    expect(() => createParticles({ ...base, forces: { attract: { point: [0, 0], strength: 1 } } })).toThrow(/attract\.point/)
+    expect(() => createParticles({ ...base, forces: { attract: { point: [0, 0, 0], strength: Infinity } } })).toThrow(/attract\.strength/)
+    expect(() => createParticles({ ...base, forces: { attract: { point: [0, 0, 0], strength: 1, softening: 0 } } })).toThrow(/attract\.softening/)
+    // a clean attractor passes through
+    expect(() => createParticles({ ...base, forces: { attract: { point: [0, 0, 0], strength: 1 } } })).not.toThrow()
+    // and no attract at all — the default
+    expect(() => createParticles(base)).not.toThrow()
+  })
+})
+
 // ─── the spawners ───────────────────────────────────────────────────────────
 
 describe('createSpawner (the shapes)', () => {

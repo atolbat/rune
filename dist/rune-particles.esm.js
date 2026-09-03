@@ -1,5 +1,5 @@
 // packages/particles/src/system.ts
-var NO_FORCES = { gravity: [0, 0, 0], drag: 0, turbulence: 0 };
+var NO_FORCES = { gravity: [0, 0, 0], drag: 0, turbulence: 0, attract: null };
 function createParticleSystem(capacity) {
   if (!Number.isInteger(capacity) || capacity < 1 || capacity > 2 ** 24) {
     throw new Error(`rune/particles: capacity must be an integer in [1, 16777216] (got ${capacity})`);
@@ -88,6 +88,13 @@ function createParticleSystem(capacity) {
       const gx = gravity[0] ?? 0, gy = gravity[1] ?? 0, gz = gravity[2] ?? 0;
       const dragFactor = drag > 0 ? Math.exp(-drag * dt) : 1;
       const hasTurb = turbulence !== 0 && Number.isFinite(turbulence);
+      const at = forces.attract;
+      const hasAttract = at !== undefined && at !== null;
+      const atx = hasAttract ? at.point[0] ?? 0 : 0;
+      const aty = hasAttract ? at.point[1] ?? 0 : 0;
+      const atz = hasAttract ? at.point[2] ?? 0 : 0;
+      const atS = hasAttract ? at.strength : 0;
+      const soft2 = hasAttract ? (at.softening ?? 0.25) ** 2 : 1;
       let i = count - 1;
       while (i >= 0) {
         const age = f.age[i] + dt;
@@ -100,6 +107,17 @@ function createParticleSystem(capacity) {
         vx += gx * dt;
         vy += gy * dt;
         vz += gz * dt;
+        if (hasAttract) {
+          const dx = atx - f.px[i], dy = aty - f.py[i], dz = atz - f.pz[i];
+          const r2 = dx * dx + dy * dy + dz * dz;
+          const r = Math.sqrt(r2);
+          if (r > 0.000001) {
+            const k = atS * dt / (r * (r2 + soft2));
+            vx += dx * k;
+            vy += dy * k;
+            vz += dz * k;
+          }
+        }
         if (hasTurb) {
           const ph = f.seed[i] * 37;
           const t = age * 5 + ph;
@@ -510,7 +528,8 @@ function createParticles(desc) {
   const forces = {
     gravity: desc.forces?.gravity ?? NO_FORCES.gravity,
     drag: desc.forces?.drag ?? NO_FORCES.drag,
-    turbulence: desc.forces?.turbulence ?? NO_FORCES.turbulence
+    turbulence: desc.forces?.turbulence ?? NO_FORCES.turbulence,
+    attract: validateAttractor(desc.forces?.attract)
   };
   let spawner = createSpawner(desc.spawner ?? DEFAULT_SPAWNER);
   let ratePerSecond = desc.rate ?? 0;
@@ -574,6 +593,22 @@ var DEFAULT_SPAWNER = {
   size: [0.1, 0.2],
   color: [[1, 1, 1, 1], [0.8, 0.9, 1, 0.6]]
 };
+function validateAttractor(at) {
+  if (at === undefined || at === null)
+    return null;
+  const { point, strength, softening } = at;
+  if (!Array.isArray(point) || point.length !== 3 || !point.every((v) => Number.isFinite(v))) {
+    throw new Error(`rune/particles: attract.point must be three finite numbers (got ${JSON.stringify(point)})`);
+  }
+  if (!Number.isFinite(strength)) {
+    throw new Error(`rune/particles: attract.strength must be finite (got ${strength}; negative = repulsion) — NaN is not an infinite attractor`);
+  }
+  const soft = softening ?? 0.25;
+  if (!Number.isFinite(soft) || soft <= 0) {
+    throw new Error(`rune/particles: attract.softening must be finite > 0 (got ${softening}; it caps the force at the center — without it the integrator NaNs)`);
+  }
+  return at;
+}
 export {
   sampleRamp,
   hash01,

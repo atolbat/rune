@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { createWebGpuRenderer } from '../src/index.ts'
+import { createWebGpuRenderer, createRenderer } from '../src/index.ts'
 import { createRecordingGPU } from '@rune/webgpu'
 
 /**
@@ -92,5 +92,37 @@ describe('webgpu texture tape path', () => {
     renderer.step(32)
     expect(calls.filter(call => call.startsWith('ensurePipeline(')).length).toBe(1)
     renderer.stop()
+  })
+
+  // Task 118: texture.upload(bytes) on the WebGPU branch — it WAS a silent
+  // no-op stub (`upload: () => ({ done }) as never`): the raw bytes never
+  // reached the texture and nothing complained. The particles demo's
+  // browser-independent sprite rides on this path — a regression here
+  // would bring the "opaque quads, black rims" back on WebGPU.
+  it('renderer.texture(w,h).upload(bytes) writes the raw bytes (ONE writeTexture, synchronous)', async () => {
+    const original = (globalThis as { navigator?: unknown }).navigator
+    ;(globalThis as { navigator?: unknown }).navigator = { gpu: { requestAdapter: async () => ({}) } }
+    try {
+      const { gpu, calls } = createRecordingGPU()
+      const r = createRenderer({
+        canvas: fakeCanvas(),
+        backend: 'webgpu',
+        createGPU: async () => gpu,
+        observeResize: false,
+        now: () => 0,
+        requestFrame: () => () => {},
+      })
+      await r.start()
+      const tex = r.texture(64, 48)
+      const bytes = new Uint8Array(64 * 48 * 4).fill(7)
+      const upload = tex.upload(bytes)
+      // ONE raw-byte write at the origin, the full texture, immediately
+      expect(calls).toContain(`texSubImage2D(${tex.textureId},0,0,64,48)`)
+      expect(upload.progress).toBe(1)
+      await upload.done
+      r.stop()
+    } finally {
+      ;(globalThis as { navigator?: unknown }).navigator = original
+    }
   })
 })

@@ -479,7 +479,20 @@ function makeGpuTextureHandle(
     width: w,
     height: h,
     mipLevels,
-    upload: () => ({ done: Promise.resolve() }) as never,
+    upload: (source: Uint8Array, options?: { priority?: number; onProgress?: (fraction: number) => void }) => {
+      // Task 118: the raw-byte upload — ONE synchronous writeTexture (the
+      // facade's texSubImage2D). Byte-exact: NO browser pixel conversion —
+      // the straight/premultiplied character of the alpha is exactly what
+      // the caller put in the bytes (the uploadImage paths convert; that
+      // browser-dependence made the particles demo's WebGL2 sprites render
+      // as opaque quads on some browsers — raw bytes are immune).
+      // options (priority/onProgress) are meaningless for a single write —
+      // acknowledged and ignored (the WebGL2 path streams in chunks and
+      // honors them there).
+      gpu.texSubImage2D(textureId, 0, 0, w, h, source)
+      options?.onProgress?.(1)
+      return { progress: 1, cancel: (): void => {}, done: Promise.resolve() }
+    },
     uploadImage: (source: GLImageSource | GPUImageSource, options?: { flipY?: boolean }) => {
       const [sw, sh] = externalImageSize(source as GPUImageSource)
       gpu.copyExternalImageToTexture(textureId, source as GPUImageSource, 0, 0, sw, sh, options?.flipY)

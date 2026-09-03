@@ -44,13 +44,20 @@
  *   Together with tangential velocity they make a shearing spiral galaxy
  *   from ONE declarative spawner (see the demo's galaxy preset).
  *
+ *   THE POINT ATTRACTOR (Task 119, three-nebula's Gravity/Attraction
+ *   behavior): forces.attract = { point, strength, softening? } — a mass
+ *   pulling (or, negative, repelling) every particle with accel
+ *   strength/(r²+softening²). Launch particles tangentially and you get an
+ *   orbiting cloud; drop them from rest and you get a collapse (see the
+ *   demo's orbit preset).
+ *
  *   DETERMINISM: same inputs → same bits, every time, every backend.
  *   The clock belongs to the caller: advance(dt) is driven from the
  *   render loop. The facade owns the rate accumulator, not the frame.
  * ══════════════════════════════════════════════════════════════════════════
  */
 
-export type { ParticleFields, SpawnRecord, ForceFields, ParticleSystem } from './system.ts'
+export type { ParticleFields, SpawnRecord, ForceFields, Attractor, ParticleSystem } from './system.ts'
 export { createParticleSystem, NO_FORCES } from './system.ts'
 export type { SpawnShape, VelocityMode, SpawnerDesc, Spawner } from './spawn.ts'
 export { createSpawner, hash01 } from './spawn.ts'

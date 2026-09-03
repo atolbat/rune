@@ -159,7 +159,7 @@ await viewerPhone.click('.mv-pill')
 await viewerPhone.waitForTimeout(400)
 await viewerPhone.screenshot({ path: join(out, 'mobile-mv-sheet.png') })
 
-// ─── particles: the six presets (desktop) + the phone sheet ───────────────
+// ─── particles: the eight presets (desktop) + the phone sheet ──────────
 const pt = await browser.newPage({ viewport: { width: 960, height: 720 } })
 pt.on('pageerror', e => console.log('PT PAGEERROR:', e.message))
 pt.on('console', m => { if (m.type() === 'error') console.log('PT CONSOLE:', m.text()) })
@@ -180,8 +180,8 @@ await pt.screenshot({ path: join(out, 'desktop-particles-fountain.png') })
 // Per-preset settle times: burst/ramp presets need several shells or a full
 // fill before their look reads (the galaxy steady state is rate·life ≈ 7k
 // particles — 3 s shows a young sparse disc).
-const SETTLE = { Fireworks: 5000, Galaxy: 10000, Embers: 4000, 'Deep Space': 4000, Meteor: 6000 }
-for (const name of ['Fireworks', 'Galaxy', 'Embers', 'Deep Space', 'Meteor']) {
+const SETTLE = { Fireworks: 5000, Galaxy: 10000, Embers: 4000, Drift: 5000, Snow: 5000, Orbit: 7000, Meteor: 6000 }
+for (const name of ['Fireworks', 'Galaxy', 'Embers', 'Drift', 'Snow', 'Orbit', 'Meteor']) {
   console.log(`[shots] preset → ${name}`)
   await pt.evaluate((n) => {
     const rows = [...document.querySelectorAll('.pt-row')]
@@ -198,27 +198,32 @@ for (const name of ['Fireworks', 'Galaxy', 'Embers', 'Deep Space', 'Meteor']) {
     { timeout: 25_000 },
   )
   await pt.waitForTimeout(SETTLE[name] ?? 3000)
-  await pt.screenshot({ path: join(out, `desktop-particles-${name.toLowerCase().replace(' ', '-')}.png`) })
+  const shotPath = join(out, `desktop-particles-${name.toLowerCase().replace(' ', '-')}.png`)
+  await pt.screenshot({ path: shotPath })
+  // the alpha gate on the ALPHA_PIPELINE presets (see assertNoBlackRims)
+  if (name === 'Embers' || name === 'Snow') await assertNoBlackRims(pt, shotPath, name)
 }
 
-// Deep Space: the FULL STOP, timed deterministically. The throttle phase is
-// anchored to the preset switch (spaceTick sets rt.t0 on the first tick, a
-// few hundred ms after this click): cruise ≈ 4.65 s, decelerate ≈ 2.3 s,
-// full stop over phase [4.65, 9.3] s. Shooting at +8 s lands ~3.4 s into
-// the stop — margin on both sides; the throttle follows real time, so low
-// headless FPS cannot shift the phase.
-await pt.evaluate(() => {
-  const rows = [...document.querySelectorAll('.pt-row')]
-  rows.find(r => r.textContent.includes('Deep Space'))?.dispatchEvent(new Event('click', { bubbles: true }))
-})
-await pt.waitForFunction(
-  () => (document.querySelector('.pt-pill')?.textContent ?? '').includes('Deep Space'),
-  null,
-  { timeout: 10_000 },
-)
-await pt.waitForTimeout(8000)
-await pt.screenshot({ path: join(out, 'desktop-particles-deep-space-stop.png') })
-console.log('[shots] deep space stop shot at phase ≈ 8 s (the stop window is [4.65, 9.3] s)')
+// THE ALPHA REGRESSION GATE (Task 118): the background is the configured
+// clear color [4,5,9]; a broken sprite alpha draws OPAQUE quads — their
+// rims are EXACTLY [0,0,0] (the straight-alpha rim rgb is 0 where a≈0).
+// PNG screenshots are lossless: any pure-[0,0,0] pixel = the alpha died.
+// Run on the embers/snow shots (the ALPHA_PIPELINE presets — the additive
+// ones hide the rim black under overbright cores).
+async function assertNoBlackRims(page, shotPath, preset) {
+  const { readFile } = await import('node:fs/promises')
+  const { PNG } = await import('pngjs')
+  const png = PNG.sync.read(await readFile(shotPath))
+  const { width: W, height: H, data } = png
+  let pure = 0
+  for (let i = 0; i < W * H * 4; i += 4) {
+    if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0) pure++
+  }
+  console.log(`[shots] alpha gate (${preset}): pure-[0,0,0] pixels = ${pure}`)
+  if (pure > 0) {
+    throw new Error(`[shots] ${preset}: ${pure} pure-black pixels — the sprite alpha broke (opaque quad rims)`)
+  }
+}
 
 // phone: the preset sheet as the entry point
 const ptPhone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })

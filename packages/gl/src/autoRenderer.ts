@@ -167,12 +167,21 @@ function wrapGpu(inner: WebGpuRenderer, decision: BackendDecision): AutoRenderer
     get transients() { return inner.transients },
     // The WebGPU renderer has no texture() — textures via gpu.createTexture
     // (as in showWebgpu.ts). For unification — we delegate to the facade.
-    texture: (w, h) => ({
-      textureId: inner.gpu.createTexture(w, h),
-      width: w,
-      height: h,
-      upload: () => ({ done: Promise.resolve() }) as never,
-    }) as never,
+    // Task 118: upload writes the RAW bytes via the facade's texSubImage2D
+    // (one writeTexture) — it was a silent no-op stub, which made
+    // texture.upload(bytes) silently lose pixels on this branch.
+    texture: (w, h) => {
+      const textureId = inner.gpu.createTexture(w, h)
+      return {
+        textureId,
+        width: w,
+        height: h,
+        upload: (source: Uint8Array) => {
+          inner.gpu.texSubImage2D(textureId, 0, 0, w, h, source)
+          return { progress: 1, cancel: (): void => {}, done: Promise.resolve() }
+        },
+      } as never
+    },
     command: spec => commandGpu(spec, inner),
     pass: (frag, opts) => inner.pass(frag, opts),
     surface: opts => inner.surface(opts) as Surface<AnyCommand>,

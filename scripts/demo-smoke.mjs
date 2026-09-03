@@ -394,9 +394,9 @@ try {
   const galaxyPill = await page.textContent('.pt-pill')
   console.log(`[smoke] particles preset switch: ${galaxyPill}`)
 
-  // Task 117/118: the two new presets — Deep Space (the fly-through with
-  // throttle stops) and Meteor (the directional firework)
-  for (const name of ['Deep Space', 'Meteor']) {
+  // Task 119: the three new presets — Drift (the user's standing dust),
+  // Snow (three-nebula's example) and Orbit (the point attractor)
+  for (const name of ['Drift', 'Snow', 'Orbit']) {
     await page.evaluate((n) => {
       const rows = [...document.querySelectorAll('.pt-row')]
       rows.find(r => r.textContent.includes(n))?.dispatchEvent(new Event('click', { bubbles: true }))
@@ -406,8 +406,28 @@ try {
       name,
       { timeout: 10_000 },
     )
-    // the preset goes live: particles appear in the pill (Deep Space ramps
-    // its rate through the throttle; Meteor waits for its first burst tick)
+    // the preset goes live: particles appear in the pill (each new preset
+    // ramps its rate from 0 — the pill shows the count growing)
+    await page.waitForFunction(
+      (n) => new RegExp(`${n} · [1-9][\\d,]* /`).test(document.querySelector('.pt-pill')?.textContent ?? ''),
+      name,
+      { timeout: 25_000 },
+    )
+    const presetAlive = await framesDiffer(page)
+    console.log(`[smoke] preset "${name}": ${await page.textContent('.pt-pill')} — ${presetAlive ? 'alive' : 'STATIC'}`)
+  }
+  // Meteor: the directional firework (kept from Task 118)
+  {
+    const name = 'Meteor'
+    await page.evaluate((n) => {
+      const rows = [...document.querySelectorAll('.pt-row')]
+      rows.find(r => r.textContent.includes(n))?.dispatchEvent(new Event('click', { bubbles: true }))
+    }, name)
+    await page.waitForFunction(
+      (n) => (document.querySelector('.pt-pill')?.textContent ?? '').includes(n),
+      name,
+      { timeout: 10_000 },
+    )
     await page.waitForFunction(
       (n) => new RegExp(`${n} · [1-9][\\d,]* /`).test(document.querySelector('.pt-pill')?.textContent ?? ''),
       name,

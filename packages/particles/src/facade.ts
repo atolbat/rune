@@ -12,7 +12,7 @@
  * ════════════════════════════════════════════════════════════════════════
  */
 
-import { createParticleSystem, NO_FORCES, type ForceFields, type ParticleSystem } from './system.ts'
+import { createParticleSystem, NO_FORCES, type Attractor, type ForceFields, type ParticleSystem } from './system.ts'
 import { createSpawner, type Spawner, type SpawnerDesc } from './spawn.ts'
 import { CONSTANT_RAMP, type Ramp } from './ramp.ts'
 import { fillBillboards, SOUP_STRIDE, VERTS_PER_PARTICLE, type CameraBasis } from './billboards.ts'
@@ -80,6 +80,7 @@ export function createParticles(desc: ParticlesDesc): Particles {
     gravity: desc.forces?.gravity ?? NO_FORCES.gravity,
     drag: desc.forces?.drag ?? NO_FORCES.drag,
     turbulence: desc.forces?.turbulence ?? NO_FORCES.turbulence,
+    attract: validateAttractor(desc.forces?.attract),
   }
 
   let spawner: Spawner = createSpawner(desc.spawner ?? DEFAULT_SPAWNER)
@@ -151,4 +152,22 @@ const DEFAULT_SPAWNER: SpawnerDesc = {
   life: [1, 2],
   size: [0.1, 0.2],
   color: [[1, 1, 1, 1], [0.8, 0.9, 1, 0.6]],
+}
+
+/** Attractor validation (once, at creation — the hot advance() loop trusts
+ *  its inputs). A loud error beats a silent NaN poisoning the whole system. */
+function validateAttractor(at: Attractor | null | undefined): Attractor | null {
+  if (at === undefined || at === null) return null
+  const { point, strength, softening } = at
+  if (!Array.isArray(point) || point.length !== 3 || !point.every(v => Number.isFinite(v))) {
+    throw new Error(`rune/particles: attract.point must be three finite numbers (got ${JSON.stringify(point)})`)
+  }
+  if (!Number.isFinite(strength)) {
+    throw new Error(`rune/particles: attract.strength must be finite (got ${strength}; negative = repulsion) — NaN is not an infinite attractor`)
+  }
+  const soft = softening ?? 0.25
+  if (!Number.isFinite(soft) || soft <= 0) {
+    throw new Error(`rune/particles: attract.softening must be finite > 0 (got ${softening}; it caps the force at the center — without it the integrator NaNs)`)
+  }
+  return at
 }

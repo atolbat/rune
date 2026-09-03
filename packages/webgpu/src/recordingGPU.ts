@@ -157,6 +157,7 @@ export function createCountingGPU(): GPUFacade & { totalCalls: number } {
     resize: bump,
     setCanvasClearColor: bump,
     createTexture: alloc as never,
+    texSubImage2D: bump,
     copyExternalImageToTexture: bump,
     copyExternalImageToTextureMip: bump,
     uploadUniforms: bump,

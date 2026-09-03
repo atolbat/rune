@@ -55,6 +55,30 @@ describe('renderer.uploads (streaming idle slot)', () => {
     // Full window utilization → growth by 1/8 (80 → 90)
     expect(renderer.uploads.window).toBe(90)
   })
+
+  // Task 118: the raw-byte texture upload — the byte-exact sprite path (the
+  // particles demo rides on it: no browser premultiply semantics between
+  // the caller's bytes and the GPU texels). GL streams the bytes through
+  // the scheduler's idle slot; the write must land after one step.
+  it('texture.upload(bytes) lands in the texture via the idle slot (raw texSubImage2D)', async () => {
+    const { gl, calls } = createRecordingGL()
+    const renderer = createRenderer({
+      canvas: fakeCanvas(),
+      createGL: () => gl,
+      observeResize: false,
+      now: () => 0,
+      requestFrame: () => () => {}, // headless: no rAF
+    })
+    await renderer.start()
+    const tex = renderer.texture(64, 64)
+    const bytes = new Uint8Array(64 * 64 * 4).fill(9)
+    tex.upload(bytes)
+    // the tasks are queued, not yet written (the idle slot runs after a frame)
+    renderer.step(16)
+    // the full-rect raw write landed (the preview and/or the whole-image tile)
+    expect(calls.some(call => call === `texSubImage2D(${tex.textureId},0,0,64,64)`)).toBe(true)
+    renderer.stop()
+  })
 })
 
 function fakeCanvas(): HTMLCanvasElement {

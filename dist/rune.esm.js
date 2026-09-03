@@ -10444,7 +10444,11 @@ function makeGpuTextureHandle(gpu, textureId, w, h, mipLevels) {
     width: w,
     height: h,
     mipLevels,
-    upload: () => ({ done: Promise.resolve() }),
+    upload: (source, options) => {
+      gpu.texSubImage2D(textureId, 0, 0, w, h, source);
+      options?.onProgress?.(1);
+      return { progress: 1, cancel: () => {}, done: Promise.resolve() };
+    },
     uploadImage: (source, options) => {
       const [sw, sh] = externalImageSize(source);
       gpu.copyExternalImageToTexture(textureId, source, 0, 0, sw, sh, options?.flipY);

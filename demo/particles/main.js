@@ -1,7 +1,8 @@
 // "particles" demo — @rune/particles, the CPU-simulated system, drawn as
 //   camera-facing billboard soups on both backends.
 //
-// Flow: four presets (fountain / fireworks / galaxy / embers) built from
+// Flow: eight presets (fountain / fireworks / galaxy / embers / drift /
+//   snow / orbit / meteor) built from
 //   createParticles({ capacity, rate, spawner, ramp, forces, spin });
 //   per frame: advance(dt) → billboards(basis) → ONE draw command with a
 //   dynamic vertex count. The soup (pos3 / uv2 / color4, 6 verts per
@@ -13,9 +14,11 @@
 //              (the feed's dirty-range write, keyed by the array itself)
 // The material is the UNLIT pair from @rune/materials (TEXTURE |
 //   VERTEX_COLOR — the texture multiplied by the per-vertex ramp tint);
-//   the sprite is a canvas radial gradient (no download); blending comes
+//   the sprite is EXPLICIT RGBA bytes — straight alpha by construction,
+//   uploaded through the raw-byte path (no canvas, no ImageBitmap, no
+//   browser premultiply semantics — Task 118); blending comes
 //   from the pipeline desc: additive for the glow presets, classic
-//   src-alpha for the smoke preset.
+//   src-alpha for the snow/embers presets.
 // Camera: slow auto-orbit; drag to orbit, pinch / wheel to zoom. The
 //   billboard basis (right / up) is taken from the VIEW matrix rows.
 import { createRenderer } from '../../dist/rune.esm.js'
@@ -31,7 +34,7 @@ const ADDITIVE_PIPELINE = {
   raster: { cull: 'none' },
   blend: { src: 'src-alpha', dst: 'one' },
 }
-// classic transparency: the smoke preset (soft dark puffs)
+// classic transparency: the snow/embers presets (soft puffs and flakes)
 const ALPHA_PIPELINE = {
   depth: { test: 'less', write: false },
   raster: { cull: 'none' },
@@ -73,17 +76,8 @@ const METEOR_PLUME = {
   color: [[1, 0.92, 0.65, 1], [1, 0.45, 0.2, 0.9]],
 }
 
-// The Deep Space streaks — comets that whip past 2-3× faster than the stars
-// (only fired while the flight throttle is open).
-const STREAK_SPAWNER = {
-  shape: { kind: 'cone', origin: [0, 0.6, -26], axis: [0, 0, 1], halfAngle: 0.06, baseRadius: 3.5, length: [0, 0.4] },
-  velocity: { mode: 'lobe' },
-  speed: [11, 15],
-  life: [2, 3],
-  size: [0.09, 0.16],
-  color: [[0.6, 0.85, 1, 1], [1, 1, 1, 1]],
-  seed: 404,
-}
+// The Deep Space streaks — REMOVED (Task 119): the user's mental model was
+// not a fly-through but standing dust — see the Drift preset below.
 
 /* The per-preset rhythms. `rt` is a fresh {} per preset switch — ticks keep
  * their timers/throttle state on it (no globals to reset, no allocation per
@@ -145,29 +139,6 @@ function galaxyTick(ctx, ps, rt) {
     color: [[1, 0.87, 0.6, 1], [1, 0.95, 0.82, 1]],
     seed: (Math.random() * 0x7fffffff) | 0,
   })
-}
-
-function spaceTick(ctx, ps, rt) {
-  // THE THROTTLE — "we fly, and sometimes stop". One period ≈ 14 s:
-  // ~4.5 s cruising, ~2.3 s decelerating, ~4.5 s FULL STOP (the starfield
-  // hangs frozen — time dilation: the whole simulation is scaled, so the
-  // stars do not age or dissolve while we stand still), ~2.3 s accelerating.
-  // The cos is mapped [0.25, 0.75] → [0, 1] so the ends DWELL, then a
-  // smoothstep softens the ramps.
-  // The phase is anchored to the PRESET SWITCH (rt is fresh per switch):
-  // Deep Space always opens in flight — a global-time phase could land in
-  // the stop, where the newborn stars (alpha 0) would never age in and the
-  // preset would open on a black screen until the throttle opened.
-  const phase = ctx.time - (rt.t0 ??= ctx.time)
-  const base = 0.5 + 0.5 * Math.cos(phase * 0.45)
-  const t = Math.min(1, Math.max(0, (base - 0.25) / 0.5))
-  const throttle = t * t * (3 - 2 * t)
-  ps.advance(ctx.dt * throttle)
-  // comets only while moving (a stopped ship sees no flybys)
-  rt.timer = (rt.timer ?? 1.2) - ctx.dt
-  if (rt.timer > 0) return
-  rt.timer = 0.9 + Math.random() * 1.7
-  if (throttle > 0.35) ps.burst(16, { ...STREAK_SPAWNER, seed: (Math.random() * 0x7fffffff) | 0 })
 }
 
 const PRESETS = {
@@ -283,34 +254,104 @@ const PRESETS = {
     }),
   },
 
-  space: {
-    title: 'Deep Space',
-    sub: 'starfield fly-through · throttle stops · additive',
+  drift: {
+    title: 'Drift',
+    sub: 'dust motes · slow wander · fade in/out',
     pipeline: ADDITIVE_PIPELINE,
-    // the camera looks straight down the flight axis (the world streams +Z
-    // past a fixed eye); the auto-orbit is nearly off so the flight reads
-    camera: { yaw: 0, pitch: 0.05, dist: 4.4, orbit: 0.004 },
-    tick: spaceTick,
+    // THE USER'S PRESET (Task 119): standing still, tiny particles all
+    // around, VERY slow chaotic motion, appearing and dissolving — no
+    // trails, no fly-through. A slow auto-orbit keeps the parallax readable
+    // (the camera stands, the world drifts).
+    camera: { yaw: 0.55, pitch: 0.15, dist: 4.6, orbit: 0.03 },
     make: () => createParticles({
       capacity: CAPACITY,
-      rate: 850,
+      rate: 380,
       ramp: createRamp([
-        { t: 0, size: 0.7, r: 1, g: 1, b: 1, a: 0 },
-        { t: 0.5, size: 1, r: 1, g: 1, b: 1, a: 0.9 },
-        { t: 1, size: 1.5, r: 1, g: 1, b: 1, a: 0 },
+        { t: 0, size: 0.9, r: 1, g: 1, b: 1, a: 0 },
+        { t: 0.2, size: 1, r: 1, g: 1, b: 1, a: 0.65 },
+        { t: 0.8, size: 1, r: 1, g: 1, b: 1, a: 0.4 },
+        { t: 1, size: 1, r: 1, g: 1, b: 1, a: 0 },
       ]),
-      forces: { gravity: [0, 0, 0], drag: 0, turbulence: 0 },
+      // near-zero launch speed + turbulence = the slow random walk; drag
+      // keeps the walk gentle instead of accelerating forever
+      forces: { gravity: [0, 0, 0], drag: 0.4, turbulence: 0.35 },
       spin: 0,
       spawner: {
-        // a big ball of stars AHEAD (the world flies, the camera rests):
-        // fixed +Z velocity — the throttle scales the whole simulation
-        shape: { kind: 'sphere', origin: [0, 0.4, -20], radius: [3, 20] },
-        velocity: { mode: 'fixed', dir: [0, 0, 1] },
-        speed: [4.5, 7],
-        life: [6.5, 9.5],
-        size: [0.05, 0.12],
-        color: [[0.65, 0.75, 1, 1], [1, 0.92, 0.75, 1]],
-        seed: 202,
+        // motes are born EVERYWHERE around the eye — a full shell, so they
+        // appear and dissolve in place, all directions equally. The shell
+        // stays inside the camera ring (max r 4.0 < dist 4.6): nothing is
+        // born inches from the eye to loom as a giant glow blob.
+        shape: { kind: 'sphere', origin: [0, 0, 0], radius: [1.0, 4.0] },
+        velocity: { mode: 'radial' },
+        speed: [0.02, 0.09],
+        life: [5, 9.5],
+        size: [0.025, 0.06],
+        color: [[0.75, 0.85, 1, 1], [1, 0.95, 0.85, 0.9]],
+        seed: 77,
+      },
+    }),
+  },
+
+  snow: {
+    title: 'Snow',
+    sub: 'falling flakes · side drift · alpha blend',
+    pipeline: ALPHA_PIPELINE,
+    // three-nebula's snow example: a wide quiet snowfall — level camera,
+    // flakes fade in above and dissolve below before the floor
+    camera: { yaw: 0.35, pitch: 0.1, dist: 6.0, orbit: 0.04 },
+    make: () => createParticles({
+      capacity: CAPACITY,
+      rate: 380,
+      ramp: createRamp([
+        { t: 0, size: 0.8, r: 0.95, g: 0.97, b: 1, a: 0 },
+        { t: 0.15, size: 1, r: 0.95, g: 0.97, b: 1, a: 0.9 },
+        { t: 1, size: 0.85, r: 0.9, g: 0.95, b: 1, a: 0 },
+      ]),
+      forces: { gravity: [0, -0.25, 0], drag: 0.3, turbulence: 0.45 },
+      spin: 0.5,
+      spawner: {
+        // the disc's axis points DOWN: the plane is horizontal, the 'axis'
+        // velocity mode falls along −Y
+        shape: { kind: 'disc', origin: [0, 3.4, 0], axis: [0, -1, 0], radius: [0, 3.8] },
+        velocity: { mode: 'axis' },
+        speed: [0.5, 0.9],
+        life: [4.5, 6.5],
+        size: [0.05, 0.11],
+        color: [[1, 1, 1, 0.95], [0.8, 0.88, 1, 0.85]],
+        seed: 11,
+      },
+    }),
+  },
+
+  orbit: {
+    title: 'Orbit',
+    sub: 'point attractor · tangential launch · additive',
+    pipeline: ADDITIVE_PIPELINE,
+    // three-nebula's Gravity/Attraction example (Task 119): a central mass
+    // (forces.attract) + particles born on a ring with tangential velocity —
+    // the near-circular speed, so they SWARM around the center instead of
+    // falling in or flying away; a whisper of drag makes them slowly decay
+    camera: { yaw: 0.75, pitch: 0.58, dist: 6.6, orbit: 0.05 },
+    make: () => createParticles({
+      capacity: CAPACITY,
+      rate: 480,
+      ramp: createRamp([
+        { t: 0, size: 0.6, r: 1, g: 1, b: 1, a: 0 },
+        { t: 0.2, size: 1, r: 0.7, g: 0.9, b: 1, a: 0.85 },
+        { t: 1, size: 0.75, r: 1, g: 0.65, b: 0.4, a: 0 },
+      ]),
+      // v_circ at r∈[1.4,2.6] ≈ 0.7..0.95 for strength 1.2 — the launch
+      // speeds below; softening 0.25 caps the pull at the center
+      forces: { gravity: [0, 0, 0], drag: 0.015, turbulence: 0, attract: { point: [0, 0, 0], strength: 1.2, softening: 0.25 } },
+      spin: 0,
+      spawner: {
+        shape: { kind: 'disc', origin: [0, 0, 0], axis: [0, 1, 0], radius: [1.4, 2.6] },
+        velocity: { mode: 'tangential' },
+        speed: [0.72, 0.95],
+        life: [6, 10],
+        size: [0.05, 0.1],
+        color: [[0.65, 0.85, 1, 1], [1, 0.8, 0.45, 0.9]],
+        seed: 55,
       },
     }),
   },
@@ -336,38 +377,57 @@ const PRESETS = {
   },
 }
 
-const PRESET_ORDER = ['fountain', 'fireworks', 'galaxy', 'embers', 'space', 'meteor']
+const PRESET_ORDER = ['fountain', 'fireworks', 'galaxy', 'embers', 'drift', 'snow', 'orbit', 'meteor']
 
 /* The per-preset camera defaults — applied on every switch so each preset
- * opens framed (the galaxy from above, space down the axis). */
+ * opens framed (the galaxy and orbit from above, snow level). */
 const DEFAULT_CAMERA = { yaw: 0.55, pitch: 0.25, dist: 4.6, orbit: 0.08 }
 let presetOrbit = DEFAULT_CAMERA.orbit
 
-/* ─── The sprite: a canvas radial gradient (no download) ───────────────── */
+/* ─── The sprite: explicit RGBA bytes, straight alpha ───────────────── */
 
-function makeSpriteBitmap() {
-  const canvas = document.createElement('canvas')
-  canvas.width = 128
-  canvas.height = 128
-  const ctx = canvas.getContext('2d')
-  // a soft glow: white core → transparent rim
-  const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64)
-  g.addColorStop(0, 'rgba(255,255,255,1)')
-  g.addColorStop(0.25, 'rgba(255,255,255,0.85)')
-  g.addColorStop(0.6, 'rgba(255,255,255,0.22)')
-  g.addColorStop(1, 'rgba(255,255,255,0)')
-  ctx.fillStyle = g
-  ctx.fillRect(0, 0, 128, 128)
-  // premultiplyAlpha: 'none' — THE cross-backend parity point (Task 116).
-  // Canvas 2D stores PREMULTIPLIED pixels; a default createImageBitmap
-  // keeps them premultiplied. WebGPU's copyExternalImageToTexture
-  // un-premultiplies on upload (premultipliedAlpha:false tag), but WebGL2's
-  // texImage2D uploads the bytes AS-IS — so without 'none' the WebGL texture
-  // holds premultiplied rgb while both pipelines blend with 'src-alpha':
-  // the alpha multiplies TWICE → dark "liquid" sprites and a dim fountain
-  // (the reported WebGL-vs-WebGPU mismatch). 'none' makes the browser
-  // un-premultiply at bitmap creation: BOTH backends sample straight alpha.
-  return createImageBitmap(canvas, { premultiplyAlpha: 'none' })
+const SPRITE_SIZE = 128
+
+// THE CROSS-BACKEND FIX (Task 118): the sprite is generated as EXPLICIT
+// RGBA bytes and uploaded via texture.upload(bytes) — the raw-byte path
+// (texSubImage2D on WebGL2, writeTexture on WebGPU) which puts EXACTLY
+// these bytes in GPU memory on every browser and backend.
+//
+// The old path (a canvas 2D gradient → createImageBitmap(canvas,
+// { premultiplyAlpha: 'none' }) → uploadImage) depended on the browser's
+// un-premultiply implementation, and on the user's WebGL2 browser it
+// served OPAQUE texels: the sprites drew as solid quads with BLACK where
+// the glow should fade (the alpha never reached the blend). Raw bytes
+// have no browser in the loop — straight alpha BY CONSTRUCTION: rgb stays
+// 255 while alpha carries the falloff, so both the additive (src-alpha·rgb)
+// and the alpha (src-alpha / one-minus-src-alpha) pipelines read it right.
+function makeSpriteBytes() {
+  const size = SPRITE_SIZE
+  const bytes = new Uint8Array(size * size * 4)
+  // the same radial falloff the canvas gradient drew:
+  // d=0 → a=1, d=0.25 → 0.85, d=0.6 → 0.22, d=1 → 0 (piecewise linear)
+  const STOPS = [[0, 1], [0.25, 0.85], [0.6, 0.22], [1, 0]]
+  const half = size / 2
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const d = Math.hypot(x - half + 0.5, y - half + 0.5) / half
+      let a = 0
+      if (d < 1) {
+        for (let s = 1; s < STOPS.length; s++) {
+          if (d <= STOPS[s][0]) {
+            const [d0, a0] = STOPS[s - 1]
+            const [d1, a1] = STOPS[s]
+            a = a0 + (a1 - a0) * ((d - d0) / (d1 - d0))
+            break
+          }
+        }
+      }
+      const i = (y * size + x) * 4
+      bytes[i] = 255; bytes[i + 1] = 255; bytes[i + 2] = 255
+      bytes[i + 3] = Math.round(a * 255)
+    }
+  }
+  return bytes
 }
 
 /* ─── Mat4 scratch + helpers (the model-viewer's formulas) ─────────────── */
@@ -429,7 +489,7 @@ let drawCommand = null        // the soup draw command
 let glDyn = null              // WebGL2: { gl, bufferId } for updateBuffer
 let gpuDyn = null             // WebGPU: the GPUFacade for syncVertexBuffer
 let soupTexture = null        // the sprite texture handle
-let rhythm = {}               // the tick state (timers, throttle) — fresh per preset
+let rhythm = {}               // the tick state (timers) — fresh per preset
 let cachedAspect = -1
 
 // the camera: orbit angles + distance
@@ -541,7 +601,7 @@ function frameCallback(ctx, record) {
   BASIS.up[0] = view[1]; BASIS.up[1] = view[5]; BASIS.up[2] = view[9]
 
   // ── simulate ──
-  // The preset's rhythm (burst timers, the space throttle) — or the plain
+  // The preset's rhythm (burst timers) — or the plain
   // advance. The tick owns EVERYTHING per-frame: pacing, bursts, dt scaling.
   const preset = PRESETS[currentPresetId]
   if (preset.tick !== undefined) preset.tick(ctx, particles, rhythm)
@@ -634,9 +694,9 @@ function switchPreset(id) {
   currentPresetId = id
   for (const [rowId, row] of rowById) row.setAttribute('aria-pressed', String(rowId === id))
   particles = PRESETS[id].make()
-  rhythm = {} // the fresh tick state (timers, the throttle phase)
-  // the preset's camera: each one opens framed (the galaxy from above,
-  // space looking down the flight axis)
+  rhythm = {} // the fresh tick state (timers)
+  // the preset's camera: each one opens framed (the galaxy and orbit
+  // from above, snow level)
   const cam = { ...DEFAULT_CAMERA, ...(PRESETS[id].camera ?? {}) }
   camYaw = cam.yaw
   camPitch = cam.pitch
@@ -653,10 +713,13 @@ function switchPreset(id) {
   if (activeRenderer !== null) void attachCommand()
 }
 
-async function attachSprite() {
-  const sprite = await makeSpriteBitmap()
-  soupTexture = activeRenderer.texture(sprite.width, sprite.height)
-  soupTexture.uploadImage(sprite)
+function attachSprite() {
+  // raw RGBA bytes, straight alpha by construction — no ImageBitmap, no
+  // browser premultiply semantics, identical texels on both backends
+  // (GL streams the chunk asynchronously — the sprite appears a frame in;
+  // WebGPU writes it synchronously)
+  soupTexture = activeRenderer.texture(SPRITE_SIZE, SPRITE_SIZE)
+  soupTexture.upload(makeSpriteBytes())
 }
 
 async function attachCommand() {
