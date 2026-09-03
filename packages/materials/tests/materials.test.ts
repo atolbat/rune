@@ -538,10 +538,14 @@ describe('pbr: the sub-model catalog', () => {
     expect(mat.glsl.fragment.match(/texture\(u_mrTex/g)?.length).toBe(1)
   })
 
-  it('PBR fragments are highp; the simple light models stay mediump', () => {
+  it('PBR and TEXTURE fragments are highp; the plain light models stay mediump', () => {
     resetMaterials()
     const pbr = materialOf({ features: pbrMask() | FLAT_ALBEDO })
     expect(pbr.glsl.fragment).toContain('precision highp float;')
+    // Task 75b: textured materials feed the fixed-function blender — the
+    // alpha path must not quantize (fp16 banding reads as a hard sprite rim)
+    const tex = materialOf({ features: TEXTURE | VERTEX_COLOR })
+    expect(tex.glsl.fragment).toContain('precision highp float;')
     const lambert = materialOf({ features: LAMBERT | FLAT_ALBEDO })
     expect(lambert.glsl.fragment).toContain('precision mediump float;')
     const matcap = materialOf({ features: MATCAP | FLAT_ALBEDO })

@@ -78,6 +78,45 @@ describe('webgl2 tape path', () => {
     expect(calls.filter(call => call.startsWith('uniform')).length).toBe(afterFirst) // no growth
   })
 
+  it('Task 75b: beginPass re-asserts the pipeline state every frame (the desync guard)', () => {
+    const { gl, calls } = createRecordingGL()
+    const arena = createUniformArena(4096)
+    const ctx = createCompileContext(arena, 'codegen')
+    const executor = createExecutor({ gl, arena, commands: ctx.commands, clears: [{ color: [0, 0, 0, 1], depth: 1 }] })
+    const command = compileDrawSpec({
+      shader: { glsl: { vertex: VERT, fragment: FRAG } },
+      // the particle pipeline shape: additive blending, depth-test without write
+      pipeline: { depth: { test: 'less', write: false }, raster: { cull: 'none' }, blend: { src: 'src-alpha', dst: 'one' } },
+      attributes: { position: { data: new Float32Array(9), size: 3 } },
+      uniforms: { u_mvp: () => MVP },
+      count: 3,
+    }, ctx)
+
+    const writer = createTapeWriter(8)
+    const frame = (): void => {
+      writer.reset()
+      writer.emit(OpCode.BeginPass, 0, 0, 0, 0)
+      command.record({}, fakeFrame(), writer)
+      writer.emit(OpCode.EndPass, 0, 0, 0, 0)
+      executor.run(writerView(writer))
+    }
+    frame()
+    frame()
+    frame()
+    // The cached state is dropped at EVERY pass start, so the blend is
+    // re-asserted once per frame: if anything outside this facade touched
+    // the GL context between frames (a context loss+restore, an extension,
+    // another library), a stale cache would silently skip the state and the
+    // particles would draw WITHOUT blending — the reported regression class.
+    const blends = calls.filter(call => call.startsWith('setBlend(src-alpha,one)')).length
+    const depths = calls.filter(call => call.startsWith('setDepthMode(less,false)')).length
+    expect(blends).toBe(3)
+    expect(depths).toBe(3)
+    // the state lands BEFORE every draw of every frame
+    const firstDraw = calls.indexOf('drawArrays(triangles,0,3,1)')
+    expect(calls.indexOf('setBlend(src-alpha,one)')).toBeLessThan(firstDraw)
+  })
+
   it('textures: bindTexture + uniform1i of the unit before draw', () => {
     const { gl, calls } = createRecordingGL()
     const arena = createUniformArena(4096)

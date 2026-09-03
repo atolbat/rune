@@ -296,10 +296,15 @@ function buildGlsl(
   const frag = sc.fragParts
   // PBR fragments run exp/sqrt chains and 4th-power products: mediump (a
   // 10-bit mantissa on mobile GPUs) banding-breaks them — highp costs
-  // nothing on desktop. The simpler light models stay mediump (the mobile
-  // win the demo tuning relies on). WGSL has no precision qualifiers (f32
-  // IS highp there), so this is GLSL-only.
-  frag.push('#version 300 es', (mask & PBR) !== 0 ? 'precision highp float;' : 'precision mediump float;')
+  // nothing on desktop. TEXTURE materials (Task 75b): the sprite/particle
+  // class feeds the fixed-function blender — a mediump alpha path quantizes
+  // the glow ramp (and on some fp16 paths the near-edge falloff collapses
+  // to steps that read as a hard rim); fragment highp is mandatory in
+  // GLES3/WebGL2, so this is free correctness. The plain light models stay
+  // mediump (the mobile win the demo tuning relies on). WGSL has no
+  // precision qualifiers (f32 IS highp there), so this is GLSL-only.
+  const highp = (mask & (PBR | TEXTURE)) !== 0
+  frag.push('#version 300 es', highp ? 'precision highp float;' : 'precision mediump float;')
   // NORMALMAP reads u_model in the fragment (object-space → world).
   if ((mask & NORMALMAP) !== 0) frag.push('uniform mat4 u_model;')
   if ((mask & TEXTURE) !== 0) frag.push('uniform sampler2D u_tex;')

@@ -3854,6 +3854,10 @@ function createExecutor(options) {
     gl.bindTarget(0, false);
     const clear = clears[0] ?? DEFAULT_CLEAR;
     gl.clear(clear.color, clear.depth);
+    lastProgram = -1;
+    lastDepthTest = "";
+    lastCull = "";
+    lastBlend = "";
   }
   function drawCommand(command, count, instances) {
     if (command === undefined)
@@ -4142,6 +4146,10 @@ function createRealGL(gl) {
   }
   function texSubImage2D(textureId, x, y, width, height, bytes) {
     gl.bindTexture(gl.TEXTURE_2D, textures.get(textureId) ?? null);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     const pair = uploadPair(textureId);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, width, height, pair.format, pair.type, bytes);
   }
@@ -4372,6 +4380,7 @@ function createRealGL(gl) {
       return;
     }
     gl.enable(gl.BLEND);
+    gl.blendEquation(gl.FUNC_ADD);
     gl.blendFunc(BLEND_FACTORS[src] ?? gl.ONE, BLEND_FACTORS[dst] ?? gl.ZERO);
   }
   function clear(color, depth2) {

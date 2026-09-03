@@ -27,9 +27,9 @@
 //   Pages serves with max-age=600, and a browser that keeps an OLD bundle
 //   for those 10 minutes shows an OLD bug even after a deploy — a changed
 //   query string forces a fresh fetch. Bump the suffix on every release.
-import { createRenderer } from '../../dist/rune.esm.js?v=120'
-import { materialOf, TEXTURE, VERTEX_COLOR } from '../../dist/rune-materials.esm.js?v=120'
-import { createParticles, createRamp } from '../../dist/rune-particles.esm.js?v=120'
+import { createRenderer } from '../../dist/rune.esm.js?v=121'
+import { materialOf, TEXTURE, VERTEX_COLOR } from '../../dist/rune-materials.esm.js?v=121'
+import { createParticles, createRamp } from '../../dist/rune-particles.esm.js?v=121'
 
 /* ─── Materials: the unlit sprite pair × 2 blend modes ─────────────────── */
 
@@ -504,6 +504,7 @@ let drawCommand = null        // the soup draw command
 let glDyn = null              // WebGL2: { gl, bufferId } for updateBuffer
 let gpuDyn = null             // WebGPU: the GPUFacade for syncVertexBuffer
 let soupTexture = null        // the sprite texture handle
+let spriteUpload = null       // the raw-byte upload (await .done before the self-test)
 let rhythm = {}               // the tick state (timers) — fresh per preset
 let cachedAspect = -1
 
@@ -732,9 +733,118 @@ function attachSprite() {
   // raw RGBA bytes, straight alpha by construction — no ImageBitmap, no
   // browser premultiply semantics, identical texels on both backends
   // (GL streams the chunk asynchronously — the sprite appears a frame in;
-  // WebGPU writes it synchronously)
+  // WebGPU writes it synchronously). The upload handle is kept: the blend
+  // self-test awaits .done so the roundtrip reads a COMPLETE texture.
   soupTexture = activeRenderer.texture(SPRITE_SIZE, SPRITE_SIZE)
-  soupTexture.upload(makeSpriteBytes())
+  spriteUpload = soupTexture.upload(makeSpriteBytes())
+}
+
+/* ─── The blend self-test (Task 121): the browser becomes the instrument ──
+ * Reported three times as "particles render without transparency on
+ * WebGL", while every headless verification renders clean — the failing
+ * configuration is a real browser/GPU we cannot reproduce. So the demo now
+ * carries its own instrument, run once at boot (and on every backend
+ * switch) on the WebGL2 path:
+ *   1. THE LIVE STATE — gl.getParameter on the renderer's own context AFTER
+ *      several frames of real particle draws: BLEND enabled, both blend
+ *      factor pairs, the equation. What the fixed-function blender actually
+ *      holds at draw time — not what the call log claims.
+ *   2. THE SPRITE ROUNDTRIP — the sprite texture is drawn through a surface
+ *      pass (a pure copy, no blend) and read back with readPixels: the
+ *      EXACT texels the sampler reads, GPU-side. A flat/opaque alpha = the
+ *      upload path is the culprit; the gaussian ramp = byte-clean.
+ * The full JSON is kept in window.__runeSelfTest — copy it from the console
+ * when reporting a visual regression; the log panel prints the verdict. */
+
+const FUNC_ADD = 0x8006
+const FACTOR_CODES = { zero: 0, one: 1, 'src-alpha': 0x0302, 'one-minus-src-alpha': 0x0303 }
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+async function runBlendSelfTest(renderer, canvas) {
+  const report = { backend: renderer.backend, preset: currentPresetId, when: new Date().toISOString() }
+  const blend = PRESETS[currentPresetId].pipeline.blend
+  const wantSrc = FACTOR_CODES[blend?.src]
+  const wantDst = FACTOR_CODES[blend?.dst]
+  try {
+    // ── probe 1: the live fixed-function state after real draws ──
+    // Poll until the particle pipeline has actually drawn (slow machines:
+    // SwiftShader ≈ 1 FPS), then snapshot — whatever it holds is the truth.
+    const gl = canvas.getContext('webgl2') // the SAME context the renderer owns
+    if (gl === null) throw new Error('canvas.getContext("webgl2") returned null — the context is gone')
+    for (let i = 0; i < 30; i++) {
+      await sleep(100)
+      if (gl.getParameter(gl.BLEND) === true) break
+    }
+    const s = {
+      blend: gl.getParameter(gl.BLEND),
+      srcRgb: gl.getParameter(gl.BLEND_SRC_RGB),
+      dstRgb: gl.getParameter(gl.BLEND_DST_RGB),
+      srcAlpha: gl.getParameter(gl.BLEND_SRC_ALPHA),
+      dstAlpha: gl.getParameter(gl.BLEND_DST_ALPHA),
+      equation: gl.getParameter(gl.BLEND_EQUATION_RGB),
+      dither: gl.getParameter(gl.DITHER),
+    }
+    report.state = s
+    report.stateOk = s.blend === true && s.srcRgb === wantSrc && s.dstRgb === wantDst
+      && s.srcAlpha === wantSrc && s.dstAlpha === wantDst && s.equation === FUNC_ADD
+
+    // ── probe 2: the sprite texels, GPU-side ──
+    await Promise.race([spriteUpload?.done ?? Promise.resolve(), sleep(3000)])
+    // The SURFACE's own pass (targets the surface FBO directly — a plain
+    // renderer.pass() targets the canvas and a capture wrapper around it
+    // would rebind the canvas right before the draw: the copy would land
+    // on screen, the surface would read its clear color)
+    const surf = renderer.inner.surface({ width: SPRITE_SIZE, height: SPRITE_SIZE, depth: false })
+    const copyCmd = surf.pass(
+      '#version 300 es\nprecision highp float;\nuniform sampler2D u_tex;\nin vec2 v_uv;\nout vec4 o_color;\nvoid main() { o_color = texture(u_tex, v_uv); }',
+      { inputs: { u_tex: soupTexture }, clear: true },
+    )
+    let fired = false
+    const handle = renderer.frame((_ctx, record) => {
+      if (fired) return
+      fired = true
+      record(copyCmd, {})
+    })
+    // Poll the readback until the capture has EXECUTED (the sprite center
+    // reads rgb 255; the clear color is [4,5,9]) or the patience runs out.
+    let data = null
+    for (let i = 0; i < 20; i++) {
+      await sleep(150)
+      const read = await surf.read()
+      data = read.data
+      if (data[(64 * SPRITE_SIZE + 64) * 4] >= 250) break
+    }
+    handle.cancel()
+    surf.dispose()
+    if (data === null) throw new Error('surface.read() returned no data')
+    const texel = (x, y) => {
+      const i = (y * SPRITE_SIZE + x) * 4
+      return [data[i], data[i + 1], data[i + 2], data[i + 3]]
+    }
+    const t = {
+      center: texel(64, 64), // a ≈ 255 (exp(0) = 1)
+      quarter: texel(24, 64), // a ≈ 40 (exp(-5 · 0.371))
+      edge: texel(2, 64), // a ≤ 8 (exp(-4.6) ≈ 0.01)
+      corner: texel(2, 2), // a = 0 (outside the falloff)
+    }
+    report.texture = t
+    report.textureOk = t.center[3] >= 250 && t.center[0] >= 250 && t.center[1] >= 250 && t.center[2] >= 250
+      && Math.abs(t.quarter[3] - 40) <= 8 && t.edge[3] <= 10 && t.corner[3] <= 4
+
+    window.__runeSelfTest = report
+    if (report.stateOk && report.textureOk) {
+      shell.log.info(`Blend self-test: PASS — state (BLEND on, ${s.srcRgb}/${s.dstRgb}, eq FUNC_ADD), sprite alpha (center ${t.center[3]}, quarter ${t.quarter[3]}, corner ${t.corner[3]})`)
+    } else {
+      shell.log.warn(
+        `Blend self-test: FAIL — state ${report.stateOk ? 'OK' : `BAD (BLEND=${s.blend}, ${s.srcRgb}/${s.dstRgb}, eq ${s.equation}; want ${wantSrc}/${wantDst})`}, `
+        + `sprite ${report.textureOk ? 'OK' : `BAD (alpha center/quarter/corner ${t.center[3]}/${t.quarter[3]}/${t.corner[3]}, rgb ${t.center.slice(0, 3)})`} — full report in window.__runeSelfTest`,
+      )
+    }
+  } catch (error) {
+    report.error = error instanceof Error ? error.message : String(error)
+    window.__runeSelfTest = report
+    shell.log.warn(`Blend self-test: ERROR — ${report.error} (see window.__runeSelfTest)`)
+  }
 }
 
 async function attachCommand() {
@@ -805,6 +915,8 @@ async function boot(mode) {
     await attachCommand()
     renderer.frame(frameCallback)
     if (seq !== bootSeq) return
+    if (renderer.backend === 'webgl2') void runBlendSelfTest(renderer, canvas)
+    else shell.log.info('Blend self-test: skipped — the WebGPU path (the reported regression is WebGL2; switch the toggle to compare)')
     pill.hidden = false
     const backendName = renderer.backend === 'webgpu' ? 'WebGPU' : 'WebGL2'
     shell.setBadge(backendName, renderer.backend === 'webgpu' ? 'gpu' : 'gl')

@@ -52,6 +52,20 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
     gl.bindTarget(0, false)
     const clear = clears[0] ?? DEFAULT_CLEAR
     gl.clear(clear.color, clear.depth)
+    // Task 75b (the blend regression class): re-assert the raster state at
+    // EVERY pass start. The caches below mirror what WE last set — but the
+    // real GL context is global mutable state: anything that touched it
+    // between our frames (a context loss+restore, a browser extension, a
+    // shared-surface blit, driver state resets) leaves the cache LYING while
+    // the context no longer holds the blend/depth we set. A stale cache =
+    // the pipeline state is silently skipped for the rest of the session —
+    // the exact "particles render without blending" report class.
+    // Cost: one redundant setDepthMode/setBlend per distinct state on the
+    // first command of the frame (the facade passes straight through).
+    lastProgram = -1
+    lastDepthTest = ''
+    lastCull = ''
+    lastBlend = ''
   }
 
   function drawCommand(command: CompiledCommand | undefined, count: number, instances: number): void {

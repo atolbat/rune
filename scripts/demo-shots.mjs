@@ -177,6 +177,33 @@ await pt.click('.pt-close').catch(() => {})
 await pt.waitForTimeout(300)
 await pt.screenshot({ path: join(out, 'desktop-particles-fountain.png') })
 
+// Task 121 — THE VERIFICATION HOLE: this sweep must run FORCED on WebGL2.
+// The reported regression ("particles render without transparency on
+// WebGL") is backend-specific; an AUTO sweep silently picks whatever this
+// machine can create (WebGPU on dev machines) and never exercises the
+// broken path. The toggle reboots the demo on the WebGL2 backend; the
+// remaining preset loop below then runs on it.
+await pt.click('#rd-fab')
+await pt.click('label[for="mode-webgl2"]')
+await pt.mouse.click(480, 100) // close the FAB sheet (an outside click)
+await pt.waitForFunction(() => document.querySelector('#backend')?.textContent === 'WebGL2', null, { timeout: 30000 })
+await pt.waitForFunction(
+  () => /\/ 8,192 · [1-9][\d,]* verts/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+  null, { timeout: 30_000 },
+)
+await pt.waitForTimeout(1500)
+await pt.screenshot({ path: join(out, 'desktop-particles-fountain-gl2.png') })
+
+// The self-test verdict (Task 121) is itself a GATE: the demo probes the
+// live GL blend state and roundtrips the sprite texture through a surface —
+// both must read healthy on the WebGL2 path, or the sweep fails loudly.
+await pt.waitForFunction(() => window.__runeSelfTest !== undefined, null, { timeout: 45000 })
+const selfTest = await pt.evaluate(() => window.__runeSelfTest)
+if (selfTest === undefined || !selfTest.stateOk || !selfTest.textureOk) {
+  throw new Error(`[shots] the particles blend self-test FAILED on WebGL2: ${JSON.stringify(selfTest)}`)
+}
+console.log(`[shots] blend self-test (WebGL2): PASS — state ${JSON.stringify(selfTest.state)}, sprite alpha center/quarter/corner ${selfTest.texture.center[3]}/${selfTest.texture.quarter[3]}/${selfTest.texture.corner[3]}`)
+
 // Per-preset settle times: burst/ramp presets need several shells or a full
 // fill before their look reads (the galaxy steady state is rate·life ≈ 7k
 // particles — 3 s shows a young sparse disc).
@@ -248,7 +275,7 @@ async function assertSpriteContour() {
   for (const mode of ['alpha', 'additive']) {
     const page = await browser.newPage({ viewport: { width: 480, height: 480 } })
     page.on('pageerror', (e) => console.log('PROBE PAGEERROR:', e.message))
-    await page.goto(`http://localhost:${port}/demo/particles/sprite-probe.html?mode=${mode}`, { waitUntil: 'networkidle' })
+    await page.goto(`http://localhost:${port}/demo/particles/sprite-probe.html?mode=${mode}&backend=webgl2`, { waitUntil: 'networkidle' })
     await page.waitForFunction(() => window.__ready === true, null, { timeout: 15000 })
     await page.waitForTimeout(500) // a drawn frame (the texture streams in on GL)
     const shotPath = join(out, `sprite-probe-${mode}.png`)

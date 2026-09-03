@@ -358,6 +358,20 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
 
   function texSubImage2D(textureId: number, x: number, y: number, width: number, height: number, bytes: Uint8Array): void {
     gl.bindTexture(gl.TEXTURE_2D, textures.get(textureId) ?? null)
+    // Task 75b (driver-proofing): the raw-byte upload contract is EXACT bytes
+    // — no browser conversion. UNPACK_* are per-context global state: if
+    // anything on this context left PREMULTIPLY_ALPHA_WEBGL=true (any
+    // ImageBitmap/canvas upload path that flipped it, another library, an
+    // extension), the driver would silently multiply our rgb by alpha at
+    // upload — the straight-alpha sprite arrives premultiplied and every
+    // blend built for straight alpha reads wrong. FLIP_Y and ALIGNMENT are
+    // pinned for the same reason (an uploaded-flipped or row-skewed sprite
+    // is equally invisible in the call log). Set → upload → done: the
+    // source-upload paths (texImage2DFromSource) manage their own flipY.
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false)
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE)
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
     // The raw-byte path — the UploadScheduler's domain: Uint8Array implies
     // 8-bit pixels. For HDR textures (rgba16f/rgba32f) the bytes will be
     // interpreted per the texture format's (format, type) — the caller must
@@ -735,6 +749,13 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
       return
     }
     gl.enable(gl.BLEND)
+    // Task 75b (driver-proofing): the equation is re-asserted explicitly.
+    // FUNC_ADD is the spec default — but it is per-context global state like
+    // the factors: anything that left FUNC_SUBTRACT / FUNC_REVERSE_SUBTRACT
+    // on this context would turn every blended draw into a subtraction while
+    // the factors stay "correct" (an invisible-to-trace class: the calls look
+    // right, the pixels get eaten). One extra call per state switch.
+    gl.blendEquation(gl.FUNC_ADD)
     // Premultiplied shader output: blendFunc(src, dst) without
     // separate RGB/A — the canvas alpha channel is opaque (alpha:false).
     gl.blendFunc(BLEND_FACTORS[src] ?? gl.ONE, BLEND_FACTORS[dst] ?? gl.ZERO)

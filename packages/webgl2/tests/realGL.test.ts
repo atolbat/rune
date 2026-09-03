@@ -34,10 +34,25 @@ function mockGL(): CallLog {
     FRONT: 1028,
     COLOR_BUFFER_BIT: 16384,
     DEPTH_BUFFER_BIT: 256,
+    BLEND: 3042,
+    FUNC_ADD: 32774,
+    ONE: 1,
+    ZERO: 0,
+    NONE: 0,
+    UNPACK_FLIP_Y_WEBGL: 37440,
+    UNPACK_PREMULTIPLY_ALPHA_WEBGL: 37441,
+    UNPACK_COLORSPACE_CONVERSION_WEBGL: 37443,
+    UNPACK_ALIGNMENT: 3317,
     createTexture: () => ({ id: ++texture }),
     bindTexture: () => {},
     texImage2D: () => {},
     texParameteri: () => {},
+    texSubImage2D: (target: number, level: number, x: number, y: number, w: number, h: number, format: number, type: number, bytes: Uint8Array) =>
+      calls.push(`texSubImage2D(${w}x${h},${bytes.length})`),
+    pixelStorei: (name: number, value: number | boolean) =>
+      calls.push(`pixelStorei(${name},${value === true ? 1 : value === false ? 0 : value})`),
+    blendEquation: (mode: number) => calls.push(`blendEquation(${mode})`),
+    blendFunc: (src: number, dst: number) => calls.push(`blendFunc(${src},${dst})`),
     createFramebuffer: () => ({ id: ++fbo }),
     bindFramebuffer: () => {},
     framebufferTexture2D: () => {},
@@ -51,8 +66,8 @@ function mockGL(): CallLog {
     clearDepth: () => calls.push('clearDepth'),
     depthMask: (write: boolean) => calls.push(`depthMask(${write ? 1 : 0})`),
     clear: (bits: number) => calls.push(`clear(${bits})`),
-    enable: () => {},
-    disable: () => {},
+    enable: (cap: number) => calls.push(`enable(${cap})`),
+    disable: (cap: number) => calls.push(`disable(${cap})`),
     depthFunc: () => {},
     cullFace: () => {},
   } as unknown as WebGL2RenderingContext
@@ -112,5 +127,47 @@ describe('realGL: clear is masked by depthMask (demo-10 regression)', () => {
     const afterFirst = calls.length
     facade.bindTarget(targetId, false) // skip: the same target, no clear
     expect(calls.length).toBe(afterFirst)
+  })
+})
+
+describe('realGL: blend driver-proofing (Task 75b — the particles transparency class)', () => {
+  test('setBlend enables BLEND, asserts FUNC_ADD, then the factors — in this order', () => {
+    const { calls, gl } = mockGL()
+    const facade = createRealGL(gl)
+    calls.length = 0
+    facade.setBlend('src-alpha', 'one')
+    // the equation is asserted between enable and the factors: a stray
+    // FUNC_SUBTRACT on the context eats every blended pixel while the
+    // factors still look correct in any call trace
+    expect(calls).toEqual([
+      'enable(3042)',
+      'blendEquation(32774)',
+      'blendFunc(770,1)',
+    ])
+  })
+
+  test('setBlend(null) disables BLEND (the opaque pipelines)', () => {
+    const { calls, gl } = mockGL()
+    const facade = createRealGL(gl)
+    calls.length = 0
+    facade.setBlend(null, null)
+    expect(calls).toEqual(['disable(3042)'])
+  })
+
+  test('the raw-byte texSubImage2D pins UNPACK_* to the no-conversion contract BEFORE the upload', () => {
+    const { calls, gl } = mockGL()
+    const facade = createRealGL(gl)
+    const textureId = facade.createTexture(64, 64)
+    calls.length = 0
+    facade.texSubImage2D(textureId, 0, 0, 64, 64, new Uint8Array(64 * 64 * 4))
+    // straight-alpha bytes must reach the GPU EXACTLY: premultiply/flip/
+    // colorspace/alignment are per-context globals that anything else on the
+    // context could have left flipped — the raw path pins them every time
+    const uploadAt = calls.findIndex(call => call.startsWith('texSubImage2D('))
+    expect(uploadAt).toBeGreaterThanOrEqual(0)
+    expect(calls[uploadAt - 1]).toBe('pixelStorei(3317,1)') // UNPACK_ALIGNMENT
+    expect(calls[uploadAt - 2]).toBe('pixelStorei(37443,0)') // COLORSPACE_CONVERSION = NONE
+    expect(calls[uploadAt - 3]).toBe('pixelStorei(37441,0)') // PREMULTIPLY_ALPHA = false
+    expect(calls[uploadAt - 4]).toBe('pixelStorei(37440,0)') // FLIP_Y = false
   })
 })

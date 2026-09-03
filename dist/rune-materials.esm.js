@@ -809,7 +809,8 @@ function buildGlsl(mask, vertUniforms, fragUniforms) {
     vert.push(`out ${varying.glslType} ${varying.glslName};`);
   pushBody(vert, "void main() {", sc.vertGlsl, "}");
   const frag = sc.fragParts;
-  frag.push("#version 300 es", (mask & PBR) !== 0 ? "precision highp float;" : "precision mediump float;");
+  const highp = (mask & (PBR | TEXTURE)) !== 0;
+  frag.push("#version 300 es", highp ? "precision highp float;" : "precision mediump float;");
   if ((mask & NORMALMAP) !== 0)
     frag.push("uniform mat4 u_model;");
   if ((mask & TEXTURE) !== 0)
