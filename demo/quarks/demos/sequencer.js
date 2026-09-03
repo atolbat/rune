@@ -112,6 +112,8 @@ export default {
       }),
       material: env.materials.sprite,
       pipeline: env.pipelines.additive,
+      // the single GLOW sprite (no tiles → never the 4×4 atlas)
+      texture: () => env.glowTexture,
     })
 
     if (typeof window !== 'undefined') (window.__seqLayer = layer) // the shots gate reads it

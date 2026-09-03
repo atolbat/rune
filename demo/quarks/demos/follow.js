@@ -46,6 +46,7 @@ export default {
       }),
       material: env.materials.sprite,
       pipeline: env.pipelines.additive,
+      texture: () => env.glowTexture,
     })
 
     const smoke = env.addLayer({
@@ -97,8 +98,9 @@ export default {
         boxModel[8] = sy * cr; boxModel[9] = -sr; boxModel[10] = cy * cr
         boxModel[12] = x; boxModel[13] = y; boxModel[14] = z
         boxModel[15] = 1
-        // record the box with the DYNAMIC model (the manual layer)
-        ctx.record(box.command, { mvp: ctx.mvp, model: boxModel, camPos: ctx.camEye })
+        // record the box with the DYNAMIC model — the mvp COMPOSED with it
+        // (gl_Position consumes P·V·M; u_model alone only feeds the normals)
+        ctx.record(box.command, { mvp: ctx.modelMvp(boxModel), model: boxModel, camPos: ctx.camEye })
 
         // the emitters ride the box: at() translates every spawn cloud to
         // its tail (a point ~0.9 behind the heading)

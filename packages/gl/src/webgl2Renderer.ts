@@ -626,6 +626,31 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     updateFrameContext(nowMs)
     statsCollector?.beginFrame()
     transients.beginFrame() // the previous frame's scratch starts aging
+    try {
+      stepFrame()
+      frameErrorCount = 0 // a clean frame resets the consecutive count
+    } catch (error) {
+      // ONE bad frame must not kill the rAF loop forever (scheduleNext is
+      // outside this try): report through the GL error sink; three
+      // consecutive failures pause the loop with an honest reason instead
+      // of a silently frozen canvas.
+      frameErrorCount++
+      options.onGlError?.(`frame error: ${error instanceof Error ? error.message : String(error)}`)
+      if (frameErrorCount >= 3) {
+        running = false
+        options.onGlError?.(`detected ${frameErrorCount} consecutive frame errors — rendering stopped`)
+        return
+      }
+    }
+    statsCollector?.endFrame()
+    drainGlErrors()
+  }
+
+  /** Consecutive frame-exception count (a clean frame resets it). */
+  let frameErrorCount = 0
+
+  /** The frame body — extracted so step() can guard it (see the catch). */
+  function stepFrame(): void {
     epoch.frame(() => {
       // M5 (Task 73): transport — snapshot the changed slots at the frame
       // boundary (the epoch): signal mirrors are consistent before the frame callbacks.
@@ -643,8 +668,6 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
       executor.run(writerView(writer))
       uploads.drain() // idle slot: streaming runs after the frame
     })
-    statsCollector?.endFrame()
-    drainGlErrors()
   }
 
   /** Task 69: drain silent GL errors once per frame (parity with onGpuError).

@@ -42,6 +42,7 @@ export default {
       }),
       material: env.materials.sprite,
       pipeline: env.pipelines.additive,
+      texture: () => env.glowTexture,
     })
 
     let t = 0

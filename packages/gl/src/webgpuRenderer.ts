@@ -302,19 +302,27 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
     if (storm.paused) return // error storm: rendering paused
     updateFrameContext(nowMs)
     transients.beginFrame() // last frame's scratch starts aging
-    epoch.frame(() => {
-      // M5 (Task 73): transport — snapshot of slots at the frame boundary (epoch),
-      // then feeds — one writeBuffer call for the dirty range.
-      options.transport?.sampleAll()
-      for (const feed of feeds) feed.sync()
-      time.value = frameCtx.time
-      writer.reset()
-      writer.emit(OpCode.BeginPass, 0, 0, 0, 0)
-      for (const callback of [...callbacks]) callback(frameCtx, recordIntoWriter)
-      writer.emit(OpCode.EndPass, 0, 0, 0, 0)
-      executor.run(writerView(writer)) // tapes: the same path as WebGL2
-      uploads.drain() // idle slot: streaming after the frame
-    })
+    try {
+      epoch.frame(() => {
+        // M5 (Task 73): transport — snapshot of slots at the frame boundary (epoch),
+        // then feeds — one writeBuffer call for the dirty range.
+        options.transport?.sampleAll()
+        for (const feed of feeds) feed.sync()
+        time.value = frameCtx.time
+        writer.reset()
+        writer.emit(OpCode.BeginPass, 0, 0, 0, 0)
+        for (const callback of [...callbacks]) callback(frameCtx, recordIntoWriter)
+        writer.emit(OpCode.EndPass, 0, 0, 0, 0)
+        executor.run(writerView(writer)) // tapes: the same path as WebGL2
+        uploads.drain() // idle slot: streaming after the frame
+      })
+    } catch (error) {
+      // ONE bad frame must not kill the rAF loop forever (scheduleNext is
+      // outside this try): the exception is reported through the storm —
+      // three consecutive failures pause the loop with an honest reason
+      // instead of a silently frozen canvas.
+      storm.handle(`frame error: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   function updateFrameContext(nowMs: number): void {

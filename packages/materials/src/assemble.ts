@@ -49,6 +49,7 @@ import {
   PBR_G_MODELS,
   PBR_MR_TEXTURE,
   PBR_SUB_MODELS,
+  PBR_ENV,
   SKIN,
   SOFT_PARTICLES,
   TEXTURE,
@@ -222,7 +223,7 @@ function validate(mask: number, jointCount: number): void {
   if ((mask & SKIN) !== 0 && (!Number.isInteger(jointCount) || jointCount < 1)) {
     throw new Error('rune/materials: SKIN requires jointCount >= 1')
   }
-  if ((mask & (PBR_SUB_MODELS | PBR_MR_TEXTURE)) !== 0 && (mask & PBR) === 0) {
+  if ((mask & (PBR_SUB_MODELS | PBR_MR_TEXTURE | PBR_ENV)) !== 0 && (mask & PBR) === 0) {
     throw new Error('rune/materials: the PBR sub-model bits require PBR')
   }
   if ((mask & PBR) !== 0) {

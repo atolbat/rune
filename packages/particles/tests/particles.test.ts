@@ -12,7 +12,7 @@ import {
   hash01,
   CONSTANT_RAMP,
 } from '../src/index.ts'
-import type { SpawnRecord } from '../src/index.ts'
+import type { SpawnRecord, SpawnerDesc } from '../src/index.ts'
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -796,5 +796,118 @@ describe('createParticles (the facade)', () => {
 
   it('capacity validation propagates', () => {
     expect(() => createParticles({ capacity: 0 })).toThrow('capacity')
+  })
+})
+
+// ─── Task 18: the GLOBAL spawn stream index (the anti-"jet" fix) ────────────
+
+describe('the spawn stream index (Task 18)', () => {
+  const SPHERE: SpawnerDesc = {
+    shape: { kind: 'sphere', origin: [0, 0, 0], radius: [0.2, 0.9] },
+    velocity: { mode: 'radial' },
+    speed: [1, 2],
+    life: [2, 2],
+    size: [0.1, 0.1],
+    color: [[1, 1, 1, 1], [1, 1, 1, 1]],
+    seed: 19,
+  }
+
+  it('a rate stream spawns UNIQUE particles (no thin jet of clones)', () => {
+    // BEFORE the fix: system.emit numbered every call 0..n-1, so the
+    // spawner hashed THE SAME records every frame — a rate stream was a
+    // single particle position repeated forever (the "jet engine").
+    const ps = createParticles({ capacity: 64, rate: 30, spawner: SPHERE })
+    ps.advance(1 / 30) // one particle (index 0)
+    ps.advance(1 / 30) // one particle (index 1 — NOT a re-roll of index 0)
+    const f = ps.fields
+    const distinct = Math.hypot(f.px[0] - f.px[1], f.py[0] - f.py[1], f.pz[0] - f.pz[1])
+    expect(distinct).toBeGreaterThan(1e-6)
+    // and the directions differ too
+    const dot = f.vx[0] * f.vx[1] + f.vy[0] * f.vy[1] + f.vz[0] * f.vz[1]
+    expect(dot).toBeLessThan(0.99)
+  })
+
+  it('repeated bursts with the SAME seed differ (every burst is unique)', () => {
+    const ps = createParticles({ capacity: 16, spawner: SPHERE })
+    ps.burst(8)
+    const first = Array.from(ps.fields.px.slice(0, 8))
+    ps.clear()
+    ps.burst(8) // same desc, same seed — the stream index moved
+    const second = Array.from(ps.fields.px.slice(0, 8))
+    const same = first.every((v, i) => v === second[i])
+    expect(same).toBe(false)
+  })
+
+  it('the stream is deterministic: the same sequence = the same bits', () => {
+    const run = () => {
+      const ps = createParticles({ capacity: 48, rate: 60, spawner: SPHERE })
+      for (let k = 0; k < 20; k++) ps.advance(1 / 60)
+      return Array.from(ps.fields.px.slice(0, 20))
+    }
+    expect(run()).toEqual(run())
+  })
+
+  it('capacity clipping advances the stream by the ACTUAL count only', () => {
+    const ps = createParticles({ capacity: 4, spawner: SPHERE })
+    expect(ps.burst(6)).toBe(4) // clipped
+    ps.clear()
+    ps.burst(2)
+    const f = ps.fields
+    // the survivors of the second burst continue AFTER the 4 clipped ones
+    // (indices 4, 5) — not a re-roll of 0, 1
+    const fresh0 = [f.px[0], f.py[0], f.pz[0]]
+    ps.clear()
+    ps.burst(2)
+    const fresh1 = [f.px[0], f.py[0], f.pz[0]]
+    expect(Math.hypot(fresh0[0] - fresh1[0], fresh0[1] - fresh1[1], fresh0[2] - fresh1[2])).toBeGreaterThan(1e-6)
+  })
+})
+
+// ─── Task 18: the integration clamp (the dt-spike explosion) ────────────────
+
+describe('the integration clamp (Task 18)', () => {
+  it('a dt spike does not explode the stiff seek spring (positions stay finite and near)', () => {
+    // The sequencer demo's exact force: seek strength 26 (explicit Euler is
+    // unstable past dt ≈ 2/√26 ≈ 0.39 s). A stall (a hidden tab, a
+    // screenshot pause) used to hand the integrator dt of SECONDS — the
+    // positions exploded to ~1e9 and the formation died off-screen.
+    const ps = createParticles({
+      capacity: 8,
+      forces: { gravity: [0, 0, 0], drag: 0, turbulence: 0, seek: { strength: 26, damping: 9.5 } },
+      spawner: {
+        shape: { kind: 'sphere', origin: [0, 0, 0], radius: [4.5, 6.5] },
+        velocity: { mode: 'radial' },
+        speed: [0.3, 1.2], life: [30, 30], size: [0.1, 0.2],
+        color: [[1, 1, 1, 1], [1, 1, 1, 1]],
+        target: { mode: 'point', point: [0, 0, 0] },
+        seed: 5,
+      },
+    })
+    ps.burst(8)
+    // normal frames, then THE SPIKE (a 5-second stall), then normal frames
+    for (let k = 0; k < 30; k++) ps.advance(1 / 60)
+    ps.advance(5)
+    for (let k = 0; k < 120; k++) ps.advance(1 / 60)
+    const f = ps.fields
+    for (let i = 0; i < ps.count; i++) {
+      expect(Number.isFinite(f.px[i] + f.py[i] + f.pz[i])).toBe(true)
+      expect(Math.hypot(f.px[i], f.py[i], f.pz[i])).toBeLessThan(100) // near the target, not 1e9
+    }
+  })
+
+  it('the rate accumulator and the burst schedule still see the REAL dt (catch-up survives the substeps)', () => {
+    const ps = createParticles({
+      capacity: 256,
+      rate: 60,
+      spawner: {
+        shape: { kind: 'point', origin: [0, 0, 0] },
+        velocity: { mode: 'fixed', dir: [0, 1, 0] },
+        speed: [0, 0], life: [10, 10], size: [1, 1],
+        color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 3,
+      },
+    })
+    ps.advance(2) // a 2 s stall — the substeps hold the integration, the RATE does not
+    expect(ps.count).toBeGreaterThanOrEqual(100) // ~120 particles owed for the stall
+    expect(ps.count).toBeLessThanOrEqual(128)
   })
 })

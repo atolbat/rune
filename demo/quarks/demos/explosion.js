@@ -90,6 +90,7 @@ export default {
       }),
       material: env.materials.sprite,
       pipeline: env.pipelines.additive,
+      texture: () => env.glowTexture,
     })
 
     // the shockwave: a FLAT expanding ring (an oriented quad on the ground

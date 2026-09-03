@@ -152,6 +152,16 @@ export interface RenderBakeOverride {
   readonly mesh?: Partial<MeshOptions>
 }
 
+/** The integration substep ceiling: one advance() never integrates a step
+ *  longer than this. A stall — a hidden tab, a debugger break, a screenshot
+ *  pause — produces dt spikes of SECONDS, and explicit Euler on the STIFF
+ *  springs (the seek force: unstable past dt ≈ 2/√strength ≈ 0.4 s)
+ *  explodes the positions to 1e9+ (the sequencer demo shipped with exactly
+ *  this: a stall returned a dead, frozen formation of off-screen
+ *  particles). Larger dt integrates in substeps — the total time is always
+ *  preserved (age/retirement stay honest), only the step is bounded. */
+const MAX_STEP = 1 / 20
+
 /** Creates the particle facade. */
 export function createParticles(desc: ParticlesDesc): Particles {
   const capacity = desc.capacity
@@ -185,9 +195,23 @@ export function createParticles(desc: ParticlesDesc): Particles {
   let carry = 0 // the fractional emission remainder
   // The live emitter origin (at) — read by the emit wrapper, never rebuilt.
   const origin = [0, 0, 0]
+  // The GLOBAL spawn stream index (the anti-"jet" fix): the store's emit
+  // always numbers particles 0..n-1 PER CALL, and the spawners hash their
+  // randomness by that index — a rate stream or repeated bursts would
+  // re-spawn THE SAME particle (one position, one velocity — a thin jet)
+  // forever. The facade translates every call-local index into a
+  // facade-global monotonic counter, so every particle ever emitted is
+  // unique (until the 2^31 wrap — four orders beyond any demo).
+  let streamIndex = 0
   const emitWrap: Spawner = (index, out) => {
-    spawner(index, out)
+    spawner(streamIndex + index, out)
     out.x += origin[0]; out.y += origin[1]; out.z += origin[2]
+  }
+  /** emit + stream advance (both call sites use the actual returned count). */
+  const emitStream = (n: number): number => {
+    const spawnedCount = system.emit(n, emitWrap)
+    streamIndex += spawnedCount
+    return spawnedCount
   }
 
   // ── the soup: one array, sized by the render kind ──────────────────────
@@ -253,7 +277,7 @@ export function createParticles(desc: ParticlesDesc): Particles {
 
     burst(n, sp) {
       if (sp !== undefined) spawner = createSpawner(sp)
-      return system.emit(n, emitWrap)
+      return emitStream(n)
     },
 
     at(x, y, z) {
@@ -326,7 +350,7 @@ export function createParticles(desc: ParticlesDesc): Particles {
       const whole = Math.floor(carry)
       if (whole > 0) {
         carry -= whole
-        system.emit(whole, emitWrap)
+        emitStream(whole)
       }
     }
     for (const state of burstState) {
@@ -336,14 +360,27 @@ export function createParticles(desc: ParticlesDesc): Particles {
       let guard = 0
       while (time >= state.next && state.firesLeft > 0 && guard++ < 64) {
         if (hash01(scheduleSeed, state.index * 7919 + 13, state.cycle) < burst.probability) {
-          system.emit(burst.count, emitWrap)
+          emitStream(burst.count)
         }
         state.firesLeft--
         state.cycle++
         state.next += burst.interval
       }
     }
-    system.advance(dt, forces)
+    // The stall guard: dt spikes (a hidden tab, a screenshot pause) would
+    // blow up the stiff springs (explicit Euler is unstable past
+    // dt ≈ 2/√strength) — integrate in SUBSTEPS of at most MAX_STEP each.
+    // Age, retirement and the trails all see the FULL dt (a life of 0.1 s
+    // ends after 0.1 s of simulation, spikes included); only the per-step
+    // integration is bounded. The rate accumulator and the burst schedule
+    // run ONCE per advance on the real dt (emission catches up).
+    if (dt > MAX_STEP) {
+      const steps = Math.min(600, Math.ceil(dt / MAX_STEP))
+      const h = dt / steps
+      for (let s = 0; s < steps; s++) system.advance(h, forces)
+    } else {
+      system.advance(dt, forces)
+    }
     time += dt
     if (history !== null) history.record(system, dt)
   }

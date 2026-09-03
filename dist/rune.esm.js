@@ -7554,6 +7554,23 @@ function createWebGL2Renderer(options) {
     updateFrameContext(nowMs);
     statsCollector?.beginFrame();
     transients.beginFrame();
+    try {
+      stepFrame();
+      frameErrorCount = 0;
+    } catch (error) {
+      frameErrorCount++;
+      options.onGlError?.(`frame error: ${error instanceof Error ? error.message : String(error)}`);
+      if (frameErrorCount >= 3) {
+        running = false;
+        options.onGlError?.(`detected ${frameErrorCount} consecutive frame errors — rendering stopped`);
+        return;
+      }
+    }
+    statsCollector?.endFrame();
+    drainGlErrors();
+  }
+  let frameErrorCount = 0;
+  function stepFrame() {
     epoch.frame(() => {
       options.transport?.sampleAll();
       for (const feed2 of feeds)
@@ -7567,8 +7584,6 @@ function createWebGL2Renderer(options) {
       executor.run(writerView(writer));
       uploads.drain();
     });
-    statsCollector?.endFrame();
-    drainGlErrors();
   }
   let lastGlErrorKey = "";
   function drainGlErrors() {
@@ -10115,19 +10130,23 @@ async function createWebGpuRenderer(options) {
       return;
     updateFrameContext(nowMs);
     transients.beginFrame();
-    epoch.frame(() => {
-      options.transport?.sampleAll();
-      for (const feed2 of feeds)
-        feed2.sync();
-      time.value = frameCtx.time;
-      writer.reset();
-      writer.emit(OpCode.BeginPass, 0, 0, 0, 0);
-      for (const callback of [...callbacks])
-        callback(frameCtx, recordIntoWriter);
-      writer.emit(OpCode.EndPass, 0, 0, 0, 0);
-      executor.run(writerView(writer));
-      uploads.drain();
-    });
+    try {
+      epoch.frame(() => {
+        options.transport?.sampleAll();
+        for (const feed2 of feeds)
+          feed2.sync();
+        time.value = frameCtx.time;
+        writer.reset();
+        writer.emit(OpCode.BeginPass, 0, 0, 0, 0);
+        for (const callback of [...callbacks])
+          callback(frameCtx, recordIntoWriter);
+        writer.emit(OpCode.EndPass, 0, 0, 0, 0);
+        executor.run(writerView(writer));
+        uploads.drain();
+      });
+    } catch (error) {
+      storm.handle(`frame error: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
   function updateFrameContext(nowMs) {
     frameCtx.time = (nowMs - startedAt) / 1000;

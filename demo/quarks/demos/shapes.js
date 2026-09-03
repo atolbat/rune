@@ -51,7 +51,10 @@ export default {
         id: `shape-${label}`,
         facade: env.createParticles({
           capacity: 1200,
-          rate: 260,
+          // THEIR density: 1000/s with a ~1 s life — a solid glowing cloud
+          // per shape (the spawn stream fix makes every particle unique —
+          // the cloud actually FILLS the shape instead of a thin jet)
+          rate: 700,
           ramp: env.createRamp([
             { t: 0, size: 0.5, r: 1, g: 0.91, b: 0.51, a: 0 },
             { t: 0.15, size: 1, r: 1, g: 0.91, b: 0.51, a: 0.9 },
@@ -61,7 +64,7 @@ export default {
             shape: place(shape, x, y),
             velocity: { mode },
             speed: mode === 'lobe' ? [0.4, 0.7] : [0.25, 0.5],
-            life: [1.6, 2.4], size: [0.05, 0.09],
+            life: [0.9, 1.4], size: [0.05, 0.09],
             color: [[1, 0.91, 0.51, 1], [1, 0.44, 0.16, 1]], seed: 90 + i * 7,
           },
         }),

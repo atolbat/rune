@@ -234,11 +234,25 @@ export const FOG: FeatureBit = 1 << 27
  *  fadeRange, 0). */
 export const SOFT_PARTICLES: FeatureBit = 1 << 28
 
+/** The analytic studio environment (the env-map stand-in for PBR metals —
+ *  three.quarks' meshMaterialDemo ships a cube envMap; ours is a cheap
+ *  CLOSED-FORM environment on the reflect vector: a sky/ground gradient,
+ *  the sun glint and an overhead softbox, tinted by the albedo for
+ *  metals and broadened by roughness). With one sun + ambient alone, a
+ *  metallic=1 surface reads near-black (the diffuse and ambient terms
+ *  die) — this bit is what makes metal look like METAL without an IBL
+ *  sampler chain. Requires PBR; uniforms u_envSky/u_envGround (rgb) and
+ *  u_envGain (float, ~1). */
+export const PBR_ENV: FeatureBit = 1 << 29
+
 /** The light models — exactly one may be present (or none: unlit). */
 export const LIGHT_MODELS: FeatureBit = LAMBERT | MATCAP | PBR
 
-/** The post effects — mutate `lit` after the light model. */
-export const POST_EFFECTS: FeatureBit = EMISSIVE | FOG
+/** The post effects — mutate `lit` after the light model. PBR_ENV is in
+ *  the family only so `lit` becomes a `var` in WGSL (it adds to it);
+ *  it can never appear without PBR, so the unlit-fallback path never
+ *  sees it. */
+export const POST_EFFECTS: FeatureBit = EMISSIVE | FOG | PBR_ENV
 
 /** The NDF family — exactly one when PBR is on. */
 export const PBR_D_MODELS: FeatureBit = PBR_D_GGX | PBR_D_BECKMANN | PBR_D_BLINN
@@ -922,6 +936,43 @@ export const CATALOG: readonly FeatureDef[] = [
         ...pbrFWgsl(ctx),
         ...pbrDiffuseWgsl(ctx),
         `${mutKw(ctx)} lit = (diffuse + (D * vis) * F) * params.u_lightColor.rgb * nDotL + kd * base.rgb * params.u_ambient.rgb;`,
+      ],
+    }),
+  },
+  {
+    id: 'pbrEnv',
+    bit: PBR_ENV,
+    vert: (_ctx: AsmCtx): VertSnippets => ({}),
+    frag: (_ctx: AsmCtx): FragSnippets => ({
+      uniforms: [
+        { name: 'u_envSky', glsl: 'uniform vec3 u_envSky;', wgsl: 'u_envSky : vec4<f32>,' },
+        { name: 'u_envGround', glsl: 'uniform vec3 u_envGround;', wgsl: 'u_envGround : vec4<f32>,' },
+        { name: 'u_envGain', glsl: 'uniform float u_envGain;', wgsl: 'u_envGain : f32,' },
+      ],
+      // The closed-form studio environment, evaluated on the reflect
+      // vector (n, v, l, rough, metal, F0 are the PBR prologue's bindings
+      // — this entry assembles right after 'pbr'). The metals TINT the
+      // environment by the albedo (F0) and lose it to roughness; the
+      // dielectrics keep only the Fresnel-weighted 4%.
+      glslBody: [
+        'vec3 rEnv = reflect(-v, n);',
+        'float envHorizon = smoothstep(-0.15, 0.25, rEnv.y);',
+        'vec3 envCol = mix(u_envGround, u_envSky, envHorizon);',
+        'envCol += u_lightColor * pow(max(dot(rEnv, l), 0.0), 24.0);',
+        'envCol += u_envSky * smoothstep(0.45, 0.95, rEnv.y) * 0.5;',
+        'float envFres = 0.04 + 0.96 * pow(1.0 - nDotV, 5.0);',
+        'float envGain = u_envGain * mix(envFres, 0.9, metal) * mix(1.0, 0.55, rough);',
+        'lit += envCol * envGain * mix(vec3(1.0), base.rgb, metal);',
+      ],
+      wgslBody: [
+        'let rEnv = reflect(-v, n);',
+        'let envHorizon = smoothstep(-0.15, 0.25, rEnv.y);',
+        'var envCol = mix(params.u_envGround.rgb, params.u_envSky.rgb, envHorizon);',
+        'envCol += params.u_lightColor.rgb * pow(max(dot(rEnv, l), 0.0), 24.0);',
+        'envCol += params.u_envSky.rgb * smoothstep(0.45, 0.95, rEnv.y) * 0.5;',
+        'let envFres = 0.04 + 0.96 * pow(1.0 - nDotV, 5.0);',
+        'let envGain = params.u_envGain * mix(envFres, 0.9, metal) * mix(1.0, 0.55, rough);',
+        'lit += envCol * envGain * mix(vec3<f32>(1.0), base.rgb, metal);',
       ],
     }),
   },

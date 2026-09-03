@@ -38,6 +38,9 @@ export default {
       }),
       material: env.materials.sprite,
       pipeline: env.pipelines.additive,
+      // the single GLOW sprite: a no-tiles layer must NOT sample the 4×4
+      // atlas (16 sub-blobs per quad read as a rigid SQUARE at small sizes)
+      texture: () => env.glowTexture,
     })
 
     return {

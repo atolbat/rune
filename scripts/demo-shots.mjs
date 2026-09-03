@@ -15,6 +15,8 @@ mkdirSync(out, { recursive: true })
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.png': 'image/png',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.glb': 'model/gltf-binary',
   '.fbx': 'application/octet-stream',
@@ -327,23 +329,82 @@ async function assertSpriteContour() {
 await assertSpriteContour()
 
 // ─── quarks: the 14-demo suite (Task 122) — a shot per demo + gates ───────
+// Task 18: the sweep runs FORCED on WebGL2 (the Task 121 lesson — an AUTO
+// sweep exercises whatever this machine can create, not the reported path),
+// and each demo gains a MOTION gate (two screenshots, 300 ms apart: a
+// frozen canvas fails even when the pill counts alive — the WebGPU
+// stale-binding freeze class) — plus a BACKEND-TOGGLE round trip at the end.
 {
   const qk = await browser.newPage({ viewport: { width: 1280, height: 800 } })
   const qkErrors = []
   qk.on('pageerror', (e) => qkErrors.push(String(e)))
   await qk.goto(`http://localhost:${port}/demo/quarks/`, { waitUntil: 'networkidle' })
-  await qk.waitForFunction(() => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 20000 })
+  // force WebGL2 via the shell FAB toggle (the demo re-boots on the backend)
+  await qk.click('#rd-fab')
+  await qk.click('label[for="mode-webgl2"]')
+  await qk.mouse.click(640, 60)
   await qk.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
+  for (let i = 0; i < 40; i++) {
+    await qk.waitForTimeout(500)
+    const badge = await qk.textContent('#backend').catch(() => '…')
+    const pill = await qk.textContent('.pt-pill').catch(() => '')
+    if (badge === 'WebGL2' && /[1-9][\d,]* particles/.test(pill)) break
+  }
+  await qk.waitForFunction(() => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 20000 })
 
   const QK_NAMES = ['muzzle', 'explosion', 'shapes', 'trail', 'sequencer', 'mesh', 'subemitter',
     'noise', 'alphatest', 'plugin', 'billboard', 'soft', 'blending', 'follow']
-  const QK_SETTLE = { sequencer: 3500, muzzle: 2500, explosion: 2100 }
+  const QK_SETTLE = { muzzle: 2500, explosion: 2100, trail: 1300 }
+  // The SEQUENCER is a still formation by design (hold phases) — its motion
+  // pair brackets the t=6.5 s MORPH: we wait for the demo's own "morph →
+  // spiral" log line, then shoot the pair mid-flight (300 ms apart).
   const shotPills = []
   for (let i = 0; i < QK_NAMES.length; i++) {
+    const name = QK_NAMES[i]
     if (i > 0) await qk.click('.pt-arrow:last-child')
-    await qk.waitForTimeout(QK_SETTLE[QK_NAMES[i]] ?? 1700)
-    await qk.screenshot({ path: join(out, `quarks-${QK_NAMES[i]}.png`) })
+    await qk.waitForTimeout(QK_SETTLE[name] ?? 1700)
+    if (name === 'sequencer') {
+      // The morph, caught IN-PAGE at rAF cadence (window.__seqLayer is
+      // exposed for this gate): an in-page promise resolves the FRAME the
+      // retarget rewrites tx[0] — no Playwright polling latency — so the
+      // pixel pair brackets the actual flight (the demo is a still
+      // formation by design; a plain 300 ms pair lands on a hold).
+      const morphed = qk.evaluate(() => new Promise(resolve => {
+        const f = window.__seqLayer?.facade?.fields
+        if (f === undefined) { resolve(false); return }
+        const t0 = f.tx[0]
+        const check = () => {
+          if (Math.abs(f.tx[0] - t0) > 0.01) { resolve(true); return }
+          requestAnimationFrame(check)
+        }
+        requestAnimationFrame(check)
+      }))
+      await Promise.race([morphed, qk.waitForTimeout(25000)])
+    }
+    await qk.screenshot({ path: join(out, `quarks-${name}.png`) })
+    // the ALIVE pill is read at SHOT A's moment (the canonical shot): the
+    // motion pair's later shot can legitimately land in a burst-free window
+    // (the sequencer's dissolve, the trail's pre-burst beat) — that is not
+    // a dead demo.
     shotPills.push(await qk.textContent('.pt-pill'))
+    // THE MOTION GATE: a second shot later — a healthy animated demo
+    // changes pixels; a frozen canvas (the stale-binding class) does not.
+    await qk.waitForTimeout(name === 'sequencer' ? 450 : 300)
+    const f2 = await qk.screenshot()
+    const f1 = await import('pngjs').then(m => m.PNG.sync.read(readFileSync(join(out, `quarks-${QK_NAMES[i]}.png`))))
+    const f2png = await import('pngjs').then(m => m.PNG.sync.read(f2))
+    let changed = 0
+    const n = f1.data.length
+    for (let p = 0; p < n; p += 64) {
+      const dd = Math.abs(f1.data[p] - f2png.data[p]) + Math.abs(f1.data[p + 1] - f2png.data[p + 1]) + Math.abs(f1.data[p + 2] - f2png.data[p + 2])
+      if (dd > 12) changed++
+    }
+    const motionFrac = changed / (n / 64)
+    const pill = shotPills[i]
+    console.log(`[shots] quarks ${QK_NAMES[i]}: motion ${(motionFrac * 100).toFixed(2)}% — ${pill}`)
+    if (motionFrac < 0.002) {
+      throw new Error(`[shots] quarks ${QK_NAMES[i]}: FROZEN canvas (${(motionFrac * 100).toFixed(3)}% pixels changed in 300 ms) — ${pill}`)
+    }
   }
   if (qkErrors.length > 0) {
     throw new Error(`[shots] quarks page errors: ${qkErrors.slice(0, 3).join(' | ')}`)
@@ -365,6 +426,63 @@ await assertSpriteContour()
     console.log(`[shots] quarks ${name}: bright ${pct.toFixed(2)}% — ${shotPills[i]} (${alive ? 'alive' : 'DEAD'})`)
     if (!alive) throw new Error(`[shots] quarks ${name}: the pill shows no live particles — ${shotPills[i]}`)
     if (pct < 0.15) throw new Error(`[shots] quarks ${name}: only ${pct.toFixed(2)}% bright pixels — the demo renders nothing`)
+  }
+  await qk.close()
+}
+
+// ─── Task 18: the BACKEND-TOGGLE round trip (the stale-binding gate) ──────
+// The WebGPU freeze class: switching WebGL2 → WebGPU → WebGL2 used to leave
+// the layers bound to the DEAD first backend (the frozen canvas with
+// "twitches"). After the round trip the canvas must ANIMATE again and no
+// page error may have escaped. (On machines without a WebGPU device the
+// middle leg boots or fails loudly — either way the LAST leg is WebGL2.)
+{
+  const qk = await browser.newPage({ viewport: { width: 1280, height: 800 } })
+  const errors = []
+  qk.on('pageerror', e => errors.push(String(e)))
+  await qk.goto(`http://localhost:${port}/demo/quarks/`, { waitUntil: 'networkidle' })
+  const settleBackend = async (want, tries = 40) => {
+    for (let i = 0; i < tries; i++) {
+      await qk.waitForTimeout(500)
+      const badge = await qk.textContent('#backend').catch(() => '…')
+      const pill = await qk.textContent('.pt-pill').catch(() => '')
+      if (badge === want && /[1-9][\d,]* particles/.test(pill)) return true
+    }
+    return false
+  }
+  // leg 1: WebGL2
+  await qk.click('#rd-fab')
+  await qk.click('label[for="mode-webgl2"]')
+  await qk.mouse.click(640, 60)
+  if (!(await settleBackend('WebGL2'))) throw new Error('[shots] toggle: WebGL2 leg never came alive')
+  // leg 2: WebGPU (may fail on this machine — the badge then says so)
+  await qk.click('#rd-fab')
+  await qk.click('label[for="mode-webgpu"]')
+  await qk.mouse.click(640, 60)
+  await qk.waitForTimeout(2500)
+  const midBadge = await qk.textContent('#backend').catch(() => '…')
+  // leg 3: back to WebGL2 — the canvas must ANIMATE (the stale-binding gate)
+  await qk.click('#rd-fab')
+  await qk.click('label[for="mode-webgl2"]')
+  await qk.mouse.click(640, 60)
+  if (!(await settleBackend('WebGL2'))) throw new Error('[shots] toggle: the WebGL2 return leg never came alive')
+  await qk.waitForTimeout(1200)
+  const { PNG } = await import('pngjs')
+  const a = PNG.sync.read(await qk.screenshot())
+  await qk.waitForTimeout(300)
+  const b = PNG.sync.read(await qk.screenshot())
+  let changed = 0
+  for (let p = 0; p < a.data.length; p += 64) {
+    const dd = Math.abs(a.data[p] - b.data[p]) + Math.abs(a.data[p + 1] - b.data[p + 1]) + Math.abs(a.data[p + 2] - b.data[p + 2])
+    if (dd > 12) changed++
+  }
+  const motionFrac = changed / (a.data.length / 64)
+  console.log(`[shots] toggle round trip (mid=${midBadge}): motion ${(motionFrac * 100).toFixed(2)}%`)
+  if (motionFrac < 0.002) {
+    throw new Error(`[shots] toggle: FROZEN canvas after the backend round trip (${(motionFrac * 100).toFixed(3)}%) — the stale-binding class is back`)
+  }
+  if (errors.length > 0) {
+    throw new Error(`[shots] toggle: page errors — ${errors.slice(0, 3).join(' | ')}`)
   }
   await qk.close()
 }

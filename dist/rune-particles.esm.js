@@ -1454,6 +1454,7 @@ function fillMeshes(system, geometry, out, options = {}) {
   return at / MESH_STRIDE;
 }
 // packages/particles/src/facade.ts
+var MAX_STEP = 1 / 20;
 function createParticles(desc) {
   const capacity = desc.capacity;
   const render = desc.render ?? { kind: "billboard" };
@@ -1482,11 +1483,17 @@ function createParticles(desc) {
   let ratePerSecond = desc.rate ?? 0;
   let carry = 0;
   const origin = [0, 0, 0];
+  let streamIndex = 0;
   const emitWrap = (index, out) => {
-    spawner(index, out);
+    spawner(streamIndex + index, out);
     out.x += origin[0];
     out.y += origin[1];
     out.z += origin[2];
+  };
+  const emitStream = (n) => {
+    const spawnedCount = system.emit(n, emitWrap);
+    streamIndex += spawnedCount;
+    return spawnedCount;
   };
   let soupFloats;
   let stride;
@@ -1552,7 +1559,7 @@ function createParticles(desc) {
     burst(n, sp) {
       if (sp !== undefined)
         spawner = createSpawner(sp);
-      return system.emit(n, emitWrap);
+      return emitStream(n);
     },
     at(x, y, z) {
       if (!Number.isFinite(x + y + z)) {
@@ -1621,7 +1628,7 @@ function createParticles(desc) {
       const whole = Math.floor(carry);
       if (whole > 0) {
         carry -= whole;
-        system.emit(whole, emitWrap);
+        emitStream(whole);
       }
     }
     for (const state of burstState) {
@@ -1629,14 +1636,21 @@ function createParticles(desc) {
       let guard = 0;
       while (time >= state.next && state.firesLeft > 0 && guard++ < 64) {
         if (hash01(scheduleSeed, state.index * 7919 + 13, state.cycle) < burst.probability) {
-          system.emit(burst.count, emitWrap);
+          emitStream(burst.count);
         }
         state.firesLeft--;
         state.cycle++;
         state.next += burst.interval;
       }
     }
-    system.advance(dt, forces);
+    if (dt > MAX_STEP) {
+      const steps = Math.min(600, Math.ceil(dt / MAX_STEP));
+      const h = dt / steps;
+      for (let s = 0;s < steps; s++)
+        system.advance(h, forces);
+    } else {
+      system.advance(dt, forces);
+    }
     time += dt;
     if (history !== null)
       history.record(system, dt);

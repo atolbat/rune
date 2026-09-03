@@ -13,13 +13,14 @@
 //   emitters), and the custom BLEND EQUATIONS (add/max/subtract) + the
 //   SOFT_PARTICLES depth fade (a color-encoded depth prepass).
 //
-// The dist imports carry ?v=122 (the stale-cache guard — bump on release).
-import { createRenderer, capsule, cube, plane, torusKnot } from '../../dist/rune.esm.js?v=122'
+// The dist imports carry ?v=123 (the stale-cache guard — bump on release).
+import { createRenderer, capsule, cube, plane, torusKnot } from '../../dist/rune.esm.js?v=123'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
-  DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES,
-} from '../../dist/rune-materials.esm.js?v=122'
-import { createParticles, createRamp, createSpawner } from '../../dist/rune-particles.esm.js?v=122'
+  DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV,
+} from '../../dist/rune-materials.esm.js?v=123'
+import { createParticles, createRamp, createSpawner } from '../../dist/rune-particles.esm.js?v=123'
+import { decodePngRgba } from './png.mjs'
 
 /* ─── the demo registry (their order) ─────────────────────────────────── */
 
@@ -49,8 +50,9 @@ const SOFT_MATERIAL = materialOf({ features: TEXTURE | VERTEX_COLOR | SOFT_PARTI
 const LAMBERT_MATERIAL = materialOf({ features: FLAT_ALBEDO | LAMBERT | DOUBLE_SIDED })
 // PBR mesh particles: the per-particle tint travels through the soup's
 // VERTEX_COLOR (FLAT_ALBEDO would need a u_albedo uniform — the soup tint
-// is the point of per-particle color)
-const PBR_MATERIAL = materialOf({ features: pbrMask() | FLAT_ALBEDO | VERTEX_COLOR })
+// is the point of per-particle color). PBR_ENV — the analytic studio
+// environment that makes metallic=1 read as metal (their envMap's stand-in).
+const PBR_MATERIAL = materialOf({ features: pbrMask() | FLAT_ALBEDO | VERTEX_COLOR | PBR_ENV })
 
 const ADDITIVE = { depth: { test: 'less', write: false }, raster: { cull: 'none' }, blend: { src: 'src-alpha', dst: 'one' } }
 const ALPHA = { depth: { test: 'less', write: false }, raster: { cull: 'none' }, blend: { src: 'src-alpha', dst: 'one-minus-src-alpha' } }
@@ -63,6 +65,24 @@ const ONE_SUBTRACT = { depth: { test: 'less', write: false }, raster: { cull: 'n
 const OPAQUE = { depth: { test: 'less', write: true }, raster: { cull: 'back' } }
 
 /* ─── the procedural sprite atlas (4×4 tiles, 64 px each) ─────────────── */
+
+/* ─── The three.quarks atlas: their texture1.png, exact bytes ───────────
+
+   Decoded ONCE at module load (before any demo's make()) — the raw RGBA
+   bytes, straight alpha by construction, no browser image semantics
+   (the Task 118 lesson). The box: `loaded` is set for the whole session;
+   `texture` is re-created per boot (the renderer owns GPU objects). The
+   muzzle demo's layers resolve () => env.quarksAtlas?.texture at
+   command-build time — always after this decode and after the boot's
+   texture creation. */
+let quarksPng = null
+try {
+  quarksPng = await decodePngRgba('assets/texture1.png')
+} catch (error) {
+  // A missing asset (a misconfigured server) must not kill the page: the
+  // muzzle demo falls back to the procedural atlas with a loud note.
+  console.warn(`texture1.png: ${error instanceof Error ? error.message : String(error)}`)
+}
 
 const ATLAS_SIZE = 256
 const TILE = 64
@@ -178,11 +198,36 @@ function makeAtlasBytes() {
 
 /* ─── Mat4 scratch + helpers (the particles demo's formulas) ───────────── */
 
+// The single-glow sprite for the RIBBON layers (the trail demo): the
+// ribbons sample the FULL texture (u along the length, v across the
+// width), so the 4×4 atlas would print a grid of glows into every
+// segment — this is one clean gaussian, 64×64, straight alpha by
+// construction.
+function makeGlowBytes() {
+  const bytes = new Uint8Array(64 * 64 * 4)
+  for (let y = 0; y < 64; y++) {
+    for (let x = 0; x < 64; x++) {
+      const u = (x + 0.5) / 64 - 0.5, v = (y + 0.5) / 64 - 0.5
+      const r = Math.hypot(u, v)
+      const a = r >= 0.5 ? 0 : Math.round(255 * Math.exp(-5 * r * r / 0.25))
+      const i = (y * 64 + x) * 4
+      bytes[i] = 255; bytes[i + 1] = 255; bytes[i + 2] = 255; bytes[i + 3] = a
+    }
+  }
+  return bytes
+}
+
 const M = () => new Float32Array(16)
 const view = M()
 const projection = M()
 const mvp = M()
 const MODEL = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
+// The composed MODEL×VIEW×PROJECTION scratch (the scene meshes): the vertex
+// shader consumes u_mvp = P·V·M — a `layer.model` alone does NOT move the
+// mesh (gl_Position never sees u_model; that matrix only feeds the
+// normals/worldPos). Without the composition a "translated" plane renders
+// at the ORIGIN and occludes everything behind it.
+const MODEL_MVP = M()
 const BASIS = { right: [1, 0, 0], up: [0, 1, 0], forward: [0, 0, -1] }
 // The camera orbit target (the follow demo moves it).
 const TARGET = [0, 0.2, 0]
@@ -234,6 +279,7 @@ let state = null          // the current demo's state object
 let rhythm = {}           // fresh per demo switch
 let atlasTexture = null
 let atlasUpload = null
+let glowTexture = null // the single-glow ribbon sprite (the trail demo)
 let layers = []           // the registered draw layers
 let labels = []           // the world-anchored DOM labels
 let labelLayer = null
@@ -350,6 +396,12 @@ const env = {
   log: shell.log,
   atlasTexture: null, // set at boot
   atlasTiles: [4, 4],
+  // the single-glow ribbon sprite (the trail demo's dedicated texture)
+  glowTexture: null, // set at boot
+  // The original three.quarks atlas (assets/texture1.png): null when the
+  // decode failed; { loaded: true, texture: T | null } otherwise — the
+  // texture object is (re-)created at every renderer boot.
+  quarksAtlas: quarksPng !== null ? { loaded: true, texture: null } : null,
   materials: {
     sprite: SPRITE_MATERIAL, leaf: LEAF_MATERIAL, soft: SOFT_MATERIAL,
     lambert: LAMBERT_MATERIAL, pbr: PBR_MATERIAL,
@@ -430,6 +482,18 @@ function buildLayerCommand(layer) {
   const soup = layer.facade.view(BASIS)
   const strideBytes = soup.stride * 4
   const layout = soup.layout
+  // THE STALE-BINDING RESET (the WebGPU freeze root cause): a backend
+  // switch re-boots the renderer, but the layer kept the OLD backend's
+  // dynamic binding (glDyn from the disposed GL context / gpuDyn from the
+  // destroyed device). The frame callback checks glDyn FIRST — a stale
+  // glDyn would send every per-frame update into the dead GL context and
+  // the NEW WebGPU vertex buffers would never update: the canvas froze on
+  // the first-frame soup (a static picture that only "twitches" as the
+  // draw count changes). Both bindings are cleared before the current
+  // backend's is written — the dual-bind is always exactly one backend old
+  // at most, never two.
+  layer.glDyn = undefined
+  layer.gpuDyn = undefined
   let bufferId
   if (activeRenderer.backend === 'webgpu') {
     layer.gpuDyn = activeRenderer.inner.gpu
@@ -446,7 +510,12 @@ function buildLayerCommand(layer) {
   if (layout.normal !== undefined) {
     attrs.normal = { data: soup.vertices, size: 3, stride: strideBytes, offset: layout.normal.offset * 4, bufferId }
   }
-  const textures = { u_tex: layer.texture ?? atlasTexture, texTexture: layer.texture ?? atlasTexture, ...(layer.textures ?? {}) }
+  // A layer's texture may be a STATIC object or a RESOLVER FUNCTION
+  // (evaluated here, at command-build time — after the renderer boot):
+  // the quarks-atlas layers resolve () => env.quarksAtlas?.texture so the
+  // command binds whatever texture the CURRENT boot created.
+  const layerTexture = typeof layer.texture === 'function' ? layer.texture() : layer.texture
+  const textures = { u_tex: layerTexture ?? atlasTexture, texTexture: layerTexture ?? atlasTexture, ...(layer.textures ?? {}) }
   const uniforms = {
     u_mvp: (p) => p.mvp,
     u_model: (p) => p.model,
@@ -537,6 +606,9 @@ function frameCallback(ctx, record) {
     camEye, camTarget, record, backend: activeRenderer.backend,
     width: env.width, height: env.height, dpr: window.devicePixelRatio,
     canvas: liveCanvas,
+    // The composed P·V·M for MANUAL mesh layers (the follow demo's flying
+    // box): gl_Position wants the model folded INTO the mvp.
+    modelMvp: (model) => { mat4Multiply(MODEL_MVP, mvp, model); return MODEL_MVP },
   }
   if (state.frame !== undefined) state.frame(frameCtx, rhythm)
 
@@ -551,7 +623,10 @@ function frameCallback(ctx, record) {
     if (layer.staticMesh === true) {
       // a manual layer (the follow demo's moving box) records itself with
       // its own dynamic model matrix
-      if (layer.manual !== true) record(layer.command, { mvp, model: layer.model ?? MODEL, camPos: camEye })
+      if (layer.manual !== true) {
+        mat4Multiply(MODEL_MVP, mvp, layer.model ?? MODEL)
+        record(layer.command, { mvp: MODEL_MVP, model: layer.model ?? MODEL, camPos: camEye })
+      }
       continue
     }
     const soup = layer.facade.view(BASIS)
@@ -684,6 +759,17 @@ async function attachAtlas() {
   atlasTexture = activeRenderer.texture(ATLAS_SIZE, ATLAS_SIZE)
   atlasUpload = atlasTexture.upload(makeAtlasBytes())
   env.atlasTexture = atlasTexture
+  glowTexture = activeRenderer.texture(64, 64)
+  glowTexture.upload(makeGlowBytes())
+  env.glowTexture = glowTexture
+  // the original three.quarks atlas: re-created on THIS renderer (the
+  // bytes were decoded once, at module load)
+  if (quarksPng !== null) {
+    const tex = activeRenderer.texture(quarksPng.width, quarksPng.height)
+    const upload = tex.upload(quarksPng.data)
+    env.quarksAtlas.texture = tex
+    if (upload?.done !== undefined) void upload.done.catch(() => { /* the facade logs */ })
+  }
 }
 
 async function boot(mode) {
@@ -731,6 +817,15 @@ async function boot(mode) {
   } catch (error) {
     if (seq !== bootSeq) return
     const message = error instanceof Error ? error.message : String(error)
+    // Auto mode: the label PROMISES "WebGPU → WebGL2 fallback" — honor it.
+    // A WebGPU boot can die late (the adapter exists but the device or the
+    // first configure fails — driver-dependent); retry once on WebGL2
+    // instead of leaving a dead canvas behind.
+    if (mode === 'auto') {
+      shell.log.warn(`WebGPU boot failed (${message.slice(0, 120)}) — falling back to WebGL2`)
+      void boot('webgl2')
+      return
+    }
     shell.setBadge(mode === 'webgpu' ? 'WebGPU unavailable' : 'startup failed', 'err')
     shell.log.error(`Boot on “${mode}” failed: ${message}`)
     if (mode === 'webgpu') {

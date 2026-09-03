@@ -28,8 +28,9 @@ var PBR_MR_TEXTURE = 1 << 25;
 var EMISSIVE = 1 << 26;
 var FOG = 1 << 27;
 var SOFT_PARTICLES = 1 << 28;
+var PBR_ENV = 1 << 29;
 var LIGHT_MODELS = LAMBERT | MATCAP | PBR;
-var POST_EFFECTS = EMISSIVE | FOG;
+var POST_EFFECTS = EMISSIVE | FOG | PBR_ENV;
 var PBR_D_MODELS = PBR_D_GGX | PBR_D_BECKMANN | PBR_D_BLINN;
 var PBR_G_MODELS = PBR_G_SMITH | PBR_G_SMITH_SCHLICK | PBR_G_SMITH_HEIGHT | PBR_G_IMPLICIT | PBR_G_NEUMANN | PBR_G_KELEMEN;
 var PBR_F_MODELS = PBR_F_SCHLICK | PBR_F_EXACT;
@@ -561,6 +562,38 @@ var CATALOG = [
     })
   },
   {
+    id: "pbrEnv",
+    bit: PBR_ENV,
+    vert: (_ctx) => ({}),
+    frag: (_ctx) => ({
+      uniforms: [
+        { name: "u_envSky", glsl: "uniform vec3 u_envSky;", wgsl: "u_envSky : vec4<f32>," },
+        { name: "u_envGround", glsl: "uniform vec3 u_envGround;", wgsl: "u_envGround : vec4<f32>," },
+        { name: "u_envGain", glsl: "uniform float u_envGain;", wgsl: "u_envGain : f32," }
+      ],
+      glslBody: [
+        "vec3 rEnv = reflect(-v, n);",
+        "float envHorizon = smoothstep(-0.15, 0.25, rEnv.y);",
+        "vec3 envCol = mix(u_envGround, u_envSky, envHorizon);",
+        "envCol += u_lightColor * pow(max(dot(rEnv, l), 0.0), 24.0);",
+        "envCol += u_envSky * smoothstep(0.45, 0.95, rEnv.y) * 0.5;",
+        "float envFres = 0.04 + 0.96 * pow(1.0 - nDotV, 5.0);",
+        "float envGain = u_envGain * mix(envFres, 0.9, metal) * mix(1.0, 0.55, rough);",
+        "lit += envCol * envGain * mix(vec3(1.0), base.rgb, metal);"
+      ],
+      wgslBody: [
+        "let rEnv = reflect(-v, n);",
+        "let envHorizon = smoothstep(-0.15, 0.25, rEnv.y);",
+        "var envCol = mix(params.u_envGround.rgb, params.u_envSky.rgb, envHorizon);",
+        "envCol += params.u_lightColor.rgb * pow(max(dot(rEnv, l), 0.0), 24.0);",
+        "envCol += params.u_envSky.rgb * smoothstep(0.45, 0.95, rEnv.y) * 0.5;",
+        "let envFres = 0.04 + 0.96 * pow(1.0 - nDotV, 5.0);",
+        "let envGain = params.u_envGain * mix(envFres, 0.9, metal) * mix(1.0, 0.55, rough);",
+        "lit += envCol * envGain * mix(vec3<f32>(1.0), base.rgb, metal);"
+      ]
+    })
+  },
+  {
     id: "mrTexture",
     bit: PBR_MR_TEXTURE,
     vert: (ctx) => has(ctx, TEXTURE | NORMALMAP) ? {} : {
@@ -781,7 +814,7 @@ function validate(mask, jointCount) {
   if ((mask & SKIN) !== 0 && (!Number.isInteger(jointCount) || jointCount < 1)) {
     throw new Error("rune/materials: SKIN requires jointCount >= 1");
   }
-  if ((mask & (PBR_SUB_MODELS | PBR_MR_TEXTURE)) !== 0 && (mask & PBR) === 0) {
+  if ((mask & (PBR_SUB_MODELS | PBR_MR_TEXTURE | PBR_ENV)) !== 0 && (mask & PBR) === 0) {
     throw new Error("rune/materials: the PBR sub-model bits require PBR");
   }
   if ((mask & PBR) !== 0) {
@@ -955,6 +988,7 @@ export {
   PBR_F_SCHLICK,
   PBR_F_MODELS,
   PBR_F_EXACT,
+  PBR_ENV,
   PBR_D_MODELS,
   PBR_D_GGX,
   PBR_D_BLINN,

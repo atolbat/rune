@@ -33,6 +33,8 @@ import {
   PBR_MR_TEXTURE,
   EMISSIVE,
   FOG,
+  PBR_ENV,
+  POST_EFFECTS,
   type PbrModelChoice,
 } from '../src/index.ts'
 import { reflectGlsl } from '@rune/webgl2'
@@ -695,5 +697,61 @@ describe('pbr backend integration (the real compilers)', () => {
     expect(reflection.uniformBytes).toBeGreaterThanOrEqual(192)
     const names = reflection.uniforms.map(u => u.name)
     expect(names).toEqual(['u_mvp', 'u_model', 'u_albedo', 'u_lightDir', 'u_lightColor', 'u_ambient', 'u_camPos', 'u_roughness', 'u_metallic'])
+  })
+})
+
+// ─── Task 18: PBR_ENV — the analytic studio environment ─────────────────────
+
+describe('pbrEnv (Task 18)', () => {
+  const ENV_MASK = pbrMask() | PBR | FLAT_ALBEDO | PBR_ENV
+
+  it('assembles both stages with the environment term and its uniforms', () => {
+    resetMaterials()
+    const material = materialOf({ features: ENV_MASK })
+    const frag = material.glsl.fragment
+    const wgsl = material.wgsl
+    // the environment is evaluated on the reflect vector
+    expect(frag).toContain('reflect(-v, n)')
+    expect(wgsl).toContain('reflect(-v, n)')
+    // the three uniforms exist in both stages' declarations
+    for (const name of ['u_envSky', 'u_envGround', 'u_envGain']) {
+      expect(material.uniforms.some(u => u.name === name)).toBe(true)
+    }
+    expect(frag).toContain('uniform vec3 u_envSky;')
+    expect(wgsl).toContain('u_envSky : vec4<f32>,')
+    // the term ADDS to lit (the PBR result), after the light model
+    expect(frag).toContain('lit += envCol * envGain')
+    expect(wgsl).toContain('lit += envCol * envGain')
+    // metals tint the environment by the albedo
+    expect(frag).toContain('mix(vec3(1.0), base.rgb, metal)')
+    expect(wgsl).toContain('mix(vec3<f32>(1.0), base.rgb, metal)')
+  })
+
+  it('WGSL lint: the env variant passes the linter clean', () => {
+    resetMaterials()
+    const material = materialOf({ features: ENV_MASK })
+    expect(lintWgsl(material.wgsl)).toEqual([])
+  })
+
+  it('the GLSL fragment reflects the sampler-free uniform set', () => {
+    resetMaterials()
+    const material = materialOf({ features: ENV_MASK })
+    const reflected = reflectGlsl(material.glsl.vertex, material.glsl.fragment)
+    const names = reflected.uniforms.map((u: { name: string }) => u.name)
+    expect(names).toContain('u_envSky')
+    expect(names).toContain('u_envGain')
+    expect(reflected.uniforms.find((u: { name: string }) => u.name === 'u_envGain')!.type).toContain('float')
+  })
+
+  it('PBR_ENV without PBR is refused loudly', () => {
+    resetMaterials()
+    expect(() => assemble(FLAT_ALBEDO | LAMBERT | PBR_ENV, 0)).toThrow('require PBR')
+  })
+
+  it('PBR_ENV makes `lit` a var in WGSL (POST_EFFECTS membership)', () => {
+    expect((POST_EFFECTS & PBR_ENV)).not.toBe(0)
+    resetMaterials()
+    const material = materialOf({ features: ENV_MASK })
+    expect(material.wgsl).toMatch(/var lit =/)
   })
 })
