@@ -17,13 +17,19 @@
 //   the sprite is EXPLICIT RGBA bytes — straight alpha by construction,
 //   uploaded through the raw-byte path (no canvas, no ImageBitmap, no
 //   browser premultiply semantics — Task 118); blending comes
-//   from the pipeline desc: additive for the glow presets, classic
-//   src-alpha for the snow/embers presets.
+//   from the pipeline desc: additive for the glow/fire presets (the
+//   gaussian sprite falloff — Task 120), classic src-alpha for the snow
+//   preset (the transparency showcase).
 // Camera: slow auto-orbit; drag to orbit, pinch / wheel to zoom. The
 //   billboard basis (right / up) is taken from the VIEW matrix rows.
-import { createRenderer } from '../../dist/rune.esm.js'
-import { materialOf, TEXTURE, VERTEX_COLOR } from '../../dist/rune-materials.esm.js'
-import { createParticles, createRamp } from '../../dist/rune-particles.esm.js'
+//
+// The dist imports carry ?v= (Task 120 — the stale-cache guard): GitHub
+//   Pages serves with max-age=600, and a browser that keeps an OLD bundle
+//   for those 10 minutes shows an OLD bug even after a deploy — a changed
+//   query string forces a fresh fetch. Bump the suffix on every release.
+import { createRenderer } from '../../dist/rune.esm.js?v=120'
+import { materialOf, TEXTURE, VERTEX_COLOR } from '../../dist/rune-materials.esm.js?v=120'
+import { createParticles, createRamp } from '../../dist/rune-particles.esm.js?v=120'
 
 /* ─── Materials: the unlit sprite pair × 2 blend modes ─────────────────── */
 
@@ -228,16 +234,24 @@ const PRESETS = {
 
   embers: {
     title: 'Embers',
-    sub: 'buoyancy · turbulence · growing smoke · alpha',
-    pipeline: ALPHA_PIPELINE,
+    sub: 'buoyancy · turbulence · additive fire',
+    // Task 120 — ADDITIVE. The old ALPHA_PIPELINE smoke (dark grey puffs,
+    // rgb 0.25/0.2/0.22 growing to 2.2× size) read as muddy dark squares on
+    // the dark background — “liquid sprites / quads, black where it should
+    // be transparent”. Additive fire CANNOT darken: every fragment only
+    // adds light, alpha=0 adds nothing — a glow that is transparent BY
+    // CONSTRUCTION on every GPU. The embers cool white-yellow → orange →
+    // deep red as they rise; Snow keeps the classic alpha-blend showcase.
+    pipeline: ADDITIVE_PIPELINE,
     camera: { pitch: 0.1, dist: 5.4, orbit: 0.03 },
     make: () => createParticles({
       capacity: CAPACITY,
       rate: 240,
       ramp: createRamp([
-        { t: 0, size: 0.35, r: 1, g: 0.75, b: 0.4, a: 0 },
-        { t: 0.15, size: 0.7, r: 1, g: 0.6, b: 0.25, a: 0.85 },
-        { t: 1, size: 2.2, r: 0.25, g: 0.2, b: 0.22, a: 0 },
+        { t: 0, size: 0.5, r: 1, g: 0.92, b: 0.7, a: 0 },
+        { t: 0.14, size: 0.8, r: 1, g: 0.87, b: 0.55, a: 1 },
+        { t: 0.5, size: 1, r: 1, g: 0.5, b: 0.18, a: 0.55 },
+        { t: 1, size: 1.5, r: 0.55, g: 0.14, b: 0.05, a: 0 },
       ]),
       // positive gravity = buoyancy here (the axis is up); turbulence = wander
       forces: { gravity: [0, 0.45, 0], drag: 0.7, turbulence: 1.1 },
@@ -296,8 +310,11 @@ const PRESETS = {
     title: 'Snow',
     sub: 'falling flakes · side drift · alpha blend',
     pipeline: ALPHA_PIPELINE,
-    // three-nebula's snow example: a wide quiet snowfall — level camera,
-    // flakes fade in above and dissolve below before the floor
+    // THE alpha-blend showcase (Task 120): classic src-alpha /
+    // one-minus-src-alpha — the white flakes over the dark sky. A blended
+    // sprite can only mix toward the flake color (bright on dark), never
+    // produce black; the alpha regression gate (demo-shots) watches this
+    // preset's pixels for exactly that regression class.
     camera: { yaw: 0.35, pitch: 0.1, dist: 6.0, orbit: 0.04 },
     make: () => createParticles({
       capacity: CAPACITY,
@@ -401,27 +418,25 @@ const SPRITE_SIZE = 128
 // have no browser in the loop — straight alpha BY CONSTRUCTION: rgb stays
 // 255 while alpha carries the falloff, so both the additive (src-alpha·rgb)
 // and the alpha (src-alpha / one-minus-src-alpha) pipelines read it right.
+//
+// Task 120 — THE FALLOFF: a smooth gaussian exp(-5r²), NO piecewise
+// “shoulder”. The old stops (1 → .85@.25 → .22@.6 → 0) held a near-solid
+// disc out to 60% of the radius — at small screen sizes that edge reads as
+// a hard silhouette and overlaps read as “chunky quads” (the user's report).
+// The gaussian falls monotonically and reaches ~0 INSIDE the quad edge
+// (r>0.97 → <1/255), so a sprite edge is never visible at any size: a
+// bright core with a wide soft halo — the classic soft-glow particle.
 function makeSpriteBytes() {
   const size = SPRITE_SIZE
   const bytes = new Uint8Array(size * size * 4)
-  // the same radial falloff the canvas gradient drew:
-  // d=0 → a=1, d=0.25 → 0.85, d=0.6 → 0.22, d=1 → 0 (piecewise linear)
-  const STOPS = [[0, 1], [0.25, 0.85], [0.6, 0.22], [1, 0]]
   const half = size / 2
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      const d = Math.hypot(x - half + 0.5, y - half + 0.5) / half
-      let a = 0
-      if (d < 1) {
-        for (let s = 1; s < STOPS.length; s++) {
-          if (d <= STOPS[s][0]) {
-            const [d0, a0] = STOPS[s - 1]
-            const [d1, a1] = STOPS[s]
-            a = a0 + (a1 - a0) * ((d - d0) / (d1 - d0))
-            break
-          }
-        }
-      }
+      const dx = (x - half + 0.5) / half
+      const dy = (y - half + 0.5) / half
+      const r2 = dx * dx + dy * dy
+      // exp(-5r²): 1 → 0.82@r.25 → 0.29@r.5 → 0.04@r.75 → ~0@r.965
+      const a = r2 >= 1 ? 0 : Math.exp(-5 * r2)
       const i = (y * size + x) * 4
       bytes[i] = 255; bytes[i + 1] = 255; bytes[i + 2] = 255
       bytes[i + 3] = Math.round(a * 255)

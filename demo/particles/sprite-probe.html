@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rune — sprite probe (internal)</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #040509; overflow: hidden; }
+  canvas { display: block; width: 480px; height: 480px; }
+</style>
+</head>
+<body>
+<canvas id="c" width="480" height="480"></canvas>
+<!--
+  THE SPRITE CONTOUR PROBE (Task 120 — internal, not linked from the demo UI).
+  Renders ONE static billboard sprite through the SAME dist bundles, material
+  and pipeline descriptors as the particles demo, at a calibrated size (~59%
+  of the canvas). demo-shots.mjs screenshots it and gates the ISO-BRIGHTNESS
+  CONTOUR: a healthy sprite+blend pipeline draws a CIRCLE (fill ≈ π/4 ≈ 78.5%,
+  aspect 1.00, the span shrinking with the threshold); any quad-shaped rim,
+  black corner or opaque square fails the gate. This catches the whole
+  regression class (texture alpha, blend factors, premultiply) on BOTH
+  backends — whatever this browser can create.
+
+  Query params: mode=alpha|additive (blend mode), backend=webgl2|webgpu.
+-->
+<script type="module">
+import { createRenderer } from '../../dist/rune.esm.js?v=120'
+import { materialOf, TEXTURE, VERTEX_COLOR } from '../../dist/rune-materials.esm.js?v=120'
+
+const Q = new URLSearchParams(location.search)
+const MODE = Q.get('mode') ?? 'alpha'
+const BACKEND = Q.get('backend') ?? undefined
+
+const SPR = 128
+// the demo's gaussian glow (Task 120) — duplicated here on purpose: the probe
+// must stay self-contained (the demo module has side effects and cannot be
+// imported). Keep the falloff in sync with demo/particles/main.js.
+function makeSpriteBytes() {
+  const bytes = new Uint8Array(SPR * SPR * 4)
+  const half = SPR / 2
+  for (let y = 0; y < SPR; y++) {
+    for (let x = 0; x < SPR; x++) {
+      const dx = (x - half + 0.5) / half
+      const dy = (y - half + 0.5) / half
+      const r2 = dx * dx + dy * dy
+      const a = r2 >= 1 ? 0 : Math.exp(-5 * r2)
+      const i = (y * SPR + x) * 4
+      bytes[i] = 255; bytes[i + 1] = 255; bytes[i + 2] = 255
+      bytes[i + 3] = Math.round(a * 255)
+    }
+  }
+  return bytes
+}
+
+const mat = materialOf({ features: TEXTURE | VERTEX_COLOR })
+const PIPE = MODE === 'additive'
+  ? { depth: { test: 'less', write: false }, raster: { cull: 'none' }, blend: { src: 'src-alpha', dst: 'one' } }
+  : { depth: { test: 'less', write: false }, raster: { cull: 'none' }, blend: { src: 'src-alpha', dst: 'one-minus-src-alpha' } }
+
+const renderer = createRenderer({
+  canvas: document.getElementById('c'),
+  backend: BACKEND,
+  clear: { color: [0.015, 0.02, 0.035, 1], depth: 1 },
+})
+await renderer.start()
+const tex = renderer.texture(SPR, SPR)
+tex.upload(makeSpriteBytes())
+
+// ONE billboard quad, ~59% of the canvas: ±1.05 scaled by 0.28 → ±0.294 NDC.
+const S = 1.05
+const soup = new Float32Array([
+  -S, -S, 0,  0, 0,  1, 1, 1, 1,
+   S, -S, 0,  1, 0,  1, 1, 1, 1,
+   S,  S, 0,  1, 1,  1, 1, 1, 1,
+  -S, -S, 0,  0, 0,  1, 1, 1, 1,
+   S,  S, 0,  1, 1,  1, 1, 1, 1,
+  -S,  S, 0,  0, 1,  1, 1, 1, 1,
+])
+let bufferId
+const isGpu = renderer.backend === 'webgpu'
+if (isGpu) {
+  // the WebGPU feed path: the dirty-range write keyed by the soup array
+  // (synced every frame — the same pattern as the demo)
+} else {
+  bufferId = renderer.inner.gl.createBuffer(soup)
+}
+const cmd = renderer.command({
+  id: 'sprite-probe',
+  shader: { glsl: mat.glsl, wgsl: mat.wgsl },
+  pipeline: PIPE,
+  attributes: {
+    position: { data: soup, size: 3, stride: 36, offset: 0, bufferId },
+    uv: { data: soup, size: 2, stride: 36, offset: 12, bufferId },
+    color: { data: soup, size: 4, stride: 36, offset: 20, bufferId },
+  },
+  textures: { u_tex: tex, texTexture: tex },
+  uniforms: { u_mvp: (p) => p.mvp, u_model: (p) => p.model },
+  count: 6,
+})
+const mvp = [0.28, 0, 0, 0, 0, 0.28, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1] // column-major diag scale
+const model = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+renderer.frame((ctx, record) => {
+  if (isGpu) renderer.inner.gpu.syncVertexBuffer(soup, soup.byteLength)
+  record(cmd, { mvp, model })
+})
+window.__ready = true
+</script>
+</body>
+</html>

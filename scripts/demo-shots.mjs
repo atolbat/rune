@@ -200,30 +200,104 @@ for (const name of ['Fireworks', 'Galaxy', 'Embers', 'Drift', 'Snow', 'Orbit', '
   await pt.waitForTimeout(SETTLE[name] ?? 3000)
   const shotPath = join(out, `desktop-particles-${name.toLowerCase().replace(' ', '-')}.png`)
   await pt.screenshot({ path: shotPath })
-  // the alpha gate on the ALPHA_PIPELINE presets (see assertNoBlackRims)
-  if (name === 'Embers' || name === 'Snow') await assertNoBlackRims(pt, shotPath, name)
+  // the pixel gates on the transparency-critical presets (see assertNoBlackRims)
+  if (name === 'Embers' || name === 'Snow' || name === 'Drift') await assertNoBlackRims(pt, shotPath, name)
 }
 
-// THE ALPHA REGRESSION GATE (Task 118): the background is the configured
-// clear color [4,5,9]; a broken sprite alpha draws OPAQUE quads — their
-// rims are EXACTLY [0,0,0] (the straight-alpha rim rgb is 0 where a≈0).
-// PNG screenshots are lossless: any pure-[0,0,0] pixel = the alpha died.
-// Run on the embers/snow shots (the ALPHA_PIPELINE presets — the additive
-// ones hide the rim black under overbright cores).
+// THE PIXEL GATES (Tasks 118+120): the background is the configured clear
+// color [4,5,9]; a broken sprite alpha draws OPAQUE quads — their rims are
+// EXACTLY [0,0,0] (the straight-alpha rim rgb is 0 where a≈0). PNG
+// screenshots are lossless: any pure-[0,0,0] pixel = the alpha died.
+// Gate 2 (Task 120, the perceptual one): additive blending can ONLY
+// brighten — a pixel DARKER than [4,5,9] on ALL channels is a dark rim /
+// muddy quad (the user's “black where it should be transparent”); a small
+// tolerance covers the UI text over the canvas. Both gates run on the
+// embers/drift/snow shots (the additive glow presets + the alpha showcase).
 async function assertNoBlackRims(page, shotPath, preset) {
   const { readFile } = await import('node:fs/promises')
   const { PNG } = await import('pngjs')
   const png = PNG.sync.read(await readFile(shotPath))
   const { width: W, height: H, data } = png
   let pure = 0
+  let darker = 0
+  const BG = [4, 5, 9] // the configured clear color
   for (let i = 0; i < W * H * 4; i += 4) {
     if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0) pure++
+    if (data[i] < BG[0] && data[i + 1] < BG[1] && data[i + 2] < BG[2]) darker++
   }
-  console.log(`[shots] alpha gate (${preset}): pure-[0,0,0] pixels = ${pure}`)
+  const total = W * H
+  console.log(`[shots] pixel gate (${preset}): pure-[0,0,0] = ${pure} (${(100 * pure / total).toFixed(3)}%), darker-than-bg = ${darker} (${(100 * darker / total).toFixed(3)}%)`)
   if (pure > 0) {
     throw new Error(`[shots] ${preset}: ${pure} pure-black pixels — the sprite alpha broke (opaque quad rims)`)
   }
+  // the perceptual gate: 0.1% tolerance covers the UI text over the canvas
+  if (darker / total > 0.001) {
+    throw new Error(`[shots] ${preset}: ${darker} pixels darker than the clear color — dark rims / muddy quads (the transparency regression)`)
+  }
 }
+
+// THE SPRITE CONTOUR GATE (Task 120): /demo/particles/sprite-probe.html
+// renders ONE static sprite through the same bundles+material+pipeline at a
+// calibrated size. The iso-brightness footprint of a healthy sprite is a
+// CIRCLE: fill ≈ π/4 ≈ 78.5% of its bounding box, aspect ≈ 1.0, and the span
+// SHRINKS as the threshold rises. A quad rim / opaque square / corner
+// artifact breaks at least one of those. Runs on both blend modes.
+async function assertSpriteContour() {
+  const { readFile } = await import('node:fs/promises')
+  const { PNG } = await import('pngjs')
+  for (const mode of ['alpha', 'additive']) {
+    const page = await browser.newPage({ viewport: { width: 480, height: 480 } })
+    page.on('pageerror', (e) => console.log('PROBE PAGEERROR:', e.message))
+    await page.goto(`http://localhost:${port}/demo/particles/sprite-probe.html?mode=${mode}`, { waitUntil: 'networkidle' })
+    await page.waitForFunction(() => window.__ready === true, null, { timeout: 15000 })
+    await page.waitForTimeout(500) // a drawn frame (the texture streams in on GL)
+    const shotPath = join(out, `sprite-probe-${mode}.png`)
+    await page.screenshot({ path: shotPath })
+    await page.close()
+
+    const png = PNG.sync.read(await readFile(shotPath))
+    const { width: W, height: H, data } = png
+    const bgLum = 0.3 * 4 + 0.6 * 5 + 0.1 * 9 // the clear color luminance ≈ 6.5
+    const bright = (x, y) => { const i = (y * W + x) * 4; return 0.3 * data[i] + 0.6 * data[i + 1] + 0.1 * data[i + 2] }
+    let prevSpan = Infinity
+    for (const TH of [bgLum + 8, bgLum + 40, bgLum + 120]) {
+      let minX = W, maxX = -1, minY = H, maxY = -1, count = 0
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          if (bright(x, y) > TH) {
+            count++
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
+          }
+        }
+      }
+      if (count === 0) throw new Error(`[shots] sprite probe (${mode}): nothing visible at threshold +${TH - bgLum} — the sprite never rendered`)
+      const rowSpan = maxY - minY + 1
+      const colSpan = maxX - minX + 1
+      const aspect = colSpan / rowSpan
+      const fill = count / (rowSpan * colSpan)
+      console.log(`[shots] contour gate (${mode}, +${TH - bgLum}): span=${colSpan}×${rowSpan} aspect=${aspect.toFixed(2)} fill=${(100 * fill).toFixed(1)}%`)
+      // a CIRCLE: aspect ≈ 1, fill ≈ π/4; a quad reads ~1.0 fill, a clipped
+      // artifact reads a wild aspect. Spans must SHRINK with the threshold.
+      if (aspect < 0.9 || aspect > 1.1) {
+        throw new Error(`[shots] sprite probe (${mode}): aspect ${aspect.toFixed(2)} — the footprint is not round (a clipped/sheared quad?)`)
+      }
+      if (fill < 0.7 || fill > 0.86) {
+        throw new Error(`[shots] sprite probe (${mode}): fill ${(100 * fill).toFixed(1)}% — not the π/4 circle (an opaque quad reads ~100%, a hollow ring reads low)`)
+      }
+      if (rowSpan > prevSpan) {
+        throw new Error(`[shots] sprite probe (${mode}): the span GROWS with the threshold — an inverted/flat profile (a hard-edged quad)`)
+      }
+      prevSpan = rowSpan
+    }
+    console.log(`[shots] contour gate (${mode}): OK — a soft round glow`)
+  }
+}
+
+// run the contour gate right after the preset shots
+await assertSpriteContour()
 
 // phone: the preset sheet as the entry point
 const ptPhone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })

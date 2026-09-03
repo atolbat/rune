@@ -8547,7 +8547,16 @@ async function createRealGPU(canvas, onGpuError) {
     if (record === undefined)
       return;
     const bytesPerPixel2 = record.format === "rgba16float" ? 8 : record.format === "rgba32float" ? 16 : 4;
-    device.queue.writeTexture({ texture: record.texture, origin: { x, y, z: 0 } }, bytes, { bytesPerRow: w * bytesPerPixel2, rowsPerImage: h }, { width: w, height: h, depthOrArrayLayers: 1 });
+    const rowBytes = w * bytesPerPixel2;
+    const alignedRow = Math.ceil(rowBytes / 256) * 256;
+    let data = bytes;
+    if (alignedRow !== rowBytes && h > 1) {
+      data = new Uint8Array(alignedRow * h);
+      for (let row = 0;row < h; row++) {
+        data.set(bytes.subarray(row * rowBytes, (row + 1) * rowBytes), row * alignedRow);
+      }
+    }
+    device.queue.writeTexture({ texture: record.texture, origin: { x, y, z: 0 } }, data, { bytesPerRow: alignedRow, rowsPerImage: h }, { width: w, height: h, depthOrArrayLayers: 1 });
   }
   function copyExternalImageToTexture(textureId, source, dstX, dstY, copyWidth, copyHeight, flipY) {
     const record = textures.get(textureId);

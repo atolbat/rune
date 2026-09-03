@@ -15,9 +15,9 @@
 // drag (touch/mouse) + auto-spin; zoom via pinch (two fingers) and wheel.
 // The demo imports the BUILT bundles: dist/rune.esm.js + dist/rune-loaders.esm.js
 // + dist/rune-animation.esm.js + dist/rune-materials.esm.js.
-import { createRenderer } from '../../dist/rune.esm.js'
-import { AssetLoader } from '../../dist/rune-loaders.esm.js'
-import { createAnimator } from '../../dist/rune-animation.esm.js'
+import { createRenderer } from '../../dist/rune.esm.js?v=120'
+import { AssetLoader } from '../../dist/rune-loaders.esm.js?v=120'
+import { createAnimator } from '../../dist/rune-animation.esm.js?v=120'
 import {
   materialOf,
   pbrMask,
@@ -29,7 +29,7 @@ import {
   LAMBERT,
   ALPHA_CUTOFF,
   MATCAP,
-} from '../../dist/rune-materials.esm.js'
+} from '../../dist/rune-materials.esm.js?v=120'
 
 /* ─── Models ─────────────────────────────────────────────────────────────── */
 

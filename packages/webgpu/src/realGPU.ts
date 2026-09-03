@@ -265,10 +265,25 @@ export async function createRealGPU(
     // rgba32float — 16). The caller prepares the data: the bytes length must
     // be w*h*bytesPerPixel of the format.
     const bytesPerPixel = record.format === 'rgba16float' ? 8 : record.format === 'rgba32float' ? 16 : 4
+    // Task 120 — THE WEBGPU ROW ALIGNMENT: bytesPerRow MUST be a multiple of
+    // 256 (spec validation). w*4 is aligned only by luck (w=64 → 256, w=128 →
+    // 512); any other width (w=100 → 400) fails validation and the write is
+    // SILENTLY dropped via the error scope — the texture stays empty and the
+    // caller sees nothing (the raw-byte sprite regression class). Fix: repack
+    // the rows into a padded buffer when the natural row is unaligned.
+    const rowBytes = w * bytesPerPixel
+    const alignedRow = Math.ceil(rowBytes / 256) * 256
+    let data: Uint8Array = bytes
+    if (alignedRow !== rowBytes && h > 1) {
+      data = new Uint8Array(alignedRow * h)
+      for (let row = 0; row < h; row++) {
+        data.set(bytes.subarray(row * rowBytes, (row + 1) * rowBytes), row * alignedRow)
+      }
+    }
     device.queue.writeTexture(
       { texture: record.texture, origin: { x, y, z: 0 } },
-      bytes as Uint8Array<ArrayBuffer>,
-      { bytesPerRow: w * bytesPerPixel, rowsPerImage: h },
+      data as Uint8Array<ArrayBuffer>,
+      { bytesPerRow: alignedRow, rowsPerImage: h },
       { width: w, height: h, depthOrArrayLayers: 1 },
     )
   }
