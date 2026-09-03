@@ -507,8 +507,12 @@ try {
     const rows = [...document.querySelectorAll('.pt-row')]
     rows.find(r => r.textContent.includes('Emitter Shapes'))?.dispatchEvent(new Event('click', { bubbles: true }))
   })
+  // wait for the labels to be PROJECTED (opacity 1), not merely present:
+  // they are created synchronously in make(), but their transforms land on
+  // the FIRST frame callback — checking immediately after the click races
+  // that frame (0/9 on a slow CI runner).
   await page.waitForFunction(
-    () => document.querySelectorAll('.qk-label').length >= 9,
+    () => [...document.querySelectorAll('.qk-label')].filter(el => el.style.opacity === '1').length >= 9,
     null,
     { timeout: 10_000 },
   )
