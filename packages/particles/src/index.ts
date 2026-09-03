@@ -55,7 +55,7 @@
  *   THE FORCE FAMILY (Task 122): gravity, drag, sine turbulence, the
  *   point attractor, the simplex noise field, collision planes with
  *   restitution/friction, the target seek spring, the speed-over-life
- *   curve.
+ *   curve, and LimitSpeedOverLife (the speed governor over the excess).
  *
  *   THE HOOKS (Task 122): onRetire (the final state of every dead
  *   particle — sub-emitters) and onSwap (external per-slot state — the
@@ -69,7 +69,7 @@
 
 export type {
   ParticleFields, SpawnRecord, ForceFields, Attractor, ParticleSystem,
-  CollisionPlane, Collision, SeekForce, RetireRecord, StoreOptions,
+  CollisionPlane, Collision, SeekForce, LimitSpeedForce, RetireRecord, StoreOptions,
 } from './system.ts'
 export { createParticleSystem, NO_FORCES, MAX_PLANES } from './system.ts'
 export type { SpawnShape, VelocityMode, SpawnerDesc, Spawner, TargetDesc, ImageMask } from './spawn.ts'

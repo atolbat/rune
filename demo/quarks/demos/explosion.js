@@ -1,162 +1,281 @@
-// explosion.js — three.quarks' ExplosionDemo ("Unity Exported"): a composed
-// multi-system effect that plays once, auto-destroys, and re-instances on a
-// schedule. Theirs loads ps.json (a Unity export); ours is the same effect
-// declared in code — five systems per explosion (core flash, fireball,
-// sparks, shockwave ring, smoke), one instance every 1.8 s.
+// explosion.js — three.quarks' ExplosionDemo ("explosion (Unity Exported)"):
+// a faithful port of their ps.json (the CFXR Explosion 1 Unity export) —
+// every number below is THEIRS, read off the export; the textures are their
+// exact assets, decoded to RGBA with the CFXR luminance-alpha baked in.
+//
+//   Their effect = SIX systems (their renderOrder):
+//     impact (−0.5) — "Impact small": ONE additive flash CARD, their
+//                     "cfxr spikes impact" star (a 108-vertex star mesh in
+//                     their export — the star shape only trims transparent
+//                     pixels; with luminance alpha the full quad composites
+//                     identically), random Z-spin, life 0.25, size 3,
+//                     SizeOverLife Bezier(.5,.93,1,1) ×3
+//     sparks (0)    — 50 stretched streaks, "cfxr stretch trait" (512×128,
+//                     bright head at u≈0 fading to black at u=1 — built for
+//                     their one-sided stretched quad), sphere r=2, speed
+//                     5–20, size 0.03, sf 0.1, life 0.3–0.6, LimitSpeed
+//                     (0, dampen .3), gravity −1, white→yellow→orange→red
+//                     (their USE_COLOR_AS_ALPHA: the gradient's alpha keys
+//                     are IGNORED, alpha = r — which stays 1: they pop out)
+//     lines  (0)    — 10 stretched darts, same texture, speed 50 (const),
+//                     size 0.05, sf 0.05, life 0.1–0.2, dampen .4
+//     flash6 (0)    — the big flash card: spikes star, additive, size 5,
+//                     life 0.2, piecewise SizeOverLife 0.6→0.75→0.85→1,
+//                     white→yellow→orange→deep red, t=0.05
+//     smoke  (1)    — 30 billboard clouds, "cfxr smoke cloud x4" (a REAL
+//                     alpha 2×2 atlas; their startTileIndex Interval(0,4)
+//                     = a random tile per particle — our frameJitter),
+//                     point burst, speed 5–15 dampened to 0.5, life
+//                     0.8–1.5, size 2–4 growing ×0.1→1, born FIRE-COLORED
+//                     (white→yellow→orange in the first 17% of life —
+//                     THE fireball) then grey, alpha 1→0 (0.6→1), t=0.1
+//     ring   (1.5)  — NOT PORTED, HONESTLY: their ring geometry is
+//                     degenerate (26 vertices, every pair on the unit
+//                     circle — zero-area triangles; it renders nothing in
+//                     their demo). We reproduce that: nothing.
+//
+//   The blending is theirs: sparks/lines NORMAL-blend (their MeshBasic
+//   NormalBlending + USE_COLOR_AS_ALPHA — black adds nothing, hides
+//   nothing), impact/flash6 ADDITIVE, smoke NORMAL with real alpha.
+//
+//   The scene is theirs: the effect at the ORIGIN (no random walk — their
+//   newInstance() clones at the group's identity transform), a new instance
+//   every refreshTime = 2 s (auto-destroy: the longest life + 0.1 burst
+//   offset = 1.6 s < 2 s, no overlap), camera at (0, 10, 10) fov 60, their
+//   dark floor at y = −10.
+const REFRESH = 2.0 // their refreshTime
+
 export default {
   title: 'Explosion (composed)',
-  sub: 'five systems per effect · shockwave ring · auto-restart',
-  camera: { yaw: 0.7, pitch: 0.3, dist: 10, orbit: 0.05, target: [0, 2, 0] },
+  sub: 'the ps.json systems · real cfxr textures · luminance alpha · every 2 s',
+  // their camera: position (0, 10, 10), fov 60, target origin, static
+  camera: { yaw: 0, pitch: Math.PI / 4, dist: Math.SQRT2 * 10, orbit: 0, target: [0, 0, 0] },
 
   make(env) {
-    // The full spawner descs (the seed re-rolls per instance).
-    const CORE_S = {
-      shape: { kind: 'sphere', origin: [0, 2, 0], radius: [0.05, 0.25] },
-      velocity: { mode: 'radial' },
-      speed: [0.3, 1.5], life: [0.14, 0.3], size: [1.6, 2.8],
-      color: [[1, 1, 0.95, 1], [1, 0.85, 0.6, 1]], seed: 61,
-    }
-    const FIREBALL_S = {
-      shape: { kind: 'sphere', origin: [0, 2, 0], radius: [0.1, 0.5] },
-      velocity: { mode: 'radial' },
-      speed: [1.5, 4.5], life: [0.5, 1.1], size: [0.9, 1.8],
-      color: [[1, 0.85, 0.55, 1], [1, 0.5, 0.25, 1]], seed: 67,
-    }
+    // ── the scene: their dark floor at y = −10 (their 0x222222 plane) ──
+    const floorModel = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -10, 0, 1])
+    env.addMesh({
+      id: 'ex-floor',
+      geometry: env.geometry.plane({ width: 500, height: 500 }),
+      material: env.materials.lambert,
+      model: floorModel,
+      // their 0x222222 floor (their far field reads 20-36/255 in a capture —
+      // a dark plane the smoke silhouette reads against)
+      uniforms: { u_albedo: [0.13, 0.13, 0.14, 1] },
+    })
+
+    // ── the spawners (the full descs — burst() REPLACES the spawner, so
+    //    every instance passes the whole desc; the seed re-rolls per
+    //    instance). All numbers are their ps.json. ──
     const SPARKS_S = {
-      shape: { kind: 'sphere', origin: [0, 2, 0], radius: [0.02, 0.15] },
+      shape: { kind: 'sphere', origin: [0, 0, 0], radius: [0, 2] },
       velocity: { mode: 'radial' },
-      speed: [6, 13], life: [0.6, 1.4], size: [0.12, 0.3],
-      color: [[1, 0.95, 0.7, 1], [1, 0.6, 0.25, 1]], seed: 71,
+      speed: [5, 20], life: [0.3, 0.6], size: [0.03, 0.03],
+      color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 61,
     }
-    const SHOCK_S = {
-      shape: { kind: 'point', origin: [0, 0.25, 0] },
+    const LINES_S = {
+      shape: { kind: 'sphere', origin: [0, 0, 0], radius: [0, 2] },
+      velocity: { mode: 'radial' },
+      speed: [50, 50], life: [0.1, 0.2], size: [0.05, 0.05],
+      color: [[1, 1, 1, 0.7], [1, 1, 1, 0.7]], seed: 67,
+    }
+    const IMPACT_S = {
+      shape: { kind: 'point', origin: [0, 0, 0] },
       velocity: { mode: 'fixed', dir: [0, 1, 0] },
-      speed: [0, 0], life: [0.45, 0.6], size: [3, 4.5],
-      color: [[1, 0.95, 0.85, 1], [1, 0.8, 0.5, 0.8]], seed: 73,
+      speed: [0, 0], life: [0.25, 0.25], size: [3, 3],
+      color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 71,
+    }
+    const FLASH6_S = {
+      shape: { kind: 'point', origin: [0, 0, 0] },
+      velocity: { mode: 'fixed', dir: [0, 1, 0] },
+      speed: [0, 0], life: [0.2, 0.2], size: [5, 5],
+      color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 73,
     }
     const SMOKE_S = {
-      shape: { kind: 'sphere', origin: [0, 1.6, 0], radius: [0.3, 0.8] },
+      shape: { kind: 'point', origin: [0, 0, 0] },
       velocity: { mode: 'radial' },
-      speed: [0.5, 2], life: [1.6, 2.8], size: [1, 2],
-      color: [[0.42, 0.4, 0.42, 0.55], [0.55, 0.53, 0.55, 0.4]], seed: 79,
+      speed: [5, 15], life: [0.8, 1.5], size: [2, 4],
+      color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 79,
     }
 
-    const core = env.addLayer({
-      id: 'ex-core',
+    // ── the layers, in THEIR renderOrder (impact −0.5 first, smoke 1
+    //    last; the additive cards/streaks in between are order-free) ──
+
+    // impact (−0.5): the additive flash card, the random Z-spun star.
+    // Their SizeOverLife Bezier(0.5, 0.929, 1, 1) sampled at t 0/.25/.5/.75/1.
+    const impact = env.addLayer({
+      id: 'ex-impact',
       facade: env.createParticles({
-        capacity: 60,
+        capacity: 8,
         ramp: env.createRamp([
-          { t: 0, size: 1, r: 1, g: 1, b: 1, a: 1, frame: 1 },
-          { t: 0.6, size: 2.2, r: 1, g: 0.85, b: 0.5, a: 0.9, frame: 4 },
-          { t: 1, size: 3, r: 1, g: 0.5, b: 0.2, a: 0, frame: 11 },
+          // their ColorOverLife gradient ×0.784→0 alpha IGNORED (their
+          // USE_COLOR_AS_ALPHA reads r: 1,1,1,0.5189) — a := r here
+          { t: 0, size: 0.5, r: 1, g: 1, b: 1, a: 1 },
+          { t: 0.15, size: 0.76, r: 1, g: 1, b: 1, a: 1 },
+          { t: 0.3, size: 0.911, r: 1, g: 0.808, b: 0, a: 1 },
+          { t: 0.5, size: 0.982, r: 1, g: 0.379, b: 0.133, a: 1 },
+          { t: 1, size: 1, r: 0.519, g: 0.008, b: 0, a: 0.519 },
         ]),
-        spawner: CORE_S,
-        render: { kind: 'billboard', tiles: env.atlasTiles },
+        spawner: IMPACT_S,
+        render: { kind: 'billboard', mode: 'oriented', axis: [0, 0, 1] },
       }),
       material: env.materials.sprite,
       pipeline: env.pipelines.additive,
+      texture: () => env.cfxrTextures.spikes,
     })
 
-    const fireball = env.addLayer({
-      id: 'ex-fireball',
-      facade: env.createParticles({
-        capacity: 300,
-        ramp: env.createRamp([
-          { t: 0, size: 0.6, r: 1, g: 0.9, b: 0.6, a: 0.9, frame: 6 },
-          { t: 0.3, size: 1.6, r: 1, g: 0.55, b: 0.2, a: 0.85, frame: 14 },
-          { t: 0.7, size: 2.6, r: 0.7, g: 0.22, b: 0.08, a: 0.4, frame: 3 },
-          { t: 1, size: 3.4, r: 0.35, g: 0.12, b: 0.06, a: 0, frame: 3 },
-        ]),
-        forces: { gravity: [0, 1.6, 0], drag: 1.1, turbulence: 1.4 },
-        spawner: FIREBALL_S,
-        render: { kind: 'billboard', tiles: env.atlasTiles, spin: 0.8 },
-      }),
-      material: env.materials.sprite,
-      pipeline: env.pipelines.additive,
-    })
-
+    // sparks (0): 50 stretched streaks, NORMAL-blended (their blending:
+    // MeshBasic NormalBlending + USE_COLOR_AS_ALPHA — not additive!)
     const sparks = env.addLayer({
       id: 'ex-sparks',
       facade: env.createParticles({
-        capacity: 900,
+        capacity: 128,
+        // their ColorOverLife: white→yellow→orange→red, r ≡ 1 → no fade
+        // (their alpha keys are dead under USE_COLOR_AS_ALPHA)
         ramp: env.createRamp([
-          { t: 0, size: 1, r: 1, g: 0.95, b: 0.7, a: 1 },
-          { t: 0.5, size: 0.6, r: 1, g: 0.7, b: 0.3, a: 0.9 },
-          { t: 1, size: 0.08, r: 1, g: 0.3, b: 0.1, a: 0 },
+          { t: 0, size: 1, r: 1, g: 1, b: 1, a: 1 },
+          { t: 0.1, size: 1, r: 1, g: 1, b: 1, a: 1 },
+          { t: 0.3, size: 1, r: 1, g: 0.808, b: 0, a: 1 },
+          { t: 0.5, size: 1, r: 1, g: 0.379, b: 0.133, a: 1 },
+          { t: 0.7, size: 1, r: 1, g: 0.018, b: 0, a: 1 },
+          { t: 1, size: 1, r: 1, g: 0.018, b: 0, a: 1 },
         ]),
-        forces: { gravity: [0, -7, 0], drag: 0.25, turbulence: 0.2 },
+        forces: { gravity: [0, -1, 0], limitSpeed: { limit: 0, dampen: 0.3 } },
         spawner: SPARKS_S,
-        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.3 },
-      }),
-      material: env.materials.sprite,
-      pipeline: env.pipelines.additive,
-      texture: () => env.glowTexture,
-    })
-
-    // the shockwave: a FLAT expanding ring (an oriented quad on the ground
-    // plane, the ring atlas tile)
-    const shock = env.addLayer({
-      id: 'ex-shock',
-      facade: env.createParticles({
-        capacity: 40,
-        ramp: env.createRamp([
-          { t: 0, size: 0.4, r: 1, g: 0.95, b: 0.85, a: 0.95, frame: 5 },
-          { t: 1, size: 7.5, r: 0.8, g: 0.7, b: 0.5, a: 0, frame: 5 },
-        ]),
-        spawner: SHOCK_S,
-        render: { kind: 'billboard', mode: 'oriented', axis: [0, 0, 1], tiles: env.atlasTiles },
-      }),
-      material: env.materials.sprite,
-      pipeline: env.pipelines.additive,
-    })
-
-    const smoke = env.addLayer({
-      id: 'ex-smoke',
-      facade: env.createParticles({
-        capacity: 500,
-        ramp: env.createRamp([
-          { t: 0, size: 0.6, r: 0.35, g: 0.33, b: 0.34, a: 0, frame: 6 },
-          { t: 0.2, size: 1.4, r: 0.4, g: 0.38, b: 0.4, a: 0.5, frame: 14 },
-          { t: 1, size: 4.2, r: 0.28, g: 0.27, b: 0.29, a: 0, frame: 3 },
-        ]),
-        forces: { gravity: [0, 0.9, 0], drag: 1, turbulence: 0.7 },
-        spawner: SMOKE_S,
-        render: { kind: 'billboard', tiles: env.atlasTiles, spin: 0.5 },
+        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.1, lengthFactor: 0 },
       }),
       material: env.materials.sprite,
       pipeline: env.pipelines.alpha,
+      texture: () => env.cfxrTextures.trait,
     })
 
-    let next = 0.3
-    let count = 0
-    const layers = [core, fireball, sparks, shock, smoke]
+    // lines (0): the 10 speed-50 darts (life 0.1–0.2 — gone in a blink)
+    const lines = env.addLayer({
+      id: 'ex-lines',
+      facade: env.createParticles({
+        capacity: 32,
+        ramp: env.createRamp([
+          { t: 0, size: 1, r: 1, g: 1, b: 1, a: 1 },
+          { t: 1, size: 1, r: 1, g: 1, b: 1, a: 1 },
+        ]),
+        forces: { limitSpeed: { limit: 0, dampen: 0.4 } },
+        spawner: LINES_S,
+        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.05, lengthFactor: 0 },
+      }),
+      material: env.materials.sprite,
+      pipeline: env.pipelines.alpha,
+      texture: () => env.cfxrTextures.trait,
+    })
 
-    const explode = (ctx) => {
-      // a new instance: a random spot on a disc, all five systems burst
-      // there (facade.at — the emitter transform of the instance)
-      count++
-      const ang = count * 2.39996 // the golden-angle walk — no clumping
-      const x = Math.cos(ang) * 2.4
-      const z = Math.sin(ang) * 2.4
-      const y = 0.3 + (count % 3) * 0.7
-      const seed = 3000 + count * 13
-      core.facade.at(x, y, z).burst(3, { ...CORE_S, seed })
-      fireball.facade.at(x, y, z).burst(26, { ...FIREBALL_S, seed: seed + 1 })
-      sparks.facade.at(x, y, z).burst(90, { ...SPARKS_S, seed: seed + 2 })
-      shock.facade.at(x, 0, z).burst(2, { ...SHOCK_S, seed: seed + 3 })
-      smoke.facade.at(x, y, z).burst(16, { ...SMOKE_S, seed: seed + 4 })
-      // their emitEnd event analogue: the log line at the START of each
-      // instance (the effect "plays once and auto-destroys" — the systems
-      // run dry with the lives)
-      if (count <= 3 || count % 5 === 0) env.log.event(`explosion #${count} at (${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})`)
-    }
+    // flash6 (0): the big additive card, t=0.05, life 0.2. Their piecewise
+    // SizeOverLife: 0.6→0.75 (0..0.15, linear), 0.75→0.85 (0.15..0.3,
+    // linear), 0.85→1 (0.3..1, Bezier(0.85, 0.985, 0.983, 1)).
+    const flash6 = env.addLayer({
+      id: 'ex-flash6',
+      facade: env.createParticles({
+        capacity: 8,
+        ramp: env.createRamp([
+          { t: 0, size: 0.6, r: 1, g: 1, b: 1, a: 1 },
+          { t: 0.05, size: 0.65, r: 1, g: 1, b: 1, a: 1 },
+          { t: 0.15, size: 0.75, r: 1, g: 0.903, b: 0.4, a: 1 },
+          { t: 0.2, size: 0.783, r: 1, g: 0.808, b: 0, a: 1 },
+          { t: 0.3, size: 0.85, r: 1, g: 0.379, b: 0.118, a: 1 },
+          { t: 0.65, size: 0.969, r: 1, g: 0.207, b: 0.059, a: 1 },
+          { t: 1, size: 1, r: 1, g: 0.034, b: 0, a: 1 },
+        ]),
+        spawner: FLASH6_S,
+        render: { kind: 'billboard', mode: 'oriented', axis: [0, 0, 1] },
+      }),
+      material: env.materials.sprite,
+      pipeline: env.pipelines.additive,
+      texture: () => env.cfxrTextures.spikes,
+    })
+
+    // smoke (1): 30 real-alpha clouds over the fire — drawn LAST (their
+    // renderOrder 1). Their startTileIndex Interval(0, 4) = a random tile
+    // per particle (our frameJitter 4); their FrameOverLife(IntervalValue)
+    // is a no-op in their engine (it only animates PiecewiseBezier) — the
+    // tile is picked at spawn and held. Their startRotation ±0.349 (a
+    // slight tilt) we approximate with the seed's full-phase spin (the
+    // cloud tiles are near-isotropic).
+    const smoke = env.addLayer({
+      id: 'ex-smoke',
+      facade: env.createParticles({
+        capacity: 64,
+        ramp: env.createRamp([
+          // their SizeOverLife Bezier(0.1, 0.399, 1.006, 1) at t 0/.25/.5/.75/1
+          { t: 0, size: 0.1, r: 1, g: 1, b: 1, a: 1 },
+          { t: 0.03, size: 0.128, r: 1, g: 1, b: 1, a: 1 },
+          { t: 0.1, size: 0.2, r: 1, g: 0.808, b: 0, a: 1 },
+          { t: 0.17, size: 0.275, r: 1, g: 0.379, b: 0.133, a: 1 },
+          { t: 0.25, size: 0.367, r: 0.764, g: 0.454, b: 0.331, a: 1 },
+          { t: 0.33, size: 0.47, r: 0.528, g: 0.528, b: 0.528, a: 1 },
+          { t: 0.5, size: 0.664, r: 0.528, g: 0.528, b: 0.528, a: 1 },
+          { t: 0.6, size: 0.77, r: 0.528, g: 0.528, b: 0.528, a: 1 },
+          { t: 0.75, size: 0.904, r: 0.528, g: 0.528, b: 0.528, a: 0.667 },
+          { t: 1, size: 1, r: 0.528, g: 0.528, b: 0.528, a: 0 },
+        ]),
+        forces: { limitSpeed: { limit: 0.5, dampen: 0.15 } },
+        spawner: SMOKE_S,
+        render: { kind: 'billboard', tiles: [2, 2], frameJitter: 4 },
+      }),
+      material: env.materials.sprite,
+      pipeline: env.pipelines.alpha,
+      texture: () => env.cfxrTextures.smoke,
+    })
+
+    // ── the instance schedule: THEIR burst times on one clock ──
+    //   t=0.05: sparks ×50 + lines ×10 + flash6 ×1
+    //   t=0.1 : impact ×1 + smoke ×30
+    // (their Ring burst is t=0 — skipped, see the header)
+    const layers = [impact, sparks, lines, flash6, smoke]
+    let next = 0.05 // the first instance fires as good as immediately
+    let count = 0
+    let clock = -1 // the current instance's age; −1 = between instances
+    let seed = 0
+    const events = [
+      {
+        t: 0.05,
+        fired: false,
+        fire() {
+          sparks.facade.burst(50, { ...SPARKS_S, seed })
+          lines.facade.burst(10, { ...LINES_S, seed: seed + 1 })
+          flash6.facade.burst(1, { ...FLASH6_S, seed: seed + 2 })
+        },
+      },
+      {
+        t: 0.1,
+        fired: false,
+        fire() {
+          impact.facade.burst(1, { ...IMPACT_S, seed: seed + 3 })
+          smoke.facade.burst(30, { ...SMOKE_S, seed: seed + 4 })
+        },
+      },
+    ]
 
     return {
       frame(ctx) {
         next -= ctx.dt
         if (next <= 0) {
-          next = 1.3
-          explode(ctx)
+          // a new instance at the ORIGIN — their newInstance(): the effect
+          // sits at the group's identity transform, every 2 s
+          next += REFRESH
+          count++
+          seed = 3000 + count * 13
+          clock = 0
+          for (const ev of events) ev.fired = false
+          // every instance (their emitEnd console log per system — we log the
+          // start; the shots/probe tools time their phases off this line)
+          env.log.event(`explosion #${count} at (0.0, 0.0, 0.0)`)
+        }
+        if (clock >= 0) {
+          clock += ctx.dt
+          for (const ev of events) {
+            if (!ev.fired && clock >= ev.t) {
+              ev.fired = true
+              ev.fire()
+            }
+          }
         }
         for (const l of layers) l.facade.advance(ctx.dt)
       },

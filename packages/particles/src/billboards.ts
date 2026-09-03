@@ -16,8 +16,17 @@
  *   camera     — the classic: the quad plane ⊥ the view direction (default)
  *   vertical   — upright: up = world +Y, turns around Y to face the camera
  *   horizontal — flat: the quad lies in the XZ plane (a ground decal)
- *   stretched  — velocity-aligned: the long axis follows the motion
- *                (speedFactor/lengthFactor — their StretchedBillBoard)
+ *   stretched  — velocity-aligned, three.quarks' StretchedBillBoard EXACTLY:
+ *                a ONE-SIDDED quad — the head (u=0) sits on the particle,
+ *                the tail (u=1) trails behind along the motion, and BOTH
+ *                extents scale with the particle's own size:
+ *                  tail   = (|v|·speedFactor + lengthFactor) · size
+ *                  width  = size
+ *                (their stretched_bb shader multiplies the pre-scaled
+ *                velocity by avgSize — a 0.03 spark at sf 0.1 grows a
+ *                0.06-unit tail, not a 2-unit laser streak; their texture
+ *                is built for this mapping: a bright head at u≈0 fading
+ *                to black at u=1)
  *   oriented   — a free 3D orientation: per-particle axis (fixed or
  *                seed-random) + angle = seed·τ + age·spin3d (their
  *                Rotation3DOverLife leaves / LocalSpace flash planes)
@@ -26,6 +35,10 @@
  *   options.tiles = [u, v] splits the sprite texture into a u×v sheet; the
  *   ramp's FRAME channel (RampPoint.frame, sampled at t = age/life, floored)
  *   picks the tile. The tile index runs row-major from the top-left.
+ *   options.frameJitter adds seed·frameJitter to the frame before the
+ *   floor — their "startTileIndex: IntervalValue(0, N)" (a per-particle
+ *   random tile; theirs also cross-blends fractional tiles — blendTiles —
+ *   ours floors to the nearest tile).
  *
  * The rotation (camera mode): each quad spins in its own plane by
  *   angle = seed·τ + age·spinSpeed
@@ -71,11 +84,20 @@ export interface BillboardOptions {
   /** The sprite sheet split [u, v] (the atlas; the ramp's frame channel
    *  picks the tile). Omitted — the full texture. */
   readonly tiles?: readonly [number, number]
-  /** 'stretched': the velocity stretch — the long half-extent gains
-   *  |v|·speedFactor world units (default 0). */
+  /** 'stretched': the velocity stretch — the tail gains
+   *  (|v|·speedFactor)·size world units, BEHIND the particle (their
+   *  SpriteBatch pre-scales the velocity attribute by speedFactor and the
+   *  shader multiplies by avgSize; default 0). */
   readonly speedFactor?: number
-  /** 'stretched': the base long half-extent = size·lengthFactor (default 1). */
+  /** 'stretched': the base tail = lengthFactor·size, added at rest so the
+   *  streak reads even when |v| ≈ 0 (their (1 + lf/vlength) term; default
+   *  1 — pass 0 for a pure velocity streak like the cfxr sparks). */
   readonly lengthFactor?: number
+  /** A per-particle random tile offset added to the ramp's frame before
+   *  the floor: frame + seed·frameJitter. three.quarks' startTileIndex
+   *  IntervalValue(0, N) — each particle picks its own atlas tile (their
+   *  fractional tiles also cross-blend neighbors; ours floors). Default 0. */
+  readonly frameJitter?: number
   /** 'oriented': the rotation axis — [x, y, z] (any length; normalized
    *  once) or 'random' (a per-particle axis from the seed — their
    *  RandomQuatGenerator look). Default 'random'. */
@@ -109,6 +131,9 @@ export function fillBillboards(
   const tileU = tiles !== undefined ? tiles[0] : 1
   const tileV = tiles !== undefined ? tiles[1] : 1
   const useAtlas = tiles !== undefined
+  // Their startTileIndex IntervalValue(0, N): the seed-scattered per-particle
+  // tile offset, added to the ramp's frame BEFORE the floor.
+  const frameJitter = options.frameJitter ?? 0
   if (useAtlas && (!Number.isInteger(tileU) || tileU < 1 || !Number.isInteger(tileV) || tileV < 1)) {
     throw new Error(`rune/particles: billboard tiles must be integers >= 1 (got [${tileU}, ${tileV}])`)
   }
@@ -157,10 +182,10 @@ export function fillBillboards(
     const px = f.px[i], py = f.py[i], pz = f.pz[i]
 
     // The atlas tile (row-major from the top-left; the frame is lerped by
-    // the ramp, floored here, clamped to the sheet).
+    // the ramp, jittered by the seed, floored here, clamped to the sheet).
     let u0 = 0, v0 = 0, uS = 1, vS = 1
     if (useAtlas) {
-      let frame = Math.floor(s[5])
+      let frame = Math.floor(s[5] + (frameJitter > 0 ? f.seed[i] * frameJitter : 0))
       if (!Number.isFinite(frame)) frame = 0
       if (frame < 0) frame = 0
       if (frame > maxFrame) frame = maxFrame
@@ -220,9 +245,12 @@ export function fillBillboards(
     }
 
     if (mode === 'stretched') {
-      // Velocity-aligned: the long axis = the motion direction, the cross
-      // axis = normalize(cross(forward, dir)) — the ribbon side. A particle
-      // at rest (|v| ≈ 0) falls back to the camera-facing quad.
+      // Velocity-aligned, three.quarks' stretched_bb EXACTLY: the HEAD
+      // (u = 0) sits ON the particle, the TAIL (u = 1) trails BEHIND along
+      // −dir; both extents scale with the particle's own size (their
+      // avgSize). A particle at rest (|v| ≈ 0) falls back to the camera-
+      // facing quad (their shader NaNs at |v| → 0 — they hack a 0.001
+      // speedFactor floor; we degrade gracefully).
       const vx = f.vx[i], vy = f.vy[i], vz = f.vz[i]
       const vlen = Math.hypot(vx, vy, vz)
       if (vlen < 1e-4) {
@@ -236,19 +264,21 @@ export function fillBillboards(
       let sl = Math.hypot(sx, sy, sz)
       if (sl < 1e-6) { sx = dy; sy = -dx; sz = 0; sl = Math.hypot(sx, sy, sz) || 1 }
       sx /= sl; sy /= sl; sz /= sl
-      const halfL = half * lengthFactor + vlen * speedFactor * 0.5
+      const sizeFull = f.size[i] * s[0]
+      const tail = (vlen * speedFactor + lengthFactor) * sizeFull
       const halfW = half
-      // The quad: long along dir, wide along side.
-      const o0x = -dx * halfL - sx * halfW, o0y = -dy * halfL - sy * halfW, o0z = -dz * halfL - sz * halfW
-      const o1x = dx * halfL - sx * halfW, o1y = dy * halfL - sy * halfW, o1z = dz * halfL - sz * halfW
-      const o2x = dx * halfL + sx * halfW, o2y = dy * halfL + sy * halfW, o2z = dz * halfL + sz * halfW
-      const o3x = -dx * halfL + sx * halfW, o3y = -dy * halfL + sy * halfW, o3z = -dz * halfL + sz * halfW
-      at = vert3(out, at, px, py, pz, o0x, o0y, o0z, u0, v0, cr, cg, cb, ca)
-      at = vert3(out, at, px, py, pz, o1x, o1y, o1z, u0 + uS, v0, cr, cg, cb, ca)
-      at = vert3(out, at, px, py, pz, o2x, o2y, o2z, u0 + uS, v0 + vS, cr, cg, cb, ca)
-      at = vert3(out, at, px, py, pz, o0x, o0y, o0z, u0, v0, cr, cg, cb, ca)
-      at = vert3(out, at, px, py, pz, o2x, o2y, o2z, u0 + uS, v0 + vS, cr, cg, cb, ca)
-      at = vert3(out, at, px, py, pz, o3x, o3y, o3z, u0, v0 + vS, cr, cg, cb, ca)
+      // The head edge (u=0) at the particle, the tail edge (u=1) at
+      // p − dir·tail; the width spans ±halfW along the side axis.
+      const h0x = -sx * halfW, h0y = -sy * halfW, h0z = -sz * halfW
+      const h1x = sx * halfW, h1y = sy * halfW, h1z = sz * halfW
+      const t0x = -dx * tail - sx * halfW, t0y = -dy * tail - sy * halfW, t0z = -dz * tail - sz * halfW
+      const t1x = -dx * tail + sx * halfW, t1y = -dy * tail + sy * halfW, t1z = -dz * tail + sz * halfW
+      at = vert3(out, at, px, py, pz, h0x, h0y, h0z, u0, v0, cr, cg, cb, ca)
+      at = vert3(out, at, px, py, pz, t0x, t0y, t0z, u0 + uS, v0, cr, cg, cb, ca)
+      at = vert3(out, at, px, py, pz, t1x, t1y, t1z, u0 + uS, v0 + vS, cr, cg, cb, ca)
+      at = vert3(out, at, px, py, pz, h0x, h0y, h0z, u0, v0, cr, cg, cb, ca)
+      at = vert3(out, at, px, py, pz, t1x, t1y, t1z, u0 + uS, v0 + vS, cr, cg, cb, ca)
+      at = vert3(out, at, px, py, pz, h1x, h1y, h1z, u0, v0 + vS, cr, cg, cb, ca)
       continue
     }
 

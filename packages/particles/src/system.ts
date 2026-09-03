@@ -113,6 +113,19 @@ export interface SeekForce {
   readonly damping: number
 }
 
+/** The speed limiter — three.quarks' LimitSpeedOverLife, exactly: while the
+ *  speed is above `limit`, the EXCESS is damped toward it every frame by
+ *  v *= 1 − ((|v| − limit)/|v|)·dampen·dt·20 (their frame-rate-bound 20·dt
+ *  factor, kept verbatim — at 60 fps it reads as a brisk friction).
+ *  limit 0 + dampen 0.3 is their cfxr spark brake: a fast burst that halts
+ *  mid-air instead of sailing offscreen. */
+export interface LimitSpeedForce {
+  /** The speed floor the damping drives toward, units/second (>= 0). */
+  readonly limit: number
+  /** The damping strength in [0, 1] (their `dampen`). */
+  readonly dampen: number
+}
+
 /** The force fields of the integrator.
  *  gravity — a constant acceleration [x, y, z] (units/s²);
  *  drag — exponential velocity damping per second (v *= e^(−drag·dt));
@@ -125,7 +138,8 @@ export interface SeekForce {
  *  rescale v *= c(t)/c(t−dt);
  *  collide — collision planes with restitution/friction (see Collision);
  *  noise — the simplex flow field (see NoiseField);
- *  seek — the target spring (see SeekForce). */
+ *  seek — the target spring (see SeekForce);
+ *  limitSpeed — three.quarks' LimitSpeedOverLife (see LimitSpeedForce). */
 export interface ForceFields {
   readonly gravity: readonly number[]
   readonly drag: number
@@ -135,12 +149,13 @@ export interface ForceFields {
   readonly collide?: Collision | null
   readonly noise?: NoiseField | null
   readonly seek?: SeekForce | null
+  readonly limitSpeed?: LimitSpeedForce | null
 }
 
 /** The default force fields (all zero — a ballistic void). */
 export const NO_FORCES: ForceFields = {
   gravity: [0, 0, 0], drag: 0, turbulence: 0, attract: null,
-  speedCurve: null, collide: null, noise: null, seek: null,
+  speedCurve: null, collide: null, noise: null, seek: null, limitSpeed: null,
 }
 
 /** The retired-particle snapshot — a REUSED record handed to onRetire
@@ -334,6 +349,12 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
       const hasSeek = seek !== null
       const seekK = hasSeek ? seek!.strength : 0
       const seekC = hasSeek ? seek!.damping : 0
+      // three.quarks' LimitSpeedOverLife — the speed governor over the
+      // EXCESS above the limit (their per-frame dampen·20·dt multiply).
+      const limitSpeed = forces.limitSpeed ?? null
+      const hasLimit = limitSpeed !== null
+      const lsLimit = hasLimit ? limitSpeed!.limit : 0
+      const lsDampen = hasLimit ? limitSpeed!.dampen : 0
 
       // Reverse walk + swap-remove from the tail: particles beyond i are
       // already integrated (or dead), so the survivor lands in a slot that
@@ -357,6 +378,18 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
           vx *= k; vy *= k; vz *= k
         }
         if (dragFactor !== 1) { vx *= dragFactor; vy *= dragFactor; vz *= dragFactor }
+        if (hasLimit) {
+          // v *= 1 − ((|v| − limit)/|v|)·dampen·dt·20 — verbatim their
+          // LimitSpeedOverLife.update (the 20·dt is their frame-rate
+          // coupling; preserved for parity). Clamped at 0 (dampen 1 at a
+          // long dt would otherwise flip the velocity's sign).
+          const speed = Math.sqrt(vx * vx + vy * vy + vz * vz)
+          if (speed > lsLimit && speed > 1e-9) {
+            let k = 1 - ((speed - lsLimit) / speed) * lsDampen * dt * 20
+            if (k < 0) k = 0
+            vx *= k; vy *= k; vz *= k
+          }
+        }
         vx += gx * dt; vy += gy * dt; vz += gz * dt
         if (hasAttract) {
           // Δv = strength·dt·dir / (r·(r² + soft²)): normalized direction,

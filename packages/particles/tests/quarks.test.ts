@@ -169,6 +169,24 @@ describe('Task 122: the atlas (FrameOverLife)', () => {
     expect(soup[4]).toBeCloseTo(0.5, 9)
     expect(soup[9 + 3]).toBeCloseTo(1, 9)
   })
+
+  it('fillBillboards: frameJitter scatters the tile by the particle seed (their startTileIndex Interval)', () => {
+    const system = createParticleSystem(4)
+    system.emit(2, (i, out) => {
+      out.x = 0; out.y = 0; out.z = 0; out.vx = 0; out.vy = 0; out.vz = 0
+      out.life = 1; out.size = 1; out.r = 1; out.g = 1; out.b = 1; out.a = 1
+      out.seed = i === 0 ? 0.1 : 0.6
+    })
+    const ramp = createRamp([{ t: 0, size: 1, r: 1, g: 1, b: 1, a: 1 }])
+    const soup = new Float32Array(4 * 6 * 9)
+    fillBillboards(system, BASIS, soup, { ramp, tiles: [2, 2], frameJitter: 4 })
+    // particle 0 (seed .1): frame = floor(.1·4) = 0 → tile (0, 0): v ∈ [0, .5)
+    expect(soup[4]).toBeCloseTo(0, 9)
+    // particle 1 (seed .6): frame = floor(.6·4) = 2 → tile (0, 1): v ∈ [.5, 1)
+    expect(soup[6 * 9 + 4]).toBeCloseTo(0.5, 9)
+    // both share the column 0 → u starts at 0
+    expect(soup[6 * 9 + 3]).toBeCloseTo(0, 9)
+  })
 })
 
 // ─── the render modes ───────────────────────────────────────────────────────
@@ -208,7 +226,7 @@ describe('Task 122: the billboard render modes', () => {
     }
   })
 
-  it('stretched: the long axis follows the velocity; a rest falls back to camera', () => {
+  it('stretched: three.quarks semantics — the head ON the particle, the tail behind, both scaled by size', () => {
     const system = one()
     system.emit(1, (i, out) => { // a second particle, moving along +X
       out.x = 0; out.y = 0; out.z = 0; out.vx = 10; out.vy = 0; out.vz = 0
@@ -219,19 +237,36 @@ describe('Task 122: the billboard render modes', () => {
     const soup = new Float32Array(8 * 6 * 9)
     const verts = fillBillboards(system, BASIS, soup, { mode: 'stretched', lengthFactor: 1 })
     expect(verts).toBe(12)
-    // the moving particle (index 1, verts 6..11): the long axis is X —
-    // verts at x = ±half·(1 + 0? lengthFactor 1, speedFactor 0) → ±0.5
+    // the moving particle (index 1, verts 6..11): the HEAD edge (u = 0)
+    // sits ON the particle (x = 0), the TAIL edge (u = 1) trails BEHIND
+    // by lf·size = 1; the width spans ±size/2 along Y
+    let heads = 0, tails = 0
     for (let v = 6; v < 12; v++) {
-      expect(Math.abs(soup[v * 9] - 0)).toBeCloseTo(0.5, 9)
+      const x = soup[v * 9], u = soup[v * 9 + 3]
+      if (Math.abs(x) < 1e-9) {
+        heads++
+        expect(u).toBeCloseTo(0, 9)
+      } else {
+        tails++
+        expect(x).toBeCloseTo(-1, 6)
+        expect(u).toBeCloseTo(1, 9)
+      }
       expect(Math.abs(soup[v * 9 + 1])).toBeLessThanOrEqual(0.5 + 1e-9)
     }
-    // with speedFactor 2: the half-length grows by |v|·2·0.5 = 10
+    expect(heads).toBe(3)
+    expect(tails).toBe(3)
+    // the resting particle (verts 0..5) degrades to the camera quad — finite
+    for (let v = 0; v < 6; v++) {
+      expect(Number.isFinite(soup[v * 9] + soup[v * 9 + 1] + soup[v * 9 + 2])).toBe(true)
+    }
+    // speedFactor 2: the tail gains (|v|·sf)·size = 20 → the tail edge at −21,
+    // the head still at 0 (their avgSize scaling — NOT a world-unit streak)
     const soup2 = new Float32Array(8 * 6 * 9)
     fillBillboards(system, BASIS, soup2, { mode: 'stretched', lengthFactor: 1, speedFactor: 2 })
     const xs = []
     for (let v = 6; v < 12; v++) xs.push(soup2[v * 9])
-    expect(Math.max(...xs)).toBeCloseTo(10.5, 6)
-    expect(Math.min(...xs)).toBeCloseTo(-10.5, 6)
+    expect(Math.max(...xs)).toBeCloseTo(0, 6)
+    expect(Math.min(...xs)).toBeCloseTo(-21, 6)
   })
 
   it('oriented: the quad rotates rigidly — every corner keeps its distance', () => {

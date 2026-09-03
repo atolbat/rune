@@ -13,13 +13,13 @@
 //   emitters), and the custom BLEND EQUATIONS (add/max/subtract) + the
 //   SOFT_PARTICLES depth fade (a color-encoded depth prepass).
 //
-// The dist imports carry ?v=123 (the stale-cache guard — bump on release).
-import { createRenderer, capsule, cube, plane, torusKnot } from '../../dist/rune.esm.js?v=123'
+// The dist imports carry ?v=124 (the stale-cache guard — bump on release).
+import { createRenderer, capsule, cube, plane, torusKnot } from '../../dist/rune.esm.js?v=124'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV,
-} from '../../dist/rune-materials.esm.js?v=123'
-import { createParticles, createRamp, createSpawner } from '../../dist/rune-particles.esm.js?v=123'
+} from '../../dist/rune-materials.esm.js?v=124'
+import { createParticles, createRamp, createSpawner } from '../../dist/rune-particles.esm.js?v=124'
 import { decodePngRgba } from './png.mjs'
 
 /* ─── the demo registry (their order) ─────────────────────────────────── */
@@ -82,6 +82,39 @@ try {
   // A missing asset (a misconfigured server) must not kill the page: the
   // muzzle demo falls back to the procedural atlas with a loud note.
   console.warn(`texture1.png: ${error instanceof Error ? error.message : String(error)}`)
+}
+
+/* ─── The three cfxr explosion textures (their ps.json's exact assets) ──
+
+   "cfxr stretch trait" (512×128 — the sparks/lines streak), "cfxr spikes
+   impact" (512×512 — the flash star), "cfxr smoke cloud x4" (512×512, a
+   2×2 cloud atlas with REAL alpha). The first two ship white-on-black
+   with NO usable alpha (trait: a=255 everywhere; spikes: RGB only) — the
+   original reads them through their USE_COLOR_AS_ALPHA define (the
+   fragment's alpha = texel.r — the CFXR trick: black adds nothing and
+   hides nothing). We bake the SAME alpha into the bytes — texel.a :=
+   texel.r — so the stock blend modes composite byte-identically on both
+   backends, and the ramps carry their gradient's r in the alpha channel
+   (the alpha those systems actually see). */
+const CFXR_FILES = [
+  ['trait', 'assets/cfxr-stretch-trait.png', true],
+  ['spikes', 'assets/cfxr-spikes-impact.png', true],
+  ['smoke', 'assets/cfxr-smoke-cloud-x4.png', false],
+]
+const cfxrPngs = {}
+for (const [key, file, bake] of CFXR_FILES) {
+  try {
+    const png = await decodePngRgba(file)
+    if (bake) {
+      const d = png.data
+      for (let i = 0; i < d.length; i += 4) d[i + 3] = d[i]
+    }
+    cfxrPngs[key] = png
+  } catch (error) {
+    // same contract as texture1.png — the layers fall back to the
+    // procedural atlas, loudly
+    console.warn(`${file}: ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
 const ATLAS_SIZE = 256
@@ -402,6 +435,10 @@ const env = {
   // decode failed; { loaded: true, texture: T | null } otherwise — the
   // texture object is (re-)created at every renderer boot.
   quarksAtlas: quarksPng !== null ? { loaded: true, texture: null } : null,
+  // The three cfxr explosion textures (trait/spikes/smoke — see the module
+  // header): {} until the boot creates them; the explosion demo's layers
+  // resolve () => env.cfxrTextures.trait at command-build time.
+  cfxrTextures: {},
   materials: {
     sprite: SPRITE_MATERIAL, leaf: LEAF_MATERIAL, soft: SOFT_MATERIAL,
     lambert: LAMBERT_MATERIAL, pbr: PBR_MATERIAL,
@@ -768,6 +805,17 @@ async function attachAtlas() {
     const tex = activeRenderer.texture(quarksPng.width, quarksPng.height)
     const upload = tex.upload(quarksPng.data)
     env.quarksAtlas.texture = tex
+    if (upload?.done !== undefined) void upload.done.catch(() => { /* the facade logs */ })
+  }
+  // the cfxr explosion set — one texture per decoded PNG, per boot (the
+  // explosion demo's layers resolve () => env.cfxrTextures.trait at
+  // command-build time, after this)
+  env.cfxrTextures = {}
+  for (const key of Object.keys(cfxrPngs)) {
+    const png = cfxrPngs[key]
+    const tex = activeRenderer.texture(png.width, png.height)
+    const upload = tex.upload(png.data)
+    env.cfxrTextures[key] = tex
     if (upload?.done !== undefined) void upload.done.catch(() => { /* the facade logs */ })
   }
 }

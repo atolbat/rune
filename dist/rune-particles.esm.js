@@ -239,7 +239,8 @@ var NO_FORCES = {
   speedCurve: null,
   collide: null,
   noise: null,
-  seek: null
+  seek: null,
+  limitSpeed: null
 };
 var MAX_PLANES = 16;
 function createParticleSystem(capacity, options = {}) {
@@ -419,6 +420,10 @@ function createParticleSystem(capacity, options = {}) {
       const hasSeek = seek !== null;
       const seekK = hasSeek ? seek.strength : 0;
       const seekC = hasSeek ? seek.damping : 0;
+      const limitSpeed = forces.limitSpeed ?? null;
+      const hasLimit = limitSpeed !== null;
+      const lsLimit = hasLimit ? limitSpeed.limit : 0;
+      const lsDampen = hasLimit ? limitSpeed.dampen : 0;
       let i = count - 1;
       while (i >= 0) {
         const age = f.age[i] + dt;
@@ -438,6 +443,17 @@ function createParticleSystem(capacity, options = {}) {
           vx *= dragFactor;
           vy *= dragFactor;
           vz *= dragFactor;
+        }
+        if (hasLimit) {
+          const speed = Math.sqrt(vx * vx + vy * vy + vz * vz);
+          if (speed > lsLimit && speed > 0.000000001) {
+            let k = 1 - (speed - lsLimit) / speed * lsDampen * dt * 20;
+            if (k < 0)
+              k = 0;
+            vx *= k;
+            vy *= k;
+            vz *= k;
+          }
         }
         vx += gx * dt;
         vy += gy * dt;
@@ -977,6 +993,7 @@ function fillBillboards(system, basis, out, options = {}) {
   const tileU = tiles !== undefined ? tiles[0] : 1;
   const tileV = tiles !== undefined ? tiles[1] : 1;
   const useAtlas = tiles !== undefined;
+  const frameJitter = options.frameJitter ?? 0;
   if (useAtlas && (!Number.isInteger(tileU) || tileU < 1 || !Number.isInteger(tileV) || tileV < 1)) {
     throw new Error(`rune/particles: billboard tiles must be integers >= 1 (got [${tileU}, ${tileV}])`);
   }
@@ -1027,7 +1044,7 @@ function fillBillboards(system, basis, out, options = {}) {
     const px = f.px[i], py = f.py[i], pz = f.pz[i];
     let u0 = 0, v0 = 0, uS = 1, vS = 1;
     if (useAtlas) {
-      let frame = Math.floor(s[5]);
+      let frame = Math.floor(s[5] + (frameJitter > 0 ? f.seed[i] * frameJitter : 0));
       if (!Number.isFinite(frame))
         frame = 0;
       if (frame < 0)
@@ -1097,18 +1114,19 @@ function fillBillboards(system, basis, out, options = {}) {
       sx /= sl;
       sy /= sl;
       sz /= sl;
-      const halfL = half * lengthFactor + vlen * speedFactor * 0.5;
+      const sizeFull = f.size[i] * s[0];
+      const tail = (vlen * speedFactor + lengthFactor) * sizeFull;
       const halfW = half;
-      const o0x2 = -dx * halfL - sx * halfW, o0y2 = -dy * halfL - sy * halfW, o0z2 = -dz * halfL - sz * halfW;
-      const o1x2 = dx * halfL - sx * halfW, o1y2 = dy * halfL - sy * halfW, o1z2 = dz * halfL - sz * halfW;
-      const o2x2 = dx * halfL + sx * halfW, o2y2 = dy * halfL + sy * halfW, o2z2 = dz * halfL + sz * halfW;
-      const o3x2 = -dx * halfL + sx * halfW, o3y2 = -dy * halfL + sy * halfW, o3z2 = -dz * halfL + sz * halfW;
-      at = vert3(out, at, px, py, pz, o0x2, o0y2, o0z2, u0, v0, cr, cg, cb, ca);
-      at = vert3(out, at, px, py, pz, o1x2, o1y2, o1z2, u0 + uS, v0, cr, cg, cb, ca);
-      at = vert3(out, at, px, py, pz, o2x2, o2y2, o2z2, u0 + uS, v0 + vS, cr, cg, cb, ca);
-      at = vert3(out, at, px, py, pz, o0x2, o0y2, o0z2, u0, v0, cr, cg, cb, ca);
-      at = vert3(out, at, px, py, pz, o2x2, o2y2, o2z2, u0 + uS, v0 + vS, cr, cg, cb, ca);
-      at = vert3(out, at, px, py, pz, o3x2, o3y2, o3z2, u0, v0 + vS, cr, cg, cb, ca);
+      const h0x = -sx * halfW, h0y = -sy * halfW, h0z = -sz * halfW;
+      const h1x = sx * halfW, h1y = sy * halfW, h1z = sz * halfW;
+      const t0x = -dx * tail - sx * halfW, t0y = -dy * tail - sy * halfW, t0z = -dz * tail - sz * halfW;
+      const t1x = -dx * tail + sx * halfW, t1y = -dy * tail + sy * halfW, t1z = -dz * tail + sz * halfW;
+      at = vert3(out, at, px, py, pz, h0x, h0y, h0z, u0, v0, cr, cg, cb, ca);
+      at = vert3(out, at, px, py, pz, t0x, t0y, t0z, u0 + uS, v0, cr, cg, cb, ca);
+      at = vert3(out, at, px, py, pz, t1x, t1y, t1z, u0 + uS, v0 + vS, cr, cg, cb, ca);
+      at = vert3(out, at, px, py, pz, h0x, h0y, h0z, u0, v0, cr, cg, cb, ca);
+      at = vert3(out, at, px, py, pz, t1x, t1y, t1z, u0 + uS, v0 + vS, cr, cg, cb, ca);
+      at = vert3(out, at, px, py, pz, h1x, h1y, h1z, u0, v0 + vS, cr, cg, cb, ca);
       continue;
     }
     let ax2 = oax, ay2 = oay, az2 = oaz;
@@ -1468,7 +1486,8 @@ function createParticles(desc) {
     speedCurve: desc.forces?.speedCurve ?? null,
     collide: validateCollision(desc.forces?.collide),
     noise: desc.forces?.noise !== undefined && desc.forces?.noise !== null ? validateNoise(desc.forces.noise) : null,
-    seek: validateSeek(desc.forces?.seek)
+    seek: validateSeek(desc.forces?.seek),
+    limitSpeed: validateLimitSpeed(desc.forces?.limitSpeed)
   };
   const kind = render.kind;
   let history = null;
@@ -1602,7 +1621,8 @@ function createParticles(desc) {
           speedFactor: o.speedFactor ?? renderOpts.speedFactor,
           lengthFactor: o.lengthFactor ?? renderOpts.lengthFactor,
           axis: o.axis ?? renderOpts.axis,
-          spin3d: o.spin3d ?? renderOpts.spin3d
+          spin3d: o.spin3d ?? renderOpts.spin3d,
+          frameJitter: o.frameJitter ?? renderOpts.frameJitter
         });
       }
       return view;
@@ -1730,6 +1750,17 @@ function validateSeek(seek) {
     throw new Error(`rune/particles: seek.damping must be a finite >= 0 (got ${seek.damping}; ≈ 2·√strength is critically damped)`);
   }
   return seek;
+}
+function validateLimitSpeed(ls) {
+  if (ls === undefined || ls === null)
+    return null;
+  if (!Number.isFinite(ls.limit) || ls.limit < 0) {
+    throw new Error(`rune/particles: limitSpeed.limit must be a finite >= 0 (got ${ls.limit})`);
+  }
+  if (!Number.isFinite(ls.dampen) || ls.dampen < 0 || ls.dampen > 1) {
+    throw new Error(`rune/particles: limitSpeed.dampen must be in [0, 1] (got ${ls.dampen}; their dampen)`);
+  }
+  return ls;
 }
 function validateBurst(burst) {
   if (!Number.isFinite(burst.time) || burst.time < 0) {

@@ -7,8 +7,11 @@
 // management, no premultiply, no flip — so texture.upload() lands
 // byte-identical texels on WebGL2 and WebGPU alike.
 //
-// Scope (deliberately narrow — it serves ONE asset):
-//   • 8-bit RGBA (color type 6), non-interlaced — the texture1.png atlas
+// Scope (deliberately narrow — it serves the demo's assets):
+//   • 8-bit RGBA (color type 6) and RGB (color type 2) PNGs, non-interlaced
+//     — the texture1.png atlas + the cfxr explosion set (their "spikes
+//     impact" ships WITHOUT an alpha channel — white-on-black RGB, decoded
+//     to RGBA a=255; the demo bakes the alpha it needs on top)
 //   • zlib-wrapped IDAT streams via DecompressionStream('deflate')
 //     (the RFC-1950 wrapper — NOT 'deflate-raw')
 //   • all five scanline filters (None/Sub/Up/Average/Paeth)
@@ -57,10 +60,11 @@ export async function decodePngRgba(url) {
     at += 12 + length
   }
   if (width <= 0 || height <= 0 || idat.length === 0) throw new Error('PNG has no image data')
-  if (bitDepth !== 8 || colorType !== 6) {
-    throw new Error(`only 8-bit RGBA PNGs are supported (got depth ${bitDepth}, color type ${colorType})`)
+  if (bitDepth !== 8 || (colorType !== 6 && colorType !== 2)) {
+    throw new Error(`only 8-bit RGBA/RGB PNGs are supported (got depth ${bitDepth}, color type ${colorType})`)
   }
   if (interlace !== 0) throw new Error('interlaced PNGs are not supported')
+  const nch = colorType === 6 ? 4 : 3
 
   // ── the zlib stream: concatenate the IDAT run, inflate ──
   let total = 0
@@ -71,7 +75,7 @@ export async function decodePngRgba(url) {
   const raw = await inflate(zlibBytes)
 
   // ── the scanlines: unfilter all five filters ──
-  const stride = width * 4
+  const stride = width * nch
   if (raw.length < height * (1 + stride)) throw new Error('inflated data is short of the declared size')
   const data = new Uint8Array(width * height * 4)
   let prev = null // the previous row's UNFILTERED bytes (null for row 0)
@@ -81,25 +85,34 @@ export async function decodePngRgba(url) {
     const row = raw.subarray(src, src + stride)
     src += stride
     if (filter === 1) { // Sub: left
-      for (let i = 4; i < stride; i++) row[i] = (row[i] + row[i - 4]) & 255
+      for (let i = nch; i < stride; i++) row[i] = (row[i] + row[i - nch]) & 255
     } else if (filter === 2) { // Up: above
       if (prev !== null) for (let i = 0; i < stride; i++) row[i] = (row[i] + prev[i]) & 255
     } else if (filter === 3) { // Average: floor((left + above) / 2)
       if (prev !== null) {
-        for (let i = 0; i < 4; i++) row[i] = (row[i] + (prev[i] >> 1)) & 255
-        for (let i = 4; i < stride; i++) row[i] = (row[i] + ((row[i - 4] + prev[i]) >> 1)) & 255
+        for (let i = 0; i < nch; i++) row[i] = (row[i] + (prev[i] >> 1)) & 255
+        for (let i = nch; i < stride; i++) row[i] = (row[i] + ((row[i - nch] + prev[i]) >> 1)) & 255
       } else {
-        for (let i = 4; i < stride; i++) row[i] = (row[i] + (row[i - 4] >> 1)) & 255
+        for (let i = nch; i < stride; i++) row[i] = (row[i] + (row[i - nch] >> 1)) & 255
       }
     } else if (filter === 4) { // Paeth
       for (let i = 0; i < stride; i++) {
-        const a = i >= 4 ? row[i - 4] : 0
+        const a = i >= nch ? row[i - nch] : 0
         const b = prev !== null ? prev[i] : 0
-        const c = i >= 4 && prev !== null ? prev[i - 4] : 0
+        const c = i >= nch && prev !== null ? prev[i - nch] : 0
         row[i] = (row[i] + paeth(a, b, c)) & 255
       }
     } // filter 0: None
-    data.set(row, y * stride)
+    // RGB (nch 3) expands to RGBA in place as it lands in `data`.
+    const outRow = y * width * 4
+    if (nch === 4) {
+      data.set(row, outRow)
+    } else {
+      for (let x = 0; x < width; x++) {
+        const s3 = x * 3, d4 = outRow + x * 4
+        data[d4] = row[s3]; data[d4 + 1] = row[s3 + 1]; data[d4 + 2] = row[s3 + 2]; data[d4 + 3] = 255
+      }
+    }
     prev = row
   }
   return { width, height, data }

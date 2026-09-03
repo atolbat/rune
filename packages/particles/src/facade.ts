@@ -23,7 +23,7 @@
 
 import {
   createParticleSystem, NO_FORCES, MAX_PLANES,
-  type Attractor, type ForceFields, type ParticleFields, type ParticleSystem, type RetireRecord, type Collision, type SeekForce,
+  type Attractor, type ForceFields, type ParticleFields, type ParticleSystem, type RetireRecord, type Collision, type SeekForce, type LimitSpeedForce,
 } from './system.ts'
 import { createSpawner, type Spawner, type SpawnerDesc } from './spawn.ts'
 import { CONSTANT_RAMP, type Ramp } from './ramp.ts'
@@ -177,6 +177,7 @@ export function createParticles(desc: ParticlesDesc): Particles {
     collide: validateCollision(desc.forces?.collide),
     noise: desc.forces?.noise !== undefined && desc.forces?.noise !== null ? validateNoise(desc.forces!.noise as NoiseField) : null,
     seek: validateSeek(desc.forces?.seek),
+    limitSpeed: validateLimitSpeed(desc.forces?.limitSpeed),
   }
 
   // ── the render kind setup (before the store: trails need onSwap) ──────
@@ -318,6 +319,7 @@ export function createParticles(desc: ParticlesDesc): Particles {
           lengthFactor: o.lengthFactor ?? renderOpts.lengthFactor,
           axis: o.axis ?? renderOpts.axis,
           spin3d: o.spin3d ?? renderOpts.spin3d,
+          frameJitter: o.frameJitter ?? renderOpts.frameJitter,
         })
       }
       return view
@@ -472,6 +474,18 @@ function validateSeek(seek: SeekForce | null | undefined): SeekForce | null {
     throw new Error(`rune/particles: seek.damping must be a finite >= 0 (got ${seek.damping}; ≈ 2·√strength is critically damped)`)
   }
   return seek
+}
+
+/** LimitSpeed validation (three.quarks' LimitSpeedOverLife). */
+function validateLimitSpeed(ls: LimitSpeedForce | null | undefined): LimitSpeedForce | null {
+  if (ls === undefined || ls === null) return null
+  if (!Number.isFinite(ls.limit) || ls.limit < 0) {
+    throw new Error(`rune/particles: limitSpeed.limit must be a finite >= 0 (got ${ls.limit})`)
+  }
+  if (!Number.isFinite(ls.dampen) || ls.dampen < 0 || ls.dampen > 1) {
+    throw new Error(`rune/particles: limitSpeed.dampen must be in [0, 1] (got ${ls.dampen}; their dampen)`)
+  }
+  return ls
 }
 
 /** Burst validation. */

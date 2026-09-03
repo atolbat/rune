@@ -132,6 +132,25 @@ describe('createParticleSystem (the SoA store)', () => {
     expect(ps.fields.vx[0]).toBeCloseTo(10 * Math.exp(-2), 5)
   })
 
+  it('limitSpeed: three.quarks LimitSpeedOverLife — the excess above the limit is damped, below is untouched', () => {
+    const ps = createParticleSystem(2)
+    ps.emit(2, fixedSpawner({ vx: 10, life: 10 }))
+    ps.fields.vx[1] = 0.4 // below the limit
+    // v = 10, limit 0.5, dampen 0.5, dt 0.1:
+    //   percent = 9.5/10; k = 1 − 0.95·0.5·0.1·20 = 0.05 → vx = 0.5 (the limit)
+    ps.advance(0.1, { gravity: [0, 0, 0], drag: 0, turbulence: 0, limitSpeed: { limit: 0.5, dampen: 0.5 } })
+    expect(ps.fields.vx[0]).toBeCloseTo(0.5, 9)
+    expect(ps.fields.vx[1]).toBeCloseTo(0.4, 6) // f32 storage
+  })
+
+  it('limitSpeed: limit 0 + dampen 1 at a long dt clamps at zero (no sign flip)', () => {
+    const ps = createParticleSystem(1)
+    ps.emit(1, fixedSpawner({ vx: 10, life: 10 }))
+    // k = 1 − 1·1·1·20 → clamped to 0, not −19 (the velocity never flips)
+    ps.advance(1, { gravity: [0, 0, 0], drag: 0, turbulence: 0, limitSpeed: { limit: 0, dampen: 1 } })
+    expect(ps.fields.vx[0]).toBe(0)
+  })
+
   it('compacts the dead by swap-remove — no skips, no double integration', () => {
     const ps = createParticleSystem(4)
     // lives staggered: 0 dies first, 2 dies second
