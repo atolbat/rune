@@ -63,6 +63,22 @@ export interface ParticlesDesc {
   readonly forces?: Partial<ForceFields>
   /** The continuous emission rate, particles/second (0 — bursts only). */
   readonly rate?: number
+  /** Task 124 — VELOCITY INHERITANCE: the fraction of the EMITTER's own
+   *  velocity (the at() origin's movement, sampled per advance) added to
+   *  every newborn. 0 (the default) = the ballistic void; 0.8 = a rocket's
+   *  smoke DRAGS behind the flight instead of blooming in place — the
+   *  classic game-engine "inherit velocity" knob. A teleport (an at() jump
+   *  larger than 25 units in one advance) contributes NOTHING that frame
+   *  (a repositioning is not a launch). The velocity is the LAST advance()'s
+   *  sample: rate/burst emission inside advance() sees the current frame,
+   *  a burst() called between advances sees the previous one. */
+  readonly inheritVelocity?: number
+  /** Task 124 — RATE OVER DISTANCE: particles per WORLD UNIT the emitter
+   *  (the at() origin) travels, on top of the time rate. The emission tracks
+   *  the SWING, not the clock: a sword edge at rest emits nothing, a fast
+   *  arc emits a dense trail (tire dust, speed lines, weapon trails). A
+   *  teleport (> 25 units in one advance) emits nothing. Default 0 (off). */
+  readonly rateOverDistance?: number
   /** The spawner used by the rate accumulator and burst() (default:
    *  a white 1-unit sphere burst at the origin — set your own!). */
   readonly spawner?: SpawnerDesc
@@ -193,7 +209,16 @@ export function createParticles(desc: ParticlesDesc): Particles {
 
   let spawner: Spawner = createSpawner(desc.spawner ?? DEFAULT_SPAWNER)
   let ratePerSecond = desc.rate ?? 0
-  let carry = 0 // the fractional emission remainder
+  let carry = 0 // the fractional emission remainder (the time rate)
+  // Task 124 — the emitter-motion knobs: the velocity inheritance and the
+  // rate-over-distance. The emitter velocity is resampled EVERY advance from
+  // the at() origin's movement; a jump beyond MAX_EMITTER_STEP units in one
+  // advance is a TELEPORT — it contributes neither velocity nor distance.
+  const inheritK = validateInherit(desc.inheritVelocity)
+  const rateOverDist = validateRateOverDistance(desc.rateOverDistance)
+  let distCarry = 0 // the fractional emission remainder (the distance rate)
+  let lastOx = 0, lastOy = 0, lastOz = 0 // the origin at the last advance
+  let emitterVx = 0, emitterVy = 0, emitterVz = 0
   // The live emitter origin (at) — read by the emit wrapper, never rebuilt.
   const origin = [0, 0, 0]
   // The GLOBAL spawn stream index (the anti-"jet" fix): the store's emit
@@ -207,6 +232,13 @@ export function createParticles(desc: ParticlesDesc): Particles {
   const emitWrap: Spawner = (index, out) => {
     spawner(streamIndex + index, out)
     out.x += origin[0]; out.y += origin[1]; out.z += origin[2]
+    // Task 124 — the velocity inheritance: the newborn rides the emitter's
+    // own motion (the rocket's smoke drags behind the flight path).
+    if (inheritK > 0) {
+      out.vx += emitterVx * inheritK
+      out.vy += emitterVy * inheritK
+      out.vz += emitterVz * inheritK
+    }
   }
   /** emit + stream advance (both call sites use the actual returned count). */
   const emitStream = (n: number): number => {
@@ -337,6 +369,7 @@ export function createParticles(desc: ParticlesDesc): Particles {
     clear() {
       system.clear()
       carry = 0
+      distCarry = 0
       return facade
     },
   }
@@ -344,6 +377,29 @@ export function createParticles(desc: ParticlesDesc): Particles {
   /** The one advance implementation (the prewarm shares it). */
   function advanceInternal(dt: number): void {
     if (!Number.isFinite(dt) || dt <= 0) return
+    // Task 124 — the emitter motion FIRST (this frame's newborns inherit the
+    // CURRENT frame's emitter velocity; the distance emission precedes the
+    // rate so a swing's trail starts at the swing). A teleport (> the step
+    // cap) zeroes the velocity and skips the distance — repositioning is not
+    // launching.
+    if (inheritK > 0 || rateOverDist > 0) {
+      const mdx = origin[0] - lastOx, mdy = origin[1] - lastOy, mdz = origin[2] - lastOz
+      const moved = Math.hypot(mdx, mdy, mdz)
+      if (moved > MAX_EMITTER_STEP) {
+        emitterVx = 0; emitterVy = 0; emitterVz = 0
+      } else {
+        emitterVx = mdx / dt; emitterVy = mdy / dt; emitterVz = mdz / dt
+        if (rateOverDist > 0 && moved > 0) {
+          distCarry += moved * rateOverDist
+          const whole = Math.floor(distCarry)
+          if (whole > 0) {
+            distCarry -= whole
+            emitStream(whole)
+          }
+        }
+      }
+      lastOx = origin[0]; lastOy = origin[1]; lastOz = origin[2]
+    }
     // The rate first (this frame's newborns see the full dt — no
     // systematic one-frame lag), then the burst schedule, then the
     // integration + compaction, then the trail history.
@@ -416,6 +472,31 @@ const DEFAULT_SPAWNER: SpawnerDesc = {
   color: [[1, 1, 1, 1], [0.8, 0.9, 1, 0.6]],
 }
 
+/** The teleport threshold: an at() jump larger than this in ONE advance is a
+ *  repositioning, not motion — it contributes neither inherited velocity nor
+ *  distance emission (25 units/frame is far beyond any real emitter's speed:
+ *  a 60 fps rocket at 10 u/s moves 0.17). */
+const MAX_EMITTER_STEP = 25
+
+/** Inheritance validation: a finite fraction >= 0 (1 = fully riding the
+ *  emitter; > 1 = overshoot — allowed, it reads as a slingshot). */
+function validateInherit(k: number | undefined): number {
+  if (k === undefined) return 0
+  if (!Number.isFinite(k) || k < 0) {
+    throw new Error(`rune/particles: inheritVelocity must be a finite >= 0 (got ${k}; the fraction of the emitter's velocity a newborn rides)`)
+  }
+  return k
+}
+
+/** Rate-over-distance validation: particles per world unit, finite >= 0. */
+function validateRateOverDistance(r: number | undefined): number {
+  if (r === undefined) return 0
+  if (!Number.isFinite(r) || r < 0) {
+    throw new Error(`rune/particles: rateOverDistance must be a finite >= 0 (got ${r}; particles per world unit the emitter travels)`)
+  }
+  return r
+}
+
 /** Attractor validation (once, at creation — the hot advance() loop trusts
  *  its inputs). A loud error beats a silent NaN poisoning the whole system. */
 function validateAttractor(at: Attractor | null | undefined): Attractor | null {
@@ -460,6 +541,14 @@ function validateCollision(collide: Collision | null | undefined): Collision | n
     if (!Number.isFinite(fr) || fr < 0 || fr > 1) {
       throw new Error(`rune/particles: plane friction must be in [0, 1] (got ${fr})`)
     }
+    // Task 124 — kill on contact + the contact events.
+    if (plane.kill !== undefined && typeof plane.kill !== 'boolean') {
+      throw new Error(`rune/particles: plane kill must be a boolean (got ${JSON.stringify(plane.kill)}; true = the particle retires on contact)`)
+    }
+  }
+  // Task 124 — the contact-event hook: a function, or absent.
+  if (collide.onCollide !== undefined && typeof collide.onCollide !== 'function') {
+    throw new Error(`rune/particles: collide.onCollide must be a function (got ${typeof collide.onCollide}; called per contact after the integration walk — the splash hook)`)
   }
   return collide
 }

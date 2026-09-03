@@ -69,7 +69,11 @@ export type SpawnShape =
   | { readonly kind: 'line'; readonly from: readonly number[]; readonly to: readonly number[] }
 
 /** How the spawn velocity is directed.
- *  radial     — away from the shape origin (the sphere burst; any shape);
+ *  radial     — away from the shape origin (the sphere burst; any shape).
+ *                             DEGENERATE at the origin (a point shape, a
+ *               zero-radius sphere): a uniform RANDOM unit-sphere direction
+ *               — three.quarks' PointEmitter, exactly (theta = u·τ,
+ *               phi = acos(2v−1)): a point burst SCATTERS, never jets.
  *  lobe       — the cone's axis fanned by its halfAngle (cone only);
  *  axis       — along the shape axis (cone / disc / line);
  *  tangential — cross(axis, radial): orbits, galaxies, vortices
@@ -154,6 +158,9 @@ export type Spawner = (index: number, out: SpawnRecord) => void
 const TAU = 6.283185307179586
 // The salt streams: decorrelated per property (any distinct constants).
 const S_DIR = 1, S_SPD = 2, S_LIFE = 3, S_SIZE = 4, S_COL = 5, S_SEED = 6, S_P0 = 7, S_P1 = 8, S_P2 = 9, S_TARGET = 10
+// Task 124 — the degenerate-radial scatter direction (two independent
+// draws: the azimuth θ and the polar cosφ).
+const S_SCAT0 = 11, S_SCAT1 = 12
 
 /** Validates the description and compiles it into a flat spawner closure
  *  (all vectors normalized / precomputed ONCE, here). */
@@ -448,7 +455,22 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
     if (velocity.mode === 'radial') {
       dx = px - ox; dy = py - oy; dz = pz - oz
       const l = Math.hypot(dx, dy, dz)
-      if (l > 1e-12) { dx /= l; dy /= l; dz /= l } else { dx = ax; dy = ay; dz = az }
+      if (l > 1e-12) { dx /= l; dy /= l; dz /= l }
+      else {
+        // Task 124 — the degenerate case (a particle AT the shape origin: a
+        // point burst, or a zero-radius sphere — three.quarks' PointEmitter
+        // and their ps.json's r=0.0001 sphere): their direction is a UNIFORM
+        // RANDOM UNIT-SPHERE vector (theta = u·τ, phi = acos(2v−1)), so the
+        // burst SCATTERS in every direction. The old axis fallback produced a
+        // single-direction jet (the explosion smoke blow-back bug) — never
+        // again. Deterministic: the same (seed, index) pair, the same draw.
+        const theta = TAU * hash01(seed, index, S_SCAT0)
+        const cphi = 2 * hash01(seed, index, S_SCAT1) - 1
+        const sphi = Math.sqrt(Math.max(0, 1 - cphi * cphi))
+        dx = sphi * Math.cos(theta)
+        dy = sphi * Math.sin(theta)
+        dz = cphi
+      }
     } else if (velocity.mode === 'axis') {
       dx = ax; dy = ay; dz = az
     } else if (velocity.mode === 'tangential') {

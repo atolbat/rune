@@ -97,11 +97,35 @@ export interface CollisionPlane {
   readonly restitution: number
   /** Tangential damping on contact: 0 = frictionless, 1 = full stop. */
   readonly friction?: number
+  /** Task 124 — kill on contact: the particle RETIRES this frame (no bounce,
+   *  no lying on the surface — rain on the floor, embers into the pit). Pair
+   *  with collide.onCollide to spawn the splash at the death site. Default
+   *  false. */
+  readonly kill?: boolean
 }
 
 /** The collision set: up to a few planes (floor, walls). */
 export interface Collision {
   readonly planes: readonly CollisionPlane[]
+  /** Task 124 — contact events, flushed AFTER the integration walk (a fully
+   *  consistent store: a callback may burst OTHER systems inside — never
+   *  this one mid-walk). Fires once per contact, AFTER the response (the
+   *  record carries the post-bounce velocity — a splash inherits a sensible
+   *  direction); a killed particle's LAST event is its death. The record is
+   *  REUSED — copy what you need. Cap: 512 events per advance() (a stall
+   *  catch-up of dense rain); the overflow drops silently. */
+  readonly onCollide?: (record: CollideRecord) => void
+}
+
+/** One collision contact (the REUSED record handed to collide.onCollide). */
+export interface CollideRecord {
+  /** The contact position, world space (snapped onto the surface). */
+  x: number; y: number; z: number
+  /** The POST-response velocity: reflected, restitution-scaled, friction-
+   *  damped (for a killed particle: its velocity as it landed). */
+  vx: number; vy: number; vz: number
+  /** The plane index hit (0 = collide.planes[0]). */
+  plane: number
 }
 
 /** The seek spring (three.quarks' sequencer pull): a critically-damped-ish
@@ -215,6 +239,12 @@ export interface ParticleSystem {
  *  scratch is sized to this). */
 export const MAX_PLANES = 16
 
+/** The collision-event cap per advance() (Task 124): dense rain at a stall
+ *  catch-up can cross a floor hundreds of times in one call — the flat
+ *  event scratch is sized to this and the overflow drops silently (the
+ *  splash is cosmetic; the simulation is untouched). */
+const MAX_COLLIDE_EVENTS = 512
+
 /** Creates the store. `capacity` is the hard ceiling (allocation happens
  *  here, once: 16 floats + the counter scalars per particle). */
 export function createParticleSystem(capacity: number, options: StoreOptions = {}): ParticleSystem {
@@ -248,9 +278,16 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
   // no subarray views in the hot loop (a view IS an allocation).
   const curveScratch = new Float32Array(6)
   const curvePrev = new Float32Array(6)
-  // The flattened collision planes (nx, ny, nz, px, py, pz, keep) — filled
-  // once per advance() call; the hot loop reads flat scalars, never arrays.
-  const flatPlanes = new Float64Array(MAX_PLANES * 7)
+  // The flattened collision planes (nx, ny, nz, px, py, pz, keep, kill) —
+  // filled once per advance() call; the hot loop reads flat scalars, never
+  // arrays. The 8th slot (Task 124): 1 = kill on contact.
+  const flatPlanes = new Float64Array(MAX_PLANES * 8)
+  // Task 124 — the collision events (x, y, z, vx, vy, vz, plane), collected
+  // during the walk into a flat scratch and flushed AFTER it (a consistent
+  // store — the splash callback may burst other systems). The reused record.
+  const collideEvents = new Float64Array(MAX_COLLIDE_EVENTS * 7)
+  let collideEventCount = 0
+  const collideRec: CollideRecord = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, plane: 0 }
 
   let count = 0
   let spawned = 0
@@ -325,8 +362,13 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
       const hasCurve = speedCurve !== null
       const collide = forces.collide ?? null
       const planeCount = collide !== null ? Math.min(collide.planes.length, MAX_PLANES) : 0
+      // The collide EVENT hook (Task 124): hoisted — absent = a clean loop
+      // (no event scratch writes at all).
+      const onCollide = collide !== null ? collide.onCollide : undefined
+      const wantEvents = onCollide !== undefined
       // The planes, pre-flattened ONCE PER FRAME (normalize + scalars) into
       // the closure scratch — the hot loop reads flat numbers, never arrays.
+      collideEventCount = 0
       if (planeCount > 0) {
         const planes = collide!.planes
         for (let p = 0; p < planeCount; p++) {
@@ -334,10 +376,11 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
           let nx = plane.normal[0] ?? 0, ny = plane.normal[1] ?? 0, nz = plane.normal[2] ?? 0
           const nl = Math.hypot(nx, ny, nz)
           if (nl < 1e-12) { nx = 0; ny = 1; nz = 0 } else { nx /= nl; ny /= nl; nz /= nl }
-          const b = p * 7
+          const b = p * 8
           flatPlanes[b] = nx; flatPlanes[b + 1] = ny; flatPlanes[b + 2] = nz
           flatPlanes[b + 3] = plane.point[0] ?? 0; flatPlanes[b + 4] = plane.point[1] ?? 0; flatPlanes[b + 5] = plane.point[2] ?? 0
           flatPlanes[b + 6] = 1 - (plane.friction ?? 0) // the tangential keep factor
+          flatPlanes[b + 7] = plane.kill === true ? 1 : 0 // Task 124: die on contact
         }
       }
       const noise = forces.noise ?? null
@@ -442,7 +485,7 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
         // separating particle keeps its velocity). Friction damps the
         // TANGENTIAL part of the reflected velocity only.
         for (let p = 0; p < planeCount; p++) {
-          const b = p * 7
+          const b = p * 8
           const nx = flatPlanes[b], ny = flatPlanes[b + 1], nz = flatPlanes[b + 2]
           const d = (f.px[i] - flatPlanes[b + 3]) * nx + (f.py[i] - flatPlanes[b + 4]) * ny + (f.pz[i] - flatPlanes[b + 5]) * nz
           if (d >= 0) continue
@@ -462,6 +505,19 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
           // The snap: back onto the surface + ε (no immediate re-penetration).
           const push = -d + 1e-4
           f.px[i] += push * nx; f.py[i] += push * ny; f.pz[i] += push * nz
+          // Task 124 — kill on contact: the retire branch below re-reads
+          // f.life[i], so zeroing it here retires the particle THIS frame
+          // (onRetire still fires, with this final, post-response state).
+          if (flatPlanes[b + 7] === 1) f.life[i] = 0
+          // Task 124 — the contact event (post-response position + velocity),
+          // deferred: collected during the walk, flushed after it.
+          if (wantEvents && collideEventCount < MAX_COLLIDE_EVENTS) {
+            const eb = collideEventCount * 7
+            collideEvents[eb] = f.px[i]; collideEvents[eb + 1] = f.py[i]; collideEvents[eb + 2] = f.pz[i]
+            collideEvents[eb + 3] = vx; collideEvents[eb + 4] = vy; collideEvents[eb + 5] = vz
+            collideEvents[eb + 6] = p
+            collideEventCount++
+          }
         }
         if (age >= f.life[i]) {
           // Dead: retire by swap-with-tail (or plain shrink when i IS the
@@ -497,6 +553,20 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
           f.vx[i] = vx; f.vy[i] = vy; f.vz[i] = vz
         }
         i--
+      }
+      // Task 124 — the collision events, flushed AFTER the walk: the store
+      // is fully consistent (compaction done) — the callback may burst OTHER
+      // particle systems at the contact points (the rain's splashes). The
+      // record is reused; the callback must copy what it keeps.
+      if (collideEventCount > 0 && onCollide !== undefined) {
+        for (let e = 0; e < collideEventCount; e++) {
+          const b = e * 7
+          collideRec.x = collideEvents[b]; collideRec.y = collideEvents[b + 1]; collideRec.z = collideEvents[b + 2]
+          collideRec.vx = collideEvents[b + 3]; collideRec.vy = collideEvents[b + 4]; collideRec.vz = collideEvents[b + 5]
+          collideRec.plane = collideEvents[b + 6]
+          onCollide(collideRec)
+        }
+        collideEventCount = 0
       }
     },
 

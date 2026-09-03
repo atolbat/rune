@@ -243,6 +243,7 @@ var NO_FORCES = {
   limitSpeed: null
 };
 var MAX_PLANES = 16;
+var MAX_COLLIDE_EVENTS = 512;
 function createParticleSystem(capacity, options = {}) {
   if (!Number.isInteger(capacity) || capacity < 1 || capacity > 2 ** 24) {
     throw new Error(`rune/particles: capacity must be an integer in [1, 16777216] (got ${capacity})`);
@@ -304,7 +305,10 @@ function createParticleSystem(capacity, options = {}) {
   const onSwap = options.onSwap;
   const curveScratch = new Float32Array(6);
   const curvePrev = new Float32Array(6);
-  const flatPlanes = new Float64Array(MAX_PLANES * 7);
+  const flatPlanes = new Float64Array(MAX_PLANES * 8);
+  const collideEvents = new Float64Array(MAX_COLLIDE_EVENTS * 7);
+  let collideEventCount = 0;
+  const collideRec = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, plane: 0 };
   let count = 0;
   let spawned = 0;
   let retired = 0;
@@ -386,6 +390,9 @@ function createParticleSystem(capacity, options = {}) {
       const hasCurve = speedCurve !== null;
       const collide = forces.collide ?? null;
       const planeCount = collide !== null ? Math.min(collide.planes.length, MAX_PLANES) : 0;
+      const onCollide = collide !== null ? collide.onCollide : undefined;
+      const wantEvents = onCollide !== undefined;
+      collideEventCount = 0;
       if (planeCount > 0) {
         const planes = collide.planes;
         for (let p = 0;p < planeCount; p++) {
@@ -401,7 +408,7 @@ function createParticleSystem(capacity, options = {}) {
             ny /= nl;
             nz /= nl;
           }
-          const b = p * 7;
+          const b = p * 8;
           flatPlanes[b] = nx;
           flatPlanes[b + 1] = ny;
           flatPlanes[b + 2] = nz;
@@ -409,6 +416,7 @@ function createParticleSystem(capacity, options = {}) {
           flatPlanes[b + 4] = plane.point[1] ?? 0;
           flatPlanes[b + 5] = plane.point[2] ?? 0;
           flatPlanes[b + 6] = 1 - (plane.friction ?? 0);
+          flatPlanes[b + 7] = plane.kill === true ? 1 : 0;
         }
       }
       const noise = forces.noise ?? null;
@@ -494,7 +502,7 @@ function createParticleSystem(capacity, options = {}) {
         f.py[i] += vy * dt;
         f.pz[i] += vz * dt;
         for (let p = 0;p < planeCount; p++) {
-          const b = p * 7;
+          const b = p * 8;
           const nx = flatPlanes[b], ny = flatPlanes[b + 1], nz = flatPlanes[b + 2];
           const d = (f.px[i] - flatPlanes[b + 3]) * nx + (f.py[i] - flatPlanes[b + 4]) * ny + (f.pz[i] - flatPlanes[b + 5]) * nz;
           if (d >= 0)
@@ -515,6 +523,19 @@ function createParticleSystem(capacity, options = {}) {
           f.px[i] += push * nx;
           f.py[i] += push * ny;
           f.pz[i] += push * nz;
+          if (flatPlanes[b + 7] === 1)
+            f.life[i] = 0;
+          if (wantEvents && collideEventCount < MAX_COLLIDE_EVENTS) {
+            const eb = collideEventCount * 7;
+            collideEvents[eb] = f.px[i];
+            collideEvents[eb + 1] = f.py[i];
+            collideEvents[eb + 2] = f.pz[i];
+            collideEvents[eb + 3] = vx;
+            collideEvents[eb + 4] = vy;
+            collideEvents[eb + 5] = vz;
+            collideEvents[eb + 6] = p;
+            collideEventCount++;
+          }
         }
         if (age >= f.life[i]) {
           if (onRetire !== undefined) {
@@ -566,6 +587,20 @@ function createParticleSystem(capacity, options = {}) {
         }
         i--;
       }
+      if (collideEventCount > 0 && onCollide !== undefined) {
+        for (let e = 0;e < collideEventCount; e++) {
+          const b = e * 7;
+          collideRec.x = collideEvents[b];
+          collideRec.y = collideEvents[b + 1];
+          collideRec.z = collideEvents[b + 2];
+          collideRec.vx = collideEvents[b + 3];
+          collideRec.vy = collideEvents[b + 4];
+          collideRec.vz = collideEvents[b + 5];
+          collideRec.plane = collideEvents[b + 6];
+          onCollide(collideRec);
+        }
+        collideEventCount = 0;
+      }
     },
     clear() {
       retired += count;
@@ -592,6 +627,8 @@ var S_P0 = 7;
 var S_P1 = 8;
 var S_P2 = 9;
 var S_TARGET = 10;
+var S_SCAT0 = 11;
+var S_SCAT1 = 12;
 function createSpawner(desc) {
   const shape = desc.shape;
   const velocity = desc.velocity;
@@ -900,9 +937,12 @@ function createSpawner(desc) {
         dy /= l;
         dz /= l;
       } else {
-        dx = ax;
-        dy = ay;
-        dz = az;
+        const theta = TAU * hash01(seed, index, S_SCAT0);
+        const cphi = 2 * hash01(seed, index, S_SCAT1) - 1;
+        const sphi = Math.sqrt(Math.max(0, 1 - cphi * cphi));
+        dx = sphi * Math.cos(theta);
+        dy = sphi * Math.sin(theta);
+        dz = cphi;
       }
     } else if (velocity.mode === "axis") {
       dx = ax;
@@ -1501,6 +1541,11 @@ function createParticles(desc) {
   let spawner = createSpawner(desc.spawner ?? DEFAULT_SPAWNER);
   let ratePerSecond = desc.rate ?? 0;
   let carry = 0;
+  const inheritK = validateInherit(desc.inheritVelocity);
+  const rateOverDist = validateRateOverDistance(desc.rateOverDistance);
+  let distCarry = 0;
+  let lastOx = 0, lastOy = 0, lastOz = 0;
+  let emitterVx = 0, emitterVy = 0, emitterVz = 0;
   const origin = [0, 0, 0];
   let streamIndex = 0;
   const emitWrap = (index, out) => {
@@ -1508,6 +1553,11 @@ function createParticles(desc) {
     out.x += origin[0];
     out.y += origin[1];
     out.z += origin[2];
+    if (inheritK > 0) {
+      out.vx += emitterVx * inheritK;
+      out.vy += emitterVy * inheritK;
+      out.vz += emitterVz * inheritK;
+    }
   };
   const emitStream = (n) => {
     const spawnedCount = system.emit(n, emitWrap);
@@ -1637,12 +1687,37 @@ function createParticles(desc) {
     clear() {
       system.clear();
       carry = 0;
+      distCarry = 0;
       return facade;
     }
   };
   function advanceInternal(dt) {
     if (!Number.isFinite(dt) || dt <= 0)
       return;
+    if (inheritK > 0 || rateOverDist > 0) {
+      const mdx = origin[0] - lastOx, mdy = origin[1] - lastOy, mdz = origin[2] - lastOz;
+      const moved = Math.hypot(mdx, mdy, mdz);
+      if (moved > MAX_EMITTER_STEP) {
+        emitterVx = 0;
+        emitterVy = 0;
+        emitterVz = 0;
+      } else {
+        emitterVx = mdx / dt;
+        emitterVy = mdy / dt;
+        emitterVz = mdz / dt;
+        if (rateOverDist > 0 && moved > 0) {
+          distCarry += moved * rateOverDist;
+          const whole = Math.floor(distCarry);
+          if (whole > 0) {
+            distCarry -= whole;
+            emitStream(whole);
+          }
+        }
+      }
+      lastOx = origin[0];
+      lastOy = origin[1];
+      lastOz = origin[2];
+    }
     if (ratePerSecond > 0) {
       carry += ratePerSecond * dt;
       const whole = Math.floor(carry);
@@ -1695,6 +1770,23 @@ var DEFAULT_SPAWNER = {
   size: [0.1, 0.2],
   color: [[1, 1, 1, 1], [0.8, 0.9, 1, 0.6]]
 };
+var MAX_EMITTER_STEP = 25;
+function validateInherit(k) {
+  if (k === undefined)
+    return 0;
+  if (!Number.isFinite(k) || k < 0) {
+    throw new Error(`rune/particles: inheritVelocity must be a finite >= 0 (got ${k}; the fraction of the emitter's velocity a newborn rides)`);
+  }
+  return k;
+}
+function validateRateOverDistance(r) {
+  if (r === undefined)
+    return 0;
+  if (!Number.isFinite(r) || r < 0) {
+    throw new Error(`rune/particles: rateOverDistance must be a finite >= 0 (got ${r}; particles per world unit the emitter travels)`);
+  }
+  return r;
+}
 function validateAttractor(at) {
   if (at === undefined || at === null)
     return null;
@@ -1737,6 +1829,12 @@ function validateCollision(collide) {
     if (!Number.isFinite(fr) || fr < 0 || fr > 1) {
       throw new Error(`rune/particles: plane friction must be in [0, 1] (got ${fr})`);
     }
+    if (plane.kill !== undefined && typeof plane.kill !== "boolean") {
+      throw new Error(`rune/particles: plane kill must be a boolean (got ${JSON.stringify(plane.kill)}; true = the particle retires on contact)`);
+    }
+  }
+  if (collide.onCollide !== undefined && typeof collide.onCollide !== "function") {
+    throw new Error(`rune/particles: collide.onCollide must be a function (got ${typeof collide.onCollide}; called per contact after the integration walk — the splash hook)`);
   }
   return collide;
 }

@@ -57,6 +57,14 @@
  *   restitution/friction, the target seek spring, the speed-over-life
  *   curve, and LimitSpeedOverLife (the speed governor over the excess).
  *
+ *   THE EMITTER-MOTION FAMILY (Task 124 — the game-feel knobs):
+ *     inheritVelocity — newborns ride a fraction of the emitter's own
+ *              velocity (a rocket's smoke drags behind the flight);
+ *     rateOverDistance — emission per world unit TRAVELED (a sword edge,
+ *              tire dust: the trail tracks the swing, not the clock);
+ *     collide kill/onCollide — rain dies on the floor and SPLASHES
+ *              (contact events, flushed after the integration walk).
+ *
  *   THE HOOKS (Task 122): onRetire (the final state of every dead
  *   particle — sub-emitters) and onSwap (external per-slot state — the
  *   trails follow it automatically).
@@ -69,7 +77,7 @@
 
 export type {
   ParticleFields, SpawnRecord, ForceFields, Attractor, ParticleSystem,
-  CollisionPlane, Collision, SeekForce, LimitSpeedForce, RetireRecord, StoreOptions,
+  CollisionPlane, Collision, CollideRecord, SeekForce, LimitSpeedForce, RetireRecord, StoreOptions,
 } from './system.ts'
 export { createParticleSystem, NO_FORCES, MAX_PLANES } from './system.ts'
 export type { SpawnShape, VelocityMode, SpawnerDesc, Spawner, TargetDesc, ImageMask } from './spawn.ts'

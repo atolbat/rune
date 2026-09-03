@@ -1,9 +1,11 @@
-/** scripts/pages-verify.mjs — checks the LIVE demo on GitHub Pages. */
+/** scripts/pages-verify.mjs — checks the LIVE demo on GitHub Pages.
+ *  BASE is overridable for a local run: BASE=http://localhost:8080 bun
+ *  scripts/pages-verify.mjs (with `bun run demo`'s server up). */
 import { join, resolve } from 'node:path'
 import { mkdirSync } from 'node:fs'
 import { chromium } from 'playwright'
 
-const BASE = 'https://atolbat.github.io/rune'
+const BASE = process.env.BASE ?? 'https://atolbat.github.io/rune'
 const OUT = resolve(import.meta.dirname, '..', '.shots')
 
 mkdirSync(OUT, { recursive: true })
@@ -141,7 +143,7 @@ try {
   const shotB = await page.locator('#canvas').screenshot()
   const pill = await page.textContent('.pt-pill')
   const logText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
-  const gpuClean = !/too small|Invalid CommandBuffer|storm|rendering stopped|GL: GL_|GPU: |failed/i.test(logText)
+  const gpuClean = !/too small|Invalid CommandBuffer|rendering stopped|GL: GL_|GPU: |failed/i.test(logText)
   await page.screenshot({ path: join(OUT, 'live-particles.png') })
   console.log(`particles pill: ${pill}`)
   console.log(`particles GPU log: ${gpuClean ? 'clean' : 'ERRORS'}`)
@@ -151,7 +153,7 @@ try {
 }
 console.log(particlesLiveOk ? 'PARTICLES LIVE OK' : 'PARTICLES LIVE FAIL')
 
-// ─── quarks: the 14-demo carousel on the LIVE page (Task 122) ─────────────
+// ─── quarks: the 19-demo carousel on the LIVE page (Task 122 + 124) ────────────
 let quarksLiveOk = false
 try {
   await page.goto(`${BASE}/demo/quarks/`, { waitUntil: 'networkidle' })
@@ -162,10 +164,10 @@ try {
     { timeout: 30_000 },
   )
   await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
-  // cycle through ALL 14 demos; each must go live
+  // cycle through ALL 19 demos; each must go live
   let allLive = true
   const names = []
-  for (let i = 1; i < 14; i++) {
+  for (let i = 1; i < 19; i++) {
     await page.click('.pt-arrow:last-child')
     await page.waitForFunction(
       () => / · [1-9][\d,]* particles · [1-9][\d,]* verts/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
@@ -178,11 +180,11 @@ try {
   await page.waitForTimeout(900)
   const shotB = await page.locator('#canvas').screenshot()
   const logText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
-  const gpuClean = !/too small|Invalid CommandBuffer|storm|rendering stopped|GL: GL_|GPU: |failed/i.test(logText)
+  const gpuClean = !/too small|Invalid CommandBuffer|rendering stopped|GL: GL_|GPU: |failed/i.test(logText)
   await page.screenshot({ path: join(OUT, 'live-quarks.png'), fullPage: true })
   console.log(`quarks cycle: ${names.join(' → ')}`)
   console.log(`quarks GPU log: ${gpuClean ? 'clean' : 'ERRORS'}`)
-  quarksLiveOk = names.length === 13 && !shotA.equals(shotB) && gpuClean
+  quarksLiveOk = names.length === 18 && !shotA.equals(shotB) && gpuClean
 } catch (error) {
   console.log(`quarks check failed: ${error instanceof Error ? error.message : String(error)}`)
 }

@@ -13,13 +13,13 @@
 //   emitters), and the custom BLEND EQUATIONS (add/max/subtract) + the
 //   SOFT_PARTICLES depth fade (a color-encoded depth prepass).
 //
-// The dist imports carry ?v=124 (the stale-cache guard — bump on release).
-import { createRenderer, capsule, cube, plane, torusKnot } from '../../dist/rune.esm.js?v=124'
+// The dist imports carry ?v=125 (the stale-cache guard — bump on release).
+import { createRenderer, capsule, cube, plane, torusKnot } from '../../dist/rune.esm.js?v=125'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV,
-} from '../../dist/rune-materials.esm.js?v=124'
-import { createParticles, createRamp, createSpawner } from '../../dist/rune-particles.esm.js?v=124'
+} from '../../dist/rune-materials.esm.js?v=125'
+import { createParticles, createRamp, createSpawner } from '../../dist/rune-particles.esm.js?v=125'
 import { decodePngRgba } from './png.mjs'
 
 /* ─── the demo registry (their order) ─────────────────────────────────── */
@@ -39,8 +39,18 @@ import soft from './demos/soft.js'
 import blending from './demos/blending.js'
 import follow from './demos/follow.js'
 
+// the rune originals (Task 124 — the game-designer set, built on the new
+// emitter-motion family: inherit velocity, rate over distance, collide
+// kill + splash events)
+import rocket from './demos/rocket.js'
+import storm from './demos/storm.js'
+import slash from './demos/slash.js'
+import vortex from './demos/vortex.js'
+import fireflies from './demos/fireflies.js'
+
 const DEMOS = [muzzle, explosion, shapes, trail, sequencer, mesh, subemitter,
-  noise, alphatest, plugin, billboard, soft, blending, follow]
+  noise, alphatest, plugin, billboard, soft, blending, follow,
+  rocket, storm, slash, vortex, fireflies]
 
 /* ─── materials & pipelines ────────────────────────────────────────────── */
 
@@ -151,8 +161,14 @@ function makeAtlasBytes() {
     const cross = Math.max(Math.exp(-90 * v * v), Math.exp(-90 * u * u)) * (r < 0.48 ? 1 : 0)
     return [R, R, R, Math.min(255, Math.round(255 * (core + cross * 0.85)))]
   })
-  // 5: the ring (an annulus)
-  put(5, (u, v, r) => [R, R, R, Math.round(255 * Math.exp(-Math.pow((r - 0.3) / 0.08, 2)))])
+  // 5: the ring (a SOFT annulus + a faint filled interior — reads as a water
+  // ripple at rest and a shockwave in motion; the old σ=0.08 wireframe ring
+  // looked like a decal)
+  put(5, (u, v, r) => {
+    const ring = Math.exp(-Math.pow((r - 0.3) / 0.14, 2))
+    const fill = r < 0.3 ? 0.32 * (1 - r / 0.3) : 0
+    return [R, R, R, Math.round(255 * Math.min(1, ring + fill))]
+  })
   // 6: the smoke puff (a blobby lobe — three offset gaussians)
   put(6, (u, v) => {
     const lobes = [[-0.13, 0.08, 0.16], [0.11, -0.05, 0.2], [0.02, 0.13, 0.13]]
@@ -408,7 +424,7 @@ DEMOS.forEach((demo, index) => {
 
 const note = document.createElement('div')
 note.className = 'pt-note'
-note.innerHTML = 'Sim: <code>@rune/particles</code> · 14 three.quarks examples · <a href="https://github.com/Alchemist0823/three.quarks" target="_blank" rel="noopener">the originals</a> · drag to orbit, pinch to zoom'
+note.innerHTML = 'Sim: <code>@rune/particles</code> · 14 three.quarks examples + 5 rune originals · <a href="https://github.com/Alchemist0823/three.quarks" target="_blank" rel="noopener">the originals</a> · drag to orbit, pinch to zoom'
 sheet.append(sheetHead, rows, note)
 
 const dragHint = document.createElement('div')
@@ -890,6 +906,6 @@ async function boot(mode) {
 /* ─── Go ───────────────────────────────────────────────────────────────── */
 
 shell.log.info(`WebGL2: ${typeof WebGL2RenderingContext !== 'undefined' ? 'present in the browser' : 'missing'}`)
-shell.log.info('14 three.quarks demos on @rune/particles — the Task 122 surface: shapes, targets, trails, meshes, atlas, forces, blend equations, soft particles')
+shell.log.info('19 demos on @rune/particles — the Task 122 surface (14 three.quarks examples) + the Task 124 rune originals (rocket, rainstorm, slash, vortex, fireflies)')
 switchDemo(0)
 void boot(shell.mode ?? 'auto')

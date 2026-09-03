@@ -738,6 +738,15 @@ const SPHERE_DESC = {
   seed: 19,
 }
 
+/** Task 124 — a zero-velocity spawner (the inheritance tests need newborns
+ *  that ONLY carry the emitter's motion). */
+const STILL: SpawnerDesc = {
+  shape: { kind: 'point', origin: [0, 0, 0] },
+  velocity: { mode: 'fixed', dir: [0, 1, 0] },
+  speed: [0, 0], life: [10, 10], size: [1, 1],
+  color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 44,
+}
+
 describe('createParticles (the facade)', () => {
   it('rate: the fractional accumulator spawns exactly rate·dt per second', () => {
     const ps = createParticles({
@@ -928,5 +937,203 @@ describe('the integration clamp (Task 18)', () => {
     ps.advance(2) // a 2 s stall — the substeps hold the integration, the RATE does not
     expect(ps.count).toBeGreaterThanOrEqual(100) // ~120 particles owed for the stall
     expect(ps.count).toBeLessThanOrEqual(128)
+  })
+})
+
+// ─── Task 124: the degenerate-radial SCATTER (three.quarks' PointEmitter) ───
+
+describe('the degenerate radial (Task 124 — the explosion smoke scatter)', () => {
+  const rec: SpawnRecord = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, life: 1, size: 1, r: 1, g: 1, b: 1, a: 1, seed: 0, tx: NaN, ty: NaN, tz: NaN }
+  const POINT_BURST: SpawnerDesc = {
+    shape: { kind: 'point', origin: [0, 0, 0] },
+    velocity: { mode: 'radial' },
+    speed: [5, 15],
+    life: [0.8, 1.5],
+    size: [2, 4],
+    color: [[1, 1, 1, 1], [1, 1, 1, 1]],
+    seed: 79,
+  }
+
+  it('a point burst SCATTERS over the full sphere (every octant hit, no +Z jet)', () => {
+    // THE bug: the ps.json smoke is a sphere r=0.0001 (a point) with radial
+    // velocity — our degenerate fallback used to return the shape AXIS
+    // (0,0,1), so all 30 smoke puffs jetted +Z in one direction. three.quarks'
+    // PointEmitter draws theta = u·τ, phi = acos(2v−1) — a uniform random
+    // unit-sphere direction. 512 draws: every octant populated, the mean
+    // direction ≈ 0, and a good share of DOWNWARD directions.
+    const s = createSpawner(POINT_BURST)
+    const N = 512
+    const octants = new Array(8).fill(0)
+    let down = 0
+    let mx = 0, my = 0, mz = 0
+    for (let i = 0; i < N; i++) {
+      s(i, rec)
+      const sp = Math.hypot(rec.vx, rec.vy, rec.vz)
+      expect(sp).toBeGreaterThanOrEqual(4.9999)
+      expect(sp).toBeLessThanOrEqual(15.0001)
+      const dx = rec.vx / sp, dy = rec.vy / sp, dz = rec.vz / sp
+      mx += dx; my += dy; mz += dz
+      if (dz < 0) down++
+      octants[(dx < 0 ? 1 : 0) | (dy < 0 ? 2 : 0) | (dz < 0 ? 4 : 0)]++
+    }
+    for (let o = 0; o < 8; o++) expect(octants[o]).toBeGreaterThan(20)
+    expect(Math.hypot(mx, my, mz) / N).toBeLessThan(0.2) // isotropic (a jet would read 1.0)
+    expect(down / N).toBeGreaterThan(0.35) // no +Z jet (the old bug)
+  })
+
+  it('the scatter is deterministic (the same seed, the same draws)', () => {
+    const s = createSpawner(POINT_BURST)
+    const a: SpawnRecord = { ...rec }
+    const b: SpawnRecord = { ...rec }
+    s(17, a)
+    s(17, b)
+    expect(a).toEqual(b)
+  })
+
+  it('a NON-degenerate sphere+radial is untouched (v ∥ p − origin)', () => {
+    // the fix must not bleed into the real radial: the sphere burst keeps
+    // its outward velocity, bit-identically.
+    const s = createSpawner({
+      ...POINT_BURST,
+      shape: { kind: 'sphere', origin: [0, 0, 0], radius: [0.5, 1.5] as [number, number] },
+    })
+    for (let i = 0; i < 200; i++) {
+      s(i, rec)
+      const cross = Math.abs(rec.x * rec.vy - rec.y * rec.vx)
+        + Math.abs(rec.y * rec.vz - rec.z * rec.vy)
+        + Math.abs(rec.z * rec.vx - rec.x * rec.vz)
+      expect(cross).toBeLessThan(1e-5) // v ∥ (p − 0)
+    }
+  })
+})
+
+// ─── Task 124: the emitter-motion family (inherit + rate-over-distance) ─────
+
+describe('the emitter-motion family (Task 124)', () => {
+  it('inheritVelocity: newborns ride the emitter movement between advances', () => {
+    const ps = createParticles({ capacity: 8, rate: 10, inheritVelocity: 0.5, spawner: STILL })
+    ps.at(1, 0, 0) // the emitter moved +1 before this advance
+    ps.advance(0.1) // emitter velocity 10 u/s → the 1 newborn rides at 5
+    expect(ps.count).toBe(1)
+    expect(ps.fields.vx[0]).toBeCloseTo(5, 6)
+    expect(ps.fields.vy[0]).toBe(0)
+    expect(ps.fields.vz[0]).toBe(0)
+    // the spawn POSITION followed the origin (+1), and the newborn then saw
+    // the full dt of this frame (the facade's no-one-frame-lag design):
+    // 1 + 5 × 0.1 = 1.5
+    expect(ps.fields.px[0]).toBeCloseTo(1.5, 6)
+  })
+
+  it('inheritVelocity: a TELEPORT contributes nothing (repositioning is not launching)', () => {
+    const ps = createParticles({ capacity: 8, rate: 10, inheritVelocity: 0.9, spawner: STILL })
+    ps.advance(0.1) // baseline (1 newborn, no movement)
+    ps.at(60, 0, 0) // a teleport, far beyond the 25-unit step cap
+    ps.advance(0.1) // 1 newborn — with ZERO inherited velocity
+    const f = ps.fields
+    expect(Math.abs(f.vx[1])).toBeLessThan(1e-9)
+  })
+
+  it('rateOverDistance: the emission tracks the TRAVEL, not the clock', () => {
+    const ps = createParticles({ capacity: 16, rate: 0, rateOverDistance: 4, spawner: STILL })
+    ps.at(0.5, 0, 0)
+    ps.advance(0.1) // 0.5 units × 4 per unit = 2 particles
+    expect(ps.count).toBe(2)
+    ps.advance(0.1) // no movement — no emission
+    expect(ps.count).toBe(2)
+    ps.at(0.75, 0, 0)
+    ps.advance(0.1) // 0.25 × 4 = 1 more
+    expect(ps.count).toBe(3)
+    ps.at(80, 0, 0)
+    ps.advance(0.1) // teleport — nothing
+    expect(ps.count).toBe(3)
+  })
+
+  it('the knobs validate loudly', () => {
+    expect(() => createParticles({ capacity: 4, spawner: STILL, inheritVelocity: -0.5 })).toThrow('inheritVelocity')
+    expect(() => createParticles({ capacity: 4, spawner: STILL, inheritVelocity: Number.NaN })).toThrow('inheritVelocity')
+    expect(() => createParticles({ capacity: 4, spawner: STILL, rateOverDistance: -1 })).toThrow('rateOverDistance')
+    expect(() => createParticles({ capacity: 4, spawner: STILL, rateOverDistance: Number.POSITIVE_INFINITY })).toThrow('rateOverDistance')
+  })
+})
+
+// ─── Task 124: the collide kill + contact events (the rain splash) ──────────
+
+describe('the collide kill + onCollide (Task 124)', () => {
+  const DROP: SpawnerDesc = {
+    shape: { kind: 'point', origin: [0, 5, 0] },
+    velocity: { mode: 'fixed', dir: [0, -1, 0] },
+    speed: [10, 10], life: [10, 10], size: [0.1, 0.1],
+    color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 9,
+  }
+
+  it('kill: the particle dies ON the plane this frame (no lying on the floor)', () => {
+    const retires: number[] = []
+    const ps = createParticles({
+      capacity: 4,
+      forces: {
+        collide: { planes: [{ normal: [0, 1, 0], point: [0, 0, 0], restitution: 0.4, kill: true }] },
+      },
+      spawner: DROP,
+      onRetire: (r) => retires.push(r.y),
+    })
+    ps.burst(1)
+    ps.advance(0.6) // crosses y=0 at t=0.5 — killed on contact
+    expect(ps.count).toBe(0)
+    expect(retires.length).toBe(1)
+    expect(retires[0]).toBeGreaterThanOrEqual(0) // died ON the floor, not under it
+    expect(retires[0]).toBeLessThan(0.05)
+  })
+
+  it('onCollide: the event carries the POST-response state, flushed after the walk', () => {
+    const hits: { x: number, y: number, vy: number, plane: number }[] = []
+    const ps = createParticles({
+      capacity: 4,
+      forces: {
+        collide: {
+          planes: [{ normal: [0, 1, 0], point: [0, 0, 0], restitution: 0.4, friction: 0 }],
+          onCollide: (r) => hits.push({ x: r.x, y: r.y, vy: r.vy, plane: r.plane }),
+        },
+      },
+      spawner: DROP,
+    })
+    ps.burst(1)
+    ps.advance(0.6) // bounces (no kill): the event reports the bounce
+    expect(hits.length).toBe(1)
+    expect(hits[0].y).toBeGreaterThanOrEqual(0)
+    expect(hits[0].y).toBeLessThan(0.05)
+    expect(hits[0].vy).toBeCloseTo(4, 5) // 10 × 0.4 reflected back up
+    expect(hits[0].plane).toBe(0)
+    expect(ps.count).toBe(1) // alive — the bounce, not the death
+  })
+
+  it('onCollide may safely spawn into OTHER systems mid-advance (the splash)', () => {
+    const splash = createParticles({ capacity: 16, spawner: STILL })
+    const rain = createParticles({
+      capacity: 4,
+      forces: {
+        collide: {
+          planes: [{ normal: [0, 1, 0], point: [0, 0, 0], restitution: 0, kill: true }],
+          onCollide: (r) => { splash.at(r.x, r.y, r.z); splash.burst(2) },
+        },
+      },
+      spawner: DROP,
+    })
+    rain.burst(1)
+    rain.advance(0.6)
+    expect(rain.count).toBe(0) // the drop died on contact
+    expect(splash.count).toBe(2) // the splash was born at the impact
+    expect(splash.fields.py[0]).toBeGreaterThanOrEqual(0) // spawned AT the floor
+    expect(splash.fields.py[0]).toBeLessThan(0.05)
+  })
+
+  it('the new collide fields validate loudly', () => {
+    expect(() => createParticles({
+      capacity: 4, spawner: STILL,
+      forces: { collide: { planes: [{ normal: [0, 1, 0], point: [0, 0, 0], restitution: 0, kill: 'yes' as never }] } },
+    })).toThrow('kill')
+    expect(() => createParticles({
+      capacity: 4, spawner: STILL,
+      forces: { collide: { planes: [{ normal: [0, 1, 0], point: [0, 0, 0], restitution: 0 }], onCollide: 42 as never } },
+    })).toThrow('onCollide')
   })
 })
