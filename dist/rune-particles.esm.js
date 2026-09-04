@@ -386,6 +386,7 @@ function createParticleSystem(capacity, options = {}) {
       const atz = hasAttract ? at.point[2] ?? 0 : 0;
       const atS = hasAttract ? at.strength : 0;
       const soft2 = hasAttract ? (at.softening ?? 0.25) ** 2 : 1;
+      const killR2 = hasAttract ? (at.killRadius ?? 0) ** 2 : 0;
       const speedCurve = forces.speedCurve ?? null;
       const hasCurve = speedCurve !== null;
       const collide = forces.collide ?? null;
@@ -476,6 +477,8 @@ function createParticleSystem(capacity, options = {}) {
             vy += dy * k;
             vz += dz * k;
           }
+          if (killR2 > 0 && r2 < killR2)
+            f.life[i] = 0;
         }
         if (hasTurb) {
           const ph = f.seed[i] * 37;
@@ -629,6 +632,10 @@ var S_P2 = 9;
 var S_TARGET = 10;
 var S_SCAT0 = 11;
 var S_SCAT1 = 12;
+var S_PATH0 = 13;
+var S_PATH1 = 14;
+var S_PATH2 = 15;
+var S_PATH3 = 16;
 function createSpawner(desc) {
   const shape = desc.shape;
   const velocity = desc.velocity;
@@ -641,9 +648,9 @@ function createSpawner(desc) {
     throw new Error("rune/particles: spawner size must be >= 0");
   const seed = (desc.seed ?? 1) | 0;
   const c0 = desc.color[0], c1 = desc.color[1];
-  const ox = shape.kind === "line" ? shape.from[0] : shape.origin[0];
-  const oy = shape.kind === "line" ? shape.from[1] : shape.origin[1];
-  const oz = shape.kind === "line" ? shape.from[2] : shape.origin[2];
+  const ox = shape.kind === "line" ? shape.from[0] : shape.kind === "path" ? shape.points[0] : shape.origin[0];
+  const oy = shape.kind === "line" ? shape.from[1] : shape.kind === "path" ? shape.points[1] : shape.origin[1];
+  const oz = shape.kind === "line" ? shape.from[2] : shape.kind === "path" ? shape.points[2] : shape.origin[2];
   let ax = 0, ay = 0, az = 1;
   const hasAxis = shape.kind === "cone" || shape.kind === "disc" || shape.kind === "line" || shape.kind === "hemisphere" || shape.kind === "donut" || shape.kind === "rectangle" || shape.kind === "grid";
   if (hasAxis) {
@@ -713,6 +720,67 @@ function createSpawner(desc) {
       throw new Error(`rune/particles: grid rows/columns must be integers >= 1 (got ${gridRows}×${gridCols})`);
     }
   }
+  let pathPts = null;
+  let pathDirs = null;
+  let pathPerp = null;
+  let pathSegs = 0, pathLattice = false, pathScatter = 0;
+  if (shape.kind === "path") {
+    const pts = shape.points;
+    if (!Array.isArray(pts) && !(pts instanceof Float64Array) && !(pts instanceof Float32Array)) {
+      throw new Error("rune/particles: path points must be a flat array of xyz triples");
+    }
+    if (pts.length < 6 || pts.length % 3 !== 0) {
+      throw new Error(`rune/particles: path needs >= 2 points as a flat xyz array (got ${pts.length} numbers)`);
+    }
+    let allFinite = true;
+    for (let k = 0;k < pts.length; k++) {
+      if (!Number.isFinite(pts[k])) {
+        allFinite = false;
+        break;
+      }
+    }
+    if (!allFinite)
+      throw new Error("rune/particles: path points must all be finite");
+    pathSegs = pts.length / 3 - 1;
+    pathLattice = shape.mode === "lattice";
+    pathScatter = shape.scatter ?? 0;
+    if (!Number.isFinite(pathScatter) || pathScatter < 0) {
+      throw new Error(`rune/particles: path scatter must be a finite >= 0 (got ${shape.scatter})`);
+    }
+    pathPts = Float64Array.from(pts);
+    pathDirs = new Float64Array(pathSegs * 3);
+    pathPerp = pathScatter > 0 ? new Float64Array(pathSegs * 6) : null;
+    for (let s = 0;s < pathSegs; s++) {
+      const b = s * 3;
+      const dx = pts[b + 3] - pts[b], dy = pts[b + 4] - pts[b + 1], dz = pts[b + 5] - pts[b + 2];
+      const l = Math.hypot(dx, dy, dz);
+      if (l === 0 || !Number.isFinite(l)) {
+        throw new Error(`rune/particles: path segment ${s} has zero length (points ${s} and ${s + 1} coincide) — no direction to emit along`);
+      }
+      const ndx = dx / l, ndy = dy / l, ndz = dz / l;
+      pathDirs[b] = ndx;
+      pathDirs[b + 1] = ndy;
+      pathDirs[b + 2] = ndz;
+      if (pathPerp !== null) {
+        let p1x = ndz, p1y = 0, p1z = -ndx;
+        let pl = Math.hypot(p1x, p1y, p1z);
+        if (pl < 0.000001) {
+          p1x = 1;
+          p1y = 0;
+          p1z = 0;
+          pl = 1;
+        }
+        p1x /= pl;
+        p1z /= pl;
+        pathPerp[b * 2] = p1x;
+        pathPerp[b * 2 + 1] = p1y;
+        pathPerp[b * 2 + 2] = p1z;
+        pathPerp[b * 2 + 3] = ndy * p1z - ndz * p1y;
+        pathPerp[b * 2 + 4] = ndz * p1x - ndx * p1z;
+        pathPerp[b * 2 + 5] = ndx * p1y - ndy * p1x;
+      }
+    }
+  }
   let arms = 0, armSpread = 0.35, twist = 0;
   if (shape.kind === "disc" && shape.arms !== undefined) {
     arms = shape.arms;
@@ -748,8 +816,8 @@ function createSpawner(desc) {
     fz = velocity.dir[2] / l;
   } else if (velocity.mode === "lobe" && shape.kind !== "cone") {
     throw new Error("rune/particles: velocity mode 'lobe' needs the cone shape (its halfAngle defines the fan)");
-  } else if (velocity.mode === "axis" && !hasAxis) {
-    throw new Error("rune/particles: velocity mode 'axis' needs a shape with an axis (cone/disc/line/hemisphere/donut/rectangle/grid)");
+  } else if (velocity.mode === "axis" && !hasAxis && shape.kind !== "path") {
+    throw new Error("rune/particles: velocity mode 'axis' needs a shape with an axis (cone/disc/line/hemisphere/donut/rectangle/grid) or the path shape (its LOCAL segment direction)");
   } else if (velocity.mode === "tangential" && shape.kind !== "disc" && shape.kind !== "sphere" && shape.kind !== "donut" && shape.kind !== "hemisphere") {
     throw new Error("rune/particles: velocity mode 'tangential' needs the disc, sphere, donut or hemisphere shape");
   }
@@ -926,6 +994,31 @@ function createSpawner(desc) {
       px = ox + (shape.to[0] - ox) * u;
       py = oy + (shape.to[1] - oy) * u;
       pz = oz + (shape.to[2] - oz) * u;
+    } else if (shape.kind === "path") {
+      let seg;
+      if (pathLattice)
+        seg = (index % pathSegs + pathSegs) % pathSegs;
+      else
+        seg = Math.min(pathSegs - 1, Math.floor(hash01(seed, index, S_PATH0) * pathSegs));
+      const b = seg * 3;
+      const t = hash01(seed, index, S_PATH1);
+      px = pathPts[b] + (pathPts[b + 3] - pathPts[b]) * t;
+      py = pathPts[b + 1] + (pathPts[b + 4] - pathPts[b + 1]) * t;
+      pz = pathPts[b + 2] + (pathPts[b + 5] - pathPts[b + 2]) * t;
+      if (velocity.mode === "axis") {
+        dx = pathDirs[b];
+        dy = pathDirs[b + 1];
+        dz = pathDirs[b + 2];
+      }
+      if (pathScatter > 0) {
+        const pb = seg * 6;
+        const rr = pathScatter * Math.sqrt(hash01(seed, index, S_PATH2));
+        const th = TAU * hash01(seed, index, S_PATH3);
+        const cth = Math.cos(th) * rr, sth = Math.sin(th) * rr;
+        px += pathPerp[pb] * cth + pathPerp[pb + 3] * sth;
+        py += pathPerp[pb + 1] * cth + pathPerp[pb + 4] * sth;
+        pz += pathPerp[pb + 2] * cth + pathPerp[pb + 5] * sth;
+      }
     }
     if (velocity.mode === "radial") {
       dx = px - ox;
@@ -944,7 +1037,7 @@ function createSpawner(desc) {
         dy = sphi * Math.sin(theta);
         dz = cphi;
       }
-    } else if (velocity.mode === "axis") {
+    } else if (velocity.mode === "axis" && shape.kind !== "path") {
       dx = ax;
       dy = ay;
       dz = az;
@@ -1511,6 +1604,185 @@ function fillMeshes(system, geometry, out, options = {}) {
   }
   return at / MESH_STRIDE;
 }
+// packages/particles/src/field.ts
+function createGrassField(desc) {
+  const count = desc.count;
+  if (!Number.isInteger(count) || count < 1 || count > 2000000) {
+    throw new Error(`rune/particles: grass count must be an integer in [1, 2M] (got ${count})`);
+  }
+  const radius = desc.radius;
+  if (!Number.isFinite(radius) || radius <= 0) {
+    throw new Error(`rune/particles: grass radius must be a finite > 0 (got ${radius})`);
+  }
+  const [hMin, hMax] = desc.height;
+  if (!Number.isFinite(hMin + hMax) || hMin <= 0 || hMax < hMin) {
+    throw new Error(`rune/particles: grass height must be [min > 0 <= max] (got [${hMin}, ${hMax}])`);
+  }
+  const wRange = desc.width ?? [0.06, 0.12];
+  const [wMin, wMax] = wRange;
+  if (!Number.isFinite(wMin + wMax) || wMin <= 0 || wMax < wMin) {
+    throw new Error(`rune/particles: grass width must be [min > 0 <= max] (got [${wMin}, ${wMax}])`);
+  }
+  const groundY = desc.groundY ?? 0;
+  const c0 = desc.color?.[0] ?? [0.16, 0.34, 0.1];
+  const c1 = desc.color?.[1] ?? [0.42, 0.55, 0.18];
+  const fade = desc.fade ?? radius * 0.9;
+  if (!Number.isFinite(fade) || fade <= 0) {
+    throw new Error(`rune/particles: grass fade must be a finite > 0 (got ${fade})`);
+  }
+  const seed = (desc.seed ?? 1) | 0;
+  const pos = new Float32Array(count * 3);
+  const par = new Float32Array(count * 4);
+  const tint = new Float32Array(count * 4);
+  for (let i = 0;i < count; i++) {
+    const rr = radius * Math.sqrt(hash01(seed, i, 21));
+    const ang = 6.283185307179586 * hash01(seed, i, 22);
+    pos[i * 3] = Math.cos(ang) * rr;
+    pos[i * 3 + 1] = groundY;
+    pos[i * 3 + 2] = Math.sin(ang) * rr;
+    par[i * 4] = hMin + (hMax - hMin) * hash01(seed, i, 23);
+    par[i * 4 + 1] = 6.283185307179586 * hash01(seed, i, 24);
+    par[i * 4 + 2] = hash01(seed, i, 25);
+    par[i * 4 + 3] = wMin + (wMax - wMin) * hash01(seed, i, 26);
+    const mix = hash01(seed, i, 27);
+    tint[i * 4] = c0[0] + (c1[0] - c0[0]) * mix;
+    tint[i * 4 + 1] = c0[1] + (c1[1] - c0[1]) * mix;
+    tint[i * 4 + 2] = c0[2] + (c1[2] - c0[2]) * mix;
+    tint[i * 4 + 3] = 0.8 + 0.4 * hash01(seed, i, 28);
+  }
+  return { pos, par, tint, count, fade, glsl: glslOf(fade), wgsl: wgslOf(fade) };
+}
+function glslOf(fade) {
+  const F = fade.toFixed(2);
+  const vertex = `#version 300 es
+// The grass vertex: one quad per blade from gl_VertexID, cylindrical
+// billboard, the gust field + the per-blade flutter bend.
+layout(location = 0) in vec3 i_pos;
+layout(location = 1) in vec4 i_par;
+layout(location = 2) in vec4 i_tint;
+uniform mat4 u_mvp;
+uniform vec3 u_camPos;
+uniform float u_time;
+uniform vec4 u_wind; // (dirX, dirZ, strength, gustiness)
+out vec2 v_uv;
+out vec4 v_tint;
+out float v_fade;
+
+const vec2 CORNERS[6] = vec2[6](vec2(0.0, 1.0), vec2(1.0, 1.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(0.0, 0.0));
+
+void main() {
+  vec2 cu = CORNERS[gl_VertexID];
+  float t = cu.y; // 0 at the base, 1 at the tip
+  float h = i_par.x, lean = i_par.y, phase = i_par.z, width = i_par.w;
+
+  // The gust field: two TRAVELING waves across the field (the wind reads
+  // as waves crossing, not a uniform wiggle) + the per-blade flutter.
+  float wave = sin(dot(i_pos.xz, vec2(0.35, 0.22)) - u_time * 1.7)
+             + 0.55 * sin(dot(i_pos.xz, vec2(-0.21, 0.4)) + u_time * 1.1);
+  float flutter = sin(u_time * (2.2 + phase * 1.5) + phase * 6.28318);
+  float bendK = u_wind.z * (0.55 + 0.45 * wave) + u_wind.w * flutter;
+
+  // The static lean (a fixed per-blade tilt) and the wind bend, both
+  // growing with t^2 (a blade bends at the top, not the base).
+  float b = t * t;
+  vec2 leanDir = vec2(cos(lean), sin(lean)) * (0.35 * b);
+  vec2 windOff = u_wind.xy * (bendK * 0.45 * b);
+
+  // Cylindrical billboard: face the camera around world Y, anchored.
+  vec3 toCam = u_camPos - i_pos;
+  vec3 right = normalize(vec3(-toCam.z, 0.0, toCam.x));
+  vec3 world = i_pos + right * ((cu.x - 0.5) * width)
+             + vec3(0.0, t * h, 0.0)
+             + vec3(leanDir.x + windOff.x, 0.0, leanDir.y + windOff.y);
+
+  gl_Position = u_mvp * vec4(world, 1.0);
+  v_uv = vec2(cu.x, t);
+  v_tint = i_tint;
+  v_fade = clamp((${F} - length(u_camPos - i_pos)) / (${F} * 0.25), 0.0, 1.0);
+}`;
+  const fragment = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+in vec4 v_tint;
+in float v_fade;
+uniform sampler2D u_tex;
+out vec4 o_color;
+void main() {
+  vec4 texel = texture(u_tex, v_uv);
+  // The blade gradient: dark base -> bright tip (the texture owns it).
+  float a = texel.a * v_fade;
+  if (a < 0.5) discard; // alpha MASK: the far blades thin out (the LOD)
+  o_color = vec4(texel.rgb * v_tint.rgb * v_tint.a, 1.0);
+}`;
+  return { vertex, fragment };
+}
+function wgslOf(fade) {
+  const F = fade.toFixed(2);
+  return `
+struct Params {
+  u_mvp : mat4x4<f32>,
+  u_camPos : vec4<f32>,
+  u_time : f32,
+  u_wind : vec4<f32>,
+}
+@group(0) @binding(0) var<uniform> params : Params;
+@group(1) @binding(0) var texSampler : sampler;
+@group(1) @binding(1) var texTexture : texture_2d<f32>;
+
+struct VSOut {
+  @builtin(position) pos : vec4<f32>,
+  @location(0) uv : vec2<f32>,
+  @location(1) tint : vec4<f32>,
+  @location(2) fade : f32,
+}
+
+@vertex
+fn vsMain(@builtin(vertex_index) vi : u32,
+          @location(0) i_pos : vec3<f32>,
+          @location(1) i_par : vec4<f32>,
+          @location(2) i_tint : vec4<f32>) -> VSOut {
+  var corners = array<vec2<f32>, 6>(vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0), vec2<f32>(1.0, 0.0),
+                                     vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 0.0));
+  let cu = corners[vi];
+  let t = cu.y;
+  let h = i_par.x;
+  let lean = i_par.y;
+  let phase = i_par.z;
+  let width = i_par.w;
+
+  let wave = sin(dot(i_pos.xz, vec2<f32>(0.35, 0.22)) - params.u_time * 1.7)
+           + 0.55 * sin(dot(i_pos.xz, vec2<f32>(-0.21, 0.4)) + params.u_time * 1.1);
+  let flutter = sin(params.u_time * (2.2 + phase * 1.5) + phase * 6.28318);
+  let bendK = params.u_wind.z * (0.55 + 0.45 * wave) + params.u_wind.w * flutter;
+
+  let b = t * t;
+  let leanDir = vec2<f32>(cos(lean), sin(lean)) * (0.35 * b);
+  let windOff = params.u_wind.xy * (bendK * 0.45 * b);
+
+  let toCam = params.u_camPos.xyz - i_pos;
+  var right = vec3<f32>(-toCam.z, 0.0, toCam.x);
+  let rl = length(right);
+  if (rl < 1e-6) { right = vec3<f32>(1.0, 0.0, 0.0); } else { right = right / rl; }
+  let world = i_pos + right * ((cu.x - 0.5) * width)
+            + vec3<f32>(0.0, t * h, 0.0)
+            + vec3<f32>(leanDir.x + windOff.x, 0.0, leanDir.y + windOff.y);
+
+  var out : VSOut;
+  out.pos = params.u_mvp * vec4<f32>(world, 1.0);
+  out.uv = vec2<f32>(cu.x, t);
+  out.tint = i_tint;
+  out.fade = clamp((${F} - length(params.u_camPos.xyz - i_pos)) / (${F} * 0.25), 0.0, 1.0);
+  return out;
+}
+
+@fragment
+fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
+  let texel = textureSample(texTexture, texSampler, frag.uv);
+  let a = texel.a * frag.fade;
+  if (a < 0.5) { discard; }
+  return vec4<f32>(texel.rgb * frag.tint.rgb * frag.tint.a, 1.0);
+}`;
+}
 // packages/particles/src/facade.ts
 var MAX_STEP = 1 / 20;
 function createParticles(desc) {
@@ -1543,13 +1815,32 @@ function createParticles(desc) {
   let carry = 0;
   const inheritK = validateInherit(desc.inheritVelocity);
   const rateOverDist = validateRateOverDistance(desc.rateOverDistance);
+  const wrap = validateWrap(desc.wrap);
+  const wrapX = wrap !== null && wrap[0] > 0 ? wrap[0] : 0;
+  const wrapY = wrap !== null && wrap[1] > 0 ? wrap[1] : 0;
+  const wrapZ = wrap !== null && wrap[2] > 0 ? wrap[2] : 0;
+  const hasWrap = wrapX > 0 || wrapY > 0 || wrapZ > 0;
   let distCarry = 0;
   let lastOx = 0, lastOy = 0, lastOz = 0;
   let emitterVx = 0, emitterVy = 0, emitterVz = 0;
   const origin = [0, 0, 0];
+  let r00 = 1, r01 = 0, r02 = 0;
+  let r10 = 0, r11 = 1, r12 = 0;
+  let r20 = 0, r21 = 0, r22 = 1;
+  let oriented = false;
   let streamIndex = 0;
   const emitWrap = (index, out) => {
     spawner(streamIndex + index, out);
+    if (oriented) {
+      const { x, y, z } = out;
+      out.x = x * r00 + y * r01 + z * r02;
+      out.y = x * r10 + y * r11 + z * r12;
+      out.z = x * r20 + y * r21 + z * r22;
+      const { vx, vy, vz } = out;
+      out.vx = vx * r00 + vy * r01 + vz * r02;
+      out.vy = vx * r10 + vy * r11 + vz * r12;
+      out.vz = vx * r20 + vy * r21 + vz * r22;
+    }
     out.x += origin[0];
     out.y += origin[1];
     out.z += origin[2];
@@ -1637,6 +1928,43 @@ function createParticles(desc) {
       origin[0] = x;
       origin[1] = y;
       origin[2] = z;
+      return facade;
+    },
+    orient(m) {
+      if (m === null) {
+        r00 = 1;
+        r01 = 0;
+        r02 = 0;
+        r10 = 0;
+        r11 = 1;
+        r12 = 0;
+        r20 = 0;
+        r21 = 0;
+        r22 = 1;
+        oriented = false;
+        return facade;
+      }
+      const n = m.length;
+      if (n !== 9 && n !== 16) {
+        throw new Error(`rune/particles: orient() takes a column-major 3×3 or 4×4 matrix, or null (got ${n} numbers)`);
+      }
+      const c = n === 16 ? 4 : 3;
+      const v00 = m[0], v10 = m[1], v20 = m[2];
+      const v01 = m[c], v11 = m[c + 1], v21 = m[c + 2];
+      const v02 = m[c * 2], v12 = m[c * 2 + 1], v22 = m[c * 2 + 2];
+      if (![v00, v10, v20, v01, v11, v21, v02, v12, v22].every(Number.isFinite)) {
+        throw new Error("rune/particles: orient() matrix entries must all be finite");
+      }
+      r00 = v00;
+      r01 = v01;
+      r02 = v02;
+      r10 = v10;
+      r11 = v11;
+      r12 = v12;
+      r20 = v20;
+      r21 = v21;
+      r22 = v22;
+      oriented = true;
       return facade;
     },
     advance(dt) {
@@ -1746,6 +2074,19 @@ function createParticles(desc) {
     } else {
       system.advance(dt, forces);
     }
+    if (hasWrap) {
+      const f = system.fields;
+      const n = system.count;
+      const cx = origin[0], cy = origin[1], cz = origin[2];
+      for (let i = 0;i < n; i++) {
+        if (wrapX > 0)
+          f.px[i] = cx + wrapAxis(f.px[i] - cx, wrapX);
+        if (wrapY > 0)
+          f.py[i] = cy + wrapAxis(f.py[i] - cy, wrapY);
+        if (wrapZ > 0)
+          f.pz[i] = cz + wrapAxis(f.pz[i] - cz, wrapZ);
+      }
+    }
     time += dt;
     if (history !== null)
       history.record(system, dt);
@@ -1787,6 +2128,21 @@ function validateRateOverDistance(r) {
   }
   return r;
 }
+function wrapAxis(d, size) {
+  let m = (d + size * 0.5) % size;
+  if (m < 0)
+    m += size;
+  return m - size * 0.5;
+}
+function validateWrap(wrap) {
+  if (wrap === undefined || wrap === null)
+    return null;
+  const size = wrap.size;
+  if (!Array.isArray(size) || size.length !== 3 || !size.every((v) => Number.isFinite(v) && v >= 0)) {
+    throw new Error(`rune/particles: wrap.size must be three finite numbers >= 0, 0 disables the axis (got ${JSON.stringify(size)})`);
+  }
+  return [size[0], size[1], size[2]];
+}
 function validateAttractor(at) {
   if (at === undefined || at === null)
     return null;
@@ -1800,6 +2156,10 @@ function validateAttractor(at) {
   const soft = softening ?? 0.25;
   if (!Number.isFinite(soft) || soft <= 0) {
     throw new Error(`rune/particles: attract.softening must be finite > 0 (got ${softening}; it caps the force at the center — without it the integrator NaNs)`);
+  }
+  const kill = at.killRadius ?? 0;
+  if (!Number.isFinite(kill) || kill < 0) {
+    throw new Error(`rune/particles: attract.killRadius must be a finite >= 0 (got ${at.killRadius}; particles inside the sphere are consumed)`);
   }
   return at;
 }
@@ -1891,6 +2251,7 @@ export {
   createRamp,
   createParticles,
   createParticleSystem,
+  createGrassField,
   VERTS_PER_PARTICLE,
   SOUP_STRIDE,
   RAMP_STRIDE,

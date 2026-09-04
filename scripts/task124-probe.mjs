@@ -1,18 +1,25 @@
-/** scripts/task124-probe.mjs — the rune-originals validation (Task 124):
- *  cycles to each of the 5 new demos, polls the live layer stats over a
- *  watch window (SwiftShader's slow frames dilate short VFX moments —
- *  the slash spans real seconds; sparse sampling falls between them),
- *  screenshots each, and checks demo-specific MECHANIC invariants:
+/** scripts/task124-probe.mjs — the rune-originals validation (Tasks 124 + 126):
+ *  cycles to each of the 8 rune-original demos, polls the live layer
+ *  stats over a watch window (SwiftShader's slow frames dilate short VFX
+ *  moments — the slash spans real seconds; sparse sampling falls between
+ *  them), screenshots each, and checks demo-specific MECHANIC invariants:
  *
  *    rocket  — the smoke's mean velocity tracks the missile's flight
  *              (inheritance); debris live during flight (rate-over-distance)
  *    storm   — rain never sinks below the floor (kill); splash rings born
- *              (onCollide sub-emission)
+ *              (onCollide sub-emission); the wrap keeps the sheet around
+ *              the walker (the rain bbox extent ≤ the wrap box)
  *    slash   — the ribbon + glints + impact fire over the cycle
  *    vortex  — the disc DRAINS: the OLDER half of the population sits
- *              closer to the core than the younger half (decaying orbits)
+ *              closer to the core than the younger half (decaying orbits);
+ *              the sink CONSUMES (the drain's retire counter climbs)
  *    fireflies — the swarm gathers: the mean distance to the lantern
  *              point stays inside the spawn shell
+ *    dust    — the motes stay INSIDE the wrap box (extent ≤ 34) while the
+ *              swarm stays dense; the haze cards live
+ *    grass   — the seeds drift alive; the field draws (bright fraction)
+ *    lightning — strikes FIRE (the bolt layer's retire counter climbs by
+ *              ≥ 1 channel per strike); the charged mist stays alive
  *
  *  A screenshot's bright-fraction catches a black screen. WebGL2 only
  *  (SwiftShader; WebGPU is not alive headless — the live site is the
@@ -57,6 +64,9 @@ const NEW_DEMOS = [
   { title: 'Sword Slash', watchMs: 14000, shotAt: 7000 },
   { title: 'Vortex', watchMs: 5500, shotAt: 3500 },
   { title: 'Fireflies', watchMs: 5500, shotAt: 3500 },
+  { title: 'Dust & Haze', watchMs: 6000, shotAt: 3000 },
+  { title: 'Grass Field', watchMs: 6000, shotAt: 3000 },
+  { title: 'Lightning Storm', watchMs: 9000, shotAt: 4200 },
 ]
 
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
@@ -88,9 +98,14 @@ async function layerStats(page) {
     if (!f || n === 0) return { id: l.id, count: 0 }
     let vx = 0, vy = 0, vz = 0, minY = 1e9
     let radYoung = 0, nYoung = 0, radOld = 0, nOld = 0
+    let minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9
     for (let i = 0; i < n; i++) {
       vx += f.vx[i]; vy += f.vy[i]; vz += f.vz[i]
       if (f.py[i] < minY) minY = f.py[i]
+      if (f.px[i] < minX) minX = f.px[i]
+      if (f.px[i] > maxX) maxX = f.px[i]
+      if (f.pz[i] < minZ) minZ = f.pz[i]
+      if (f.pz[i] > maxZ) maxZ = f.pz[i]
       const rad = Math.hypot(f.px[i], f.py[i] - 1.8, f.pz[i])
       if (f.age[i] < 1.6) { radYoung += rad; nYoung++ } else { radOld += rad; nOld++ }
     }
@@ -98,6 +113,8 @@ async function layerStats(page) {
       id: l.id, count: n,
       meanV: [vx / n, vy / n, vz / n],
       minY,
+      extentX: maxX - minX,
+      extentZ: maxZ - minZ,
       radYoung: nYoung > 0 ? radYoung / nYoung : null,
       radOld: nOld > 0 ? radOld / nOld : null,
     }
@@ -135,6 +152,9 @@ for (let d = 0; d < NEW_DEMOS.length; d++) {
     'Sword Slash': ['sl-shock', 'sl-sparks'],
     Vortex: ['vx-disc'],
     Fireflies: ['ff-flies'],
+    'Dust & Haze': ['du-motes'],
+    'Grass Field': ['gr-seeds'],
+    'Lightning Storm': [],
   }
   const seen = []
   const start = Date.now()
@@ -193,6 +213,14 @@ for (let d = 0; d < NEW_DEMOS.length; d++) {
     const ringPeak = Math.max(...seen.map(s => find(s, 'st-ring')?.count ?? 0))
     const dropPeak = Math.max(...seen.map(s => find(s, 'st-drop')?.count ?? 0))
     if (!(ringPeak > 30 && dropPeak > 20)) { ok = false; why.push(`splashes thin (ring ≤${ringPeak}, drops ≤${dropPeak} — onCollide dead?)`) }
+    // Task 126 — THE ENDLESS RAIN: the drops stay inside the 56-unit wrap
+    // box around the walker (the bbox extent is center-independent)
+    let extent = 0
+    for (const s of seen) {
+      const rain = find(s, 'st-rain')
+      if (rain) extent = Math.max(extent, rain.extentX ?? 0, rain.extentZ ?? 0)
+    }
+    if (extent > 56.9) { ok = false; why.push(`rain escaped the wrap box (extent ${extent.toFixed(1)} > 56)`) }
   }
   if (title === 'Sword Slash') {
     if (!ever('sl-ribbon')) { ok = false; why.push('ribbon never live') }
@@ -211,6 +239,11 @@ for (let d = 0; d < NEW_DEMOS.length; d++) {
     }
     if (!drainOk) { ok = false; why.push('no radial drain (older half not closer to the core)') }
     if (!ever('vx-disc', 200)) { ok = false; why.push('disc thin') }
+    // Task 126 — the SINK: the disc's retire counter climbs (the funnel
+    // CONSUMES its matter at the core, it no longer flies through)
+    const consumed = await page.evaluate(() =>
+      (window.__quarksLayers ?? []).find(x => x.id === 'vx-disc')?.facade?.stats?.().retired ?? 0)
+    if (consumed < 100) { ok = false; why.push(`the sink consumed too little (retired ${consumed})`) }
   }
   if (title === 'Fireflies') {
     const meanDist = await page.evaluate(() => {
@@ -227,6 +260,44 @@ for (let d = 0; d < NEW_DEMOS.length; d++) {
       return dd / l.facade.count
     })
     if (!(meanDist > 0 && meanDist < 3.2)) { ok = false; why.push(`swarm mean distance to lantern ${meanDist.toFixed(2)} (seek dead?)`) }
+  }
+  if (title === 'Dust & Haze') {
+    // THE WRAP: the motes stay inside the 34-unit box wherever the walker
+    // went (the bbox EXTENT is center-independent) + the swarm stays dense
+    let extent = 0, peak = 0, hazeEver = 0
+    for (const s of seen) {
+      const motes = find(s, 'du-motes')
+      if (motes) {
+        extent = Math.max(extent, motes.extentX ?? 0, motes.extentZ ?? 0)
+        peak = Math.max(peak, motes.count)
+      }
+      hazeEver = Math.max(hazeEver, find(s, 'du-haze')?.count ?? 0)
+    }
+    if (!(peak >= 800)) { ok = false; why.push(`motes thin (peak ${peak})`) }
+    if (extent > 34.9) { ok = false; why.push(`motes escaped the wrap box (extent ${extent.toFixed(1)} > 34)`) }
+    if (hazeEver < 1) { ok = false; why.push('no haze cards') }
+  }
+  if (title === 'Grass Field') {
+    // the seeds' density is wall-clock-dependent on slow rasterizers —
+    // the FIELD is the demo (an instanced raw layer, not a facade); its
+    // presence is the bright fraction + the adaptive-density log line
+    if (!ever('gr-seeds')) { ok = false; why.push('seeds never live') }
+    if (frac < 0.03) { ok = false; why.push(`field not drawn (bright ${(frac * 100).toFixed(1)}%)`) }
+    const adapted = await page.evaluate(() =>
+      (document.querySelector('#log-list')?.textContent ?? '').includes('adaptive density'))
+    const seedsPeak = Math.max(...seen.map(s => find(s, 'gr-seeds')?.count ?? 0))
+    if (!adapted && seedsPeak < 40) { ok = false; why.push(`seeds thin (${seedsPeak}) and no adaptive-density note — the frame loop stalled?`) }
+  }
+  if (title === 'Lightning Storm') {
+    // strikes FIRE: the bolt layer's retire counter climbs (11 channel
+    // segments retire per strike — sampling the 0.16-s life directly is
+    // too flaky on SwiftShader)
+    const retired = await page.evaluate(() =>
+      (window.__quarksLayers ?? []).find(x => x.id === 'lt-bolt')?.facade?.stats?.().retired ?? 0)
+    const glowRetired = await page.evaluate(() =>
+      (window.__quarksLayers ?? []).find(x => x.id === 'lt-glow')?.facade?.stats?.().retired ?? 0)
+    if (!(retired >= 11 && glowRetired >= 11)) { ok = false; why.push(`strikes thin (bolt retired ${retired}, glow ${glowRetired})`) }
+    if (!ever('lt-mist', 20)) { ok = false; why.push('mist never dense') }
   }
 
   console.log(`  ${ok ? 'PASS' : 'FAIL'}${why.length ? ' — ' + why.join('; ') : ''}`)

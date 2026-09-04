@@ -18,6 +18,12 @@ export interface WgslAttributeInfo {
 export interface WgslTextureInfo {
   readonly name: string
   readonly kind: 'texture_2d' | 'sampler'
+  /** The DECLARED @binding(N) of the group-1 resource. -1 — the declaration
+   *  carried no @binding attribute (invalid WGSL anyway — the callers fall
+   *  back to the legacy sequential layout). Task 126: the materials reserve
+   *  tex@1, nrm@2, mat@3, mr@4, depth@5 — a sequential 1..N layout breaks
+   *  any material whose set is not a prefix (SOFT_PARTICLES: 1 + 5). */
+  readonly binding: number
 }
 
 export interface WgslReflection {
@@ -138,8 +144,15 @@ function scanAttributes(wgsl: string): WgslAttributeInfo[] {
 
 function scanTextures(wgsl: string): WgslTextureInfo[] {
   const found: WgslTextureInfo[] = []
-  for (const match of wgsl.matchAll(/@group\(1\)[^\n]*var\s+(\w+)\s*:\s*(texture_2d<f32>|sampler)/g)) {
-    found.push({ name: match[1], kind: match[2] === 'sampler' ? 'sampler' : 'texture_2d' })
+  for (const match of wgsl.matchAll(/@group\(1\)[^\n;]*var\s+(\w+)\s*:\s*(texture_2d<f32>|sampler)/g)) {
+    // The DECLARED @binding(N), extracted from the same declaration segment
+    // (the attribute order inside one var statement is free in WGSL).
+    const bMatch = /@binding\((\d+)\)/.exec(match[0])
+    found.push({
+      name: match[1],
+      kind: match[2] === 'sampler' ? 'sampler' : 'texture_2d',
+      binding: bMatch !== null ? Number(bMatch[1]) : -1,
+    })
   }
   return found
 }

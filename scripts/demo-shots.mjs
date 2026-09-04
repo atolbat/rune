@@ -353,8 +353,9 @@ await assertSpriteContour()
   await qk.waitForFunction(() => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 20000 })
 
   const QK_NAMES = ['muzzle', 'explosion', 'shapes', 'trail', 'sequencer', 'mesh', 'subemitter',
-    'noise', 'alphatest', 'plugin', 'billboard', 'soft', 'blending', 'follow']
-  const QK_SETTLE = { muzzle: 2500, explosion: 2100, trail: 1300 }
+    'noise', 'alphatest', 'plugin', 'billboard', 'soft', 'blending', 'follow',
+    'rocket', 'storm', 'slash', 'vortex', 'fireflies', 'dust', 'grass', 'lightning']
+  const QK_SETTLE = { muzzle: 2500, explosion: 2100, trail: 1300, grass: 2600, lightning: 2600 }
   // The SEQUENCER is a still formation by design (hold phases) — its motion
   // pair brackets the t=6.5 s MORPH: we wait for the demo's own "morph →
   // spiral" log line, then shoot the pair mid-flight (300 ms apart).
@@ -381,15 +382,67 @@ await assertSpriteContour()
       }))
       await Promise.race([morphed, qk.waitForTimeout(25000)])
     }
+    if (name === 'explosion') {
+      // PHASE-LOCKED (the blast is periodic, the effect lives ~1.6 s of
+      // every 2 — but the first frame after the switch carries the boot
+      // lag and SwiftShader dilates the cadence, so a FIXED settle can
+      // land the pair in the dead gap). Wait for the NEXT "explosion #"
+      // log line, then shoot mid-blast: the pair always brackets live
+      // fire, exactly like the explosion-shots tool's MutationObserver.
+      const before = await qk.evaluate(() =>
+        (document.querySelector('#log-list')?.textContent ?? '').match(/explosion #(\d+)/g)?.length ?? 0)
+      await qk.waitForFunction(
+        (n) => ((document.querySelector('#log-list')?.textContent ?? '').match(/explosion #\d+/g)?.length ?? 0) > n,
+        before,
+        { timeout: 15000 },
+      ).catch(() => {})
+      await qk.waitForTimeout(400) // mid-blast: the flash + sparks + young smoke
+    }
+    if (name === 'slash') {
+      // PHASE-LOCKED (the same class as the explosion): the swing cycle
+      // has quiet windups by design — wait for the next action beat
+      // (glints/ribbon/impact alive in the pill) before the canonical
+      // shot (the demo OPENS mid-slash, but the settle can overshoot
+      // into the next windup's quiet beat).
+      await qk.waitForFunction(
+        () => /Sword Slash · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+        null,
+        { timeout: 12000 },
+      ).catch(() => {})
+      await qk.waitForTimeout(250)
+    }
+    if (name === 'trail') {
+      // PHASE-LOCKED (the same class as the explosion): the firework burst
+      // is periodic (t=0.6 then every 5 s) — wait until comets are LIVE in
+      // the pill, then shoot mid-flight (a fixed settle can land the
+      // pre-burst beat under the 22-demo module-load lag).
+      await qk.waitForFunction(
+        () => /Trails & Collision · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+        null,
+        { timeout: 12000 },
+      ).catch(() => {})
+      await qk.waitForTimeout(500)
+    }
     await qk.screenshot({ path: join(out, `quarks-${name}.png`) })
     // the ALIVE pill is read at SHOT A's moment (the canonical shot): the
     // motion pair's later shot can legitimately land in a burst-free window
     // (the sequencer's dissolve, the trail's pre-burst beat) — that is not
     // a dead demo.
     shotPills.push(await qk.textContent('.pt-pill'))
-    // THE MOTION GATE: a second shot later — a healthy animated demo
+    // THE MOTION GATE: a second shot LATER — a healthy animated demo
     // changes pixels; a frozen canvas (the stale-binding class) does not.
-    await qk.waitForTimeout(name === 'sequencer' ? 450 : 300)
+    // THE PAIR WINDOW: wait for at least TWO NEW RENDERED FRAMES (the
+    // page's own __quarksFrame tick) instead of a fixed 300 ms — a slow
+    // rasterizer (SwiftShader) can take > 300 ms per frame, and a fixed
+    // window would sample the SAME frame twice: a live canvas read as
+    // FROZEN. Capped at 1.8 s (a genuinely frozen canvas never ticks).
+    const tickA = await qk.evaluate(() => window.__quarksFrame ?? 0)
+    await qk.waitForFunction(
+      (t) => (window.__quarksFrame ?? 0) >= t + 2,
+      tickA,
+      { timeout: 1800 },
+    ).catch(() => {})
+    await qk.waitForTimeout(name === 'sequencer' ? 450 : 120)
     const f2 = await qk.screenshot()
     const f1 = await import('pngjs').then(m => m.PNG.sync.read(readFileSync(join(out, `quarks-${QK_NAMES[i]}.png`))))
     const f2png = await import('pngjs').then(m => m.PNG.sync.read(f2))

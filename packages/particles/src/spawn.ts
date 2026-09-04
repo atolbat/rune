@@ -34,7 +34,12 @@ export function hash01(seed: number, index: number, salt: number): number {
  *  Task 122 — the three.quarks emitter family: `hemisphere` (the upper
  *  dome around the axis), `donut` (a torus: the ring + the tube circle),
  *  `rectangle` (a plane patch ⊥ axis), `grid` (a lattice — 'random' cells
- *  like theirs, or 'lattice' index→cell for perfect full-grid bursts). */
+ *  like theirs, or 'lattice' index→cell for perfect full-grid bursts).
+ *
+ *  Task 126 — `path`: a POLYLINE spawner (lightning bolts, laser beams,
+ *  wall-of-fire walls): one burst of `segments` particles covers the whole
+ *  path exactly ('lattice' — index → segment), the velocity follows the
+ *  LOCAL segment direction (mode 'axis'), `scatter` jitters sideways. */
 export type SpawnShape =
   | { readonly kind: 'point'; readonly origin: readonly number[] }
   | { readonly kind: 'sphere'; readonly origin: readonly number[]; readonly radius: readonly [number, number] }
@@ -67,6 +72,19 @@ export type SpawnShape =
        *  rows×columns fills the grid PERFECTLY, deterministically. */
       readonly mode?: 'random' | 'lattice' }
   | { readonly kind: 'line'; readonly from: readonly number[]; readonly to: readonly number[] }
+  | { readonly kind: 'path'
+      /** The flat polyline [x0,y0,z0, x1,y1,z1, …] — ≥ 2 points (1 segment).
+       *  Repeated consecutive points are rejected (a zero-length segment has
+       *  no direction). */
+      readonly points: readonly number[]
+      /** 'lattice' — index → segment: one burst of `segments` particles
+       *  covers the WHOLE path exactly, deterministically (the jagged bolt
+       *  in ONE burst). 'random' — a hash-picked segment per particle.
+       *  Default 'random'. */
+      readonly mode?: 'random' | 'lattice'
+      /** The lateral scatter radius around the polyline, world units — a
+       *  fuzzy band around the path instead of a razor line. Default 0. */
+      readonly scatter?: number }
 
 /** How the spawn velocity is directed.
  *  radial     — away from the shape origin (the sphere burst; any shape).
@@ -161,6 +179,9 @@ const S_DIR = 1, S_SPD = 2, S_LIFE = 3, S_SIZE = 4, S_COL = 5, S_SEED = 6, S_P0 
 // Task 124 — the degenerate-radial scatter direction (two independent
 // draws: the azimuth θ and the polar cosφ).
 const S_SCAT0 = 11, S_SCAT1 = 12
+// Task 126 — the path spawner streams: the segment pick, the t along it,
+// the scatter radius and the scatter angle.
+const S_PATH0 = 13, S_PATH1 = 14, S_PATH2 = 15, S_PATH3 = 16
 
 /** Validates the description and compiles it into a flat spawner closure
  *  (all vectors normalized / precomputed ONCE, here). */
@@ -176,9 +197,9 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
   const c0 = desc.color[0], c1 = desc.color[1]
 
   // ── the shape constants (origin, axis, ranges — all flat scalars) ──────
-  const ox = shape.kind === 'line' ? shape.from[0] : shape.origin[0]
-  const oy = shape.kind === 'line' ? shape.from[1] : shape.origin[1]
-  const oz = shape.kind === 'line' ? shape.from[2] : shape.origin[2]
+  const ox = shape.kind === 'line' ? shape.from[0] : shape.kind === 'path' ? shape.points[0] : shape.origin[0]
+  const oy = shape.kind === 'line' ? shape.from[1] : shape.kind === 'path' ? shape.points[1] : shape.origin[1]
+  const oz = shape.kind === 'line' ? shape.from[2] : shape.kind === 'path' ? shape.points[2] : shape.origin[2]
   let ax = 0, ay = 0, az = 1
   const hasAxis = shape.kind === 'cone' || shape.kind === 'disc' || shape.kind === 'line'
     || shape.kind === 'hemisphere' || shape.kind === 'donut' || shape.kind === 'rectangle' || shape.kind === 'grid'
@@ -237,6 +258,58 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
       throw new Error(`rune/particles: grid rows/columns must be integers >= 1 (got ${gridRows}×${gridCols})`)
     }
   }
+  // Task 126 — the PATH spawner: the polyline is validated + precompiled
+  // ONCE here — per-segment direction, length, and the two scatter
+  // perpendiculars (the emit path only lerps and jitters).
+  let pathPts: Float64Array | null = null
+  let pathDirs: Float64Array | null = null
+  let pathPerp: Float64Array | null = null
+  let pathSegs = 0, pathLattice = false, pathScatter = 0
+  if (shape.kind === 'path') {
+    const pts: readonly number[] = shape.points
+    if (!Array.isArray(pts) && !(pts instanceof Float64Array) && !(pts instanceof Float32Array)) {
+      throw new Error('rune/particles: path points must be a flat array of xyz triples')
+    }
+    if (pts.length < 6 || pts.length % 3 !== 0) {
+      throw new Error(`rune/particles: path needs >= 2 points as a flat xyz array (got ${pts.length} numbers)`)
+    }
+    let allFinite = true
+    for (let k = 0; k < pts.length; k++) {
+      if (!Number.isFinite(pts[k])) { allFinite = false; break }
+    }
+    if (!allFinite) throw new Error('rune/particles: path points must all be finite')
+    pathSegs = (pts.length / 3) - 1
+    pathLattice = shape.mode === 'lattice'
+    pathScatter = shape.scatter ?? 0
+    if (!Number.isFinite(pathScatter) || pathScatter < 0) {
+      throw new Error(`rune/particles: path scatter must be a finite >= 0 (got ${shape.scatter})`)
+    }
+    pathPts = Float64Array.from(pts)
+    pathDirs = new Float64Array(pathSegs * 3)
+    pathPerp = pathScatter > 0 ? new Float64Array(pathSegs * 6) : null
+    for (let s = 0; s < pathSegs; s++) {
+      const b = s * 3
+      const dx = pts[b + 3] - pts[b], dy = pts[b + 4] - pts[b + 1], dz = pts[b + 5] - pts[b + 2]
+      const l = Math.hypot(dx, dy, dz)
+      if (l === 0 || !Number.isFinite(l)) {
+        throw new Error(`rune/particles: path segment ${s} has zero length (points ${s} and ${s + 1} coincide) — no direction to emit along`)
+      }
+      const ndx = dx / l, ndy = dy / l, ndz = dz / l
+      pathDirs[b] = ndx; pathDirs[b + 1] = ndy; pathDirs[b + 2] = ndz
+      if (pathPerp !== null) {
+        // The scatter frame: p1 = cross(worldUp, dir) (fallback (1,0,0)
+        // when the segment is vertical), p2 = cross(dir, p1).
+        let p1x = ndz, p1y = 0, p1z = -ndx
+        let pl = Math.hypot(p1x, p1y, p1z)
+        if (pl < 1e-6) { p1x = 1; p1y = 0; p1z = 0; pl = 1 }
+        p1x /= pl; p1z /= pl
+        pathPerp[b * 2] = p1x; pathPerp[b * 2 + 1] = p1y; pathPerp[b * 2 + 2] = p1z
+        pathPerp[b * 2 + 3] = ndy * p1z - ndz * p1y
+        pathPerp[b * 2 + 4] = ndz * p1x - ndx * p1z
+        pathPerp[b * 2 + 5] = ndx * p1y - ndy * p1x
+      }
+    }
+  }
   // Task 117: the disc's spiral arms — compiled ONCE into flat scalars.
   let arms = 0, armSpread = 0.35, twist = 0
   if (shape.kind === 'disc' && shape.arms !== undefined) {
@@ -269,8 +342,8 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
     fx = velocity.dir[0] / l; fy = velocity.dir[1] / l; fz = velocity.dir[2] / l
   } else if (velocity.mode === 'lobe' && shape.kind !== 'cone') {
     throw new Error("rune/particles: velocity mode 'lobe' needs the cone shape (its halfAngle defines the fan)")
-  } else if (velocity.mode === 'axis' && !hasAxis) {
-    throw new Error("rune/particles: velocity mode 'axis' needs a shape with an axis (cone/disc/line/hemisphere/donut/rectangle/grid)")
+  } else if (velocity.mode === 'axis' && !hasAxis && shape.kind !== 'path') {
+    throw new Error("rune/particles: velocity mode 'axis' needs a shape with an axis (cone/disc/line/hemisphere/donut/rectangle/grid) or the path shape (its LOCAL segment direction)")
   } else if (velocity.mode === 'tangential' && shape.kind !== 'disc' && shape.kind !== 'sphere' && shape.kind !== 'donut' && shape.kind !== 'hemisphere') {
     throw new Error("rune/particles: velocity mode 'tangential' needs the disc, sphere, donut or hemisphere shape")
   }
@@ -449,6 +522,33 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
       px = ox + (shape.to[0] - ox) * u
       py = oy + (shape.to[1] - oy) * u
       pz = oz + (shape.to[2] - oz) * u
+    } else if (shape.kind === 'path') {
+      // Task 126 — the polyline: 'lattice' maps the call index onto segments
+      // (a cyclic shift of the global stream still covers ALL segments in
+      // one burst of `segments` particles); 'random' hash-picks one. The
+      // position lerps along the chosen segment, 'axis' velocity points
+      // along the LOCAL segment (the jagged bolt reads as a bolt), and the
+      // scatter jitters in the segment's precomputed perpendicular plane.
+      let seg: number
+      if (pathLattice) seg = ((index % pathSegs) + pathSegs) % pathSegs
+      else seg = Math.min(pathSegs - 1, Math.floor(hash01(seed, index, S_PATH0) * pathSegs))
+      const b = seg * 3
+      const t = hash01(seed, index, S_PATH1)
+      px = pathPts![b] + (pathPts![b + 3] - pathPts![b]) * t
+      py = pathPts![b + 1] + (pathPts![b + 4] - pathPts![b + 1]) * t
+      pz = pathPts![b + 2] + (pathPts![b + 5] - pathPts![b + 2]) * t
+      if (velocity.mode === 'axis') {
+        dx = pathDirs![b]; dy = pathDirs![b + 1]; dz = pathDirs![b + 2]
+      }
+      if (pathScatter > 0) {
+        const pb = seg * 6
+        const rr = pathScatter * Math.sqrt(hash01(seed, index, S_PATH2))
+        const th = TAU * hash01(seed, index, S_PATH3)
+        const cth = Math.cos(th) * rr, sth = Math.sin(th) * rr
+        px += pathPerp![pb] * cth + pathPerp![pb + 3] * sth
+        py += pathPerp![pb + 1] * cth + pathPerp![pb + 4] * sth
+        pz += pathPerp![pb + 2] * cth + pathPerp![pb + 5] * sth
+      }
     }
 
     // The velocity direction by mode.
@@ -471,7 +571,7 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
         dy = sphi * Math.sin(theta)
         dz = cphi
       }
-    } else if (velocity.mode === 'axis') {
+    } else if (velocity.mode === 'axis' && shape.kind !== 'path') {
       dx = ax; dy = ay; dz = az
     } else if (velocity.mode === 'tangential') {
       // cross(axis, radial) normalized: the orbit direction.

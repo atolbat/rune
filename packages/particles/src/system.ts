@@ -77,11 +77,17 @@ export interface SpawnRecord {
 /** A point attractor — three-nebula's Gravity/Attraction behavior.
  *  accel = strength / (r² + softening²), pointing at `point`; a NEGATIVE
  *  strength repels (a repulsor). `softening` (default 0.25) caps the force
- *  at the center: no singularity, no NaN, no slingshot through the origin. */
+ *  at the center: no singularity, no NaN, no slingshot through the origin.
+ *  Task 126 — `killRadius`: particles entering the sphere around `point`
+ *  are CONSUMED (they retire this frame — the accretion-disc drain, the
+ *  funnel sink; onRetire fires with the final state, so the consumption
+ *  can burst the next generation). 0 (the default) — nothing is consumed. */
 export interface Attractor {
   readonly point: readonly number[]
   readonly strength: number
   readonly softening?: number
+  /** Consume particles within this radius of the point (>= 0). */
+  readonly killRadius?: number
 }
 
 /** A collision plane (three.quarks' ApplyCollision, declarative): an
@@ -357,6 +363,8 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
       const atz = hasAttract ? (at.point[2] ?? 0) : 0
       const atS = hasAttract ? at.strength : 0
       const soft2 = hasAttract ? (at.softening ?? 0.25) ** 2 : 1
+      // Task 126 — the sink's squared radius (0 — the sink is off).
+      const killR2 = hasAttract ? (at.killRadius ?? 0) ** 2 : 0
       // Task 122 — the new forces, hoisted (absent = a clean loop):
       const speedCurve = forces.speedCurve ?? null
       const hasCurve = speedCurve !== null
@@ -445,6 +453,10 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
             const k = atS * dt / (r * (r2 + soft2))
             vx += dx * k; vy += dy * k; vz += dz * k
           }
+          // Task 126 — the sink: consumed THIS frame (the retire branch
+          // below re-reads f.life[i]; zeroing it retires the particle with
+          // onRetire firing — the drain's splash point).
+          if (killR2 > 0 && r2 < killR2) f.life[i] = 0
         }
         if (hasTurb) {
           // The deterministic wander: three hash-phased sines of the

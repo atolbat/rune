@@ -1,50 +1,88 @@
-// alphatest.js — three.quarks' AlphaTestDemo: falling LEAVES — textured
-// quads with an alpha MASK (discard below the cutoff — no blending, depth
-// write ON: the leaves occlude each other correctly), tumbling in 3D
-// (their Rotation3DOverLife), decelerating as they fall (their
-// SpeedOverLife 1 → 0 — our speedCurve).
+// alphatest.js — three.quarks' AlphaTestDemo: falling LEAVES — exactly
+// theirs: a REAL 3D leaf MESH per particle (their instancingGeometry from
+// leave.glb — extracted verbatim into leaf-geometry.js + assets/leaves.png
+// by scripts/extract-leaf.mjs), a RANDOM start rotation (their
+// RandomQuatGenerator — our seed-random axis + seed phase), a 3D TUMBLE
+// (their Rotation3DOverLife around (0, 0.5, 0.2) — our spin3d), alpha MASK
+// (glTF alphaMode MASK @ cutoff 0.88 — discard, no blending, depth write
+// ON: the leaves occlude each other correctly), a point burst at x=+2
+// (their PointEmitter: a random unit-sphere direction), startSpeed ~5 with
+// their SpeedOverLife 1→0 decay — the launch dies into a drifting fall.
+import { LEAF } from './leaf-geometry.js'
+import { decodePngRgba } from '../png.mjs'
+
+// their texture, decoded ONCE at module load (the same contract as the
+// other demo assets — a missing file falls back to the procedural atlas)
+let leafPng = null
+try {
+  leafPng = await decodePngRgba('assets/leaves.png')
+} catch (error) {
+  console.warn(`leaves.png: ${error instanceof Error ? error.message : String(error)}`)
+}
+
 export default {
   title: 'Alpha Test (leaves)',
-  sub: 'ALPHA_CUTOFF discard · 3D tumble · SpeedOverLife',
-  camera: { yaw: 0.4, pitch: 0.2, dist: 7.5, orbit: 0.05, target: [0, 0.6, 0] },
+  sub: 'the REAL leaf mesh · glTF alpha MASK · 3D tumble · SpeedOverLife',
+  camera: { yaw: 0.4, pitch: 0.2, dist: 8, orbit: 0.05, target: [0, 0.4, 0] },
 
   make(env) {
+    // their leaf texture on THIS renderer (bytes decoded at module load)
+    let leafTexture = null
+    if (leafPng !== null) {
+      leafTexture = env.renderer.texture(leafPng.width, leafPng.height)
+      leafTexture.upload(leafPng.data)
+    }
+
     const leaves = env.addLayer({
       id: 'leaves',
       facade: env.createParticles({
-        capacity: 200,
+        capacity: 110,
         rate: 0,
-        bursts: [{ time: 0.01, count: 130, cycle: 0, interval: 6, probability: 1 }],
+        // their loop: one 100-leaf burst every ~5 s (duration 5, looping)
+        bursts: [{ time: 0.01, count: 100, cycle: 0, interval: 5.2, probability: 1 }],
         ramp: env.createRamp([
-          { t: 0, size: 0.9, r: 1, g: 1, b: 1, a: 1 },
-          { t: 0.9, size: 1, r: 0.95, g: 0.95, b: 0.9, a: 1 },
-          { t: 1, size: 0.8, r: 0.85, g: 0.8, b: 0.75, a: 1 },
+          { t: 0, size: 1, r: 1, g: 1, b: 1, a: 1 },
+          { t: 0.9, size: 1, r: 1, g: 1, b: 1, a: 1 },
+          { t: 1, size: 0.9, r: 1, g: 1, b: 1, a: 1 },
         ]),
         forces: {
-          gravity: [0, -1.4, 0], drag: 0, turbulence: 0.55,
-          // SpeedOverLife: 1 → 0.18 — the launch dies into a gentle fall
+          // their SpeedOverLife: Bezier(1, 0.75, 0.5, 0) — the launch dies
+          // into a drift; NO gravity (their demo — the leaves hang, tumble
+          // and fade, they do not drop)
+          gravity: [0, -0.18, 0], drag: 0,
           speedCurve: env.createRamp([
             { t: 0, size: 1, r: 1, g: 1, b: 1, a: 1 },
-            { t: 1, size: 0.18, r: 1, g: 1, b: 1, a: 1 },
+            { t: 1, size: 0, r: 1, g: 1, b: 1, a: 1 },
           ]),
+          turbulence: 0.35,
         },
         spawner: {
-          // their demo: a point burst at x=+2, speed 5 (we add a small fan)
-          shape: { kind: 'cone', origin: [1.2, 2.6, 0], axis: [0, 1, 0], halfAngle: 0.9, baseRadius: 0.2, length: [0, 0.1] },
-          velocity: { mode: 'lobe' },
-          speed: [2.6, 3.4], life: [4.5, 6], size: [0.34, 0.5],
-          color: [[1, 1, 1, 1], [1, 0.95, 0.85, 1]], seed: 173,
+          // their PointEmitter at x=+2: the burst scatters on the unit sphere
+          shape: { kind: 'point', origin: [2, 1.2, 0] },
+          velocity: { mode: 'radial' },
+          speed: [4.6, 5.4], life: [4, 5], size: [0.4, 0.5],
+          color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 173,
         },
-        render: { kind: 'billboard', mode: 'oriented', axis: 'random', spin: 1.8, tiles: env.atlasTiles },
+        // their RandomQuat start + Rotation3DOverLife tumble, in one knob:
+        // a seed-random axis + the seed-phased start angle + age·spin
+        render: { kind: 'mesh', geometry: LEAF, axis: 'random', spin: 1.1 },
       }),
-      material: env.materials.leaf,
-      // alpha-TEST (not blend): opaque fragments with discard, depth write
-      // TRUE, no cull (the leaf quads are two-sided)
+      material: env.materials.leafLit,
+      // alpha-TEST (their alphaMode MASK): opaque fragments with discard,
+      // depth write TRUE, no cull (the leaf mesh is doubleSided)
       pipeline: { depth: { test: 'less', write: true }, raster: { cull: 'none' } },
-      uniforms: { u_alphaCutoff: 0.5 },
+      uniforms: {
+        u_alphaCutoff: 0.88,
+        // the LAMBERT light (the facade layers carry it explicitly —
+        // buildMeshCommand only wires the static meshes)
+        u_lightDir: () => env.LIGHT_DIR,
+        u_lightColor: env.LIGHT_COLOR,
+        u_ambient: env.AMBIENT,
+      },
+      texture: leafTexture !== null ? () => leafTexture : () => env.glowTexture,
     })
 
-    // the ground: a faint disc the leaves fall past (the depth reference)
+    // the ground: a faint disc the leaves drift past (the depth reference)
     const ground = env.addLayer({
       id: 'leaves-ground',
       facade: env.createParticles({
@@ -71,6 +109,10 @@ export default {
       frame(ctx) {
         leaves.facade.advance(ctx.dt)
         ground.facade.advance(ctx.dt)
+      },
+
+      dispose() {
+        leafTexture?.dispose()
       },
     }
   },

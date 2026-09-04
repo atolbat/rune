@@ -270,8 +270,12 @@ export default {
           bodyModel[15] = 1
           ctx.record(body.command, { mvp: ctx.modelMvp(bodyModel), model: bodyModel, camPos: ctx.camEye })
 
-          // every emitter rides the nozzle (behind the body's tail)
-          const nxz = px - nx * 0.58, nyz = py - ny * 0.58, nzz = pz - nz * 0.58
+          // every emitter rides the NOZZLE — the actual tail: the capsule
+          // is radius 0.13 × height 0.85 (total length ≈ 1.11, half 0.555)
+          // and the body center sits 0.45 behind the path point, so the
+          // tail is ~1.0 behind it. The old 0.58 put the flame nearly
+          // MID-BODY ("the jet flame is in the middle of the rocket").
+          const nxz = px - nx * 1.03, nyz = py - ny * 1.03, nzz = pz - nz * 1.03
           for (const l of emitters) l.facade.at(nxz, nyz, nzz)
 
           // the camera target chases the missile

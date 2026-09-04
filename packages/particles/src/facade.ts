@@ -35,6 +35,16 @@ import { createTrailHistory, fillTrails, type TrailOptions, type TrailBakeOption
 import { fillMeshes, MESH_STRIDE, type MeshGeometry, type MeshOptions } from './meshes.ts'
 import { hash01 } from './spawn.ts'
 
+/** Task 126 — the WRAP VOLUME: the endless, emitter-anchored field. Each
+ *  axis with size > 0 wraps the live positions into a box of that size
+ *  centered on the at() origin (the camera, for weather and ambience): a
+ *  particle that leaves through one wall re-enters through the opposite
+ *  one — the field reads as infinite wherever the emitter goes. */
+export interface WrapDesc {
+  /** The box size per axis (x, y, z), world units — 0 disables that axis. */
+  readonly size: readonly [number, number, number]
+}
+
 /** One scheduled burst (three.quarks' emissionBursts): fires `count`
  *  particles at `time`, then every `interval` seconds, `cycle` times
  *  (0 = forever). Each firing passes a `probability` gate (deterministic:
@@ -82,6 +92,14 @@ export interface ParticlesDesc {
   /** The spawner used by the rate accumulator and burst() (default:
    *  a white 1-unit sphere burst at the origin — set your own!). */
   readonly spawner?: SpawnerDesc
+  /** Task 126 — the WRAP VOLUME (the endless field): after every
+   *  integration the live positions wrap into a box of `size` centered on
+   *  the at() ORIGIN — rain and dust that follow the camera read as an
+   *  infinite field (a particle leaving through one wall re-enters through
+   *  the opposite one). Per-axis: a size of 0 disables that axis. Do NOT
+   *  combine with the trail render kind — a wrap teleport cuts a long
+   *  segment straight through the ribbon. Default: off. */
+  readonly wrap?: WrapDesc
   /** The billboard spin speed, radians/second (default 0). */
   readonly spin?: number
   /** The declarative burst schedule (Task 122) — fired by advance(). */
@@ -144,6 +162,14 @@ export interface Particles {
    *  (x, y, z). The VELOCITY is untouched — a moving emitter leaves a
    *  trail of its spawn cloud. Chainable. */
   at(x: number, y: number, z: number): this
+  /** Task 126 — the emitter ORIENTATION (three.quarks' worldSpace:false —
+   *  a RIGID attachment): a rotation applied to every spawn CLOUD and
+   *  VELOCITY before the at() translation. A column-major 3×3 or 4×4
+   *  matrix (the upper-left 3×3 is read — the translation column is
+   *  ignored, use at() for it), or null to reset to identity. The exhaust
+   *  cone of an attached emitter follows the OBJECT's heading, not the
+   *  world axes. Chainable. Zero cost until the first call. */
+  orient(m: ArrayLike<number> | null): this
   /** Integrates the system by dt (seconds), services the continuous rate
    *  and the burst schedule, and records the trail history (the trail
    *  render kind). Chainable. */
@@ -216,11 +242,23 @@ export function createParticles(desc: ParticlesDesc): Particles {
   // advance is a TELEPORT — it contributes neither velocity nor distance.
   const inheritK = validateInherit(desc.inheritVelocity)
   const rateOverDist = validateRateOverDistance(desc.rateOverDistance)
+  // Task 126 — the WRAP VOLUME: flat per-axis sizes (0 = the axis is off).
+  const wrap = validateWrap(desc.wrap)
+  const wrapX = wrap !== null && wrap[0] > 0 ? wrap[0] : 0
+  const wrapY = wrap !== null && wrap[1] > 0 ? wrap[1] : 0
+  const wrapZ = wrap !== null && wrap[2] > 0 ? wrap[2] : 0
+  const hasWrap = wrapX > 0 || wrapY > 0 || wrapZ > 0
   let distCarry = 0 // the fractional emission remainder (the distance rate)
   let lastOx = 0, lastOy = 0, lastOz = 0 // the origin at the last advance
   let emitterVx = 0, emitterVy = 0, emitterVz = 0
   // The live emitter origin (at) — read by the emit wrapper, never rebuilt.
   const origin = [0, 0, 0]
+  // Task 126 — the emitter ORIENTATION: row-major scalars, identity until
+  // the first orient() call (the `oriented` flag keeps the emit path free).
+  let r00 = 1, r01 = 0, r02 = 0
+  let r10 = 0, r11 = 1, r12 = 0
+  let r20 = 0, r21 = 0, r22 = 1
+  let oriented = false
   // The GLOBAL spawn stream index (the anti-"jet" fix): the store's emit
   // always numbers particles 0..n-1 PER CALL, and the spawners hash their
   // randomness by that index — a rate stream or repeated bursts would
@@ -231,6 +269,19 @@ export function createParticles(desc: ParticlesDesc): Particles {
   let streamIndex = 0
   const emitWrap: Spawner = (index, out) => {
     spawner(streamIndex + index, out)
+    // Task 126 — the rigid attachment: the spawn cloud AND its velocity
+    // rotate by the emitter orientation BEFORE the at() translation (the
+    // exhaust cone follows the object's heading, not the world axes).
+    if (oriented) {
+      const x = out.x, y = out.y, z = out.z
+      out.x = x * r00 + y * r01 + z * r02
+      out.y = x * r10 + y * r11 + z * r12
+      out.z = x * r20 + y * r21 + z * r22
+      const vx = out.vx, vy = out.vy, vz = out.vz
+      out.vx = vx * r00 + vy * r01 + vz * r02
+      out.vy = vx * r10 + vy * r11 + vz * r12
+      out.vz = vx * r20 + vy * r21 + vz * r22
+    }
     out.x += origin[0]; out.y += origin[1]; out.z += origin[2]
     // Task 124 — the velocity inheritance: the newborn rides the emitter's
     // own motion (the rocket's smoke drags behind the flight path).
@@ -318,6 +369,34 @@ export function createParticles(desc: ParticlesDesc): Particles {
         throw new Error(`rune/particles: at() needs three finite numbers (got ${x}, ${y}, ${z})`)
       }
       origin[0] = x; origin[1] = y; origin[2] = z
+      return facade
+    },
+
+    orient(m) {
+      if (m === null) {
+        r00 = 1; r01 = 0; r02 = 0
+        r10 = 0; r11 = 1; r12 = 0
+        r20 = 0; r21 = 0; r22 = 1
+        oriented = false
+        return facade
+      }
+      const n = m.length
+      if (n !== 9 && n !== 16) {
+        throw new Error(`rune/particles: orient() takes a column-major 3×3 or 4×4 matrix, or null (got ${n} numbers)`)
+      }
+      // The upper-left 3×3, column-major input → row-major scalars (the
+      // emit multiply reads rows). 3×3: columns at 0/3/6; 4×4: at 0/4/8.
+      const c = n === 16 ? 4 : 3
+      const v00 = m[0], v10 = m[1], v20 = m[2]
+      const v01 = m[c], v11 = m[c + 1], v21 = m[c + 2]
+      const v02 = m[c * 2], v12 = m[c * 2 + 1], v22 = m[c * 2 + 2]
+      if (![v00, v10, v20, v01, v11, v21, v02, v12, v22].every(Number.isFinite)) {
+        throw new Error('rune/particles: orient() matrix entries must all be finite')
+      }
+      r00 = v00; r01 = v01; r02 = v02
+      r10 = v10; r11 = v11; r12 = v12
+      r20 = v20; r21 = v21; r22 = v22
+      oriented = true
       return facade
     },
 
@@ -439,6 +518,21 @@ export function createParticles(desc: ParticlesDesc): Particles {
     } else {
       system.advance(dt, forces)
     }
+    // Task 126 — the WRAP VOLUME: the endless field. The live positions wrap
+    // into the box around the CURRENT origin (the camera), AFTER the
+    // integration — a drop/dust mote that left through one wall re-enters
+    // through the opposite one. One modulo per axis per particle; skipped
+    // entirely when no axis is set.
+    if (hasWrap) {
+      const f = system.fields
+      const n = system.count
+      const cx = origin[0], cy = origin[1], cz = origin[2]
+      for (let i = 0; i < n; i++) {
+        if (wrapX > 0) f.px[i] = cx + wrapAxis(f.px[i] - cx, wrapX)
+        if (wrapY > 0) f.py[i] = cy + wrapAxis(f.py[i] - cy, wrapY)
+        if (wrapZ > 0) f.pz[i] = cz + wrapAxis(f.pz[i] - cz, wrapZ)
+      }
+    }
     time += dt
     if (history !== null) history.record(system, dt)
   }
@@ -497,6 +591,24 @@ function validateRateOverDistance(r: number | undefined): number {
   return r
 }
 
+/** Wrap one axis into [-size/2, size/2) around the center: the classic
+ *  toroidal modulo (JS % can be negative — re-add the size once). */
+function wrapAxis(d: number, size: number): number {
+  let m = (d + size * 0.5) % size
+  if (m < 0) m += size
+  return m - size * 0.5
+}
+
+/** Wrap validation: three finite sizes >= 0 (0 disables the axis). */
+function validateWrap(wrap: WrapDesc | undefined): [number, number, number] | null {
+  if (wrap === undefined || wrap === null) return null
+  const size = wrap.size
+  if (!Array.isArray(size) || size.length !== 3 || !size.every((v: number) => Number.isFinite(v) && v >= 0)) {
+    throw new Error(`rune/particles: wrap.size must be three finite numbers >= 0, 0 disables the axis (got ${JSON.stringify(size)})`)
+  }
+  return [size[0], size[1], size[2]]
+}
+
 /** Attractor validation (once, at creation — the hot advance() loop trusts
  *  its inputs). A loud error beats a silent NaN poisoning the whole system. */
 function validateAttractor(at: Attractor | null | undefined): Attractor | null {
@@ -511,6 +623,11 @@ function validateAttractor(at: Attractor | null | undefined): Attractor | null {
   const soft = softening ?? 0.25
   if (!Number.isFinite(soft) || soft <= 0) {
     throw new Error(`rune/particles: attract.softening must be finite > 0 (got ${softening}; it caps the force at the center — without it the integrator NaNs)`)
+  }
+  // Task 126 — the sink radius: finite >= 0 (0 — nothing is consumed).
+  const kill = at.killRadius ?? 0
+  if (!Number.isFinite(kill) || kill < 0) {
+    throw new Error(`rune/particles: attract.killRadius must be a finite >= 0 (got ${at.killRadius}; particles inside the sphere are consumed)`)
   }
   return at
 }

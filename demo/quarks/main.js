@@ -13,13 +13,13 @@
 //   emitters), and the custom BLEND EQUATIONS (add/max/subtract) + the
 //   SOFT_PARTICLES depth fade (a color-encoded depth prepass).
 //
-// The dist imports carry ?v=125 (the stale-cache guard — bump on release).
-import { createRenderer, capsule, cube, plane, torusKnot } from '../../dist/rune.esm.js?v=125'
+// The dist imports carry ?v=126 (the stale-cache guard — bump on release).
+import { createRenderer, capsule, cube, plane, torusKnot } from '../../dist/rune.esm.js?v=126'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV,
-} from '../../dist/rune-materials.esm.js?v=125'
-import { createParticles, createRamp, createSpawner } from '../../dist/rune-particles.esm.js?v=125'
+} from '../../dist/rune-materials.esm.js?v=126'
+import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=126'
 import { decodePngRgba } from './png.mjs'
 
 /* ─── the demo registry (their order) ─────────────────────────────────── */
@@ -48,13 +48,23 @@ import slash from './demos/slash.js'
 import vortex from './demos/vortex.js'
 import fireflies from './demos/fireflies.js'
 
+// the Task 126 rune originals (the game-designer set #2: the GPU-static
+// grass field, the endless wrapped dust, the procedural lightning bolts)
+import dust from './demos/dust.js'
+import grass from './demos/grass.js'
+import lightning from './demos/lightning.js'
+
 const DEMOS = [muzzle, explosion, shapes, trail, sequencer, mesh, subemitter,
   noise, alphatest, plugin, billboard, soft, blending, follow,
-  rocket, storm, slash, vortex, fireflies]
+  rocket, storm, slash, vortex, fireflies, dust, grass, lightning]
 
 /* ─── materials & pipelines ────────────────────────────────────────────── */
 
 const SPRITE_MATERIAL = materialOf({ features: TEXTURE | VERTEX_COLOR })
+// Task 126 — the LEAF MESH material (the alphatest demo's real 3D leaves):
+// lit + alpha MASK + double-sided (their leave.glb material: alphaMode
+// MASK @ 0.88, doubleSided, metallic 0)
+const LEAF_LIT_MATERIAL = materialOf({ features: TEXTURE | VERTEX_COLOR | ALPHA_CUTOFF | LAMBERT | DOUBLE_SIDED })
 const LEAF_MATERIAL = materialOf({ features: TEXTURE | VERTEX_COLOR | ALPHA_CUTOFF })
 const SOFT_MATERIAL = materialOf({ features: TEXTURE | VERTEX_COLOR | SOFT_PARTICLES })
 const LAMBERT_MATERIAL = materialOf({ features: FLAT_ALBEDO | LAMBERT | DOUBLE_SIDED })
@@ -266,6 +276,29 @@ function makeGlowBytes() {
   return bytes
 }
 
+/* ─── The ribbon texture (the weapon-arc streak) ───────────────────
+
+   fillTrails maps u along the ribbon's LENGTH and v across its WIDTH —
+   a radial glow (the 64×64 sprite) fades to black at every edge: the
+   ribbon reads as a blob in its middle, not an ARC. This is a STREAK:
+   bright along the whole u axis, a gaussian falloff across v (64×16,
+   straight alpha by construction — rgb = white·alpha so additive AND
+   alpha blend both work). */
+function makeRibbonBytes() {
+  const W = 64, H = 16
+  const bytes = new Uint8Array(W * H * 4)
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const v = (y + 0.5) / H - 0.5
+      const a = Math.exp(-(v * v) / 0.018)
+      const i = (y * W + x) * 4
+      bytes[i] = bytes[i + 1] = bytes[i + 2] = Math.round(255 * a)
+      bytes[i + 3] = 255
+    }
+  }
+  return bytes
+}
+
 const M = () => new Float32Array(16)
 const view = M()
 const projection = M()
@@ -323,12 +356,14 @@ function mat4Multiply(out, a, b) {
 
 let activeRenderer = null
 let bootSeq = 0
+let bootedOnce = false // the first successful boot (a re-boot re-makes the demo)
 let demoIndex = 0
 let state = null          // the current demo's state object
 let rhythm = {}           // fresh per demo switch
 let atlasTexture = null
 let atlasUpload = null
 let glowTexture = null // the single-glow ribbon sprite (the trail demo)
+let ribbonTexture = null // the weapon-arc streak (the slash ribbon; Task 126)
 let layers = []           // the registered draw layers
 let labels = []           // the world-anchored DOM labels
 let labelLayer = null
@@ -424,7 +459,7 @@ DEMOS.forEach((demo, index) => {
 
 const note = document.createElement('div')
 note.className = 'pt-note'
-note.innerHTML = 'Sim: <code>@rune/particles</code> · 14 three.quarks examples + 5 rune originals · <a href="https://github.com/Alchemist0823/three.quarks" target="_blank" rel="noopener">the originals</a> · drag to orbit, pinch to zoom'
+note.innerHTML = 'Sim: <code>@rune/particles</code> · 14 three.quarks examples + 8 rune originals · <a href="https://github.com/Alchemist0823/three.quarks" target="_blank" rel="noopener">the originals</a> · drag to orbit, pinch to zoom'
 sheet.append(sheetHead, rows, note)
 
 const dragHint = document.createElement('div')
@@ -456,7 +491,7 @@ const env = {
   // resolve () => env.cfxrTextures.trait at command-build time.
   cfxrTextures: {},
   materials: {
-    sprite: SPRITE_MATERIAL, leaf: LEAF_MATERIAL, soft: SOFT_MATERIAL,
+    sprite: SPRITE_MATERIAL, leaf: LEAF_MATERIAL, leafLit: LEAF_LIT_MATERIAL, soft: SOFT_MATERIAL,
     lambert: LAMBERT_MATERIAL, pbr: PBR_MATERIAL,
   },
   pipelines: {
@@ -467,6 +502,8 @@ const env = {
   createParticles,
   createRamp,
   createSpawner,
+  // Task 126 — the GPU-static vegetation field
+  createGrassField,
   // The shared light (the LAMBERT/PBR scene meshes).
   LIGHT_DIR: [-0.35, 0.82, 0.45],
   LIGHT_COLOR: [1.05, 1.0, 0.92, 1],
@@ -652,6 +689,11 @@ function frameCallback(ctx, record) {
   env.width = ctx.size[0]
   env.height = ctx.size[1]
   frameTime += ctx.dt
+  // the frame tick (the shots gate samples it): a slow rasterizer can
+  // take > 300 ms per frame — the gate waits for a NEW tick between its
+  // screenshot pair instead of a fixed window (which would sample the
+  // same frame twice and read a live canvas as FROZEN)
+  if (typeof window !== 'undefined') window.__quarksFrame = (window.__quarksFrame ?? 0) + 1
 
   // ── the demo's own logic (advance, camera overrides, prepasses) ──
   const frameCtx = {
@@ -787,6 +829,17 @@ function switchDemo(index) {
   if (index === demoIndex && state !== null) return
   demoIndex = index
   for (const [i, row] of rowByIndex) row.setAttribute('aria-pressed', String(i === index))
+  activateDemo('switch')
+}
+
+/** (Re)makes the current demo: teardown + fresh state. `why` — 'switch' or
+ *  'reboot' (a renderer re-boot: every demo-owned GPU object — the soft
+ *  demo's DEPTH-PREPASS SURFACE, its raw prepass commands — must be
+ *  re-created on the NEW backend. Before this, a backend toggle left the
+ *  soft demo recording commands compiled on the DEAD renderer and binding
+ *  a texture from a disposed surface: a GL INVALID_OPERATION every frame
+ *  and an empty prepass on WebGPU.) */
+function activateDemo(why) {
   // teardown the old demo
   if (state !== null && state.dispose !== undefined) {
     try { state.dispose() } catch (error) { shell.log.warn(`dispose: ${error instanceof Error ? error.message : String(error)}`) }
@@ -795,12 +848,12 @@ function switchDemo(index) {
   env.clearLabels()
   rhythm = {}
   frameTime = 0
-  const demo = DEMOS[index]
+  const demo = DEMOS[demoIndex]
   env.camera({ yaw: 0.55, pitch: 0.25, dist: 5.2, orbit: 0.06, target: [0, 0.2, 0] })
   if (demo.camera !== undefined) env.camera(demo.camera)
   state = demo.make(env)
   if (typeof window !== 'undefined') window.__quarksLayers = layers // the shots/debug handle
-  shell.log.event(`Demo: ${demo.title} — ${demo.sub}`)
+  shell.log.event(`Demo: ${demo.title} — ${demo.sub}${why === 'reboot' ? ' · re-made on the new backend' : ''}`)
   updatePill(0)
   // a live renderer: build the commands for the new layers
   if (activeRenderer !== null) attachLayers()
@@ -815,6 +868,11 @@ async function attachAtlas() {
   glowTexture = activeRenderer.texture(64, 64)
   glowTexture.upload(makeGlowBytes())
   env.glowTexture = glowTexture
+  // the weapon-arc streak (Task 126 — the slash ribbon): bright along u,
+  // a gaussian across v — a radial glow leaves a ribbon dark at its ends
+  ribbonTexture = activeRenderer.texture(64, 16)
+  ribbonTexture.upload(makeRibbonBytes())
+  env.ribbonTexture = ribbonTexture
   // the original three.quarks atlas: re-created on THIS renderer (the
   // bytes were decoded once, at module load)
   if (quarksPng !== null) {
@@ -870,6 +928,11 @@ async function boot(mode) {
     env.renderer = renderer
     env.backend = renderer.backend
     await attachAtlas()
+    // A RE-boot (a backend toggle) with a live demo: the demo state owns
+    // renderer-bound objects (the soft demo's surface + prepass commands)
+    // — re-make it on THIS backend. The FIRST boot already made demo 0
+    // above (before the renderer existed — its commands build below).
+    if (state !== null && bootedOnce) activateDemo('reboot')
     attachLayers()
     renderer.frame(frameCallback)
     if (seq !== bootSeq) return
@@ -877,6 +940,7 @@ async function boot(mode) {
     const backendName = renderer.backend === 'webgpu' ? 'WebGPU' : 'WebGL2'
     shell.setBadge(backendName, renderer.backend === 'webgpu' ? 'gpu' : 'gl')
     shell.log.info(`Backend: ${backendName}${renderer.backend === 'webgl2' && mode === 'auto' ? ' (fallback)' : ''}`)
+    bootedOnce = true
     if (atlasUpload?.done !== undefined) void atlasUpload.done.catch(() => { /* logged by the facade */ })
   } catch (error) {
     if (seq !== bootSeq) return
@@ -906,6 +970,6 @@ async function boot(mode) {
 /* ─── Go ───────────────────────────────────────────────────────────────── */
 
 shell.log.info(`WebGL2: ${typeof WebGL2RenderingContext !== 'undefined' ? 'present in the browser' : 'missing'}`)
-shell.log.info('19 demos on @rune/particles — the Task 122 surface (14 three.quarks examples) + the Task 124 rune originals (rocket, rainstorm, slash, vortex, fireflies)')
+shell.log.info('22 demos on @rune/particles — the Task 122 surface (14 three.quarks examples) + the rune originals (rocket, rainstorm, slash, vortex, fireflies, dust, grass, lightning)')
 switchDemo(0)
 void boot(shell.mode ?? 'auto')

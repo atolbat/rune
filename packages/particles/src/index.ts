@@ -65,6 +65,17 @@
  *     collide kill/onCollide — rain dies on the floor and SPLASHES
  *              (contact events, flushed after the integration walk).
  *
+ *   THE GAME-FX FAMILY (Task 126):
+ *     orient() — the emitter's ORIENTATION (their worldSpace:false — a
+ *              rigid attachment: the exhaust cone follows the object's
+ *              heading, not the world axes);
+ *     wrap — the ENDLESS VOLUME: positions wrap into a box around the at()
+ *              origin (camera-anchored rain/dust that reads as infinite);
+ *     attract.killRadius — the SINK: particles entering the sphere are
+ *              consumed (the funnel drain, with onRetire firing);
+ *     path — the POLYLINE spawner (a jagged bolt in ONE burst: lightning,
+ *              beams, fire walls).
+ *
  *   THE HOOKS (Task 122): onRetire (the final state of every dead
  *   particle — sub-emitters) and onSwap (external per-slot state — the
  *   trails follow it automatically).
@@ -93,5 +104,7 @@ export type { MeshGeometry, MeshOptions } from './meshes.ts'
 export { fillMeshes, MESH_STRIDE } from './meshes.ts'
 export type { NoiseField } from './noise.ts'
 export { simplex3, validateNoise } from './noise.ts'
-export type { ParticlesDesc, Particles, SoupView, SoupLayout, BurstDesc, RenderDesc, RenderBakeOverride } from './facade.ts'
+export type { GrassFieldDesc, GrassField } from './field.ts'
+export { createGrassField } from './field.ts'
+export type { ParticlesDesc, Particles, SoupView, SoupLayout, BurstDesc, RenderDesc, RenderBakeOverride, WrapDesc } from './facade.ts'
 export { createParticles } from './facade.ts'

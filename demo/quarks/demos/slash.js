@@ -96,10 +96,13 @@ export default {
     // ── the weapon ribbon: ONE tip particle, position WRITTEN per frame ──
     // (the fields escape hatch: the trail history follows the written
     // positions — the arc itself is the ribbon)
+    // NOTE size [1, 1]: the ribbon's head width = size · ramp · width —
+    // the first cut shipped size 0.1, a 1.3-CM-wide ribbon (invisible at
+    // the demo's camera distance — the "slash looks unfinished" report).
     const TIP_S = {
       shape: { kind: 'point', origin: [0, 0, 0] },
       velocity: { mode: 'fixed', dir: [0, 1, 0] },
-      speed: [0, 0], life: [1, 1], size: [0.1, 0.1],
+      speed: [0, 0], life: [1, 1], size: [1, 1],
       color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 7,
     }
     const ribbon = env.addLayer({
@@ -113,12 +116,16 @@ export default {
         ]),
         spawner: TIP_S,
         // points 30 at 60 Hz = 0.5 s of arc; length caps the ribbon 6.2
-        // units behind the head; the width tapers in the baker
-        render: { kind: 'trail', points: 30, step: 1 / 60, length: 6.2, width: 0.26 },
+        // units behind the head; width 0.3 (× size 1) = a 0.3-unit band
+        // that READS at this camera distance
+        render: { kind: 'trail', points: 30, step: 1 / 60, length: 6.2, width: 0.3 },
       }),
       material: env.materials.sprite,
       pipeline: env.pipelines.additive,
-      texture: () => env.glowTexture,
+      // THE STREAK (Task 126): a ribbon's uv runs u along the arc, v across
+      // its width — a radial GLOW fades to black at every edge (the arc
+      // read as a middle blob); the streak stays bright along u
+      texture: () => env.ribbonTexture,
     })
 
     // ── the impact: shock ring + sparks + dust (at the pillars) ──
@@ -191,7 +198,35 @@ export default {
       texture: () => env.cfxrTextures.smoke,
     })
 
-    const layers = [glints, ribbon, shock, sparks, dust]
+    // ── the arena embers: a slow ambient drift (the battle-ground's
+    //    breath) — also the always-alive beat between swings: the swing
+    //    cycle has quiet windups BY DESIGN (the windup emits nothing), and
+    //    a sampling gate must never land on a fully-dead pill ──
+    const EMBER_S = {
+      shape: { kind: 'disc', origin: [0, 0.6, 0], axis: [0, 1, 0], radius: [0.4, 3.4] },
+      velocity: { mode: 'radial' },
+      speed: [0.15, 0.5], life: [4.5, 8], size: [0.018, 0.045],
+      color: [[1, 0.62, 0.3, 0.55], [0.9, 0.4, 0.15, 0.3]], seed: 57,
+    }
+    const embers = env.addLayer({
+      id: 'sl-embers',
+      facade: env.createParticles({
+        capacity: 90, rate: 11, prewarm: 5,
+        ramp: env.createRamp([
+          { t: 0, size: 0.6, r: 1, g: 0.8, b: 0.5, a: 0 },
+          { t: 0.2, size: 1, r: 1, g: 0.7, b: 0.4, a: 1 },
+          { t: 1, size: 0.5, r: 0.9, g: 0.45, b: 0.2, a: 0 },
+        ]),
+        forces: { gravity: [0, 0.35, 0], drag: 0.7, noise: { strength: 0.6, scale: 0.25, speed: 0.08 } },
+        spawner: EMBER_S,
+        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.03, lengthFactor: 0.6 },
+      }),
+      material: env.materials.sprite,
+      pipeline: env.pipelines.additive,
+      texture: () => env.cfxrTextures.trait,
+    })
+
+    const layers = [glints, ribbon, shock, sparks, dust, embers]
     // open MID-SLASH (not at the windup): the demo is instantly alive —
     // a slow CI runner's live-particle gate never races the first swing
     let t = 0.58
@@ -267,9 +302,14 @@ export default {
         //    WRITE its position every frame (the fields escape hatch) ──
         if (st.phase === 'slash' && !tipFired) {
           tipFired = true
-          // the tip lives through the hit-stop so the arc trail LINGERS
-          // frozen — the signature frame of the impact
-          ribbon.facade.burst(1, { ...TIP_S, life: [ph.slash + 0.85, ph.slash + 0.85] })
+          // THE LINGER MATH: the trail history is a 0.5-s ROLLING window —
+          // a long-lived tip keeps RECORDING after the blade stops, and
+          // the static points eat the arc (the ribbon collapses to a dot
+          // at the pillar — the "looks unfinished" report). A short life
+          // (slash + 0.4) holds the arc FROZEN through the hit-stop, then
+          // the shrinking window + the fading ramp dissolve it into the
+          // impact — the classic fighting-game arc.
+          ribbon.facade.burst(1, { ...TIP_S, life: [ph.slash + 0.4, ph.slash + 0.4] })
         }
         if (st.phase !== 'slash' && st.phase !== 'windup') tipFired = false
         if (ribbon.facade.count > 0) {

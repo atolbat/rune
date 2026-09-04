@@ -3,24 +3,27 @@
 //
 //   · the DISC's spiral arms + twist — five trailing arms born in the
 //     annulus (the galaxy-maker kit);
-//   · tangential velocity + speedByRadius (Keplerian: power 0.8 — the
-//     inner rim VISIBLY outruns the outer) + a point ATTRACTOR — the
-//     matter spirals inward and is consumed by the core;
-//   · the core: a pulsing additive glow on a burst schedule;
-//   · periodic shockwave rings (HORIZONTAL billboards — flat on the
-//     ground, expanding + fading);
-//   · sparks raining from above, bent into the funnel by the same
-//     attractor; ground dust dragged in from the rim.
+//   · tangential velocity + speedByRadius (Keplerian: power 0.7 — the
+//     inner rim VISIBLY outruns the outer) + a point ATTRACTOR with
+//     killRadius (Task 126) — THE FUNNEL: the matter spirals inward,
+//     SINKS below the disc (a light gravity), and is CONSUMED at the core
+//     (it vanishes INSIDE the pulsing glow — never flies through);
+//   · the core: a pulsing additive glow ON the attractor point, fed by
+//     everything the sink swallows;
+//   · periodic shockwave rings (HORIZONTAL billboards at the funnel's
+//     mouth, expanding + fading);
+//   · sparks raining from above, bent into the funnel and CONSUMED at
+//     the core; ground dust dragged around the base.
 //
 // The palette: deep blue rim → cyan → white-hot core (the colorByRadius
 // mix, color[0] at the rim).
 export default {
   title: 'Vortex',
-  sub: 'rune original · spiral arms · Keplerian shear · attractor drain · shock rings',
+  sub: 'rune original · spiral arms · Keplerian shear · the funnel SINK · shock rings',
   camera: { yaw: 0.7, pitch: 0.42, dist: 10.5, orbit: 0.05, target: [0, 1.5, 0] },
 
   make(env) {
-    const CORE_Y = 1.8
+    const CORE_Y = 1.5 // the funnel's sink (the attractor + the core glow)
 
     // ── the scene: a dark plane ──
     env.addMesh({
@@ -33,18 +36,22 @@ export default {
 
     // the shared drain: a REAL funnel — the attractor's pull (~50/(r(r²+s²)))
     // is tuned against the tangential speeds so the orbits are mildly
-    // sub-circular: matter FALLS IN, it does not orbit forever
-    const DRAIN = { attract: { point: [0, CORE_Y, 0], strength: 50, softening: 1.6 } }
+    // sub-circular: matter FALLS IN, it does not orbit forever — and
+    // killRadius CONSUMES it inside the core glow (the sink: nothing
+    // flies through the attractor anymore).
+    const DRAIN = { attract: { point: [0, CORE_Y, 0], strength: 50, softening: 1.6, killRadius: 0.55 } }
 
     // ── the accretion disc: the spiral arms, orbiting, shearing, draining ──
-    // The drain is the SPEED CURVE (their SpeedOverLife): the orbital speed
-    // decays 1 → 0.3 over the life — a decaying orbit MUST spiral in (the
-    // viscosity story of a real accretion disc), on top of the sub-circular
-    // spawn speed. The Keplerian power 0.7 keeps the shear: the inner rim
-    // visibly outruns the outer, winding the arms tighter as they fall.
+    // The disc plane sits 0.55 ABOVE the sink; a light gravity sinks the
+    // matter as it spirals in — the arms POUR into the core, exactly the
+    // funnel silhouette. The drain is the SPEED CURVE (their SpeedOverLife):
+    // the orbital speed decays 1 → 0.3 over the life — a decaying orbit
+    // MUST spiral in (the viscosity story of a real accretion disc).
+    // The Keplerian power 0.7 keeps the shear: the inner rim visibly
+    // outruns the outer, winding the arms tighter as they fall.
     const DISC_S = {
       shape: {
-        kind: 'disc', origin: [0, CORE_Y, 0], axis: [0, 1, 0], radius: [1.3, 5.0],
+        kind: 'disc', origin: [0, CORE_Y + 0.55, 0], axis: [0, 1, 0], radius: [1.3, 5.0],
         arms: 5, armSpread: 0.42, twist: -3.2,
       },
       velocity: { mode: 'tangential' },
@@ -63,7 +70,7 @@ export default {
           { t: 0.75, size: 0.8, r: 1, g: 1, b: 1, a: 0.8 },
           { t: 1, size: 0.15, r: 1, g: 1, b: 1, a: 0 },
         ]),
-        forces: { ...DRAIN, drag: 0.05, speedCurve: env.createRamp([
+        forces: { ...DRAIN, gravity: [0, -0.5, 0], drag: 0.05, speedCurve: env.createRamp([
           { t: 0, size: 1, r: 1, g: 1, b: 1, a: 1 },
           { t: 0.5, size: 0.7, r: 1, g: 1, b: 1, a: 1 },
           { t: 1, size: 0.3, r: 1, g: 1, b: 1, a: 1 },
@@ -78,9 +85,9 @@ export default {
       texture: () => env.glowTexture,
     })
 
-    // ── the core: a pulsing glow on a schedule (two heartbeats per cycle) ──
+    // ── the core: a pulsing glow ON the sink (two heartbeats per cycle) ──
     const CORE_S = {
-      shape: { kind: 'point', origin: [0, 0, 0] },
+      shape: { kind: 'point', origin: [0, CORE_Y, 0] },
       velocity: { mode: 'fixed', dir: [0, 1, 0] },
       speed: [0, 0], life: [1.4, 1.4], size: [1.1, 1.1],
       color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 13,
@@ -105,9 +112,9 @@ export default {
       texture: () => env.glowTexture,
     })
 
-    // ── the shock rings: flat, expanding, on a schedule ──
+    // ── the shock rings: flat at the funnel's mouth, expanding, on a schedule ──
     const RING_S = {
-      shape: { kind: 'point', origin: [0, 0, 0] },
+      shape: { kind: 'point', origin: [0, CORE_Y, 0] },
       velocity: { mode: 'fixed', dir: [0, 1, 0] },
       speed: [0.4, 0.7], life: [0.8, 1.0], size: [0.5, 0.7],
       color: [[0.7, 0.9, 1, 1], [0.5, 0.8, 1, 1]], seed: 19,
@@ -130,7 +137,8 @@ export default {
       texture: () => env.atlasTexture,
     })
 
-    // ── the infalling sparks: rain from above, bent into the funnel ──
+    // ── the infalling sparks: rain from above, bent into the funnel,
+    //    CONSUMED at the core (they vanish INTO the glow, not through it) ──
     const FALL_S = {
       shape: { kind: 'sphere', origin: [0, 5.6, 0], radius: [1.6, 2.6] },
       velocity: { mode: 'radial' },
@@ -155,7 +163,7 @@ export default {
       texture: () => env.cfxrTextures.trait,
     })
 
-    // ── the ground dust: dragged in from the rim, flat puffs ──
+    // ── the ground dust: dragged around the base, flat puffs ──
     const DUST_S = {
       shape: {
         kind: 'disc', origin: [0, 0.1, 0], axis: [0, 1, 0], radius: [4.6, 6.2],

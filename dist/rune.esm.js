@@ -7894,8 +7894,13 @@ function scanAttributes2(wgsl) {
 }
 function scanTextures(wgsl) {
   const found = [];
-  for (const match of wgsl.matchAll(/@group\(1\)[^\n]*var\s+(\w+)\s*:\s*(texture_2d<f32>|sampler)/g)) {
-    found.push({ name: match[1], kind: match[2] === "sampler" ? "sampler" : "texture_2d" });
+  for (const match of wgsl.matchAll(/@group\(1\)[^\n;]*var\s+(\w+)\s*:\s*(texture_2d<f32>|sampler)/g)) {
+    const bMatch = /@binding\((\d+)\)/.exec(match[0]);
+    found.push({
+      name: match[1],
+      kind: match[2] === "sampler" ? "sampler" : "texture_2d",
+      binding: bMatch !== null ? Number(bMatch[1]) : -1
+    });
   }
   return found;
 }
@@ -8652,6 +8657,7 @@ async function createRealGPU(canvas, onGpuError) {
       wgsl,
       attrs,
       hasTextures,
+      textureBindings: hasTextures ? group1TextureBindings(wgsl) : [],
       textureCount: hasTextures ? countGroup1TextureBindings(wgsl) : 0,
       desc: desc ?? {},
       variants: new Map
@@ -8680,9 +8686,9 @@ async function createRealGPU(canvas, onGpuError) {
     const layouts = [group0];
     if (record.hasTextures) {
       const textureEntries = [];
-      for (let slot = 1;slot <= Math.max(1, record.textureCount); slot++) {
+      for (const binding of record.textureBindings.length > 0 ? record.textureBindings : [1]) {
         textureEntries.push({
-          binding: slot,
+          binding,
           visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: variant }
         });
@@ -8869,7 +8875,8 @@ async function createRealGPU(canvas, onGpuError) {
       return;
     }
     const record = pipelineOfTexture();
-    const count = Math.max(1, record?.textureCount ?? 1);
+    const bindings = record !== undefined && record.textureBindings.length > 0 ? record.textureBindings : [1];
+    const count = bindings.length;
     const memo = flushMemoBox;
     if (memo !== null && memo.pipelineId === currentPipelineId && memo.count === count && memo.ids.length === pendingTextureIds.length) {
       let same = true;
@@ -8895,20 +8902,20 @@ async function createRealGPU(canvas, onGpuError) {
       }
       const variant = first.filterable ? "float" : "unfilterable-float";
       const entries = [{ binding: 0, resource: first.sampler }];
-      for (let slot = 1;slot <= count; slot++) {
-        const id = pendingTextureIds[Math.min(slot - 1, pendingTextureIds.length - 1)];
+      for (let slot = 0;slot < count; slot++) {
+        const id = pendingTextureIds[Math.min(slot, pendingTextureIds.length - 1)];
         const resolved = resolveTexture(id);
         if (resolved === undefined) {
           pendingTextureIds.length = 0;
           return;
         }
-        entries.push({ binding: slot, resource: resolved.view });
+        entries.push({ binding: bindings[slot], resource: resolved.view });
       }
       const layout = device.createBindGroupLayout({
         entries: [
           { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: { type: variant === "float" ? "filtering" : "non-filtering" } },
-          ...Array.from({ length: count }, (_, at) => ({
-            binding: at + 1,
+          ...bindings.map((binding) => ({
+            binding,
             visibility: GPUShaderStage.FRAGMENT,
             texture: { sampleType: variant }
           }))
@@ -9245,6 +9252,20 @@ function countGroup1TextureBindings(wgsl) {
   for (const _match of wgsl.matchAll(/@group\(1\)[^\n;]*var\s+\w+\s*:\s*texture_2d/g))
     count++;
   return Math.max(1, count);
+}
+function group1TextureBindings(wgsl) {
+  const found = [];
+  for (const match of wgsl.matchAll(/@group\(1\)[^\n;]*var\s+\w+\s*:\s*texture_2d/g)) {
+    const bMatch = /@binding\((\d+)\)/.exec(match[0]);
+    if (bMatch === null)
+      continue;
+    const binding = Number(bMatch[1]);
+    if (Number.isInteger(binding) && binding >= 0 && !found.includes(binding))
+      found.push(binding);
+  }
+  if (found.length === 0)
+    found.push(1);
+  return found;
 }
 // packages/webgpu/src/capsProbe.ts
 function probeGPUCaps(probe) {

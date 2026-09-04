@@ -468,7 +468,7 @@ try {
     !mobileParticles.bodyScrolls
   await page.setViewportSize({ width: 960, height: 720 })
 
-  // ─── quarks: the 19-demo carousel (Task 122 + the Task 124 originals) ──
+  // ─── quarks: the 22-demo carousel (Task 122 + the rune originals) ──
   await page.goto(`http://localhost:${port}/demo/quarks/`, { waitUntil: 'networkidle' })
   await page.waitForFunction(
     () => document.querySelector('.pt-pill')?.textContent.includes('Muzzle'),
@@ -484,11 +484,11 @@ try {
   const quarksPill1 = await page.textContent('.pt-pill')
   console.log(`[smoke] quarks first demo: ${quarksPill1} — ${quarksFirst ? 'alive' : 'STATIC'}`)
 
-  // cycle ALL 19 demos via the ▶ arrow; each goes live (particles > 0)
+  // cycle ALL 22 demos via the ▶ arrow; each goes live (particles > 0)
   await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
   let quarksAllLive = true
   const seenDemos = []
-  for (let i = 1; i < 19; i++) {
+  for (let i = 1; i < 22; i++) {
     await page.click('.pt-arrow:last-child')
     await page.waitForFunction(
       () => / · [1-9][\d,]* particles · [1-9][\d,]* verts/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
@@ -501,7 +501,7 @@ try {
     if (!live) quarksAllLive = false
   }
   console.log(`[smoke] quarks cycle: ${seenDemos.join(' → ')}`)
-  console.log(`[smoke] quarks all 19 live: ${quarksAllLive ? 'yes' : 'SOME STATIC'}`)
+  console.log(`[smoke] quarks all 22 live: ${quarksAllLive ? 'yes' : 'SOME STATIC'}`)
   // the labels overlay (the emitter-shapes demo) projects into the viewport
   await page.evaluate(() => {
     const rows = [...document.querySelectorAll('.pt-row')]

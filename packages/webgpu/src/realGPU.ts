@@ -409,9 +409,15 @@ export async function createRealGPU(
       wgsl,
       attrs,
       hasTextures,
-      // Multi-textures: layout group 1 is built by the number of texture_2d
-      // declarations in WGSL (1 — the old single-texture contract, 2+ —
-      // base+normal map etc.)
+      // Multi-textures: layout group 1 is built from the DECLARED @binding
+      // numbers of the texture_2d declarations in WGSL, in declaration
+      // order (Task 126: the materials reserve tex@1, nrm@2, mat@3, mr@4,
+      // depth@5 — a sequential 1..N layout only matches prefix sets and
+      // broke SOFT_PARTICLES, whose set is {1, 5}: "Binding doesn't exist in
+      // [BindGroupLayout]" → an invalid pipeline → the error storm pause).
+      textureBindings: hasTextures ? group1TextureBindings(wgsl) : [],
+      // The count (kept for the memo keys / diagnostics): the number of
+      // texture_2d declarations in group 1.
       textureCount: hasTextures ? countGroup1TextureBindings(wgsl) : 0,
       desc: desc ?? {},
       variants: new Map<TextureSampleVariant, GPURenderPipeline>(),
@@ -429,7 +435,7 @@ export async function createRealGPU(
    *  rgba32float without feature 'float32-filterable'). WGSL must use
    *  textureSampleLevel (textureSample requires a filterable texture). */
   function buildPipeline(
-    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; textureCount: number; desc: GpuPipelineDesc },
+    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; textureBindings: readonly number[]; textureCount: number; desc: GpuPipelineDesc },
     variant: TextureSampleVariant,
   ): GPURenderPipeline {
     const wgsl = record.wgsl
@@ -454,13 +460,15 @@ export async function createRealGPU(
     })
     const layouts: GPUBindGroupLayout[] = [group0]
     if (record.hasTextures) {
-      // Multi-textures: bindings 1..N by the number of texture_2d in WGSL
-      // (N=1 — the previous single-texture layout, backward compatible).
-      // All textures of the command share one sampler (binding 0).
+      // Task 126: the texture entries sit at their DECLARED @binding
+      // numbers (declaration order), NOT sequentially 1..N — the materials
+      // reserve tex@1, nrm@2, mat@3, mr@4, depth@5, and only prefix sets
+      // coincide with a sequential layout. All textures of the command
+      // share one sampler (binding 0).
       const textureEntries: { binding: number; visibility: number; texture: { sampleType: TextureSampleVariant } }[] = []
-      for (let slot = 1; slot <= Math.max(1, record.textureCount); slot++) {
+      for (const binding of record.textureBindings.length > 0 ? record.textureBindings : [1]) {
         textureEntries.push({
-          binding: slot,
+          binding,
           visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: variant },
         })
@@ -570,7 +578,7 @@ export async function createRealGPU(
 
   /** Set the pipeline variant (created lazily on first use). */
   function setPipelineVariant(
-    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; textureCount: number; desc: GpuPipelineDesc; variants: Map<TextureSampleVariant, GPURenderPipeline> },
+    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; textureBindings: readonly number[]; textureCount: number; desc: GpuPipelineDesc; variants: Map<TextureSampleVariant, GPURenderPipeline> },
     variant: TextureSampleVariant,
   ): void {
     let pipeline = record.variants.get(variant)
@@ -711,12 +719,12 @@ export async function createRealGPU(
     return resolveScratch as { view: GPUTextureView; sampler: GPUSampler; filterable: boolean }
   }
 
-  /** Multi-texture bind group: sampler@0 + tex@1..N from all accumulated
-   *  textures (missing slots — repeat of the last one). Cached by
-   *  composition (id string + variant) — a set change = a new group.
-   *  Hot path: a per-draw memo (pipelineId + count + ids, compared
-   *  numerically) skips the string key and the Map lookup when the
-   *  command repeats the same texture set — the common case. */
+  /** Multi-texture bind group: sampler@0 + each texture at its DECLARED
+   *  @binding (the pipeline record's declaration order; missing slots —
+   *  repeat of the last one). Cached by composition (id string + variant)
+   *  — a set change = a new group. Hot path: a per-draw memo (pipelineId +
+   *  ids, compared numerically) skips the string key and the Map lookup
+   *  when the command repeats the same texture set — the common case. */
   let flushMemoBox: { pipelineId: number; count: number; ids: number[]; group: GPUBindGroup } | null = null
   function flushTextureBindGroup(): void {
     if (pendingTextureIds.length === 0) return
@@ -725,7 +733,12 @@ export async function createRealGPU(
       return
     }
     const record = pipelineOfTexture()
-    const count = Math.max(1, record?.textureCount ?? 1)
+    // Task 126: the DECLARED bindings (declaration order) — the flush maps
+    // the command's texture list (the reflection's declaration order) onto
+    // the same slots the pipeline layout was built from. The fallback [1]
+    // is the legacy single-texture contract.
+    const bindings = record !== undefined && record.textureBindings.length > 0 ? record.textureBindings : [1]
+    const count = bindings.length
     // Memo fast path: the same texture set on the same pipeline class —
     // bind the remembered group directly (no key string, no Map.get).
     const memo = flushMemoBox
@@ -751,20 +764,20 @@ export async function createRealGPU(
       }
       const variant = first.filterable ? 'float' : 'unfilterable-float'
       const entries: GPUBindGroupEntry[] = [{ binding: 0, resource: first.sampler }]
-      for (let slot = 1; slot <= count; slot++) {
-        const id = pendingTextureIds[Math.min(slot - 1, pendingTextureIds.length - 1)]
+      for (let slot = 0; slot < count; slot++) {
+        const id = pendingTextureIds[Math.min(slot, pendingTextureIds.length - 1)]
         const resolved = resolveTexture(id)
         if (resolved === undefined) {
           pendingTextureIds.length = 0
           return
         }
-        entries.push({ binding: slot, resource: resolved.view })
+        entries.push({ binding: bindings[slot], resource: resolved.view })
       }
       const layout = device.createBindGroupLayout({
         entries: [
           { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: { type: variant === 'float' ? 'filtering' : 'non-filtering' } },
-          ...Array.from({ length: count }, (_, at): GPUBindGroupLayoutEntry => ({
-            binding: at + 1,
+          ...bindings.map((binding): GPUBindGroupLayoutEntry => ({
+            binding,
             visibility: GPUShaderStage.FRAGMENT,
             texture: { sampleType: variant },
           })),
@@ -1169,6 +1182,10 @@ interface PipelineRecord {
   readonly hasTextures: boolean
   /** Multi-textures: the number of texture_2d declarations in group 1 of WGSL. */
   readonly textureCount: number
+  /** Task 126: the DECLARED @binding numbers of the group-1 texture_2d
+   *  resources, in declaration order — the layout (and the bind group)
+   *  mirror the shader's own numbering instead of a sequential 1..N. */
+  readonly textureBindings: readonly number[]
   readonly desc: GpuPipelineDesc
   readonly variants: Map<TextureSampleVariant, GPURenderPipeline>
 }
@@ -1180,4 +1197,23 @@ export function countGroup1TextureBindings(wgsl: string): number {
   let count = 0
   for (const _match of wgsl.matchAll(/@group\(1\)[^\n;]*var\s+\w+\s*:\s*texture_2d/g)) count++
   return Math.max(1, count)
+}
+
+/** Task 126: the DECLARED group-1 texture_2d binding numbers in WGSL, in
+ *  declaration order (deduplicated). The layout follows the shader's own
+ *  numbering: a material reserving tex@1 + depth@5 gets a {sampler@0,
+ *  tex@1, depth@5} layout, NOT {sampler@0, tex@1, tex@2} — the sequential
+ *  layout fails entry-point validation ("Binding doesn't exist in
+ *  [BindGroupLayout]") whenever the shader's binding set is not a prefix
+ *  of 1..N (SOFT_PARTICLES: {1, 5}). */
+export function group1TextureBindings(wgsl: string): number[] {
+  const found: number[] = []
+  for (const match of wgsl.matchAll(/@group\(1\)[^\n;]*var\s+\w+\s*:\s*texture_2d/g)) {
+    const bMatch = /@binding\((\d+)\)/.exec(match[0])
+    if (bMatch === null) continue
+    const binding = Number(bMatch[1])
+    if (Number.isInteger(binding) && binding >= 0 && !found.includes(binding)) found.push(binding)
+  }
+  if (found.length === 0) found.push(1) // the legacy single-texture contract
+  return found
 }

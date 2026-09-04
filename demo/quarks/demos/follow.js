@@ -1,9 +1,11 @@
 // follow.js — three.quarks' FollowObjectDemo: a particle emitter ATTACHED
 // to a moving object — a green box flying a wide circle, trailing sparks
-// and smoke from its tail (their worldSpace: false — the emitter follows
-// the object transform). Ours: facade.at() — the live emitter origin,
-// updated every frame; the camera target FOLLOWS the box (their camera
-// rides the circle with it).
+// and smoke from its tail. Ours: facade.at() + facade.orient() (Task 126)
+// — the live emitter origin AND its ORIENTATION: the exhaust cones are
+// RIGIDLY ATTACHED to the box's local frame (their worldSpace:false —
+// the local -X is the tail), so the jet always exits the tail wherever
+// the box heads and banks — the camera target FOLLOWS the box (their
+// camera rides the circle with it).
 export default {
   title: 'Follow Object',
   sub: 'emitter attached to a flying box · camera follows',
@@ -102,12 +104,19 @@ export default {
         // (gl_Position consumes P·V·M; u_model alone only feeds the normals)
         ctx.record(box.command, { mvp: ctx.modelMvp(boxModel), model: boxModel, camPos: ctx.camEye })
 
-        // the emitters ride the box: at() translates every spawn cloud to
-        // its tail (a point ~0.9 behind the heading)
+        // the emitters ride the box: at() puts the origin at the tail (a
+        // point ~0.9 behind the heading) and orient() rotates the spawn
+        // cones into the BOX's frame (Task 126 — the rigid attachment):
+        // local -X is the tail direction, so the jet follows the box's
+        // heading AND its banking roll — not the world axes (the old
+        // world-fixed cone read as "the emitter counter-rotates against
+        // the box" on the far side of the circle).
         const tailX = x - Math.cos(heading) * 0.9
         const tailZ = z - Math.sin(heading) * 0.9
         sparks.facade.at(tailX, y, tailZ)
         smoke.facade.at(tailX, y, tailZ)
+        sparks.facade.orient(boxModel)
+        smoke.facade.orient(boxModel)
 
         // the camera TARGET follows the box (their camera rides the circle)
         ctx.camTarget[0] = x
