@@ -36,7 +36,7 @@ const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
 const errors = []
 page.on('pageerror', (e) => errors.push(String(e)))
 await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
-await page.waitForFunction(() => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 30000 })
+await page.waitForFunction(() => /Sentry Turret · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 30000 })
 await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
 
 async function gotoDemo(title) {

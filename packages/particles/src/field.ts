@@ -41,7 +41,9 @@ import { hash01 } from './spawn.ts'
 
 /** The field description. */
 export interface GrassFieldDesc {
-  /** The blade count (the instance count of ONE draw call). */
+  /** The blade count (the instance count of ONE draw call). With a `mask`
+   *  this is the CEILING: the bake accepts candidates until `count` blades
+   *  pass the mask's rejection (up to 5× `count` tries). */
   readonly count: number
   /** The disc radius the blades scatter over (uniformly in area). */
   readonly radius: number
@@ -55,6 +57,15 @@ export interface GrassFieldDesc {
   readonly color?: readonly [readonly number[], readonly number[]]
   /** The RNG stream seed. */
   readonly seed?: number
+  /** Task 128 — THE DENSITY MASK: (x, z) → [0, 1]. 0 = no grass grows
+   *  here, 1 = full density. A candidate blade at (x, z) survives with
+   *  probability w (rejection sampling — the blade SPACING widens in
+   *  sparse patches, which is what density reads as), and its HEIGHT is
+   *  scaled by (0.55 + 0.45·w) — dense patches are also lusher. Supply
+   *  ANY (x, z) source: a procedural noise field, a texture sample, a
+   *  hand-painted map. Deterministic (the accept hash is a pure function
+   *  of the seed and the try index). */
+  readonly mask?: (x: number, z: number) => number
   /** The far-fade distance: blades start dissolving at fade·(1 − fadeBand)
    *  and are fully gone at fade (the stochastic density LOD). Default
    *  radius·0.9. */
@@ -106,6 +117,10 @@ export function createGrassField(desc: GrassFieldDesc): GrassField {
   if (!Number.isFinite(wMin + wMax) || wMin <= 0 || wMax < wMin) {
     throw new Error(`rune/particles: grass width must be [min > 0 <= max] (got [${wMin}, ${wMax}])`)
   }
+  const mask = desc.mask
+  if (mask !== undefined && typeof mask !== 'function') {
+    throw new Error(`rune/particles: grass mask must be a function (x, z) → [0, 1] (got ${typeof mask})`)
+  }
   const groundY = desc.groundY ?? 0
   const c0 = desc.color?.[0] ?? [0.16, 0.34, 0.1]
   const c1 = desc.color?.[1] ?? [0.42, 0.55, 0.18]
@@ -119,28 +134,52 @@ export function createGrassField(desc: GrassFieldDesc): GrassField {
   }
   const seed = (desc.seed ?? 1) | 0
 
-  const pos = new Float32Array(count * 3)
-  const par = new Float32Array(count * 4)
-  const tint = new Float32Array(count * 4)
-  for (let i = 0; i < count; i++) {
+  // Task 128 — the bake with the DENSITY MASK: candidate blades are drawn
+  // uniformly over the disc and REJECTED with probability (1 − w) at their
+  // (x, z); the surviving blades fill the buffers (bounded by 5× count
+  // tries — a brutally sparse mask still terminates with a partial field).
+  // The height and brightness scale with w — dense patches are lusher.
+  const cap = Math.min(count, 2_000_000)
+  const pos = new Float32Array(cap * 3)
+  const par = new Float32Array(cap * 4)
+  const tint = new Float32Array(cap * 4)
+  let n = 0
+  let tries = 0
+  const maxTries = cap * 5
+  while (n < cap && tries < maxTries) {
     // The uniform-in-area disc: r = R·√u (the sqrt mapping).
-    const rr = radius * Math.sqrt(hash01(seed, i, 21))
-    const ang = 6.283185307179586 * hash01(seed, i, 22)
-    pos[i * 3] = Math.cos(ang) * rr
-    pos[i * 3 + 1] = groundY
-    pos[i * 3 + 2] = Math.sin(ang) * rr
-    par[i * 4] = hMin + (hMax - hMin) * hash01(seed, i, 23)
-    par[i * 4 + 1] = 6.283185307179586 * hash01(seed, i, 24) // the lean azimuth
-    par[i * 4 + 2] = hash01(seed, i, 25) // the flutter phase
-    par[i * 4 + 3] = wMin + (wMax - wMin) * hash01(seed, i, 26)
-    const mix = hash01(seed, i, 27)
-    tint[i * 4] = c0[0] + (c1[0] - c0[0]) * mix
-    tint[i * 4 + 1] = c0[1] + (c1[1] - c0[1]) * mix
-    tint[i * 4 + 2] = c0[2] + (c1[2] - c0[2]) * mix
-    tint[i * 4 + 3] = 0.8 + 0.4 * hash01(seed, i, 28)
+    const rr = radius * Math.sqrt(hash01(seed, tries, 21))
+    const ang = 6.283185307179586 * hash01(seed, tries, 22)
+    const x = Math.cos(ang) * rr
+    const z = Math.sin(ang) * rr
+    let w = 1
+    if (mask !== undefined) {
+      w = mask(x, z)
+      if (!Number.isFinite(w)) w = 1
+      if (w < 0) w = 0
+      if (w > 1) w = 1
+      if (w < 1 && hash01(seed, tries, 41) >= w) {
+        tries++
+        continue // rejected — this spot grows nothing
+      }
+    }
+    pos[n * 3] = x
+    pos[n * 3 + 1] = groundY
+    pos[n * 3 + 2] = z
+    par[n * 4] = (hMin + (hMax - hMin) * hash01(seed, tries, 23)) * (0.55 + 0.45 * w)
+    par[n * 4 + 1] = 6.283185307179586 * hash01(seed, tries, 24) // the lean azimuth
+    par[n * 4 + 2] = hash01(seed, tries, 25) // the flutter phase
+    par[n * 4 + 3] = wMin + (wMax - wMin) * hash01(seed, tries, 26)
+    const mix = hash01(seed, tries, 27)
+    tint[n * 4] = c0[0] + (c1[0] - c0[0]) * mix
+    tint[n * 4 + 1] = c0[1] + (c1[1] - c0[1]) * mix
+    tint[n * 4 + 2] = c0[2] + (c1[2] - c0[2]) * mix
+    tint[n * 4 + 3] = (0.8 + 0.4 * hash01(seed, tries, 28)) * (0.75 + 0.35 * w)
+    n++
+    tries++
   }
 
-  return { pos, par, tint, count, fade, glsl: glslOf(fade, fadeBand), wgsl: wgslOf(fade, fadeBand) }
+  return { pos, par, tint, count: n, fade, glsl: glslOf(fade, fadeBand), wgsl: wgslOf(fade, fadeBand) }
 }
 
 /** The GLSL pair. `fade` is baked into the source (a compile-time constant
@@ -169,18 +208,29 @@ void main() {
   float t = cu.y; // 0 at the base, 1 at the tip
   float h = i_par.x, lean = i_par.y, phase = i_par.z, width = i_par.w;
 
-  // The gust field: two TRAVELING waves across the field (the wind reads
-  // as waves crossing, not a uniform wiggle) + the per-blade flutter.
-  float wave = sin(dot(i_pos.xz, vec2(0.35, 0.22)) - u_time * 1.7)
-             + 0.55 * sin(dot(i_pos.xz, vec2(-0.21, 0.4)) + u_time * 1.1);
+  // THE GUST FIELD (Task 128 — the "wind as WAVES" upgrade): the wind's
+  // bend DIRECTION now SWINGS with a traveling wave (the gust front
+  // visibly rolls across the field — not just the amplitude pulsing with
+  // every blade leaning the same way). Two waves with SHORT wavelengths
+  // (~9.7 and ~11 units — 5+ crests visible at once over a 60-unit field)
+  // crossing at an angle, plus a swing term that steers the bend around
+  // the wind axis, plus the per-blade flutter.
+  float waveA = sin(dot(i_pos.xz, vec2(0.63, 0.44)) - u_time * 2.1);
+  float waveB = sin(dot(i_pos.xz, vec2(-0.42, 0.55)) + u_time * 1.4);
+  float gust = 0.5 + 0.5 * (waveA + 0.6 * waveB) / 1.6; // 0..1 envelope
   float flutter = sin(u_time * (2.2 + phase * 1.5) + phase * 6.28318);
-  float bendK = u_wind.z * (0.55 + 0.45 * wave) + u_wind.w * flutter;
+  // the swing: the bend direction wobbles ±~20° around the wind axis,
+  // phase-shifted in space (the wave reads as a rolling front)
+  float swing = 0.36 * sin(dot(i_pos.xz, vec2(0.5, -0.33)) - u_time * 1.5);
+  vec2 windDir = normalize(u_wind.xy + vec2(1e-4, 0.0));
+  vec2 bendDir = normalize(windDir + vec2(-windDir.y, windDir.x) * swing);
+  float bendK = u_wind.z * (0.35 + 0.65 * gust) + u_wind.w * flutter;
 
   // The static lean (a fixed per-blade tilt) and the wind bend, both
   // growing with t^2 (a blade bends at the top, not the base).
   float b = t * t;
   vec2 leanDir = vec2(cos(lean), sin(lean)) * (0.35 * b);
-  vec2 windOff = u_wind.xy * (bendK * 0.45 * b);
+  vec2 windOff = bendDir * (bendK * 0.5 * b);
 
   // Cylindrical billboard: face the camera around world Y, anchored.
   vec3 toCam = u_camPos - i_pos;
@@ -253,14 +303,20 @@ fn vsMain(@builtin(vertex_index) vi : u32,
   let phase = i_par.z;
   let width = i_par.w;
 
-  let wave = sin(dot(i_pos.xz, vec2<f32>(0.35, 0.22)) - params.u_time * 1.7)
-           + 0.55 * sin(dot(i_pos.xz, vec2<f32>(-0.21, 0.4)) + params.u_time * 1.1);
+  // THE GUST FIELD — the WGSL twin of the GLSL wave/swing upgrade (the
+  // bend direction rolls with the traveling fronts, ~5 crests at once).
+  let waveA = sin(dot(i_pos.xz, vec2<f32>(0.63, 0.44)) - params.u_time * 2.1);
+  let waveB = sin(dot(i_pos.xz, vec2<f32>(-0.42, 0.55)) + params.u_time * 1.4);
+  let gust = 0.5 + 0.5 * (waveA + 0.6 * waveB) / 1.6;
   let flutter = sin(params.u_time * (2.2 + phase * 1.5) + phase * 6.28318);
-  let bendK = params.u_wind.z * (0.55 + 0.45 * wave) + params.u_wind.w * flutter;
+  let swing = 0.36 * sin(dot(i_pos.xz, vec2<f32>(0.5, -0.33)) - params.u_time * 1.5);
+  let windDir = normalize(params.u_wind.xy + vec2<f32>(1e-4, 0.0));
+  let bendDir = normalize(windDir + vec2<f32>(-windDir.y, windDir.x) * swing);
+  let bendK = params.u_wind.z * (0.35 + 0.65 * gust) + params.u_wind.w * flutter;
 
   let b = t * t;
   let leanDir = vec2<f32>(cos(lean), sin(lean)) * (0.35 * b);
-  let windOff = params.u_wind.xy * (bendK * 0.45 * b);
+  let windOff = bendDir * (bendK * 0.5 * b);
 
   let toCam = params.u_camPos.xyz - i_pos;
   var right = vec3<f32>(-toCam.z, 0.0, toCam.x);

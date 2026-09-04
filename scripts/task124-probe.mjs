@@ -74,7 +74,7 @@ const errors = []
 page.on('pageerror', (e) => errors.push(String(e)))
 page.on('console', (m) => { if (m.type() === 'error') console.log('  [console.error]', m.text().slice(0, 160)) })
 await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
-await page.waitForFunction(() => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 30000 })
+await page.waitForFunction(() => /Sentry Turret · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 30000 })
 await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
 
 /** click the next arrow until the pill shows the target title. */
@@ -280,9 +280,13 @@ for (let d = 0; d < NEW_DEMOS.length; d++) {
   if (title === 'Grass Field') {
     // the seeds' density is wall-clock-dependent on slow rasterizers —
     // the FIELD is the demo (an instanced raw layer, not a facade); its
-    // presence is the bright fraction + the adaptive-density log line
+    // presence is the bright fraction + the adaptive-density log line.
+    // Task 128 recalibrated 3% → 1.5%: the DENSITY MASK carves two dirt
+    // paths, a clearing at the origin and noise patchiness — the view
+    // legitimately carries ~40% less blade coverage than the old uniform
+    // carpet (VLM-verified: patches + clearings, thin blades, smooth fade)
     if (!ever('gr-seeds')) { ok = false; why.push('seeds never live') }
-    if (frac < 0.03) { ok = false; why.push(`field not drawn (bright ${(frac * 100).toFixed(1)}%)`) }
+    if (frac < 0.015) { ok = false; why.push(`field not drawn (bright ${(frac * 100).toFixed(1)}%)`) }
     const adapted = await page.evaluate(() =>
       (document.querySelector('#log-list')?.textContent ?? '').includes('adaptive density'))
     const seedsPeak = Math.max(...seen.map(s => find(s, 'gr-seeds')?.count ?? 0))

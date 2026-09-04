@@ -159,7 +159,7 @@ try {
   await page.goto(`${BASE}/demo/vfx/`, { waitUntil: 'networkidle' })
   await page.waitForFunction(() => document.querySelector('#backend')?.textContent !== '…', null, { timeout: 20_000 })
   await page.waitForFunction(
-    () => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+    () => /Sentry Turret · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
     null,
     { timeout: 30_000 },
   )

@@ -757,18 +757,22 @@ describe('pbrEnv (Task 18)', () => {
   })
 })
 
-describe('Task 127: OUTPUT_DITHER', () => {
-  it('folds a ±0.5/255 interleaved-gradient noise into BOTH final writes', () => {
+describe('Task 127/128: OUTPUT_DITHER (rgb noise + the Bayer alpha)', () => {
+  it('folds the ±0.5/255 rgb noise AND the 4×4 Bayer alpha dither into the final writes', () => {
     resetMaterials()
     const material = materialOf({ features: TEXTURE | VERTEX_COLOR | OUTPUT_DITHER })
     // the GLSL: the noise from gl_FragCoord, folded into the final write
     expect(material.glsl.fragment).toContain('float ditherN = (fract(52.9829189')
     expect(material.glsl.fragment).toContain('gl_FragCoord.xy')
-    expect(material.glsl.fragment).toMatch(/o_color = vec4\(base\.rgb \+ ditherN, base\.a\);/)
-    // the WGSL twin: @builtin(position) in the fragment input + the noise
+    // Task 128 — the two-sided write: rgb + ditherN, alpha + the ordered
+    // ditherA (the transparency-staircase fix for translucent stacks)
+    expect(material.glsl.fragment).toMatch(/o_color = vec4\(base\.rgb \+ ditherN, clamp\(base\.a \+ ditherA, 0\.0, 1\.0\)\);/)
+    expect(material.glsl.fragment).toContain('float ditherA = (4.0 * m2lo + m2hi - 7.5)')
+    // the WGSL twin: @builtin(position) in the fragment input + both noises
     expect(material.wgsl).toContain('let ditherN = (fract(52.9829189')
     expect(material.wgsl).toContain('frag.pos.xy')
-    expect(material.wgsl).toMatch(/return vec4<f32>\(base\.rgb \+ ditherN, base\.a\);/)
+    expect(material.wgsl).toMatch(/return vec4<f32>\(base\.rgb \+ ditherN, clamp\(base\.a \+ ditherA, 0\.0, 1\.0\)\);/)
+    expect(material.wgsl).toContain('let ditherA = (4.0 * m2lo + m2hi - 7.5)')
     // the WGSL fragment signature gained FSIn with the position builtin
     expect(material.wgsl).toMatch(/fn fsMain\(frag : FSIn\)/)
     expect(material.wgsl).toContain('@builtin(position) pos : vec4<f32>')

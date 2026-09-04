@@ -69,7 +69,9 @@ export default {
         },
         render: { kind: 'billboard', tiles: env.atlasTiles, spin: 0.8 },
       }),
-      material: env.materials.sprite,
+      // the dithered translucent material — the smoke's soft alpha fade
+      // stays smooth (no 8-bit staircase)
+      material: env.materials.haze,
       pipeline: env.pipelines.alpha,
     })
 
@@ -89,21 +91,21 @@ export default {
 
         // the box's model: Ry(-heading)·Rx(roll), COLUMN-MAJOR (gl-matrix):
         // col0 = the image of local +X = the TANGENT (the nose leads the
-        // motion); the roll banks it into the circle. THE SIGN BUG this
-        // fixed: col0 used to be (cy, 0, -sy) — the tangent mirrored in Z —
-        // which made the whole matrix a REFLECTION (det = -1): the mesh's
-        // nose pointed opposite the flight while the exhaust cone (local
-        // -X through orient()) exited the OPPOSITE side — the emitter
-        // visibly counter-rotated against the cube, and cull:'back' drew
-        // the box inside-out.
+        // motion); the roll banks it into the circle.
+        // THE SHEAR BUG this fixed (the "hypercube" report): col1/col2 carried
+        // +sy·sr / +sy·cr where Ry(-h)·Rx(r) needs −sy·sr / −sy·cr — the
+        // mismatched signs made the matrix NON-ORTHOGONAL (det = cos 2·h:
+        // the cube sheared, flipped inside-out every quarter turn — it read
+        // as a 4-D hypercube rotation). With the signs right: det ≡ 1, the
+        // columns stay orthonormal, the cube flies like a rigid body.
         const heading = t + Math.PI / 2 // the tangent direction
         const cy = Math.cos(heading), sy = Math.sin(heading)
         const roll = -0.5 // banking into the circle
         const cr = Math.cos(roll), sr = Math.sin(roll)
         boxModel.fill(0)
         boxModel[0] = cy; boxModel[2] = sy
-        boxModel[4] = sy * sr; boxModel[5] = cr; boxModel[6] = cy * sr
-        boxModel[8] = sy * cr; boxModel[9] = -sr; boxModel[10] = cy * cr
+        boxModel[4] = -sy * sr; boxModel[5] = cr; boxModel[6] = cy * sr
+        boxModel[8] = -sy * cr; boxModel[9] = -sr; boxModel[10] = cy * cr
         boxModel[12] = x; boxModel[13] = y; boxModel[14] = z
         boxModel[15] = 1
         // record the box with the DYNAMIC model — the mvp COMPOSED with it

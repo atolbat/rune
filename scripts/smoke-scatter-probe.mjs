@@ -49,7 +49,7 @@ async function probe(backend) {
     await page.mouse.click(640, 60)
     await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
   }
-  await page.waitForFunction(() => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 30000 })
+  await page.waitForFunction(() => /Sentry Turret · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 30000 })
   await page.click('.pt-arrow:last-child')
   await page.waitForFunction(() => /Explosion \(composed\) · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 20000 })
 

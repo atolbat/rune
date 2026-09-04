@@ -471,12 +471,12 @@ try {
   // ─── vfx: the 22-demo carousel (Task 122 + the rune originals) ──
   await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
   await page.waitForFunction(
-    () => document.querySelector('.pt-pill')?.textContent.includes('Muzzle'),
+    () => document.querySelector('.pt-pill')?.textContent.includes('Sentry'),
     null,
     { timeout: 20_000 },
   )
   await page.waitForFunction(
-    () => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+    () => /Sentry Turret · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
     null,
     { timeout: 20_000 },
   )
@@ -530,7 +530,7 @@ try {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
   await page.waitForFunction(
-    () => document.querySelector('.pt-pill')?.textContent.includes('Muzzle'),
+    () => document.querySelector('.pt-pill')?.textContent.includes('Sentry'),
     null,
     { timeout: 20_000 },
   )

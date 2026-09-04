@@ -61,7 +61,7 @@ async function shoot(backend) {
     const pill = await page.textContent('.pt-pill').catch(() => '')
     if (badge !== '…' && /[1-9][\d,]* particles/.test(pill)) break
   }
-  await page.waitForFunction(() => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 20000 })
+  await page.waitForFunction(() => /Sentry Turret · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 20000 })
   const badge = await page.textContent('#backend')
   console.log(`\n[${backend}] backend badge: ${badge}`)
 

@@ -62,10 +62,14 @@ const DEMOS = [muzzle, explosion, shapes, trail, sequencer, mesh, subemitter,
 /* ─── materials & pipelines ────────────────────────────────────────────── */
 
 const SPRITE_MATERIAL = materialOf({ features: TEXTURE | VERTEX_COLOR })
-// the translucent-fog material (the dust demo's haze cards): the sprite
-// material + the OUTPUT_DITHER bit — the ±0.5/255 per-pixel noise that
-// breaks the 8-bit banding stair-steps stacked ~5%-alpha cards otherwise
-// quantize into (Task 127 — the "brightness staircase" report)
+// the TRANSLUCENT-SPRITE material (the alpha-blended smokes and haze cards
+// on the page): the sprite material + the OUTPUT_DITHER bit — now TWO-SIDED
+// (Task 128): the ±0.5/255 rgb noise of Task 127 PLUS a 4×4 ordered Bayer
+// dither on the OUTPUT ALPHA (±1.5/255). The alpha half is what kills the
+// "transparency staircase": every blend rounds the destination to 8 bits,
+// and a smooth low-alpha ramp crossing the quantization steps printed
+// visible bands — jittering the source alpha decorrelates the per-pixel
+// rounding and the steps average into smooth gradients.
 const HAZE_MATERIAL = materialOf({ features: TEXTURE | VERTEX_COLOR | OUTPUT_DITHER })
 // Task 126 — the LEAF MESH material (the alphatest demo's real 3D leaves):
 // lit + alpha MASK + double-sided (their leave.glb material: alphaMode
@@ -113,8 +117,19 @@ function makeAtlasBytes() {
       for (let x = 0; x < TILE; x++) {
         const u = (x + 0.5) / TILE - 0.5, v = (y + 0.5) / TILE - 0.5
         const [r, g, b, a] = fn(u, v, Math.hypot(u, v))
+        // THE UNIVERSAL EDGE GUARD (Task 128 — the "quad boundaries every-
+        // where" report): a tile that still carries non-zero alpha at its
+        // border draws the QUAD's silhouette into the scene (the visible
+        // square edge — THE most common sprite bug on this page) and bleeds
+        // into its atlas neighbors under bilinear filtering. Every tile's
+        // alpha is now faded to zero over the last 0.1 of u/v — a rounded-
+        // square window with a margin wider than the bilinear kernel; the
+        // shapes below all live inside it (the arrow/leaf were shrunk to
+        // fit). Border pixels ≈ 0, no square edges, no cross-tile bleed —
+        // for EVERY sprite on the page, by construction.
+        const guard = Math.min(1, Math.max(0, Math.min((0.5 - Math.abs(u)) / 0.1, (0.5 - Math.abs(v)) / 0.1)))
         const i = ((oy + y) * ATLAS_SIZE + ox + x) * 4
-        bytes[i] = r; bytes[i + 1] = g; bytes[i + 2] = b; bytes[i + 3] = a
+        bytes[i] = r; bytes[i + 1] = g; bytes[i + 2] = b; bytes[i + 3] = Math.round(a * guard)
       }
     }
   }
@@ -130,14 +145,17 @@ function makeAtlasBytes() {
   // 4: the flash star (a gaussian + an anamorphic cross)
   put(4, (u, v, r) => {
     const core = r >= 0.5 ? 0 : Math.exp(-7 * r * r / 0.25)
-    const cross = Math.max(Math.exp(-90 * v * v), Math.exp(-90 * u * u)) * (r < 0.48 ? 1 : 0)
+    // the cross fades smoothly to its rim (the old hard r<0.48 cut left a
+    // visible circular edge on every flash)
+    const cross = Math.max(Math.exp(-90 * v * v), Math.exp(-90 * u * u)) * Math.max(0, 1 - Math.max(0, (r - 0.34) / 0.12))
     return [R, R, R, Math.min(255, Math.round(255 * (core + cross * 0.85)))]
   })
   // 5: the ring (a SOFT annulus + a faint filled interior — reads as a water
   // ripple at rest and a shockwave in motion; the old σ=0.08 wireframe ring
-  // looked like a decal)
+  // looked like a decal; the rim now fades before the tile edge — the
+  // hard 0.33-alpha at the border drew the quad's square corners)
   put(5, (u, v, r) => {
-    const ring = Math.exp(-Math.pow((r - 0.3) / 0.14, 2))
+    const ring = Math.exp(-Math.pow((r - 0.3) / 0.13, 2))
     const fill = r < 0.3 ? 0.32 * (1 - r / 0.3) : 0
     return [R, R, R, Math.round(255 * Math.min(1, ring + fill))]
   })
@@ -151,26 +169,28 @@ function makeAtlasBytes() {
     }
     return [R, R, R, Math.min(255, Math.round(215 * a))]
   })
-  // 7: the arrow (a triangle pointing UP — the billboard-mode demo)
+  // 7: the arrow (a triangle pointing UP — the billboard-mode demo; the
+  // base sits at v=-0.38 so the shape clears the edge guard's fade zone)
   put(7, (u, v) => {
-    const inside = Math.abs(u) < (0.5 - v) * 0.62 && v < 0.32 && v > -0.5
-    const soft = Math.abs(u) < (0.5 - v) * 0.62 + 0.03 && v < 0.35 && v > -0.53
+    const inside = Math.abs(u) < (0.38 - v) * 0.58 && v < 0.26 && v > -0.38
+    const soft = Math.abs(u) < (0.38 - v) * 0.58 + 0.03 && v < 0.29 && v > -0.41
     const a = inside ? 255 : soft ? 90 : 0
     return [R, R, R, a]
   })
-  // 8: the leaf silhouette (an ellipse + a stem, the alpha-test demo)
+  // 8: the leaf silhouette (an ellipse + a stem, the alpha-test demo;
+  // sized to clear the edge guard — the old stem tip touched the border)
   put(8, (u, v) => {
-    const ex = u / 0.42, ey = (v + 0.1) / 0.55
+    const ex = u / 0.4, ey = (v + 0.08) / 0.46
     const leaf = ex * ex + ey * ey < 1
-    const stem = Math.abs(u) < 0.03 && v > 0.1 && v < 0.5
+    const stem = Math.abs(u) < 0.03 && v > 0.08 && v < 0.36
     const a = leaf || stem ? 255 : 0
     return [Math.round(190 + 40 * (0.5 - v)), R, Math.round(90 * (v + 0.5) + 30), a]
   })
-  // 9: the bubble (a hard disc with a bright rim)
+  // 9: the bubble (a hard disc with a bright rim; sized inside the guard)
   put(9, (u, v, r) => {
-    const disc = r < 0.46
-    const rim = Math.exp(-Math.pow((r - 0.4) / 0.07, 2))
-    const hi = Math.exp(-(((u + 0.16) ** 2 + (v - 0.16) ** 2)) / 0.01)
+    const disc = r < 0.38
+    const rim = Math.exp(-Math.pow((r - 0.33) / 0.06, 2))
+    const hi = Math.exp(-(((u + 0.14) ** 2 + (v - 0.14) ** 2)) / 0.01)
     const a = disc ? 130 : rim > 0.25 ? 220 : 0
     const bright = Math.min(255, Math.round(150 + 105 * (rim + hi)))
     return [bright, bright, bright, a]
@@ -197,10 +217,11 @@ function makeAtlasBytes() {
     }
     return [R, R, R, Math.round(255 * Math.min(1, ray))]
   })
-  // 13: the rounded square glow
+  // 13: the rounded square glow (kept INSIDE the guard — reads as a soft
+  // rounded-square patch, no hard rim)
   put(13, (u, v) => {
     const d = Math.max(Math.abs(u), Math.abs(v))
-    return [R, R, R, Math.round(255 * Math.max(0, Math.exp(-Math.pow((d - 0.3) / 0.14, 2))))]
+    return [R, R, R, Math.round(255 * Math.max(0, Math.exp(-Math.pow((d - 0.26) / 0.13, 2))))]
   })
   // 14: the noise puff (a hash-jittered blob — the soft demo smoke)
   put(14, (u, v) => {
@@ -314,7 +335,8 @@ function makeSparkBytes() {
 /* The FLASH (128×128): the impact star — a hot gaussian core, eight
    radial spikes, an anamorphic cross. rgb = white·profile, alpha = 255
    (the additive convention: the contribution IS the profile; the sprite
-   never alpha-blends). */
+   never alpha-blends). The cross/rays now fade SMOOTHLY to zero before
+   the border (the old hard r<0.46 cut printed a circular rim). */
 const FLASH_N = 128
 function makeFlashBytes() {
   const bytes = new Uint8Array(FLASH_N * FLASH_N * 4)
@@ -325,14 +347,16 @@ function makeFlashBytes() {
       const r = Math.hypot(u, v)
       const ang = Math.atan2(v, u)
       const core = r >= 0.5 ? 0 : Math.exp(-(r * r) / 0.016)
+      // the shared smooth rim: 1 inside r=0.30, 0 at r=0.47
+      const rim = Math.max(0, 1 - Math.max(0, (r - 0.30) / 0.17))
       let ray = 0
       for (let k = 0; k < RAYS; k++) {
         const d = Math.abs(Math.sin(ang - k * Math.PI / RAYS))
-        const rayLen = 0.46 - (k % 2) * 0.1 // alternating long/short spikes
+        const rayLen = 0.42 - (k % 2) * 0.1 // alternating long/short spikes
         if (r < rayLen) ray = Math.max(ray, Math.exp(-70 * d * d) * (1 - r / rayLen))
       }
-      const cross = Math.max(Math.exp(-140 * v * v), Math.exp(-140 * u * u)) * (r < 0.46 ? 1 : 0) * 0.55
-      const a = Math.min(1, core + ray + cross)
+      const cross = Math.max(Math.exp(-140 * v * v), Math.exp(-140 * u * u)) * rim * 0.55
+      const a = Math.min(1, core + ray * rim + cross)
       const i = (y * FLASH_N + x) * 4
       bytes[i] = bytes[i + 1] = bytes[i + 2] = Math.round(255 * a)
       bytes[i + 3] = 255
@@ -344,8 +368,12 @@ function makeFlashBytes() {
 /* The SMOKE ATLAS (256×256, 2×2 tiles of 128): four frames of an evolving
    puff — multi-lobe kernels ERODED by value noise (the smoke has visible
    STRUCTURE, not a uniform blur), each frame's lobes drifting wider and
-   dimmer (the FrameOverLife animation), and a hard zero-alpha margin at
-   every tile border (no bilinear bleed between the frames). rgb = white,
+   dimmer (the FrameOverLife animation). THE EDGE (Task 128 — the "visible
+   quad boundaries" report): the old margin was a BOX ramp (min over the
+   four border distances) — a literally square fade whose silhouette read
+   as the quad's outline at full alpha cores. The edge is now a RADIAL
+   falloff: full inside r=0.30, zero at r=0.47 — a round, smooth silhouette
+   with a bilinear-safe margin (no cross-frame bleed either). rgb = white,
    alpha = profile — the alpha-blend convention (smoke is never additive). */
 const SMOKE_ATLAS_N = 256, SMOKE_TILE = 128
 function makeSmokeAtlasBytes() {
@@ -373,10 +401,11 @@ function makeSmokeAtlasBytes() {
         const n = vnoise(tu * 7 + 31, tv * 7 + 17, 3 + f) * 0.6
           + vnoise(tu * 15 + 7, tv * 15 + 53, 9 + f) * 0.4
         const erode = 0.62 + 0.38 * n * 2 // strong structure, not flat fog
-        // the zero margin: alpha is strictly 0 within ~6 px of every border
-        const m = Math.min(x, y, SMOKE_TILE - 1 - x, SMOKE_TILE - 1 - y)
-        const margin = Math.min(1, m / 6)
-        const a = Math.min(1, Math.max(0, k * gain * erode)) * margin
+        // THE RADIAL EDGE: 1 inside r=0.30 → 0 at r=0.47 (round silhouette,
+        // zero well before the border — no square rim, no bilinear bleed)
+        const r = Math.hypot(tu, tv)
+        const edge = Math.max(0, 1 - Math.max(0, (r - 0.3) / 0.17))
+        const a = Math.min(1, Math.max(0, k * gain * erode)) * edge
         const i = ((oy + y) * SMOKE_ATLAS_N + ox + x) * 4
         bytes[i] = bytes[i + 1] = bytes[i + 2] = 255
         bytes[i + 3] = Math.round(255 * a)
@@ -449,10 +478,13 @@ function makeMuzzleSheetBytes() {
     const a = Math.min(1, core + ray)
     return [V * a, V * a, V * a, 255]
   })
-  // 1: the crossed fins (two orthogonal bars, soft edges)
+  // 1: the crossed fins (two orthogonal bars, soft edges — the bar ends
+  // fade with the radius now; the old hard r<0.48 cut printed a circular
+  // rim around the fins)
   put(1, (u, v, r) => {
-    const bar = Math.max(Math.exp(-240 * v * v), Math.exp(-240 * u * u)) * (r < 0.48 ? 1 : 0)
-    const a = Math.min(1, bar)
+    const bar = Math.max(Math.exp(-240 * v * v), Math.exp(-240 * u * u))
+    const fade = Math.max(0, 1 - Math.max(0, (r - 0.3) / 0.16))
+    const a = Math.min(1, bar * fade)
     return [V * a, V * a, V * a, 255]
   })
   // 2: the soft flash blob (a wide gaussian)
@@ -466,7 +498,8 @@ function makeMuzzleSheetBytes() {
     const a = Math.exp(-(v * v) / 0.016) * endFade
     return [V * a, V * a, V * a, 255]
   })
-  // 4..7: the smoke frames (the smoke atlas recipe, smaller)
+  // 4..7: the smoke frames (the smoke atlas recipe, smaller — with the
+  // same RADIAL edge: no box silhouette, no cross-tile bleed)
   for (let f = 0; f < 4; f++) {
     const spread = 1 + f * 0.22, gain = 1 - f * 0.16
     const lobes = [[-0.13 * spread, 0.07, 0.16 * spread], [0.11 * spread, -0.05, 0.19 * spread], [0.03, 0.13 * spread, 0.13 * spread]]
@@ -478,7 +511,7 @@ function makeMuzzleSheetBytes() {
       }
       const n = vnoise(u * 6 + 31, v * 6 + 17, 3 + f) * 0.6 + vnoise(u * 13 + 7, v * 13 + 53, 9 + f) * 0.4
       const r = Math.hypot(u, v)
-      const edge = r > 0.44 ? 0 : 1 - Math.max(0, (r - 0.3) / 0.14)
+      const edge = Math.max(0, 1 - Math.max(0, (r - 0.28) / 0.16))
       const a = Math.min(1, Math.max(0, k * gain * (0.62 + 0.76 * n))) * edge
       return [V, V, V, Math.round(255 * a)]
     })
@@ -1043,6 +1076,7 @@ function activateDemo(why) {
   const demo = DEMOS[demoIndex]
   env.camera({ yaw: 0.55, pitch: 0.25, dist: 5.2, orbit: 0.06, target: [0, 0.2, 0] })
   if (demo.camera !== undefined) env.camera(demo.camera)
+  if (typeof window !== 'undefined') window.__vfxCounters = {} // the probe handle (fresh per demo)
   state = demo.make(env)
   if (typeof window !== 'undefined') window.__vfxLayers = layers // the shots/debug handle
   shell.log.event(`Demo: ${demo.title} — ${demo.sub}${why === 'reboot' ? ' · re-made on the new backend' : ''}`)

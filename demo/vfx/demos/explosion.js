@@ -169,7 +169,9 @@ export default {
     // smoke: the real-alpha clouds over the fire — drawn LAST (the
     // compositing order). frameJitter picks a random sheet tile per
     // particle at spawn; the seed's full-phase spin covers the slight
-    // per-particle tilt (the sheet's tiles are near-isotropic).
+    // per-particle tilt (the sheet's tiles are near-isotropic). The
+    // dithered material: the smoke's low-alpha fade no longer quantizes
+    // into visible stair-steps.
     const smoke = env.addLayer({
       id: 'ex-smoke',
       facade: env.createParticles({
@@ -191,7 +193,7 @@ export default {
         spawner: SMOKE_S,
         render: { kind: 'billboard', tiles: [2, 2], frameJitter: 4 },
       }),
-      material: env.materials.sprite,
+      material: env.materials.haze,
       pipeline: env.pipelines.alpha,
       texture: () => env.smokeAtlas,
     })

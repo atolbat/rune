@@ -22,7 +22,7 @@
  */
 
 import {
-  createParticleSystem, NO_FORCES, MAX_PLANES,
+  createParticleSystem, NO_FORCES, MAX_PLANES, MAX_SPHERES, MAX_BOXES,
   type Attractor, type ForceFields, type ParticleFields, type ParticleSystem, type RetireRecord, type Collision, type SeekForce, type LimitSpeedForce,
 } from './system.ts'
 import { createSpawner, type Spawner, type SpawnerDesc } from './spawn.ts'
@@ -635,13 +635,31 @@ function validateAttractor(at: Attractor | null | undefined): Attractor | null {
 /** Collision validation (the planes normalize per frame in the store). */
 function validateCollision(collide: Collision | null | undefined): Collision | null {
   if (collide === undefined || collide === null) return null
-  if (!Array.isArray(collide.planes) || collide.planes.length === 0) {
-    throw new Error('rune/particles: collide.planes must be a non-empty array (a collision set with no planes is a silent no-op)')
+  // Task 128 — the planes are optional now, but AT LEAST ONE shape must
+  // exist (an empty collision set is a silent no-op).
+  const shapeCount = (collide.planes?.length ?? 0) + (collide.spheres?.length ?? 0) + (collide.boxes?.length ?? 0)
+  if (shapeCount === 0) {
+    throw new Error('rune/particles: collide needs at least one plane, sphere or box (a collision set with no shapes is a silent no-op)')
   }
-  if (collide.planes.length > MAX_PLANES) {
-    throw new Error(`rune/particles: collide.planes is capped at ${MAX_PLANES} (got ${collide.planes.length}) — the flat scratch is sized to the cap`)
+  if (collide.planes !== undefined && !Array.isArray(collide.planes)) {
+    throw new Error(`rune/particles: collide.planes must be an array (got ${typeof collide.planes})`)
   }
-  for (const plane of collide.planes) {
+  if (collide.spheres !== undefined && !Array.isArray(collide.spheres)) {
+    throw new Error(`rune/particles: collide.spheres must be an array (got ${typeof collide.spheres})`)
+  }
+  if (collide.boxes !== undefined && !Array.isArray(collide.boxes)) {
+    throw new Error(`rune/particles: collide.boxes must be an array (got ${typeof collide.boxes})`)
+  }
+  if ((collide.planes?.length ?? 0) > MAX_PLANES) {
+    throw new Error(`rune/particles: collide.planes is capped at ${MAX_PLANES} (got ${collide.planes!.length}) — the flat scratch is sized to the cap`)
+  }
+  if ((collide.spheres?.length ?? 0) > MAX_SPHERES) {
+    throw new Error(`rune/particles: collide.spheres is capped at ${MAX_SPHERES} (got ${collide.spheres!.length}) — the flat scratch is sized to the cap`)
+  }
+  if ((collide.boxes?.length ?? 0) > MAX_BOXES) {
+    throw new Error(`rune/particles: collide.boxes is capped at ${MAX_BOXES} (got ${collide.boxes!.length}) — the flat scratch is sized to the cap`)
+  }
+  for (const plane of collide.planes ?? []) {
     if (!Array.isArray(plane.normal) || plane.normal.length !== 3 || !plane.normal.every((v: number) => Number.isFinite(v))) {
       throw new Error(`rune/particles: a collision plane normal must be three finite numbers (got ${JSON.stringify(plane.normal)})`)
     }
@@ -661,6 +679,44 @@ function validateCollision(collide: Collision | null | undefined): Collision | n
     // Task 124 — kill on contact + the contact events.
     if (plane.kill !== undefined && typeof plane.kill !== 'boolean') {
       throw new Error(`rune/particles: plane kill must be a boolean (got ${JSON.stringify(plane.kill)}; true = the particle retires on contact)`)
+    }
+  }
+  // Task 128 — the spheres: center/radius/restitution/friction/kill.
+  for (const sphere of collide.spheres ?? []) {
+    if (!Array.isArray(sphere.center) || sphere.center.length !== 3 || !sphere.center.every((v: number) => Number.isFinite(v))) {
+      throw new Error(`rune/particles: a collision sphere center must be three finite numbers (got ${JSON.stringify(sphere.center)})`)
+    }
+    if (!Number.isFinite(sphere.radius) || sphere.radius <= 0) {
+      throw new Error(`rune/particles: a collision sphere radius must be a finite > 0 (got ${sphere.radius})`)
+    }
+    if (!Number.isFinite(sphere.restitution) || sphere.restitution < 0 || sphere.restitution > 1) {
+      throw new Error(`rune/particles: sphere restitution must be in [0, 1] (got ${sphere.restitution})`)
+    }
+    const fr = sphere.friction ?? 0
+    if (!Number.isFinite(fr) || fr < 0 || fr > 1) {
+      throw new Error(`rune/particles: sphere friction must be in [0, 1] (got ${fr})`)
+    }
+    if (sphere.kill !== undefined && typeof sphere.kill !== 'boolean') {
+      throw new Error(`rune/particles: sphere kill must be a boolean (got ${JSON.stringify(sphere.kill)})`)
+    }
+  }
+  // Task 128 — the boxes: center/half/restitution/friction/kill.
+  for (const box of collide.boxes ?? []) {
+    if (!Array.isArray(box.center) || box.center.length !== 3 || !box.center.every((v: number) => Number.isFinite(v))) {
+      throw new Error(`rune/particles: a collision box center must be three finite numbers (got ${JSON.stringify(box.center)})`)
+    }
+    if (!Array.isArray(box.half) || box.half.length !== 3 || !box.half.every((v: number) => Number.isFinite(v) && v > 0)) {
+      throw new Error(`rune/particles: a collision box half must be three finite numbers > 0 (got ${JSON.stringify(box.half)}; [1.6, 0.9, 1.6] = a 3.2×1.8×3.2 crate)`)
+    }
+    if (!Number.isFinite(box.restitution) || box.restitution < 0 || box.restitution > 1) {
+      throw new Error(`rune/particles: box restitution must be in [0, 1] (got ${box.restitution})`)
+    }
+    const fr = box.friction ?? 0
+    if (!Number.isFinite(fr) || fr < 0 || fr > 1) {
+      throw new Error(`rune/particles: box friction must be in [0, 1] (got ${fr})`)
+    }
+    if (box.kill !== undefined && typeof box.kill !== 'boolean') {
+      throw new Error(`rune/particles: box kill must be a boolean (got ${JSON.stringify(box.kill)})`)
     }
   }
   // Task 124 — the contact-event hook: a function, or absent.

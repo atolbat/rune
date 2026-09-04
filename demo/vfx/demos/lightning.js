@@ -8,6 +8,16 @@
 //   · the segments streak ALONG their own direction (velocity 'axis' =
 //     the local segment dir) — the jagged silhouette of the path itself
 //     becomes the bolt's shape;
+//   · THE CONNECTIVITY (the "disconnected bright segments" report): the
+//     old jitter displaced each path point INDEPENDENTLY in X and Z — at a
+//     1.2-unit step and a ±1.5-unit scatter, consecutive segments could
+//     bend nearly 180°, and each stretched quad then trailed AWAY from the
+//     path — a porcupine of bars with dark wedges at every joint. The new
+//     generator WALKS the path: every step deviates from the CURRENT
+//     BEARING TO THE TARGET by a bounded cone angle, so the polyline always
+//     progresses (a real leader does not double back), the quads overlap
+//     tail-over-shoulder (~2.3× the step), and the bolt reads as ONE
+//     continuous channel. The last point lands exactly on the target;
 //   · branches fork off the main channel at random joints;
 //   · the double-STROBE ramp (1 → 0.15 → 0.95 → 0 over 0.16 s — the
 //     re-strike every real bolt does), then a dim purple AFTERGLOW path
@@ -16,27 +26,64 @@
 //     + embers scattered with the speed brake (LimitSpeed);
 //   · the sky flash — a huge dim double-blink card lighting the horizon
 //     behind the bolt.
-const SEGS = 11 // the main channel's segments
+const SEGS = 12 // the main channel's segments
 
-/** A jagged polyline from (x0,y0,z0) down to (x1,y1,z1): linear descent
- *  with a midpoint-displacement-style perpendicular jitter that shrinks
- *  toward the ground (the channel straightens as it lands). */
-function boltPath(x0, y0, z0, x1, y1, z1, seed, segs, jitter) {
+/** A jagged polyline from (x0,y0,z0) down to (x1,y1,z1): a CONE-WALK — each
+ * step deviates from the current bearing-to-target by a bounded random
+ * angle (the jaggedness shrinks toward the ground: the channel straightens
+ * as it lands), the path never doubles back, and the final point lands
+ * EXACTLY on the target. Deterministic in `seed` (the bolt replays
+ * identically). `jagged` is the max deviation angle per step in radians
+ * (~0.5 reads as a proper bolt). */
+function boltPath(x0, y0, z0, x1, y1, z1, seed, segs, jagged) {
   const pts = new Float64Array((segs + 1) * 3)
-  for (let i = 0; i <= segs; i++) {
-    const t = i / segs
-    let x = x0 + (x1 - x0) * t
-    let z = z0 + (z1 - z0) * t
-    const y = y0 + (y1 - y0) * t
-    if (i > 0 && i < segs) {
-      // deterministic hash jitter (the bolt shape replays identically)
-      const j = (n) => (Math.sin(seed * 127.1 + i * 311.7 + n * 74.7) * 43758.5453) % 1
-      const k = jitter * (1 - t * 0.65) // straightens as it lands
-      x += (j(1) - 0.5) * 2 * k
-      z += (j(2) - 0.5) * 2 * k
-    }
-    pts[i * 3] = x; pts[i * 3 + 1] = y; pts[i * 3 + 2] = z
+  pts[0] = x0; pts[1] = y0; pts[2] = z0
+  const rnd = (n) => {
+    const s = Math.sin(seed * 127.1 + n * 311.7 + 13.37) * 43758.5453
+    return s - Math.floor(s)
   }
+  let px = x0, py = y0, pz = z0
+  for (let i = 1; i < segs; i++) {
+    const t = i / segs
+    // the bearing to the target (the walk's compass)
+    let bx = x1 - px, by = y1 - py, bz = z1 - pz
+    const bl = Math.hypot(bx, by, bz) || 1
+    bx /= bl; by /= bl; bz /= bl
+    // the step: a touch over the proportional share, floored so the walk
+    // always advances visibly (no stutter segments)
+    const step = Math.max(0.8, bl / (segs - i + 0.6))
+    // the deviation: a uniform direction in the cone around the bearing.
+    // The tilt cap shrinks with t (straightens as it lands); sqrt() biases
+    // toward small tilts so the channel stays mostly downward.
+    const maxTilt = jagged * (1 - t * 0.6)
+    const tilt = maxTilt * Math.sqrt(rnd(i * 2))
+    const az = rnd(i * 2 + 1) * 6.2831853
+    // the bearing's perpendicular frame: p1 = cross(b, worldUp)
+    let p1x = bz, p1y = 0, p1z = -bx
+    let pl = Math.hypot(p1x, p1y, p1z)
+    if (pl < 1e-6) { p1x = 1; p1y = 0; p1z = 0; pl = 1 }
+    p1x /= pl; p1y /= pl; p1z /= pl
+    const p2x = by * p1z - bz * p1y, p2y = bz * p1x - bx * p1z, p2z = bx * p1y - by * p1x
+    const ct = Math.cos(tilt), st = Math.sin(tilt), ca = Math.cos(az), sa = Math.sin(az)
+    px += (bx * ct + (p1x * ca + p2x * sa) * st) * step
+    py += (by * ct + (p1y * ca + p2y * sa) * st) * step
+    pz += (bz * ct + (p1z * ca + p2z * sa) * st) * step
+    pts[i * 3] = px; pts[i * 3 + 1] = py; pts[i * 3 + 2] = pz
+  }
+  // the final leg: guarantee a healthy closing segment — if the walk
+  // drifted too near the target, pull the second-to-last point out along
+  // the incoming direction (a zero-length segment would throw in the
+  // spawner).
+  const li = (segs - 1) * 3
+  const lx = pts[li] - x1, ly = pts[li + 1] - y1, lz = pts[li + 2] - z1
+  if (Math.hypot(lx, ly, lz) < 0.7 && segs >= 2) {
+    let ax = pts[li] - pts[li - 3], ay = pts[li + 1] - pts[li - 2], az = pts[li + 2] - pts[li - 1]
+    const al = Math.hypot(ax, ay, az) || 1
+    pts[li] = x1 + (ax / al) * 1.1
+    pts[li + 1] = y1 + (ay / al) * 1.1
+    pts[li + 2] = z1 + (az / al) * 1.1
+  }
+  pts[segs * 3] = x1; pts[segs * 3 + 1] = y1; pts[segs * 3 + 2] = z1
   return pts
 }
 
@@ -57,17 +104,19 @@ export default {
 
     // ── the main channel: ONE burst along the jagged path ──
     // (stretched billboards, velocity ALONG the local segment, mostly at
-    // rest — the path itself is the bolt's shape; scatter thickens it.
+    // rest — the path itself is the bolt's shape; scatter hugs the line.
     // THE TEXTURE is the STREAK (bright along u, gaussian across v —
     // env.ribbonTexture): a bolt is a LINE, and the streak reads each
     // segment as a thin bright channel — a blobby sprite here reads as
     // stacked cones. THE WIDTH/TAIL SPLIT: a stretched quad's width =
-    // size·½ while its tail = (|v|·sf + lf)·size — a thin bolt wants a
-    // SMALL size with a LARGE lengthFactor.
+    // size·½ while its tail = (|v|·sf + lf)·size — the tail is tuned to
+    // ≈2.3× the average segment step (steps ~1.15: the quads overlap
+    // tail-over-shoulder and the channel stays CONNECTED at the joints,
+    // with the cone-walk keeping consecutive directions within ~30°).
     const BOLT_BASE = {
-      shape: { kind: 'path', points: [0, 13, 0, 0, 0, 0], mode: 'lattice', scatter: 0.05 },
+      shape: { kind: 'path', points: [0, 13, 0, 0, 0, 0], mode: 'lattice', scatter: 0.03 },
       velocity: { mode: 'axis' },
-      speed: [1.2, 1.2], life: [0.16, 0.16], size: [0.55, 0.55],
+      speed: [1.2, 1.2], life: [0.16, 0.16], size: [0.7, 0.7],
       color: [[1, 1, 1, 1], [0.8, 0.9, 1, 1]], seed: 5,
     }
     const bolt = env.addLayer({
@@ -84,7 +133,7 @@ export default {
           { t: 1, size: 0.7, r: 0.85, g: 0.9, b: 1, a: 0 },
         ]),
         spawner: BOLT_BASE,
-        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.04, lengthFactor: 7 },
+        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.04, lengthFactor: 3.4 },
       }),
       material: env.materials.sprite,
       pipeline: env.pipelines.additive,
@@ -94,7 +143,7 @@ export default {
     // ── the afterglow: the SAME path, dim violet, lingering (the
     //    ionized channel cooling) — wider than the channel ──
     const GLOW_BASE = {
-      shape: { kind: 'path', points: [0, 13, 0, 0, 0, 0], mode: 'lattice', scatter: 0.16 },
+      shape: { kind: 'path', points: [0, 13, 0, 0, 0, 0], mode: 'lattice', scatter: 0.12 },
       velocity: { mode: 'axis' },
       speed: [0.1, 0.1], life: [0.55, 0.7], size: [1.0, 1.0],
       color: [[0.55, 0.45, 0.95, 0.4], [0.4, 0.35, 0.8, 0.25]], seed: 5,
@@ -109,7 +158,7 @@ export default {
           { t: 1, size: 1.5, r: 1, g: 1, b: 1, a: 0 },
         ]),
         spawner: GLOW_BASE,
-        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.02, lengthFactor: 3 },
+        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.02, lengthFactor: 2.2 },
       }),
       material: env.materials.sprite,
       pipeline: env.pipelines.additive,
@@ -120,9 +169,9 @@ export default {
 
     // ── the branches: short forks off a random joint of the channel ──
     const BRANCH_BASE = {
-      shape: { kind: 'path', points: [0, 6, 0, 2, 3, 1], mode: 'lattice', scatter: 0.03 },
+      shape: { kind: 'path', points: [0, 6, 0, 2, 3, 1], mode: 'lattice', scatter: 0.02 },
       velocity: { mode: 'axis' },
-      speed: [0.8, 0.8], life: [0.13, 0.13], size: [0.35, 0.35],
+      speed: [0.8, 0.8], life: [0.13, 0.13], size: [0.45, 0.45],
       color: [[0.95, 0.97, 1, 1], [0.75, 0.85, 1, 0.9]], seed: 5,
     }
     const branches = env.addLayer({
@@ -135,7 +184,7 @@ export default {
           { t: 1, size: 0.6, r: 0.9, g: 0.95, b: 1, a: 0 },
         ]),
         spawner: BRANCH_BASE,
-        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.04, lengthFactor: 4.5 },
+        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.04, lengthFactor: 2.6 },
       }),
       material: env.materials.sprite,
       pipeline: env.pipelines.additive,
@@ -296,6 +345,8 @@ export default {
     let t = 1.2
     let next = 1.4
     let strikeN = 0
+    // the probe counter (scripts/task128-probe.mjs reads it)
+    const C = (typeof window !== 'undefined' ? (window.__vfxCounters ??= {}) : {})
 
     return {
       frame(ctx) {
@@ -303,6 +354,7 @@ export default {
         if (t >= next) {
           next = t + 2.1 + Math.random() * 1.6
           strikeN++
+          C.strikes = strikeN
           const seed = 900 + strikeN * 37
 
           // the strike geometry: a target on the plain, a start in the sky.
@@ -314,7 +366,9 @@ export default {
           const tz = -6.5 + Math.cos(strikeN * 1.7) * 3
           const sx = tx + (Math.sin(strikeN * 5.1) * 2.5)
           const sz = tz + (Math.cos(strikeN * 4.3) * 2.5)
-          const path = boltPath(sx, 14, sz, tx, 0, tz, seed, SEGS, 1.5)
+          // the cone-walk channel: bounded deviation, always progressing
+          // (jaggedness 0.55 rad ≈ 31° per step — a proper leader look)
+          const path = boltPath(sx, 14, sz, tx, 0, tz, seed, SEGS, 0.55)
 
           // the channel + the afterglow: the SAME jagged path, two lives.
           // THE OVERRIDE GOES INSIDE `shape` — a top-level `points` field
@@ -326,15 +380,16 @@ export default {
           bolt.facade.burst(SEGS, { ...BOLT_BASE, shape: { ...BOLT_BASE.shape, points }, seed })
           afterglow.facade.burst(SEGS, { ...GLOW_BASE, shape: { ...GLOW_BASE.shape, points }, seed })
 
-          // 1–2 branches: forks off random joints, heading out and down
+          // 1–2 branches: forks off random joints, walking out-and-down
+          // (the same cone-walk generator, from a joint of the channel)
           const nb = 1 + (strikeN % 2)
           for (let b = 0; b < nb; b++) {
             const j = 2 + ((strikeN * 7 + b * 5) % (SEGS - 3))
             const bx = path[j * 3], by = path[j * 3 + 1], bz = path[j * 3 + 2]
             const dirx = Math.sin(strikeN * 3.3 + b * 2.4)
             const dirz = Math.cos(strikeN * 2.9 + b * 1.7)
-            const bpts = boltPath(bx, by, bz, bx + dirx * 3.4, Math.max(0.3, by - 2.6), bz + dirz * 3.4, seed + b * 13, 4, 0.7)
-            branches.facade.burst(4, { ...BRANCH_BASE, shape: { ...BRANCH_BASE.shape, points: Array.from(bpts) }, seed: seed + b * 13 })
+            const bpts = boltPath(bx, by, bz, bx + dirx * 3.4, Math.max(0.3, by - 2.6), bz + dirz * 3.4, seed + b * 13, 5, 0.5)
+            branches.facade.burst(5, { ...BRANCH_BASE, shape: { ...BRANCH_BASE.shape, points: Array.from(bpts) }, seed: seed + b * 13 })
           }
 
           // the ground package at the strike point

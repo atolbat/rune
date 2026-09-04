@@ -739,8 +739,8 @@ function assemble(mask, jointCount) {
   const hasDither = (mask & OUTPUT_DITHER) !== 0;
   if (hasDither) {
     fragPosition = true;
-    sc.fragGlsl.push("float ditherN = (fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) - 0.5) * (1.0 / 255.0);");
-    sc.fragWgsl.push("let ditherN = (fract(52.9829189 * fract(dot(frag.pos.xy, vec2<f32>(0.06711056, 0.00583715)))) - 0.5) * (1.0 / 255.0);");
+    sc.fragGlsl.push("float ditherN = (fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) - 0.5) * (1.0 / 255.0);", "vec2 bayerP = mod(floor(gl_FragCoord.xy), 4.0);", "vec2 bayerLo = mod(bayerP, 2.0);", "vec2 bayerHi = floor(bayerP * 0.5);", "float m2lo = 2.0 * bayerLo.x + 3.0 * bayerLo.y - 4.0 * bayerLo.x * bayerLo.y;", "float m2hi = 2.0 * bayerHi.x + 3.0 * bayerHi.y - 4.0 * bayerHi.x * bayerHi.y;", "float ditherA = (4.0 * m2lo + m2hi - 7.5) * (3.0 / 255.0 / 16.0);");
+    sc.fragWgsl.push("let ditherN = (fract(52.9829189 * fract(dot(frag.pos.xy, vec2<f32>(0.06711056, 0.00583715)))) - 0.5) * (1.0 / 255.0);", "let bayerP = (floor(frag.pos.xy) % 4.0);", "let bayerLo = (bayerP % 2.0);", "let bayerHi = floor(bayerP * 0.5);", "let m2lo = 2.0 * bayerLo.x + 3.0 * bayerLo.y - 4.0 * bayerLo.x * bayerLo.y;", "let m2hi = 2.0 * bayerHi.x + 3.0 * bayerHi.y - 4.0 * bayerHi.x * bayerHi.y;", "let ditherA = (4.0 * m2lo + m2hi - 7.5) * (3.0 / 255.0 / 16.0);");
   }
   const ditherTail = hasDither ? " + ditherN" : "";
   if (hasLight || hasPost) {
@@ -748,8 +748,8 @@ function assemble(mask, jointCount) {
     sc.fragGlsl.push(`o_color = vec4(lit${ditherTail}, ${alpha});`);
     sc.fragWgsl.push(`return vec4<f32>(lit${ditherTail}, ${alpha});`);
   } else if (hasDither) {
-    sc.fragGlsl.push("o_color = vec4(base.rgb + ditherN, base.a);");
-    sc.fragWgsl.push("return vec4<f32>(base.rgb + ditherN, base.a);");
+    sc.fragGlsl.push("o_color = vec4(base.rgb + ditherN, clamp(base.a + ditherA, 0.0, 1.0));");
+    sc.fragWgsl.push("return vec4<f32>(base.rgb + ditherN, clamp(base.a + ditherA, 0.0, 1.0));");
   } else {
     sc.fragGlsl.push("o_color = base;");
     sc.fragWgsl.push("return base;");

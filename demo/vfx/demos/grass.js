@@ -8,10 +8,17 @@
 //     is baked ONCE, deterministically, into three instanced buffers —
 //     ZERO per-frame CPU geometry (the soup path would re-bake 252k verts
 //     every frame);
-//   · the WIND lives in the vertex shader: two TRAVELING waves across the
-//     field (the gusts cross it like weather, NOT a uniform wiggle) + a
-//     per-blade flutter phase — the field develops non-uniformly, waves
-//     of bending rolling through it;
+//   · Task 128 — THE DENSITY MASK: the blade frequency is driven by a
+//     (x, z) → [0, 1] field — here a two-octave value-noise "meadow
+//     patchiness" with TWO CARVED PATHS (a straight dirt track and a
+//     winding one) where nothing grows. The bake rejects candidates in
+//     sparse spots (the spacing widens) and scales the height with the
+//     density (dense patches are lusher) — a field that reads as a PLACE,
+//     not a uniform carpet;
+//   · Task 128 — THE WIND AS WAVES: the bend DIRECTION swings with
+//     traveling wave fronts (~5 crests visible at once, crossing at an
+//     angle) — gusts visibly ROLL across the field instead of the whole
+//     carpet pulsing in place; plus the per-blade flutter;
 //   · CYLINDRICAL billboards: the blades face the camera around world Y
 //     and stay anchored at the base — grass reads as grass from any
 //     angle;
@@ -23,6 +30,52 @@
 //     facade system — the living contrast to the static field).
 const BLADE_W = 32
 const BLADE_H = 64
+
+/** A small deterministic value noise (two octaves) for the mask's meadow
+ *  patchiness — the same recipe the procedural sprites use. */
+const maskNoise = (x, y) => {
+  const h2 = (xi, yi) => {
+    const v = Math.sin(xi * 127.1 + yi * 311.7 + 74.7) * 43758.5453
+    return v - Math.floor(v)
+  }
+  const smooth = (xf, yf) => {
+    const xi = Math.floor(xf), yi = Math.floor(yf)
+    const u = xf - xi, v = yf - yi
+    const su = u * u * (3 - 2 * u), sv = v * v * (3 - 2 * v)
+    return h2(xi, yi) * (1 - su) * (1 - sv) + h2(xi + 1, yi) * su * (1 - sv)
+      + h2(xi, yi + 1) * (1 - su) * sv + h2(xi + 1, yi + 1) * su * sv
+  }
+  return smooth(x, y) * 0.65 + smooth(x * 2.7 + 11, y * 2.7 + 5) * 0.35
+}
+
+/** THE DENSITY MASK (Task 128): (x, z) → [0, 1].
+ *   · the base: two-octave noise patchiness (0.45..1 — a natural meadow,
+ *     not a lawn);
+ *   · a straight DIRT TRACK along X at z ≈ 7.5 (the camera looks across
+ *     it — the gap makes the mask instantly legible);
+ *   · a WINDING path: z = 18·sin(x/14) — a deer trail curving through;
+ *   · a soft clearing around the ORIGIN (where the camera hovers — the
+ *     blades would otherwise fill the lens at close range).
+ * The smoothstep falloffs keep the path edges soft (a 2.5-unit feather —
+ * a hard mask edge would read as a painted decal). */
+function makeGrassMask() {
+  const ss = (e0, e1, x) => {
+    const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)))
+    return t * t * (3 - 2 * t)
+  }
+  return (x, z) => {
+    // the meadow patchiness
+    let w = 0.45 + 0.55 * Math.min(1, Math.max(0, maskNoise(x * 0.055, z * 0.055)))
+    // the straight track: distance to the z = 7.5 line
+    w *= ss(1.9, 4.4, Math.abs(z - 7.5))
+    // the winding trail: distance to z = 18·sin(x/14) + 3
+    const trail = z - (18 * Math.sin(x / 14) + 3)
+    w *= ss(1.6, 4.0, Math.abs(trail))
+    // the soft clearing at the origin
+    w *= ss(2.2, 6.5, Math.hypot(x, z))
+    return w
+  }
+}
 
 /** The blade sprite: rgb = a neutral brightness gradient (dark base →
  *  bright tip — the per-instance tint carries the green), alpha = the
@@ -53,8 +106,8 @@ function makeBladeBytes() {
 
 export default {
   title: 'Grass Field',
-  sub: 'rune original · 42k blades · ONE instanced draw · GPU wind waves · LOD fade',
-  camera: { yaw: 0.35, pitch: 0.55, dist: 10, orbit: 0.05, target: [0, 0.6, 0] },
+  sub: 'rune original · mask-driven density · traveling wind waves · 42k blades ONE draw',
+  camera: { yaw: 0.35, pitch: 0.5, dist: 11, orbit: 0.05, target: [0, 0.8, 0] },
 
   make(env) {
     const renderer = env.renderer
@@ -72,7 +125,7 @@ export default {
     const bladeTex = renderer.texture(BLADE_W, BLADE_H)
     bladeTex.upload(makeBladeBytes())
 
-    // ── THE FIELD: 42k blades, one instanced draw, GPU wind ──
+    // ── THE FIELD: 42k blades, one instanced draw, GPU wind, THE MASK ──
     const field = env.createGrassField({
       count: 42000,
       radius: 60,
@@ -80,6 +133,11 @@ export default {
       width: [0.05, 0.12],
       color: [[0.16, 0.3, 0.09], [0.5, 0.58, 0.2]],
       seed: 4213,
+      // Task 128 — THE DENSITY MASK: the noise patches + the two carved
+      // paths + the clearing (see makeGrassMask). The bake accepts ~70%
+      // of candidates (dense where w→1, sparse where w→0.45) and grows
+      // the survivors taller in the dense patches.
+      mask: makeGrassMask(),
       // THE SMOOTH DISSOLVE: fade 40 with a 0.5 band — the [20..40] unit
       // thinning spans ~115 px at THIS camera (a low, sky-in-view camera
       // compresses the band to a dozen pixels AT THE HORIZON and it reads
@@ -115,6 +173,12 @@ export default {
     let bladeCount = field.count
     let frameAvg = 16 / 1000
     let warmup = 1.2
+    // the probe counters (scripts/task128-probe.mjs reads them): the
+    // baked blade count (mask-rejected from the 42k ceiling) + the live
+    // adaptive count
+    const C = (typeof window !== 'undefined' ? (window.__vfxCounters ??= {}) : {})
+    C.bladesBaked = field.count
+    C.blades = bladeCount
 
     // ── the seeds drifting over the field (the living contrast) ──
     const SEED_S = {
@@ -178,6 +242,7 @@ export default {
           bladeCount = Math.max(10000, Math.floor(bladeCount / 2))
           frameAvg = 16 / 1000
           warmup = 1.2
+          C.blades = bladeCount
           env.log.event(`grass field: ${bladeCount.toLocaleString('en-US')} blades (adaptive density) `)
         }
         seeds.facade.advance(ctx.dt)

@@ -110,9 +110,53 @@ export interface CollisionPlane {
   readonly kill?: boolean
 }
 
-/** The collision set: up to a few planes (floor, walls). */
+/** Task 128 — a collision SPHERE: a solid ball in world space. The response
+ *  mirrors the plane: push out to the surface along the radial normal,
+ *  reflect the normal velocity scaled by restitution, damp the tangential
+ *  part, fire the contact event (record.sphere = the index). A particle
+ *  deeply inside still resolves (the normal is its radial direction; the
+ *  degenerate exactly-at-center case falls back to world +Y). */
+export interface CollisionSphere {
+  /** The center, world space. */
+  readonly center: readonly number[]
+  /** The radius, world units (> 0). */
+  readonly radius: number
+  /** Bounce factor: 0 = a dead stop on contact, 1 = a perfect bounce. */
+  readonly restitution: number
+  /** Tangential damping on contact: 0 = frictionless, 1 = full stop. */
+  readonly friction?: number
+  /** Kill on contact (see CollisionPlane.kill). Default false. */
+  readonly kill?: boolean
+}
+
+/** Task 128 — a collision BOX: an AXIS-ALIGNED box (a floor crate, a wall
+ *  block). The response finds the MINIMUM-PENETRATION axis, pushes the
+ *  particle out along it and reflects — a corner hit picks whichever face
+ *  is nearest, so a fast particle raining onto an edge rolls off the side
+ *  it actually crossed. (A yawed/OBB variant is deliberately NOT offered:
+ *  the per-particle rotate/unrotate would double the response cost for a
+ *  look the demos do not need yet — the optimization doc lists it.) */
+export interface CollisionBox {
+  /** The center, world space. */
+  readonly center: readonly number[]
+  /** The HALF-extents along x/y/z (> 0 each — [1.6, 0.9, 1.6] is a
+   *  3.2×1.8×3.2 crate). */
+  readonly half: readonly number[]
+  /** Bounce factor: 0 = a dead stop on contact, 1 = a perfect bounce. */
+  readonly restitution: number
+  /** Tangential damping on contact: 0 = frictionless, 1 = full stop. */
+  readonly friction?: number
+  /** Kill on contact (see CollisionPlane.kill). Default false. */
+  readonly kill?: boolean
+}
+
+/** The collision set: planes + spheres + boxes (up to a few of each — a
+ *  floor, a couple of props). At least ONE shape is required (a collision
+ *  set with nothing in it is a silent no-op — the facade rejects it). */
 export interface Collision {
-  readonly planes: readonly CollisionPlane[]
+  readonly planes?: readonly CollisionPlane[]
+  readonly spheres?: readonly CollisionSphere[]
+  readonly boxes?: readonly CollisionBox[]
   /** Task 124 — contact events, flushed AFTER the integration walk (a fully
    *  consistent store: a callback may burst OTHER systems inside — never
    *  this one mid-walk). Fires once per contact, AFTER the response (the
@@ -123,15 +167,21 @@ export interface Collision {
   readonly onCollide?: (record: CollideRecord) => void
 }
 
-/** One collision contact (the REUSED record handed to collide.onCollide). */
+/** One collision contact (the REUSED record handed to collide.onCollide).
+ *  The three index fields are exclusive: exactly ONE of them is >= 0 (the
+ *  shape that was hit); the others read −1. */
 export interface CollideRecord {
   /** The contact position, world space (snapped onto the surface). */
   x: number; y: number; z: number
   /** The POST-response velocity: reflected, restitution-scaled, friction-
    *  damped (for a killed particle: its velocity as it landed). */
   vx: number; vy: number; vz: number
-  /** The plane index hit (0 = collide.planes[0]). */
+  /** The plane index hit (0 = collide.planes[0]), or −1 if another shape. */
   plane: number
+  /** Task 128 — the sphere index hit, or −1 if another shape. */
+  sphere: number
+  /** Task 128 — the box index hit, or −1 if another shape. */
+  box: number
 }
 
 /** The seek spring (the sequencer pull): a critically-damped-ish
@@ -261,6 +311,11 @@ export interface ParticleSystem {
  *  scratch is sized to this). */
 export const MAX_PLANES = 16
 
+/** Task 128 — the collision sphere/box ceilings (the same contract as
+ *  MAX_PLANES). */
+export const MAX_SPHERES = 8
+export const MAX_BOXES = 8
+
 /** The collision-event cap per advance() (Task 124): dense rain at a stall
  *  catch-up can cross a floor hundreds of times in one call — the flat
  *  event scratch is sized to this and the overflow drops silently (the
@@ -304,12 +359,17 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
   // filled once per advance() call; the hot loop reads flat scalars, never
   // arrays. The 8th slot (Task 124): 1 = kill on contact.
   const flatPlanes = new Float64Array(MAX_PLANES * 8)
-  // Task 124 — the collision events (x, y, z, vx, vy, vz, plane), collected
-  // during the walk into a flat scratch and flushed AFTER it (a consistent
-  // store — the splash callback may burst other systems). The reused record.
-  const collideEvents = new Float64Array(MAX_COLLIDE_EVENTS * 7)
+  // Task 128 — the flattened spheres (cx, cy, cz, r, restitution, keep,
+  // kill) and boxes (cx, cy, cz, hx, hy, hz, restitution, keep, kill).
+  const flatSpheres = new Float64Array(MAX_SPHERES * 8)
+  const flatBoxes = new Float64Array(MAX_BOXES * 10)
+  // Task 124/128 — the collision events (x, y, z, vx, vy, vz, kind, index):
+  // kind 0 = plane, 1 = sphere, 2 = box. Collected during the walk into a
+  // flat scratch and flushed AFTER it (a consistent store — the splash
+  // callback may burst other systems). The reused record.
+  const collideEvents = new Float64Array(MAX_COLLIDE_EVENTS * 8)
   let collideEventCount = 0
-  const collideRec: CollideRecord = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, plane: 0 }
+  const collideRec: CollideRecord = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, plane: 0, sphere: -1, box: -1 }
 
   let count = 0
   let spawned = 0
@@ -385,7 +445,9 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
       const speedCurve = forces.speedCurve ?? null
       const hasCurve = speedCurve !== null
       const collide = forces.collide ?? null
-      const planeCount = collide !== null ? Math.min(collide.planes.length, MAX_PLANES) : 0
+      const planeCount = collide !== null ? Math.min(collide.planes?.length ?? 0, MAX_PLANES) : 0
+      const sphereCount = collide !== null ? Math.min(collide.spheres?.length ?? 0, MAX_SPHERES) : 0
+      const boxCount = collide !== null ? Math.min(collide.boxes?.length ?? 0, MAX_BOXES) : 0
       // The collide EVENT hook (Task 124): hoisted — absent = a clean loop
       // (no event scratch writes at all).
       const onCollide = collide !== null ? collide.onCollide : undefined
@@ -394,7 +456,7 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
       // the closure scratch — the hot loop reads flat numbers, never arrays.
       collideEventCount = 0
       if (planeCount > 0) {
-        const planes = collide!.planes
+        const planes = collide!.planes!
         for (let p = 0; p < planeCount; p++) {
           const plane = planes[p]
           let nx = plane.normal[0] ?? 0, ny = plane.normal[1] ?? 0, nz = plane.normal[2] ?? 0
@@ -405,6 +467,33 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
           flatPlanes[b + 3] = plane.point[0] ?? 0; flatPlanes[b + 4] = plane.point[1] ?? 0; flatPlanes[b + 5] = plane.point[2] ?? 0
           flatPlanes[b + 6] = 1 - (plane.friction ?? 0) // the tangential keep factor
           flatPlanes[b + 7] = plane.kill === true ? 1 : 0 // Task 124: die on contact
+        }
+      }
+      // Task 128 — the spheres/boxes flattened alongside the planes (cx,
+      // cy, cz, r/hx.., restitution, keep, kill). The sphere stride is 8,
+      // the box stride is 10.
+      if (sphereCount > 0) {
+        const spheres = collide!.spheres!
+        for (let s = 0; s < sphereCount; s++) {
+          const sp = spheres[s]
+          const b = s * 8
+          flatSpheres[b] = sp.center[0] ?? 0; flatSpheres[b + 1] = sp.center[1] ?? 0; flatSpheres[b + 2] = sp.center[2] ?? 0
+          flatSpheres[b + 3] = sp.radius
+          flatSpheres[b + 4] = sp.restitution
+          flatSpheres[b + 5] = 1 - (sp.friction ?? 0)
+          flatSpheres[b + 6] = sp.kill === true ? 1 : 0
+        }
+      }
+      if (boxCount > 0) {
+        const boxes = collide!.boxes!
+        for (let q = 0; q < boxCount; q++) {
+          const bx = boxes[q]
+          const b = q * 10
+          flatBoxes[b] = bx.center[0] ?? 0; flatBoxes[b + 1] = bx.center[1] ?? 0; flatBoxes[b + 2] = bx.center[2] ?? 0
+          flatBoxes[b + 3] = bx.half[0] ?? 0; flatBoxes[b + 4] = bx.half[1] ?? 0; flatBoxes[b + 5] = bx.half[2] ?? 0
+          flatBoxes[b + 6] = bx.restitution
+          flatBoxes[b + 7] = 1 - (bx.friction ?? 0)
+          flatBoxes[b + 8] = bx.kill === true ? 1 : 0
         }
       }
       const noise = forces.noise ?? null
@@ -520,7 +609,7 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
           const vn = vx * nx + vy * ny + vz * nz
           if (vn >= 0) continue // separating — keep the velocity, no response
           // v' = v − (1+e)·(v·n)n — the normal part flips and scales by e.
-          const e = collide!.planes[p].restitution
+          const e = collide!.planes![p].restitution
           const rlx = vx - (1 + e) * vn * nx
           const rly = vy - (1 + e) * vn * ny
           const rlz = vz - (1 + e) * vn * nz
@@ -537,13 +626,87 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
           // f.life[i], so zeroing it here retires the particle THIS frame
           // (onRetire still fires, with this final, post-response state).
           if (flatPlanes[b + 7] === 1) f.life[i] = 0
-          // Task 124 — the contact event (post-response position + velocity),
-          // deferred: collected during the walk, flushed after it.
+          // Task 124/128 — the contact event (post-response position +
+          // velocity), deferred: collected during the walk, flushed after
+          // it. Record: (x, y, z, vx, vy, vz, kind, index) — kind 0 = plane.
           if (wantEvents && collideEventCount < MAX_COLLIDE_EVENTS) {
-            const eb = collideEventCount * 7
+            const eb = collideEventCount * 8
             collideEvents[eb] = f.px[i]; collideEvents[eb + 1] = f.py[i]; collideEvents[eb + 2] = f.pz[i]
             collideEvents[eb + 3] = vx; collideEvents[eb + 4] = vy; collideEvents[eb + 5] = vz
-            collideEvents[eb + 6] = p
+            collideEvents[eb + 6] = 0; collideEvents[eb + 7] = p
+            collideEventCount++
+          }
+        }
+        // Task 128 — the SPHERE response: same contract as the planes —
+        // only when penetrating AND moving into the surface (a separating
+        // particle keeps its velocity); push out along the radial normal,
+        // reflect with restitution, damp the tangent, snap, kill?, event.
+        for (let s = 0; s < sphereCount; s++) {
+          const b = s * 8
+          let nx = f.px[i] - flatSpheres[b], ny = f.py[i] - flatSpheres[b + 1], nz = f.pz[i] - flatSpheres[b + 2]
+          const R = flatSpheres[b + 3]
+          const r2 = nx * nx + ny * ny + nz * nz
+          if (r2 >= R * R) continue
+          const r = Math.sqrt(r2)
+          if (r < 1e-6) { nx = 0; ny = 1; nz = 0 } else { nx /= r; ny /= r; nz /= r }
+          const vn = vx * nx + vy * ny + vz * nz
+          if (vn >= 0) continue // separating — no response
+          const e = flatSpheres[b + 4]
+          const rlx = vx - (1 + e) * vn * nx
+          const rly = vy - (1 + e) * vn * ny
+          const rlz = vz - (1 + e) * vn * nz
+          const keep = flatSpheres[b + 5]
+          const vnn = rlx * nx + rly * ny + rlz * nz
+          vx = vnn * nx + keep * (rlx - vnn * nx)
+          vy = vnn * ny + keep * (rly - vnn * ny)
+          vz = vnn * nz + keep * (rlz - vnn * nz)
+          // the snap: onto the surface + ε
+          const push = R - r + 1e-4
+          f.px[i] += push * nx; f.py[i] += push * ny; f.pz[i] += push * nz
+          if (flatSpheres[b + 6] === 1) f.life[i] = 0
+          if (wantEvents && collideEventCount < MAX_COLLIDE_EVENTS) {
+            const eb = collideEventCount * 8
+            collideEvents[eb] = f.px[i]; collideEvents[eb + 1] = f.py[i]; collideEvents[eb + 2] = f.pz[i]
+            collideEvents[eb + 3] = vx; collideEvents[eb + 4] = vy; collideEvents[eb + 5] = vz
+            collideEvents[eb + 6] = 1; collideEvents[eb + 7] = s
+            collideEventCount++
+          }
+        }
+        // Task 128 — the BOX response: the minimum-penetration axis becomes
+        // the contact normal (a corner hit picks the nearest face — the
+        // particle rolls off the side it actually crossed).
+        for (let q = 0; q < boxCount; q++) {
+          const b = q * 10
+          const lx = f.px[i] - flatBoxes[b], ly = f.py[i] - flatBoxes[b + 1], lz = f.pz[i] - flatBoxes[b + 2]
+          const hx = flatBoxes[b + 3], hy = flatBoxes[b + 4], hz = flatBoxes[b + 5]
+          if (Math.abs(lx) >= hx || Math.abs(ly) >= hy || Math.abs(lz) >= hz) continue
+          const px = hx - Math.abs(lx), py = hy - Math.abs(ly), pz = hz - Math.abs(lz)
+          // the min-penetration axis + the outward sign (the true min of
+          // the three — a corner-region hit rolls off whichever face is
+          // NEAREST)
+          let nx = 0, ny = 0, nz = 0, surf = hx
+          const mn = Math.min(px, py, pz)
+          if (mn === py) { surf = hy; ny = Math.sign(ly) || 1 } else if (mn === pz) { surf = hz; nz = Math.sign(lz) || 1 } else { nx = Math.sign(lx) || 1 }
+          const vn = vx * nx + vy * ny + vz * nz
+          if (vn >= 0) continue // separating — no response
+          const e = flatBoxes[b + 6]
+          const rlx = vx - (1 + e) * vn * nx
+          const rly = vy - (1 + e) * vn * ny
+          const rlz = vz - (1 + e) * vn * nz
+          const keep = flatBoxes[b + 7]
+          const vnn = rlx * nx + rly * ny + rlz * nz
+          vx = vnn * nx + keep * (rlx - vnn * nx)
+          vy = vnn * ny + keep * (rly - vnn * ny)
+          vz = vnn * nz + keep * (rlz - vnn * nz)
+          // the snap: onto the face + ε
+          const push = surf - Math.abs(nx ? lx : ny ? ly : lz) + 1e-4
+          f.px[i] += push * nx; f.py[i] += push * ny; f.pz[i] += push * nz
+          if (flatBoxes[b + 8] === 1) f.life[i] = 0
+          if (wantEvents && collideEventCount < MAX_COLLIDE_EVENTS) {
+            const eb = collideEventCount * 8
+            collideEvents[eb] = f.px[i]; collideEvents[eb + 1] = f.py[i]; collideEvents[eb + 2] = f.pz[i]
+            collideEvents[eb + 3] = vx; collideEvents[eb + 4] = vy; collideEvents[eb + 5] = vz
+            collideEvents[eb + 6] = 2; collideEvents[eb + 7] = q
             collideEventCount++
           }
         }
@@ -588,10 +751,13 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
       // record is reused; the callback must copy what it keeps.
       if (collideEventCount > 0 && onCollide !== undefined) {
         for (let e = 0; e < collideEventCount; e++) {
-          const b = e * 7
+          const b = e * 8
           collideRec.x = collideEvents[b]; collideRec.y = collideEvents[b + 1]; collideRec.z = collideEvents[b + 2]
           collideRec.vx = collideEvents[b + 3]; collideRec.vy = collideEvents[b + 4]; collideRec.vz = collideEvents[b + 5]
-          collideRec.plane = collideEvents[b + 6]
+          const kind = collideEvents[b + 6], idx = collideEvents[b + 7]
+          collideRec.plane = kind === 0 ? idx : -1
+          collideRec.sphere = kind === 1 ? idx : -1
+          collideRec.box = kind === 2 ? idx : -1
           onCollide(collideRec)
         }
         collideEventCount = 0

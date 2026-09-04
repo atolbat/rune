@@ -350,7 +350,7 @@ await assertSpriteContour()
     const pill = await vfxPage.textContent('.pt-pill').catch(() => '')
     if (badge === 'WebGL2' && /[1-9][\d,]* particles/.test(pill)) break
   }
-  await vfxPage.waitForFunction(() => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 20000 })
+  await vfxPage.waitForFunction(() => /Sentry Turret · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 20000 })
 
   const VFX_NAMES = ['muzzle', 'explosion', 'shapes', 'trail', 'sequencer', 'mesh', 'subemitter',
     'noise', 'alphatest', 'plugin', 'billboard', 'soft', 'blending', 'follow',
@@ -430,6 +430,17 @@ await assertSpriteContour()
         { timeout: 12000 },
       ).catch(() => {})
       await vfxPage.waitForTimeout(500)
+    }
+    if (name === 'storm') {
+      // PHASE-LOCKED (the pill-race class, seen as an intermittent "0
+      // particles" flake): the rain fills ~1 s after the module boots, and
+      // a loaded-down runner can burn the whole 1.7 s settle before the
+      // first drop spawns — wait until drops are LIVE in the pill.
+      await vfxPage.waitForFunction(
+        () => /Rainstorm · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+        null,
+        { timeout: 12000 },
+      ).catch(() => {})
     }
     await vfxPage.screenshot({ path: join(out, `vfx-${name}.png`) })
     // the ALIVE pill is read at SHOT A's moment (the canonical shot): the

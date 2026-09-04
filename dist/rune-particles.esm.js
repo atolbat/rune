@@ -263,6 +263,8 @@ var NO_FORCES = {
   limitSpeed: null
 };
 var MAX_PLANES = 16;
+var MAX_SPHERES = 8;
+var MAX_BOXES = 8;
 var MAX_COLLIDE_EVENTS = 512;
 function createParticleSystem(capacity, options = {}) {
   if (!Number.isInteger(capacity) || capacity < 1 || capacity > 2 ** 24) {
@@ -326,9 +328,11 @@ function createParticleSystem(capacity, options = {}) {
   const curveScratch = new Float32Array(6);
   const curvePrev = new Float32Array(6);
   const flatPlanes = new Float64Array(MAX_PLANES * 8);
-  const collideEvents = new Float64Array(MAX_COLLIDE_EVENTS * 7);
+  const flatSpheres = new Float64Array(MAX_SPHERES * 8);
+  const flatBoxes = new Float64Array(MAX_BOXES * 10);
+  const collideEvents = new Float64Array(MAX_COLLIDE_EVENTS * 8);
   let collideEventCount = 0;
-  const collideRec = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, plane: 0 };
+  const collideRec = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, plane: 0, sphere: -1, box: -1 };
   let count = 0;
   let spawned = 0;
   let retired = 0;
@@ -410,7 +414,9 @@ function createParticleSystem(capacity, options = {}) {
       const speedCurve = forces.speedCurve ?? null;
       const hasCurve = speedCurve !== null;
       const collide = forces.collide ?? null;
-      const planeCount = collide !== null ? Math.min(collide.planes.length, MAX_PLANES) : 0;
+      const planeCount = collide !== null ? Math.min(collide.planes?.length ?? 0, MAX_PLANES) : 0;
+      const sphereCount = collide !== null ? Math.min(collide.spheres?.length ?? 0, MAX_SPHERES) : 0;
+      const boxCount = collide !== null ? Math.min(collide.boxes?.length ?? 0, MAX_BOXES) : 0;
       const onCollide = collide !== null ? collide.onCollide : undefined;
       const wantEvents = onCollide !== undefined;
       collideEventCount = 0;
@@ -438,6 +444,36 @@ function createParticleSystem(capacity, options = {}) {
           flatPlanes[b + 5] = plane.point[2] ?? 0;
           flatPlanes[b + 6] = 1 - (plane.friction ?? 0);
           flatPlanes[b + 7] = plane.kill === true ? 1 : 0;
+        }
+      }
+      if (sphereCount > 0) {
+        const spheres = collide.spheres;
+        for (let s = 0;s < sphereCount; s++) {
+          const sp = spheres[s];
+          const b = s * 8;
+          flatSpheres[b] = sp.center[0] ?? 0;
+          flatSpheres[b + 1] = sp.center[1] ?? 0;
+          flatSpheres[b + 2] = sp.center[2] ?? 0;
+          flatSpheres[b + 3] = sp.radius;
+          flatSpheres[b + 4] = sp.restitution;
+          flatSpheres[b + 5] = 1 - (sp.friction ?? 0);
+          flatSpheres[b + 6] = sp.kill === true ? 1 : 0;
+        }
+      }
+      if (boxCount > 0) {
+        const boxes = collide.boxes;
+        for (let q = 0;q < boxCount; q++) {
+          const bx = boxes[q];
+          const b = q * 10;
+          flatBoxes[b] = bx.center[0] ?? 0;
+          flatBoxes[b + 1] = bx.center[1] ?? 0;
+          flatBoxes[b + 2] = bx.center[2] ?? 0;
+          flatBoxes[b + 3] = bx.half[0] ?? 0;
+          flatBoxes[b + 4] = bx.half[1] ?? 0;
+          flatBoxes[b + 5] = bx.half[2] ?? 0;
+          flatBoxes[b + 6] = bx.restitution;
+          flatBoxes[b + 7] = 1 - (bx.friction ?? 0);
+          flatBoxes[b + 8] = bx.kill === true ? 1 : 0;
         }
       }
       const noise = forces.noise ?? null;
@@ -549,14 +585,112 @@ function createParticleSystem(capacity, options = {}) {
           if (flatPlanes[b + 7] === 1)
             f.life[i] = 0;
           if (wantEvents && collideEventCount < MAX_COLLIDE_EVENTS) {
-            const eb = collideEventCount * 7;
+            const eb = collideEventCount * 8;
             collideEvents[eb] = f.px[i];
             collideEvents[eb + 1] = f.py[i];
             collideEvents[eb + 2] = f.pz[i];
             collideEvents[eb + 3] = vx;
             collideEvents[eb + 4] = vy;
             collideEvents[eb + 5] = vz;
-            collideEvents[eb + 6] = p;
+            collideEvents[eb + 6] = 0;
+            collideEvents[eb + 7] = p;
+            collideEventCount++;
+          }
+        }
+        for (let s = 0;s < sphereCount; s++) {
+          const b = s * 8;
+          let nx = f.px[i] - flatSpheres[b], ny = f.py[i] - flatSpheres[b + 1], nz = f.pz[i] - flatSpheres[b + 2];
+          const R = flatSpheres[b + 3];
+          const r2 = nx * nx + ny * ny + nz * nz;
+          if (r2 >= R * R)
+            continue;
+          const r = Math.sqrt(r2);
+          if (r < 0.000001) {
+            nx = 0;
+            ny = 1;
+            nz = 0;
+          } else {
+            nx /= r;
+            ny /= r;
+            nz /= r;
+          }
+          const vn = vx * nx + vy * ny + vz * nz;
+          if (vn >= 0)
+            continue;
+          const e = flatSpheres[b + 4];
+          const rlx = vx - (1 + e) * vn * nx;
+          const rly = vy - (1 + e) * vn * ny;
+          const rlz = vz - (1 + e) * vn * nz;
+          const keep = flatSpheres[b + 5];
+          const vnn = rlx * nx + rly * ny + rlz * nz;
+          vx = vnn * nx + keep * (rlx - vnn * nx);
+          vy = vnn * ny + keep * (rly - vnn * ny);
+          vz = vnn * nz + keep * (rlz - vnn * nz);
+          const push = R - r + 0.0001;
+          f.px[i] += push * nx;
+          f.py[i] += push * ny;
+          f.pz[i] += push * nz;
+          if (flatSpheres[b + 6] === 1)
+            f.life[i] = 0;
+          if (wantEvents && collideEventCount < MAX_COLLIDE_EVENTS) {
+            const eb = collideEventCount * 8;
+            collideEvents[eb] = f.px[i];
+            collideEvents[eb + 1] = f.py[i];
+            collideEvents[eb + 2] = f.pz[i];
+            collideEvents[eb + 3] = vx;
+            collideEvents[eb + 4] = vy;
+            collideEvents[eb + 5] = vz;
+            collideEvents[eb + 6] = 1;
+            collideEvents[eb + 7] = s;
+            collideEventCount++;
+          }
+        }
+        for (let q = 0;q < boxCount; q++) {
+          const b = q * 10;
+          const lx = f.px[i] - flatBoxes[b], ly = f.py[i] - flatBoxes[b + 1], lz = f.pz[i] - flatBoxes[b + 2];
+          const hx = flatBoxes[b + 3], hy = flatBoxes[b + 4], hz = flatBoxes[b + 5];
+          if (Math.abs(lx) >= hx || Math.abs(ly) >= hy || Math.abs(lz) >= hz)
+            continue;
+          const px = hx - Math.abs(lx), py = hy - Math.abs(ly), pz = hz - Math.abs(lz);
+          let nx = 0, ny = 0, nz = 0, surf = hx;
+          const mn = Math.min(px, py, pz);
+          if (mn === py) {
+            surf = hy;
+            ny = Math.sign(ly) || 1;
+          } else if (mn === pz) {
+            surf = hz;
+            nz = Math.sign(lz) || 1;
+          } else {
+            nx = Math.sign(lx) || 1;
+          }
+          const vn = vx * nx + vy * ny + vz * nz;
+          if (vn >= 0)
+            continue;
+          const e = flatBoxes[b + 6];
+          const rlx = vx - (1 + e) * vn * nx;
+          const rly = vy - (1 + e) * vn * ny;
+          const rlz = vz - (1 + e) * vn * nz;
+          const keep = flatBoxes[b + 7];
+          const vnn = rlx * nx + rly * ny + rlz * nz;
+          vx = vnn * nx + keep * (rlx - vnn * nx);
+          vy = vnn * ny + keep * (rly - vnn * ny);
+          vz = vnn * nz + keep * (rlz - vnn * nz);
+          const push = surf - Math.abs(nx ? lx : ny ? ly : lz) + 0.0001;
+          f.px[i] += push * nx;
+          f.py[i] += push * ny;
+          f.pz[i] += push * nz;
+          if (flatBoxes[b + 8] === 1)
+            f.life[i] = 0;
+          if (wantEvents && collideEventCount < MAX_COLLIDE_EVENTS) {
+            const eb = collideEventCount * 8;
+            collideEvents[eb] = f.px[i];
+            collideEvents[eb + 1] = f.py[i];
+            collideEvents[eb + 2] = f.pz[i];
+            collideEvents[eb + 3] = vx;
+            collideEvents[eb + 4] = vy;
+            collideEvents[eb + 5] = vz;
+            collideEvents[eb + 6] = 2;
+            collideEvents[eb + 7] = q;
             collideEventCount++;
           }
         }
@@ -612,14 +746,17 @@ function createParticleSystem(capacity, options = {}) {
       }
       if (collideEventCount > 0 && onCollide !== undefined) {
         for (let e = 0;e < collideEventCount; e++) {
-          const b = e * 7;
+          const b = e * 8;
           collideRec.x = collideEvents[b];
           collideRec.y = collideEvents[b + 1];
           collideRec.z = collideEvents[b + 2];
           collideRec.vx = collideEvents[b + 3];
           collideRec.vy = collideEvents[b + 4];
           collideRec.vz = collideEvents[b + 5];
-          collideRec.plane = collideEvents[b + 6];
+          const kind = collideEvents[b + 6], idx = collideEvents[b + 7];
+          collideRec.plane = kind === 0 ? idx : -1;
+          collideRec.sphere = kind === 1 ? idx : -1;
+          collideRec.box = kind === 2 ? idx : -1;
           onCollide(collideRec);
         }
         collideEventCount = 0;
@@ -1643,6 +1780,10 @@ function createGrassField(desc) {
   if (!Number.isFinite(wMin + wMax) || wMin <= 0 || wMax < wMin) {
     throw new Error(`rune/particles: grass width must be [min > 0 <= max] (got [${wMin}, ${wMax}])`);
   }
+  const mask = desc.mask;
+  if (mask !== undefined && typeof mask !== "function") {
+    throw new Error(`rune/particles: grass mask must be a function (x, z) → [0, 1] (got ${typeof mask})`);
+  }
   const groundY = desc.groundY ?? 0;
   const c0 = desc.color?.[0] ?? [0.16, 0.34, 0.1];
   const c1 = desc.color?.[1] ?? [0.42, 0.55, 0.18];
@@ -1655,26 +1796,48 @@ function createGrassField(desc) {
     throw new Error(`rune/particles: grass fadeBand must be in (0, 1) (got ${fadeBand})`);
   }
   const seed = (desc.seed ?? 1) | 0;
-  const pos = new Float32Array(count * 3);
-  const par = new Float32Array(count * 4);
-  const tint = new Float32Array(count * 4);
-  for (let i = 0;i < count; i++) {
-    const rr = radius * Math.sqrt(hash01(seed, i, 21));
-    const ang = 6.283185307179586 * hash01(seed, i, 22);
-    pos[i * 3] = Math.cos(ang) * rr;
-    pos[i * 3 + 1] = groundY;
-    pos[i * 3 + 2] = Math.sin(ang) * rr;
-    par[i * 4] = hMin + (hMax - hMin) * hash01(seed, i, 23);
-    par[i * 4 + 1] = 6.283185307179586 * hash01(seed, i, 24);
-    par[i * 4 + 2] = hash01(seed, i, 25);
-    par[i * 4 + 3] = wMin + (wMax - wMin) * hash01(seed, i, 26);
-    const mix = hash01(seed, i, 27);
-    tint[i * 4] = c0[0] + (c1[0] - c0[0]) * mix;
-    tint[i * 4 + 1] = c0[1] + (c1[1] - c0[1]) * mix;
-    tint[i * 4 + 2] = c0[2] + (c1[2] - c0[2]) * mix;
-    tint[i * 4 + 3] = 0.8 + 0.4 * hash01(seed, i, 28);
+  const cap = Math.min(count, 2000000);
+  const pos = new Float32Array(cap * 3);
+  const par = new Float32Array(cap * 4);
+  const tint = new Float32Array(cap * 4);
+  let n = 0;
+  let tries = 0;
+  const maxTries = cap * 5;
+  while (n < cap && tries < maxTries) {
+    const rr = radius * Math.sqrt(hash01(seed, tries, 21));
+    const ang = 6.283185307179586 * hash01(seed, tries, 22);
+    const x = Math.cos(ang) * rr;
+    const z = Math.sin(ang) * rr;
+    let w = 1;
+    if (mask !== undefined) {
+      w = mask(x, z);
+      if (!Number.isFinite(w))
+        w = 1;
+      if (w < 0)
+        w = 0;
+      if (w > 1)
+        w = 1;
+      if (w < 1 && hash01(seed, tries, 41) >= w) {
+        tries++;
+        continue;
+      }
+    }
+    pos[n * 3] = x;
+    pos[n * 3 + 1] = groundY;
+    pos[n * 3 + 2] = z;
+    par[n * 4] = (hMin + (hMax - hMin) * hash01(seed, tries, 23)) * (0.55 + 0.45 * w);
+    par[n * 4 + 1] = 6.283185307179586 * hash01(seed, tries, 24);
+    par[n * 4 + 2] = hash01(seed, tries, 25);
+    par[n * 4 + 3] = wMin + (wMax - wMin) * hash01(seed, tries, 26);
+    const mix = hash01(seed, tries, 27);
+    tint[n * 4] = c0[0] + (c1[0] - c0[0]) * mix;
+    tint[n * 4 + 1] = c0[1] + (c1[1] - c0[1]) * mix;
+    tint[n * 4 + 2] = c0[2] + (c1[2] - c0[2]) * mix;
+    tint[n * 4 + 3] = (0.8 + 0.4 * hash01(seed, tries, 28)) * (0.75 + 0.35 * w);
+    n++;
+    tries++;
   }
-  return { pos, par, tint, count, fade, glsl: glslOf(fade, fadeBand), wgsl: wgslOf(fade, fadeBand) };
+  return { pos, par, tint, count: n, fade, glsl: glslOf(fade, fadeBand), wgsl: wgslOf(fade, fadeBand) };
 }
 function glslOf(fade, band) {
   const F = fade.toFixed(2);
@@ -1700,18 +1863,29 @@ void main() {
   float t = cu.y; // 0 at the base, 1 at the tip
   float h = i_par.x, lean = i_par.y, phase = i_par.z, width = i_par.w;
 
-  // The gust field: two TRAVELING waves across the field (the wind reads
-  // as waves crossing, not a uniform wiggle) + the per-blade flutter.
-  float wave = sin(dot(i_pos.xz, vec2(0.35, 0.22)) - u_time * 1.7)
-             + 0.55 * sin(dot(i_pos.xz, vec2(-0.21, 0.4)) + u_time * 1.1);
+  // THE GUST FIELD (Task 128 — the "wind as WAVES" upgrade): the wind's
+  // bend DIRECTION now SWINGS with a traveling wave (the gust front
+  // visibly rolls across the field — not just the amplitude pulsing with
+  // every blade leaning the same way). Two waves with SHORT wavelengths
+  // (~9.7 and ~11 units — 5+ crests visible at once over a 60-unit field)
+  // crossing at an angle, plus a swing term that steers the bend around
+  // the wind axis, plus the per-blade flutter.
+  float waveA = sin(dot(i_pos.xz, vec2(0.63, 0.44)) - u_time * 2.1);
+  float waveB = sin(dot(i_pos.xz, vec2(-0.42, 0.55)) + u_time * 1.4);
+  float gust = 0.5 + 0.5 * (waveA + 0.6 * waveB) / 1.6; // 0..1 envelope
   float flutter = sin(u_time * (2.2 + phase * 1.5) + phase * 6.28318);
-  float bendK = u_wind.z * (0.55 + 0.45 * wave) + u_wind.w * flutter;
+  // the swing: the bend direction wobbles ±~20° around the wind axis,
+  // phase-shifted in space (the wave reads as a rolling front)
+  float swing = 0.36 * sin(dot(i_pos.xz, vec2(0.5, -0.33)) - u_time * 1.5);
+  vec2 windDir = normalize(u_wind.xy + vec2(1e-4, 0.0));
+  vec2 bendDir = normalize(windDir + vec2(-windDir.y, windDir.x) * swing);
+  float bendK = u_wind.z * (0.35 + 0.65 * gust) + u_wind.w * flutter;
 
   // The static lean (a fixed per-blade tilt) and the wind bend, both
   // growing with t^2 (a blade bends at the top, not the base).
   float b = t * t;
   vec2 leanDir = vec2(cos(lean), sin(lean)) * (0.35 * b);
-  vec2 windOff = u_wind.xy * (bendK * 0.45 * b);
+  vec2 windOff = bendDir * (bendK * 0.5 * b);
 
   // Cylindrical billboard: face the camera around world Y, anchored.
   vec3 toCam = u_camPos - i_pos;
@@ -1782,14 +1956,20 @@ fn vsMain(@builtin(vertex_index) vi : u32,
   let phase = i_par.z;
   let width = i_par.w;
 
-  let wave = sin(dot(i_pos.xz, vec2<f32>(0.35, 0.22)) - params.u_time * 1.7)
-           + 0.55 * sin(dot(i_pos.xz, vec2<f32>(-0.21, 0.4)) + params.u_time * 1.1);
+  // THE GUST FIELD — the WGSL twin of the GLSL wave/swing upgrade (the
+  // bend direction rolls with the traveling fronts, ~5 crests at once).
+  let waveA = sin(dot(i_pos.xz, vec2<f32>(0.63, 0.44)) - params.u_time * 2.1);
+  let waveB = sin(dot(i_pos.xz, vec2<f32>(-0.42, 0.55)) + params.u_time * 1.4);
+  let gust = 0.5 + 0.5 * (waveA + 0.6 * waveB) / 1.6;
   let flutter = sin(params.u_time * (2.2 + phase * 1.5) + phase * 6.28318);
-  let bendK = params.u_wind.z * (0.55 + 0.45 * wave) + params.u_wind.w * flutter;
+  let swing = 0.36 * sin(dot(i_pos.xz, vec2<f32>(0.5, -0.33)) - params.u_time * 1.5);
+  let windDir = normalize(params.u_wind.xy + vec2<f32>(1e-4, 0.0));
+  let bendDir = normalize(windDir + vec2<f32>(-windDir.y, windDir.x) * swing);
+  let bendK = params.u_wind.z * (0.35 + 0.65 * gust) + params.u_wind.w * flutter;
 
   let b = t * t;
   let leanDir = vec2<f32>(cos(lean), sin(lean)) * (0.35 * b);
-  let windOff = params.u_wind.xy * (bendK * 0.45 * b);
+  let windOff = bendDir * (bendK * 0.5 * b);
 
   let toCam = params.u_camPos.xyz - i_pos;
   var right = vec3<f32>(-toCam.z, 0.0, toCam.x);
@@ -2201,13 +2381,29 @@ function validateAttractor(at) {
 function validateCollision(collide) {
   if (collide === undefined || collide === null)
     return null;
-  if (!Array.isArray(collide.planes) || collide.planes.length === 0) {
-    throw new Error("rune/particles: collide.planes must be a non-empty array (a collision set with no planes is a silent no-op)");
+  const shapeCount = (collide.planes?.length ?? 0) + (collide.spheres?.length ?? 0) + (collide.boxes?.length ?? 0);
+  if (shapeCount === 0) {
+    throw new Error("rune/particles: collide needs at least one plane, sphere or box (a collision set with no shapes is a silent no-op)");
   }
-  if (collide.planes.length > MAX_PLANES) {
+  if (collide.planes !== undefined && !Array.isArray(collide.planes)) {
+    throw new Error(`rune/particles: collide.planes must be an array (got ${typeof collide.planes})`);
+  }
+  if (collide.spheres !== undefined && !Array.isArray(collide.spheres)) {
+    throw new Error(`rune/particles: collide.spheres must be an array (got ${typeof collide.spheres})`);
+  }
+  if (collide.boxes !== undefined && !Array.isArray(collide.boxes)) {
+    throw new Error(`rune/particles: collide.boxes must be an array (got ${typeof collide.boxes})`);
+  }
+  if ((collide.planes?.length ?? 0) > MAX_PLANES) {
     throw new Error(`rune/particles: collide.planes is capped at ${MAX_PLANES} (got ${collide.planes.length}) — the flat scratch is sized to the cap`);
   }
-  for (const plane of collide.planes) {
+  if ((collide.spheres?.length ?? 0) > MAX_SPHERES) {
+    throw new Error(`rune/particles: collide.spheres is capped at ${MAX_SPHERES} (got ${collide.spheres.length}) — the flat scratch is sized to the cap`);
+  }
+  if ((collide.boxes?.length ?? 0) > MAX_BOXES) {
+    throw new Error(`rune/particles: collide.boxes is capped at ${MAX_BOXES} (got ${collide.boxes.length}) — the flat scratch is sized to the cap`);
+  }
+  for (const plane of collide.planes ?? []) {
     if (!Array.isArray(plane.normal) || plane.normal.length !== 3 || !plane.normal.every((v) => Number.isFinite(v))) {
       throw new Error(`rune/particles: a collision plane normal must be three finite numbers (got ${JSON.stringify(plane.normal)})`);
     }
@@ -2226,6 +2422,42 @@ function validateCollision(collide) {
     }
     if (plane.kill !== undefined && typeof plane.kill !== "boolean") {
       throw new Error(`rune/particles: plane kill must be a boolean (got ${JSON.stringify(plane.kill)}; true = the particle retires on contact)`);
+    }
+  }
+  for (const sphere of collide.spheres ?? []) {
+    if (!Array.isArray(sphere.center) || sphere.center.length !== 3 || !sphere.center.every((v) => Number.isFinite(v))) {
+      throw new Error(`rune/particles: a collision sphere center must be three finite numbers (got ${JSON.stringify(sphere.center)})`);
+    }
+    if (!Number.isFinite(sphere.radius) || sphere.radius <= 0) {
+      throw new Error(`rune/particles: a collision sphere radius must be a finite > 0 (got ${sphere.radius})`);
+    }
+    if (!Number.isFinite(sphere.restitution) || sphere.restitution < 0 || sphere.restitution > 1) {
+      throw new Error(`rune/particles: sphere restitution must be in [0, 1] (got ${sphere.restitution})`);
+    }
+    const fr = sphere.friction ?? 0;
+    if (!Number.isFinite(fr) || fr < 0 || fr > 1) {
+      throw new Error(`rune/particles: sphere friction must be in [0, 1] (got ${fr})`);
+    }
+    if (sphere.kill !== undefined && typeof sphere.kill !== "boolean") {
+      throw new Error(`rune/particles: sphere kill must be a boolean (got ${JSON.stringify(sphere.kill)})`);
+    }
+  }
+  for (const box of collide.boxes ?? []) {
+    if (!Array.isArray(box.center) || box.center.length !== 3 || !box.center.every((v) => Number.isFinite(v))) {
+      throw new Error(`rune/particles: a collision box center must be three finite numbers (got ${JSON.stringify(box.center)})`);
+    }
+    if (!Array.isArray(box.half) || box.half.length !== 3 || !box.half.every((v) => Number.isFinite(v) && v > 0)) {
+      throw new Error(`rune/particles: a collision box half must be three finite numbers > 0 (got ${JSON.stringify(box.half)}; [1.6, 0.9, 1.6] = a 3.2×1.8×3.2 crate)`);
+    }
+    if (!Number.isFinite(box.restitution) || box.restitution < 0 || box.restitution > 1) {
+      throw new Error(`rune/particles: box restitution must be in [0, 1] (got ${box.restitution})`);
+    }
+    const fr = box.friction ?? 0;
+    if (!Number.isFinite(fr) || fr < 0 || fr > 1) {
+      throw new Error(`rune/particles: box friction must be in [0, 1] (got ${fr})`);
+    }
+    if (box.kill !== undefined && typeof box.kill !== "boolean") {
+      throw new Error(`rune/particles: box kill must be a boolean (got ${JSON.stringify(box.kill)})`);
     }
   }
   if (collide.onCollide !== undefined && typeof collide.onCollide !== "function") {
@@ -2293,7 +2525,9 @@ export {
   PARTICLE_FLOATS,
   NO_FORCES,
   MESH_STRIDE,
+  MAX_SPHERES,
   MAX_PLANES,
+  MAX_BOXES,
   FIELD_NAMES,
   CONSTANT_RAMP
 };

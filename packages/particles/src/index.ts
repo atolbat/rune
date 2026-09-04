@@ -88,9 +88,9 @@
 
 export type {
   ParticleFields, SpawnRecord, ForceFields, Attractor, ParticleSystem,
-  CollisionPlane, Collision, CollideRecord, SeekForce, LimitSpeedForce, RetireRecord, StoreOptions,
+  CollisionPlane, CollisionSphere, CollisionBox, Collision, CollideRecord, SeekForce, LimitSpeedForce, RetireRecord, StoreOptions,
 } from './system.ts'
-export { createParticleSystem, NO_FORCES, MAX_PLANES, FIELD_NAMES, PARTICLE_FLOATS } from './system.ts'
+export { createParticleSystem, NO_FORCES, MAX_PLANES, MAX_SPHERES, MAX_BOXES, FIELD_NAMES, PARTICLE_FLOATS } from './system.ts'
 export type { SpawnShape, VelocityMode, SpawnerDesc, Spawner, TargetDesc, ImageMask } from './spawn.ts'
 export { createSpawner, hash01 } from './spawn.ts'
 export type { RampPoint, Ramp } from './ramp.ts'
