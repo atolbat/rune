@@ -74,9 +74,9 @@ export default {
           },
         },
         spawner: RAIN_S,
-        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.42, lengthFactor: 0.6 },
+        render: { kind: 'billboard', draw: 'instance', mode: 'stretched', speedFactor: 0.42, lengthFactor: 0.6 },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.alpha,
       texture: () => env.sparkTexture,
     })
@@ -101,9 +101,9 @@ export default {
         ]),
         spawner: RING_S,
         // HORIZONTAL billboards: the ripple lies flat on the wet floor
-        render: { kind: 'billboard', mode: 'horizontal', tiles: [4, 4] },
+        render: { kind: 'billboard', draw: 'instance', mode: 'horizontal', tiles: [4, 4] },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       texture: () => env.atlasTexture,
     })
@@ -125,9 +125,9 @@ export default {
         ]),
         forces: { gravity: [0, -14, 0] },
         spawner: DROP_S,
-        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.1 },
+        render: { kind: 'billboard', draw: 'instance', mode: 'stretched', speedFactor: 0.1 },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       texture: () => env.sparkTexture,
     })
@@ -153,9 +153,9 @@ export default {
           { t: 1, size: 1, r: 0.7, g: 0.85, b: 1, a: 0 },
         ]),
         spawner: BOLT_S,
-        render: { kind: 'billboard', mode: 'camera' },
+        render: { kind: 'billboard', draw: 'instance', mode: 'camera' },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       // the single-glow sprite (the ribbon texture): one clean gaussian,
       // not the 4×4 atlas grid

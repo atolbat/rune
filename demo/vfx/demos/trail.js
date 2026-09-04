@@ -117,8 +117,9 @@ export default {
         ]),
         forces: FORCES,
         spawner: SPAWN,
+        render: { kind: 'billboard', draw: 'instance' },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       texture: () => env.glowTexture,
     })

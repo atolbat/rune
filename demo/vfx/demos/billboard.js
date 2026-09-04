@@ -41,13 +41,13 @@ export default {
             color: [[1, 1, 1, 1], [0.7, 0.9, 1, 1]], seed: 191 + i * 13,
           },
           render: {
-            kind: 'billboard',
+            kind: 'billboard', draw: 'instance',
             mode,
             tiles: env.atlasTiles,
             ...(mode === 'stretched' ? { speedFactor: 0.2, lengthFactor } : {}),
           },
         }),
-        material: env.materials.sprite,
+        material: env.materials.bbSprite,
         pipeline: env.pipelines.alpha,
       })
     })

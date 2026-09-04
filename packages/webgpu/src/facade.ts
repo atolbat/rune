@@ -171,6 +171,33 @@ export interface GPUFacade {
    *  Float32Array itself (stable in the feed renderer). Binding is done by
    *  the executor via bindVertexBuffer (the same keyed cache). */
   syncVertexBuffer(data: Float32Array, byteLength: number): void
+  /** Task 131 (the GPGPU tier) — EXTERNAL BUFFERS: caller-owned GPU
+   *  storage (usage flags are the caller's: STORAGE | COPY_DST |
+   *  VERTEX | COPY_SRC...; the facade stays usage-agnostic). The ids are
+   *  the facade-scoped handles (like textureId). writeExternalBuffer
+   *  takes a byte offset into the buffer (the emit-block staging writes
+   *  at [slot × stride]); readExternalBuffer maps a copy (the probe
+   *  parity gates); bindExternalVertexBuffer binds one as a vertex
+   *  source (the PACK output — the instance records the render draws
+   *  directly, zero per-frame CPU upload). */
+  createExternalBuffer(byteLength: number, usage: number): number
+  writeExternalBuffer(bufferId: number, data: Float32Array | Uint32Array, byteOffset?: number, byteLength?: number): void
+  readExternalBuffer(bufferId: number, byteLength: number): Promise<Float32Array>
+  deleteExternalBuffer(bufferId: number): void
+  /** The GPUBuffer of an external id (the orchestrator's diagnostics). */
+  externalBufferOf(bufferId: number): unknown
+  bindExternalVertexBuffer(slot: number, bufferId: number): void
+  /** Task 131 — COMPUTE: a pipeline FAMILY over one WGSL module with a
+   *  FIXED five-binding layout (0 uniform, 1 rw storage, 2 ro storage,
+   *  3 rw storage, 4 ro storage — one bind group for every entry).
+   *  createCompute(wgsl, uniformBytes, [stateId, swapsId, recordsId,
+   *  rampId]) binds the four external buffers ONCE; runCompute(id,
+   *  entry, uniformData, workgroups) dispatches one entry. The dispatch
+   *  is enqueued on the frame's encoder BEFORE the render pass opens
+   *  (the step() → record() tape order); a runCompute inside an open
+   *  render pass is a loud onGpuError, never a silent no-op. */
+  createCompute(wgsl: string, uniformBytes: number, bufferIds: readonly number[]): number
+  runCompute(computeId: number, entry: string, uniformData: Float32Array, workgroups: number): void
   bindTexture(textureId: number): void
   beginPass(clearIndex: number): void
   draw(count: number, instances: number): void

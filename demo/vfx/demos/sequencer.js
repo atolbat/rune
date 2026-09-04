@@ -84,6 +84,7 @@ export default {
       expose: true,
       facade: env.createParticles({
         capacity: COUNT,
+        render: { kind: 'billboard', draw: 'instance' },
         // the newborns: a loose cloud around the text plane, heading to the
         // TEXT targets (the image target does the seeking)
         rate: 0,
@@ -109,7 +110,7 @@ export default {
           target: { mode: 'image', origin: [0, 0.4, 0], axis: [0, 0, 1], width: 8.4, height: 3.15, mask: textMask },
         },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       // the single GLOW sprite (no tiles → never the 4×4 atlas)
       texture: () => env.glowTexture,

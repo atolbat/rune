@@ -163,6 +163,14 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
     bindVertexBuffer: (slot, data, size) => raw.bindVertexBuffer(slot, data, size),
     // M5 (Task 73): feed dual-bind — a frame op (per-frame dirty range), not journaled.
     syncVertexBuffer: (data, byteLength) => raw.syncVertexBuffer(data, byteLength),
+    bindExternalVertexBuffer: (slot, bufferId) => raw.bindExternalVertexBuffer(slot, bufferId),
+    createExternalBuffer: (byteLength, usage) => raw.createExternalBuffer(byteLength, usage),
+    writeExternalBuffer: (id, data, byteOffset, byteLength) => raw.writeExternalBuffer(id, data, byteOffset, byteLength),
+    readExternalBuffer: (id, byteLength) => raw.readExternalBuffer(id, byteLength),
+    deleteExternalBuffer: id => raw.deleteExternalBuffer(id),
+    externalBufferOf: id => raw.externalBufferOf(id),
+    createCompute: (wgsl, uniformBytes, bufferIds) => raw.createCompute(wgsl, uniformBytes, bufferIds),
+    runCompute: (computeId, entry, uniformData, workgroups) => raw.runCompute(computeId, entry, uniformData, workgroups),
     bindTexture: textureOrViewId => {
       touchTexOrView(textureOrViewId)
       raw.bindTexture(rawTexOrView(textureOrViewId))

@@ -17,6 +17,9 @@
  *          owns that part)
  *   No instancing, no point sprites, no transform feedback — the soup is
  *   the lowest common denominator of WebGL2 AND WebGPU draw paths.
+ *   (Task 131: the OPTIONAL instanced path — render.draw:'instance' —
+ *   packs 16-float records and lets the BILLBOARD material expand the
+ *   quad on the GPU; the soup stays the default and the LCD.)
  *
  *   Two levels of API (the repo's facade + composable core split):
  *     facade : createParticles — rate/burst/at/advance/view, the ramp,
@@ -98,6 +101,12 @@ export { createRamp, sampleRamp, CONSTANT_RAMP, RAMP_STRIDE } from './ramp.ts'
 export type { BillboardMode } from './billboards.ts'
 export { fillBillboards, SOUP_STRIDE, VERTS_PER_PARTICLE } from './billboards.ts'
 export type { CameraBasis, BillboardOptions } from './billboards.ts'
+export type { PackOptions, InstanceField } from './instances.ts'
+export { packInstances, INSTANCE_STRIDE, INSTANCE_LAYOUT } from './instances.ts'
+export {
+  gpuSimWgsl, gpuRampLUT, GPU_STATE_STRIDE, GPU_SIM_UNIFORM_BYTES, GPU_SIM_UNIFORM_FLOATS,
+  GPU_SIM_U32_FIELDS, GPU_SIM_F32_FIELDS, GPU_SIM_VEC4_FIELDS, GPU_FORCE_MASK, GPU_SIM_ENTRIES,
+} from './gpuSim.ts'
 export type { TrailOptions, TrailHistory, TrailBakeOptions } from './trails.ts'
 export { createTrailHistory, fillTrails } from './trails.ts'
 export type { MeshGeometry, MeshOptions } from './meshes.ts'
@@ -106,5 +115,5 @@ export type { NoiseField } from './noise.ts'
 export { simplex3, validateNoise } from './noise.ts'
 export type { GrassFieldDesc, GrassField } from './field.ts'
 export { createGrassField } from './field.ts'
-export type { ParticlesDesc, Particles, SoupView, SoupLayout, BurstDesc, RenderDesc, RenderBakeOverride, WrapDesc } from './facade.ts'
+export type { ParticlesDesc, Particles, SoupView, SoupLayout, BurstDesc, RenderDesc, RenderBakeOverride, WrapDesc, GpuHandoff } from './facade.ts'
 export { createParticles } from './facade.ts'

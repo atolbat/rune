@@ -8186,7 +8186,8 @@ function orderedAttributes(reflection, spec) {
     size: spec.attributes?.[attr.name]?.size ?? attr.size,
     stride: spec.attributes?.[attr.name]?.stride,
     offset: spec.attributes?.[attr.name]?.offset,
-    step: spec.attributes?.[attr.name]?.step
+    step: spec.attributes?.[attr.name]?.step,
+    bufferId: spec.attributes?.[attr.name]?.bufferId
   }));
 }
 function boundTextures(reflection, spec) {
@@ -8274,7 +8275,10 @@ function createGpuExecutor(options) {
     const attrOrder = command.attrOrder;
     for (let slot = 0;slot < attrOrder.length; slot++) {
       const attribute = attrOrder[slot];
-      gpu.bindVertexBuffer(slot, attribute.data, attribute.size);
+      if (attribute.bufferId !== undefined)
+        gpu.bindExternalVertexBuffer(slot, attribute.bufferId);
+      else
+        gpu.bindVertexBuffer(slot, attribute.data, attribute.size);
     }
     for (const textureId of command.textureIds)
       gpu.bindTexture(textureId);
@@ -9239,6 +9243,146 @@ async function createRealGPU(canvas, onGpuError) {
     currentTarget = 0;
     device.destroy();
   }
+  const externalBuffers = new Map;
+  let nextExternalId = 1;
+  function createExternalBuffer(byteLength, usage) {
+    if (!Number.isFinite(byteLength) || byteLength <= 0) {
+      onGpuError?.(`createExternalBuffer: byteLength must be > 0 (got ${byteLength})`);
+      return -1;
+    }
+    const buffer = device.createBuffer({ size: Math.ceil(byteLength / 4) * 4, usage });
+    const id = nextExternalId++;
+    externalBuffers.set(id, buffer);
+    return id;
+  }
+  function externalBufferOf(id) {
+    return externalBuffers.get(id);
+  }
+  function writeExternalBuffer(id, data, byteOffset = 0, byteLength = data.byteLength) {
+    const buffer = externalBuffers.get(id);
+    if (buffer === undefined) {
+      onGpuError?.(`writeExternalBuffer(${id}): no such external buffer`);
+      return;
+    }
+    const capped = Math.min(byteLength, buffer.size - byteOffset);
+    if (capped !== byteLength) {
+      onGpuError?.(`writeExternalBuffer(${id}) clamp: ${byteLength} @${byteOffset} → ${capped} (buffer size ${buffer.size})`);
+    }
+    if (capped <= 0)
+      return;
+    try {
+      device.queue.writeBuffer(buffer, byteOffset, data.buffer, data.byteOffset, capped);
+    } catch (error) {
+      onGpuError?.(`writeExternalBuffer(${id}, ${capped} bytes) rejected: ${errorMessage(error)}`);
+    }
+  }
+  function readExternalBuffer(id, byteLength) {
+    return new Promise((resolve3, reject) => {
+      const buffer = externalBuffers.get(id);
+      if (buffer === undefined) {
+        reject(new Error(`rune: readExternalBuffer(${id}) — no such external buffer`));
+        return;
+      }
+      const capped = Math.min(byteLength, buffer.size);
+      const staging = device.createBuffer({ size: Math.max(16, Math.ceil(capped / 256) * 256), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(buffer, 0, staging, 0, Math.ceil(capped / 4) * 4);
+      device.queue.submit([enc.finish()]);
+      staging.mapAsync(GPUMapMode.READ).then(() => {
+        const bytes = new Uint8Array(staging.getMappedRange().slice(0));
+        staging.unmap();
+        staging.destroy();
+        resolve3(new Float32Array(bytes.buffer, 0, Math.floor(capped / 4)));
+      }, (error) => {
+        staging.destroy();
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
+  }
+  function deleteExternalBuffer(id) {
+    const buffer = externalBuffers.get(id);
+    if (buffer === undefined)
+      return;
+    externalBuffers.delete(id);
+    buffer.destroy();
+  }
+  function bindExternalVertexBuffer(slot, bufferId) {
+    const buffer = externalBuffers.get(bufferId);
+    if (buffer === undefined) {
+      onGpuError?.(`bindExternalVertexBuffer(${slot}, ${bufferId}): no such external buffer`);
+      return;
+    }
+    pass?.setVertexBuffer(slot, buffer);
+  }
+  const computeFamilies = new Map;
+  let nextComputeId = 1;
+  function createCompute(wgsl, uniformBytes2, bufferIds) {
+    const module = device.createShaderModule({ code: wgsl });
+    module.getCompilationInfo().then((info) => {
+      for (const message of info.messages) {
+        if (message.type === "error")
+          onGpuError?.(`compute WGSL: ${message.message} (line ${message.lineNum})`);
+      }
+    }).catch(() => {});
+    const layout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
+      ]
+    });
+    const uniformSize = Math.max(16, Math.ceil(uniformBytes2 / 16) * 16);
+    const uniform = device.createBuffer({ size: uniformSize, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const entries = [{ binding: 0, resource: { buffer: uniform } }];
+    for (let b = 0;b < 4; b++) {
+      const buffer = externalBuffers.get(bufferIds[b]);
+      if (buffer === undefined) {
+        onGpuError?.(`createCompute: binding ${b + 1} — no external buffer ${bufferIds[b]}`);
+        return -1;
+      }
+      entries.push({ binding: b + 1, resource: { buffer } });
+    }
+    const group = device.createBindGroup({ layout, entries });
+    const id = nextComputeId++;
+    computeFamilies.set(id, { module, layout, group, uniform, uniformBytes: uniformSize, pipelines: new Map });
+    return id;
+  }
+  function runCompute(computeId, entry, uniformData, workgroups) {
+    const family = computeFamilies.get(computeId);
+    if (family === undefined) {
+      onGpuError?.(`runCompute(${computeId}): no such compute family`);
+      return;
+    }
+    if (pass !== null) {
+      onGpuError?.(`runCompute(${entry}): a render pass is open — compute must run BEFORE the frame's draws (the tape contract: step() in the frame callback, record/draw after)`);
+      return;
+    }
+    let pipeline = family.pipelines.get(entry);
+    if (pipeline === undefined) {
+      try {
+        pipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [family.layout] }), compute: { module: family.module, entryPoint: entry } });
+      } catch (error) {
+        onGpuError?.(`createComputePipeline(${entry}) rejected: ${errorMessage(error)}`);
+        return;
+      }
+      family.pipelines.set(entry, pipeline);
+    }
+    const bytes = Math.min(uniformData.byteLength, family.uniformBytes);
+    device.queue.writeBuffer(family.uniform, 0, uniformData.buffer, uniformData.byteOffset, bytes);
+    if (uniformData.byteLength > family.uniformBytes) {
+      onGpuError?.(`runCompute(${entry}) uniform clamp: ${uniformData.byteLength} → ${family.uniformBytes} bytes (the staging was sized at createCompute)`);
+    }
+    if (workgroups <= 0)
+      return;
+    encoder ??= device.createCommandEncoder();
+    const cp = encoder.beginComputePass();
+    cp.setPipeline(pipeline);
+    cp.setBindGroup(0, family.group);
+    cp.dispatchWorkgroups(workgroups);
+    cp.end();
+  }
   return {
     configure,
     resize,
@@ -9253,11 +9397,19 @@ async function createRealGPU(canvas, onGpuError) {
     bindUniforms,
     bindVertexBuffer,
     syncVertexBuffer,
+    bindExternalVertexBuffer,
     bindTexture,
     beginPass,
     draw,
     endPass,
     submit,
+    createExternalBuffer,
+    writeExternalBuffer,
+    readExternalBuffer,
+    deleteExternalBuffer,
+    externalBufferOf,
+    createCompute,
+    runCompute,
     readTargetPixels,
     createTarget,
     bindTarget,
@@ -9546,6 +9698,14 @@ function withJournalGpu(gpu, journal) {
     bindUniforms: (dynamicOffset) => gpu.bindUniforms(dynamicOffset),
     bindVertexBuffer: (slot, data, size) => gpu.bindVertexBuffer(slot, data, size),
     syncVertexBuffer: (data, byteLength) => gpu.syncVertexBuffer(data, byteLength),
+    bindExternalVertexBuffer: (slot, bufferId) => gpu.bindExternalVertexBuffer(slot, bufferId),
+    createExternalBuffer: (byteLength, usage) => gpu.createExternalBuffer(byteLength, usage),
+    writeExternalBuffer: (id, data, byteOffset, byteLength) => gpu.writeExternalBuffer(id, data, byteOffset, byteLength),
+    readExternalBuffer: (id, byteLength) => gpu.readExternalBuffer(id, byteLength),
+    deleteExternalBuffer: (id) => gpu.deleteExternalBuffer(id),
+    externalBufferOf: (id) => gpu.externalBufferOf(id),
+    createCompute: (wgsl, uniformBytes2, bufferIds) => gpu.createCompute(wgsl, uniformBytes2, bufferIds),
+    runCompute: (computeId, entry, uniformData, workgroups) => gpu.runCompute(computeId, entry, uniformData, workgroups),
     bindTexture: (textureOrViewId) => gpu.bindTexture(textureOrViewId),
     beginPass: (clearIndex) => gpu.beginPass(clearIndex),
     draw: (count, instances) => gpu.draw(count, instances),
@@ -9743,6 +9903,14 @@ function createResourceSessionGPU(raw, journal) {
     bindUniforms: (dynamicOffset) => raw.bindUniforms(dynamicOffset),
     bindVertexBuffer: (slot, data, size) => raw.bindVertexBuffer(slot, data, size),
     syncVertexBuffer: (data, byteLength) => raw.syncVertexBuffer(data, byteLength),
+    bindExternalVertexBuffer: (slot, bufferId) => raw.bindExternalVertexBuffer(slot, bufferId),
+    createExternalBuffer: (byteLength, usage) => raw.createExternalBuffer(byteLength, usage),
+    writeExternalBuffer: (id, data, byteOffset, byteLength) => raw.writeExternalBuffer(id, data, byteOffset, byteLength),
+    readExternalBuffer: (id, byteLength) => raw.readExternalBuffer(id, byteLength),
+    deleteExternalBuffer: (id) => raw.deleteExternalBuffer(id),
+    externalBufferOf: (id) => raw.externalBufferOf(id),
+    createCompute: (wgsl, uniformBytes2, bufferIds) => raw.createCompute(wgsl, uniformBytes2, bufferIds),
+    runCompute: (computeId, entry, uniformData, workgroups) => raw.runCompute(computeId, entry, uniformData, workgroups),
     bindTexture: (textureOrViewId) => {
       touchTexOrView(textureOrViewId);
       raw.bindTexture(rawTexOrView(textureOrViewId));
@@ -10711,6 +10879,551 @@ function removeItem3(list, item) {
   if (at >= 0)
     list.splice(at, 1);
 }
+// packages/particles/src/noise.ts
+var F3 = 1 / 3;
+var G3 = 1 / 6;
+var PERM = buildPerm();
+var GRAD3 = new Int8Array([
+  1,
+  1,
+  0,
+  -1,
+  1,
+  0,
+  1,
+  -1,
+  0,
+  -1,
+  -1,
+  0,
+  1,
+  0,
+  1,
+  -1,
+  0,
+  1,
+  1,
+  0,
+  -1,
+  -1,
+  0,
+  -1,
+  0,
+  1,
+  1,
+  0,
+  -1,
+  1,
+  0,
+  1,
+  -1,
+  0,
+  -1,
+  -1
+]);
+function buildPerm() {
+  const p = new Uint8Array(256);
+  for (let i = 0;i < 256; i++)
+    p[i] = i;
+  let state = 2654435769;
+  for (let i = 255;i > 0; i--) {
+    state = Math.imul(state ^ state >>> 15, 2246822507) | 0;
+    state = Math.imul(state ^ state >>> 13, 3266489909) | 0;
+    const j = (state >>> 24) % (i + 1);
+    const t = p[i];
+    p[i] = p[j];
+    p[j] = t;
+  }
+  const wrapped = new Uint8Array(512);
+  for (let i = 0;i < 512; i++)
+    wrapped[i] = p[i & 255];
+  return wrapped;
+}
+
+// packages/particles/src/ramp.ts
+var COMPILED = new WeakMap;
+
+// packages/particles/src/system.ts
+var FIELD_NAMES = [
+  "px",
+  "py",
+  "pz",
+  "vx",
+  "vy",
+  "vz",
+  "age",
+  "life",
+  "size",
+  "cr",
+  "cg",
+  "cb",
+  "ca",
+  "seed",
+  "tx",
+  "ty",
+  "tz"
+];
+var PARTICLE_FLOATS = FIELD_NAMES.length;
+// packages/particles/src/billboards.ts
+var SCRATCH = new Float32Array(6);
+// packages/particles/src/instances.ts
+var SCRATCH2 = new Float32Array(6);
+// packages/particles/src/gpuSim.ts
+var GPU_STATE_STRIDE = FIELD_NAMES.length;
+var GPU_SIM_UNIFORM_BYTES = 144;
+var GPU_SIM_UNIFORM_FLOATS = GPU_SIM_UNIFORM_BYTES / 4;
+var GPU_SIM_U32_FIELDS = {
+  count: 0,
+  swapCount: 2,
+  forceMask: 32
+};
+var GPU_SIM_F32_FIELDS = {
+  dt: 1,
+  drag: 8,
+  turbulence: 9,
+  attractStrength: 10,
+  softening2: 11,
+  noiseStrength: 16,
+  noiseScale: 17,
+  noiseSpeed: 18,
+  limit: 19,
+  dampen: 20,
+  frameJitter: 21,
+  tileU: 22,
+  tileV: 23
+};
+var GPU_SIM_VEC4_FIELDS = {
+  gravity: 4,
+  attractPoint: 12,
+  wrapSize: 24,
+  wrapCenter: 28
+};
+var GPU_FORCE_MASK = {
+  gravity: 1,
+  drag: 2,
+  turbulence: 4,
+  attract: 8,
+  noise: 16,
+  limitSpeed: 32,
+  wrap: 64
+};
+function gpuRampLUT(points) {
+  if (points.length === 0)
+    throw new Error("rune/particles: the GPU sim needs a ramp with at least one point");
+  if (points.length > 256) {
+    throw new Error(`rune/particles: the GPU sim's ramp is capped at 256 control points (got ${points.length})`);
+  }
+  const lut = new Float32Array(points.length * 7);
+  for (let i = 0;i < points.length; i++) {
+    const p = points[i];
+    const b = i * 7;
+    lut[b] = p.t;
+    lut[b + 1] = p.size;
+    lut[b + 2] = p.r;
+    lut[b + 3] = p.g;
+    lut[b + 4] = p.b;
+    lut[b + 5] = p.a;
+    lut[b + 6] = p.frame ?? 0;
+  }
+  return lut;
+}
+function gpuSimWgsl() {
+  const perm = Array.from(PERM, (v) => `${v}u`).join(", ");
+  const grads = [];
+  for (let g = 0;g < 12; g++) {
+    grads.push(`vec3<f32>(${GRAD3[g * 3]}, ${GRAD3[g * 3 + 1]}, ${GRAD3[g * 3 + 2]})`);
+  }
+  return `
+// @rune/particles — the GPGPU sim tier (Task 131). The state: the FIELD_NAMES
+// rows interleaved (17 floats). The entries: compact (the swap replay),
+// advance (the force walk), pack (the instance records).
+// The uniform layout mirrors GPU_SIM_* in gpuSim.ts (144 bytes).
+
+struct SimParams {
+  count : u32,
+  dt : f32,
+  swapCount : u32,
+  _pad0 : u32,
+  gravity : vec4<f32>,
+  drag : f32,
+  turbulence : f32,
+  attractStrength : f32,
+  softening2 : f32,
+  attractPoint : vec4<f32>,
+  noiseStrength : f32,
+  noiseScale : f32,
+  noiseSpeed : f32,
+  limit : f32,
+  dampen : f32,
+  frameJitter : f32,
+  tileU : f32,
+  tileV : f32,
+  wrapSize : vec4<f32>,
+  wrapCenter : vec4<f32>,
+  forceMask : u32,
+  _pad1 : u32,
+  _pad2 : u32,
+  _pad3 : u32,
+}
+
+@group(0) @binding(0) var<uniform> P : SimParams;
+@group(0) @binding(1) var<storage, read_write> state : array<f32>;
+@group(0) @binding(2) var<storage, read> swaps : array<vec2<u32>>;
+@group(0) @binding(3) var<storage, read_write> records : array<f32>;
+@group(0) @binding(4) var<storage, read> rampLUT : array<f32>;
+
+const FSTRIDE : u32 = ${GPU_STATE_STRIDE}u;
+const RSTRIDE : u32 = 16u;
+
+// ── the simplex noise (the SAME table the CPU evaluates — noise.ts) ────────
+var<private> SIM_PERM : array<u32, 512> = array<u32, 512>(${perm});
+var<private> SIM_GRADS : array<vec3<f32>, 12> = array<vec3<f32>, 12>(${grads.join(", ")});
+
+fn simplex3(v : vec3<f32>) -> f32 {
+  let F3 = 0.333333333333;
+  let G3 = 0.166666666667;
+  let s = (v.x + v.y + v.z) * F3;
+  let i = i32(floor(v.x + s));
+  let j = i32(floor(v.y + s));
+  let k = i32(floor(v.z + s));
+  let t = f32(i + j + k) * G3;
+  let x0 = v.x - (f32(i) - t);
+  let y0 = v.y - (f32(j) - t);
+  let z0 = v.z - (f32(k) - t);
+  // the simplex containing (x0, y0, z0): the offset ranking
+  var i1 = 0; var j1 = 0; var k1 = 0; var i2 = 0; var j2 = 0; var k2 = 0;
+  if (x0 >= y0) {
+    if (y0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+    else if (x0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 0; k2 = 1; }
+    else { i1 = 0; j1 = 0; k1 = 1; i2 = 1; j2 = 0; k2 = 1; }
+  } else {
+    if (y0 < z0) { i1 = 0; j1 = 0; k1 = 1; i2 = 0; j2 = 1; k2 = 1; }
+    else if (x0 < z0) { i1 = 0; j1 = 1; k1 = 0; i2 = 0; j2 = 1; k2 = 1; }
+    else { i1 = 0; j1 = 1; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+  }
+  let x1 = x0 - f32(i1) + G3; let y1 = y0 - f32(j1) + G3; let z1 = z0 - f32(k1) + G3;
+  let x2 = x0 - f32(i2) + 2.0 * G3; let y2 = y0 - f32(j2) + 2.0 * G3; let z2 = z0 - f32(k2) + 2.0 * G3;
+  let x3 = x0 - 1.0 + 3.0 * G3; let y3 = y0 - 1.0 + 3.0 * G3; let z3 = z0 - 1.0 + 3.0 * G3;
+  let ii = u32(i & 255); let jj = u32(j & 255); let kk = u32(k & 255);
+  var n = 0.0;
+  var t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
+  if (t0 > 0.0) {
+    let g = SIM_PERM[ii + SIM_PERM[jj + SIM_PERM[kk]]] % 12u;
+    t0 = t0 * t0;
+    n += t0 * t0 * dot(SIM_GRADS[g], vec3<f32>(x0, y0, z0));
+  }
+  var t1 = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;
+  if (t1 > 0.0) {
+    let g = SIM_PERM[ii + u32(i1) + SIM_PERM[jj + u32(j1) + SIM_PERM[kk + u32(k1)]]] % 12u;
+    t1 = t1 * t1;
+    n += t1 * t1 * dot(SIM_GRADS[g], vec3<f32>(x1, y1, z1));
+  }
+  var t2 = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;
+  if (t2 > 0.0) {
+    let g = SIM_PERM[ii + u32(i2) + SIM_PERM[jj + u32(j2) + SIM_PERM[kk + u32(k2)]]] % 12u;
+    t2 = t2 * t2;
+    n += t2 * t2 * dot(SIM_GRADS[g], vec3<f32>(x2, y2, z2));
+  }
+  var t3 = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;
+  if (t3 > 0.0) {
+    let g = SIM_PERM[ii + 1u + SIM_PERM[jj + 1u + SIM_PERM[kk + 1u]]] % 12u;
+    t3 = t3 * t3;
+    n += t3 * t3 * dot(SIM_GRADS[g], vec3<f32>(x3, y3, z3));
+  }
+  return 32.0 * n;
+}
+
+fn wrapAxis(d : f32, size : f32) -> f32 {
+  var m = (d + size * 0.5) % size;
+  if (m < 0.0) { m += size; }
+  return m - size * 0.5;
+}
+
+// ── compact: the CPU's swap list, replayed IN ORDER (a single thread — the
+// list is per-frame deaths, tens; the order is the CPU compaction's own) ────
+@compute @workgroup_size(1)
+fn compact(@builtin(global_invocation_id) gid : vec3<u32>) {
+  if (gid.x != 0u) { return; }
+  for (var s = 0u; s < P.swapCount; s++) {
+    let pair = swaps[s];
+    let dstSlot = pair.x * FSTRIDE;
+    let srcSlot = pair.y * FSTRIDE; // 'from' is a RESERVED WGSL keyword
+    for (var f = 0u; f < FSTRIDE; f++) {
+      state[dstSlot + f] = state[srcSlot + f];
+    }
+  }
+}
+
+// ── advance: the force walk (the reference order: drag → limit → gravity →
+// attract → turbulence → noise), the integration, age += dt, the wrap ──────
+@compute @workgroup_size(64)
+fn advance(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.count) { return; }
+  let b = i * FSTRIDE;
+  var px = state[b]; var py = state[b + 1u]; var pz = state[b + 2u];
+  var vx = state[b + 3u]; var vy = state[b + 4u]; var vz = state[b + 5u];
+  let age = state[b + 6u];
+  let seed = state[b + 13u];
+  if ((P.forceMask & 2u) != 0u) {
+    let k = exp(-P.drag * P.dt);
+    vx *= k; vy *= k; vz *= k;
+  }
+  if ((P.forceMask & 32u) != 0u) {
+    let speed = sqrt(vx * vx + vy * vy + vz * vz);
+    if (speed > P.limit && speed > 1e-9) {
+      var k = 1.0 - ((speed - P.limit) / speed) * P.dampen * P.dt * 20.0;
+      if (k < 0.0) { k = 0.0; }
+      vx *= k; vy *= k; vz *= k;
+    }
+  }
+  if ((P.forceMask & 1u) != 0u) {
+    vx += P.gravity.x * P.dt;
+    vy += P.gravity.y * P.dt;
+    vz += P.gravity.z * P.dt;
+  }
+  if ((P.forceMask & 8u) != 0u) {
+    let dx = P.attractPoint.x - px;
+    let dy = P.attractPoint.y - py;
+    let dz = P.attractPoint.z - pz;
+    let r2 = dx * dx + dy * dy + dz * dz;
+    let r = sqrt(r2);
+    if (r > 1e-6) {
+      let k = P.attractStrength * P.dt / (r * (r2 + P.softening2));
+      vx += dx * k; vy += dy * k; vz += dz * k;
+    }
+  }
+  if ((P.forceMask & 4u) != 0u) {
+    let t = age * 5.0 + seed * 37.0;
+    vx += sin(t) * P.turbulence * P.dt;
+    vy += sin(t * 1.7 + 11.3) * P.turbulence * P.dt;
+    vz += cos(t * 0.9 + 4.7) * P.turbulence * P.dt;
+  }
+  if ((P.forceMask & 16u) != 0u) {
+    // the simplex flow — the CPU reference's exact coordinate mapping
+    let adrift = age * P.noiseSpeed;
+    let so = seed * 13.7;
+    let sx = px * P.noiseScale + adrift;
+    let sy = py * P.noiseScale;
+    let sz = pz * P.noiseScale;
+    vx += simplex3(vec3<f32>(sx, sy + so, sz + 5.3)) * P.noiseStrength * P.dt;
+    vy += simplex3(vec3<f32>(sx + 11.7, sy + adrift, sz + 9.1 + so)) * P.noiseStrength * P.dt;
+    vz += simplex3(vec3<f32>(sx + 3.1, sy + 7.7 + so, sz + adrift)) * P.noiseStrength * P.dt;
+  }
+  px += vx * P.dt; py += vy * P.dt; pz += vz * P.dt;
+  if ((P.forceMask & 64u) != 0u) {
+    if (P.wrapSize.x > 0.0) { px = P.wrapCenter.x + wrapAxis(px - P.wrapCenter.x, P.wrapSize.x); }
+    if (P.wrapSize.y > 0.0) { py = P.wrapCenter.y + wrapAxis(py - P.wrapCenter.y, P.wrapSize.y); }
+    if (P.wrapSize.z > 0.0) { pz = P.wrapCenter.z + wrapAxis(pz - P.wrapCenter.z, P.wrapSize.z); }
+  }
+  state[b] = px; state[b + 1u] = py; state[b + 2u] = pz;
+  state[b + 3u] = vx; state[b + 4u] = vy; state[b + 5u] = vz;
+  state[b + 6u] = age + P.dt;
+}
+
+// ── pack: the 16-float instance records (packInstances' GPU twin — the
+// record layout of the BILLBOARD material / INSTANCE_LAYOUT) ───────────────
+@compute @workgroup_size(64)
+fn pack(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.count) { return; }
+  let b = i * FSTRIDE;
+  let age = state[b + 6u];
+  let life = state[b + 7u];
+  var t = 0.0;
+  if (life > 0.0) { t = age / life; }
+  // the ramp LUT (7-float rows: t, size, r, g, b, a, frame) — sampleRamp's
+  // exact walk: clamp → binary search → lerp
+  let n = arrayLength(&rampLUT) / 7u;
+  var size = 1.0; var r = 1.0; var g = 1.0; var bl = 1.0; var a = 1.0; var frame = 0.0;
+  if (n == 1u) {
+    size = rampLUT[1]; r = rampLUT[2]; g = rampLUT[3]; bl = rampLUT[4]; a = rampLUT[5]; frame = rampLUT[6];
+  } else if (t <= rampLUT[0]) {
+    size = rampLUT[1]; r = rampLUT[2]; g = rampLUT[3]; bl = rampLUT[4]; a = rampLUT[5]; frame = rampLUT[6];
+  } else {
+    let lastR = (n - 1u) * 7u;
+    if (t >= rampLUT[lastR]) {
+      size = rampLUT[lastR + 1u]; r = rampLUT[lastR + 2u]; g = rampLUT[lastR + 3u];
+      bl = rampLUT[lastR + 4u]; a = rampLUT[lastR + 5u]; frame = rampLUT[lastR + 6u];
+    } else {
+      var lo = 0u; var hi = n - 1u;
+      var guard = 0u;
+      while (hi - lo > 1u && guard < 32u) {
+        let mid = (lo + hi) >> 1u;
+        if (rampLUT[mid * 7u] <= t) { lo = mid; } else { hi = mid; }
+        guard++;
+      }
+      let ra = lo * 7u; let rb = hi * 7u;
+      let span = rampLUT[rb] - rampLUT[ra];
+      var k = 0.0;
+      if (span > 0.0) { k = (t - rampLUT[ra]) / span; }
+      size = rampLUT[ra + 1u] + (rampLUT[rb + 1u] - rampLUT[ra + 1u]) * k;
+      r = rampLUT[ra + 2u] + (rampLUT[rb + 2u] - rampLUT[ra + 2u]) * k;
+      g = rampLUT[ra + 3u] + (rampLUT[rb + 3u] - rampLUT[ra + 3u]) * k;
+      bl = rampLUT[ra + 4u] + (rampLUT[rb + 4u] - rampLUT[ra + 4u]) * k;
+      a = rampLUT[ra + 5u] + (rampLUT[rb + 5u] - rampLUT[ra + 5u]) * k;
+      frame = rampLUT[ra + 6u] + (rampLUT[rb + 6u] - rampLUT[ra + 6u]) * k;
+    }
+  }
+  let half = state[b + 8u] * size * 0.5;
+  let seed = state[b + 13u];
+  // the tile origin: frame + seed·jitter → floor → clamp → row-major
+  var fr = floor(frame + seed * P.frameJitter);
+  // NaN-safe: every NaN comparison is FALSE — !(fr >= 0) catches NaN and
+  // the negatives in one branch (WGSL has no isnan builtin)
+  if (!(fr >= 0.0)) { fr = 0.0; }
+  let maxFrame = P.tileU * P.tileV - 1.0;
+  if (fr > maxFrame) { fr = maxFrame; }
+  var u0 = 0.0; var v0 = 0.0;
+  if (P.tileU >= 1.0 && P.tileV >= 1.0) {
+    u0 = (fr % P.tileU) / P.tileU;
+    v0 = floor(fr / P.tileU) / P.tileV;
+  }
+  let o = i * RSTRIDE;
+  records[o] = state[b]; records[o + 1u] = state[b + 1u]; records[o + 2u] = state[b + 2u];
+  records[o + 3u] = state[b + 3u]; records[o + 4u] = state[b + 4u]; records[o + 5u] = state[b + 5u];
+  records[o + 6u] = state[b + 9u] * r; records[o + 7u] = state[b + 10u] * g;
+  records[o + 8u] = state[b + 11u] * bl; records[o + 9u] = state[b + 12u] * a;
+  records[o + 10u] = half;
+  records[o + 11u] = seed * 6.283185307179586;
+  records[o + 12u] = age;
+  records[o + 13u] = seed;
+  records[o + 14u] = u0; records[o + 15u] = v0;
+}
+`;
+}
+// packages/particles/src/trails.ts
+var SCRATCH3 = new Float32Array(6);
+// packages/particles/src/meshes.ts
+var SCRATCH4 = new Float32Array(6);
+// packages/particles/src/facade.ts
+var MAX_STEP = 1 / 20;
+// packages/gl/src/particlesGpu.ts
+var BUF = {
+  STORAGE: 128,
+  COPY_DST: 8,
+  VERTEX: 32
+};
+var WORKGROUP = 64;
+function createGpuParticles(facade, gpu) {
+  const handoff = facade.gpuHandoff;
+  if (handoff === null) {
+    throw new Error('rune/gl: createGpuParticles needs a sim:"gpu" facade (this one runs the CPU tier)');
+  }
+  const ho = handoff;
+  const capacity = facade.capacity;
+  const stateId = gpu.createExternalBuffer(GPU_STATE_STRIDE * capacity * 4, BUF.STORAGE | BUF.COPY_DST);
+  const swapsId = gpu.createExternalBuffer(2 * capacity * 4, BUF.STORAGE | BUF.COPY_DST);
+  const recordsId = gpu.createExternalBuffer(16 * capacity * 4, BUF.STORAGE | BUF.VERTEX);
+  const lut = gpuRampLUT(facade.ramp.points);
+  const rampId = gpu.createExternalBuffer(lut.byteLength, BUF.STORAGE | BUF.COPY_DST);
+  gpu.writeExternalBuffer(rampId, lut);
+  const computeId = gpu.createCompute(gpuSimWgsl(), GPU_SIM_UNIFORM_FLOATS * 4, [stateId, swapsId, recordsId, rampId]);
+  if (computeId < 0 || stateId < 0 || swapsId < 0 || recordsId < 0 || rampId < 0) {
+    throw new Error("rune/gl: createGpuParticles — the facade rejected a buffer (see the GPU error log)");
+  }
+  ho.attached = true;
+  const uniBuf = new ArrayBuffer(GPU_SIM_UNIFORM_FLOATS * 4);
+  const uni = new Float32Array(uniBuf);
+  const u32 = new Uint32Array(uniBuf);
+  const forces = facade.forces;
+  const F = GPU_SIM_F32_FIELDS;
+  const V = GPU_SIM_VEC4_FIELDS;
+  const render = facade.render;
+  let mask = 0;
+  const gravity = forces.gravity ?? [0, 0, 0];
+  if (gravity[0] !== 0 || gravity[1] !== 0 || gravity[2] !== 0) {
+    mask |= GPU_FORCE_MASK.gravity;
+    uni[V.gravity] = gravity[0];
+    uni[V.gravity + 1] = gravity[1];
+    uni[V.gravity + 2] = gravity[2];
+  }
+  if (forces.drag > 0) {
+    mask |= GPU_FORCE_MASK.drag;
+    uni[F.drag] = forces.drag;
+  }
+  if (forces.turbulence !== 0) {
+    mask |= GPU_FORCE_MASK.turbulence;
+    uni[F.turbulence] = forces.turbulence;
+  }
+  const attract = forces.attract ?? null;
+  if (attract !== null) {
+    mask |= GPU_FORCE_MASK.attract;
+    uni[V.attractPoint] = attract.point[0];
+    uni[V.attractPoint + 1] = attract.point[1];
+    uni[V.attractPoint + 2] = attract.point[2];
+    uni[F.attractStrength] = attract.strength;
+    uni[F.softening2] = (attract.softening ?? 0.25) ** 2;
+  }
+  const noise = forces.noise ?? null;
+  if (noise !== null && noise.strength !== 0) {
+    mask |= GPU_FORCE_MASK.noise;
+    uni[F.noiseStrength] = noise.strength;
+    uni[F.noiseScale] = noise.scale;
+    uni[F.noiseSpeed] = noise.speed;
+  }
+  const limit = forces.limitSpeed ?? null;
+  if (limit !== null) {
+    mask |= GPU_FORCE_MASK.limitSpeed;
+    uni[F.limit] = limit.limit;
+    uni[F.dampen] = limit.dampen;
+  }
+  const wrapSize = ho.wrapSize;
+  if (wrapSize !== null && (wrapSize[0] > 0 || wrapSize[1] > 0 || wrapSize[2] > 0)) {
+    mask |= GPU_FORCE_MASK.wrap;
+    uni[V.wrapSize] = wrapSize[0];
+    uni[V.wrapSize + 1] = wrapSize[1];
+    uni[V.wrapSize + 2] = wrapSize[2];
+  }
+  const tiles = render.tiles ?? [1, 1];
+  uni[F.tileU] = tiles[0];
+  uni[F.tileV] = tiles[1];
+  uni[F.frameJitter] = render.frameJitter ?? 0;
+  u32[GPU_SIM_U32_FIELDS.forceMask] = mask;
+  const staticMask = mask;
+  function step(dt) {
+    const count = facade.count;
+    if (count <= 0 && ho.emitCount === 0 && ho.swapCount === 0)
+      return;
+    u32[GPU_SIM_U32_FIELDS.count] = count;
+    uni[GPU_SIM_F32_FIELDS.dt] = dt;
+    u32[GPU_SIM_U32_FIELDS.swapCount] = ho.swapCount;
+    u32[GPU_SIM_U32_FIELDS.forceMask] = staticMask;
+    const wc = ho.emitOrigin;
+    uni[V.wrapCenter] = wc[0];
+    uni[V.wrapCenter + 1] = wc[1];
+    uni[V.wrapCenter + 2] = wc[2];
+    if (ho.swapCount > 0) {
+      gpu.writeExternalBuffer(swapsId, ho.swaps, 0, ho.swapCount * 8);
+    }
+    if (ho.emitCount > 0) {
+      gpu.writeExternalBuffer(stateId, ho.emitRows, ho.emitBase * GPU_STATE_STRIDE * 4, ho.emitCount * GPU_STATE_STRIDE * 4);
+    }
+    if (ho.swapCount > 0)
+      gpu.runCompute(computeId, "compact", uni, 1);
+    const workgroups = Math.ceil(count / WORKGROUP);
+    if (workgroups > 0) {
+      gpu.runCompute(computeId, "advance", uni, workgroups);
+      gpu.runCompute(computeId, "pack", uni, workgroups);
+    }
+  }
+  return {
+    step,
+    get recordsBufferId() {
+      return recordsId;
+    },
+    get stateBufferId() {
+      return stateId;
+    },
+    dispose() {
+      gpu.deleteExternalBuffer(stateId);
+      gpu.deleteExternalBuffer(swapsId);
+      gpu.deleteExternalBuffer(recordsId);
+      gpu.deleteExternalBuffer(rampId);
+      ho.attached = false;
+    }
+  };
+}
 // packages/math/src/mat4.ts
 function mat4Identity(out) {
   out.fill(0);
@@ -11447,6 +12160,7 @@ export {
   createRendererFeedGL,
   createRenderer,
   createPortability,
+  createGpuParticles,
   computeMipLevels,
   combineWebgpuScope,
   capsule,

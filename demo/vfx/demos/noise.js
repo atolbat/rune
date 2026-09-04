@@ -16,6 +16,7 @@ export default {
       id: 'noise-jet',
       facade: env.createParticles({
         capacity: 3000,
+        render: { kind: 'billboard', draw: 'instance' },
         rate: 500,
         ramp: env.createRamp([
           { t: 0, size: 0.5, r: 0.85, g: 0.95, b: 1, a: 0 },
@@ -35,7 +36,7 @@ export default {
           color: [[1, 1, 1, 1], [0.55, 0.75, 1, 0.9]], seed: 161,
         },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       // the single GLOW sprite: a no-tiles layer must NOT sample the 4×4
       // atlas (16 sub-blobs per quad read as a rigid SQUARE at small sizes)

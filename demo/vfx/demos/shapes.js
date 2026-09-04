@@ -50,6 +50,7 @@ export default {
         id: `shape-${label}`,
         facade: env.createParticles({
           capacity: 1200,
+          render: { kind: 'billboard', draw: 'instance' },
           // the density: 1000/s with a ~1 s life — a solid glowing cloud
           // per shape (the spawn stream fix makes every particle unique —
           // the cloud actually FILLS the shape instead of a thin jet)
@@ -67,7 +68,7 @@ export default {
             color: [[1, 0.91, 0.51, 1], [1, 0.44, 0.16, 1]], seed: 90 + i * 7,
           },
         }),
-        material: env.materials.sprite,
+        material: env.materials.bbSprite,
         pipeline: env.pipelines.additive,
       }))
     })

@@ -2,24 +2,6 @@
 var F3 = 1 / 3;
 var G3 = 1 / 6;
 var PERM = buildPerm();
-function buildPerm() {
-  const p = new Uint8Array(256);
-  for (let i = 0;i < 256; i++)
-    p[i] = i;
-  let state = 2654435769;
-  for (let i = 255;i > 0; i--) {
-    state = Math.imul(state ^ state >>> 15, 2246822507) | 0;
-    state = Math.imul(state ^ state >>> 13, 3266489909) | 0;
-    const j = (state >>> 24) % (i + 1);
-    const t = p[i];
-    p[i] = p[j];
-    p[j] = t;
-  }
-  const wrapped = new Uint8Array(512);
-  for (let i = 0;i < 512; i++)
-    wrapped[i] = p[i & 255];
-  return wrapped;
-}
 var GRAD3 = new Int8Array([
   1,
   1,
@@ -58,6 +40,24 @@ var GRAD3 = new Int8Array([
   -1,
   -1
 ]);
+function buildPerm() {
+  const p = new Uint8Array(256);
+  for (let i = 0;i < 256; i++)
+    p[i] = i;
+  let state = 2654435769;
+  for (let i = 255;i > 0; i--) {
+    state = Math.imul(state ^ state >>> 15, 2246822507) | 0;
+    state = Math.imul(state ^ state >>> 13, 3266489909) | 0;
+    const j = (state >>> 24) % (i + 1);
+    const t = p[i];
+    p[i] = p[j];
+    p[j] = t;
+  }
+  const wrapped = new Uint8Array(512);
+  for (let i = 0;i < 512; i++)
+    wrapped[i] = p[i & 255];
+  return wrapped;
+}
 function simplex3(x, y, z) {
   const s = (x + y + z) * F3;
   const i = Math.floor(x + s), j = Math.floor(y + s), k = Math.floor(z + s);
@@ -158,6 +158,27 @@ function validateNoise(noise) {
 // packages/particles/src/ramp.ts
 var CONSTANT_RAMP = { points: [{ t: 0, size: 1, r: 1, g: 1, b: 1, a: 1 }] };
 var RAMP_STRIDE = 6;
+var COMPILED = new WeakMap;
+function flatRamp(ramp) {
+  let flat = COMPILED.get(ramp);
+  if (flat === undefined) {
+    const pts = ramp.points;
+    flat = new Float64Array(pts.length * 7);
+    for (let i = 0;i < pts.length; i++) {
+      const p = pts[i];
+      const b = i * 7;
+      flat[b] = p.t;
+      flat[b + 1] = p.size;
+      flat[b + 2] = p.r;
+      flat[b + 3] = p.g;
+      flat[b + 4] = p.b;
+      flat[b + 5] = p.a;
+      flat[b + 6] = p.frame ?? 0;
+    }
+    COMPILED.set(ramp, flat);
+  }
+  return flat;
+}
 function createRamp(points) {
   if (points.length === 0)
     throw new Error("rune/particles: a ramp needs at least one control point");
@@ -179,55 +200,53 @@ function createRamp(points) {
   return { points };
 }
 function sampleRamp(ramp, t, out) {
-  const pts = ramp.points;
-  const n = pts.length;
+  const flat = flatRamp(ramp);
+  const n = flat.length / 7;
   if (n === 1) {
-    const p = pts[0];
-    out[0] = p.size;
-    out[1] = p.r;
-    out[2] = p.g;
-    out[3] = p.b;
-    out[4] = p.a;
-    out[5] = p.frame ?? 0;
+    out[0] = flat[1];
+    out[1] = flat[2];
+    out[2] = flat[3];
+    out[3] = flat[4];
+    out[4] = flat[5];
+    out[5] = flat[6];
     return;
   }
-  if (t <= pts[0].t) {
-    const p = pts[0];
-    out[0] = p.size;
-    out[1] = p.r;
-    out[2] = p.g;
-    out[3] = p.b;
-    out[4] = p.a;
-    out[5] = p.frame ?? 0;
+  if (t <= flat[0]) {
+    out[0] = flat[1];
+    out[1] = flat[2];
+    out[2] = flat[3];
+    out[3] = flat[4];
+    out[4] = flat[5];
+    out[5] = flat[6];
     return;
   }
-  if (t >= pts[n - 1].t) {
-    const p = pts[n - 1];
-    out[0] = p.size;
-    out[1] = p.r;
-    out[2] = p.g;
-    out[3] = p.b;
-    out[4] = p.a;
-    out[5] = p.frame ?? 0;
+  const last = (n - 1) * 7;
+  if (t >= flat[last]) {
+    out[0] = flat[last + 1];
+    out[1] = flat[last + 2];
+    out[2] = flat[last + 3];
+    out[3] = flat[last + 4];
+    out[4] = flat[last + 5];
+    out[5] = flat[last + 6];
     return;
   }
   let lo = 0, hi = n - 1;
   while (hi - lo > 1) {
     const mid = lo + hi >> 1;
-    if (pts[mid].t <= t)
+    if (flat[mid * 7] <= t)
       lo = mid;
     else
       hi = mid;
   }
-  const a = pts[lo], b = pts[hi];
-  const span = b.t - a.t;
-  const k = span > 0 ? (t - a.t) / span : 0;
-  out[0] = a.size + (b.size - a.size) * k;
-  out[1] = a.r + (b.r - a.r) * k;
-  out[2] = a.g + (b.g - a.g) * k;
-  out[3] = a.b + (b.b - a.b) * k;
-  out[4] = a.a + (b.a - a.a) * k;
-  out[5] = (a.frame ?? 0) + ((b.frame ?? 0) - (a.frame ?? 0)) * k;
+  const a = lo * 7, b = hi * 7;
+  const span = flat[b] - flat[a];
+  const k = span > 0 ? (t - flat[a]) / span : 0;
+  out[0] = flat[a + 1] + (flat[b + 1] - flat[a + 1]) * k;
+  out[1] = flat[a + 2] + (flat[b + 2] - flat[a + 2]) * k;
+  out[2] = flat[a + 3] + (flat[b + 3] - flat[a + 3]) * k;
+  out[3] = flat[a + 4] + (flat[b + 4] - flat[a + 4]) * k;
+  out[4] = flat[a + 5] + (flat[b + 5] - flat[a + 5]) * k;
+  out[5] = flat[a + 6] + (flat[b + 6] - flat[a + 6]) * k;
 }
 
 // packages/particles/src/system.ts
@@ -1500,6 +1519,397 @@ function vert3(out, at, px, py, pz, ox, oy, oz, u, v, cr, cg, cb, ca) {
   out[at + 8] = ca;
   return at + SOUP_STRIDE;
 }
+// packages/particles/src/instances.ts
+var INSTANCE_STRIDE = 16;
+var INSTANCE_LAYOUT = {
+  pos: { size: 3, offset: 0 },
+  vel: { size: 3, offset: 3 },
+  color: { size: 4, offset: 6 },
+  par: { size: 4, offset: 10 },
+  uv0: { size: 2, offset: 14 }
+};
+function packInstances(system, out, options = {}) {
+  const ramp = options.ramp ?? CONSTANT_RAMP;
+  const tiles = options.tiles;
+  const tileU = tiles !== undefined ? tiles[0] : 1;
+  const tileV = tiles !== undefined ? tiles[1] : 1;
+  const useAtlas = tiles !== undefined;
+  if (useAtlas && (!Number.isInteger(tileU) || tileU < 1 || !Number.isInteger(tileV) || tileV < 1)) {
+    throw new Error(`rune/particles: billboard tiles must be integers >= 1 (got [${tileU}, ${tileV}])`);
+  }
+  const maxFrame = tileU * tileV - 1;
+  const frameJitter = options.frameJitter ?? 0;
+  const f = system.fields;
+  const count = system.count;
+  const s = SCRATCH2;
+  let n = 0;
+  for (let i = 0;i < count; i++) {
+    const age = f.age[i];
+    const life = f.life[i];
+    const t = life > 0 ? age / life : 0;
+    sampleRamp(ramp, t, s);
+    const half = f.size[i] * s[0] * 0.5;
+    if (half <= 0)
+      continue;
+    let u0 = 0, v0 = 0;
+    if (useAtlas) {
+      let frame = Math.floor(s[5] + (frameJitter > 0 ? f.seed[i] * frameJitter : 0));
+      if (!Number.isFinite(frame))
+        frame = 0;
+      if (frame < 0)
+        frame = 0;
+      if (frame > maxFrame)
+        frame = maxFrame;
+      u0 = frame % tileU / tileU;
+      v0 = Math.floor(frame / tileU) / tileV;
+    }
+    const at = n * INSTANCE_STRIDE;
+    out[at] = f.px[i];
+    out[at + 1] = f.py[i];
+    out[at + 2] = f.pz[i];
+    out[at + 3] = f.vx[i];
+    out[at + 4] = f.vy[i];
+    out[at + 5] = f.vz[i];
+    out[at + 6] = f.cr[i] * s[1];
+    out[at + 7] = f.cg[i] * s[2];
+    out[at + 8] = f.cb[i] * s[3];
+    out[at + 9] = f.ca[i] * s[4];
+    out[at + 10] = half;
+    out[at + 11] = f.seed[i] * 6.283185307179586;
+    out[at + 12] = age;
+    out[at + 13] = f.seed[i];
+    out[at + 14] = u0;
+    out[at + 15] = v0;
+    n++;
+  }
+  return n;
+}
+var SCRATCH2 = new Float32Array(6);
+// packages/particles/src/gpuSim.ts
+var GPU_STATE_STRIDE = FIELD_NAMES.length;
+var GPU_SIM_UNIFORM_BYTES = 144;
+var GPU_SIM_UNIFORM_FLOATS = GPU_SIM_UNIFORM_BYTES / 4;
+var GPU_SIM_U32_FIELDS = {
+  count: 0,
+  swapCount: 2,
+  forceMask: 32
+};
+var GPU_SIM_F32_FIELDS = {
+  dt: 1,
+  drag: 8,
+  turbulence: 9,
+  attractStrength: 10,
+  softening2: 11,
+  noiseStrength: 16,
+  noiseScale: 17,
+  noiseSpeed: 18,
+  limit: 19,
+  dampen: 20,
+  frameJitter: 21,
+  tileU: 22,
+  tileV: 23
+};
+var GPU_SIM_VEC4_FIELDS = {
+  gravity: 4,
+  attractPoint: 12,
+  wrapSize: 24,
+  wrapCenter: 28
+};
+var GPU_FORCE_MASK = {
+  gravity: 1,
+  drag: 2,
+  turbulence: 4,
+  attract: 8,
+  noise: 16,
+  limitSpeed: 32,
+  wrap: 64
+};
+function gpuRampLUT(points) {
+  if (points.length === 0)
+    throw new Error("rune/particles: the GPU sim needs a ramp with at least one point");
+  if (points.length > 256) {
+    throw new Error(`rune/particles: the GPU sim's ramp is capped at 256 control points (got ${points.length})`);
+  }
+  const lut = new Float32Array(points.length * 7);
+  for (let i = 0;i < points.length; i++) {
+    const p = points[i];
+    const b = i * 7;
+    lut[b] = p.t;
+    lut[b + 1] = p.size;
+    lut[b + 2] = p.r;
+    lut[b + 3] = p.g;
+    lut[b + 4] = p.b;
+    lut[b + 5] = p.a;
+    lut[b + 6] = p.frame ?? 0;
+  }
+  return lut;
+}
+var GPU_SIM_ENTRIES = ["compact", "advance", "pack"];
+function gpuSimWgsl() {
+  const perm = Array.from(PERM, (v) => `${v}u`).join(", ");
+  const grads = [];
+  for (let g = 0;g < 12; g++) {
+    grads.push(`vec3<f32>(${GRAD3[g * 3]}, ${GRAD3[g * 3 + 1]}, ${GRAD3[g * 3 + 2]})`);
+  }
+  return `
+// @rune/particles — the GPGPU sim tier (Task 131). The state: the FIELD_NAMES
+// rows interleaved (17 floats). The entries: compact (the swap replay),
+// advance (the force walk), pack (the instance records).
+// The uniform layout mirrors GPU_SIM_* in gpuSim.ts (144 bytes).
+
+struct SimParams {
+  count : u32,
+  dt : f32,
+  swapCount : u32,
+  _pad0 : u32,
+  gravity : vec4<f32>,
+  drag : f32,
+  turbulence : f32,
+  attractStrength : f32,
+  softening2 : f32,
+  attractPoint : vec4<f32>,
+  noiseStrength : f32,
+  noiseScale : f32,
+  noiseSpeed : f32,
+  limit : f32,
+  dampen : f32,
+  frameJitter : f32,
+  tileU : f32,
+  tileV : f32,
+  wrapSize : vec4<f32>,
+  wrapCenter : vec4<f32>,
+  forceMask : u32,
+  _pad1 : u32,
+  _pad2 : u32,
+  _pad3 : u32,
+}
+
+@group(0) @binding(0) var<uniform> P : SimParams;
+@group(0) @binding(1) var<storage, read_write> state : array<f32>;
+@group(0) @binding(2) var<storage, read> swaps : array<vec2<u32>>;
+@group(0) @binding(3) var<storage, read_write> records : array<f32>;
+@group(0) @binding(4) var<storage, read> rampLUT : array<f32>;
+
+const FSTRIDE : u32 = ${GPU_STATE_STRIDE}u;
+const RSTRIDE : u32 = 16u;
+
+// ── the simplex noise (the SAME table the CPU evaluates — noise.ts) ────────
+var<private> SIM_PERM : array<u32, 512> = array<u32, 512>(${perm});
+var<private> SIM_GRADS : array<vec3<f32>, 12> = array<vec3<f32>, 12>(${grads.join(", ")});
+
+fn simplex3(v : vec3<f32>) -> f32 {
+  let F3 = 0.333333333333;
+  let G3 = 0.166666666667;
+  let s = (v.x + v.y + v.z) * F3;
+  let i = i32(floor(v.x + s));
+  let j = i32(floor(v.y + s));
+  let k = i32(floor(v.z + s));
+  let t = f32(i + j + k) * G3;
+  let x0 = v.x - (f32(i) - t);
+  let y0 = v.y - (f32(j) - t);
+  let z0 = v.z - (f32(k) - t);
+  // the simplex containing (x0, y0, z0): the offset ranking
+  var i1 = 0; var j1 = 0; var k1 = 0; var i2 = 0; var j2 = 0; var k2 = 0;
+  if (x0 >= y0) {
+    if (y0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+    else if (x0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 0; k2 = 1; }
+    else { i1 = 0; j1 = 0; k1 = 1; i2 = 1; j2 = 0; k2 = 1; }
+  } else {
+    if (y0 < z0) { i1 = 0; j1 = 0; k1 = 1; i2 = 0; j2 = 1; k2 = 1; }
+    else if (x0 < z0) { i1 = 0; j1 = 1; k1 = 0; i2 = 0; j2 = 1; k2 = 1; }
+    else { i1 = 0; j1 = 1; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+  }
+  let x1 = x0 - f32(i1) + G3; let y1 = y0 - f32(j1) + G3; let z1 = z0 - f32(k1) + G3;
+  let x2 = x0 - f32(i2) + 2.0 * G3; let y2 = y0 - f32(j2) + 2.0 * G3; let z2 = z0 - f32(k2) + 2.0 * G3;
+  let x3 = x0 - 1.0 + 3.0 * G3; let y3 = y0 - 1.0 + 3.0 * G3; let z3 = z0 - 1.0 + 3.0 * G3;
+  let ii = u32(i & 255); let jj = u32(j & 255); let kk = u32(k & 255);
+  var n = 0.0;
+  var t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
+  if (t0 > 0.0) {
+    let g = SIM_PERM[ii + SIM_PERM[jj + SIM_PERM[kk]]] % 12u;
+    t0 = t0 * t0;
+    n += t0 * t0 * dot(SIM_GRADS[g], vec3<f32>(x0, y0, z0));
+  }
+  var t1 = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;
+  if (t1 > 0.0) {
+    let g = SIM_PERM[ii + u32(i1) + SIM_PERM[jj + u32(j1) + SIM_PERM[kk + u32(k1)]]] % 12u;
+    t1 = t1 * t1;
+    n += t1 * t1 * dot(SIM_GRADS[g], vec3<f32>(x1, y1, z1));
+  }
+  var t2 = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;
+  if (t2 > 0.0) {
+    let g = SIM_PERM[ii + u32(i2) + SIM_PERM[jj + u32(j2) + SIM_PERM[kk + u32(k2)]]] % 12u;
+    t2 = t2 * t2;
+    n += t2 * t2 * dot(SIM_GRADS[g], vec3<f32>(x2, y2, z2));
+  }
+  var t3 = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;
+  if (t3 > 0.0) {
+    let g = SIM_PERM[ii + 1u + SIM_PERM[jj + 1u + SIM_PERM[kk + 1u]]] % 12u;
+    t3 = t3 * t3;
+    n += t3 * t3 * dot(SIM_GRADS[g], vec3<f32>(x3, y3, z3));
+  }
+  return 32.0 * n;
+}
+
+fn wrapAxis(d : f32, size : f32) -> f32 {
+  var m = (d + size * 0.5) % size;
+  if (m < 0.0) { m += size; }
+  return m - size * 0.5;
+}
+
+// ── compact: the CPU's swap list, replayed IN ORDER (a single thread — the
+// list is per-frame deaths, tens; the order is the CPU compaction's own) ────
+@compute @workgroup_size(1)
+fn compact(@builtin(global_invocation_id) gid : vec3<u32>) {
+  if (gid.x != 0u) { return; }
+  for (var s = 0u; s < P.swapCount; s++) {
+    let pair = swaps[s];
+    let dstSlot = pair.x * FSTRIDE;
+    let srcSlot = pair.y * FSTRIDE; // 'from' is a RESERVED WGSL keyword
+    for (var f = 0u; f < FSTRIDE; f++) {
+      state[dstSlot + f] = state[srcSlot + f];
+    }
+  }
+}
+
+// ── advance: the force walk (the reference order: drag → limit → gravity →
+// attract → turbulence → noise), the integration, age += dt, the wrap ──────
+@compute @workgroup_size(64)
+fn advance(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.count) { return; }
+  let b = i * FSTRIDE;
+  var px = state[b]; var py = state[b + 1u]; var pz = state[b + 2u];
+  var vx = state[b + 3u]; var vy = state[b + 4u]; var vz = state[b + 5u];
+  let age = state[b + 6u];
+  let seed = state[b + 13u];
+  if ((P.forceMask & 2u) != 0u) {
+    let k = exp(-P.drag * P.dt);
+    vx *= k; vy *= k; vz *= k;
+  }
+  if ((P.forceMask & 32u) != 0u) {
+    let speed = sqrt(vx * vx + vy * vy + vz * vz);
+    if (speed > P.limit && speed > 1e-9) {
+      var k = 1.0 - ((speed - P.limit) / speed) * P.dampen * P.dt * 20.0;
+      if (k < 0.0) { k = 0.0; }
+      vx *= k; vy *= k; vz *= k;
+    }
+  }
+  if ((P.forceMask & 1u) != 0u) {
+    vx += P.gravity.x * P.dt;
+    vy += P.gravity.y * P.dt;
+    vz += P.gravity.z * P.dt;
+  }
+  if ((P.forceMask & 8u) != 0u) {
+    let dx = P.attractPoint.x - px;
+    let dy = P.attractPoint.y - py;
+    let dz = P.attractPoint.z - pz;
+    let r2 = dx * dx + dy * dy + dz * dz;
+    let r = sqrt(r2);
+    if (r > 1e-6) {
+      let k = P.attractStrength * P.dt / (r * (r2 + P.softening2));
+      vx += dx * k; vy += dy * k; vz += dz * k;
+    }
+  }
+  if ((P.forceMask & 4u) != 0u) {
+    let t = age * 5.0 + seed * 37.0;
+    vx += sin(t) * P.turbulence * P.dt;
+    vy += sin(t * 1.7 + 11.3) * P.turbulence * P.dt;
+    vz += cos(t * 0.9 + 4.7) * P.turbulence * P.dt;
+  }
+  if ((P.forceMask & 16u) != 0u) {
+    // the simplex flow — the CPU reference's exact coordinate mapping
+    let adrift = age * P.noiseSpeed;
+    let so = seed * 13.7;
+    let sx = px * P.noiseScale + adrift;
+    let sy = py * P.noiseScale;
+    let sz = pz * P.noiseScale;
+    vx += simplex3(vec3<f32>(sx, sy + so, sz + 5.3)) * P.noiseStrength * P.dt;
+    vy += simplex3(vec3<f32>(sx + 11.7, sy + adrift, sz + 9.1 + so)) * P.noiseStrength * P.dt;
+    vz += simplex3(vec3<f32>(sx + 3.1, sy + 7.7 + so, sz + adrift)) * P.noiseStrength * P.dt;
+  }
+  px += vx * P.dt; py += vy * P.dt; pz += vz * P.dt;
+  if ((P.forceMask & 64u) != 0u) {
+    if (P.wrapSize.x > 0.0) { px = P.wrapCenter.x + wrapAxis(px - P.wrapCenter.x, P.wrapSize.x); }
+    if (P.wrapSize.y > 0.0) { py = P.wrapCenter.y + wrapAxis(py - P.wrapCenter.y, P.wrapSize.y); }
+    if (P.wrapSize.z > 0.0) { pz = P.wrapCenter.z + wrapAxis(pz - P.wrapCenter.z, P.wrapSize.z); }
+  }
+  state[b] = px; state[b + 1u] = py; state[b + 2u] = pz;
+  state[b + 3u] = vx; state[b + 4u] = vy; state[b + 5u] = vz;
+  state[b + 6u] = age + P.dt;
+}
+
+// ── pack: the 16-float instance records (packInstances' GPU twin — the
+// record layout of the BILLBOARD material / INSTANCE_LAYOUT) ───────────────
+@compute @workgroup_size(64)
+fn pack(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.count) { return; }
+  let b = i * FSTRIDE;
+  let age = state[b + 6u];
+  let life = state[b + 7u];
+  var t = 0.0;
+  if (life > 0.0) { t = age / life; }
+  // the ramp LUT (7-float rows: t, size, r, g, b, a, frame) — sampleRamp's
+  // exact walk: clamp → binary search → lerp
+  let n = arrayLength(&rampLUT) / 7u;
+  var size = 1.0; var r = 1.0; var g = 1.0; var bl = 1.0; var a = 1.0; var frame = 0.0;
+  if (n == 1u) {
+    size = rampLUT[1]; r = rampLUT[2]; g = rampLUT[3]; bl = rampLUT[4]; a = rampLUT[5]; frame = rampLUT[6];
+  } else if (t <= rampLUT[0]) {
+    size = rampLUT[1]; r = rampLUT[2]; g = rampLUT[3]; bl = rampLUT[4]; a = rampLUT[5]; frame = rampLUT[6];
+  } else {
+    let lastR = (n - 1u) * 7u;
+    if (t >= rampLUT[lastR]) {
+      size = rampLUT[lastR + 1u]; r = rampLUT[lastR + 2u]; g = rampLUT[lastR + 3u];
+      bl = rampLUT[lastR + 4u]; a = rampLUT[lastR + 5u]; frame = rampLUT[lastR + 6u];
+    } else {
+      var lo = 0u; var hi = n - 1u;
+      var guard = 0u;
+      while (hi - lo > 1u && guard < 32u) {
+        let mid = (lo + hi) >> 1u;
+        if (rampLUT[mid * 7u] <= t) { lo = mid; } else { hi = mid; }
+        guard++;
+      }
+      let ra = lo * 7u; let rb = hi * 7u;
+      let span = rampLUT[rb] - rampLUT[ra];
+      var k = 0.0;
+      if (span > 0.0) { k = (t - rampLUT[ra]) / span; }
+      size = rampLUT[ra + 1u] + (rampLUT[rb + 1u] - rampLUT[ra + 1u]) * k;
+      r = rampLUT[ra + 2u] + (rampLUT[rb + 2u] - rampLUT[ra + 2u]) * k;
+      g = rampLUT[ra + 3u] + (rampLUT[rb + 3u] - rampLUT[ra + 3u]) * k;
+      bl = rampLUT[ra + 4u] + (rampLUT[rb + 4u] - rampLUT[ra + 4u]) * k;
+      a = rampLUT[ra + 5u] + (rampLUT[rb + 5u] - rampLUT[ra + 5u]) * k;
+      frame = rampLUT[ra + 6u] + (rampLUT[rb + 6u] - rampLUT[ra + 6u]) * k;
+    }
+  }
+  let half = state[b + 8u] * size * 0.5;
+  let seed = state[b + 13u];
+  // the tile origin: frame + seed·jitter → floor → clamp → row-major
+  var fr = floor(frame + seed * P.frameJitter);
+  // NaN-safe: every NaN comparison is FALSE — !(fr >= 0) catches NaN and
+  // the negatives in one branch (WGSL has no isnan builtin)
+  if (!(fr >= 0.0)) { fr = 0.0; }
+  let maxFrame = P.tileU * P.tileV - 1.0;
+  if (fr > maxFrame) { fr = maxFrame; }
+  var u0 = 0.0; var v0 = 0.0;
+  if (P.tileU >= 1.0 && P.tileV >= 1.0) {
+    u0 = (fr % P.tileU) / P.tileU;
+    v0 = floor(fr / P.tileU) / P.tileV;
+  }
+  let o = i * RSTRIDE;
+  records[o] = state[b]; records[o + 1u] = state[b + 1u]; records[o + 2u] = state[b + 2u];
+  records[o + 3u] = state[b + 3u]; records[o + 4u] = state[b + 4u]; records[o + 5u] = state[b + 5u];
+  records[o + 6u] = state[b + 9u] * r; records[o + 7u] = state[b + 10u] * g;
+  records[o + 8u] = state[b + 11u] * bl; records[o + 9u] = state[b + 12u] * a;
+  records[o + 10u] = half;
+  records[o + 11u] = seed * 6.283185307179586;
+  records[o + 12u] = age;
+  records[o + 13u] = seed;
+  records[o + 14u] = u0; records[o + 15u] = v0;
+}
+`;
+}
 // packages/particles/src/trails.ts
 function createTrailHistory(capacity, options = {}) {
   const points = options.points ?? 24;
@@ -1578,7 +1988,7 @@ function createTrailHistory(capacity, options = {}) {
     }
   };
 }
-var SCRATCH2 = new Float32Array(6);
+var SCRATCH3 = new Float32Array(6);
 function fillTrails(system, history, basis, out, options = {}) {
   const ramp = options.ramp ?? CONSTANT_RAMP;
   const lengthCap = options.length ?? Infinity;
@@ -1589,7 +1999,7 @@ function fillTrails(system, history, basis, out, options = {}) {
   const { hx, heads, counts } = history;
   const stride = points * 3;
   const fx = basis.forward[0], fy = basis.forward[1], fz = basis.forward[2];
-  const s = SCRATCH2;
+  const s = SCRATCH3;
   let at = 0;
   for (let i = 0;i < count; i++) {
     const histCount = counts[i];
@@ -1693,7 +2103,7 @@ function tv(out, at, x, y, z, u, v, cr, cg, cb, ca) {
 }
 // packages/particles/src/meshes.ts
 var MESH_STRIDE = 12;
-var SCRATCH3 = new Float32Array(6);
+var SCRATCH4 = new Float32Array(6);
 function fillMeshes(system, geometry, out, options = {}) {
   const ramp = options.ramp ?? CONSTANT_RAMP;
   const spin = options.spin ?? 0;
@@ -1707,7 +2117,7 @@ function fillMeshes(system, geometry, out, options = {}) {
   if (g.length < vCount * 3) {
     throw new Error(`rune/particles: mesh geometry positions too short (${g.length} floats for ${vCount} verts)`);
   }
-  const s = SCRATCH3;
+  const s = SCRATCH4;
   let oax = 0, oay = 0, oaz = 1;
   const axisRandom = axisOpt === "random";
   if (!axisRandom) {
@@ -2014,366 +2424,7 @@ fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
   return vec4<f32>(texel.rgb * frag.tint.rgb * frag.tint.a, 1.0);
 }`;
 }
-// packages/particles/src/facade.ts
-var MAX_STEP = 1 / 20;
-function createParticles(desc) {
-  const capacity = desc.capacity;
-  const render = desc.render ?? { kind: "billboard" };
-  const ramp = desc.ramp ?? CONSTANT_RAMP;
-  const spin = desc.spin ?? 0;
-  const forces = {
-    gravity: desc.forces?.gravity ?? NO_FORCES.gravity,
-    drag: desc.forces?.drag ?? NO_FORCES.drag,
-    turbulence: desc.forces?.turbulence ?? NO_FORCES.turbulence,
-    attract: validateAttractor(desc.forces?.attract),
-    speedCurve: desc.forces?.speedCurve ?? null,
-    collide: validateCollision(desc.forces?.collide),
-    noise: desc.forces?.noise !== undefined && desc.forces?.noise !== null ? validateNoise(desc.forces.noise) : null,
-    seek: validateSeek(desc.forces?.seek),
-    limitSpeed: validateLimitSpeed(desc.forces?.limitSpeed)
-  };
-  const kind = render.kind;
-  let history = null;
-  if (kind === "trail") {
-    history = createTrailHistory(capacity, render);
-  }
-  const system = createParticleSystem(capacity, {
-    onRetire: desc.onRetire,
-    onSwap: history !== null ? history.handleSwap : undefined
-  });
-  let spawner = createSpawner(desc.spawner ?? DEFAULT_SPAWNER);
-  let ratePerSecond = desc.rate ?? 0;
-  let carry = 0;
-  const inheritK = validateInherit(desc.inheritVelocity);
-  const rateOverDist = validateRateOverDistance(desc.rateOverDistance);
-  const wrap = validateWrap(desc.wrap);
-  const wrapX = wrap !== null && wrap[0] > 0 ? wrap[0] : 0;
-  const wrapY = wrap !== null && wrap[1] > 0 ? wrap[1] : 0;
-  const wrapZ = wrap !== null && wrap[2] > 0 ? wrap[2] : 0;
-  const hasWrap = wrapX > 0 || wrapY > 0 || wrapZ > 0;
-  let distCarry = 0;
-  let lastOx = 0, lastOy = 0, lastOz = 0;
-  let emitterVx = 0, emitterVy = 0, emitterVz = 0;
-  const origin = [0, 0, 0];
-  let r00 = 1, r01 = 0, r02 = 0;
-  let r10 = 0, r11 = 1, r12 = 0;
-  let r20 = 0, r21 = 0, r22 = 1;
-  let oriented = false;
-  let streamIndex = 0;
-  const emitWrap = (index, out) => {
-    spawner(streamIndex + index, out);
-    if (oriented) {
-      const { x, y, z } = out;
-      out.x = x * r00 + y * r01 + z * r02;
-      out.y = x * r10 + y * r11 + z * r12;
-      out.z = x * r20 + y * r21 + z * r22;
-      const { vx, vy, vz } = out;
-      out.vx = vx * r00 + vy * r01 + vz * r02;
-      out.vy = vx * r10 + vy * r11 + vz * r12;
-      out.vz = vx * r20 + vy * r21 + vz * r22;
-    }
-    out.x += origin[0];
-    out.y += origin[1];
-    out.z += origin[2];
-    if (inheritK > 0) {
-      out.vx += emitterVx * inheritK;
-      out.vy += emitterVy * inheritK;
-      out.vz += emitterVz * inheritK;
-    }
-  };
-  const emitStream = (n) => {
-    const spawnedCount = system.emit(n, emitWrap);
-    streamIndex += spawnedCount;
-    return spawnedCount;
-  };
-  let soupFloats;
-  let stride;
-  let layout;
-  if (kind === "mesh") {
-    const geo = render.geometry;
-    const vertsPer = geo.vertexCount;
-    if (!Number.isInteger(vertsPer) || vertsPer < 3) {
-      throw new Error(`rune/particles: mesh geometry needs >= 3 vertices (got ${vertsPer})`);
-    }
-    soupFloats = capacity * vertsPer * MESH_STRIDE;
-    stride = MESH_STRIDE;
-    layout = { position: { size: 3, offset: 0 }, normal: { size: 3, offset: 3 }, uv: { size: 2, offset: 6 }, color: { size: 4, offset: 8 } };
-  } else if (kind === "trail") {
-    const points = history.points;
-    soupFloats = capacity * points * VERTS_PER_PARTICLE * SOUP_STRIDE;
-    stride = SOUP_STRIDE;
-    layout = { position: { size: 3, offset: 0 }, uv: { size: 2, offset: 3 }, color: { size: 4, offset: 5 } };
-  } else {
-    soupFloats = capacity * VERTS_PER_PARTICLE * SOUP_STRIDE;
-    stride = SOUP_STRIDE;
-    layout = { position: { size: 3, offset: 0 }, uv: { size: 2, offset: 3 }, color: { size: 4, offset: 5 } };
-  }
-  const vertices = new Float32Array(soupFloats);
-  const view = { vertices, vertexCount: 0, stride, layout };
-  let time = 0;
-  const bursts = (desc.bursts ?? []).map((burst) => validateBurst(burst));
-  const burstState = bursts.map((burst, index) => ({
-    next: burst.time,
-    firesLeft: burst.cycle === 0 ? Infinity : burst.cycle,
-    cycle: 0,
-    index
-  }));
-  const scheduleSeed = (desc.spawner?.seed ?? 1) | 0;
-  const prewarm = desc.prewarm ?? 0;
-  if (prewarm > 0) {
-    if (!Number.isFinite(prewarm) || prewarm > 3600) {
-      throw new Error(`rune/particles: prewarm must be a finite seconds count <= 3600 (got ${prewarm})`);
-    }
-    const steps = Math.ceil(prewarm * 60);
-    for (let i = 0;i < steps; i++)
-      advanceInternal(1 / 60);
-  }
-  const facade = {
-    get count() {
-      return system.count;
-    },
-    get capacity() {
-      return capacity;
-    },
-    get fields() {
-      return system.fields;
-    },
-    rate(perSecond, sp) {
-      if (!Number.isFinite(perSecond) || perSecond < 0) {
-        throw new Error(`rune/particles: rate must be a finite >= 0 (got ${perSecond})`);
-      }
-      ratePerSecond = perSecond;
-      if (sp !== undefined)
-        spawner = createSpawner(sp);
-      return facade;
-    },
-    burst(n, sp) {
-      if (sp !== undefined)
-        spawner = createSpawner(sp);
-      return emitStream(n);
-    },
-    at(x, y, z) {
-      if (!Number.isFinite(x + y + z)) {
-        throw new Error(`rune/particles: at() needs three finite numbers (got ${x}, ${y}, ${z})`);
-      }
-      origin[0] = x;
-      origin[1] = y;
-      origin[2] = z;
-      return facade;
-    },
-    orient(m) {
-      if (m === null) {
-        r00 = 1;
-        r01 = 0;
-        r02 = 0;
-        r10 = 0;
-        r11 = 1;
-        r12 = 0;
-        r20 = 0;
-        r21 = 0;
-        r22 = 1;
-        oriented = false;
-        return facade;
-      }
-      const n = m.length;
-      if (n !== 9 && n !== 16) {
-        throw new Error(`rune/particles: orient() takes a column-major 3×3 or 4×4 matrix, or null (got ${n} numbers)`);
-      }
-      const c = n === 16 ? 4 : 3;
-      const v00 = m[0], v10 = m[1], v20 = m[2];
-      const v01 = m[c], v11 = m[c + 1], v21 = m[c + 2];
-      const v02 = m[c * 2], v12 = m[c * 2 + 1], v22 = m[c * 2 + 2];
-      if (![v00, v10, v20, v01, v11, v21, v02, v12, v22].every(Number.isFinite)) {
-        throw new Error("rune/particles: orient() matrix entries must all be finite");
-      }
-      r00 = v00;
-      r01 = v01;
-      r02 = v02;
-      r10 = v10;
-      r11 = v11;
-      r12 = v12;
-      r20 = v20;
-      r21 = v21;
-      r22 = v22;
-      oriented = true;
-      return facade;
-    },
-    advance(dt) {
-      advanceInternal(dt);
-      return facade;
-    },
-    view(basis, options) {
-      if (kind === "mesh") {
-        const renderOpts = render;
-        const o = options?.mesh ?? {};
-        view.vertexCount = fillMeshes(system, render.geometry, vertices, {
-          ramp,
-          axis: o.axis ?? renderOpts.axis,
-          spin: o.spin ?? renderOpts.spin
-        });
-      } else if (kind === "trail") {
-        const renderOpts = render;
-        const o = options?.trail ?? {};
-        view.vertexCount = fillTrails(system, history, withForward(basis), vertices, {
-          ramp,
-          length: o.length ?? renderOpts.length,
-          width: o.width ?? renderOpts.width
-        });
-      } else {
-        const renderOpts = render;
-        const o = options?.billboard ?? {};
-        view.vertexCount = fillBillboards(system, basis, vertices, {
-          ramp,
-          spin,
-          mode: o.mode ?? renderOpts.mode ?? "camera",
-          tiles: o.tiles ?? renderOpts.tiles,
-          speedFactor: o.speedFactor ?? renderOpts.speedFactor,
-          lengthFactor: o.lengthFactor ?? renderOpts.lengthFactor,
-          axis: o.axis ?? renderOpts.axis,
-          spin3d: o.spin3d ?? renderOpts.spin3d,
-          frameJitter: o.frameJitter ?? renderOpts.frameJitter
-        });
-      }
-      return view;
-    },
-    billboards(basis) {
-      return facade.view(basis);
-    },
-    stats() {
-      const out = { count: system.count, capacity, spawned: system.spawned, retired: system.retired, dropped: system.dropped };
-      return out;
-    },
-    clear() {
-      system.clear();
-      carry = 0;
-      distCarry = 0;
-      return facade;
-    }
-  };
-  function advanceInternal(dt) {
-    if (!Number.isFinite(dt) || dt <= 0)
-      return;
-    if (inheritK > 0 || rateOverDist > 0) {
-      const mdx = origin[0] - lastOx, mdy = origin[1] - lastOy, mdz = origin[2] - lastOz;
-      const moved = Math.hypot(mdx, mdy, mdz);
-      if (moved > MAX_EMITTER_STEP) {
-        emitterVx = 0;
-        emitterVy = 0;
-        emitterVz = 0;
-      } else {
-        emitterVx = mdx / dt;
-        emitterVy = mdy / dt;
-        emitterVz = mdz / dt;
-        if (rateOverDist > 0 && moved > 0) {
-          distCarry += moved * rateOverDist;
-          const whole = Math.floor(distCarry);
-          if (whole > 0) {
-            distCarry -= whole;
-            emitStream(whole);
-          }
-        }
-      }
-      lastOx = origin[0];
-      lastOy = origin[1];
-      lastOz = origin[2];
-    }
-    if (ratePerSecond > 0) {
-      carry += ratePerSecond * dt;
-      const whole = Math.floor(carry);
-      if (whole > 0) {
-        carry -= whole;
-        emitStream(whole);
-      }
-    }
-    for (const state of burstState) {
-      const burst = bursts[state.index];
-      let guard = 0;
-      while (time >= state.next && state.firesLeft > 0 && guard++ < 64) {
-        if (hash01(scheduleSeed, state.index * 7919 + 13, state.cycle) < burst.probability) {
-          emitStream(burst.count);
-        }
-        state.firesLeft--;
-        state.cycle++;
-        state.next += burst.interval;
-      }
-    }
-    if (dt > MAX_STEP) {
-      const steps = Math.min(600, Math.ceil(dt / MAX_STEP));
-      const h = dt / steps;
-      for (let s = 0;s < steps; s++)
-        system.advance(h, forces);
-    } else {
-      system.advance(dt, forces);
-    }
-    if (hasWrap) {
-      const f = system.fields;
-      const n = system.count;
-      const cx = origin[0], cy = origin[1], cz = origin[2];
-      for (let i = 0;i < n; i++) {
-        if (wrapX > 0)
-          f.px[i] = cx + wrapAxis(f.px[i] - cx, wrapX);
-        if (wrapY > 0)
-          f.py[i] = cy + wrapAxis(f.py[i] - cy, wrapY);
-        if (wrapZ > 0)
-          f.pz[i] = cz + wrapAxis(f.pz[i] - cz, wrapZ);
-      }
-    }
-    time += dt;
-    if (history !== null)
-      history.record(system, dt);
-  }
-  function withForward(basis) {
-    if (basis.forward !== undefined) {
-      return { right: basis.right, up: basis.up, forward: basis.forward };
-    }
-    const { right: r, up: u } = basis;
-    const cx = r[1] * u[2] - r[2] * u[1];
-    const cy = r[2] * u[0] - r[0] * u[2];
-    const cz = r[0] * u[1] - r[1] * u[0];
-    return { right: r, up: u, forward: [-cx, -cy, -cz] };
-  }
-  return facade;
-}
-var DEFAULT_SPAWNER = {
-  shape: { kind: "sphere", origin: [0, 0, 0], radius: [0.2, 0.6] },
-  velocity: { mode: "radial" },
-  speed: [1, 2],
-  life: [1, 2],
-  size: [0.1, 0.2],
-  color: [[1, 1, 1, 1], [0.8, 0.9, 1, 0.6]]
-};
-var MAX_EMITTER_STEP = 25;
-function validateInherit(k) {
-  if (k === undefined)
-    return 0;
-  if (!Number.isFinite(k) || k < 0) {
-    throw new Error(`rune/particles: inheritVelocity must be a finite >= 0 (got ${k}; the fraction of the emitter's velocity a newborn rides)`);
-  }
-  return k;
-}
-function validateRateOverDistance(r) {
-  if (r === undefined)
-    return 0;
-  if (!Number.isFinite(r) || r < 0) {
-    throw new Error(`rune/particles: rateOverDistance must be a finite >= 0 (got ${r}; particles per world unit the emitter travels)`);
-  }
-  return r;
-}
-function wrapAxis(d, size) {
-  let m = (d + size * 0.5) % size;
-  if (m < 0)
-    m += size;
-  return m - size * 0.5;
-}
-function validateWrap(wrap) {
-  if (wrap === undefined || wrap === null)
-    return null;
-  const size = wrap.size;
-  if (!Array.isArray(size) || size.length !== 3 || !size.every((v) => Number.isFinite(v) && v >= 0)) {
-    throw new Error(`rune/particles: wrap.size must be three finite numbers >= 0, 0 disables the axis (got ${JSON.stringify(size)})`);
-  }
-  return [size[0], size[1], size[2]];
-}
+// packages/particles/src/validate.ts
 function validateAttractor(at) {
   if (at === undefined || at === null)
     return null;
@@ -2503,6 +2554,31 @@ function validateLimitSpeed(ls) {
   }
   return ls;
 }
+function validateInherit(k) {
+  if (k === undefined)
+    return 0;
+  if (!Number.isFinite(k) || k < 0) {
+    throw new Error(`rune/particles: inheritVelocity must be a finite >= 0 (got ${k}; the fraction of the emitter's velocity a newborn rides)`);
+  }
+  return k;
+}
+function validateRateOverDistance(r) {
+  if (r === undefined)
+    return 0;
+  if (!Number.isFinite(r) || r < 0) {
+    throw new Error(`rune/particles: rateOverDistance must be a finite >= 0 (got ${r}; particles per world unit the emitter travels)`);
+  }
+  return r;
+}
+function validateWrap(wrap) {
+  if (wrap === undefined || wrap === null)
+    return null;
+  const size = wrap.size;
+  if (!Array.isArray(size) || size.length !== 3 || !size.every((v) => Number.isFinite(v) && v >= 0)) {
+    throw new Error(`rune/particles: wrap.size must be three finite numbers >= 0, 0 disables the axis (got ${JSON.stringify(size)})`);
+  }
+  return [size[0], size[1], size[2]];
+}
 function validateBurst(burst) {
   if (!Number.isFinite(burst.time) || burst.time < 0) {
     throw new Error(`rune/particles: burst time must be a finite >= 0 (got ${burst.time})`);
@@ -2521,11 +2597,546 @@ function validateBurst(burst) {
   }
   return burst;
 }
+
+// packages/particles/src/facade.ts
+var MAX_STEP = 1 / 20;
+function createParticles(desc) {
+  const capacity = desc.capacity;
+  const render = desc.render ?? { kind: "billboard" };
+  const ramp = desc.ramp ?? CONSTANT_RAMP;
+  const spin = desc.spin ?? 0;
+  const forces = {
+    gravity: desc.forces?.gravity ?? NO_FORCES.gravity,
+    drag: desc.forces?.drag ?? NO_FORCES.drag,
+    turbulence: desc.forces?.turbulence ?? NO_FORCES.turbulence,
+    attract: validateAttractor(desc.forces?.attract),
+    speedCurve: desc.forces?.speedCurve ?? null,
+    collide: validateCollision(desc.forces?.collide),
+    noise: desc.forces?.noise !== undefined && desc.forces?.noise !== null ? validateNoise(desc.forces.noise) : null,
+    seek: validateSeek(desc.forces?.seek),
+    limitSpeed: validateLimitSpeed(desc.forces?.limitSpeed)
+  };
+  const wrap = validateWrap(desc.wrap);
+  const wrapX = wrap !== null && wrap[0] > 0 ? wrap[0] : 0;
+  const wrapY = wrap !== null && wrap[1] > 0 ? wrap[1] : 0;
+  const wrapZ = wrap !== null && wrap[2] > 0 ? wrap[2] : 0;
+  const hasWrap = wrapX > 0 || wrapY > 0 || wrapZ > 0;
+  const kind = render.kind;
+  let history = null;
+  if (kind === "trail") {
+    history = createTrailHistory(capacity, render);
+  }
+  const sim = desc.sim ?? "cpu";
+  const gpuMode = sim === "gpu";
+  let gpuHandoff = null;
+  let gpuSwaps = null;
+  let gpuSwapCount = 0;
+  if (gpuMode) {
+    if (kind !== "billboard" || render.draw !== "instance") {
+      throw new Error('rune/particles: sim:"gpu" requires render { kind: "billboard", draw: "instance" } (the GPU tier packs the instance records itself — the soup/trail/mesh kinds are CPU-baked)');
+    }
+    if (desc.onRetire !== undefined) {
+      throw new Error('rune/particles: sim:"gpu" rejects onRetire (the death site lives on the GPU — the sub-emitter family stays on the CPU tier)');
+    }
+    if (forces.collide !== null) {
+      throw new Error('rune/particles: sim:"gpu" rejects collide (the bounce response needs the CPU positions; the contact events are CPU-blind — the rain/splash family stays on the CPU tier)');
+    }
+    if (forces.seek !== null) {
+      throw new Error('rune/particles: sim:"gpu" rejects seek (the targets are dynamic CPU writes — retargeting would need strided per-frame uploads; the sequencer family stays on the CPU tier)');
+    }
+    if (forces.speedCurve !== null) {
+      throw new Error('rune/particles: sim:"gpu" rejects forces.speedCurve (the telescoping rescale stays CPU-side in v1 — the rocket class keeps sim:"cpu")');
+    }
+    if ((forces.attract ?? null) !== null && (forces.attract?.killRadius ?? 0) > 0) {
+      throw new Error('rune/particles: sim:"gpu" rejects attract.killRadius (the sink retires via positions — CPU-blind on the GPU tier; the vortex drain stays on the CPU tier)');
+    }
+    if ((desc.prewarm ?? 0) > 0) {
+      throw new Error('rune/particles: sim:"gpu" rejects prewarm (the GPU state cannot be fast-forwarded synchronously — emit a burst and let a few frames pass instead)');
+    }
+    gpuSwaps = new Uint32Array(2 * capacity);
+    gpuHandoff = {
+      attached: false,
+      emitRows: new Float32Array(GPU_STATE_STRIDE * capacity),
+      emitBase: 0,
+      emitCount: 0,
+      swaps: gpuSwaps,
+      swapCount: 0,
+      emitOrigin: [0, 0, 0],
+      wrapSize: hasWrap ? [wrapX, wrapY, wrapZ] : null
+    };
+  }
+  const system = createParticleSystem(capacity, {
+    onRetire: desc.onRetire,
+    onSwap: gpuSwaps !== null ? (to, from) => {
+      if (gpuSwapCount < gpuSwaps.length / 2) {
+        const at = gpuSwapCount * 2;
+        gpuSwaps[at] = to;
+        gpuSwaps[at + 1] = from;
+        gpuSwapCount++;
+      }
+    } : history !== null ? history.handleSwap : undefined
+  });
+  let spawner = createSpawner(desc.spawner ?? DEFAULT_SPAWNER);
+  let ratePerSecond = desc.rate ?? 0;
+  let carry = 0;
+  const inheritK = validateInherit(desc.inheritVelocity);
+  const rateOverDist = validateRateOverDistance(desc.rateOverDistance);
+  let distCarry = 0;
+  let lastOx = 0, lastOy = 0, lastOz = 0;
+  let emitterVx = 0, emitterVy = 0, emitterVz = 0;
+  const origin = [0, 0, 0];
+  let r00 = 1, r01 = 0, r02 = 0;
+  let r10 = 0, r11 = 1, r12 = 0;
+  let r20 = 0, r21 = 0, r22 = 1;
+  let oriented = false;
+  let streamIndex = 0;
+  const emitWrap = (index, out) => {
+    spawner(streamIndex + index, out);
+    if (oriented) {
+      const { x, y, z } = out;
+      out.x = x * r00 + y * r01 + z * r02;
+      out.y = x * r10 + y * r11 + z * r12;
+      out.z = x * r20 + y * r21 + z * r22;
+      const { vx, vy, vz } = out;
+      out.vx = vx * r00 + vy * r01 + vz * r02;
+      out.vy = vx * r10 + vy * r11 + vz * r12;
+      out.vz = vx * r20 + vy * r21 + vz * r22;
+    }
+    out.x += origin[0];
+    out.y += origin[1];
+    out.z += origin[2];
+    if (inheritK > 0) {
+      out.vx += emitterVx * inheritK;
+      out.vy += emitterVy * inheritK;
+      out.vz += emitterVz * inheritK;
+    }
+  };
+  const emitStream = (n) => {
+    const spawnedCount = system.emit(n, emitWrap);
+    streamIndex += spawnedCount;
+    return spawnedCount;
+  };
+  let soupFloats;
+  let stride;
+  let layout;
+  let drawFormat = "soup";
+  if (kind === "mesh") {
+    const geo = render.geometry;
+    const vertsPer = geo.vertexCount;
+    if (!Number.isInteger(vertsPer) || vertsPer < 3) {
+      throw new Error(`rune/particles: mesh geometry needs >= 3 vertices (got ${vertsPer})`);
+    }
+    soupFloats = capacity * vertsPer * MESH_STRIDE;
+    stride = MESH_STRIDE;
+    layout = { position: { size: 3, offset: 0 }, normal: { size: 3, offset: 3 }, uv: { size: 2, offset: 6 }, color: { size: 4, offset: 8 } };
+  } else if (kind === "trail") {
+    const points = history.points;
+    soupFloats = capacity * points * VERTS_PER_PARTICLE * SOUP_STRIDE;
+    stride = SOUP_STRIDE;
+    layout = { position: { size: 3, offset: 0 }, uv: { size: 2, offset: 3 }, color: { size: 4, offset: 5 } };
+  } else {
+    const draw = render.draw === "instance" ? "instance" : "soup";
+    drawFormat = draw;
+    if (draw === "instance") {
+      soupFloats = capacity * INSTANCE_STRIDE;
+      stride = INSTANCE_STRIDE;
+      layout = { position: { size: 3, offset: INSTANCE_LAYOUT.pos.offset }, uv: { size: 2, offset: INSTANCE_LAYOUT.uv0.offset }, color: { size: 4, offset: INSTANCE_LAYOUT.color.offset } };
+    } else {
+      soupFloats = capacity * VERTS_PER_PARTICLE * SOUP_STRIDE;
+      stride = SOUP_STRIDE;
+      layout = { position: { size: 3, offset: 0 }, uv: { size: 2, offset: 3 }, color: { size: 4, offset: 5 } };
+    }
+  }
+  const vertices = new Float32Array(soupFloats);
+  const view = {
+    vertices,
+    vertexCount: 0,
+    stride,
+    layout,
+    draw: drawFormat,
+    instanceCount: 0,
+    instanceLayout: drawFormat === "instance" ? INSTANCE_LAYOUT : null
+  };
+  let time = 0;
+  const bursts = (desc.bursts ?? []).map((burst) => validateBurst(burst));
+  const burstState = bursts.map((burst, index) => ({
+    next: burst.time,
+    firesLeft: burst.cycle === 0 ? Infinity : burst.cycle,
+    cycle: 0,
+    index
+  }));
+  const scheduleSeed = (desc.spawner?.seed ?? 1) | 0;
+  const prewarm = desc.prewarm ?? 0;
+  if (prewarm > 0) {
+    if (!Number.isFinite(prewarm) || prewarm > 3600) {
+      throw new Error(`rune/particles: prewarm must be a finite seconds count <= 3600 (got ${prewarm})`);
+    }
+    const steps = Math.ceil(prewarm * 60);
+    for (let i = 0;i < steps; i++)
+      advanceInternal(1 / 60);
+  }
+  const facade = {
+    get count() {
+      return system.count;
+    },
+    get capacity() {
+      return capacity;
+    },
+    get fields() {
+      return system.fields;
+    },
+    get render() {
+      return render;
+    },
+    get spin() {
+      return spin;
+    },
+    get forces() {
+      return forces;
+    },
+    get ramp() {
+      return ramp;
+    },
+    get gpuHandoff() {
+      return gpuHandoff;
+    },
+    rate(perSecond, sp) {
+      if (!Number.isFinite(perSecond) || perSecond < 0) {
+        throw new Error(`rune/particles: rate must be a finite >= 0 (got ${perSecond})`);
+      }
+      ratePerSecond = perSecond;
+      if (sp !== undefined)
+        spawner = createSpawner(sp);
+      return facade;
+    },
+    burst(n, sp) {
+      if (sp !== undefined)
+        spawner = createSpawner(sp);
+      return emitStream(n);
+    },
+    at(x, y, z) {
+      if (!Number.isFinite(x + y + z)) {
+        throw new Error(`rune/particles: at() needs three finite numbers (got ${x}, ${y}, ${z})`);
+      }
+      origin[0] = x;
+      origin[1] = y;
+      origin[2] = z;
+      return facade;
+    },
+    orient(m) {
+      if (m === null) {
+        r00 = 1;
+        r01 = 0;
+        r02 = 0;
+        r10 = 0;
+        r11 = 1;
+        r12 = 0;
+        r20 = 0;
+        r21 = 0;
+        r22 = 1;
+        oriented = false;
+        return facade;
+      }
+      const n = m.length;
+      if (n !== 9 && n !== 16) {
+        throw new Error(`rune/particles: orient() takes a column-major 3×3 or 4×4 matrix, or null (got ${n} numbers)`);
+      }
+      const c = n === 16 ? 4 : 3;
+      const v00 = m[0], v10 = m[1], v20 = m[2];
+      const v01 = m[c], v11 = m[c + 1], v21 = m[c + 2];
+      const v02 = m[c * 2], v12 = m[c * 2 + 1], v22 = m[c * 2 + 2];
+      if (![v00, v10, v20, v01, v11, v21, v02, v12, v22].every(Number.isFinite)) {
+        throw new Error("rune/particles: orient() matrix entries must all be finite");
+      }
+      r00 = v00;
+      r01 = v01;
+      r02 = v02;
+      r10 = v10;
+      r11 = v11;
+      r12 = v12;
+      r20 = v20;
+      r21 = v21;
+      r22 = v22;
+      oriented = true;
+      return facade;
+    },
+    advance(dt) {
+      advanceInternal(dt);
+      return facade;
+    },
+    view(basis, options) {
+      if (kind === "mesh") {
+        const renderOpts = render;
+        const o = options?.mesh ?? {};
+        view.vertexCount = fillMeshes(system, render.geometry, vertices, {
+          ramp,
+          axis: o.axis ?? renderOpts.axis,
+          spin: o.spin ?? renderOpts.spin
+        });
+      } else if (kind === "trail") {
+        const renderOpts = render;
+        const o = options?.trail ?? {};
+        view.vertexCount = fillTrails(system, history, withForward(basis), vertices, {
+          ramp,
+          length: o.length ?? renderOpts.length,
+          width: o.width ?? renderOpts.width
+        });
+      } else {
+        const renderOpts = render;
+        const o = options?.billboard ?? {};
+        if (gpuMode) {
+          view.vertexCount = system.count;
+          view.instanceCount = system.count;
+        } else if (drawFormat === "instance") {
+          const packOpts = {
+            ramp,
+            tiles: o.tiles ?? renderOpts.tiles,
+            frameJitter: o.frameJitter ?? renderOpts.frameJitter
+          };
+          view.vertexCount = packInstances(system, vertices, packOpts);
+          view.instanceCount = view.vertexCount;
+        } else {
+          view.vertexCount = fillBillboards(system, basis, vertices, {
+            ramp,
+            spin,
+            mode: o.mode ?? renderOpts.mode ?? "camera",
+            tiles: o.tiles ?? renderOpts.tiles,
+            speedFactor: o.speedFactor ?? renderOpts.speedFactor,
+            lengthFactor: o.lengthFactor ?? renderOpts.lengthFactor,
+            axis: o.axis ?? renderOpts.axis,
+            spin3d: o.spin3d ?? renderOpts.spin3d,
+            frameJitter: o.frameJitter ?? renderOpts.frameJitter
+          });
+          view.instanceCount = 0;
+        }
+      }
+      return view;
+    },
+    billboards(basis) {
+      return facade.view(basis);
+    },
+    stats() {
+      const out = { count: system.count, capacity, spawned: system.spawned, retired: system.retired, dropped: system.dropped };
+      return out;
+    },
+    clear() {
+      system.clear();
+      carry = 0;
+      distCarry = 0;
+      if (gpuHandoff !== null) {
+        gpuHandoff.emitBase = 0;
+        gpuHandoff.emitCount = 0;
+        gpuHandoff.swapCount = 0;
+        gpuSwapCount = 0;
+      }
+      return facade;
+    }
+  };
+  function advanceGpu(dt) {
+    const handoff = gpuHandoff;
+    if (!handoff.attached) {
+      throw new Error('rune/particles: sim:"gpu" needs the GPU backend — createGpuParticles(facade, gpuFacade) from @rune/gl (WebGL2 has no compute; pass sim:"cpu" there)');
+    }
+    const emitBase = system.count;
+    handoff.emitBase = emitBase;
+    handoff.emitCount = 0;
+    gpuSwapCount = 0;
+    handoff.emitOrigin[0] = origin[0];
+    handoff.emitOrigin[1] = origin[1];
+    handoff.emitOrigin[2] = origin[2];
+    if (inheritK > 0 || rateOverDist > 0) {
+      const mdx = origin[0] - lastOx, mdy = origin[1] - lastOy, mdz = origin[2] - lastOz;
+      const moved = Math.hypot(mdx, mdy, mdz);
+      if (moved > MAX_EMITTER_STEP) {
+        emitterVx = 0;
+        emitterVy = 0;
+        emitterVz = 0;
+      } else {
+        emitterVx = mdx / dt;
+        emitterVy = mdy / dt;
+        emitterVz = mdz / dt;
+        if (rateOverDist > 0 && moved > 0) {
+          distCarry += moved * rateOverDist;
+          const whole = Math.floor(distCarry);
+          if (whole > 0) {
+            distCarry -= whole;
+            emitStream(whole);
+          }
+        }
+      }
+      lastOx = origin[0];
+      lastOy = origin[1];
+      lastOz = origin[2];
+    }
+    if (ratePerSecond > 0) {
+      carry += ratePerSecond * dt;
+      const whole = Math.floor(carry);
+      if (whole > 0) {
+        carry -= whole;
+        emitStream(whole);
+      }
+    }
+    for (const state of burstState) {
+      const burst = bursts[state.index];
+      let guard = 0;
+      while (time >= state.next && state.firesLeft > 0 && guard++ < 64) {
+        if (hash01(scheduleSeed, state.index * 7919 + 13, state.cycle) < burst.probability) {
+          emitStream(burst.count);
+        }
+        state.firesLeft--;
+        state.cycle++;
+        state.next += burst.interval;
+      }
+    }
+    const n = system.count - emitBase;
+    if (n > 0) {
+      const f = system.fields;
+      const rows = handoff.emitRows;
+      for (let i = 0;i < n; i++) {
+        const s = emitBase + i;
+        const at = i * GPU_STATE_STRIDE;
+        rows[at] = f.px[s];
+        rows[at + 1] = f.py[s];
+        rows[at + 2] = f.pz[s];
+        rows[at + 3] = f.vx[s];
+        rows[at + 4] = f.vy[s];
+        rows[at + 5] = f.vz[s];
+        rows[at + 6] = f.age[s];
+        rows[at + 7] = f.life[s];
+        rows[at + 8] = f.size[s];
+        rows[at + 9] = f.cr[s];
+        rows[at + 10] = f.cg[s];
+        rows[at + 11] = f.cb[s];
+        rows[at + 12] = f.ca[s];
+        rows[at + 13] = f.seed[s];
+        rows[at + 14] = f.tx[s];
+        rows[at + 15] = f.ty[s];
+        rows[at + 16] = f.tz[s];
+      }
+      handoff.emitCount = n;
+    }
+    if (dt > MAX_STEP) {
+      const steps = Math.min(600, Math.ceil(dt / MAX_STEP));
+      const h = dt / steps;
+      for (let s = 0;s < steps; s++)
+        system.advance(h, NO_FORCES);
+    } else {
+      system.advance(dt, NO_FORCES);
+    }
+    handoff.swapCount = gpuSwapCount;
+    time += dt;
+  }
+  function advanceInternal(dt) {
+    if (!Number.isFinite(dt) || dt <= 0)
+      return;
+    if (gpuMode) {
+      advanceGpu(dt);
+      return;
+    }
+    if (inheritK > 0 || rateOverDist > 0) {
+      const mdx = origin[0] - lastOx, mdy = origin[1] - lastOy, mdz = origin[2] - lastOz;
+      const moved = Math.hypot(mdx, mdy, mdz);
+      if (moved > MAX_EMITTER_STEP) {
+        emitterVx = 0;
+        emitterVy = 0;
+        emitterVz = 0;
+      } else {
+        emitterVx = mdx / dt;
+        emitterVy = mdy / dt;
+        emitterVz = mdz / dt;
+        if (rateOverDist > 0 && moved > 0) {
+          distCarry += moved * rateOverDist;
+          const whole = Math.floor(distCarry);
+          if (whole > 0) {
+            distCarry -= whole;
+            emitStream(whole);
+          }
+        }
+      }
+      lastOx = origin[0];
+      lastOy = origin[1];
+      lastOz = origin[2];
+    }
+    if (ratePerSecond > 0) {
+      carry += ratePerSecond * dt;
+      const whole = Math.floor(carry);
+      if (whole > 0) {
+        carry -= whole;
+        emitStream(whole);
+      }
+    }
+    for (const state of burstState) {
+      const burst = bursts[state.index];
+      let guard = 0;
+      while (time >= state.next && state.firesLeft > 0 && guard++ < 64) {
+        if (hash01(scheduleSeed, state.index * 7919 + 13, state.cycle) < burst.probability) {
+          emitStream(burst.count);
+        }
+        state.firesLeft--;
+        state.cycle++;
+        state.next += burst.interval;
+      }
+    }
+    if (dt > MAX_STEP) {
+      const steps = Math.min(600, Math.ceil(dt / MAX_STEP));
+      const h = dt / steps;
+      for (let s = 0;s < steps; s++)
+        system.advance(h, forces);
+    } else {
+      system.advance(dt, forces);
+    }
+    if (hasWrap) {
+      const f = system.fields;
+      const n = system.count;
+      const cx = origin[0], cy = origin[1], cz = origin[2];
+      for (let i = 0;i < n; i++) {
+        if (wrapX > 0)
+          f.px[i] = cx + wrapAxis(f.px[i] - cx, wrapX);
+        if (wrapY > 0)
+          f.py[i] = cy + wrapAxis(f.py[i] - cy, wrapY);
+        if (wrapZ > 0)
+          f.pz[i] = cz + wrapAxis(f.pz[i] - cz, wrapZ);
+      }
+    }
+    time += dt;
+    if (history !== null)
+      history.record(system, dt);
+  }
+  function withForward(basis) {
+    if (basis.forward !== undefined) {
+      return { right: basis.right, up: basis.up, forward: basis.forward };
+    }
+    const { right: r, up: u } = basis;
+    const cx = r[1] * u[2] - r[2] * u[1];
+    const cy = r[2] * u[0] - r[0] * u[2];
+    const cz = r[0] * u[1] - r[1] * u[0];
+    return { right: r, up: u, forward: [-cx, -cy, -cz] };
+  }
+  return facade;
+}
+var DEFAULT_SPAWNER = {
+  shape: { kind: "sphere", origin: [0, 0, 0], radius: [0.2, 0.6] },
+  velocity: { mode: "radial" },
+  speed: [1, 2],
+  life: [1, 2],
+  size: [0.1, 0.2],
+  color: [[1, 1, 1, 1], [0.8, 0.9, 1, 0.6]]
+};
+var MAX_EMITTER_STEP = 25;
+function wrapAxis(d, size) {
+  let m = (d + size * 0.5) % size;
+  if (m < 0)
+    m += size;
+  return m - size * 0.5;
+}
 export {
   validateNoise,
   simplex3,
   sampleRamp,
+  packInstances,
   hash01,
+  gpuSimWgsl,
+  gpuRampLUT,
   fillTrails,
   fillMeshes,
   fillBillboards,
@@ -2544,6 +3155,16 @@ export {
   MAX_SPHERES,
   MAX_PLANES,
   MAX_BOXES,
+  INSTANCE_STRIDE,
+  INSTANCE_LAYOUT,
+  GPU_STATE_STRIDE,
+  GPU_SIM_VEC4_FIELDS,
+  GPU_SIM_UNIFORM_FLOATS,
+  GPU_SIM_UNIFORM_BYTES,
+  GPU_SIM_U32_FIELDS,
+  GPU_SIM_F32_FIELDS,
+  GPU_SIM_ENTRIES,
+  GPU_FORCE_MASK,
   FIELD_NAMES,
   CONSTANT_RAMP
 };

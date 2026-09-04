@@ -30,6 +30,162 @@ var FOG = 1 << 27;
 var SOFT_PARTICLES = 1 << 28;
 var OUTPUT_DITHER = 1 << 30;
 var PBR_ENV = 1 << 29;
+var BILLBOARD = 1 << 31;
+var BB_VERT_GLSL = [
+  "const vec2 BB_CORNERS[6] = vec2[6](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, 1.0));",
+  "vec2 bbCu = BB_CORNERS[gl_VertexID];",
+  "float bbA = bbCu.x;",
+  "float bbB = bbCu.y;",
+  "float bbHalf = i_par.x;",
+  "vec2 bbUv = i_uv0 + vec2((bbA + 1.0) * 0.5 * u_bbB.z, (bbB + 1.0) * 0.5 * u_bbB.w);",
+  "int bbMode = int(u_bbA.x + 0.5);",
+  "vec3 bbWorld = i_pos;",
+  "if (bbMode == 0) {",
+  "  // camera: the quad plane faces the view; the seed phases the spin.",
+  "  float bbAng = i_par.y + i_par.z * u_bbA.y;",
+  "  float bbCos = cos(bbAng);",
+  "  float bbSin = sin(bbAng);",
+  "  float bbOx = (bbCos * bbA - bbSin * bbB) * bbHalf;",
+  "  float bbOy = (bbSin * bbA + bbCos * bbB) * bbHalf;",
+  "  bbWorld = i_pos + u_bbRight * bbOx + u_bbUp * bbOy;",
+  "} else if (bbMode == 1 || bbMode == 2) {",
+  "  // vertical (upright) / horizontal (a ground decal): hz ⊥ the forward",
+  "  // in the ground plane; the up = world +Y or the forward projection.",
+  "  vec3 bbHzRaw = vec3(u_bbForward.z, 0.0, -u_bbForward.x);",
+  "  float bbHzl = length(bbHzRaw);",
+  "  vec3 bbHz = bbHzl < 1e-6 ? vec3(1.0, 0.0, 0.0) : bbHzRaw / bbHzl;",
+  "  vec3 bbHfRaw = vec3(u_bbForward.x, 0.0, u_bbForward.z);",
+  "  float bbHfl = length(bbHfRaw);",
+  "  vec3 bbHf = bbHfl < 1e-6 ? bbHfRaw : bbHfRaw / bbHfl;",
+  "  vec3 bbAu = bbMode == 1 ? vec3(0.0, 1.0, 0.0) : bbHf;",
+  "  bbWorld = i_pos + bbHz * (bbA * bbHalf) + bbAu * (bbB * bbHalf);",
+  "} else if (bbMode == 3) {",
+  "  // stretched: the head (a<0) rides the particle, the tail (a>0)",
+  "  // trails along −dir; the width spans ±half on the side axis.",
+  "  float bbVlen = length(i_vel);",
+  "  if (bbVlen < 1e-4) {",
+  "    bbWorld = i_pos + u_bbRight * (bbA * bbHalf) + u_bbUp * (bbB * bbHalf);",
+  "  } else {",
+  "    vec3 bbDir = i_vel / bbVlen;",
+  "    vec3 bbSideRaw = cross(u_bbForward, bbDir);",
+  "    float bbSl = length(bbSideRaw);",
+  "    vec3 bbSide;",
+  "    if (bbSl < 1e-6) {",
+  "      vec3 bbFb = vec3(bbDir.y, -bbDir.x, 0.0);",
+  "      float bbFl = length(bbFb);",
+  "      bbSide = bbFl > 1e-12 ? bbFb / bbFl : vec3(0.0, 0.0, 0.0);",
+  "    } else {",
+  "      bbSide = bbSideRaw / bbSl;",
+  "    }",
+  "    float bbTail = (bbVlen * u_bbA.z + u_bbA.w) * (2.0 * bbHalf);",
+  "    bbWorld = i_pos + bbSide * (bbB * bbHalf) - bbDir * (bbA > 0.0 ? bbTail : 0.0);",
+  "  }",
+  "} else {",
+  "  // oriented: the free 3D rotation — the axis (fixed, or the seed’s",
+  "  // uniform-sphere direction) and the angle = seed·τ + age·spin3d.",
+  "  vec3 bbAxis;",
+  "  if (u_bbB.y > 0.5) {",
+  "    float bbS1 = fract(i_par.w * 7.31);",
+  "    float bbS2 = fract(i_par.w * 3.77);",
+  "    float bbZ = 1.0 - 2.0 * bbS1;",
+  "    float bbR = sqrt(max(1.0 - bbZ * bbZ, 0.0));",
+  "    float bbPhi = 6.283185307179586 * bbS2;",
+  "    bbAxis = vec3(bbR * cos(bbPhi), bbR * sin(bbPhi), bbZ);",
+  "  } else {",
+  "    bbAxis = u_bbAxis;",
+  "  }",
+  "  float bbAng = i_par.y + i_par.z * u_bbB.x;",
+  "  float bbCos = cos(bbAng);",
+  "  float bbSin = sin(bbAng);",
+  "  float bbTt = 1.0 - bbCos;",
+  "  float bbM00 = bbTt * bbAxis.x * bbAxis.x + bbCos;",
+  "  float bbM01 = bbTt * bbAxis.x * bbAxis.y - bbSin * bbAxis.z;",
+  "  float bbM10 = bbTt * bbAxis.x * bbAxis.y + bbSin * bbAxis.z;",
+  "  float bbM11 = bbTt * bbAxis.y * bbAxis.y + bbCos;",
+  "  float bbM20 = bbTt * bbAxis.x * bbAxis.z - bbSin * bbAxis.y;",
+  "  float bbM21 = bbTt * bbAxis.y * bbAxis.z + bbSin * bbAxis.x;",
+  "  bbWorld = i_pos + vec3(",
+  "    bbM00 * (bbA * bbHalf) + bbM01 * (bbB * bbHalf),",
+  "    bbM10 * (bbA * bbHalf) + bbM11 * (bbB * bbHalf),",
+  "    bbM20 * (bbA * bbHalf) + bbM21 * (bbB * bbHalf));",
+  "}"
+];
+var BB_VERT_WGSL = [
+  "var bbCorners = array<vec2<f32>, 6>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),",
+  "                                   vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0));",
+  "let bbCu = bbCorners[vi];",
+  "let bbA = bbCu.x;",
+  "let bbB = bbCu.y;",
+  "let bbHalf = i_par.x;",
+  "let bbUv = i_uv0 + vec2<f32>((bbA + 1.0) * 0.5 * params.u_bbB.z, (bbB + 1.0) * 0.5 * params.u_bbB.w);",
+  "let bbMode = i32(params.u_bbA.x + 0.5);",
+  "var bbWorld = i_pos;",
+  "if (bbMode == 0) {",
+  "  let bbAng = i_par.y + i_par.z * params.u_bbA.y;",
+  "  let bbCos = cos(bbAng);",
+  "  let bbSin = sin(bbAng);",
+  "  let bbOx = (bbCos * bbA - bbSin * bbB) * bbHalf;",
+  "  let bbOy = (bbSin * bbA + bbCos * bbB) * bbHalf;",
+  "  bbWorld = i_pos + params.u_bbRight.xyz * bbOx + params.u_bbUp.xyz * bbOy;",
+  "} else if (bbMode == 1 || bbMode == 2) {",
+  "  let bbHzRaw = vec3<f32>(params.u_bbForward.z, 0.0, -params.u_bbForward.x);",
+  "  let bbHzl = length(bbHzRaw);",
+  "  var bbHz = vec3<f32>(1.0, 0.0, 0.0);",
+  "  if (bbHzl >= 1e-6) { bbHz = bbHzRaw / bbHzl; }",
+  "  let bbHfRaw = vec3<f32>(params.u_bbForward.x, 0.0, params.u_bbForward.z);",
+  "  let bbHfl = length(bbHfRaw);",
+  "  var bbHf = bbHfRaw;",
+  "  if (bbHfl >= 1e-6) { bbHf = bbHfRaw / bbHfl; }",
+  "  var bbAu = vec3<f32>(0.0, 1.0, 0.0);",
+  "  if (bbMode == 2) { bbAu = bbHf; }",
+  "  bbWorld = i_pos + bbHz * (bbA * bbHalf) + bbAu * (bbB * bbHalf);",
+  "} else if (bbMode == 3) {",
+  "  let bbVlen = length(i_vel);",
+  "  if (bbVlen < 1e-4) {",
+  "    bbWorld = i_pos + params.u_bbRight.xyz * (bbA * bbHalf) + params.u_bbUp.xyz * (bbB * bbHalf);",
+  "  } else {",
+  "    let bbDir = i_vel / bbVlen;",
+  "    let bbSideRaw = cross(params.u_bbForward.xyz, bbDir);",
+  "    let bbSl = length(bbSideRaw);",
+  "    var bbSide = vec3<f32>(0.0, 0.0, 0.0);",
+  "    if (bbSl >= 1e-6) {",
+  "      bbSide = bbSideRaw / bbSl;",
+  "    } else {",
+  "      let bbFb = vec3<f32>(bbDir.y, -bbDir.x, 0.0);",
+  "      let bbFl = length(bbFb);",
+  "      if (bbFl > 1e-12) { bbSide = bbFb / bbFl; }",
+  "    }",
+  "    let bbTail = (bbVlen * params.u_bbA.z + params.u_bbA.w) * (2.0 * bbHalf);",
+  "    var bbTrail = 0.0;",
+  "    if (bbA > 0.0) { bbTrail = bbTail; }",
+  "    bbWorld = i_pos + bbSide * (bbB * bbHalf) - bbDir * bbTrail;",
+  "  }",
+  "} else {",
+  "  var bbAxis = params.u_bbAxis.xyz;",
+  "  if (params.u_bbB.y > 0.5) {",
+  "    let bbS1 = fract(i_par.w * 7.31);",
+  "    let bbS2 = fract(i_par.w * 3.77);",
+  "    let bbZ = 1.0 - 2.0 * bbS1;",
+  "    let bbR = sqrt(max(1.0 - bbZ * bbZ, 0.0));",
+  "    let bbPhi = 6.283185307179586 * bbS2;",
+  "    bbAxis = vec3<f32>(bbR * cos(bbPhi), bbR * sin(bbPhi), bbZ);",
+  "  }",
+  "  let bbAng = i_par.y + i_par.z * params.u_bbB.x;",
+  "  let bbCos = cos(bbAng);",
+  "  let bbSin = sin(bbAng);",
+  "  let bbTt = 1.0 - bbCos;",
+  "  let bbM00 = bbTt * bbAxis.x * bbAxis.x + bbCos;",
+  "  let bbM01 = bbTt * bbAxis.x * bbAxis.y - bbSin * bbAxis.z;",
+  "  let bbM10 = bbTt * bbAxis.x * bbAxis.y + bbSin * bbAxis.z;",
+  "  let bbM11 = bbTt * bbAxis.y * bbAxis.y + bbCos;",
+  "  let bbM20 = bbTt * bbAxis.x * bbAxis.z - bbSin * bbAxis.y;",
+  "  let bbM21 = bbTt * bbAxis.y * bbAxis.z + bbSin * bbAxis.x;",
+  "  bbWorld = i_pos + vec3<f32>(",
+  "    bbM00 * (bbA * bbHalf) + bbM01 * (bbB * bbHalf),",
+  "    bbM10 * (bbA * bbHalf) + bbM11 * (bbB * bbHalf),",
+  "    bbM20 * (bbA * bbHalf) + bbM21 * (bbB * bbHalf));",
+  "}"
+];
 var LIGHT_MODELS = LAMBERT | MATCAP | PBR;
 var POST_EFFECTS = EMISSIVE | FOG | PBR_ENV;
 var PBR_D_MODELS = PBR_D_GGX | PBR_D_BECKMANN | PBR_D_BLINN;
@@ -428,10 +584,10 @@ var CATALOG = [
   {
     id: "texture",
     bit: TEXTURE,
-    vert: (_ctx) => ({
+    vert: (ctx) => ({
       varyings: [{ glslName: "v_uv", wgslName: "uv", glslType: "vec2", wgslType: "vec2<f32>" }],
-      glslBody: ["v_uv = uv;"],
-      wgslOut: ["out.uv = uv;"]
+      glslBody: [has(ctx, BILLBOARD) ? "v_uv = bbUv;" : "v_uv = uv;"],
+      wgslOut: [has(ctx, BILLBOARD) ? "out.uv = bbUv;" : "out.uv = uv;"]
     }),
     frag: (ctx) => ({
       glslBody: [`vec4 base = texture(u_tex, v_uv);`],
@@ -453,11 +609,11 @@ var CATALOG = [
   {
     id: "vertexColor",
     bit: VERTEX_COLOR,
-    vert: (_ctx) => ({
-      attrs: [{ name: "color", glslType: "vec4", wgslType: "vec4<f32>" }],
+    vert: (ctx) => ({
+      attrs: has(ctx, BILLBOARD) ? [] : [{ name: "color", glslType: "vec4", wgslType: "vec4<f32>" }],
       varyings: [{ glslName: "v_color", wgslName: "color", glslType: "vec4", wgslType: "vec4<f32>" }],
-      glslBody: ["v_color = color;"],
-      wgslOut: ["out.color = color;"]
+      glslBody: [has(ctx, BILLBOARD) ? "v_color = i_color;" : "v_color = color;"],
+      wgslOut: [has(ctx, BILLBOARD) ? "out.color = i_color;" : "out.color = color;"]
     }),
     frag: (_ctx) => ({
       glslBody: ["base *= v_color;"],
@@ -663,6 +819,28 @@ var CATALOG = [
         "base.a = base.a * clamp(dz / max(params.u_softParams.z, 1e-6), 0.0, 1.0);"
       ]
     })
+  },
+  {
+    id: "billboard",
+    bit: BILLBOARD,
+    vert: (_ctx) => ({
+      attrs: [
+        { name: "i_pos", glslType: "vec3", wgslType: "vec3<f32>", instance: true },
+        { name: "i_vel", glslType: "vec3", wgslType: "vec3<f32>", instance: true },
+        { name: "i_color", glslType: "vec4", wgslType: "vec4<f32>", instance: true },
+        { name: "i_par", glslType: "vec4", wgslType: "vec4<f32>", instance: true },
+        { name: "i_uv0", glslType: "vec2", wgslType: "vec2<f32>", instance: true }
+      ],
+      uniforms: [
+        { name: "u_bbA", glsl: "uniform vec4 u_bbA;", wgsl: "u_bbA : vec4<f32>," },
+        { name: "u_bbB", glsl: "uniform vec4 u_bbB;", wgsl: "u_bbB : vec4<f32>," },
+        { name: "u_bbRight", glsl: "uniform vec3 u_bbRight;", wgsl: "u_bbRight : vec4<f32>," },
+        { name: "u_bbUp", glsl: "uniform vec3 u_bbUp;", wgsl: "u_bbUp : vec4<f32>," },
+        { name: "u_bbForward", glsl: "uniform vec3 u_bbForward;", wgsl: "u_bbForward : vec4<f32>," },
+        { name: "u_bbAxis", glsl: "uniform vec3 u_bbAxis;", wgsl: "u_bbAxis : vec4<f32>," }
+      ]
+    }),
+    frag: (_ctx) => ({})
   }
 ];
 // packages/materials/src/assemble.ts
@@ -687,13 +865,16 @@ function assemble(mask, jointCount) {
   validate(mask, jointCount);
   const ctx = { mask, jointCount };
   resetScratch();
-  const needsNormal = (mask & (LAMBERT | MATCAP | PBR)) !== 0 && (mask & NORMALMAP) === 0;
-  const needsUv = (mask & (TEXTURE | NORMALMAP | PBR_MR_TEXTURE)) !== 0;
-  sc.attrs.push({ name: "position", glslType: "vec3", wgslType: "vec3<f32>" });
-  if (needsNormal)
-    sc.attrs.push({ name: "normal", glslType: "vec3", wgslType: "vec3<f32>" });
-  if (needsUv)
-    sc.attrs.push({ name: "uv", glslType: "vec2", wgslType: "vec2<f32>" });
+  const billboard = (mask & BILLBOARD) !== 0;
+  const needsNormal = !billboard && (mask & (LAMBERT | MATCAP | PBR)) !== 0 && (mask & NORMALMAP) === 0;
+  const needsUv = !billboard && (mask & (TEXTURE | NORMALMAP | PBR_MR_TEXTURE)) !== 0;
+  if (!billboard) {
+    sc.attrs.push({ name: "position", glslType: "vec3", wgslType: "vec3<f32>" });
+    if (needsNormal)
+      sc.attrs.push({ name: "normal", glslType: "vec3", wgslType: "vec3<f32>" });
+    if (needsUv)
+      sc.attrs.push({ name: "uv", glslType: "vec2", wgslType: "vec2<f32>" });
+  }
   const hasLight = (mask & (LAMBERT | MATCAP | PBR)) !== 0;
   const hasPost = (mask & (EMISSIVE | FOG)) !== 0;
   let litFallback = false;
@@ -730,8 +911,12 @@ function assemble(mask, jointCount) {
     if (f.fragPosition === true)
       fragPosition = true;
   }
-  const pos = (mask & INSTANCED) !== 0 ? "position4Inst" : "position4";
-  if ((mask & SKIN) === 0) {
+  const pos = billboard ? "vec4(bbWorld, 1.0)" : (mask & INSTANCED) !== 0 ? "position4Inst" : "position4";
+  const posWgsl = billboard ? "vec4<f32>(bbWorld, 1.0)" : (mask & INSTANCED) !== 0 ? "position4Inst" : "position4";
+  if (billboard) {
+    sc.vertGlsl.unshift(...BB_VERT_GLSL);
+    sc.vertWgslPre.unshift(...BB_VERT_WGSL);
+  } else if ((mask & SKIN) === 0) {
     sc.vertGlsl.unshift("vec4 position4 = vec4(position, 1.0);");
     sc.vertWgslPre.unshift("let position4 = vec4<f32>(position, 1.0);");
   }
@@ -765,7 +950,7 @@ function assemble(mask, jointCount) {
   if ((mask & PBR_MR_TEXTURE) !== 0)
     sc.samplers.push("u_mrTex");
   const glsl = buildGlsl(mask, sc.vertUniforms, sc.fragUniforms);
-  const wgsl = buildWgsl(mask, pos);
+  const wgsl = buildWgsl(mask, posWgsl, billboard);
   return {
     mask,
     jointCount,
@@ -810,6 +995,20 @@ function popcount(v) {
   return c;
 }
 function validate(mask, jointCount) {
+  if ((mask & BILLBOARD) !== 0) {
+    if ((mask & TEXTURE) === 0) {
+      throw new Error("rune/materials: BILLBOARD requires TEXTURE (a billboard is a sprite — the atlas/tile source)");
+    }
+    if ((mask & VERTEX_COLOR) === 0) {
+      throw new Error("rune/materials: BILLBOARD requires VERTEX_COLOR (the ramp tint/alpha rides the instance record — without it sprites cannot fade)");
+    }
+    if ((mask & (SKIN | INSTANCED | NORMALMAP)) !== 0) {
+      throw new Error("rune/materials: BILLBOARD excludes SKIN, INSTANCED and NORMALMAP (a billboard has no normal and no per-vertex position — the instance record IS the vertex)");
+    }
+    if ((mask & (LAMBERT | MATCAP | PBR)) !== 0) {
+      throw new Error("rune/materials: BILLBOARD excludes the light models (a billboard carries no normal — use the unlit sprite family)");
+    }
+  }
   if ((mask & (TEXTURE | FLAT_ALBEDO)) === (TEXTURE | FLAT_ALBEDO)) {
     throw new Error("rune/materials: TEXTURE and FLAT_ALBEDO are mutually exclusive (one base color source)");
   }
@@ -903,7 +1102,7 @@ function buildGlsl(mask, vertUniforms, fragUniforms) {
 `), fragment: frag.join(`
 `) };
 }
-function buildWgsl(mask, pos) {
+function buildWgsl(mask, pos, billboard) {
   const lines = sc.wgslParts;
   lines.push("struct Params {", "  u_mvp : mat4x4<f32>,", "  u_model : mat4x4<f32>,");
   for (const uniform of sc.uniforms)
@@ -928,6 +1127,8 @@ function buildWgsl(mask, pos) {
   lines.push("}");
   lines.push("@vertex");
   lines.push("fn vsMain(");
+  if (billboard)
+    lines.push("  @builtin(vertex_index) vi : u32,");
   sc.attrs.forEach((attr, at) => lines.push(`  @location(${at}) ${attr.name} : ${attr.wgslType},`));
   const body = sc.vertBody;
   body.push(...sc.vertWgslPre);
@@ -1020,5 +1221,8 @@ export {
   EMISSIVE,
   DOUBLE_SIDED,
   CATALOG,
+  BILLBOARD,
+  BB_VERT_WGSL,
+  BB_VERT_GLSL,
   ALPHA_CUTOFF
 };

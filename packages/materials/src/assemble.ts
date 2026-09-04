@@ -31,6 +31,9 @@
 
 import {
   ALPHA_CUTOFF,
+  BB_VERT_GLSL,
+  BB_VERT_WGSL,
+  BILLBOARD,
   CATALOG,
   EMISSIVE,
   FLAT_ALBEDO,
@@ -54,6 +57,7 @@ import {
   SOFT_PARTICLES,
   OUTPUT_DITHER,
   TEXTURE,
+  VERTEX_COLOR,
   type AsmCtx,
   type AttrDecl,
   type UniformDecl,
@@ -101,11 +105,14 @@ export function assemble(mask: number, jointCount: number): AssembledMaterial {
   const ctx: AsmCtx = { mask, jointCount }
   resetScratch()
 
-  const needsNormal = (mask & (LAMBERT | MATCAP | PBR)) !== 0 && (mask & NORMALMAP) === 0
-  const needsUv = (mask & (TEXTURE | NORMALMAP | PBR_MR_TEXTURE)) !== 0
-  sc.attrs.push({ name: 'position', glslType: 'vec3', wgslType: 'vec3<f32>' })
-  if (needsNormal) sc.attrs.push({ name: 'normal', glslType: 'vec3', wgslType: 'vec3<f32>' })
-  if (needsUv) sc.attrs.push({ name: 'uv', glslType: 'vec2', wgslType: 'vec2<f32>' })
+  const billboard = (mask & BILLBOARD) !== 0
+  const needsNormal = !billboard && (mask & (LAMBERT | MATCAP | PBR)) !== 0 && (mask & NORMALMAP) === 0
+  const needsUv = !billboard && (mask & (TEXTURE | NORMALMAP | PBR_MR_TEXTURE)) !== 0
+  if (!billboard) {
+    sc.attrs.push({ name: 'position', glslType: 'vec3', wgslType: 'vec3<f32>' })
+    if (needsNormal) sc.attrs.push({ name: 'normal', glslType: 'vec3', wgslType: 'vec3<f32>' })
+    if (needsUv) sc.attrs.push({ name: 'uv', glslType: 'vec2', wgslType: 'vec2<f32>' })
+  }
 
   const hasLight = (mask & (LAMBERT | MATCAP | PBR)) !== 0
   const hasPost = (mask & (EMISSIVE | FOG)) !== 0
@@ -137,8 +144,17 @@ export function assemble(mask: number, jointCount: number): AssembledMaterial {
 
   // The default position expression: SKIN declares its own position4; every
   // other combination starts from the raw attribute. INSTANCED rewraps it.
-  const pos = (mask & INSTANCED) !== 0 ? 'position4Inst' : 'position4'
-  if ((mask & SKIN) === 0) {
+  // Task 131 — BILLBOARD REPLACES the position source entirely: the
+  // preamble (emitted FIRST, before the features' varying writes — they
+  // reference bbUv/i_color) unpacks the instance record, expands the
+  // 6-corner quad from gl_VertexID across all five orientation modes and
+  // leaves `bbWorld`; the final line multiplies THAT.
+  const pos = billboard ? 'vec4(bbWorld, 1.0)' : (mask & INSTANCED) !== 0 ? 'position4Inst' : 'position4'
+  const posWgsl = billboard ? 'vec4<f32>(bbWorld, 1.0)' : (mask & INSTANCED) !== 0 ? 'position4Inst' : 'position4'
+  if (billboard) {
+    sc.vertGlsl.unshift(...BB_VERT_GLSL)
+    sc.vertWgslPre.unshift(...BB_VERT_WGSL)
+  } else if ((mask & SKIN) === 0) {
     sc.vertGlsl.unshift('vec4 position4 = vec4(position, 1.0);')
     sc.vertWgslPre.unshift('let position4 = vec4<f32>(position, 1.0);')
   }
@@ -208,7 +224,7 @@ export function assemble(mask: number, jointCount: number): AssembledMaterial {
   if ((mask & PBR_MR_TEXTURE) !== 0) sc.samplers.push('u_mrTex')
 
   const glsl = buildGlsl(mask, sc.vertUniforms, sc.fragUniforms)
-  const wgsl = buildWgsl(mask, pos)
+  const wgsl = buildWgsl(mask, posWgsl, billboard)
   return {
     mask,
     jointCount,
@@ -247,6 +263,21 @@ function popcount(v: number): number {
 }
 
 function validate(mask: number, jointCount: number): void {
+  // Task 131 — the BILLBOARD combination rules: the sprite family.
+  if ((mask & BILLBOARD) !== 0) {
+    if ((mask & TEXTURE) === 0) {
+      throw new Error('rune/materials: BILLBOARD requires TEXTURE (a billboard is a sprite — the atlas/tile source)')
+    }
+    if ((mask & VERTEX_COLOR) === 0) {
+      throw new Error('rune/materials: BILLBOARD requires VERTEX_COLOR (the ramp tint/alpha rides the instance record — without it sprites cannot fade)')
+    }
+    if ((mask & (SKIN | INSTANCED | NORMALMAP)) !== 0) {
+      throw new Error('rune/materials: BILLBOARD excludes SKIN, INSTANCED and NORMALMAP (a billboard has no normal and no per-vertex position — the instance record IS the vertex)')
+    }
+    if ((mask & (LAMBERT | MATCAP | PBR)) !== 0) {
+      throw new Error('rune/materials: BILLBOARD excludes the light models (a billboard carries no normal — use the unlit sprite family)')
+    }
+  }
   if ((mask & (TEXTURE | FLAT_ALBEDO)) === (TEXTURE | FLAT_ALBEDO)) {
     throw new Error('rune/materials: TEXTURE and FLAT_ALBEDO are mutually exclusive (one base color source)')
   }
@@ -326,7 +357,9 @@ function pushBody(parts: string[], open: string, lines: readonly string[], close
   parts.push(open, '  ' + lines.join('\n  '), close)
 }
 
-/** GLSL pair: dense locations (0..n), varyings linked by name. */
+/** GLSL pair: dense locations (0..n), varyings linked by name. (The
+ *  gl_Position line — with the billboard's `vec4(bbWorld, 1.0)` — is
+ *  already in sc.vertGlsl; no position expression needed here.) */
 function buildGlsl(
   mask: number,
   vertUniforms: readonly UniformDecl[],
@@ -369,7 +402,7 @@ function buildGlsl(
 }
 
 /** WGSL: one Params struct (ALL uniforms), group(1) textures, two entries. */
-function buildWgsl(mask: number, pos: string): string {
+function buildWgsl(mask: number, pos: string, billboard: boolean): string {
   const lines = sc.wgslParts
   lines.push('struct Params {', '  u_mvp : mat4x4<f32>,', '  u_model : mat4x4<f32>,')
   for (const uniform of sc.uniforms) lines.push(`  ${uniform.wgsl}`)
@@ -391,6 +424,10 @@ function buildWgsl(mask: number, pos: string): string {
 
   lines.push('@vertex')
   lines.push('fn vsMain(')
+  // Task 131 — BILLBOARD: the corner expansion reads the vertex index
+  // (one quad per instance, 6 corners); the reflector skips non-@location
+  // params, so the binding contract is unaffected.
+  if (billboard) lines.push('  @builtin(vertex_index) vi : u32,')
   sc.attrs.forEach((attr, at) => lines.push(`  @location(${at}) ${attr.name} : ${attr.wgslType},`))
   // one scratch reuse: the vertex body (pre + out + return)
   const body = sc.vertBody

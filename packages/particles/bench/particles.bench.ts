@@ -13,6 +13,9 @@ import { createParticles, createRamp } from '../src/index.ts'
  *      ramp bookkeeping): the GPGPU-compute candidate.
  *   4. BAKE-ONLY — the soup expansion alone (billboard math + ramp
  *      sampling + the write): the instanced-draw candidate.
+ *   4b. PACK-ONLY (Task 131) — the INSTANCE record pack alone (the ramp +
+ *      the 16-float gather, no vertex expansion): what the instanced path
+ *      pays where the soup path pays the bake.
  *   5. FORCES-HEAVY — the full force stack (noise + seek + collision
  *      planes + limitSpeed): the worst-case CPU per-particle cost.
  *   6. EMISSION — 100k spawns through the sphere spawner (hash RNG +
@@ -84,17 +87,41 @@ function atCapacity(forces: object): { ms: number; count: number } {
   return { ms, count: checksum / FRAMES / 6 }
 }
 
-function splitStages(): { advanceMs: number; bakeMs: number; count: number; soupBytes: number } {
-  // 100k long-lived: alternate the two stages to isolate their costs
-  const ps = createParticles({ capacity: 100_000, spawner: SPAWNER, ramp: RAMP, spin: 1 })
-  ps.burst(100_000, { ...SPAWNER, life: [30, 30] })
+function splitStages(): { advanceMs: number; bakeMs: number; packMs: number; count: number; soupBytes: number; instanceBytes: number } {
+  // 100k long-lived: isolate the three CPU stages. TWO facades over the
+  // same deterministic spawner (the soup one measures the BAKE, the
+  // instance one the PACK — identical states: the same seeds, the same
+  // advance sequence).
+  const mk = () => {
+    const ps = createParticles({
+      capacity: 100_000, spawner: SPAWNER, ramp: RAMP, spin: 1,
+      render: { kind: 'billboard', draw: 'instance' },
+    })
+    ps.burst(100_000, { ...SPAWNER, life: [30, 30] })
+    return ps
+  }
+  const soupPs = createParticles({ capacity: 100_000, spawner: SPAWNER, ramp: RAMP, spin: 1 })
+  soupPs.burst(100_000, { ...SPAWNER, life: [30, 30] })
+  const instPs = mk()
   const FRAMES = 60
-  ps.advance(1 / 60)
+  soupPs.advance(1 / 60)
+  instPs.advance(1 / 60)
   let checksum = 0
-  const advanceMs = timed(FRAMES, () => { ps.advance(1 / 60) })
-  const bakeMs = timed(FRAMES, () => { checksum += ps.billboards(BASIS).vertexCount })
-  const view = ps.billboards(BASIS)
-  return { advanceMs, bakeMs, count: checksum / FRAMES / 6, soupBytes: view.vertexCount * view.stride * 4 }
+  let packCount = 0
+  let packBytes = 0
+  const advanceMs = timed(FRAMES, () => { soupPs.advance(1 / 60); instPs.advance(1 / 60) })
+  const bakeMs = timed(FRAMES, () => { checksum += soupPs.billboards(BASIS).vertexCount })
+  const packMs = timed(FRAMES, () => {
+    const view = instPs.view(BASIS)
+    packCount += view.instanceCount
+    packBytes = view.vertexCount * view.stride * 4
+  })
+  const view = soupPs.billboards(BASIS)
+  return {
+    advanceMs, bakeMs, packMs, count: checksum / FRAMES / 6,
+    soupBytes: view.vertexCount * view.stride * 4,
+    instanceBytes: packBytes,
+  }
 }
 
 function forcesHeavy(): number {
@@ -152,6 +179,7 @@ if (process.argv.includes('--json')) {
     load: { count: loadCount, msPerFrame: +(load / 60).toFixed(2), nsPerParticle: +(load / 60 / 100_000 * 1e6).toFixed(0) },
     advanceOnly: { msPerFrame: +(split.advanceMs / 60).toFixed(2) },
     bakeOnly: { msPerFrame: +(split.bakeMs / 60).toFixed(2), soupBytesPerFrame: split.soupBytes },
+    packOnly: { msPerFrame: +(split.packMs / 60).toFixed(2), instanceBytesPerFrame: split.instanceBytes },
     forcesHeavy: { msPerFrame: +(heavy / 60).toFixed(2) },
     emission: { msPer100k: +emit.toFixed(2), nsPerSpawn: +(emit / 100_000 * 1e6).toFixed(0) },
     allocationStable: identity.stable,
@@ -161,7 +189,8 @@ if (process.argv.includes('--json')) {
   console.log(`steady state (~${Math.round(steadyCount)} live) : ${(steady / 300).toFixed(3)} ms/frame (advance + bake)`)
   console.log(`full load (100k live)          : ${(load / 60).toFixed(2)} ms/frame (${(load / 60 / 100_000 * 1e6).toFixed(0)} ns/particle)`)
   console.log(`  ├─ advance only              : ${(split.advanceMs / 60).toFixed(2)} ms/frame (the GPGPU candidate)`)
-  console.log(`  └─ bake only                 : ${(split.bakeMs / 60).toFixed(2)} ms/frame, ${(split.soupBytes / 1024 / 1024).toFixed(1)} MiB soup/frame (the instanced-draw candidate)`)
+  console.log(`  ├─ bake only (the soup)      : ${(split.bakeMs / 60).toFixed(2)} ms/frame, ${(split.soupBytes / 1024 / 1024).toFixed(1)} MiB soup/frame (the 6-vertex CPU expansion)`)
+  console.log(`  └─ pack only (Task 131)      : ${(split.packMs / 60).toFixed(2)} ms/frame, ${(split.instanceBytes / 1024 / 1024).toFixed(1)} MiB records/frame (the instanced path's CPU cost — the GPU expands)`)
   console.log(`forces-heavy (full stack)      : ${(heavy / 60).toFixed(2)} ms/frame (noise + seek + collide + limit)`)
   console.log(`emission (100k burst)          : ${emit.toFixed(2)} ms (${(emit / 100_000 * 1e6).toFixed(0)} ns/spawn)`)
   console.log(`allocation identity (500 frames): ${identity.stable ? 'STABLE (the soup + the view are the same references)' : 'BROKEN'}`)

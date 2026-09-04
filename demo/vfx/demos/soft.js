@@ -126,9 +126,9 @@ fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
           speed: [0.8, 1.6], life: [2.2, 3], size: [0.9, 1.3],
           color: [[0.85, 0.87, 0.92, 0.7], [0.7, 0.72, 0.78, 0.55]], seed: 223,
         },
-        render: { kind: 'billboard', tiles: env.smokeAtlasTiles, spin: 0.6 },
+        render: { kind: 'billboard', draw: 'instance', tiles: env.smokeAtlasTiles, spin: 0.6 },
       }),
-      material: env.materials.soft,
+      material: env.materials.bbSoft,
       pipeline: env.pipelines.alpha,
       texture: () => env.smokeAtlas,
       textures: {

@@ -37,9 +37,9 @@ export default {
           speed: [0, 0], life: [1000, 1000], size: [0.16, 0.16],
           color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 181,
         },
-        render: { kind: 'billboard', mode: 'oriented', axis: [1, 0, 0], spin: 0 },
+        render: { kind: 'billboard', draw: 'instance', mode: 'oriented', axis: [1, 0, 0], spin: 0 },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       texture: () => env.glowTexture,
     })

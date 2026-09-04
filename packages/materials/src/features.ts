@@ -256,6 +256,209 @@ export const OUTPUT_DITHER: FeatureBit = 1 << 30
  *  u_envGain (float, ~1). */
 export const PBR_ENV: FeatureBit = 1 << 29
 
+/** Task 131 — THE BILLBOARD VERTEX STAGE (the instanced particle draw):
+ *  the material's vertex shader expands ONE QUAD PER INSTANCE from
+ *  gl_VertexID / @builtin(vertex_index) — the GPU half of the
+ *  instanced-draw path (see @rune/particles instances.ts, the CPU half:
+ *  packInstances writes the 16-float records this stage consumes).
+ *
+ *  THE ATTRIBUTE CONTRACT (all step='instance', one record = one quad,
+ *  draw count = 6 × instances):
+ *    i_pos vec3, i_vel vec3, i_color vec4, i_par vec4, i_uv0 vec2
+ *  — EXACTLY @rune/particles' INSTANCE_LAYOUT (the names and the order
+ *  are the cross-package contract; both sides pin them with tests).
+ *
+ *  THE UNIFORM CONTRACT (the caller derives them from CameraBasis +
+ *  BillboardOptions — the demo harness's instance-layer builder):
+ *    u_bbA vec4 — (mode, spin, speedFactor, lengthFactor); mode: 0 camera,
+ *                 1 vertical, 2 horizontal, 3 stretched, 4 oriented
+ *    u_bbB vec4 — (spin3d, axisRandom, tileScaleU, tileScaleV); tile
+ *                 scales = 1/tiles[0], 1/tiles[1] (the atlas)
+ *    u_bbRight / u_bbUp / u_bbForward vec3 — the camera basis (forward
+ *                 feeds vertical/horizontal/stretched)
+ *    u_bbAxis vec3 — the 'oriented' mode's fixed axis (normalized;
+ *                 read only when axisRandom < 0.5)
+ *
+ *  SEMANTICS: the corner math reproduces @rune/particles fillBillboards()
+ *  — the record's i_par.y (seed·τ) phases the spin, i_par.z (age)
+ *  advances it, the stretched tail = (|v|·sf + lf)·2·half trails the
+ *  motion, the oriented axis is the seed's uniform-sphere direction.
+ *  The parity suite (the JS twin) pins the reference; the visual gates
+ *  pin both backends.
+ *
+ *  REQUIRES TEXTURE (the atlas/tile source) and VERTEX_COLOR (the ramp's
+ *  tint/alpha IS the record's color — without it sprites cannot fade).
+ *  EXCLUDES the light models, SKIN, INSTANCED and NORMALMAP (a billboard
+ *  has no normal and no per-vertex position — the record IS the vertex). */
+export const BILLBOARD: FeatureBit = 1 << 31
+
+/** Task 131 — the billboard vertex BODY (GLSL main lines): the 6-corner
+ *  table from gl_VertexID, the record unpack, the atlas uv, and the five
+ *  orientation modes → `bbWorld` (the assembler emits this preamble FIRST,
+ *  before the features' varying writes, and closes with
+ *  `gl_Position = u_mvp * vec4(bbWorld, 1.0)`). The math is @rune/particles
+ *  fillBillboards() verbatim — the JS twin in the particles test suite is
+ *  the bit-pinned reference. */
+export const BB_VERT_GLSL: readonly string[] = [
+  'const vec2 BB_CORNERS[6] = vec2[6](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, 1.0));',
+  'vec2 bbCu = BB_CORNERS[gl_VertexID];',
+  'float bbA = bbCu.x;',
+  'float bbB = bbCu.y;',
+  'float bbHalf = i_par.x;',
+  'vec2 bbUv = i_uv0 + vec2((bbA + 1.0) * 0.5 * u_bbB.z, (bbB + 1.0) * 0.5 * u_bbB.w);',
+  'int bbMode = int(u_bbA.x + 0.5);',
+  'vec3 bbWorld = i_pos;',
+  'if (bbMode == 0) {',
+  '  // camera: the quad plane faces the view; the seed phases the spin.',
+  '  float bbAng = i_par.y + i_par.z * u_bbA.y;',
+  '  float bbCos = cos(bbAng);',
+  '  float bbSin = sin(bbAng);',
+  '  float bbOx = (bbCos * bbA - bbSin * bbB) * bbHalf;',
+  '  float bbOy = (bbSin * bbA + bbCos * bbB) * bbHalf;',
+  '  bbWorld = i_pos + u_bbRight * bbOx + u_bbUp * bbOy;',
+  '} else if (bbMode == 1 || bbMode == 2) {',
+  '  // vertical (upright) / horizontal (a ground decal): hz ⊥ the forward',
+  '  // in the ground plane; the up = world +Y or the forward projection.',
+  '  vec3 bbHzRaw = vec3(u_bbForward.z, 0.0, -u_bbForward.x);',
+  '  float bbHzl = length(bbHzRaw);',
+  '  vec3 bbHz = bbHzl < 1e-6 ? vec3(1.0, 0.0, 0.0) : bbHzRaw / bbHzl;',
+  '  vec3 bbHfRaw = vec3(u_bbForward.x, 0.0, u_bbForward.z);',
+  '  float bbHfl = length(bbHfRaw);',
+  '  vec3 bbHf = bbHfl < 1e-6 ? bbHfRaw : bbHfRaw / bbHfl;',
+  '  vec3 bbAu = bbMode == 1 ? vec3(0.0, 1.0, 0.0) : bbHf;',
+  '  bbWorld = i_pos + bbHz * (bbA * bbHalf) + bbAu * (bbB * bbHalf);',
+  '} else if (bbMode == 3) {',
+  '  // stretched: the head (a<0) rides the particle, the tail (a>0)',
+  '  // trails along −dir; the width spans ±half on the side axis.',
+  '  float bbVlen = length(i_vel);',
+  '  if (bbVlen < 1e-4) {',
+  '    bbWorld = i_pos + u_bbRight * (bbA * bbHalf) + u_bbUp * (bbB * bbHalf);',
+  '  } else {',
+  '    vec3 bbDir = i_vel / bbVlen;',
+  '    vec3 bbSideRaw = cross(u_bbForward, bbDir);',
+  '    float bbSl = length(bbSideRaw);',
+  '    vec3 bbSide;',
+  '    if (bbSl < 1e-6) {',
+  '      vec3 bbFb = vec3(bbDir.y, -bbDir.x, 0.0);',
+  '      float bbFl = length(bbFb);',
+  '      bbSide = bbFl > 1e-12 ? bbFb / bbFl : vec3(0.0, 0.0, 0.0);',
+  '    } else {',
+  '      bbSide = bbSideRaw / bbSl;',
+  '    }',
+  '    float bbTail = (bbVlen * u_bbA.z + u_bbA.w) * (2.0 * bbHalf);',
+  '    bbWorld = i_pos + bbSide * (bbB * bbHalf) - bbDir * (bbA > 0.0 ? bbTail : 0.0);',
+  '  }',
+  '} else {',
+  '  // oriented: the free 3D rotation — the axis (fixed, or the seed\u2019s',
+  '  // uniform-sphere direction) and the angle = seed·τ + age·spin3d.',
+  '  vec3 bbAxis;',
+  '  if (u_bbB.y > 0.5) {',
+  '    float bbS1 = fract(i_par.w * 7.31);',
+  '    float bbS2 = fract(i_par.w * 3.77);',
+  '    float bbZ = 1.0 - 2.0 * bbS1;',
+  '    float bbR = sqrt(max(1.0 - bbZ * bbZ, 0.0));',
+  '    float bbPhi = 6.283185307179586 * bbS2;',
+  '    bbAxis = vec3(bbR * cos(bbPhi), bbR * sin(bbPhi), bbZ);',
+  '  } else {',
+  '    bbAxis = u_bbAxis;',
+  '  }',
+  '  float bbAng = i_par.y + i_par.z * u_bbB.x;',
+  '  float bbCos = cos(bbAng);',
+  '  float bbSin = sin(bbAng);',
+  '  float bbTt = 1.0 - bbCos;',
+  '  float bbM00 = bbTt * bbAxis.x * bbAxis.x + bbCos;',
+  '  float bbM01 = bbTt * bbAxis.x * bbAxis.y - bbSin * bbAxis.z;',
+  '  float bbM10 = bbTt * bbAxis.x * bbAxis.y + bbSin * bbAxis.z;',
+  '  float bbM11 = bbTt * bbAxis.y * bbAxis.y + bbCos;',
+  '  float bbM20 = bbTt * bbAxis.x * bbAxis.z - bbSin * bbAxis.y;',
+  '  float bbM21 = bbTt * bbAxis.y * bbAxis.z + bbSin * bbAxis.x;',
+  '  bbWorld = i_pos + vec3(',
+  '    bbM00 * (bbA * bbHalf) + bbM01 * (bbB * bbHalf),',
+  '    bbM10 * (bbA * bbHalf) + bbM11 * (bbB * bbHalf),',
+  '    bbM20 * (bbA * bbHalf) + bbM21 * (bbB * bbHalf));',
+  '}',
+]
+
+/** The WGSL twin of BB_VERT_GLSL (the same statements, the WGSL
+ *  vocabulary; vi = @builtin(vertex_index), the uniforms read
+ *  params.*). Consumed by assemble.ts alongside the GLSL lines. */
+export const BB_VERT_WGSL: readonly string[] = [
+  'var bbCorners = array<vec2<f32>, 6>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),',
+  '                                   vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0));',
+  'let bbCu = bbCorners[vi];',
+  'let bbA = bbCu.x;',
+  'let bbB = bbCu.y;',
+  'let bbHalf = i_par.x;',
+  'let bbUv = i_uv0 + vec2<f32>((bbA + 1.0) * 0.5 * params.u_bbB.z, (bbB + 1.0) * 0.5 * params.u_bbB.w);',
+  'let bbMode = i32(params.u_bbA.x + 0.5);',
+  'var bbWorld = i_pos;',
+  'if (bbMode == 0) {',
+  '  let bbAng = i_par.y + i_par.z * params.u_bbA.y;',
+  '  let bbCos = cos(bbAng);',
+  '  let bbSin = sin(bbAng);',
+  '  let bbOx = (bbCos * bbA - bbSin * bbB) * bbHalf;',
+  '  let bbOy = (bbSin * bbA + bbCos * bbB) * bbHalf;',
+  '  bbWorld = i_pos + params.u_bbRight.xyz * bbOx + params.u_bbUp.xyz * bbOy;',
+  '} else if (bbMode == 1 || bbMode == 2) {',
+  '  let bbHzRaw = vec3<f32>(params.u_bbForward.z, 0.0, -params.u_bbForward.x);',
+  '  let bbHzl = length(bbHzRaw);',
+  '  var bbHz = vec3<f32>(1.0, 0.0, 0.0);',
+  '  if (bbHzl >= 1e-6) { bbHz = bbHzRaw / bbHzl; }',
+  '  let bbHfRaw = vec3<f32>(params.u_bbForward.x, 0.0, params.u_bbForward.z);',
+  '  let bbHfl = length(bbHfRaw);',
+  '  var bbHf = bbHfRaw;',
+  '  if (bbHfl >= 1e-6) { bbHf = bbHfRaw / bbHfl; }',
+  '  var bbAu = vec3<f32>(0.0, 1.0, 0.0);',
+  '  if (bbMode == 2) { bbAu = bbHf; }',
+  '  bbWorld = i_pos + bbHz * (bbA * bbHalf) + bbAu * (bbB * bbHalf);',
+  '} else if (bbMode == 3) {',
+  '  let bbVlen = length(i_vel);',
+  '  if (bbVlen < 1e-4) {',
+  '    bbWorld = i_pos + params.u_bbRight.xyz * (bbA * bbHalf) + params.u_bbUp.xyz * (bbB * bbHalf);',
+  '  } else {',
+  '    let bbDir = i_vel / bbVlen;',
+  '    let bbSideRaw = cross(params.u_bbForward.xyz, bbDir);',
+  '    let bbSl = length(bbSideRaw);',
+  '    var bbSide = vec3<f32>(0.0, 0.0, 0.0);',
+  '    if (bbSl >= 1e-6) {',
+  '      bbSide = bbSideRaw / bbSl;',
+  '    } else {',
+  '      let bbFb = vec3<f32>(bbDir.y, -bbDir.x, 0.0);',
+  '      let bbFl = length(bbFb);',
+  '      if (bbFl > 1e-12) { bbSide = bbFb / bbFl; }',
+  '    }',
+  '    let bbTail = (bbVlen * params.u_bbA.z + params.u_bbA.w) * (2.0 * bbHalf);',
+  '    var bbTrail = 0.0;',
+  '    if (bbA > 0.0) { bbTrail = bbTail; }',
+  '    bbWorld = i_pos + bbSide * (bbB * bbHalf) - bbDir * bbTrail;',
+  '  }',
+  '} else {',
+  '  var bbAxis = params.u_bbAxis.xyz;',
+  '  if (params.u_bbB.y > 0.5) {',
+  '    let bbS1 = fract(i_par.w * 7.31);',
+  '    let bbS2 = fract(i_par.w * 3.77);',
+  '    let bbZ = 1.0 - 2.0 * bbS1;',
+  '    let bbR = sqrt(max(1.0 - bbZ * bbZ, 0.0));',
+  '    let bbPhi = 6.283185307179586 * bbS2;',
+  '    bbAxis = vec3<f32>(bbR * cos(bbPhi), bbR * sin(bbPhi), bbZ);',
+  '  }',
+  '  let bbAng = i_par.y + i_par.z * params.u_bbB.x;',
+  '  let bbCos = cos(bbAng);',
+  '  let bbSin = sin(bbAng);',
+  '  let bbTt = 1.0 - bbCos;',
+  '  let bbM00 = bbTt * bbAxis.x * bbAxis.x + bbCos;',
+  '  let bbM01 = bbTt * bbAxis.x * bbAxis.y - bbSin * bbAxis.z;',
+  '  let bbM10 = bbTt * bbAxis.x * bbAxis.y + bbSin * bbAxis.z;',
+  '  let bbM11 = bbTt * bbAxis.y * bbAxis.y + bbCos;',
+  '  let bbM20 = bbTt * bbAxis.x * bbAxis.z - bbSin * bbAxis.y;',
+  '  let bbM21 = bbTt * bbAxis.y * bbAxis.z + bbSin * bbAxis.x;',
+  '  bbWorld = i_pos + vec3<f32>(',
+  '    bbM00 * (bbA * bbHalf) + bbM01 * (bbB * bbHalf),',
+  '    bbM10 * (bbA * bbHalf) + bbM11 * (bbB * bbHalf),',
+  '    bbM20 * (bbA * bbHalf) + bbM21 * (bbB * bbHalf));',
+  '}',
+]
+
 /** The light models — exactly one may be present (or none: unlit). */
 export const LIGHT_MODELS: FeatureBit = LAMBERT | MATCAP | PBR
 
@@ -805,10 +1008,12 @@ export const CATALOG: readonly FeatureDef[] = [
   {
     id: 'texture',
     bit: TEXTURE,
-    vert: (_ctx: AsmCtx): VertSnippets => ({
+    vert: (ctx: AsmCtx): VertSnippets => ({
       varyings: [{ glslName: 'v_uv', wgslName: 'uv', glslType: 'vec2', wgslType: 'vec2<f32>' }],
-      glslBody: ['v_uv = uv;'],
-      wgslOut: ['out.uv = uv;'],
+      // Task 131 — BILLBOARD: the uv comes from the record's tile origin +
+      // the corner (bbUv, computed in the assembler's billboard preamble).
+      glslBody: [has(ctx, BILLBOARD) ? 'v_uv = bbUv;' : 'v_uv = uv;'],
+      wgslOut: [has(ctx, BILLBOARD) ? 'out.uv = bbUv;' : 'out.uv = uv;'],
     }),
     frag: (ctx: AsmCtx): FragSnippets => ({
       glslBody: [`vec4 base = texture(u_tex, v_uv);`],
@@ -830,11 +1035,13 @@ export const CATALOG: readonly FeatureDef[] = [
   {
     id: 'vertexColor',
     bit: VERTEX_COLOR,
-    vert: (_ctx: AsmCtx): VertSnippets => ({
-      attrs: [{ name: 'color', glslType: 'vec4', wgslType: 'vec4<f32>' }],
+    vert: (ctx: AsmCtx): VertSnippets => ({
+      // Task 131 — BILLBOARD: the tint rides the instance record (i_color),
+      // not a per-vertex attribute.
+      attrs: has(ctx, BILLBOARD) ? [] : [{ name: 'color', glslType: 'vec4', wgslType: 'vec4<f32>' }],
       varyings: [{ glslName: 'v_color', wgslName: 'color', glslType: 'vec4', wgslType: 'vec4<f32>' }],
-      glslBody: ['v_color = color;'],
-      wgslOut: ['out.color = color;'],
+      glslBody: [has(ctx, BILLBOARD) ? 'v_color = i_color;' : 'v_color = color;'],
+      wgslOut: [has(ctx, BILLBOARD) ? 'out.color = i_color;' : 'out.color = color;'],
     }),
     frag: (_ctx: AsmCtx): FragSnippets => ({
       glslBody: ['base *= v_color;'],
@@ -1067,5 +1274,32 @@ export const CATALOG: readonly FeatureDef[] = [
         'base.a = base.a * clamp(dz / max(params.u_softParams.z, 1e-6), 0.0, 1.0);',
       ],
     }),
+  },
+  {
+    // Task 131 — the instanced billboard vertex stage. The ATTRS and the
+    // UNIFORMS live here; the BODY (the corner expansion, all five modes)
+    // is emitted by the ASSEMBLER's billboard preamble (it must precede
+    // the TEXTURE/VERTEX_COLOR varying writes that reference bbUv/i_color
+    // — see BB_VERT_GLSL/BB_VERT_WGSL and assemble.ts's special case).
+    id: 'billboard',
+    bit: BILLBOARD,
+    vert: (_ctx: AsmCtx): VertSnippets => ({
+      attrs: [
+        { name: 'i_pos', glslType: 'vec3', wgslType: 'vec3<f32>', instance: true },
+        { name: 'i_vel', glslType: 'vec3', wgslType: 'vec3<f32>', instance: true },
+        { name: 'i_color', glslType: 'vec4', wgslType: 'vec4<f32>', instance: true },
+        { name: 'i_par', glslType: 'vec4', wgslType: 'vec4<f32>', instance: true },
+        { name: 'i_uv0', glslType: 'vec2', wgslType: 'vec2<f32>', instance: true },
+      ],
+      uniforms: [
+        { name: 'u_bbA', glsl: 'uniform vec4 u_bbA;', wgsl: 'u_bbA : vec4<f32>,' },
+        { name: 'u_bbB', glsl: 'uniform vec4 u_bbB;', wgsl: 'u_bbB : vec4<f32>,' },
+        { name: 'u_bbRight', glsl: 'uniform vec3 u_bbRight;', wgsl: 'u_bbRight : vec4<f32>,' },
+        { name: 'u_bbUp', glsl: 'uniform vec3 u_bbUp;', wgsl: 'u_bbUp : vec4<f32>,' },
+        { name: 'u_bbForward', glsl: 'uniform vec3 u_bbForward;', wgsl: 'u_bbForward : vec4<f32>,' },
+        { name: 'u_bbAxis', glsl: 'uniform vec3 u_bbAxis;', wgsl: 'u_bbAxis : vec4<f32>,' },
+      ],
+    }),
+    frag: (_ctx: AsmCtx): FragSnippets => ({}),
   },
 ]

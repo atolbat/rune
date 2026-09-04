@@ -31,8 +31,17 @@ const F3 = 1 / 3
 const G3 = 1 / 6
 
 /** The fixed permutation table (512 entries, wrapped) — the constant that
- *  pins the noise to the same field everywhere. */
-const PERM = buildPerm()
+ *  pins the noise to the same field everywhere. Task 131: exported — the
+ *  WGSL twin (gpuSim.ts) bakes THE SAME table into the shader source (the
+ *  GPU-sim tier evaluates the identical field). */
+export const PERM = buildPerm()
+
+/** The 12 simplex gradients (Task 131: exported for the WGSL twin). */
+export const GRAD3 = new Int8Array([
+  1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1, 0,
+  1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, -1,
+  0, 1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1,
+])
 
 function buildPerm(): Uint8Array {
   // A deterministic Fisher-Yates over 0..255 driven by our own integer
@@ -53,13 +62,6 @@ function buildPerm(): Uint8Array {
   for (let i = 0; i < 512; i++) wrapped[i] = p[i & 255]
   return wrapped
 }
-
-/** The 12 simplex gradients (ijk on the cube edges). */
-const GRAD3 = new Int8Array([
-  1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1, 0,
-  1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, -1,
-  0, 1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1,
-])
 
 /** One noise sample in [-1, 1]. Pure, allocation-free, deterministic. */
 export function simplex3(x: number, y: number, z: number): number {

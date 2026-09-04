@@ -354,8 +354,8 @@ await assertSpriteContour()
 
   const VFX_NAMES = ['muzzle', 'explosion', 'shapes', 'trail', 'sequencer', 'mesh', 'subemitter',
     'noise', 'alphatest', 'plugin', 'billboard', 'soft', 'blending', 'follow',
-    'rocket', 'storm', 'slash', 'vortex', 'fireflies', 'dust', 'grass', 'lightning', 'laser']
-  const VFX_SETTLE = { muzzle: 2500, explosion: 2100, trail: 1300, grass: 2600, lightning: 2600, laser: 3000 }
+    'rocket', 'storm', 'slash', 'vortex', 'fireflies', 'dust', 'grass', 'lightning', 'laser', 'gpuEmbers']
+  const VFX_SETTLE = { muzzle: 2500, explosion: 2100, trail: 1300, grass: 2600, lightning: 2600, laser: 3000, gpuEmbers: 4200 }
   // The SEQUENCER is a still formation by design (hold phases) — its motion
   // pair brackets the t=6.5 s MORPH: we wait for the demo's own "morph →
   // spiral" log line, then shoot the pair mid-flight (300 ms apart).
@@ -405,6 +405,16 @@ await assertSpriteContour()
         { timeout: 12000 },
       ).catch(() => {})
       await vfxPage.waitForTimeout(400) // mid-blast: the flash + sparks + young smoke
+      // RE-CONFIRM ALIVE (the stale-pill race): the live-wait above can
+      // resolve on a pill up to 250 ms STALE — the window's TAIL — and the
+      // +400 ms then lands the shot in the 0.4 s dead gap (the
+      // "0 particles — DEAD" flake). A second live-wait re-locks onto the
+      // burst (the next blast's flash counts — alive is alive).
+      await vfxPage.waitForFunction(
+        () => /Explosion \(composed\) \u00b7 [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+        null,
+        { timeout: 12000 },
+      ).catch(() => {})
     }
     if (name === 'slash') {
       // PHASE-LOCKED (the same class as the explosion): the swing cycle
@@ -423,7 +433,7 @@ await assertSpriteContour()
       // PHASE-LOCKED (the same class as the explosion): the firework burst
       // is periodic (t=0.6 then every 5 s) — wait until comets are LIVE in
       // the pill, then shoot mid-flight (a fixed settle can land the
-      // pre-burst beat under the 22-demo module-load lag).
+      // pre-burst beat under the 24-demo module-load lag).
       await vfxPage.waitForFunction(
         () => /Trails & Collision · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
         null,
@@ -442,12 +452,37 @@ await assertSpriteContour()
         { timeout: 12000 },
       ).catch(() => {})
     }
+    // THE PILL IS READ BEFORE THE SHOT LANDS: the 4 Hz pill can carry up to
+    // 250 ms of STALE text, and the screenshot's own latency on a loaded
+    // runner pushes a read-after-shot past a burst's dead gap (the
+    // explosion's 0.4 s quiet tail read as "0 particles — DEAD"). Reading
+    // at the phase-lock's live moment is the honest "alive at the shot"
+    // signal; the motion pair's later shot can still legitimately land in
+    // a burst-free window (the sequencer's dissolve, the trail's pre-burst
+    // beat) — that is not a dead demo.
+    let shotPill = await vfxPage.textContent('.pt-pill')
+    if (!/ · [1-9][\d,]* particles · [1-9][\d,]* verts/.test(shotPill)) {
+      // THE RE-LOCK (the loaded-runner boot race, the storm class): the
+      // phase-locks above can time out while the demo is still filling —
+      // GPU-stalled frames freeze the 4 Hz pill at its boot text. ONE
+      // bounded re-wait for ANY live pill, then re-read.
+      await vfxPage.waitForFunction(
+        () => / · [1-9][\d,]* particles · [1-9][\d,]* verts/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+        null,
+        { timeout: 20000 },
+      ).catch(() => {})
+      shotPill = await vfxPage.textContent('.pt-pill')
+      if (!/ · [1-9][\d,]* particles/.test(shotPill)) {
+        // diagnostics for the DEAD read (what the page itself knows)
+        const diag = await vfxPage.evaluate(() => ({
+          frames: window.__vfxFrame ?? -1,
+          log: (document.querySelector('#log-list')?.textContent ?? '').slice(-500),
+        })).catch(() => ({ frames: -1, log: '[eval failed — the page is gone]' }))
+        console.log(`[shots] vfx ${name} DEAD-read diagnostics: frames=${diag.frames} log="${diag.log}"`)
+      }
+    }
+    shotPills.push(shotPill)
     await vfxPage.screenshot({ path: join(out, `vfx-${name}.png`) })
-    // the ALIVE pill is read at SHOT A's moment (the canonical shot): the
-    // motion pair's later shot can legitimately land in a burst-free window
-    // (the sequencer's dissolve, the trail's pre-burst beat) — that is not
-    // a dead demo.
-    shotPills.push(await vfxPage.textContent('.pt-pill'))
     // THE MOTION GATE: a second shot LATER — a healthy animated demo
     // changes pixels; a frozen canvas (the stale-binding class) does not.
     // THE PAIR WINDOW: wait for at least TWO NEW RENDERED FRAMES (the

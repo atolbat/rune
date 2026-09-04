@@ -67,6 +67,26 @@ export function createRecordingGPU(): RecordingGPU {
     bindUniforms: offset => calls.push(`bindUniforms(${offset})`),
     bindVertexBuffer: (slot, data, size) => calls.push(`bindVertexBuffer(${slot},${data.length},${size})`),
     syncVertexBuffer: (data, byteLength) => calls.push(`syncVertexBuffer(${data.length},${byteLength})`),
+    // Task 131 — the GPGPU tier (recorded; the recorder has no device)
+    bindExternalVertexBuffer: (slot, bufferId) => calls.push(`bindExternalVertexBuffer(${slot},${bufferId})`),
+    createExternalBuffer: (byteLength, usage) => {
+      calls.push(`createExternalBuffer(${byteLength},${usage})`)
+      return 900_000 + calls.length
+    },
+    writeExternalBuffer: (id, data, byteOffset = 0, byteLength = data.byteLength) =>
+      calls.push(`writeExternalBuffer(${id},${byteLength},${byteOffset})`),
+    readExternalBuffer: id => {
+      calls.push(`readExternalBuffer(${id})`)
+      return Promise.resolve(new Float32Array(0))
+    },
+    deleteExternalBuffer: id => calls.push(`deleteExternalBuffer(${id})`),
+    externalBufferOf: () => undefined,
+    createCompute: (wgsl, uniformBytes, bufferIds) => {
+      calls.push(`createCompute(${uniformBytes},${bufferIds.join('+')})`)
+      return 1
+    },
+    runCompute: (computeId, entry, uniformData, workgroups) =>
+      calls.push(`runCompute(${computeId},${entry},${uniformData.length},${workgroups})`),
     bindTexture: textureId => calls.push(`bindTexture(${textureId})`),
     beginPass: clearIndex => {
       currentTarget = 0
@@ -166,6 +186,17 @@ export function createCountingGPU(): GPUFacade & { totalCalls: number } {
     bindUniforms: bump,
     bindVertexBuffer: bump,
     syncVertexBuffer: bump,
+    bindExternalVertexBuffer: bump,
+    createExternalBuffer: alloc as never,
+    writeExternalBuffer: bump,
+    readExternalBuffer: () => {
+      bump()
+      return Promise.resolve(new Float32Array(0))
+    },
+    deleteExternalBuffer: bump,
+    externalBufferOf: bump,
+    createCompute: alloc as never,
+    runCompute: bump,
     bindTexture: bump,
     beginPass: bump,
     draw: bump,

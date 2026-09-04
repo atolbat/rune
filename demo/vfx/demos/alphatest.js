@@ -90,9 +90,9 @@ export default {
           speed: [0, 0], life: [1000, 1000], size: [30, 30],
           color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 9,
         },
-        render: { kind: 'billboard', mode: 'horizontal', tiles: [4, 4] },
+        render: { kind: 'billboard', draw: 'instance', mode: 'horizontal', tiles: [4, 4] },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.alpha,
       texture: () => env.atlasTexture,
     })

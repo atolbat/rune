@@ -202,9 +202,9 @@ export default {
           noise: { strength: 1.6, scale: 0.14, speed: 0.11 },
         },
         spawner: SEED_S,
-        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.03, lengthFactor: 0.5 },
+        render: { kind: 'billboard', draw: 'instance', mode: 'stretched', speedFactor: 0.03, lengthFactor: 0.5 },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       texture: () => env.sparkTexture,
     })

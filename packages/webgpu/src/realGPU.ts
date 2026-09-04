@@ -1135,6 +1135,180 @@ export async function createRealGPU(
     device.destroy()
   }
 
+  // ─── Task 131: the GPGPU tier — external buffers + compute passes ───────
+  // The contract (see docs/particles-optimization.md Phase 2): a caller-
+  // owned buffer (STORAGE usage, optionally VERTEX|COPY_DST|COPY_SRC — the
+  // facade stays usage-agnostic, the flags are the caller's), a compute
+  // pipeline family over a FIXED five-binding layout (0 uniform, 1 rw
+  // storage, 2 ro storage, 3 rw storage, 4 ro storage — one bind group for
+  // all entries), and dispatches that MUST run before the render pass
+  // opens (the frame callback's step() precedes record/draw by the tape
+  // contract). Validation errors are loud (onGpuError), never silent.
+
+  const externalBuffers = new Map<number, GPUBuffer>()
+  let nextExternalId = 1
+
+  function createExternalBuffer(byteLength: number, usage: number): number {
+    if (!Number.isFinite(byteLength) || byteLength <= 0) {
+      onGpuError?.(`createExternalBuffer: byteLength must be > 0 (got ${byteLength})`)
+      return -1
+    }
+    const buffer = device.createBuffer({ size: Math.ceil(byteLength / 4) * 4, usage })
+    const id = nextExternalId++
+    externalBuffers.set(id, buffer)
+    return id
+  }
+
+  function externalBufferOf(id: number): GPUBuffer | undefined {
+    return externalBuffers.get(id)
+  }
+
+  function writeExternalBuffer(id: number, data: Float32Array | Uint32Array, byteOffset = 0, byteLength = data.byteLength): void {
+    const buffer = externalBuffers.get(id)
+    if (buffer === undefined) {
+      onGpuError?.(`writeExternalBuffer(${id}): no such external buffer`)
+      return
+    }
+    const capped = Math.min(byteLength, buffer.size - byteOffset)
+    if (capped !== byteLength) {
+      onGpuError?.(`writeExternalBuffer(${id}) clamp: ${byteLength} @${byteOffset} → ${capped} (buffer size ${buffer.size})`)
+    }
+    if (capped <= 0) return
+    try {
+      device.queue.writeBuffer(buffer, byteOffset, data.buffer as ArrayBuffer, data.byteOffset, capped)
+    } catch (error) {
+      onGpuError?.(`writeExternalBuffer(${id}, ${capped} bytes) rejected: ${errorMessage(error)}`)
+    }
+  }
+
+  function readExternalBuffer(id: number, byteLength: number): Promise<Float32Array> {
+    return new Promise((resolve, reject) => {
+      const buffer = externalBuffers.get(id)
+      if (buffer === undefined) {
+        reject(new Error(`rune: readExternalBuffer(${id}) — no such external buffer`))
+        return
+      }
+      const capped = Math.min(byteLength, buffer.size)
+      const staging = device.createBuffer({ size: Math.max(16, Math.ceil(capped / 256) * 256), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ })
+      const enc = device.createCommandEncoder()
+      enc.copyBufferToBuffer(buffer, 0, staging, 0, Math.ceil(capped / 4) * 4)
+      device.queue.submit([enc.finish()])
+      void staging.mapAsync(GPUMapMode.READ).then(() => {
+        // NaN-safe: build from a copied byte view (the mapped range
+        // detaches on unmap).
+        const bytes = new Uint8Array(staging.getMappedRange().slice(0))
+        staging.unmap()
+        staging.destroy()
+        resolve(new Float32Array(bytes.buffer, 0, Math.floor(capped / 4)))
+      }, (error: unknown) => {
+        staging.destroy()
+        reject(error instanceof Error ? error : new Error(String(error)))
+      })
+    })
+  }
+
+  function deleteExternalBuffer(id: number): void {
+    const buffer = externalBuffers.get(id)
+    if (buffer === undefined) return
+    externalBuffers.delete(id)
+    buffer.destroy()
+  }
+
+  function bindExternalVertexBuffer(slot: number, bufferId: number): void {
+    const buffer = externalBuffers.get(bufferId)
+    if (buffer === undefined) {
+      onGpuError?.(`bindExternalVertexBuffer(${slot}, ${bufferId}): no such external buffer`)
+      return
+    }
+    pass?.setVertexBuffer(slot, buffer)
+  }
+
+  /** The compute family record: the module, the shared five-binding layout,
+   *  the per-entry pipelines, the uniform staging + the ONE bind group. */
+  interface ComputeFamily {
+    readonly module: GPUShaderModule
+    readonly layout: GPUBindGroupLayout
+    readonly group: GPUBindGroup
+    readonly uniform: GPUBuffer
+    readonly uniformBytes: number
+    readonly pipelines: Map<string, GPUComputePipeline>
+  }
+  const computeFamilies = new Map<number, ComputeFamily>()
+  let nextComputeId = 1
+
+  function createCompute(wgsl: string, uniformBytes: number, bufferIds: readonly number[]): number {
+    const module = device.createShaderModule({ code: wgsl })
+    void module.getCompilationInfo().then(info => {
+      for (const message of info.messages) {
+        if (message.type === 'error') onGpuError?.(`compute WGSL: ${message.message} (line ${message.lineNum})`)
+      }
+    }).catch(() => {})
+    // THE FIXED LAYOUT (the particles contract; other consumers follow the
+    // same five slots): 0 uniform / 1 rw storage / 2 ro storage / 3 rw
+    // storage / 4 ro storage. Entries may use a subset — a pipeline layout
+    // may declare more than its entry reads.
+    const layout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      ],
+    })
+    const uniformSize = Math.max(16, Math.ceil(uniformBytes / 16) * 16)
+    const uniform = device.createBuffer({ size: uniformSize, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
+    const entries: GPUBindGroupEntry[] = [{ binding: 0, resource: { buffer: uniform } }]
+    for (let b = 0; b < 4; b++) {
+      const buffer = externalBuffers.get(bufferIds[b])
+      if (buffer === undefined) {
+        onGpuError?.(`createCompute: binding ${b + 1} — no external buffer ${bufferIds[b]}`)
+        return -1
+      }
+      entries.push({ binding: b + 1, resource: { buffer } })
+    }
+    const group = device.createBindGroup({ layout, entries })
+    const id = nextComputeId++
+    computeFamilies.set(id, { module, layout, group, uniform, uniformBytes: uniformSize, pipelines: new Map() })
+    return id
+  }
+
+  function runCompute(computeId: number, entry: string, uniformData: Float32Array, workgroups: number): void {
+    const family = computeFamilies.get(computeId)
+    if (family === undefined) {
+      onGpuError?.(`runCompute(${computeId}): no such compute family`)
+      return
+    }
+    if (pass !== null) {
+      onGpuError?.(`runCompute(${entry}): a render pass is open — compute must run BEFORE the frame's draws (the tape contract: step() in the frame callback, record/draw after)`)
+      return
+    }
+    let pipeline = family.pipelines.get(entry)
+    if (pipeline === undefined) {
+      try {
+        pipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [family.layout] }), compute: { module: family.module, entryPoint: entry } })
+      } catch (error) {
+        onGpuError?.(`createComputePipeline(${entry}) rejected: ${errorMessage(error)}`)
+        return
+      }
+      family.pipelines.set(entry, pipeline)
+    }
+    // the uniform write (clamped to the staging size — a struct change
+    // between calls is a caller bug, reported once, never fatal)
+    const bytes = Math.min(uniformData.byteLength, family.uniformBytes)
+    device.queue.writeBuffer(family.uniform, 0, uniformData.buffer as ArrayBuffer, uniformData.byteOffset, bytes)
+    if (uniformData.byteLength > family.uniformBytes) {
+      onGpuError?.(`runCompute(${entry}) uniform clamp: ${uniformData.byteLength} → ${family.uniformBytes} bytes (the staging was sized at createCompute)`)
+    }
+    if (workgroups <= 0) return
+    encoder ??= device.createCommandEncoder()
+    const cp = encoder.beginComputePass()
+    cp.setPipeline(pipeline)
+    cp.setBindGroup(0, family.group)
+    cp.dispatchWorkgroups(workgroups)
+    cp.end()
+  }
+
   return {
     configure,
     resize,
@@ -1149,11 +1323,20 @@ export async function createRealGPU(
     bindUniforms,
     bindVertexBuffer,
     syncVertexBuffer,
+    bindExternalVertexBuffer,
     bindTexture,
     beginPass,
     draw,
     endPass,
     submit,
+    // Task 131 — the GPGPU tier
+    createExternalBuffer,
+    writeExternalBuffer,
+    readExternalBuffer,
+    deleteExternalBuffer,
+    externalBufferOf,
+    createCompute,
+    runCompute,
     readTargetPixels,
     createTarget,
     bindTarget,

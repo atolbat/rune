@@ -82,11 +82,15 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
     }
     gpu.usePipeline(command.pipelineId)
     gpu.bindUniforms(command.sliceOffset)
-    // Indexed loop — no closure allocation per draw.
+    // Indexed loop — no closure allocation per draw. Task 131: an
+    // attribute with bufferId binds the EXTERNAL GPU buffer (the GPGPU
+    // pack's output — the instance records, zero per-frame CPU upload);
+    // otherwise the data-keyed vertex buffer.
     const attrOrder = command.attrOrder
     for (let slot = 0; slot < attrOrder.length; slot++) {
       const attribute = attrOrder[slot]
-      gpu.bindVertexBuffer(slot, attribute.data, attribute.size)
+      if (attribute.bufferId !== undefined) gpu.bindExternalVertexBuffer(slot, attribute.bufferId)
+      else gpu.bindVertexBuffer(slot, attribute.data, attribute.size)
     }
     for (const textureId of command.textureIds) gpu.bindTexture(textureId)
     gpu.draw(count, instances)
@@ -99,7 +103,7 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
 interface RichWgpuCommand extends WgpuCommand {
   readonly pipelineId: number
   readonly wgsl: string
-  readonly attrOrder: readonly { readonly data: Float32Array; readonly size: number; readonly stride?: number; readonly offset?: number; readonly step?: 'vertex' | 'instance' }[]
+  readonly attrOrder: readonly { readonly data: Float32Array; readonly size: number; readonly stride?: number; readonly offset?: number; readonly step?: 'vertex' | 'instance'; readonly bufferId?: number }[]
   readonly pipeline: GpuPipelineDesc
   readonly textureIds: readonly number[]
   readonly sliceOffset: number

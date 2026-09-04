@@ -9,6 +9,7 @@
   "dependencies": {
     "@rune/core": "workspace:*",
     "@rune/math": "workspace:*",
+    "@rune/particles": "workspace:*",
     "@rune/prims": "workspace:*",
     "@rune/webgl2": "workspace:*",
     "@rune/webgpu": "workspace:*"

@@ -31,9 +31,9 @@ export default {
         ]),
         forces: { gravity: [0, -11, 0], drag: 0.1, turbulence: 0.3 },
         spawner: SPLASH_S,
-        render: { kind: 'billboard', tiles: env.atlasTiles },
+        render: { kind: 'billboard', draw: 'instance', tiles: env.atlasTiles },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.alpha,
     })
 
@@ -57,14 +57,14 @@ export default {
           speed: [0.7, 1.4], life: [1.1, 2.3], size: [0.12, 0.3],
           color: [[0.7, 1, 0.55, 0.9], [0.85, 1, 0.7, 0.75]], seed: 149,
         },
-        render: { kind: 'billboard', tiles: env.atlasTiles },
+        render: { kind: 'billboard', draw: 'instance', tiles: env.atlasTiles },
         // THE SUB-EMITTER: every retired bubble bursts the splash system at
         // its death position (the record is REUSED — read it synchronously)
         onRetire: (record) => {
           splash.facade.at(record.x, record.y, record.z).burst(9 + ((record.seed * 7) | 0) % 5, { ...SPLASH_S, seed: 7000 + ((record.seed * 4096) | 0) })
         },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
     })
 
@@ -85,9 +85,9 @@ export default {
           speed: [0, 0], life: [1000, 1000], size: [5.6, 5.6],
           color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 5,
         },
-        render: { kind: 'billboard', mode: 'oriented', axis: [0, 0, 1], tiles: env.atlasTiles },
+        render: { kind: 'billboard', draw: 'instance', mode: 'oriented', axis: [0, 0, 1], tiles: env.atlasTiles },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
     })
 

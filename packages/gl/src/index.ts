@@ -16,6 +16,8 @@ export type { WebGpuRenderer, WebGpuRendererOptions, GpuFrameContext, GpuRecorde
 // Channel: T0/T1/T2 — SAB/local ring (.buffer → to the worker via attachFeed),
 // T3 — ping-pong (createMsgFeedWriter in the worker + applyChunks/takeRecycled).
 export { createRendererFeedGL, createRendererFeedGPU } from './rendererFeed.ts'
+export { createGpuParticles } from './particlesGpu.ts'
+export type { GpuParticles } from './particlesGpu.ts'
 export type {
   RendererFeed,
   RendererFeedOptions,

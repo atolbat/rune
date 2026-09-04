@@ -86,9 +86,9 @@ export default {
         // STRETCHED ×0.85 inheritance: the glints ride the blade's motion,
         // so the velocity IS the tangent — they streak ALONG the arc
         // (the speed-line smear of a fast swing)
-        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.05 },
+        render: { kind: 'billboard', draw: 'instance', mode: 'stretched', speedFactor: 0.05 },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       texture: () => env.sparkTexture,
     })
@@ -120,7 +120,7 @@ export default {
         // that READS at this camera distance
         render: { kind: 'trail', points: 30, step: 1 / 60, length: 6.2, width: 0.3 },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       // THE STREAK (Task 126): a ribbon's uv runs u along the arc, v across
       // its width — a radial GLOW fades to black at every edge (the arc
@@ -145,9 +145,9 @@ export default {
           { t: 1, size: 4.2, r: 0.4, g: 0.7, b: 1, a: 0, frame: 5 },
         ]),
         spawner: SHOCK_S,
-        render: { kind: 'billboard', mode: 'horizontal', tiles: [4, 4] },
+        render: { kind: 'billboard', draw: 'instance', mode: 'horizontal', tiles: [4, 4] },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       texture: () => env.atlasTexture,
     })
@@ -168,9 +168,9 @@ export default {
         ]),
         forces: { gravity: [0, -11, 0], limitSpeed: { limit: 0, dampen: 0.35 } },
         spawner: SPARK_S,
-        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.09 },
+        render: { kind: 'billboard', draw: 'instance', mode: 'stretched', speedFactor: 0.09 },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.alpha,
       texture: () => env.sparkTexture,
     })
@@ -191,9 +191,9 @@ export default {
         ]),
         forces: { gravity: [0, 0.8, 0], drag: 1.4 },
         spawner: DUST_S,
-        render: { kind: 'billboard', tiles: [2, 2], frameJitter: 4, spin: 0.9 },
+        render: { kind: 'billboard', draw: 'instance', tiles: [2, 2], frameJitter: 4, spin: 0.9 },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.alpha,
       texture: () => env.smokeAtlas,
     })
@@ -219,9 +219,9 @@ export default {
         ]),
         forces: { gravity: [0, 0.35, 0], drag: 0.7, noise: { strength: 0.6, scale: 0.25, speed: 0.08 } },
         spawner: EMBER_S,
-        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.03, lengthFactor: 0.6 },
+        render: { kind: 'billboard', draw: 'instance', mode: 'stretched', speedFactor: 0.03, lengthFactor: 0.6 },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       texture: () => env.sparkTexture,
     })

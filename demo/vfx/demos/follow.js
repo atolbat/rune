@@ -43,9 +43,9 @@ export default {
           speed: [2.2, 3.6], life: [0.8, 1.6], size: [0.08, 0.2],
           color: [[1, 0.95, 0.6, 1], [1, 0.55, 0.25, 1]], seed: 233,
         },
-        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.25 },
+        render: { kind: 'billboard', draw: 'instance', mode: 'stretched', speedFactor: 0.25 },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       texture: () => env.glowTexture,
     })
@@ -67,11 +67,11 @@ export default {
           speed: [0.8, 1.8], life: [1.4, 2.4], size: [0.6, 1.1],
           color: [[0.6, 0.62, 0.66, 0.4], [0.72, 0.74, 0.78, 0.3]], seed: 239,
         },
-        render: { kind: 'billboard', tiles: env.atlasTiles, spin: 0.8 },
+        render: { kind: 'billboard', draw: 'instance', tiles: env.atlasTiles, spin: 0.8 },
       }),
       // the dithered translucent material — the smoke's soft alpha fade
       // stays smooth (no 8-bit staircase)
-      material: env.materials.haze,
+      material: env.materials.bbHaze,
       pipeline: env.pipelines.alpha,
     })
 

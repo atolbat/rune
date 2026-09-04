@@ -43,7 +43,7 @@ export interface WgpuDrawSpec {
    *  (the pipeline builds arrayStride = stride, attribute offset = offset).
    *  Task 75: step='instance' — the record is read once per instance
    *  (quad-stars from the feed). */
-  readonly attributes?: Record<string, { readonly data: Float32Array; readonly size: number; readonly stride?: number; readonly offset?: number; readonly step?: 'vertex' | 'instance' }>
+  readonly attributes?: Record<string, { readonly data: Float32Array; readonly size: number; readonly stride?: number; readonly offset?: number; readonly step?: 'vertex' | 'instance'; readonly bufferId?: number }>
   readonly textures?: Record<string, TextureHandle>
   readonly count: WgpuDynamic<number>
   readonly instances?: WgpuDynamic<number>
@@ -91,7 +91,7 @@ export function createWgpuContext(arena: SliceArena): WgpuCompileContext {
 
 interface RichCommand extends WgpuCommand {
   readonly wgsl: string
-  readonly attrOrder: readonly { readonly data: Float32Array; readonly size: number; readonly stride?: number; readonly offset?: number; readonly step?: 'vertex' | 'instance' }[]
+  readonly attrOrder: readonly { readonly data: Float32Array; readonly size: number; readonly stride?: number; readonly offset?: number; readonly step?: 'vertex' | 'instance'; readonly bufferId?: number }[]
   readonly pipeline: GpuPipelineDesc
   readonly textureIds: readonly number[]
   readonly fields: readonly WgslUniformInfo[]
@@ -180,13 +180,14 @@ function resolveNumber(declared: WgpuDynamic<number>, props: unknown, frameCtx: 
 /** Attributes in ascending @location order (pipeline buffer order).
  *  M5: the feed's stride/offset are passed through to the pipeline (interleaving).
  *  Task 75: step='instance' → pipeline stepMode (instancing). */
-function orderedAttributes(reflection: WgslReflection, spec: WgpuDrawSpec): { data: Float32Array; size: number; stride?: number; offset?: number; step?: 'vertex' | 'instance' }[] {
+function orderedAttributes(reflection: WgslReflection, spec: WgpuDrawSpec): { data: Float32Array; size: number; stride?: number; offset?: number; step?: 'vertex' | 'instance'; bufferId?: number }[] {
   return reflection.attributes.map((attr: WgslAttributeInfo) => ({
     data: spec.attributes?.[attr.name]?.data ?? new Float32Array(attr.size),
     size: spec.attributes?.[attr.name]?.size ?? attr.size,
     stride: spec.attributes?.[attr.name]?.stride,
     offset: spec.attributes?.[attr.name]?.offset,
     step: spec.attributes?.[attr.name]?.step,
+    bufferId: spec.attributes?.[attr.name]?.bufferId,
   }))
 }
 

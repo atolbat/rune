@@ -1,9 +1,8 @@
 # @rune/particles — the optimization program
 
-Status: **the baselines are in, the plan is written, nothing has been ported
-yet.** This document is the map for the next optimization pass: what we
-measured, what it means, what to move where, and which seams in the code
-are already prepared for it.
+Status: **Phase 1 (the instanced draw) and Phase 2 (the GPGPU tier) are
+SHIPPED** (Task 131). The etalons below carry the before/after; the
+phases describe what moved where, and what remains.
 
 ---
 
@@ -11,116 +10,112 @@ are already prepared for it.
 
 `bun packages/particles/bench/particles.bench.ts` (median of 5 runs):
 
-| stage | 100k live | ns/particle | notes |
+| stage | the soup (before) | the instanced path (after) | notes |
 |---|---|---|---|
-| **advance + bake** (the full frame) | **10.5 ms** | 105 | what a demo pays |
-| ├─ **advance only** (integrate + forces + retire) | **1.85 ms** | 18.5 | the GPGPU candidate |
-| └─ **bake only** (soup expansion + ramp sampling) | **8.7 ms** | 87 | **the real bottleneck** |
-| bake's output | 20.6 MiB soup/frame | — | 100k × 6 verts × 9 floats |
-| forces-heavy (noise + seek + collide + limit) | 19.6 ms | 196 | the worst-case advance |
-| emission (100k one-shot burst) | 21.5 ms | 215 | the spawn path |
-| steady state (~9.5k live, typical demo) | 1.08 ms | 114 | fine as-is |
-| allocation identity (500 frames) | STABLE | — | zero allocations per frame |
+| **advance + bake** (100k live) | 10.5 ms | **5.3 ms** (advance 1.8 + pack 3.5) | the CPU frame of a draw:'instance' layer |
+| └─ **bake only** (the 6-vertex CPU expansion) | 8.7 ms | — | replaced by the GPU corner expansion |
+| └─ **pack only** (Task 131: the 16-float records) | — | **3.6 ms** | ~2.4 ms with a constant ramp |
+| the per-frame traffic | 20.6 MiB | **6.1 MiB** | 3.4× less |
+| forces-heavy (100k) | 19.6 ms | 19.6 ms (CPU) / ~0 CPU (GPU tier) | the GPU tier runs them as compute |
+| emission (100k one-shot) | 21.5 ms | 21.5 ms | CPU-side in both tiers |
+| steady state (~9.5k live) | 1.05 ms | ~0.7 ms | |
+| allocation identity (500 frames) | STABLE | STABLE | both paths |
 
-**The headline: the CPU simulation is NOT the bottleneck.** At 100k live
-particles the integration walk costs 1.85 ms; the *billboard soup bake*
-— expanding each particle into 6 vertices × 9 floats on the CPU, then
-uploading the whole thing every frame — costs **8.7 ms and 20.6 MiB of
-frame traffic**. 83% of the frame is geometry expansion that the GPU
-could do itself.
+The GPGPU tier's CPU cost at 160k live (the GPU Embers demo): **~1 ms**
+(emission + the aging walk + the handoff) — the forces, the aging on the
+GPU, the wrap and the record pack all run as compute passes; the per-frame
+CPU→GPU particle traffic is the emit block + the swap list only.
 
-(Reference point: the grass field demo already proves the pattern —
-42,000 blades, ONE instanced draw, all vertex math on the GPU, ~0 CPU
-per frame. The particle soup is the same problem, unsolved.)
+## 2. Phase 1 — the instanced draw path ✅ SHIPPED
 
-## 2. The plan (phased, each phase independently shippable)
+`render: { kind: 'billboard', draw: 'instance' }` — one quad drawn N times:
 
-### Phase 1 — the instanced draw path (kills the bake, the big win)
+- `instances.ts` — `packInstances()`: ONE 16-float record per particle
+  (pos, vel, the ramp-resolved color, the half-extent/spin/seed/age
+  parameters, the atlas tile origin). The count parity with
+  `fillBillboards()/6` is pinned by tests; the JS twin of the shader math
+  is the bit-reference (the parity suite, task131.test.ts).
+- The **BILLBOARD material feature** (@rune/materials): the vertex stage
+  expands the 6-corner quad from `gl_VertexID` / `@builtin(vertex_index)`
+  — all five modes (camera/vertical/horizontal/stretched/oriented), the
+  spin, the atlas tile scale — one draw call: 6 vertices × N instances.
+  The fragment stage composes unchanged (ALPHA_CUTOFF, SOFT_PARTICLES,
+  OUTPUT_DITHER all work on top).
+- The soup stays the default (the LCD contract); every billboard layer of
+  /demo/vfx/ moved to the instance path (73 layers).
 
-Replace the per-particle 6-vertex soup with **one quad drawn N times**:
+## 3. Phase 2 — the GPGPU tier (WebGPU compute) ✅ SHIPPED (opt-in)
 
-- The quad's 4 corner positions come from `gl_VertexID`/`@builtin(vertex_index)`
-  (the grass field's exact trick — no vertex buffer at all).
-- Per-particle data rides INSTANCE attributes: `i_pos vec3, i_size float,
-  i_color vec4, i_uv0 vec2 (tile), i_spin float, i_seed float` — 13 floats
-  per particle written straight from the SoA store (5.2 MiB at 100k vs
-  today's 20.6 MiB soup, and no per-vertex expansion at all).
-- The VERTEX shader does the billboard math (camera/vertical/horizontal/
-  stretched/oriented modes are all a `u_mode` uniform switch), the ramp
-  sampling (a small uniform-array LUT or a 1D texture), the atlas tile
-  pick, the spin. This is exactly what `fillBillboards` does today, moved
-  across the bus.
-- Expected: the bake's 8.7 ms → ~1 ms (a store→instance-buffer pack),
-  upload traffic 20.6 → 5.2 MiB, and the draw count unchanged (1 per layer).
-- CPU cost after Phase 1 at 100k: ~2.8 ms/frame (advance 1.85 + pack ~1).
+`sim: 'gpu'` — the WebGPU compute tier:
 
-Works identically on WebGL2 and WebGPU (both have instanced draws; the
-engine's `step: 'instance'` attribute plumbing already exists — the feed's
-star quads and the grass field use it).
+- **The state** lives in one storage buffer (the SoA fields interleaved,
+  17 floats × capacity — the `FIELD_NAMES` seam). The CPU keeps the
+  count/age/life (emission, death, compaction); the positions/velocities
+  are GPU-authoritative.
+- **The readback-free split**: the CPU never reads the GPU state. Death
+  is the CPU's own age/life walk; the compaction's swap list is collected
+  by the `onSwap` hook and REPLAYED on the GPU (the same moves in the
+  same order — the exact CPU compaction).
+- **The passes** (`gpuSim.ts`'s WGSL, dispatched by `@rune/gl`'s
+  `createGpuParticles` between `advance()` and the draw): `compact` (the
+  swap replay) → `advance` (gravity/drag/turbulence/attract/noise/limit +
+  the integration + age + the wrap) → `pack` (the same 16-float instance
+  records, GPU-side — the render binds the buffer directly, ZERO
+  per-frame CPU→GPU particle traffic).
+- **The forces supported**: gravity, drag, turbulence, attract (static),
+  noise (the same permutation table as the CPU), limitSpeed, wrap. The
+  CPU-coupled features are rejected LOUDLY (onRetire, collide, seek,
+  speedCurve, attract.killRadius, prewarm — the death site and the
+  contact events are CPU-blind).
+- **The parity gate** (`scripts/task131-wgsl-sim.mjs`, the raw-device
+  path): after 90 frames of gravity+drag, the GPU state matches the CPU
+  reference to **1 f32 ULP** (worst |Δ| = 0.00001 over 2250 particles);
+  the pack records match at the same tolerance; the noise run moves
+  2048/2048 with zero NaN.
+- **The demo**: "GPU Embers" (#24) — 160k embers on WebGPU; the same demo
+  on WebGL2 runs the CPU tier at 32k (the tier split, not a stub — the
+  dual-backend look-parity contract keeps every other demo on sim:'cpu').
 
-### Phase 2 — GPGPU advance (kills the integration walk)
+## 4. The renderer seams added (Task 131)
 
-Only worth it after Phase 1 (it attacks the remaining 1.85–2.8 ms):
+- `@rune/webgpu`: external buffers (`createExternalBuffer` /
+  `writeExternalBuffer` / `readExternalBuffer` / `bindExternalVertexBuffer`)
+  and compute (`createCompute` / `runCompute` — a fixed five-binding
+  layout: 0 uniform, 1 rw, 2 ro, 3 rw, 4 ro storage; one bind group per
+  family; dispatches enqueue before the render pass opens).
+- The WGPU command/executor: an attribute with `bufferId` binds the
+  external buffer (the GL side already had the contract — the feed's
+  dual-bind).
+- `@rune/gl`: `createGpuParticles(facade, gpuFacade)` — the orchestrator.
 
-- **WebGPU**: the SoA store becomes storage buffers (or one interleaved
-  `array<f32>` buffer). A compute pass integrates: gravity/drag/noise/seek/
-  collide/limit, one workgroup per 64 particles, `@builtin(invocation_index)`
-  as the particle id. Retirement/compaction stays CPU-side (a compact
-  readback of the alive index list — one `uint32 × count` buffer, cheap)
-  or moves to a prefix-sum pass later.
-- **WebGL2** (no compute shaders): two options —
-  a. **transform feedback**: the integration as a vertex shader over the
-     particle buffer, ping-ponged between two VBOs (the classic pre-compute
-     GPGPU); renderable as the Phase-1 instance source directly — zero
-     readbacks.
-  b. **float-texture ping-pong** (the WebGL1-era fallback): RGBA32F
-     attachments, positions/velocities as texels. Slower, only if (a) is
-     blocked (feedback loop restrictions on some drivers).
-- Emission stays CPU-side initially (215 ns/spawn is fine up to ~50k/s;
-  a GPU RNG hash + an append buffer is the later step).
+## 5. What remains (the opportunistic list)
 
-### Phase 3 — the small stuff (do opportunistically)
+- **WebGL2 transform feedback** — the GL twin of the compute tier (the
+  integration as a vertex shader, ping-ponged VBOs). The CPU path stays
+  WebGL2's engine; the tier table would then match on both backends.
+- **Sorting**: translucent layers draw in spawn order; a depth-bucket
+  counting sort (~0.5 ms at 100k) would kill most of the popping.
+- **Culling**: a per-particle distance cull in the pack loop (one
+  comparison) + the per-layer frustum reject.
+- **Emission on the GPU**: a hash-RNG append pass (the 215 ns/spawn CPU
+  cost is fine to ~50k/s).
+- **The ramp LUT as a texture** (the pack's binary search → a texture
+  fetch): ~1 ms at 100k, only if the GPU pack ever needs the relief.
 
-- **Sorting**: translucent layers currently draw in spawn order; a
-  depth-bucket sort (64 buckets by view-space z, counting sort, per layer)
-  costs ~0.5 ms at 100k and kills most of the popping. GPU bitonic sort
-  only if the buckets prove insufficient.
-- **Culling**: a per-layer frustum reject of the whole facade, then a
-  per-particle distance cull baked into the Phase-1 pack loop (one
-  comparison per particle).
-- **Bake micro-optimizations** (if Phase 1 is deferred): the ramp's binary
-  search is ~6 branches/particle — a flat LUT of 64 samples linearly
-  interpolated turns it into 2 loads; `Math.hypot` → a squared-norm fast
-  path in the stretched mode's rest check.
-- **Spawn-side**: the hash RNG (`hash01`) is already stateless and fast;
-  the emission cost is dominated by validation + field writes, both
-  irreducible without changing the contract.
+## 6. The verification of this program (Task 131)
 
-## 3. The seams prepared in the code (as of this document)
-
-- `system.ts` — the SoA store is one flat `Float32Array` per field
-  (`ParticleFields`), publicly readable AND writable through the facade
-  (`facade.fields`): a GPU backend can bind the same store as instance
-  sources without touching the API surface.
-- `facade.ts` — the two stages of the frame are already isolated calls:
-  `advance(dt)` (all simulation) and `view(basis)` (all baking). A Phase-1
-  or Phase-2 backend swaps the IMPLEMENTATION of exactly one of them.
-- `billboards.ts` — `fillBillboards` is a pure function of (store, basis,
-  options): its math is the reference semantics the vertex-shader port
-  must reproduce bit-for-bit (the existing tests are the parity suite).
-- `field.ts` (grass) — the working precedent for the whole pattern:
-  CPU-baked instance arrays + GPU vertex expansion, both backends, one
-  draw. Phase 1 is "field.ts, but for the dynamic soup".
-- `bench/particles.bench.ts` — the etalon harness with `--json`: run it
-  on the same machine before/after any phase; the numbers in section 1
-  are the pre-port reference.
-
-## 4. What NOT to do yet
-
-- No WebGPU-only features on the hot path (the dual-backend contract is
-  the product; WebGL2 keeps parity via transform feedback, not stubs).
-- No async readbacks in the frame path (the WebGPU readback exists and
-  works, but a per-frame `mapAsync` stall would eat the win; Phase 2's
-  compaction is the only allowed readback, batched).
-- No change to the demo-facing API (`createParticles` desc, facade
-  methods) — the optimization is internal by contract.
+- `task131.test.ts` — the instance path's parity suite (the packer, the
+  JS twin vs fillBillboards, the facade integration).
+- `task131gpu.test.ts` — the facade's sim:'gpu' contract (validation,
+  the handoff protocol, the CPU mirror's determinism).
+- `scripts/task131-wgsl-raw.mjs` — the BILLBOARD material's WGSL rendered
+  PIXEL-VERIFIED on a raw device (the camera-mode quad: position, extent,
+  color, uv through the real pipeline).
+- `scripts/task131-wgsl-sim.mjs` — the compute sim's 1-ULP parity vs the
+  CPU reference (the raw-device gate).
+- `scripts/task131-sim-probe.mjs` — the on-hardware state gate (the local
+  SwiftShader env cannot mapAsync the live device — the documented
+  limitation; local coverage is the raw gate above).
+- The full demo gates: demo-smoke (24 live), demo-shots (24 ×
+  motion+alive+bright + the round trip), task128-probe (24 cycling on the
+  WebGPU flags, the GPU tier live at 104k, GPU log clean).

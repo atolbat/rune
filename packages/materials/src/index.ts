@@ -16,6 +16,11 @@
 // ergonomic route, the raw bits the explicit one. A variant carries ONLY
 // the chosen formulas, with the Cook-Torrance algebra folded at assembly.
 //
+// BILLBOARD (Task 131) is the instanced-particle vertex stage: it pairs
+// with @rune/particles' INSTANCE_LAYOUT records (packInstances) — one
+// quad per instance, the corner expansion on the GPU. See features.ts
+// for the attribute/uniform contract.
+//
 // Layers:
 //   features.ts  — the catalog (bits + GLSL/WGSL snippets)
 //   assemble.ts  — the one-shot builder (pure, zero ghost allocations)
@@ -57,6 +62,9 @@ export {
   SOFT_PARTICLES,
   OUTPUT_DITHER,
   PBR_ENV,
+  BILLBOARD,
+  BB_VERT_GLSL,
+  BB_VERT_WGSL,
   LIGHT_MODELS,
   POST_EFFECTS,
   PBR_D_MODELS,

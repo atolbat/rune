@@ -1,4 +1,4 @@
-// "vfx" demo — the game-VFX study: 23 demos on @rune/particles + the rune
+// "vfx" demo — the game-VFX study: 24 demos on @rune/particles + the rune
 //   renderer, one page with a carousel (◀ ▶ through the set).
 //
 // The library surface this page exercises end to end:
@@ -15,14 +15,14 @@
 //
 // EVERY sprite on this page is OURS — generated in this file (deterministic
 // pure functions → raw RGBA uploads; no image assets, no browser
-// premultiply semantics). The dist imports carry ?v=129 (the stale-cache
+// premultiply semantics). The dist imports carry ?v=131 (the stale-cache
 // guard — bump on release; Task 130 changed @rune/particles: the line lattice).
-import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=129'
+import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=131'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
-  DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER,
-} from '../../dist/rune-materials.esm.js?v=129'
-import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=129'
+  DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER, BILLBOARD,
+} from '../../dist/rune-materials.esm.js?v=131'
+import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=131'
 
 /* ─── the demo registry (the carousel order) ────────────────────────────── */
 
@@ -55,14 +55,24 @@ import dust from './demos/dust.js'
 import grass from './demos/grass.js'
 import lightning from './demos/lightning.js'
 import laser from './demos/laser.js'
+import gpuEmbers from './demos/gpuEmbers.js'
 
 const DEMOS = [muzzle, explosion, shapes, trail, sequencer, mesh, subemitter,
   noise, alphatest, plugin, billboard, soft, blending, follow,
-  rocket, storm, slash, vortex, fireflies, dust, grass, lightning, laser]
+  rocket, storm, slash, vortex, fireflies, dust, grass, lightning, laser, gpuEmbers]
 
 /* ─── materials & pipelines ────────────────────────────────────────────── */
 
 const SPRITE_MATERIAL = materialOf({ features: TEXTURE | VERTEX_COLOR })
+// Task 131 — the INSTANCED-SPRITE twins: the same sprite family + the
+// BILLBOARD vertex stage — the material's shader expands the quad on the
+// GPU from the facade's 16-float instance records (render.draw:'instance').
+// Every billboard layer of this page moves to these; the soup twins stay
+// for the trail/mesh kinds and the library's LCD contract.
+const BB_SPRITE_MATERIAL = materialOf({ features: TEXTURE | VERTEX_COLOR | BILLBOARD })
+const BB_HAZE_MATERIAL = materialOf({ features: TEXTURE | VERTEX_COLOR | BILLBOARD | OUTPUT_DITHER })
+const BB_LEAF_MATERIAL = materialOf({ features: TEXTURE | VERTEX_COLOR | BILLBOARD | ALPHA_CUTOFF })
+const BB_SOFT_MATERIAL = materialOf({ features: TEXTURE | VERTEX_COLOR | BILLBOARD | SOFT_PARTICLES })
 // the TRANSLUCENT-SPRITE material (the alpha-blended smokes and haze cards
 // on the page): the sprite material + the OUTPUT_DITHER bit — now TWO-SIDED
 // (Task 128): the ±0.5/255 rgb noise of Task 127 PLUS a 4×4 ordered Bayer
@@ -716,7 +726,7 @@ DEMOS.forEach((demo, index) => {
 
 const note = document.createElement('div')
 note.className = 'pt-note'
-note.innerHTML = 'Sim: <code>@rune/particles</code> · 23 demos · every sprite procedural · drag to orbit, pinch to zoom'
+note.innerHTML = 'Sim: <code>@rune/particles</code> · 24 demos · every sprite procedural · drag to orbit, pinch to zoom'
 sheet.append(sheetHead, rows, note)
 
 const dragHint = document.createElement('div')
@@ -750,6 +760,7 @@ const env = {
   materials: {
     sprite: SPRITE_MATERIAL, leaf: LEAF_MATERIAL, leafLit: LEAF_LIT_MATERIAL, soft: SOFT_MATERIAL,
     lambert: LAMBERT_MATERIAL, pbr: PBR_MATERIAL, haze: HAZE_MATERIAL,
+    bbSprite: BB_SPRITE_MATERIAL, bbHaze: BB_HAZE_MATERIAL, bbLeaf: BB_LEAF_MATERIAL, bbSoft: BB_SOFT_MATERIAL,
   },
   pipelines: {
     additive: ADDITIVE, alpha: ALPHA,
@@ -825,8 +836,15 @@ const env = {
 
 /* ─── The layer machinery: commands + the per-frame soup upload ───────── */
 
+/** The billboard mode → the BILLBOARD uniform's mode index (u_bbA.x). */
+const BB_MODE_INDEX = { camera: 0, vertical: 1, horizontal: 2, stretched: 3, oriented: 4 }
+
 function buildLayerCommand(layer) {
   const soup = layer.facade.view(BASIS)
+  // Task 131 — the DRAW FORMAT switch: an instance-mode facade (render.draw
+  // === 'instance') packs 16-float records and needs the BILLBOARD material's
+  // instanced command (one draw: 6 vertices × N instances).
+  if (soup.draw === 'instance') return buildLayerInstanceCommand(layer, soup)
   const strideBytes = soup.stride * 4
   const layout = soup.layout
   // THE STALE-BINDING RESET (the WebGPU freeze root cause): a backend
@@ -876,6 +894,84 @@ function buildLayerCommand(layer) {
     textures,
     uniforms,
     count: (p) => p.vertexCount ?? 0,
+  })
+  layer.soup = soup
+}
+
+/** Task 131 — the INSTANCED layer command: the facade's 16-float records as
+ *  five instance-step attributes + the BILLBOARD uniforms (the mode, the
+ *  spin, the stretch factors, the tile scales, the camera basis). The draw
+ *  is ONE instanced call: 6 corners × the live instance count, the corner
+ *  expansion on the GPU (the packer replaced the CPU bake). */
+function buildLayerInstanceCommand(layer, soup) {
+  const strideBytes = soup.stride * 4 // 64 — INSTANCE_STRIDE × 4
+  const L = soup.instanceLayout
+  // THE STALE-BINDING RESET (the same contract as the soup path — see
+  // buildLayerCommand's comment): both dynamic bindings are cleared before
+  // the current backend's is written.
+  layer.glDyn = undefined
+  layer.gpuDyn = undefined
+  let bufferId
+  if (activeRenderer.backend === 'webgpu') {
+    layer.gpuDyn = activeRenderer.inner.gpu
+  } else {
+    const gl = activeRenderer.inner.gl
+    bufferId = gl.createBuffer(soup.vertices)
+    layer.glDyn = { gl, bufferId }
+  }
+  // The record fields → five instance attributes (the cross-package
+  // contract: the material declares i_pos/i_vel/i_color/i_par/i_uv0).
+  // Task 131 — THE GPU TIER: a layer with gpuBackend binds the EXTERNAL
+  // records buffer (the compute pack's output — no data array upload, no
+  // data-keyed cache); a CPU-pack layer binds its own buffer as before.
+  const gpuTier = layer.gpuBackend !== undefined
+  const recordsBufferId = gpuTier ? layer.gpuBackend.recordsBufferId : undefined
+  const attr = (field) => ({
+    data: soup.vertices, size: field.size, stride: strideBytes,
+    offset: field.offset * 4, bufferId: gpuTier ? recordsBufferId : bufferId, step: 'instance',
+  })
+  const attrs = {
+    i_pos: attr(L.pos), i_vel: attr(L.vel), i_color: attr(L.color),
+    i_par: attr(L.par), i_uv0: attr(L.uv0),
+  }
+  const layerTexture = typeof layer.texture === 'function' ? layer.texture() : layer.texture
+  const textures = { u_tex: layerTexture ?? atlasTexture, texTexture: layerTexture ?? atlasTexture, ...(layer.textures ?? {}) }
+  // The BILLBOARD uniforms from the facade's resolved render desc + the
+  // live camera basis (the basis resolvers read the module-level arrays —
+  // zero allocation per frame).
+  const r = layer.facade.render
+  const spin = layer.facade.spin
+  const mode = BB_MODE_INDEX[r.mode ?? 'camera'] ?? 0
+  const tiles = r.tiles ?? [1, 1]
+  const axisRandom = r.axis === undefined || r.axis === 'random' ? 1 : 0
+  let axis = [0, 0, 1]
+  if (!axisRandom) {
+    const a = r.axis
+    const al = Math.hypot(a[0] ?? 0, a[1] ?? 0, a[2] ?? 0) || 1
+    axis = [(a[0] ?? 0) / al, (a[1] ?? 0) / al, (a[2] ?? 0) / al]
+  }
+  const bbA = [mode, spin, r.speedFactor ?? 0, r.lengthFactor ?? 1]
+  const bbB = [r.spin3d ?? 0, axisRandom, 1 / (tiles[0] || 1), 1 / (tiles[1] || 1)]
+  const uniforms = {
+    u_mvp: (p) => p.mvp,
+    u_model: (p) => p.model,
+    u_bbA: () => bbA,
+    u_bbB: () => bbB,
+    u_bbRight: () => BASIS.right,
+    u_bbUp: () => BASIS.up,
+    u_bbForward: () => BASIS.forward,
+    u_bbAxis: () => axis,
+    ...(layer.uniforms ?? {}),
+  }
+  layer.command = activeRenderer.command({
+    id: `vfx:i:${layer.id ?? Math.random().toString(36).slice(2, 8)}`,
+    shader: { glsl: layer.material.glsl, wgsl: layer.material.wgsl },
+    pipeline: layer.pipeline,
+    attributes: attrs,
+    textures,
+    uniforms,
+    count: 6, // the two triangles of one quad — from gl_VertexID
+    instances: (p) => p.instanceCount ?? 0,
   })
   layer.soup = soup
 }
@@ -982,6 +1078,20 @@ function frameCallback(ctx, record) {
       continue
     }
     const soup = layer.facade.view(BASIS)
+    if (soup.draw === 'instance') {
+      // Task 131 — the instanced path: upload the LIVE RECORD PREFIX (16
+      // floats × instanceCount — a subarray, the rendererFeed pattern),
+      // draw 6 corners × the instance count through the BB command.
+      const instanceCount = soup.instanceCount
+      if (instanceCount > 0) {
+        const liveFloats = instanceCount * soup.stride
+        if (layer.glDyn !== undefined) layer.glDyn.gl.updateBuffer(layer.glDyn.bufferId, soup.vertices.subarray(0, liveFloats))
+        else if (layer.gpuDyn !== undefined) layer.gpuDyn.syncVertexBuffer(soup.vertices, liveFloats * 4)
+        record(layer.command, { mvp, model: MODEL, camPos: camEye, instanceCount, ...(layer.props?.(frameCtx) ?? {}) })
+        liveVerts += instanceCount * 6
+      }
+      continue
+    }
     const vertexCount = soup.vertexCount
     const liveBytes = vertexCount * soup.stride * 4
     if (layer.glDyn !== undefined) layer.glDyn.gl.updateBuffer(layer.glDyn.bufferId, soup.vertices)
@@ -1182,6 +1292,9 @@ async function boot(mode) {
     activeRenderer = renderer
     env.renderer = renderer
     env.backend = renderer.backend
+    // Task 131 — the probe handle: the GPU facade (the state-buffer
+    // readback gates read the sim's own memory through it)
+    if (typeof window !== 'undefined' && renderer.backend === 'webgpu') window.__vfxGpuFacade = renderer.inner.gpu
     await attachAtlas()
     // A RE-boot (a backend toggle) with a live demo: the demo state owns
     // renderer-bound objects (the soft demo's surface + prepass commands)
@@ -1225,6 +1338,6 @@ async function boot(mode) {
 /* ─── Go ───────────────────────────────────────────────────────────────── */
 
 shell.log.info(`WebGL2: ${typeof WebGL2RenderingContext !== 'undefined' ? 'present in the browser' : 'missing'}`)
-shell.log.info('23 demos on @rune/particles — the library surface end to end + the rune originals (rocket, rainstorm, slash, vortex, fireflies, dust, grass, lightning, laser)')
+shell.log.info('24 demos on @rune/particles — the library surface end to end + the rune originals + the GPU compute tier (160k embers on WebGPU)')
 switchDemo(0)
 void boot(shell.mode ?? 'auto')

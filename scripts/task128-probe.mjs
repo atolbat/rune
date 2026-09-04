@@ -50,13 +50,13 @@ await page.waitForTimeout(3000)
 // close the demo-picker sheet if it booted open (it covers the arrows)
 await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
 
-// cycle through all 23 demos, 2.6 s each — enough for the muzzle turret to
+// cycle through all 24 demos, 2.6 s each — enough for the muzzle turret to
 // fire, the trails to rain, the lightning to strike, the laser to burn
 const labelSel = '.pt-label'
 const results = []
 const perDemo = []
 page.on('crash', () => console.log('!! PAGE CRASHED (renderer process died)'))
-for (let i = 0; i < 23; i++) {
+for (let i = 0; i < 24; i++) {
   const before = errors.length
   try {
     await page.click('.pt-arrow:last-child', { timeout: 15000 }).catch((e) => console.log(`  click #${i + 1} failed: ${String(e).slice(0, 120)}`))

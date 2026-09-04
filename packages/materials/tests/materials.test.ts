@@ -35,6 +35,8 @@ import {
   EMISSIVE,
   FOG,
   PBR_ENV,
+  BILLBOARD,
+  SOFT_PARTICLES,
   POST_EFFECTS,
   type PbrModelChoice,
 } from '../src/index.ts'
@@ -794,5 +796,163 @@ describe('Task 127/128: OUTPUT_DITHER (rgb noise + the Bayer alpha)', () => {
     resetMaterials()
     const material = materialOf({ features: TEXTURE | VERTEX_COLOR | OUTPUT_DITHER })
     expect(material.glsl.fragment).toContain('precision highp float;')
+  })
+})
+
+/* ── Task 131: BILLBOARD — the instanced particle vertex stage ───────────── */
+
+describe('Task 131: BILLBOARD (the instanced particle vertex stage)', () => {
+  const SPRITE_BB = TEXTURE | VERTEX_COLOR | BILLBOARD
+
+  it('replaces the vertex attributes with the instance record (the cross-package contract)', () => {
+    resetMaterials()
+    const mat = materialOf({ features: SPRITE_BB })
+    // The attribute set is EXACTLY @rune/particles' INSTANCE_LAYOUT names,
+    // in order — the record IS the vertex.
+    expect(mat.attributes.map(a => a.name)).toEqual(['i_pos', 'i_vel', 'i_color', 'i_par', 'i_uv0'])
+    expect(mat.attributes.map(a => a.glslType)).toEqual(['vec3', 'vec3', 'vec4', 'vec4', 'vec2'])
+    expect(mat.attributes.every(a => a.instance === true)).toBe(true)
+    // No position/uv/color per-vertex attributes — the corner math owns them.
+    expect(mat.glsl.vertex).not.toMatch(/in vec3 position;/)
+    expect(mat.glsl.vertex).not.toMatch(/in vec2 uv;/)
+    expect(mat.glsl.vertex).not.toMatch(/in vec4 color;/)
+    // The instance record attributes, dense locations 0..4.
+    for (let at = 0; at < 5; at++) {
+      expect(mat.glsl.vertex).toContain(`layout(location = ${at}) in`)
+    }
+    expect(mat.glsl.vertex).toContain('in vec3 i_pos;')
+    expect(mat.glsl.vertex).toContain('in vec2 i_uv0;')
+  })
+
+  it('emits the corner expansion (all five modes) and the bbWorld position', () => {
+    resetMaterials()
+    const mat = materialOf({ features: SPRITE_BB })
+    const v = mat.glsl.vertex
+    // The 6-corner table + the gl_VertexID fetch.
+    expect(v).toContain('BB_CORNERS[6]')
+    expect(v).toContain('BB_CORNERS[gl_VertexID]')
+    // The mode chain: camera(0) / vertical+horizontal(1,2) / stretched(3) /
+    // oriented(else) — the u_bbA.x switch.
+    expect(v).toContain('int bbMode = int(u_bbA.x + 0.5);')
+    expect(v).toContain('bbMode == 0')
+    expect(v).toContain('bbMode == 1 || bbMode == 2')
+    expect(v).toContain('bbMode == 3')
+    // The final position: the mvp times the expanded world position.
+    expect(v).toContain('gl_Position = u_mvp * vec4(bbWorld, 1.0);')
+    // The varyings ride the record: the uv from the tile origin + corner,
+    // the color straight from i_color.
+    expect(v).toContain('v_uv = bbUv;')
+    expect(v).toContain('v_color = i_color;')
+    // The uniforms of the contract.
+    expect(v).toContain('uniform vec4 u_bbA;')
+    expect(v).toContain('uniform vec4 u_bbB;')
+    expect(v).toContain('uniform vec3 u_bbRight;')
+    expect(v).toContain('uniform vec3 u_bbUp;')
+    expect(v).toContain('uniform vec3 u_bbForward;')
+    expect(v).toContain('uniform vec3 u_bbAxis;')
+  })
+
+  it('the WGSL twin: vertex_index builtin, the same params, params.* reads', () => {
+    resetMaterials()
+    const mat = materialOf({ features: SPRITE_BB })
+    const w = mat.wgsl
+    expect(w).toContain('@builtin(vertex_index) vi : u32')
+    expect(w).toContain('bbCorners[vi]')
+    for (const name of ['i_pos', 'i_vel', 'i_color', 'i_par', 'i_uv0']) {
+      expect(w).toMatch(new RegExp(`@location\\(\\d\\) ${name} :`))
+    }
+    expect(w).toContain('out.pos = params.u_mvp * vec4<f32>(bbWorld, 1.0);')
+    expect(w).toContain('out.uv = bbUv;')
+    expect(w).toContain('out.color = i_color;')
+    expect(w).toContain('u_bbA : vec4<f32>,')
+    expect(w).toContain('u_bbRight : vec4<f32>,')
+  })
+
+  it('reflects for BOTH compilers exactly like a drawable material (the binding contract)', () => {
+    resetMaterials()
+    const mat = materialOf({ features: SPRITE_BB })
+    // WGSL: 5 @location params (the builtin skipped), the uniforms parsed.
+    const r = reflectWgsl(mat.wgsl)
+    expect(r.attributes.map(a => a.name)).toEqual(['i_pos', 'i_vel', 'i_color', 'i_par', 'i_uv0'])
+    expect(r.attributes.map(a => a.location)).toEqual([0, 1, 2, 3, 4])
+    for (const name of ['u_mvp', 'u_bbA', 'u_bbB', 'u_bbRight', 'u_bbUp', 'u_bbForward', 'u_bbAxis']) {
+      expect(r.uniforms.map(u => u.name)).toContain(name)
+    }
+    // GLSL: the reflection drives the executor's attribute binding.
+    const g = reflectGlsl(mat.glsl.vertex, mat.glsl.fragment)
+    expect(g.attributes.map(a => a.name)).toEqual(['i_pos', 'i_vel', 'i_color', 'i_par', 'i_uv0'])
+    expect(g.uniforms.map(u => u.name)).toContain('u_bbA')
+  })
+
+  it('composes with the sprite family: ALPHA_CUTOFF, SOFT_PARTICLES, OUTPUT_DITHER', () => {
+    resetMaterials()
+    const mat = materialOf({ features: SPRITE_BB | ALPHA_CUTOFF | SOFT_PARTICLES | OUTPUT_DITHER })
+    expect(mat.glsl.fragment).toContain('u_alphaCutoff')
+    expect(mat.glsl.fragment).toContain('u_depth')
+    expect(mat.glsl.fragment).toContain('ditherA')
+    expect(mat.wgsl).toContain('depthTexture')
+    // The instance attributes survived the composition.
+    expect(mat.attributes.map(a => a.name)).toEqual(['i_pos', 'i_vel', 'i_color', 'i_par', 'i_uv0'])
+  })
+
+  it('compiles through the REAL GL command path (the executor contract)', async () => {
+    resetMaterials()
+    const { createCompileContext, compileDrawSpec } = await import('@rune/webgl2')
+    const arena = createUniformArena(1 << 16)
+    const ctx = createCompileContext(arena, 'codegen')
+    const mat = materialOf({ features: SPRITE_BB })
+    const records = new Float32Array(16 * 8)
+    const command = compileDrawSpec({
+      shader: { glsl: mat.glsl },
+      pipeline: { blend: { src: 'one', dst: 'one-minus-src-alpha' } },
+      uniforms: {
+        u_mvp: TRI.subarray(0, 16) as unknown as Float32Array,
+        u_bbA: [0, 1.5, 0, 1],
+        u_bbB: [0, 1, 1, 1],
+        u_bbRight: [1, 0, 0],
+        u_bbUp: [0, 1, 0],
+        u_bbForward: [0, 0, -1],
+        u_bbAxis: [0, 0, 1],
+      },
+      attributes: {
+        i_pos: { data: records, size: 3, stride: 64, offset: 0, step: 'instance' },
+        i_vel: { data: records, size: 3, stride: 64, offset: 12, step: 'instance' },
+        i_color: { data: records, size: 4, stride: 64, offset: 24, step: 'instance' },
+        i_par: { data: records, size: 4, stride: 64, offset: 40, step: 'instance' },
+        i_uv0: { data: records, size: 2, stride: 64, offset: 56, step: 'instance' },
+      },
+      count: 6,
+      instances: 8,
+    }, ctx)
+    expect(command.id).toBe(0)
+    // Every record attribute compiled with the instance divisor.
+    const rich = command as unknown as { attributes: Array<{ location: number; instance: boolean; stride?: number; offset?: number }> }
+    expect(rich.attributes).toHaveLength(5)
+    for (const attr of rich.attributes) {
+      expect(attr.instance).toBe(true)
+      expect(attr.stride).toBe(64)
+    }
+    expect(rich.attributes[0].offset).toBe(0)
+    expect(rich.attributes[4].offset).toBe(56)
+  })
+
+  it('rejects the meaningless combinations (loud, at assembly)', () => {
+    resetMaterials()
+    expect(() => materialOf({ features: TEXTURE | BILLBOARD })).toThrow('BILLBOARD requires VERTEX_COLOR')
+    expect(() => materialOf({ features: VERTEX_COLOR | FLAT_ALBEDO | BILLBOARD })).toThrow('BILLBOARD requires TEXTURE')
+    expect(() => materialOf({ features: SPRITE_BB | LAMBERT })).toThrow('BILLBOARD excludes the light models')
+    expect(() => materialOf({ features: SPRITE_BB | INSTANCED })).toThrow('BILLBOARD excludes')
+    expect(() => materialOf({ features: SPRITE_BB | SKIN })).toThrow('BILLBOARD excludes')
+    expect(() => materialOf({ features: SPRITE_BB | NORMALMAP })).toThrow('BILLBOARD excludes')
+  })
+
+  it('the mask with bit 31 keys the variant cache injectively (the negative-int32 case)', () => {
+    resetMaterials()
+    const a = materialOf({ features: SPRITE_BB })
+    const b = materialOf({ features: SPRITE_BB })
+    expect(a).toBe(b) // the cache hit — the same variant object
+    expect(variantCount()).toBe(1)
+    const other = materialOf({ features: TEXTURE | VERTEX_COLOR | OUTPUT_DITHER })
+    expect(other).not.toBe(a)
   })
 })

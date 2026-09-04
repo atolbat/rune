@@ -81,9 +81,9 @@ export default {
           { t: 1, size: 0.94, r: 1, g: 0.8, b: 0.42, a: 0.5 },
         ]),
         spawner: HALO_S,
-        render: { kind: 'billboard', mode: 'camera' },
+        render: { kind: 'billboard', draw: 'instance', mode: 'camera' },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       texture: () => env.glowTexture,
     })
@@ -104,9 +104,9 @@ export default {
           { t: 1, size: 1, r: 0.9, g: 0.93, b: 1, a: 0.4 },
         ]),
         spawner: MOON_S,
-        render: { kind: 'billboard', mode: 'camera' },
+        render: { kind: 'billboard', draw: 'instance', mode: 'camera' },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       texture: () => env.glowTexture,
     })
@@ -144,9 +144,9 @@ export default {
           seek: { strength: 1.5, damping: 2.7 },
         },
         spawner: FLY_S,
-        render: { kind: 'billboard', mode: 'camera' },
+        render: { kind: 'billboard', draw: 'instance', mode: 'camera' },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       // the single-glow sprite: WITHOUT tiles the 4×4 atlas would print a
       // grid of glows into every particle (the "sharp squares" bug)

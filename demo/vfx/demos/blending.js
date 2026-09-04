@@ -65,6 +65,7 @@ export default {
         id: `blend-${label}`,
         facade: env.createParticles({
           capacity: 34,
+          render: { kind: 'billboard', draw: 'instance' },
           prewarm: 10,
           // a slow trickle: every ~0.35 s a new sprite fades in as an old
           // one fades out — the cloud NEVER empties, NEVER re-arranges at
@@ -86,7 +87,7 @@ export default {
             color: [[0.5, 0.5, 0.5, 1], [0.55, 0.55, 0.55, 1]], seed: 211 + i * 17,
           },
         }),
-        material: env.materials.sprite,
+        material: env.materials.bbSprite,
         pipeline: env.pipelines[pipeline],
         texture: () => sprite,
       })

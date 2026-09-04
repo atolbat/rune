@@ -57,9 +57,9 @@ export default {
           noise: { strength: 0.55, scale: 0.22, speed: 0.07 },
         },
         spawner: MOTE_S,
-        render: { kind: 'billboard', mode: 'camera', spin: 0.3 },
+        render: { kind: 'billboard', draw: 'instance', mode: 'camera', spin: 0.3 },
       }),
-      material: env.materials.sprite,
+      material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       texture: () => env.glowTexture,
     })
@@ -84,11 +84,11 @@ export default {
         ]),
         forces: { gravity: [0, 0.015, 0], drag: 0.3 },
         spawner: HAZE_S,
-        render: { kind: 'billboard', spin: 0.05 },
+        render: { kind: 'billboard', draw: 'instance', spin: 0.05 },
       }),
       // the dithered sprite material + the dedicated edge-safe cloud:
       // no tile seams, no quantization stair-steps at the ~5% alphas
-      material: env.materials.haze,
+      material: env.materials.bbHaze,
       pipeline: env.pipelines.alpha,
       texture: () => env.hazeTexture,
     })

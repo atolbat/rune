@@ -22,12 +22,18 @@
  */
 
 import {
-  createParticleSystem, NO_FORCES, MAX_PLANES, MAX_SPHERES, MAX_BOXES,
-  type Attractor, type ForceFields, type ParticleFields, type ParticleSystem, type RetireRecord, type Collision, type SeekForce, type LimitSpeedForce,
+  createParticleSystem, NO_FORCES,
+  type ForceFields, type ParticleFields, type ParticleSystem, type RetireRecord,
 } from './system.ts'
+import {
+  validateAttractor, validateCollision, validateSeek, validateLimitSpeed,
+  validateInherit, validateRateOverDistance, validateWrap, validateBurst,
+} from './validate.ts'
 import { createSpawner, type Spawner, type SpawnerDesc } from './spawn.ts'
 import { CONSTANT_RAMP, type Ramp } from './ramp.ts'
 import { validateNoise, type NoiseField } from './noise.ts'
+import { packInstances, INSTANCE_STRIDE, INSTANCE_LAYOUT, type PackOptions } from './instances.ts'
+import { GPU_STATE_STRIDE } from './gpuSim.ts'
 import {
   fillBillboards, SOUP_STRIDE, VERTS_PER_PARTICLE, type CameraBasis, type BillboardOptions,
 } from './billboards.ts'
@@ -57,9 +63,13 @@ export interface BurstDesc {
   readonly probability: number
 }
 
-/** The render description — which soup the facade bakes. */
+/** The render description — which soup the facade bakes.
+ *  Task 131 — the billboard kind's `draw` picks the record format:
+ *  'soup' (the classic 6-vertex expansion, the LCD of every draw path) or
+ *  'instance' (16-float records + the BILLBOARD material's GPU expansion —
+ *  the optimization program's Phase 1; see instances.ts). */
 export type RenderDesc =
-  | ({ readonly kind: 'billboard' } & Omit<BillboardOptions, 'ramp'>)
+  | ({ readonly kind: 'billboard'; readonly draw?: 'soup' | 'instance' } & Omit<BillboardOptions, 'ramp'>)
   | ({ readonly kind: 'trail' } & TrailOptions & Omit<TrailBakeOptions, 'ramp'>)
   | ({ readonly kind: 'mesh'; readonly geometry: MeshGeometry } & Omit<MeshOptions, 'ramp'>)
 
@@ -112,6 +122,46 @@ export interface ParticlesDesc {
   /** The retire hook (Task 122 — sub-emitters): called per dead particle
    *  with its final state (a REUSED record — copy what you need). */
   readonly onRetire?: (record: RetireRecord) => void
+  /** Task 131 — THE SIMULATION TIER: 'cpu' (the default — the reference,
+   *  bit-identical on both backends) or 'gpu' (the WebGPU compute tier —
+   *  the state lives in a storage buffer, the forces/aging run as compute
+   *  passes, the CPU keeps emission + death + compaction; see
+   *  docs/particles-optimization.md Phase 2). Requires render.draw:
+   *  'instance'; rejects the CPU-coupled features (onRetire, collide,
+   *  seek, speedCurve, attract.killRadius, prewarm — the death site and
+   *  the contact events are CPU-blind on the GPU tier). WebGL2 has no
+   *  compute: attach the GPU backend (@rune/gl createGpuParticles) or the
+   *  first advance() fails LOUDLY. The CPU tier stays the demos' default
+   *  (the dual-backend visual-parity contract). */
+  readonly sim?: 'cpu' | 'gpu'
+}
+
+/** Task 131 — sim:'gpu' — the per-frame CPU→GPU handoff (read by the
+ *  orchestrator between advance() and the draw; reset at the next
+ *  advance). The emit rows are the NEW particles at their
+ *  PRE-COMPACTION slots — upload them FIRST, then replay the swaps: the
+ *  GPU state ends up matching the CPU's post-compaction structure
+ *  exactly (the same moves in the same order on the same data). */
+export interface GpuHandoff {
+  /** True once the orchestrator attached (createGpuParticles). The
+   *  facade's first advance() without it throws (a loud misconfiguration
+   *  — WebGL2 must pass sim:'cpu'). */
+  attached: boolean
+  /** The interleaved FIELD_NAMES rows of this advance's newborns, at
+   *  their pre-compaction slots [emitBase, emitBase + emitCount). */
+  readonly emitRows: Float32Array
+  emitBase: number
+  emitCount: number
+  /** The compaction swaps of this advance: (to, from) u32 pairs in the
+   *  CPU walk's exact order. */
+  readonly swaps: Uint32Array
+  swapCount: number
+  /** The at() origin at this advance (the WRAP CENTER the GPU wraps
+   *  around — the same origin the CPU tier's wrap block uses). */
+  readonly emitOrigin: readonly number[]
+  /** The resolved wrap sizes (per-axis, 0 = off; null — no wrap). Static:
+   *  the desc's wrap. */
+  readonly wrapSize: readonly [number, number, number] | null
 }
 
 /** The attribute layout of a soup — how a draw command binds it. */
@@ -123,20 +173,35 @@ export interface SoupLayout {
 }
 
 /** The soup view — a REUSED result object (the scene.cull pattern): the
- *  same reference every frame, the vertexCount updated. */
+ *  same reference every frame, the counts updated. Task 131 — the view
+ *  carries BOTH record formats: `draw` says which one `vertices` holds.
+ *  'soup'     — vertices = the 6-vertex expansion (stride 9), vertexCount
+ *               counts VERTICES (a plain drawArrays).
+ *  'instance' — vertices = the 16-float records (stride 16), vertexCount
+ *               === instanceCount counts INSTANCES (draw 6 vertices ×
+ *               instanceCount through the BILLBOARD material). */
 export interface SoupView {
-  /** The vertex soup, valid on [0, vertexCount × stride). */
+  /** The vertex soup or the instance records, valid on
+   *  [0, vertexCount × stride). */
   readonly vertices: Float32Array
-  /** Live vertices this frame. */
+  /** Live vertices (soup) or instances (instance) this frame. */
   vertexCount: number
-  /** Floats per vertex of THIS view (36 billboard/trail, 48 mesh). */
+  /** Floats per record of THIS view (36 billboard/trail, 48 mesh, 16 the
+   *  instance records). */
   readonly stride: number
   /** The attribute layout (byte offsets are stride×4-based: offsets here
-   *  are in FLOATS — multiply by 4 for bytes). */
+   *  are in FLOATS — multiply by 4 for bytes). In instance mode: position =
+   *  i_pos, uv = i_uv0 (the tile origin), color = i_color. */
   readonly layout: SoupLayout
+  /** Task 131 — which record format `vertices` holds. */
+  readonly draw: 'soup' | 'instance'
+  /** Task 131 — the live instance count (instance mode; 0 in soup mode). */
+  instanceCount: number
+  /** Task 131 — the instance record field offsets (instance mode; null
+   *  in soup mode). The GPU-mapping contract of the BILLBOARD material. */
+  readonly instanceLayout: typeof INSTANCE_LAYOUT | null
 }
 
-/** The facade. */
 /** The facade. */
 export interface Particles {
   /** Live particles. */
@@ -149,6 +214,23 @@ export interface Particles {
    *  advance() calls — the "custom plugin" story). The store owns the
    *  compaction; never reorder the [0, count) range yourself. */
   readonly fields: ParticleFields
+  /** Task 131 — the resolved render description (read-only): which soup
+   *  the facade bakes + the billboard options (the mode, the tiles, the
+   *  stretch factors — what a renderer derives the BILLBOARD material's
+   *  uniforms from). */
+  readonly render: RenderDesc
+  /** The billboard spin speed, radians/second (the desc's spin). */
+  readonly spin: number
+  /** Task 131 — the resolved force fields (read-only): the GPGPU
+   *  orchestrator reads them (the GPU tier runs the same forces). */
+  readonly forces: ForceFields
+  /** Task 131 — the over-life ramp (read-only): the GPGPU orchestrator
+   *  uploads it as the pack's LUT. */
+  readonly ramp: Ramp
+  /** Task 131 — sim:'gpu' — the per-frame GPU handoff (null on the CPU
+   *  tier). Read it between advance() and the draw, then run the
+   *  orchestrator's step(). */
+  readonly gpuHandoff: GpuHandoff | null
 
   /** Sets the continuous emission: `rate` particles/second through the
    *  spawner (a spawner argument replaces the current one). Chainable. */
@@ -176,7 +258,8 @@ export interface Particles {
   advance(dt: number): this
   /** Bakes the soup for the camera basis (the render kind chooses the
    *  baker). Returns the REUSED view — hold no reference across frames,
-   *  read it and draw. */
+   *  read it and draw. Task 131: a billboard desc with draw:'instance'
+   *  packs the 16-float records instead (see SoupView.draw). */
   view(basis: CameraBasis, options?: RenderBakeOverride): SoupView
   /** The billboard alias of view() (the classic API — back-compat). */
   billboards(basis: CameraBasis): SoupView
@@ -222,15 +305,71 @@ export function createParticles(desc: ParticlesDesc): Particles {
     limitSpeed: validateLimitSpeed(desc.forces?.limitSpeed),
   }
 
+  // Task 126 — the WRAP VOLUME: flat per-axis sizes (0 = the axis is off).
+  const wrap = validateWrap(desc.wrap)
+  const wrapX = wrap !== null && wrap[0] > 0 ? wrap[0] : 0
+  const wrapY = wrap !== null && wrap[1] > 0 ? wrap[1] : 0
+  const wrapZ = wrap !== null && wrap[2] > 0 ? wrap[2] : 0
+  const hasWrap = wrapX > 0 || wrapY > 0 || wrapZ > 0
+
   // ── the render kind setup (before the store: trails need onSwap) ──────
   const kind = render.kind
   let history: TrailHistory | null = null
   if (kind === 'trail') {
     history = createTrailHistory(capacity, render as TrailOptions)
   }
+  // Task 131 — THE SIMULATION TIER. 'gpu': the WebGPU compute advance (the
+  // CPU keeps emission/death/compaction; the state lives in a storage
+  // buffer). Validated loudly against the CPU-coupled features.
+  const sim = desc.sim ?? 'cpu'
+  const gpuMode = sim === 'gpu'
+  let gpuHandoff: GpuHandoff | null = null
+  let gpuSwaps: Uint32Array | null = null
+  let gpuSwapCount = 0
+  if (gpuMode) {
+    if (kind !== 'billboard' || (render as { draw?: string }).draw !== 'instance') {
+      throw new Error('rune/particles: sim:"gpu" requires render { kind: "billboard", draw: "instance" } (the GPU tier packs the instance records itself — the soup/trail/mesh kinds are CPU-baked)')
+    }
+    if (desc.onRetire !== undefined) {
+      throw new Error('rune/particles: sim:"gpu" rejects onRetire (the death site lives on the GPU — the sub-emitter family stays on the CPU tier)')
+    }
+    if (forces.collide !== null) {
+      throw new Error('rune/particles: sim:"gpu" rejects collide (the bounce response needs the CPU positions; the contact events are CPU-blind — the rain/splash family stays on the CPU tier)')
+    }
+    if (forces.seek !== null) {
+      throw new Error('rune/particles: sim:"gpu" rejects seek (the targets are dynamic CPU writes — retargeting would need strided per-frame uploads; the sequencer family stays on the CPU tier)')
+    }
+    if (forces.speedCurve !== null) {
+      throw new Error('rune/particles: sim:"gpu" rejects forces.speedCurve (the telescoping rescale stays CPU-side in v1 — the rocket class keeps sim:"cpu")')
+    }
+    if ((forces.attract ?? null) !== null && ((forces.attract as { killRadius?: number } | null)?.killRadius ?? 0) > 0) {
+      throw new Error('rune/particles: sim:"gpu" rejects attract.killRadius (the sink retires via positions — CPU-blind on the GPU tier; the vortex drain stays on the CPU tier)')
+    }
+    if ((desc.prewarm ?? 0) > 0) {
+      throw new Error('rune/particles: sim:"gpu" rejects prewarm (the GPU state cannot be fast-forwarded synchronously — emit a burst and let a few frames pass instead)')
+    }
+    gpuSwaps = new Uint32Array(2 * capacity) // the pairs ≤ the deaths ≤ capacity
+    gpuHandoff = {
+      attached: false,
+      emitRows: new Float32Array(GPU_STATE_STRIDE * capacity),
+      emitBase: 0, emitCount: 0,
+      swaps: gpuSwaps, swapCount: 0,
+      emitOrigin: [0, 0, 0],
+      wrapSize: hasWrap ? [wrapX, wrapY, wrapZ] : null,
+    }
+  }
   const system: ParticleSystem = createParticleSystem(capacity, {
     onRetire: desc.onRetire,
-    onSwap: history !== null ? history.handleSwap : undefined,
+    onSwap: gpuSwaps !== null
+      ? (to, from) => {
+        // the GPU compaction replay: the exact CPU moves in exact order
+        if (gpuSwapCount < gpuSwaps!.length / 2) {
+          const at = gpuSwapCount * 2
+          gpuSwaps![at] = to; gpuSwaps![at + 1] = from
+          gpuSwapCount++
+        }
+      }
+      : history !== null ? history.handleSwap : undefined,
   })
 
   let spawner: Spawner = createSpawner(desc.spawner ?? DEFAULT_SPAWNER)
@@ -242,12 +381,6 @@ export function createParticles(desc: ParticlesDesc): Particles {
   // advance is a TELEPORT — it contributes neither velocity nor distance.
   const inheritK = validateInherit(desc.inheritVelocity)
   const rateOverDist = validateRateOverDistance(desc.rateOverDistance)
-  // Task 126 — the WRAP VOLUME: flat per-axis sizes (0 = the axis is off).
-  const wrap = validateWrap(desc.wrap)
-  const wrapX = wrap !== null && wrap[0] > 0 ? wrap[0] : 0
-  const wrapY = wrap !== null && wrap[1] > 0 ? wrap[1] : 0
-  const wrapZ = wrap !== null && wrap[2] > 0 ? wrap[2] : 0
-  const hasWrap = wrapX > 0 || wrapY > 0 || wrapZ > 0
   let distCarry = 0 // the fractional emission remainder (the distance rate)
   let lastOx = 0, lastOy = 0, lastOz = 0 // the origin at the last advance
   let emitterVx = 0, emitterVy = 0, emitterVz = 0
@@ -302,6 +435,7 @@ export function createParticles(desc: ParticlesDesc): Particles {
   let soupFloats: number
   let stride: number
   let layout: SoupLayout
+  let drawFormat: 'soup' | 'instance' = 'soup'
   if (kind === 'mesh') {
     const geo = (render as { geometry: MeshGeometry }).geometry
     const vertsPer = geo.vertexCount
@@ -317,12 +451,28 @@ export function createParticles(desc: ParticlesDesc): Particles {
     stride = SOUP_STRIDE
     layout = { position: { size: 3, offset: 0 }, uv: { size: 2, offset: 3 }, color: { size: 4, offset: 5 } }
   } else {
-    soupFloats = capacity * VERTS_PER_PARTICLE * SOUP_STRIDE
-    stride = SOUP_STRIDE
-    layout = { position: { size: 3, offset: 0 }, uv: { size: 2, offset: 3 }, color: { size: 4, offset: 5 } }
+    // Task 131 — the DRAW FORMAT: 'instance' packs 16-float records (the
+    // GPU expands the quad — the Phase-1 path); 'soup' (the default, the
+    // classic LCD) bakes the 6-vertex expansion CPU-side.
+    const draw = (render as { draw?: 'soup' | 'instance' }).draw === 'instance' ? 'instance' : 'soup'
+    drawFormat = draw
+    if (draw === 'instance') {
+      soupFloats = capacity * INSTANCE_STRIDE
+      stride = INSTANCE_STRIDE
+      layout = { position: { size: 3, offset: INSTANCE_LAYOUT.pos.offset }, uv: { size: 2, offset: INSTANCE_LAYOUT.uv0.offset }, color: { size: 4, offset: INSTANCE_LAYOUT.color.offset } }
+    } else {
+      soupFloats = capacity * VERTS_PER_PARTICLE * SOUP_STRIDE
+      stride = SOUP_STRIDE
+      layout = { position: { size: 3, offset: 0 }, uv: { size: 2, offset: 3 }, color: { size: 4, offset: 5 } }
+    }
   }
   const vertices = new Float32Array(soupFloats)
-  const view: SoupView = { vertices, vertexCount: 0, stride, layout }
+  const view: SoupView = {
+    vertices, vertexCount: 0, stride, layout,
+    draw: drawFormat,
+    instanceCount: 0,
+    instanceLayout: drawFormat === 'instance' ? INSTANCE_LAYOUT : null,
+  }
 
   // ── the burst schedule state (Task 122) ────────────────────────────────
   let time = 0 // the facade's own clock (per-facade closure state; the prewarm shares it)
@@ -349,6 +499,11 @@ export function createParticles(desc: ParticlesDesc): Particles {
     get count() { return system.count },
     get capacity() { return capacity },
     get fields() { return system.fields },
+    get render() { return render },
+    get spin() { return spin },
+    get forces() { return forces },
+    get ramp() { return ramp },
+    get gpuHandoff() { return gpuHandoff },
 
     rate(perSecond, sp) {
       if (!Number.isFinite(perSecond) || perSecond < 0) {
@@ -421,17 +576,39 @@ export function createParticles(desc: ParticlesDesc): Particles {
       } else {
         const renderOpts = render as Omit<BillboardOptions, 'ramp'>
         const o = options?.billboard ?? {}
-        view.vertexCount = fillBillboards(system, basis, vertices, {
-          ramp,
-          spin,
-          mode: o.mode ?? renderOpts.mode ?? 'camera',
-          tiles: o.tiles ?? renderOpts.tiles,
-          speedFactor: o.speedFactor ?? renderOpts.speedFactor,
-          lengthFactor: o.lengthFactor ?? renderOpts.lengthFactor,
-          axis: o.axis ?? renderOpts.axis,
-          spin3d: o.spin3d ?? renderOpts.spin3d,
-          frameJitter: o.frameJitter ?? renderOpts.frameJitter,
-        })
+        if (gpuMode) {
+          // Task 131 — the GPU tier: the records are PACKED ON THE GPU (the
+          // pack dispatch of the orchestrator's step()); view() reports the
+          // COUNT ONLY (the CPU buffer stays zero — never uploaded, the
+          // draw binds the external records buffer through bufferId).
+          view.vertexCount = system.count
+          view.instanceCount = system.count
+        } else if (drawFormat === 'instance') {
+          // Task 131 — the instanced path: the 16-float records (the CPU
+          // resolves the ramp/tint/tile; the BILLBOARD material's vertex
+          // stage expands the quad on the GPU). The counts alias: the
+          // records ARE the draw's instances.
+          const packOpts: PackOptions = {
+            ramp,
+            tiles: o.tiles ?? renderOpts.tiles,
+            frameJitter: o.frameJitter ?? renderOpts.frameJitter,
+          }
+          view.vertexCount = packInstances(system, vertices, packOpts)
+          view.instanceCount = view.vertexCount
+        } else {
+          view.vertexCount = fillBillboards(system, basis, vertices, {
+            ramp,
+            spin,
+            mode: o.mode ?? renderOpts.mode ?? 'camera',
+            tiles: o.tiles ?? renderOpts.tiles,
+            speedFactor: o.speedFactor ?? renderOpts.speedFactor,
+            lengthFactor: o.lengthFactor ?? renderOpts.lengthFactor,
+            axis: o.axis ?? renderOpts.axis,
+            spin3d: o.spin3d ?? renderOpts.spin3d,
+            frameJitter: o.frameJitter ?? renderOpts.frameJitter,
+          })
+          view.instanceCount = 0
+        }
       }
       return view
     },
@@ -449,13 +626,116 @@ export function createParticles(desc: ParticlesDesc): Particles {
       system.clear()
       carry = 0
       distCarry = 0
+      if (gpuHandoff !== null) {
+        gpuHandoff.emitBase = 0
+        gpuHandoff.emitCount = 0
+        gpuHandoff.swapCount = 0
+        gpuSwapCount = 0
+      }
       return facade
     },
+  }
+
+  /** Task 131 — the GPU-tier advance: emission CPU-side (the SoA as the
+   *  scratch), the emit rows gathered PRE-COMPACTION, then the aging walk
+   *  (NO forces — the GPU owns them), the compaction swap list collected,
+   *  and NO wrap (the GPU's positions are authoritative). The orchestrator
+   *  reads facade.gpuHandoff between this call and the draw. */
+  function advanceGpu(dt: number): void {
+    const handoff = gpuHandoff!
+    if (!handoff.attached) {
+      throw new Error('rune/particles: sim:"gpu" needs the GPU backend — createGpuParticles(facade, gpuFacade) from @rune/gl (WebGL2 has no compute; pass sim:"cpu" there)')
+    }
+    const emitBase = system.count
+    handoff.emitBase = emitBase
+    handoff.emitCount = 0
+    gpuSwapCount = 0
+    ;(handoff.emitOrigin as unknown as number[])[0] = origin[0]
+    ;(handoff.emitOrigin as unknown as number[])[1] = origin[1]
+    ;(handoff.emitOrigin as unknown as number[])[2] = origin[2]
+    // Task 124 — the emitter motion FIRST (this frame's newborns inherit
+    // the CURRENT frame's emitter velocity; the distance emission precedes
+    // the rate so a swing's trail starts at the swing).
+    if (inheritK > 0 || rateOverDist > 0) {
+      const mdx = origin[0] - lastOx, mdy = origin[1] - lastOy, mdz = origin[2] - lastOz
+      const moved = Math.hypot(mdx, mdy, mdz)
+      if (moved > MAX_EMITTER_STEP) {
+        emitterVx = 0; emitterVy = 0; emitterVz = 0
+      } else {
+        emitterVx = mdx / dt; emitterVy = mdy / dt; emitterVz = mdz / dt
+        if (rateOverDist > 0 && moved > 0) {
+          distCarry += moved * rateOverDist
+          const whole = Math.floor(distCarry)
+          if (whole > 0) {
+            distCarry -= whole
+            emitStream(whole)
+          }
+        }
+      }
+      lastOx = origin[0]; lastOy = origin[1]; lastOz = origin[2]
+    }
+    if (ratePerSecond > 0) {
+      carry += ratePerSecond * dt
+      const whole = Math.floor(carry)
+      if (whole > 0) {
+        carry -= whole
+        emitStream(whole)
+      }
+    }
+    for (const state of burstState) {
+      const burst = bursts[state.index]
+      // A while, not an if: a long stall (a hidden tab) fires the missed
+      // bursts — the schedule is time-anchored, not frame-anchored.
+      let guard = 0
+      while (time >= state.next && state.firesLeft > 0 && guard++ < 64) {
+        if (hash01(scheduleSeed, state.index * 7919 + 13, state.cycle) < burst.probability) {
+          emitStream(burst.count)
+        }
+        state.firesLeft--
+        state.cycle++
+        state.next += burst.interval
+      }
+    }
+    // THE EMIT GATHER (pre-compaction): the fresh rows at their slots —
+    // the GPU upload lands BEFORE the swap replay, so the GPU state ends
+    // up matching the CPU's post-compaction structure exactly.
+    const n = system.count - emitBase
+    if (n > 0) {
+      const f = system.fields
+      const rows = handoff.emitRows
+      for (let i = 0; i < n; i++) {
+        const s = emitBase + i
+        const at = i * GPU_STATE_STRIDE
+        rows[at] = f.px[s]; rows[at + 1] = f.py[s]; rows[at + 2] = f.pz[s]
+        rows[at + 3] = f.vx[s]; rows[at + 4] = f.vy[s]; rows[at + 5] = f.vz[s]
+        rows[at + 6] = f.age[s]; rows[at + 7] = f.life[s]; rows[at + 8] = f.size[s]
+        rows[at + 9] = f.cr[s]; rows[at + 10] = f.cg[s]; rows[at + 11] = f.cb[s]; rows[at + 12] = f.ca[s]
+        rows[at + 13] = f.seed[s]
+        rows[at + 14] = f.tx[s]; rows[at + 15] = f.ty[s]; rows[at + 16] = f.tz[s]
+      }
+      handoff.emitCount = n
+    }
+    // The aging walk: NO forces (the GPU runs them), retirement + the
+    // compaction (the collector fills the swap list). The stall guard's
+    // substeps preserve the age/retirement honesty.
+    if (dt > MAX_STEP) {
+      const steps = Math.min(600, Math.ceil(dt / MAX_STEP))
+      const h = dt / steps
+      for (let s = 0; s < steps; s++) system.advance(h, NO_FORCES)
+    } else {
+      system.advance(dt, NO_FORCES)
+    }
+    handoff.swapCount = gpuSwapCount
+    time += dt
   }
 
   /** The one advance implementation (the prewarm shares it). */
   function advanceInternal(dt: number): void {
     if (!Number.isFinite(dt) || dt <= 0) return
+    if (gpuMode) {
+      advanceGpu(dt)
+      return
+    }
     // Task 124 — the emitter motion FIRST (this frame's newborns inherit the
     // CURRENT frame's emitter velocity; the distance emission precedes the
     // rate so a swing's trail starts at the swing). A teleport (> the step
@@ -572,200 +852,10 @@ const DEFAULT_SPAWNER: SpawnerDesc = {
  *  a 60 fps rocket at 10 u/s moves 0.17). */
 const MAX_EMITTER_STEP = 25
 
-/** Inheritance validation: a finite fraction >= 0 (1 = fully riding the
- *  emitter; > 1 = overshoot — allowed, it reads as a slingshot). */
-function validateInherit(k: number | undefined): number {
-  if (k === undefined) return 0
-  if (!Number.isFinite(k) || k < 0) {
-    throw new Error(`rune/particles: inheritVelocity must be a finite >= 0 (got ${k}; the fraction of the emitter's velocity a newborn rides)`)
-  }
-  return k
-}
-
-/** Rate-over-distance validation: particles per world unit, finite >= 0. */
-function validateRateOverDistance(r: number | undefined): number {
-  if (r === undefined) return 0
-  if (!Number.isFinite(r) || r < 0) {
-    throw new Error(`rune/particles: rateOverDistance must be a finite >= 0 (got ${r}; particles per world unit the emitter travels)`)
-  }
-  return r
-}
-
 /** Wrap one axis into [-size/2, size/2) around the center: the classic
  *  toroidal modulo (JS % can be negative — re-add the size once). */
 function wrapAxis(d: number, size: number): number {
   let m = (d + size * 0.5) % size
   if (m < 0) m += size
   return m - size * 0.5
-}
-
-/** Wrap validation: three finite sizes >= 0 (0 disables the axis). */
-function validateWrap(wrap: WrapDesc | undefined): [number, number, number] | null {
-  if (wrap === undefined || wrap === null) return null
-  const size = wrap.size
-  if (!Array.isArray(size) || size.length !== 3 || !size.every((v: number) => Number.isFinite(v) && v >= 0)) {
-    throw new Error(`rune/particles: wrap.size must be three finite numbers >= 0, 0 disables the axis (got ${JSON.stringify(size)})`)
-  }
-  return [size[0], size[1], size[2]]
-}
-
-/** Attractor validation (once, at creation — the hot advance() loop trusts
- *  its inputs). A loud error beats a silent NaN poisoning the whole system. */
-function validateAttractor(at: Attractor | null | undefined): Attractor | null {
-  if (at === undefined || at === null) return null
-  const { point, strength, softening } = at
-  if (!Array.isArray(point) || point.length !== 3 || !point.every((v: number) => Number.isFinite(v))) {
-    throw new Error(`rune/particles: attract.point must be three finite numbers (got ${JSON.stringify(point)})`)
-  }
-  if (!Number.isFinite(strength)) {
-    throw new Error(`rune/particles: attract.strength must be finite (got ${strength}; negative = repulsion) — NaN is not an infinite attractor`)
-  }
-  const soft = softening ?? 0.25
-  if (!Number.isFinite(soft) || soft <= 0) {
-    throw new Error(`rune/particles: attract.softening must be finite > 0 (got ${softening}; it caps the force at the center — without it the integrator NaNs)`)
-  }
-  // Task 126 — the sink radius: finite >= 0 (0 — nothing is consumed).
-  const kill = at.killRadius ?? 0
-  if (!Number.isFinite(kill) || kill < 0) {
-    throw new Error(`rune/particles: attract.killRadius must be a finite >= 0 (got ${at.killRadius}; particles inside the sphere are consumed)`)
-  }
-  return at
-}
-
-/** Collision validation (the planes normalize per frame in the store). */
-function validateCollision(collide: Collision | null | undefined): Collision | null {
-  if (collide === undefined || collide === null) return null
-  // Task 128 — the planes are optional now, but AT LEAST ONE shape must
-  // exist (an empty collision set is a silent no-op).
-  const shapeCount = (collide.planes?.length ?? 0) + (collide.spheres?.length ?? 0) + (collide.boxes?.length ?? 0)
-  if (shapeCount === 0) {
-    throw new Error('rune/particles: collide needs at least one plane, sphere or box (a collision set with no shapes is a silent no-op)')
-  }
-  if (collide.planes !== undefined && !Array.isArray(collide.planes)) {
-    throw new Error(`rune/particles: collide.planes must be an array (got ${typeof collide.planes})`)
-  }
-  if (collide.spheres !== undefined && !Array.isArray(collide.spheres)) {
-    throw new Error(`rune/particles: collide.spheres must be an array (got ${typeof collide.spheres})`)
-  }
-  if (collide.boxes !== undefined && !Array.isArray(collide.boxes)) {
-    throw new Error(`rune/particles: collide.boxes must be an array (got ${typeof collide.boxes})`)
-  }
-  if ((collide.planes?.length ?? 0) > MAX_PLANES) {
-    throw new Error(`rune/particles: collide.planes is capped at ${MAX_PLANES} (got ${collide.planes!.length}) — the flat scratch is sized to the cap`)
-  }
-  if ((collide.spheres?.length ?? 0) > MAX_SPHERES) {
-    throw new Error(`rune/particles: collide.spheres is capped at ${MAX_SPHERES} (got ${collide.spheres!.length}) — the flat scratch is sized to the cap`)
-  }
-  if ((collide.boxes?.length ?? 0) > MAX_BOXES) {
-    throw new Error(`rune/particles: collide.boxes is capped at ${MAX_BOXES} (got ${collide.boxes!.length}) — the flat scratch is sized to the cap`)
-  }
-  for (const plane of collide.planes ?? []) {
-    if (!Array.isArray(plane.normal) || plane.normal.length !== 3 || !plane.normal.every((v: number) => Number.isFinite(v))) {
-      throw new Error(`rune/particles: a collision plane normal must be three finite numbers (got ${JSON.stringify(plane.normal)})`)
-    }
-    if (Math.hypot(plane.normal[0], plane.normal[1], plane.normal[2]) < 1e-12) {
-      throw new Error('rune/particles: a collision plane normal must be non-zero')
-    }
-    if (!Array.isArray(plane.point) || plane.point.length !== 3 || !plane.point.every((v: number) => Number.isFinite(v))) {
-      throw new Error(`rune/particles: a collision plane point must be three finite numbers (got ${JSON.stringify(plane.point)})`)
-    }
-    if (!Number.isFinite(plane.restitution) || plane.restitution < 0 || plane.restitution > 1) {
-      throw new Error(`rune/particles: plane restitution must be in [0, 1] (got ${plane.restitution})`)
-    }
-    const fr = plane.friction ?? 0
-    if (!Number.isFinite(fr) || fr < 0 || fr > 1) {
-      throw new Error(`rune/particles: plane friction must be in [0, 1] (got ${fr})`)
-    }
-    // Task 124 — kill on contact + the contact events.
-    if (plane.kill !== undefined && typeof plane.kill !== 'boolean') {
-      throw new Error(`rune/particles: plane kill must be a boolean (got ${JSON.stringify(plane.kill)}; true = the particle retires on contact)`)
-    }
-  }
-  // Task 128 — the spheres: center/radius/restitution/friction/kill.
-  for (const sphere of collide.spheres ?? []) {
-    if (!Array.isArray(sphere.center) || sphere.center.length !== 3 || !sphere.center.every((v: number) => Number.isFinite(v))) {
-      throw new Error(`rune/particles: a collision sphere center must be three finite numbers (got ${JSON.stringify(sphere.center)})`)
-    }
-    if (!Number.isFinite(sphere.radius) || sphere.radius <= 0) {
-      throw new Error(`rune/particles: a collision sphere radius must be a finite > 0 (got ${sphere.radius})`)
-    }
-    if (!Number.isFinite(sphere.restitution) || sphere.restitution < 0 || sphere.restitution > 1) {
-      throw new Error(`rune/particles: sphere restitution must be in [0, 1] (got ${sphere.restitution})`)
-    }
-    const fr = sphere.friction ?? 0
-    if (!Number.isFinite(fr) || fr < 0 || fr > 1) {
-      throw new Error(`rune/particles: sphere friction must be in [0, 1] (got ${fr})`)
-    }
-    if (sphere.kill !== undefined && typeof sphere.kill !== 'boolean') {
-      throw new Error(`rune/particles: sphere kill must be a boolean (got ${JSON.stringify(sphere.kill)})`)
-    }
-  }
-  // Task 128 — the boxes: center/half/restitution/friction/kill.
-  for (const box of collide.boxes ?? []) {
-    if (!Array.isArray(box.center) || box.center.length !== 3 || !box.center.every((v: number) => Number.isFinite(v))) {
-      throw new Error(`rune/particles: a collision box center must be three finite numbers (got ${JSON.stringify(box.center)})`)
-    }
-    if (!Array.isArray(box.half) || box.half.length !== 3 || !box.half.every((v: number) => Number.isFinite(v) && v > 0)) {
-      throw new Error(`rune/particles: a collision box half must be three finite numbers > 0 (got ${JSON.stringify(box.half)}; [1.6, 0.9, 1.6] = a 3.2×1.8×3.2 crate)`)
-    }
-    if (!Number.isFinite(box.restitution) || box.restitution < 0 || box.restitution > 1) {
-      throw new Error(`rune/particles: box restitution must be in [0, 1] (got ${box.restitution})`)
-    }
-    const fr = box.friction ?? 0
-    if (!Number.isFinite(fr) || fr < 0 || fr > 1) {
-      throw new Error(`rune/particles: box friction must be in [0, 1] (got ${fr})`)
-    }
-    if (box.kill !== undefined && typeof box.kill !== 'boolean') {
-      throw new Error(`rune/particles: box kill must be a boolean (got ${JSON.stringify(box.kill)})`)
-    }
-  }
-  // Task 124 — the contact-event hook: a function, or absent.
-  if (collide.onCollide !== undefined && typeof collide.onCollide !== 'function') {
-    throw new Error(`rune/particles: collide.onCollide must be a function (got ${typeof collide.onCollide}; called per contact after the integration walk — the splash hook)`)
-  }
-  return collide
-}
-
-/** Seek validation. */
-function validateSeek(seek: SeekForce | null | undefined): SeekForce | null {
-  if (seek === undefined || seek === null) return null
-  if (!Number.isFinite(seek.strength) || seek.strength <= 0) {
-    throw new Error(`rune/particles: seek.strength must be a finite > 0 (got ${seek.strength})`)
-  }
-  if (!Number.isFinite(seek.damping) || seek.damping < 0) {
-    throw new Error(`rune/particles: seek.damping must be a finite >= 0 (got ${seek.damping}; ≈ 2·√strength is critically damped)`)
-  }
-  return seek
-}
-
-/** LimitSpeed validation (the over-life speed limiter). */
-function validateLimitSpeed(ls: LimitSpeedForce | null | undefined): LimitSpeedForce | null {
-  if (ls === undefined || ls === null) return null
-  if (!Number.isFinite(ls.limit) || ls.limit < 0) {
-    throw new Error(`rune/particles: limitSpeed.limit must be a finite >= 0 (got ${ls.limit})`)
-  }
-  if (!Number.isFinite(ls.dampen) || ls.dampen < 0 || ls.dampen > 1) {
-    throw new Error(`rune/particles: limitSpeed.dampen must be in [0, 1] (got ${ls.dampen}; their dampen)`)
-  }
-  return ls
-}
-
-/** Burst validation. */
-function validateBurst(burst: BurstDesc): BurstDesc {
-  if (!Number.isFinite(burst.time) || burst.time < 0) {
-    throw new Error(`rune/particles: burst time must be a finite >= 0 (got ${burst.time})`)
-  }
-  if (!Number.isInteger(burst.count) || burst.count < 1) {
-    throw new Error(`rune/particles: burst count must be an integer >= 1 (got ${burst.count})`)
-  }
-  if (!Number.isInteger(burst.cycle) || burst.cycle < 0) {
-    throw new Error(`rune/particles: burst cycle must be an integer >= 0 (0 = repeating; got ${burst.cycle})`)
-  }
-  if (!Number.isFinite(burst.interval) || burst.interval <= 0) {
-    throw new Error(`rune/particles: burst interval must be a finite > 0 (got ${burst.interval})`)
-  }
-  if (!Number.isFinite(burst.probability) || burst.probability < 0 || burst.probability > 1) {
-    throw new Error(`rune/particles: burst probability must be in [0, 1] (got ${burst.probability})`)
-  }
-  return burst
 }
