@@ -120,7 +120,16 @@ export default {
         // that READS at this camera distance
         render: { kind: 'trail', points: 30, step: 1 / 60, length: 6.2, width: 0.3 },
       }),
-      material: env.materials.bbSprite,
+      // THE SOUP MATERIAL, not bbSprite: a trail bakes position/uv/color
+      // vertices, but the BILLBOARD material's vertex stage declares ONLY
+      // the i_* instance records — a soup command against it binds 12-byte
+      // placeholder buffers into a 64-byte-stride instance pipeline and
+      // WebGPU fails the draw validation (the Sword Slash crash: "Instance
+      // range (first: 0, count: 1) requires a larger buffer (24) than the
+      // bound buffer size (12)… slot 1 with stride 64"), while WebGL2
+      // silently renders nothing. The trail demo's ribbon uses `sprite` —
+      // the same contract here.
+      material: env.materials.sprite,
       pipeline: env.pipelines.additive,
       // THE STREAK (Task 126): a ribbon's uv runs u along the arc, v across
       // its width — a radial GLOW fades to black at every edge (the arc
@@ -191,7 +200,7 @@ export default {
         ]),
         forces: { gravity: [0, 0.8, 0], drag: 1.4 },
         spawner: DUST_S,
-        render: { kind: 'billboard', draw: 'instance', tiles: [2, 2], frameJitter: 4, spin: 0.9 },
+        render: { kind: 'billboard', draw: 'instance', tiles: [2, 2], frameJitter: 4, spin: 0.9, sort: true },
       }),
       material: env.materials.bbSprite,
       pipeline: env.pipelines.alpha,

@@ -32,11 +32,13 @@
  */
 
 import type { GPUFacade } from '@rune/webgpu'
+import type { GLFacade } from '@rune/webgl2'
 import type { Particles } from '@rune/particles'
 import {
   gpuSimWgsl, gpuRampLUT, GPU_STATE_STRIDE, GPU_SIM_UNIFORM_FLOATS,
   GPU_SIM_U32_FIELDS, GPU_SIM_F32_FIELDS, GPU_SIM_VEC4_FIELDS, GPU_FORCE_MASK,
 } from '@rune/particles'
+import { createGpuParticlesTf } from './particlesGpuGl.ts'
 
 /** The GPUBufferUsage bits (the spec's stable values — the orchestrator
  *  composes them for the external buffers; the facade stays
@@ -66,11 +68,26 @@ export interface GpuParticles {
   dispose(): void
 }
 
-/** Attaches the GPU tier to a sim:'gpu' facade. The facade's handoff
- *  becomes `attached` — its advance() stops throwing. WebGL2 has no
- *  compute: call this ONLY on the WebGPU backend (the demos tier the sim
- *  by the active backend). */
-export function createGpuParticles(facade: Particles, gpu: GPUFacade): GpuParticles {
+/** Attaches the GPU tier to a sim:'gpu' facade — THE COMMON POINT (Task
+ *  132): the WebGPU compute tier (createCompute — the SSBO path, this file)
+ *  or the WebGL2 transform-feedback tier (createTransformPass —
+ *  particlesGpuGl.ts, the SSBO's twin), dispatched by the facade's shape.
+ *  The facade's handoff becomes `attached` — its advance() stops throwing.
+ *  The demo code is identical for both backends — the tier is the
+ *  library's business, not the demo's. */
+export function createGpuParticles(facade: Particles, backend: GPUFacade | GLFacade): GpuParticles {
+  if (typeof (backend as GPUFacade).createCompute === 'function') {
+    return createGpuParticlesCompute(facade, backend as GPUFacade)
+  }
+  if (typeof (backend as GLFacade).createTransformPass === 'function') {
+    return createGpuParticlesTf(facade, backend as GLFacade)
+  }
+  throw new Error('rune/gl: createGpuParticles needs a WebGPU GPUFacade (createCompute) or a WebGL2 GLFacade (createTransformPass)')
+}
+
+/** The WebGPU compute tier (the SSBO path — dispatched by
+ *  createGpuParticles when the facade exposes createCompute). */
+function createGpuParticlesCompute(facade: Particles, gpu: GPUFacade): GpuParticles {
   const handoff = facade.gpuHandoff
   if (handoff === null) {
     throw new Error('rune/gl: createGpuParticles needs a sim:"gpu" facade (this one runs the CPU tier)')

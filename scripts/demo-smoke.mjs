@@ -76,13 +76,27 @@ const browser = await chromium.launch({
   ],
 })
 
-/** Two canvas screenshots differ → the animation is alive. */
+/** Two canvas screenshots differ → the animation is alive.
+ *  Task 132 — the CLIP form: the element screenshot's actionability wait
+ *  ("waiting for element to be stable" — two rAF ticks with the same box)
+ *  starves under a busy software rasterizer (the compositor + the main
+ *  thread at 100%: 20s+ stalls, a flaky gate — the page itself provably
+ *  alive at 30-70fps). The clip is read synchronously via
+ *  getBoundingClientRect (no stability dependency) and the PAGE screenshot
+ *  with that clip is captured directly — the same canvas region, the same
+ *  hash-diff verdict, none of the brittleness. */
 async function framesDiffer(page) {
-  const canvas = page.locator('#canvas')
+  const box = await page.evaluate(() => {
+    const el = document.querySelector('#canvas')
+    if (el === null) return null
+    const r = el.getBoundingClientRect()
+    return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }
+  })
+  const clip = box === null ? undefined : (box.width > 0 && box.height > 0 ? box : undefined)
   await page.waitForTimeout(700)
-  const shotA = await canvas.screenshot()
+  const shotA = await page.screenshot({ clip, timeout: 30_000 })
   await page.waitForTimeout(700)
-  const shotB = await canvas.screenshot()
+  const shotB = await page.screenshot({ clip, timeout: 30_000 })
   return (
     createHash('sha256').update(shotA).digest('hex') !==
     createHash('sha256').update(shotB).digest('hex')

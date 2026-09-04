@@ -77,6 +77,12 @@ export type BillboardMode = 'camera' | 'vertical' | 'horizontal' | 'stretched' |
 export interface BillboardOptions {
   /** The over-life ramp (size + color + frame); default: the constant identity. */
   readonly ramp?: Ramp
+  /** Task 132 — the DRAW ORDER: an index sequence (typically the output of
+   *  sortDepthBackToFront) — the particles are baked in this order instead
+   *  of slot order. Omitted/null — the natural [0, count) walk. The facade
+   *  passes its render.sort sequence here; the parity contract with the
+   *  instance-record path pins the SAME order in both bakers. */
+  readonly order?: readonly number[] | null
   /** The spin speed, radians/second (the seed phases each particle). */
   readonly spin?: number
   /** The orientation mode (default 'camera' — the classic billboard). */
@@ -169,7 +175,13 @@ export function fillBillboards(
   const spin3d = options.spin3d ?? 0
 
   let at = 0
-  for (let i = 0; i < count; i++) {
+  // Task 132 — the draw order: `order` (the sorted index sequence) walks
+  // the particles in the given sequence; the default — the slot order.
+  const order = options.order
+  const ordered = order !== undefined && order !== null
+  const n = ordered ? order!.length : count
+  for (let j = 0; j < n; j++) {
+    const i = ordered ? order![j] : j
     const age = f.age[i]
     const life = f.life[i]
     const t = life > 0 ? age / life : 0

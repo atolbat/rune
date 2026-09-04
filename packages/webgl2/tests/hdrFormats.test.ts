@@ -2,7 +2,9 @@
 //
 // Contract:
 //  • createTexture({format:'rgba16f', mipLevels:N}) → texStorage2D c
-//    internalFormat RGBA16F (0x881A); {format:'rgba32f'} → RGBA32F (0x8816).
+//    internalFormat RGBA16F (0x881A); {format:'rgba32f'} → RGBA32F (0x8814 —
+//    the GL registry value; 0x8816 was a Task 67 typo that survived the
+//    mock tests until the Task 132 TF tier allocated a real rgba32f).
 //  • The mutable path (mipLevels=1) is allocated with the format's
 //    (internalFormat, uploadFormat, uploadType) triple: RGBA16F+RGBA+HALF_FLOAT etc.
 //  • Uploads (texImage2DFromSource / texSubImage2DFromSource /
@@ -19,7 +21,7 @@ import { createRealGL } from '../src/realGL.ts'
 // Spec-fixed GLenums for the asserts.
 const RGBA8 = 0x8058
 const RGBA16F = 0x881a
-const RGBA32F = 0x8816
+const RGBA32F = 0x8814 // the GL registry value (Task 132's enum fix)
 const RGBA = 0x1908
 const UNSIGNED_BYTE = 0x1401
 const HALF_FLOAT = 0x140b

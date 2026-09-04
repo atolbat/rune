@@ -15,14 +15,14 @@
 //
 // EVERY sprite on this page is OURS — generated in this file (deterministic
 // pure functions → raw RGBA uploads; no image assets, no browser
-// premultiply semantics). The dist imports carry ?v=131 (the stale-cache
+// premultiply semantics). The dist imports carry ?v=132 (the stale-cache
 // guard — bump on release; Task 130 changed @rune/particles: the line lattice).
-import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=131'
+import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=132'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER, BILLBOARD,
-} from '../../dist/rune-materials.esm.js?v=131'
-import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=131'
+} from '../../dist/rune-materials.esm.js?v=132'
+import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=132'
 
 /* ─── the demo registry (the carousel order) ────────────────────────────── */
 
@@ -1084,9 +1084,15 @@ function frameCallback(ctx, record) {
       // draw 6 corners × the instance count through the BB command.
       const instanceCount = soup.instanceCount
       if (instanceCount > 0) {
-        const liveFloats = instanceCount * soup.stride
-        if (layer.glDyn !== undefined) layer.glDyn.gl.updateBuffer(layer.glDyn.bufferId, soup.vertices.subarray(0, liveFloats))
-        else if (layer.gpuDyn !== undefined) layer.gpuDyn.syncVertexBuffer(soup.vertices, liveFloats * 4)
+        // Task 132 — the GPU tier (BOTH backends: the WebGPU compute records
+        // OR the WebGL2 transform-feedback records) binds the EXTERNAL
+        // records buffer through the command's bufferIds — the CPU array is
+        // zeros in gpuMode and syncing it pours dead megabytes per frame.
+        if (layer.gpuBackend == null) {
+          const liveFloats = instanceCount * soup.stride
+          if (layer.glDyn !== undefined) layer.glDyn.gl.updateBuffer(layer.glDyn.bufferId, soup.vertices.subarray(0, liveFloats))
+          else if (layer.gpuDyn !== undefined) layer.gpuDyn.syncVertexBuffer(soup.vertices, liveFloats * 4)
+        }
         record(layer.command, { mvp, model: MODEL, camPos: camEye, instanceCount, ...(layer.props?.(frameCtx) ?? {}) })
         liveVerts += instanceCount * 6
       }

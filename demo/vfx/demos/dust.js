@@ -84,7 +84,7 @@ export default {
         ]),
         forces: { gravity: [0, 0.015, 0], drag: 0.3 },
         spawner: HAZE_S,
-        render: { kind: 'billboard', draw: 'instance', spin: 0.05 },
+        render: { kind: 'billboard', draw: 'instance', spin: 0.05, sort: true },
       }),
       // the dithered sprite material + the dedicated edge-safe cloud:
       // no tile seams, no quantization stair-steps at the ~5% alphas

@@ -3936,7 +3936,7 @@ function createExecutor(options) {
 var ENUM = {
   RGBA8: 32856,
   RGBA16F: 34842,
-  RGBA32F: 34838,
+  RGBA32F: 34836,
   RGBA: 6408,
   UNSIGNED_BYTE: 5121,
   HALF_FLOAT: 5131,
@@ -4470,6 +4470,152 @@ function createRealGL(gl, onViewportHeal) {
     gl.deleteBuffer(buffer);
     buffers.delete(bufferId);
   }
+  const transformPasses = new Map;
+  let nextTransformPass = 1;
+  const transformProgramIds = new Set;
+  function createTransformPass(desc) {
+    const program = gl.createProgram();
+    gl.attachShader(program, compile(gl.VERTEX_SHADER, desc.vertex));
+    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, `#version 300 es
+precision lowp float;
+void main() {}
+`));
+    gl.transformFeedbackVaryings(program, desc.outputs, gl.INTERLEAVED_ATTRIBS);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error(`rune: transform pass linking: ${gl.getProgramInfoLog(program)}`);
+    }
+    const tf = gl.createTransformFeedback();
+    const vao = gl.createVertexArray();
+    const attribDecl = desc.attributes ?? [];
+    const attribLocations = attribDecl.map((a) => gl.getAttribLocation(program, a.name));
+    const id = nextTransformPass++;
+    transformPasses.set(id, {
+      program,
+      tf,
+      vao,
+      uniforms: new Map,
+      attribLocations,
+      attribDecl,
+      uniformDecl: desc.uniforms ?? [],
+      textureDecl: desc.textures ?? []
+    });
+    const programId = nextProgram++;
+    programs.set(programId, { program, uniforms: transformPasses.get(id).uniforms });
+    transformProgramIds.add(programId);
+    transformPassIds.set(id, programId);
+    return id;
+  }
+  const transformPassIds = new Map;
+  function tfLocation(record, name) {
+    const cached = record.uniforms.get(name);
+    if (cached !== undefined)
+      return cached;
+    const loc = gl.getUniformLocation(record.program, name);
+    record.uniforms.set(name, loc);
+    return loc;
+  }
+  function runTransformPass(passId, vertexCount, output) {
+    const record = transformPasses.get(passId);
+    if (record === undefined) {
+      throw new Error(`rune: runTransformPass(${passId}) — no such transform pass`);
+    }
+    if (vertexCount <= 0)
+      return;
+    const outBuffer = buffers.get(output.bufferId);
+    if (outBuffer === undefined) {
+      throw new Error(`rune: runTransformPass(${passId}, out ${output.bufferId}) — no such output buffer`);
+    }
+    const programId = transformPassIds.get(passId);
+    if (programId !== undefined)
+      useProgram(programId);
+    else
+      gl.useProgram(record.program);
+    gl.bindVertexArray(record.vao);
+    const ab = output.attribBuffers;
+    if (ab !== undefined) {
+      for (let i = 0;i < record.attribLocations.length && i < ab.length; i++) {
+        const bufferId = ab[i];
+        if (bufferId === undefined)
+          continue;
+        const a = record.attribDecl[i];
+        bindVertexBuffer(bufferId, record.attribLocations[i], a.size, a.stride, a.offset, a.divisor);
+      }
+    }
+    const tex = output.textures;
+    if (tex !== undefined) {
+      for (let i = 0;i < record.textureDecl.length && i < tex.length; i++) {
+        const textureId = tex[i];
+        if (textureId === undefined)
+          continue;
+        bindTexture(textureId, i);
+      }
+    }
+    const data = output.uniformData;
+    if (data !== undefined) {
+      let at = 0;
+      for (const u of record.uniformDecl) {
+        const loc = tfLocation(record, u.name);
+        if (loc === null)
+          continue;
+        if (u.size === 1)
+          gl.uniform1f(loc, data[at] ?? 0);
+        else if (u.size === 2)
+          gl.uniform2f(loc, data[at] ?? 0, data[at + 1] ?? 0);
+        else if (u.size === 3)
+          gl.uniform3f(loc, data[at] ?? 0, data[at + 1] ?? 0, data[at + 2] ?? 0);
+        else
+          gl.uniform4f(loc, data[at] ?? 0, data[at + 1] ?? 0, data[at + 2] ?? 0, data[at + 3] ?? 0);
+        at += u.size;
+      }
+    }
+    gl.enable(gl.RASTERIZER_DISCARD);
+    gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, record.tf);
+    gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, outBuffer);
+    gl.beginTransformFeedback(gl.POINTS);
+    gl.drawArrays(gl.POINTS, 0, vertexCount);
+    gl.endTransformFeedback();
+    gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null);
+    gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+    gl.disable(gl.RASTERIZER_DISCARD);
+    gl.bindVertexArray(null);
+  }
+  function deleteTransformPass(passId) {
+    const record = transformPasses.get(passId);
+    if (record === undefined)
+      return;
+    const programId = transformPassIds.get(passId);
+    if (programId !== undefined) {
+      if (currentProgramId === programId) {
+        gl.useProgram(null);
+        currentProgram = null;
+        currentProgramId = -1;
+      }
+      programs.delete(programId);
+      transformProgramIds.delete(programId);
+    }
+    gl.deleteTransformFeedback(record.tf);
+    gl.deleteVertexArray(record.vao);
+    gl.deleteProgram(record.program);
+    transformPassIds.delete(passId);
+    transformPasses.delete(passId);
+  }
+  function texSubImage2DBuffer(textureId, x, y, width, height, bufferId, byteOffset = 0) {
+    const texture = textures.get(textureId);
+    if (texture === undefined) {
+      throw new Error(`rune: texSubImage2DBuffer — no such texture ${textureId}`);
+    }
+    const buffer = buffers.get(bufferId);
+    if (buffer === undefined) {
+      throw new Error(`rune: texSubImage2DBuffer — no such buffer ${bufferId}`);
+    }
+    const pair = uploadPair(textureId);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, buffer);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, width, height, pair.format, pair.type, byteOffset);
+    gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null);
+  }
   return {
     createProgram,
     useProgram,
@@ -4502,7 +4648,11 @@ function createRealGL(gl, onViewportHeal) {
     deleteTexture,
     deleteTarget,
     deleteProgram,
-    deleteBuffer
+    deleteBuffer,
+    createTransformPass,
+    runTransformPass,
+    deleteTransformPass,
+    texSubImage2DBuffer
   };
 }
 // packages/webgl2/src/capsProbe.ts
@@ -6641,7 +6791,11 @@ function withJournal(gl, journal) {
     deleteBuffer: (bufferId) => {
       gl.deleteBuffer(bufferId);
       journal.record({ kind: "destroyBuffer", id: bufferId });
-    }
+    },
+    createTransformPass: (desc) => gl.createTransformPass(desc),
+    runTransformPass: (passId, vertexCount, output) => gl.runTransformPass(passId, vertexCount, output),
+    deleteTransformPass: (passId) => gl.deleteTransformPass(passId),
+    texSubImage2DBuffer: (textureId, x, y, width, height, bufferId, byteOffset) => gl.texSubImage2DBuffer(textureId, x, y, width, height, bufferId, byteOffset)
   };
 }
 function replayJournalOn(journal, target, sourceFor) {
@@ -6880,7 +7034,11 @@ function createResourceSessionGL(raw, journal) {
     clear: (color, depth2) => raw.clear(color, depth2),
     drawArrays: (mode, first, count, instances) => raw.drawArrays(mode, first, count, instances),
     deleteProgram: (programId) => raw.deleteProgram(programId),
-    deleteBuffer: (bufferId) => raw.deleteBuffer(bufferId)
+    deleteBuffer: (bufferId) => raw.deleteBuffer(bufferId),
+    createTransformPass: (desc) => raw.createTransformPass(desc),
+    runTransformPass: (passId, vertexCount, output) => raw.runTransformPass(passId, vertexCount, output),
+    deleteTransformPass: (passId) => raw.deleteTransformPass(passId),
+    texSubImage2DBuffer: (textureId, x, y, width, height, bufferId, byteOffset) => raw.texSubImage2DBuffer(rawTex(textureId), x, y, width, height, bufferId, byteOffset)
   };
   function applyOp2(op, acc) {
     switch (op.kind) {
@@ -8055,8 +8213,8 @@ function createPipelineCache() {
     get size() {
       return next - 1;
     },
-    idOf(desc, shaderId) {
-      const key = structuralKey(desc, shaderId);
+    idOf(desc, shaderId, layoutKey) {
+      const key = structuralKey(desc, shaderId, layoutKey);
       const known = ids.get(key);
       if (known !== undefined)
         return known;
@@ -8066,13 +8224,14 @@ function createPipelineCache() {
     }
   };
 }
-function structuralKey(desc, shaderId) {
+function structuralKey(desc, shaderId, layoutKey) {
   return [
     shaderId,
     depthKey(desc.depth),
     blendKey(desc.blend),
     rasterKey(desc.raster),
-    desc.primitive ?? "triangles"
+    desc.primitive ?? "triangles",
+    layoutKey ?? "layout:default"
   ].join("|");
 }
 function depthKey(depth2) {
@@ -8100,13 +8259,13 @@ function createWgpuContext(arena) {
   return {
     arena,
     commands: [],
-    pipelineOf(desc, wgsl) {
+    pipelineOf(desc, wgsl, layoutKey) {
       let shaderId = shaderIds.get(wgsl);
       if (shaderId === undefined) {
         shaderId = nextShaderId++;
         shaderIds.set(wgsl, shaderId);
       }
-      return cache.idOf(desc ?? {}, shaderId);
+      return cache.idOf(desc ?? {}, shaderId, layoutKey);
     },
     nextPipelineId: () => nextPipeline++
   };
@@ -8114,7 +8273,8 @@ function createWgpuContext(arena) {
 function compileWgslSpec(spec, ctx) {
   const reflection = reflectWgsl2(spec.shader.wgsl);
   const id = ctx.commands.length;
-  const pipelineId = ctx.pipelineOf(spec.pipeline, spec.shader.wgsl);
+  const attrOrder = orderedAttributes(reflection, spec);
+  const pipelineId = ctx.pipelineOf(spec.pipeline, spec.shader.wgsl, vertexLayoutKey(attrOrder));
   const uniformBytes2 = Math.max(256, reflection.uniformBytes);
   const sliceOffset = ctx.arena.alloc(uniformBytes2);
   const sliceBytes = uniformBytes2;
@@ -8128,7 +8288,7 @@ function compileWgslSpec(spec, ctx) {
     id,
     pipelineId,
     wgsl: spec.shader.wgsl,
-    attrOrder: orderedAttributes(reflection, spec),
+    attrOrder,
     pipeline: spec.pipeline ?? {},
     textureIds: boundTextures(reflection, spec),
     fields: reflection.uniforms,
@@ -8189,6 +8349,9 @@ function orderedAttributes(reflection, spec) {
     step: spec.attributes?.[attr.name]?.step,
     bufferId: spec.attributes?.[attr.name]?.bufferId
   }));
+}
+function vertexLayoutKey(attrOrder) {
+  return attrOrder.map((a) => `${a.size}:${a.stride ?? a.size * 4}:${a.offset ?? 0}:${a.step === "instance" ? "i" : "v"}`).join(",");
 }
 function boundTextures(reflection, spec) {
   const ids = [];
@@ -11292,12 +11455,540 @@ fn pack(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 `;
 }
+// packages/particles/src/gpuSimGl.ts
+var GPU_GL_TEXELS_PER_PARTICLE = 5;
+var GPU_GL_STATE_TEXTURE_W = 2048;
+function gpuGlStateTextureH(capacity) {
+  return Math.max(1, Math.ceil(capacity * GPU_GL_TEXELS_PER_PARTICLE / GPU_GL_STATE_TEXTURE_W));
+}
+var GPU_GL_ADVANCE_UNIFORMS = [
+  { name: "u_dt", size: 1 },
+  { name: "u_gravity", size: 3 },
+  { name: "u_drag", size: 1 },
+  { name: "u_turbulence", size: 1 },
+  { name: "u_attractStrength", size: 1 },
+  { name: "u_softening2", size: 1 },
+  { name: "u_attractPoint", size: 3 },
+  { name: "u_noiseStrength", size: 1 },
+  { name: "u_noiseScale", size: 1 },
+  { name: "u_noiseSpeed", size: 1 },
+  { name: "u_limit", size: 1 },
+  { name: "u_dampen", size: 1 },
+  { name: "u_wrapSize", size: 3 },
+  { name: "u_wrapCenter", size: 3 },
+  { name: "u_fDrag", size: 1 },
+  { name: "u_fLimit", size: 1 },
+  { name: "u_fGravity", size: 1 },
+  { name: "u_fAttract", size: 1 },
+  { name: "u_fTurb", size: 1 },
+  { name: "u_fNoise", size: 1 },
+  { name: "u_fWrap", size: 1 }
+];
+var GPU_GL_ADVANCE_F = {
+  dt: 0,
+  gravity: 1,
+  drag: 4,
+  turbulence: 5,
+  attractStrength: 6,
+  softening2: 7,
+  attractPoint: 8,
+  noiseStrength: 11,
+  noiseScale: 12,
+  noiseSpeed: 13,
+  limit: 14,
+  dampen: 15,
+  wrapSize: 16,
+  wrapCenter: 19,
+  fDrag: 22,
+  fLimit: 23,
+  fGravity: 24,
+  fAttract: 25,
+  fTurb: 26,
+  fNoise: 27,
+  fWrap: 28
+};
+var GPU_GL_PACK_UNIFORMS = [
+  { name: "u_tileU", size: 1 },
+  { name: "u_tileV", size: 1 },
+  { name: "u_frameJitter", size: 1 },
+  { name: "u_rampN", size: 1 }
+];
+var GPU_GL_PACK_F = {
+  tileU: 0,
+  tileV: 1,
+  frameJitter: 2,
+  rampN: 3
+};
+var GPU_GL_ADVANCE_OUTPUTS = ["v_s0", "v_s1", "v_s2", "v_s3", "v_s4"];
+var GPU_GL_PACK_OUTPUTS = ["v_r0", "v_r1", "v_r2", "v_r3"];
+function gpuRampLUTTexture(points) {
+  if (points.length === 0)
+    throw new Error("rune/particles: the GPU sim needs a ramp with at least one point");
+  if (points.length > 256) {
+    throw new Error(`rune/particles: the GPU sim's ramp is capped at 256 control points (got ${points.length})`);
+  }
+  const lut = new Float32Array(points.length * 8);
+  for (let i = 0;i < points.length; i++) {
+    const p = points[i];
+    const b = i * 8;
+    lut[b] = p.t;
+    lut[b + 1] = p.size;
+    lut[b + 2] = p.r;
+    lut[b + 3] = p.g;
+    lut[b + 4] = p.b;
+    lut[b + 5] = p.a;
+    lut[b + 6] = p.frame ?? 0;
+  }
+  return lut;
+}
+function glslPrelude(w) {
+  const perm = Array.from(PERM, (v) => `${v}u`).join(", ");
+  const grads = [];
+  for (let g = 0;g < 12; g++) {
+    grads.push(`vec3(${GRAD3[g * 3]}, ${GRAD3[g * 3 + 1]}, ${GRAD3[g * 3 + 2]})`);
+  }
+  return `
+precision highp float;
+uniform highp sampler2D u_state;
+const int W = ${w};
+ivec2 texelOf(int idx) { return ivec2(idx % W, idx / W); }
+vec4 fetchState(int slot, int row) { return texelFetch(u_state, texelOf(slot * 5 + row), 0); }
+// ── the simplex noise (the SAME table the CPU/WGSL evaluate — noise.ts) ────
+const uint PERM_T[512] = uint[512](${perm});
+const vec3 GRAD_T[12] = vec3[12](${grads.join(", ")});
+float simplex3(vec3 v) {
+  const float F3 = 0.333333333333;
+  const float G3 = 0.166666666667;
+  float s = (v.x + v.y + v.z) * F3;
+  int i = int(floor(v.x + s));
+  int j = int(floor(v.y + s));
+  int k = int(floor(v.z + s));
+  float t = float(i + j + k) * G3;
+  float x0 = v.x - (float(i) - t);
+  float y0 = v.y - (float(j) - t);
+  float z0 = v.z - (float(k) - t);
+  int i1 = 0; int j1 = 0; int k1 = 0; int i2 = 0; int j2 = 0; int k2 = 0;
+  if (x0 >= y0) {
+    if (y0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+    else if (x0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 0; k2 = 1; }
+    else { i1 = 0; j1 = 0; k1 = 1; i2 = 1; j2 = 0; k2 = 1; }
+  } else {
+    if (y0 < z0) { i1 = 0; j1 = 0; k1 = 1; i2 = 0; j2 = 1; k2 = 1; }
+    else if (x0 < z0) { i1 = 0; j1 = 1; k1 = 0; i2 = 0; j2 = 1; k2 = 1; }
+    else { i1 = 0; j1 = 1; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+  }
+  float x1 = x0 - float(i1) + G3; float y1 = y0 - float(j1) + G3; float z1 = z0 - float(k1) + G3;
+  float x2 = x0 - float(i2) + 2.0 * G3; float y2 = y0 - float(j2) + 2.0 * G3; float z2 = z0 - float(k2) + 2.0 * G3;
+  float x3 = x0 - 1.0 + 3.0 * G3; float y3 = y0 - 1.0 + 3.0 * G3; float z3 = z0 - 1.0 + 3.0 * G3;
+  uint ii = uint(i & 255); uint jj = uint(j & 255); uint kk = uint(k & 255);
+  float n = 0.0;
+  float t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
+  if (t0 > 0.0) {
+    uint g = PERM_T[ii + PERM_T[jj + PERM_T[kk]]] % 12u;
+    t0 = t0 * t0;
+    n += t0 * t0 * dot(GRAD_T[g], vec3(x0, y0, z0));
+  }
+  float t1 = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;
+  if (t1 > 0.0) {
+    uint g = PERM_T[ii + uint(i1) + PERM_T[jj + uint(j1) + PERM_T[kk + uint(k1)]]] % 12u;
+    t1 = t1 * t1;
+    n += t1 * t1 * dot(GRAD_T[g], vec3(x1, y1, z1));
+  }
+  float t2 = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;
+  if (t2 > 0.0) {
+    uint g = PERM_T[ii + uint(i2) + PERM_T[jj + uint(j2) + PERM_T[kk + uint(k2)]]] % 12u;
+    t2 = t2 * t2;
+    n += t2 * t2 * dot(GRAD_T[g], vec3(x2, y2, z2));
+  }
+  float t3 = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;
+  if (t3 > 0.0) {
+    uint g = PERM_T[ii + 1u + PERM_T[jj + 1u + PERM_T[kk + 1u]]] % 12u;
+    t3 = t3 * t3;
+    n += t3 * t3 * dot(GRAD_T[g], vec3(x3, y3, z3));
+  }
+  return 32.0 * n;
+}
+float wrapAxis(float d, float size) {
+  float m = mod(d + size * 0.5, size);
+  if (m < 0.0) { m += size; }
+  return m - size * 0.5;
+}
+`;
+}
+function gpuSimGlAdvanceGlsl() {
+  return `#version 300 es
+// @rune/particles — the GPGPU TF tier (Task 132): compact+advance, the
+// GLSL twin of the WGSL entries. The uniform set mirrors
+// GPU_GL_ADVANCE_UNIFORMS (the orchestrator packs them in order).
+${glslPrelude(GPU_GL_STATE_TEXTURE_W)}
+uniform float u_dt;
+uniform vec3 u_gravity;
+uniform float u_drag;
+uniform float u_turbulence;
+uniform float u_attractStrength;
+uniform float u_softening2;
+uniform vec3 u_attractPoint;
+uniform float u_noiseStrength;
+uniform float u_noiseScale;
+uniform float u_noiseSpeed;
+uniform float u_limit;
+uniform float u_dampen;
+uniform vec3 u_wrapSize;
+uniform vec3 u_wrapCenter;
+uniform float u_fDrag;
+uniform float u_fLimit;
+uniform float u_fGravity;
+uniform float u_fAttract;
+uniform float u_fTurb;
+uniform float u_fNoise;
+uniform float u_fWrap;
+// the provenance: vertex i (the FINAL slot) gathers the pre-state of
+// particle a_map[i] (a float — exact for every integer ≤ 2^24).
+in float a_map;
+// the TF outputs: the 20-float state row (17 fields + 3 pad).
+out vec4 v_s0; // px, py, pz, vx
+out vec4 v_s1; // vy, vz, age, life
+out vec4 v_s2; // size, cr, cg, cb
+out vec4 v_s3; // ca, seed, tx, ty
+out vec4 v_s4; // tz, pad, pad, pad
+void main() {
+  int src = int(a_map + 0.5);
+  vec4 s0 = fetchState(src, 0);
+  vec4 s1 = fetchState(src, 1);
+  vec4 s2 = fetchState(src, 2);
+  vec4 s3 = fetchState(src, 3);
+  vec4 s4 = fetchState(src, 4);
+  float px = s0.x; float py = s0.y; float pz = s0.z;
+  float vx = s0.w; float vy = s1.x; float vz = s1.y;
+  float age = s1.z;
+  float seed = s3.y;
+  // the force walk — the WGSL advance's exact order
+  if (u_fDrag > 0.5) {
+    float k = exp(-u_drag * u_dt);
+    vx *= k; vy *= k; vz *= k;
+  }
+  if (u_fLimit > 0.5) {
+    float speed = sqrt(vx * vx + vy * vy + vz * vz);
+    if (speed > u_limit && speed > 1e-9) {
+      float k = 1.0 - ((speed - u_limit) / speed) * u_dampen * u_dt * 20.0;
+      if (k < 0.0) { k = 0.0; }
+      vx *= k; vy *= k; vz *= k;
+    }
+  }
+  if (u_fGravity > 0.5) {
+    vx += u_gravity.x * u_dt;
+    vy += u_gravity.y * u_dt;
+    vz += u_gravity.z * u_dt;
+  }
+  if (u_fAttract > 0.5) {
+    float dx = u_attractPoint.x - px;
+    float dy = u_attractPoint.y - py;
+    float dz = u_attractPoint.z - pz;
+    float r2 = dx * dx + dy * dy + dz * dz;
+    float r = sqrt(r2);
+    if (r > 1e-6) {
+      float k = u_attractStrength * u_dt / (r * (r2 + u_softening2));
+      vx += dx * k; vy += dy * k; vz += dz * k;
+    }
+  }
+  if (u_fTurb > 0.5) {
+    float t = age * 5.0 + seed * 37.0;
+    vx += sin(t) * u_turbulence * u_dt;
+    vy += sin(t * 1.7 + 11.3) * u_turbulence * u_dt;
+    vz += cos(t * 0.9 + 4.7) * u_turbulence * u_dt;
+  }
+  if (u_fNoise > 0.5) {
+    // the simplex flow — the CPU/WGSL reference's exact coordinate mapping
+    float adrift = age * u_noiseSpeed;
+    float so = seed * 13.7;
+    float sx = px * u_noiseScale + adrift;
+    float sy = py * u_noiseScale;
+    float sz = pz * u_noiseScale;
+    vx += simplex3(vec3(sx, sy + so, sz + 5.3)) * u_noiseStrength * u_dt;
+    vy += simplex3(vec3(sx + 11.7, sy + adrift, sz + 9.1 + so)) * u_noiseStrength * u_dt;
+    vz += simplex3(vec3(sx + 3.1, sy + 7.7 + so, sz + adrift)) * u_noiseStrength * u_dt;
+  }
+  px += vx * u_dt; py += vy * u_dt; pz += vz * u_dt;
+  if (u_fWrap > 0.5) {
+    if (u_wrapSize.x > 0.0) { px = u_wrapCenter.x + wrapAxis(px - u_wrapCenter.x, u_wrapSize.x); }
+    if (u_wrapSize.y > 0.0) { py = u_wrapCenter.y + wrapAxis(py - u_wrapCenter.y, u_wrapSize.y); }
+    if (u_wrapSize.z > 0.0) { pz = u_wrapCenter.z + wrapAxis(pz - u_wrapCenter.z, u_wrapSize.z); }
+  }
+  v_s0 = vec4(px, py, pz, vx);
+  v_s1 = vec4(vy, vz, age + u_dt, s1.w);
+  v_s2 = s2;
+  v_s3 = s3;
+  v_s4 = s4;
+  gl_Position = vec4(0.0, 0.0, 0.5, 1.0); // never rasterized (discard on)
+}
+`;
+}
+function gpuSimGlPackGlsl() {
+  return `#version 300 es
+// @rune/particles — the GPGPU TF tier (Task 132): the record pack, the
+// GLSL twin of the WGSL pack entry. The uniform set mirrors
+// GPU_GL_PACK_UNIFORMS.
+${glslPrelude(GPU_GL_STATE_TEXTURE_W)}
+uniform highp sampler2D u_ramp;
+uniform float u_tileU;
+uniform float u_tileV;
+uniform float u_frameJitter;
+uniform float u_rampN;
+// the TF outputs: the 16-float instance record (INSTANCE_LAYOUT).
+out vec4 v_r0; // px, py, pz, vx
+out vec4 v_r1; // vy, vz, cr, cg
+out vec4 v_r2; // cb, ca, halfExtent, angle0 (seed·tau)
+out vec4 v_r3; // age, seed, u0, v0
+// the ramp LUT: 2 texels per point k — (t, size, r, g) at 2k, (b, a, frame, 0) at 2k+1.
+vec4 rampA(int k) { return texelFetch(u_ramp, ivec2(k * 2, 0), 0); }
+vec4 rampB(int k) { return texelFetch(u_ramp, ivec2(k * 2 + 1, 0), 0); }
+float rampT(int k) { return rampA(k).x; }
+void main() {
+  int i = gl_VertexID;
+  vec4 s0 = fetchState(i, 0);
+  vec4 s1 = fetchState(i, 1);
+  vec4 s2 = fetchState(i, 2);
+  vec4 s3 = fetchState(i, 3);
+  float age = s1.z;
+  float life = s1.w;
+  float t = life > 0.0 ? age / life : 0.0;
+  // the ramp walk — the WGSL pack's exact semantics: clamp → binary
+  // search → lerp (sampleRamp's own walk).
+  int n = int(u_rampN + 0.5);
+  float size = 1.0; float r = 1.0; float g = 1.0; float b = 1.0; float a = 1.0; float frame = 0.0;
+  if (n == 1 || t <= rampT(0)) {
+    vec4 ra = rampA(0); vec4 rb = rampB(0);
+    size = ra.y; r = ra.z; g = ra.w; b = rb.x; a = rb.y; frame = rb.z;
+  } else {
+    int last = n - 1;
+    if (t >= rampT(last)) {
+      vec4 ra = rampA(last); vec4 rb = rampB(last);
+      size = ra.y; r = ra.z; g = ra.w; b = rb.x; a = rb.y; frame = rb.z;
+    } else {
+      int lo = 0; int hi = n - 1;
+      for (int guard = 0; guard < 32 && hi - lo > 1; guard++) {
+        int mid = (lo + hi) / 2;
+        if (rampT(mid) <= t) { lo = mid; } else { hi = mid; }
+      }
+      float span = rampT(hi) - rampT(lo);
+      float k = span > 0.0 ? (t - rampT(lo)) / span : 0.0;
+      vec4 raLo = rampA(lo); vec4 rbLo = rampB(lo);
+      vec4 raHi = rampA(hi); vec4 rbHi = rampB(hi);
+      size = mix(raLo.y, raHi.y, k);
+      r = mix(raLo.z, raHi.z, k);
+      g = mix(raLo.w, raHi.w, k);
+      b = mix(rbLo.x, rbHi.x, k);
+      a = mix(rbLo.y, rbHi.y, k);
+      frame = mix(rbLo.z, rbHi.z, k);
+    }
+  }
+  float halfExtent = s2.x * size * 0.5;
+  float seed = s3.y;
+  // the tile origin: frame + seed·jitter → floor → clamp → row-major
+  // (NaN-safe: every NaN comparison is false — !(fr >= 0.0) catches NaN
+  // and the negatives in one branch).
+  float fr = floor(frame + seed * u_frameJitter);
+  if (!(fr >= 0.0)) { fr = 0.0; }
+  float maxFrame = u_tileU * u_tileV - 1.0;
+  if (fr > maxFrame) { fr = maxFrame; }
+  float u0 = 0.0; float v0 = 0.0;
+  if (u_tileU >= 1.0 && u_tileV >= 1.0) {
+    u0 = mod(fr, u_tileU) / u_tileU;
+    v0 = floor(fr / u_tileU) / u_tileV;
+  }
+  v_r0 = s0;
+  v_r1 = vec4(s1.x, s1.y, s2.y * r, s2.z * g);
+  v_r2 = vec4(s2.w * b, s3.x * a, halfExtent, seed * 6.283185307179586);
+  v_r3 = vec4(age, seed, u0, v0);
+  gl_Position = vec4(0.0, 0.0, 0.5, 1.0); // never rasterized (discard on)
+}
+`;
+}
 // packages/particles/src/trails.ts
 var SCRATCH3 = new Float32Array(6);
 // packages/particles/src/meshes.ts
 var SCRATCH4 = new Float32Array(6);
 // packages/particles/src/facade.ts
 var MAX_STEP = 1 / 20;
+// packages/gl/src/particlesGpuGl.ts
+function gpuGlProvenance(preCount, swaps, swapCount, prov) {
+  for (let i = 0;i < preCount; i++)
+    prov[i] = i;
+  for (let s = 0;s < swapCount; s++) {
+    const to = swaps[s * 2];
+    const from = swaps[s * 2 + 1];
+    prov[to] = prov[from];
+  }
+}
+function createGpuParticlesTf(facade, gl) {
+  const handoff = facade.gpuHandoff;
+  if (handoff === null) {
+    throw new Error('rune/gl: createGpuParticlesTf needs a sim:"gpu" facade (this one runs the CPU tier)');
+  }
+  const ho = handoff;
+  const capacity = facade.capacity;
+  const W = GPU_GL_STATE_TEXTURE_W;
+  const H = gpuGlStateTextureH(capacity);
+  const stateTex = gl.createTexture(W, H, { format: "rgba32f" });
+  const lut = gpuRampLUTTexture(facade.ramp.points);
+  const rampW = Math.max(2, facade.ramp.points.length * 2);
+  const rampTex = gl.createTexture(rampW, 1, { format: "rgba32f" });
+  gl.texSubImage2D(rampTex, 0, 0, rampW, 1, lut);
+  const stateOut = gl.createBuffer(new Float32Array(W * H * 4));
+  const records = gl.createBuffer(new Float32Array(capacity * 16));
+  const mapBuf = gl.createBuffer(new Float32Array(capacity));
+  const advPass = gl.createTransformPass({
+    vertex: gpuSimGlAdvanceGlsl(),
+    outputs: GPU_GL_ADVANCE_OUTPUTS,
+    attributes: [{ name: "a_map", size: 1, stride: 4 }],
+    textures: ["u_state"],
+    uniforms: GPU_GL_ADVANCE_UNIFORMS
+  });
+  const packPass = gl.createTransformPass({
+    vertex: gpuSimGlPackGlsl(),
+    outputs: GPU_GL_PACK_OUTPUTS,
+    textures: ["u_state", "u_ramp"],
+    uniforms: GPU_GL_PACK_UNIFORMS
+  });
+  ho.attached = true;
+  const advUni = new Float32Array(GPU_GL_ADVANCE_UNIFORMS.reduce((n, u) => n + u.size, 0));
+  const packUni = new Float32Array(GPU_GL_PACK_UNIFORMS.reduce((n, u) => n + u.size, 0));
+  const packF = GPU_GL_PACK_F;
+  const render = facade.render;
+  const tiles = render.tiles ?? [1, 1];
+  packUni[packF.tileU] = tiles[0];
+  packUni[packF.tileV] = tiles[1];
+  packUni[packF.frameJitter] = render.frameJitter ?? 0;
+  packUni[packF.rampN] = facade.ramp.points.length;
+  const forces = facade.forces;
+  const A = GPU_GL_ADVANCE_F;
+  let fDrag = 0, fLimit = 0, fGravity = 0, fAttract = 0, fTurb = 0, fNoise = 0, fWrap = 0;
+  const gravity = forces.gravity ?? [0, 0, 0];
+  if (gravity[0] !== 0 || gravity[1] !== 0 || gravity[2] !== 0) {
+    fGravity = 1;
+    advUni[A.gravity] = gravity[0];
+    advUni[A.gravity + 1] = gravity[1];
+    advUni[A.gravity + 2] = gravity[2];
+  }
+  if (forces.drag > 0) {
+    fDrag = 1;
+    advUni[A.drag] = forces.drag;
+  }
+  if (forces.turbulence !== 0) {
+    fTurb = 1;
+    advUni[A.turbulence] = forces.turbulence;
+  }
+  const attract = forces.attract ?? null;
+  if (attract !== null) {
+    fAttract = 1;
+    advUni[A.attractPoint] = attract.point[0];
+    advUni[A.attractPoint + 1] = attract.point[1];
+    advUni[A.attractPoint + 2] = attract.point[2];
+    advUni[A.attractStrength] = attract.strength;
+    advUni[A.softening2] = (attract.softening ?? 0.25) ** 2;
+  }
+  const noise = forces.noise ?? null;
+  if (noise !== null && noise.strength !== 0) {
+    fNoise = 1;
+    advUni[A.noiseStrength] = noise.strength;
+    advUni[A.noiseScale] = noise.scale;
+    advUni[A.noiseSpeed] = noise.speed;
+  }
+  const limit = forces.limitSpeed ?? null;
+  if (limit !== null) {
+    fLimit = 1;
+    advUni[A.limit] = limit.limit;
+    advUni[A.dampen] = limit.dampen;
+  }
+  const wrapSize = ho.wrapSize;
+  if (wrapSize !== null && (wrapSize[0] > 0 || wrapSize[1] > 0 || wrapSize[2] > 0)) {
+    fWrap = 1;
+    advUni[A.wrapSize] = wrapSize[0];
+    advUni[A.wrapSize + 1] = wrapSize[1];
+    advUni[A.wrapSize + 2] = wrapSize[2];
+  }
+  advUni[A.fDrag] = fDrag;
+  advUni[A.fLimit] = fLimit;
+  advUni[A.fGravity] = fGravity;
+  advUni[A.fAttract] = fAttract;
+  advUni[A.fTurb] = fTurb;
+  advUni[A.fNoise] = fNoise;
+  advUni[A.fWrap] = fWrap;
+  const emitPacked = new Float32Array(capacity * 20);
+  const prov = new Int32Array(capacity);
+  const mapFloats = new Float32Array(capacity);
+  function step(dt) {
+    const count = facade.count;
+    if (count <= 0 && ho.emitCount === 0 && ho.swapCount === 0)
+      return;
+    advUni[A.dt] = dt;
+    const wc = ho.emitOrigin;
+    advUni[A.wrapCenter] = wc[0];
+    advUni[A.wrapCenter + 1] = wc[1];
+    advUni[A.wrapCenter + 2] = wc[2];
+    if (ho.emitCount > 0) {
+      const rows = ho.emitRows;
+      const n = ho.emitCount;
+      for (let i = 0;i < n; i++) {
+        const s = i * 17;
+        const d = i * 20;
+        for (let f = 0;f < 17; f++)
+          emitPacked[d + f] = rows[s + f];
+        emitPacked[d + 17] = 0;
+        emitPacked[d + 18] = 0;
+        emitPacked[d + 19] = 0;
+      }
+      const start = ho.emitBase * GPU_GL_TEXELS_PER_PARTICLE;
+      const end = start + n * GPU_GL_TEXELS_PER_PARTICLE;
+      const y0 = Math.floor(start / W);
+      const y1 = Math.floor((end - 1) / W);
+      for (let y = y0;y <= y1; y++) {
+        const x0 = y === y0 ? start - y * W : 0;
+        const x1 = y === y1 ? end - y * W : W;
+        const byteOffset = (y * W + x0 - start) * 16;
+        const byteLength = (x1 - x0) * 16;
+        gl.texSubImage2D(stateTex, x0, y, x1 - x0, 1, new Float32Array(emitPacked.buffer, byteOffset, byteLength / 4));
+      }
+    }
+    const preCount = ho.emitBase + ho.emitCount;
+    gpuGlProvenance(preCount, ho.swaps, ho.swapCount, prov);
+    for (let i = 0;i < count; i++)
+      mapFloats[i] = prov[i];
+    gl.updateBuffer(mapBuf, mapFloats.subarray(0, count));
+    gl.runTransformPass(advPass, count, {
+      bufferId: stateOut,
+      attribBuffers: [mapBuf],
+      textures: [stateTex],
+      uniformData: advUni
+    });
+    gl.texSubImage2DBuffer(stateTex, 0, 0, W, H, stateOut, 0);
+    gl.runTransformPass(packPass, count, {
+      bufferId: records,
+      textures: [stateTex, rampTex],
+      uniformData: packUni
+    });
+  }
+  return {
+    step,
+    get recordsBufferId() {
+      return records;
+    },
+    get stateBufferId() {
+      return stateOut;
+    },
+    dispose() {
+      gl.deleteTransformPass(advPass);
+      gl.deleteTransformPass(packPass);
+      gl.deleteBuffer(stateOut);
+      gl.deleteBuffer(records);
+      gl.deleteBuffer(mapBuf);
+      gl.deleteTexture(stateTex);
+      gl.deleteTexture(rampTex);
+      ho.attached = false;
+    }
+  };
+}
+
 // packages/gl/src/particlesGpu.ts
 var BUF = {
   STORAGE: 128,
@@ -11305,7 +11996,16 @@ var BUF = {
   VERTEX: 32
 };
 var WORKGROUP = 64;
-function createGpuParticles(facade, gpu) {
+function createGpuParticles(facade, backend) {
+  if (typeof backend.createCompute === "function") {
+    return createGpuParticlesCompute(facade, backend);
+  }
+  if (typeof backend.createTransformPass === "function") {
+    return createGpuParticlesTf(facade, backend);
+  }
+  throw new Error("rune/gl: createGpuParticles needs a WebGPU GPUFacade (createCompute) or a WebGL2 GLFacade (createTransformPass)");
+}
+function createGpuParticlesCompute(facade, gpu) {
   const handoff = facade.gpuHandoff;
   if (handoff === null) {
     throw new Error('rune/gl: createGpuParticles needs a sim:"gpu" facade (this one runs the CPU tier)');

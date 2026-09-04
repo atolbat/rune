@@ -109,4 +109,39 @@ describe('webgpu command + executor', () => {
     expect(a.pipelineId).toBe(b.pipelineId)
     expect(a.pipelineId).not.toBe(c.pipelineId)
   })
+
+  // Task 132 — the Sword Slash crash regression: the VERTEX LAYOUT is part
+  // of the pipeline identity on WebGPU (arrayStride/offset/stepMode are
+  // baked into the GPURenderPipeline). Two commands sharing one shader +
+  // one pipeline desc but binding different strides (a 36-byte soup vs a
+  // 64-byte instance record) must NOT share a pipeline — the first to
+  // draw would dictate the layout for both and the other's draw would
+  // fail validation (or misread the data) on the real device.
+  it('same shader+desc, different vertex strides → different pipelines', () => {
+    const arena = createSliceArena(8192)
+    const ctx = createWgpuContext(arena)
+    const soup = compileWgslSpec(withAttributes(makeSpec(), { position: { data: new Float32Array(27), size: 3, stride: 36, offset: 0 } }), ctx)
+    const instance = compileWgslSpec(withAttributes(makeSpec(), { position: { data: new Float32Array(16), size: 3, stride: 64, offset: 0, step: 'instance' } }), ctx)
+    expect(soup.pipelineId).not.toBe(instance.pipelineId)
+    // the same layout again → the SAME id (the cache still dedups)
+    const soupAgain = compileWgslSpec(withAttributes(makeSpec(), { position: { data: new Float32Array(27), size: 3, stride: 36, offset: 0 } }), ctx)
+    expect(soupAgain.pipelineId).toBe(soup.pipelineId)
+  })
+
+  // The offset and the step mode are part of the layout identity too —
+  // the record's i_vel (offset 12, instance step) vs a plain uv slot.
+  it('offset/step differences split pipelines', () => {
+    const arena = createSliceArena(8192)
+    const ctx = createWgpuContext(arena)
+    const at0 = compileWgslSpec(withAttributes(makeSpec(), { position: { data: new Float32Array(9), size: 3, stride: 36, offset: 0 } }), ctx)
+    const at12 = compileWgslSpec(withAttributes(makeSpec(), { position: { data: new Float32Array(9), size: 3, stride: 36, offset: 12 } }), ctx)
+    const instanced = compileWgslSpec(withAttributes(makeSpec(), { position: { data: new Float32Array(9), size: 3, stride: 36, offset: 0, step: 'instance' } }), ctx)
+    expect(at0.pipelineId).not.toBe(at12.pipelineId)
+    expect(at0.pipelineId).not.toBe(instanced.pipelineId)
+  })
 })
+
+/** Attaches a position attribute to a spec (the helper for the layout-key tests). */
+function withAttributes(spec: WgpuDrawSpec, attributes: Record<string, { data: Float32Array; size: number; stride?: number; offset?: number; step?: 'vertex' | 'instance' }>): WgpuDrawSpec {
+  return { ...spec, attributes }
+}

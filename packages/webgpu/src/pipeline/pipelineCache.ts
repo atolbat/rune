@@ -11,7 +11,16 @@ export interface GpuPipelineDesc {
 /** Pipeline cache: structural key → stable id. */
 export interface PipelineCache {
   readonly size: number
-  idOf(desc: GpuPipelineDesc, shaderId: number): number
+  /** Task 132 — layoutKey: the VERTEX BUFFER LAYOUT signature (per-slot
+   *  stride/offset/step, see vertexLayoutKey in command.ts). WebGPU bakes
+   *  the vertex layout INTO the pipeline object: two commands sharing a
+   *  shader+desc but binding different strides (a soup stride 36 vs an
+   *  instance stride 64) are DIFFERENT pipelines — without the layout in
+   *  the key the first command's layout silently rules them all (the
+   *  Sword Slash WebGPU crash: the ribbon's soup draw validated against
+   *  the glints' instance pipeline). Backward compatible: no layoutKey —
+   *  the pre-Task-132 key. */
+  idOf(desc: GpuPipelineDesc, shaderId: number, layoutKey?: string): number
 }
 
 /** Creates a pipeline cache. */
@@ -22,8 +31,8 @@ export function createPipelineCache(): PipelineCache {
   let next = 1
   return {
     get size() { return next - 1 },
-    idOf(desc, shaderId) {
-      const key = structuralKey(desc, shaderId)
+    idOf(desc, shaderId, layoutKey) {
+      const key = structuralKey(desc, shaderId, layoutKey)
       const known = ids.get(key)
       if (known !== undefined) return known
       const id = next++
@@ -33,14 +42,16 @@ export function createPipelineCache(): PipelineCache {
   }
 }
 
-/** Structural key: a canonical string of descriptor fields. */
-export function structuralKey(desc: GpuPipelineDesc, shaderId: number): string {
+/** Structural key: a canonical string of descriptor fields (+ the Task 132
+ *  vertex layout signature when the command declares one). */
+export function structuralKey(desc: GpuPipelineDesc, shaderId: number, layoutKey?: string): string {
   return [
     shaderId,
     depthKey(desc.depth),
     blendKey(desc.blend),
     rasterKey(desc.raster),
     desc.primitive ?? 'triangles',
+    layoutKey ?? 'layout:default',
   ].join('|')
 }
 

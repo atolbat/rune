@@ -1,7 +1,8 @@
 # @rune/particles — the optimization program
 
-Status: **Phase 1 (the instanced draw) and Phase 2 (the GPGPU tier) are
-SHIPPED** (Task 131). The etalons below carry the before/after; the
+Status: **Phase 1 (the instanced draw), Phase 2 (the GPGPU tier) and
+Phase 3 (the WebGL2 transform-feedback twin + the painter's order) are
+SHIPPED** (Tasks 131–132). The etalons below carry the before/after; the
 phases describe what moved where, and what remains.
 
 ---
@@ -76,6 +77,65 @@ CPU→GPU particle traffic is the emit block + the swap list only.
   on WebGL2 runs the CPU tier at 32k (the tier split, not a stub — the
   dual-backend look-parity contract keeps every other demo on sim:'cpu').
 
+## 3b. Phase 3 — the WebGL2 TRANSFORM-FEEDBACK twin ✅ SHIPPED (Task 132)
+
+**The SSBO's twin — the common point**: `createGpuParticles(facade,
+backend)` now dispatches by the facade's shape — a WebGPU `GPUFacade`
+(`createCompute`) runs the compute tier above; a WebGL2 `GLFacade`
+(`createTransformPass`) runs the **transform-feedback tier**. The demo
+code is identical for both backends; the tier is the library's business.
+
+- **The state** lives in one rgba32f texture (a flat texel array, 5 texels
+  = 20 floats per particle — the 3-float pad keeps every TF row 4-float
+  aligned, the attribute-offset rule). The TF output's sequential texel
+  order matches the texture exactly — `texSubImage2DBuffer` (the PBO
+  upload) round-trips the state buffer→texture with zero CPU traffic,
+  the WebGL2 twin of the storage-buffer ping-pong.
+- **The passes** (`gpuSimGl.ts`'s GLSL, dispatched by `@rune/gl`'s
+  `createGpuParticlesTf`): `compactAdvance` (ONE gather pass — vertex i =
+  final slot i reads the pre-state of particle `map[i]` through the
+  texture, integrates it, writes slot i; the WGSL compact + advance
+  composed) → the PBO round-trip → `pack` (vertex i = `gl_VertexID` — the
+  same 16-float instance records, bound directly as the draw's instance
+  attributes through `bufferId`).
+- **The map**: the CPU compaction's provenance — the swap list replayed
+  on indices exactly as the WGSL compact replays it on state; `map[j]` =
+  the pre-slot of the particle that ends up at slot j. Pinned by a golden
+  test (positions encoding their own pre-slots).
+- **The facade's handoff** gained the catch-up: a MANUAL `burst()` between
+  advances now reaches the GPU (the emit gather starts at the synced
+  count, not the current one — the between-advance bursts were silently
+  lost before, on BOTH tiers).
+- **The renderer seams** (`@rune/webgl2`): the TF family
+  (`createTransformPass` / `runTransformPass` / `deleteTransformPass` /
+  `texSubImage2DBuffer`) — the GLSL twin of the WebGPU compute contract
+  (a packed uniform array, buffer/texture inputs, ONE output buffer; the
+  state contract: RASTERIZER_DISCARD only inside begin/end, the TF object
+  + its bindings unbound after, a DEDICATED VAO so the renderer's vertex
+  state never sees the pass).
+- **The dormant-bug harvest**: the enum fix (`GL_RGBA32F` is 0x8814, not
+  0x8816 — the typo survived the mock-based tests since the Task 67 HDR
+  work; no demo allocated a float texture until this tier) and the
+  Float32Array-view rule for FLOAT uploads (ANGLE rejects Uint8Array
+  views).
+- **The demo**: "GPU Embers" now runs `sim:'gpu'` on BOTH backends — 160k
+  on WebGPU, 16k on WebGL2 (the software-GL budget; a real GPU carries
+  far more).
+
+## 3c. The painter's order — `render.sort` ✅ SHIPPED (Task 132)
+
+`render: { ..., sort: true }` on a billboard layer: **back to front**
+(depth = dot(forward, position), far first — `sort.ts`). The SAME index
+sequence feeds both bakers (the soup quads and the instance records —
+the draw-format parity), the comparator is a total order (engine-independent
+determinism), the scratch is caller-owned (zero per-frame allocation).
+Additive layers need nothing (the blend commutes); the trail kind rejects
+it (one continuous ribbon), the mesh kind rejects it (the depth buffer
+resolves), `sim:'gpu'` rejects it (the records are packed GPU-side — no
+CPU positions to sort; the CPU mirror holds none by design). Applied to
+the alpha-blended smokes: the sentry's impact smoke, the explosion, the
+dust, the soft, the slash dust, the laser's charge wisps and boom smoke.
+
 ## 4. The renderer seams added (Task 131)
 
 - `@rune/webgpu`: external buffers (`createExternalBuffer` /
@@ -90,24 +150,38 @@ CPU→GPU particle traffic is the emit block + the swap list only.
 
 ## 5. What remains (the opportunistic list)
 
-- **WebGL2 transform feedback** — the GL twin of the compute tier (the
-  integration as a vertex shader, ping-ponged VBOs). The CPU path stays
-  WebGL2's engine; the tier table would then match on both backends.
-- **Sorting**: translucent layers draw in spawn order; a depth-bucket
-  counting sort (~0.5 ms at 100k) would kill most of the popping.
+- ~~**WebGL2 transform feedback**~~ — ✅ shipped (Phase 3b above).
+- ~~**Sorting**~~ — ✅ shipped (Phase 3c above: the full depth sort, the
+  painter's order; a counting-sort bucket pass stays interesting for
+  100k+-sized alpha layers).
 - **Culling**: a per-particle distance cull in the pack loop (one
   comparison) + the per-layer frustum reject.
 - **Emission on the GPU**: a hash-RNG append pass (the 215 ns/spawn CPU
   cost is fine to ~50k/s).
+- **The GPU-tier sort**: a compute/TF bitonic sort over the records (the
+  CPU tier's mirror holds no positions — the GPU-side key pass would
+  come with the culling pass above).
 - **The ramp LUT as a texture** (the pack's binary search → a texture
-  fetch): ~1 ms at 100k, only if the GPU pack ever needs the relief.
+  fetch): ~1 ms at 100k, only if the GPU pack ever needs the relief (the
+  TF tier already does it — texture fetches in GLSL).
 
-## 6. The verification of this program (Task 131)
+## 6. The verification of this program (Tasks 131–132)
 
 - `task131.test.ts` — the instance path's parity suite (the packer, the
   JS twin vs fillBillboards, the facade integration).
 - `task131gpu.test.ts` — the facade's sim:'gpu' contract (validation,
   the handoff protocol, the CPU mirror's determinism).
+- `task132.test.ts` — the painter's order (the sort, the draw-format
+  parity, the validation rejections).
+- `tests/particlesGpuGl.test.ts` (@rune/gl) — the TF tier: the GLSL
+  generation (the ES 3.00 contract, the reserved words, the force
+  order), the provenance golden test, the step sequence, the dispatch.
+- `tests/transformFeedback.test.ts` (@rune/webgl2) — the TF family's
+  state contract (the varyings-before-link, the discard/TF bind/unbind
+  sequence, the dedicated VAO, the PBO upload's bind/restore).
+- The WebGPU pipeline cache's vertex-layout key (the Sword Slash crash's
+  renderer-side root): two commands sharing a shader+desc but binding
+  different strides are DIFFERENT pipelines — pinned in command.test.ts.
 - `scripts/task131-wgsl-raw.mjs` — the BILLBOARD material's WGSL rendered
   PIXEL-VERIFIED on a raw device (the camera-mode quad: position, extent,
   color, uv through the real pipeline).

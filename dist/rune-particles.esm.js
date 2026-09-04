@@ -1357,7 +1357,11 @@ function fillBillboards(system, basis, out, options = {}) {
   }
   const spin3d = options.spin3d ?? 0;
   let at = 0;
-  for (let i = 0;i < count; i++) {
+  const order = options.order;
+  const ordered = order !== undefined && order !== null;
+  const n = ordered ? order.length : count;
+  for (let j = 0;j < n; j++) {
+    const i = ordered ? order[j] : j;
     const age = f.age[i];
     const life = f.life[i];
     const t = life > 0 ? age / life : 0;
@@ -1543,7 +1547,11 @@ function packInstances(system, out, options = {}) {
   const count = system.count;
   const s = SCRATCH2;
   let n = 0;
-  for (let i = 0;i < count; i++) {
+  const order = options.order;
+  const ordered = order !== undefined && order !== null;
+  const total = ordered ? order.length : count;
+  for (let j = 0;j < total; j++) {
+    const i = ordered ? order[j] : j;
     const age = f.age[i];
     const life = f.life[i];
     const t = life > 0 ? age / life : 0;
@@ -1585,6 +1593,18 @@ function packInstances(system, out, options = {}) {
   return n;
 }
 var SCRATCH2 = new Float32Array(6);
+// packages/particles/src/sort.ts
+function sortDepthBackToFront(fields, count, forward, indices, keys) {
+  if (count <= 0)
+    return 0;
+  const fx = forward[0], fy = forward[1], fz = forward[2];
+  for (let i = 0;i < count; i++) {
+    indices[i] = i;
+    keys[i] = fx * fields.px[i] + fy * fields.py[i] + fz * fields.pz[i];
+  }
+  indices.subarray(0, count).sort((a, b) => keys[b] - keys[a] || b - a);
+  return count;
+}
 // packages/particles/src/gpuSim.ts
 var GPU_STATE_STRIDE = FIELD_NAMES.length;
 var GPU_SIM_UNIFORM_BYTES = 144;
@@ -1907,6 +1927,356 @@ fn pack(@builtin(global_invocation_id) gid : vec3<u32>) {
   records[o + 12u] = age;
   records[o + 13u] = seed;
   records[o + 14u] = u0; records[o + 15u] = v0;
+}
+`;
+}
+// packages/particles/src/gpuSimGl.ts
+var GPU_GL_STATE_STRIDE = 20;
+var GPU_GL_TEXELS_PER_PARTICLE = 5;
+var GPU_GL_STATE_TEXTURE_W = 2048;
+function gpuGlStateTextureH(capacity) {
+  return Math.max(1, Math.ceil(capacity * GPU_GL_TEXELS_PER_PARTICLE / GPU_GL_STATE_TEXTURE_W));
+}
+var GPU_GL_ADVANCE_UNIFORMS = [
+  { name: "u_dt", size: 1 },
+  { name: "u_gravity", size: 3 },
+  { name: "u_drag", size: 1 },
+  { name: "u_turbulence", size: 1 },
+  { name: "u_attractStrength", size: 1 },
+  { name: "u_softening2", size: 1 },
+  { name: "u_attractPoint", size: 3 },
+  { name: "u_noiseStrength", size: 1 },
+  { name: "u_noiseScale", size: 1 },
+  { name: "u_noiseSpeed", size: 1 },
+  { name: "u_limit", size: 1 },
+  { name: "u_dampen", size: 1 },
+  { name: "u_wrapSize", size: 3 },
+  { name: "u_wrapCenter", size: 3 },
+  { name: "u_fDrag", size: 1 },
+  { name: "u_fLimit", size: 1 },
+  { name: "u_fGravity", size: 1 },
+  { name: "u_fAttract", size: 1 },
+  { name: "u_fTurb", size: 1 },
+  { name: "u_fNoise", size: 1 },
+  { name: "u_fWrap", size: 1 }
+];
+var GPU_GL_ADVANCE_F = {
+  dt: 0,
+  gravity: 1,
+  drag: 4,
+  turbulence: 5,
+  attractStrength: 6,
+  softening2: 7,
+  attractPoint: 8,
+  noiseStrength: 11,
+  noiseScale: 12,
+  noiseSpeed: 13,
+  limit: 14,
+  dampen: 15,
+  wrapSize: 16,
+  wrapCenter: 19,
+  fDrag: 22,
+  fLimit: 23,
+  fGravity: 24,
+  fAttract: 25,
+  fTurb: 26,
+  fNoise: 27,
+  fWrap: 28
+};
+var GPU_GL_PACK_UNIFORMS = [
+  { name: "u_tileU", size: 1 },
+  { name: "u_tileV", size: 1 },
+  { name: "u_frameJitter", size: 1 },
+  { name: "u_rampN", size: 1 }
+];
+var GPU_GL_PACK_F = {
+  tileU: 0,
+  tileV: 1,
+  frameJitter: 2,
+  rampN: 3
+};
+var GPU_GL_ADVANCE_OUTPUTS = ["v_s0", "v_s1", "v_s2", "v_s3", "v_s4"];
+var GPU_GL_PACK_OUTPUTS = ["v_r0", "v_r1", "v_r2", "v_r3"];
+function gpuRampLUTTexture(points) {
+  if (points.length === 0)
+    throw new Error("rune/particles: the GPU sim needs a ramp with at least one point");
+  if (points.length > 256) {
+    throw new Error(`rune/particles: the GPU sim's ramp is capped at 256 control points (got ${points.length})`);
+  }
+  const lut = new Float32Array(points.length * 8);
+  for (let i = 0;i < points.length; i++) {
+    const p = points[i];
+    const b = i * 8;
+    lut[b] = p.t;
+    lut[b + 1] = p.size;
+    lut[b + 2] = p.r;
+    lut[b + 3] = p.g;
+    lut[b + 4] = p.b;
+    lut[b + 5] = p.a;
+    lut[b + 6] = p.frame ?? 0;
+  }
+  return lut;
+}
+function glslPrelude(w) {
+  const perm = Array.from(PERM, (v) => `${v}u`).join(", ");
+  const grads = [];
+  for (let g = 0;g < 12; g++) {
+    grads.push(`vec3(${GRAD3[g * 3]}, ${GRAD3[g * 3 + 1]}, ${GRAD3[g * 3 + 2]})`);
+  }
+  return `
+precision highp float;
+uniform highp sampler2D u_state;
+const int W = ${w};
+ivec2 texelOf(int idx) { return ivec2(idx % W, idx / W); }
+vec4 fetchState(int slot, int row) { return texelFetch(u_state, texelOf(slot * 5 + row), 0); }
+// ── the simplex noise (the SAME table the CPU/WGSL evaluate — noise.ts) ────
+const uint PERM_T[512] = uint[512](${perm});
+const vec3 GRAD_T[12] = vec3[12](${grads.join(", ")});
+float simplex3(vec3 v) {
+  const float F3 = 0.333333333333;
+  const float G3 = 0.166666666667;
+  float s = (v.x + v.y + v.z) * F3;
+  int i = int(floor(v.x + s));
+  int j = int(floor(v.y + s));
+  int k = int(floor(v.z + s));
+  float t = float(i + j + k) * G3;
+  float x0 = v.x - (float(i) - t);
+  float y0 = v.y - (float(j) - t);
+  float z0 = v.z - (float(k) - t);
+  int i1 = 0; int j1 = 0; int k1 = 0; int i2 = 0; int j2 = 0; int k2 = 0;
+  if (x0 >= y0) {
+    if (y0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+    else if (x0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 0; k2 = 1; }
+    else { i1 = 0; j1 = 0; k1 = 1; i2 = 1; j2 = 0; k2 = 1; }
+  } else {
+    if (y0 < z0) { i1 = 0; j1 = 0; k1 = 1; i2 = 0; j2 = 1; k2 = 1; }
+    else if (x0 < z0) { i1 = 0; j1 = 1; k1 = 0; i2 = 0; j2 = 1; k2 = 1; }
+    else { i1 = 0; j1 = 1; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }
+  }
+  float x1 = x0 - float(i1) + G3; float y1 = y0 - float(j1) + G3; float z1 = z0 - float(k1) + G3;
+  float x2 = x0 - float(i2) + 2.0 * G3; float y2 = y0 - float(j2) + 2.0 * G3; float z2 = z0 - float(k2) + 2.0 * G3;
+  float x3 = x0 - 1.0 + 3.0 * G3; float y3 = y0 - 1.0 + 3.0 * G3; float z3 = z0 - 1.0 + 3.0 * G3;
+  uint ii = uint(i & 255); uint jj = uint(j & 255); uint kk = uint(k & 255);
+  float n = 0.0;
+  float t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
+  if (t0 > 0.0) {
+    uint g = PERM_T[ii + PERM_T[jj + PERM_T[kk]]] % 12u;
+    t0 = t0 * t0;
+    n += t0 * t0 * dot(GRAD_T[g], vec3(x0, y0, z0));
+  }
+  float t1 = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;
+  if (t1 > 0.0) {
+    uint g = PERM_T[ii + uint(i1) + PERM_T[jj + uint(j1) + PERM_T[kk + uint(k1)]]] % 12u;
+    t1 = t1 * t1;
+    n += t1 * t1 * dot(GRAD_T[g], vec3(x1, y1, z1));
+  }
+  float t2 = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;
+  if (t2 > 0.0) {
+    uint g = PERM_T[ii + uint(i2) + PERM_T[jj + uint(j2) + PERM_T[kk + uint(k2)]]] % 12u;
+    t2 = t2 * t2;
+    n += t2 * t2 * dot(GRAD_T[g], vec3(x2, y2, z2));
+  }
+  float t3 = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;
+  if (t3 > 0.0) {
+    uint g = PERM_T[ii + 1u + PERM_T[jj + 1u + PERM_T[kk + 1u]]] % 12u;
+    t3 = t3 * t3;
+    n += t3 * t3 * dot(GRAD_T[g], vec3(x3, y3, z3));
+  }
+  return 32.0 * n;
+}
+float wrapAxis(float d, float size) {
+  float m = mod(d + size * 0.5, size);
+  if (m < 0.0) { m += size; }
+  return m - size * 0.5;
+}
+`;
+}
+function gpuSimGlAdvanceGlsl() {
+  return `#version 300 es
+// @rune/particles — the GPGPU TF tier (Task 132): compact+advance, the
+// GLSL twin of the WGSL entries. The uniform set mirrors
+// GPU_GL_ADVANCE_UNIFORMS (the orchestrator packs them in order).
+${glslPrelude(GPU_GL_STATE_TEXTURE_W)}
+uniform float u_dt;
+uniform vec3 u_gravity;
+uniform float u_drag;
+uniform float u_turbulence;
+uniform float u_attractStrength;
+uniform float u_softening2;
+uniform vec3 u_attractPoint;
+uniform float u_noiseStrength;
+uniform float u_noiseScale;
+uniform float u_noiseSpeed;
+uniform float u_limit;
+uniform float u_dampen;
+uniform vec3 u_wrapSize;
+uniform vec3 u_wrapCenter;
+uniform float u_fDrag;
+uniform float u_fLimit;
+uniform float u_fGravity;
+uniform float u_fAttract;
+uniform float u_fTurb;
+uniform float u_fNoise;
+uniform float u_fWrap;
+// the provenance: vertex i (the FINAL slot) gathers the pre-state of
+// particle a_map[i] (a float — exact for every integer ≤ 2^24).
+in float a_map;
+// the TF outputs: the 20-float state row (17 fields + 3 pad).
+out vec4 v_s0; // px, py, pz, vx
+out vec4 v_s1; // vy, vz, age, life
+out vec4 v_s2; // size, cr, cg, cb
+out vec4 v_s3; // ca, seed, tx, ty
+out vec4 v_s4; // tz, pad, pad, pad
+void main() {
+  int src = int(a_map + 0.5);
+  vec4 s0 = fetchState(src, 0);
+  vec4 s1 = fetchState(src, 1);
+  vec4 s2 = fetchState(src, 2);
+  vec4 s3 = fetchState(src, 3);
+  vec4 s4 = fetchState(src, 4);
+  float px = s0.x; float py = s0.y; float pz = s0.z;
+  float vx = s0.w; float vy = s1.x; float vz = s1.y;
+  float age = s1.z;
+  float seed = s3.y;
+  // the force walk — the WGSL advance's exact order
+  if (u_fDrag > 0.5) {
+    float k = exp(-u_drag * u_dt);
+    vx *= k; vy *= k; vz *= k;
+  }
+  if (u_fLimit > 0.5) {
+    float speed = sqrt(vx * vx + vy * vy + vz * vz);
+    if (speed > u_limit && speed > 1e-9) {
+      float k = 1.0 - ((speed - u_limit) / speed) * u_dampen * u_dt * 20.0;
+      if (k < 0.0) { k = 0.0; }
+      vx *= k; vy *= k; vz *= k;
+    }
+  }
+  if (u_fGravity > 0.5) {
+    vx += u_gravity.x * u_dt;
+    vy += u_gravity.y * u_dt;
+    vz += u_gravity.z * u_dt;
+  }
+  if (u_fAttract > 0.5) {
+    float dx = u_attractPoint.x - px;
+    float dy = u_attractPoint.y - py;
+    float dz = u_attractPoint.z - pz;
+    float r2 = dx * dx + dy * dy + dz * dz;
+    float r = sqrt(r2);
+    if (r > 1e-6) {
+      float k = u_attractStrength * u_dt / (r * (r2 + u_softening2));
+      vx += dx * k; vy += dy * k; vz += dz * k;
+    }
+  }
+  if (u_fTurb > 0.5) {
+    float t = age * 5.0 + seed * 37.0;
+    vx += sin(t) * u_turbulence * u_dt;
+    vy += sin(t * 1.7 + 11.3) * u_turbulence * u_dt;
+    vz += cos(t * 0.9 + 4.7) * u_turbulence * u_dt;
+  }
+  if (u_fNoise > 0.5) {
+    // the simplex flow — the CPU/WGSL reference's exact coordinate mapping
+    float adrift = age * u_noiseSpeed;
+    float so = seed * 13.7;
+    float sx = px * u_noiseScale + adrift;
+    float sy = py * u_noiseScale;
+    float sz = pz * u_noiseScale;
+    vx += simplex3(vec3(sx, sy + so, sz + 5.3)) * u_noiseStrength * u_dt;
+    vy += simplex3(vec3(sx + 11.7, sy + adrift, sz + 9.1 + so)) * u_noiseStrength * u_dt;
+    vz += simplex3(vec3(sx + 3.1, sy + 7.7 + so, sz + adrift)) * u_noiseStrength * u_dt;
+  }
+  px += vx * u_dt; py += vy * u_dt; pz += vz * u_dt;
+  if (u_fWrap > 0.5) {
+    if (u_wrapSize.x > 0.0) { px = u_wrapCenter.x + wrapAxis(px - u_wrapCenter.x, u_wrapSize.x); }
+    if (u_wrapSize.y > 0.0) { py = u_wrapCenter.y + wrapAxis(py - u_wrapCenter.y, u_wrapSize.y); }
+    if (u_wrapSize.z > 0.0) { pz = u_wrapCenter.z + wrapAxis(pz - u_wrapCenter.z, u_wrapSize.z); }
+  }
+  v_s0 = vec4(px, py, pz, vx);
+  v_s1 = vec4(vy, vz, age + u_dt, s1.w);
+  v_s2 = s2;
+  v_s3 = s3;
+  v_s4 = s4;
+  gl_Position = vec4(0.0, 0.0, 0.5, 1.0); // never rasterized (discard on)
+}
+`;
+}
+function gpuSimGlPackGlsl() {
+  return `#version 300 es
+// @rune/particles — the GPGPU TF tier (Task 132): the record pack, the
+// GLSL twin of the WGSL pack entry. The uniform set mirrors
+// GPU_GL_PACK_UNIFORMS.
+${glslPrelude(GPU_GL_STATE_TEXTURE_W)}
+uniform highp sampler2D u_ramp;
+uniform float u_tileU;
+uniform float u_tileV;
+uniform float u_frameJitter;
+uniform float u_rampN;
+// the TF outputs: the 16-float instance record (INSTANCE_LAYOUT).
+out vec4 v_r0; // px, py, pz, vx
+out vec4 v_r1; // vy, vz, cr, cg
+out vec4 v_r2; // cb, ca, halfExtent, angle0 (seed·tau)
+out vec4 v_r3; // age, seed, u0, v0
+// the ramp LUT: 2 texels per point k — (t, size, r, g) at 2k, (b, a, frame, 0) at 2k+1.
+vec4 rampA(int k) { return texelFetch(u_ramp, ivec2(k * 2, 0), 0); }
+vec4 rampB(int k) { return texelFetch(u_ramp, ivec2(k * 2 + 1, 0), 0); }
+float rampT(int k) { return rampA(k).x; }
+void main() {
+  int i = gl_VertexID;
+  vec4 s0 = fetchState(i, 0);
+  vec4 s1 = fetchState(i, 1);
+  vec4 s2 = fetchState(i, 2);
+  vec4 s3 = fetchState(i, 3);
+  float age = s1.z;
+  float life = s1.w;
+  float t = life > 0.0 ? age / life : 0.0;
+  // the ramp walk — the WGSL pack's exact semantics: clamp → binary
+  // search → lerp (sampleRamp's own walk).
+  int n = int(u_rampN + 0.5);
+  float size = 1.0; float r = 1.0; float g = 1.0; float b = 1.0; float a = 1.0; float frame = 0.0;
+  if (n == 1 || t <= rampT(0)) {
+    vec4 ra = rampA(0); vec4 rb = rampB(0);
+    size = ra.y; r = ra.z; g = ra.w; b = rb.x; a = rb.y; frame = rb.z;
+  } else {
+    int last = n - 1;
+    if (t >= rampT(last)) {
+      vec4 ra = rampA(last); vec4 rb = rampB(last);
+      size = ra.y; r = ra.z; g = ra.w; b = rb.x; a = rb.y; frame = rb.z;
+    } else {
+      int lo = 0; int hi = n - 1;
+      for (int guard = 0; guard < 32 && hi - lo > 1; guard++) {
+        int mid = (lo + hi) / 2;
+        if (rampT(mid) <= t) { lo = mid; } else { hi = mid; }
+      }
+      float span = rampT(hi) - rampT(lo);
+      float k = span > 0.0 ? (t - rampT(lo)) / span : 0.0;
+      vec4 raLo = rampA(lo); vec4 rbLo = rampB(lo);
+      vec4 raHi = rampA(hi); vec4 rbHi = rampB(hi);
+      size = mix(raLo.y, raHi.y, k);
+      r = mix(raLo.z, raHi.z, k);
+      g = mix(raLo.w, raHi.w, k);
+      b = mix(rbLo.x, rbHi.x, k);
+      a = mix(rbLo.y, rbHi.y, k);
+      frame = mix(rbLo.z, rbHi.z, k);
+    }
+  }
+  float halfExtent = s2.x * size * 0.5;
+  float seed = s3.y;
+  // the tile origin: frame + seed·jitter → floor → clamp → row-major
+  // (NaN-safe: every NaN comparison is false — !(fr >= 0.0) catches NaN
+  // and the negatives in one branch).
+  float fr = floor(frame + seed * u_frameJitter);
+  if (!(fr >= 0.0)) { fr = 0.0; }
+  float maxFrame = u_tileU * u_tileV - 1.0;
+  if (fr > maxFrame) { fr = maxFrame; }
+  float u0 = 0.0; float v0 = 0.0;
+  if (u_tileU >= 1.0 && u_tileV >= 1.0) {
+    u0 = mod(fr, u_tileU) / u_tileU;
+    v0 = floor(fr / u_tileU) / u_tileV;
+  }
+  v_r0 = s0;
+  v_r1 = vec4(s1.x, s1.y, s2.y * r, s2.z * g);
+  v_r2 = vec4(s2.w * b, s3.x * a, halfExtent, seed * 6.283185307179586);
+  v_r3 = vec4(age, seed, u0, v0);
+  gl_Position = vec4(0.0, 0.0, 0.5, 1.0); // never rasterized (discard on)
 }
 `;
 }
@@ -2626,11 +2996,16 @@ function createParticles(desc) {
   if (kind === "trail") {
     history = createTrailHistory(capacity, render);
   }
+  const sortOn = render.sort === true;
+  if (sortOn && kind !== "billboard") {
+    throw new Error(`rune/particles: render.sort is a billboard-kind option (a ${kind} layer cannot take a painter's order — trails are one continuous ribbon, meshes resolve through the depth buffer)`);
+  }
   const sim = desc.sim ?? "cpu";
   const gpuMode = sim === "gpu";
   let gpuHandoff = null;
   let gpuSwaps = null;
   let gpuSwapCount = 0;
+  let gpuSynced = 0;
   if (gpuMode) {
     if (kind !== "billboard" || render.draw !== "instance") {
       throw new Error('rune/particles: sim:"gpu" requires render { kind: "billboard", draw: "instance" } (the GPU tier packs the instance records itself — the soup/trail/mesh kinds are CPU-baked)');
@@ -2652,6 +3027,9 @@ function createParticles(desc) {
     }
     if ((desc.prewarm ?? 0) > 0) {
       throw new Error('rune/particles: sim:"gpu" rejects prewarm (the GPU state cannot be fast-forwarded synchronously — emit a burst and let a few frames pass instead)');
+    }
+    if (sortOn) {
+      throw new Error('rune/particles: sim:"gpu" rejects render.sort (the records are packed GPU-side — the CPU mirror holds no positions to sort; sorted alpha layers stay on sim:"cpu" — see sort.ts)');
     }
     gpuSwaps = new Uint32Array(2 * capacity);
     gpuHandoff = {
@@ -2757,6 +3135,9 @@ function createParticles(desc) {
     instanceCount: 0,
     instanceLayout: drawFormat === "instance" ? INSTANCE_LAYOUT : null
   };
+  const sortIndices = sortOn ? new Int32Array(capacity) : null;
+  const sortKeys = sortOn ? new Float32Array(capacity) : null;
+  const sortOrder = sortOn ? new Array(capacity).fill(0) : null;
   let time = 0;
   const bursts = (desc.bursts ?? []).map((burst) => validateBurst(burst));
   const burstState = bursts.map((burst, index) => ({
@@ -2884,6 +3265,18 @@ function createParticles(desc) {
       } else {
         const renderOpts = render;
         const o = options?.billboard ?? {};
+        let order = null;
+        if (sortOn) {
+          const forward = basis.forward;
+          if (forward === undefined) {
+            throw new Error("rune/particles: render.sort needs the camera basis forward (the depth key is dot(forward, position) — pass a full CameraBasis)");
+          }
+          const n = sortDepthBackToFront(system.fields, system.count, forward, sortIndices, sortKeys);
+          for (let i = 0;i < n; i++)
+            sortOrder[i] = sortIndices[i];
+          sortOrder.length = n;
+          order = sortOrder;
+        }
         if (gpuMode) {
           view.vertexCount = system.count;
           view.instanceCount = system.count;
@@ -2891,7 +3284,8 @@ function createParticles(desc) {
           const packOpts = {
             ramp,
             tiles: o.tiles ?? renderOpts.tiles,
-            frameJitter: o.frameJitter ?? renderOpts.frameJitter
+            frameJitter: o.frameJitter ?? renderOpts.frameJitter,
+            order
           };
           view.vertexCount = packInstances(system, vertices, packOpts);
           view.instanceCount = view.vertexCount;
@@ -2905,7 +3299,8 @@ function createParticles(desc) {
             lengthFactor: o.lengthFactor ?? renderOpts.lengthFactor,
             axis: o.axis ?? renderOpts.axis,
             spin3d: o.spin3d ?? renderOpts.spin3d,
-            frameJitter: o.frameJitter ?? renderOpts.frameJitter
+            frameJitter: o.frameJitter ?? renderOpts.frameJitter,
+            order
           });
           view.instanceCount = 0;
         }
@@ -2928,6 +3323,7 @@ function createParticles(desc) {
         gpuHandoff.emitCount = 0;
         gpuHandoff.swapCount = 0;
         gpuSwapCount = 0;
+        gpuSynced = 0;
       }
       return facade;
     }
@@ -2935,9 +3331,9 @@ function createParticles(desc) {
   function advanceGpu(dt) {
     const handoff = gpuHandoff;
     if (!handoff.attached) {
-      throw new Error('rune/particles: sim:"gpu" needs the GPU backend — createGpuParticles(facade, gpuFacade) from @rune/gl (WebGL2 has no compute; pass sim:"cpu" there)');
+      throw new Error('rune/particles: sim:"gpu" needs the GPU backend — createGpuParticles(facade, gpuOrGlFacade) from @rune/gl (WebGPU: the compute tier; WebGL2: the transform-feedback tier)');
     }
-    const emitBase = system.count;
+    const emitBase = gpuSynced;
     handoff.emitBase = emitBase;
     handoff.emitCount = 0;
     gpuSwapCount = 0;
@@ -3024,6 +3420,7 @@ function createParticles(desc) {
       system.advance(dt, NO_FORCES);
     }
     handoff.swapCount = gpuSwapCount;
+    gpuSynced = system.count;
     time += dt;
   }
   function advanceInternal(dt) {
@@ -3131,12 +3528,17 @@ function wrapAxis(d, size) {
 }
 export {
   validateNoise,
+  sortDepthBackToFront,
   simplex3,
   sampleRamp,
   packInstances,
   hash01,
   gpuSimWgsl,
+  gpuSimGlPackGlsl,
+  gpuSimGlAdvanceGlsl,
+  gpuRampLUTTexture,
   gpuRampLUT,
+  gpuGlStateTextureH,
   fillTrails,
   fillMeshes,
   fillBillboards,
@@ -3164,6 +3566,15 @@ export {
   GPU_SIM_U32_FIELDS,
   GPU_SIM_F32_FIELDS,
   GPU_SIM_ENTRIES,
+  GPU_GL_TEXELS_PER_PARTICLE,
+  GPU_GL_STATE_TEXTURE_W,
+  GPU_GL_STATE_STRIDE,
+  GPU_GL_PACK_UNIFORMS,
+  GPU_GL_PACK_OUTPUTS,
+  GPU_GL_PACK_F,
+  GPU_GL_ADVANCE_UNIFORMS,
+  GPU_GL_ADVANCE_OUTPUTS,
+  GPU_GL_ADVANCE_F,
   GPU_FORCE_MASK,
   FIELD_NAMES,
   CONSTANT_RAMP

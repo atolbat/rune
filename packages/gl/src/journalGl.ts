@@ -136,6 +136,15 @@ export function withJournal(gl: GLFacade, journal: Journal): GLFacade {
       gl.deleteBuffer(bufferId)
       journal.record({ kind: 'destroyBuffer', id: bufferId })
     },
+    // Task 132 — the transform-feedback family: NOT journaled (the same
+    // contract as the WebGPU compute family — the orchestrator recreates
+    // its passes on re-attach; the TF buffers themselves ARE journaled
+    // through the ordinary createBuffer path).
+    createTransformPass: desc => gl.createTransformPass(desc),
+    runTransformPass: (passId, vertexCount, output) => gl.runTransformPass(passId, vertexCount, output),
+    deleteTransformPass: passId => gl.deleteTransformPass(passId),
+    texSubImage2DBuffer: (textureId, x, y, width, height, bufferId, byteOffset) =>
+      gl.texSubImage2DBuffer(textureId, x, y, width, height, bufferId, byteOffset),
   }
 }
 

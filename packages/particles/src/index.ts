@@ -15,11 +15,18 @@
  *          command (the demo binds it to the unlit TEXTURE + VERTEX_COLOR
  *          material, or LAMBERT/PBR for the mesh kind; @rune/materials
  *          owns that part)
- *   No instancing, no point sprites, no transform feedback — the soup is
- *   the lowest common denominator of WebGL2 AND WebGPU draw paths.
+ *   The soup is the lowest common denominator of WebGL2 AND WebGPU draw
+ *   paths — the default and the LCD.
  *   (Task 131: the OPTIONAL instanced path — render.draw:'instance' —
  *   packs 16-float records and lets the BILLBOARD material expand the
- *   quad on the GPU; the soup stays the default and the LCD.)
+ *   quad on the GPU.
+ *    Task 132: the GPGPU simulation tier — sim:'gpu' — runs the forces,
+ *   the aging and the record pack ON THE GPU on BOTH backends: compute
+ *   passes over a storage buffer (WebGPU) or transform-feedback passes
+ *   over a float texture (WebGL2 — the SSBO's twin, ONE dispatch point in
+ *   @rune/gl's createGpuParticles; see gpuSim.ts/gpuSimGl.ts).
+ *    Task 132: render.sort — the painter's order for alpha-blended
+ *   billboards (back to front, both bakers, deterministic; see sort.ts).)
  *
  *   Two levels of API (the repo's facade + composable core split):
  *     facade : createParticles — rate/burst/at/advance/view, the ramp,
@@ -103,10 +110,17 @@ export { fillBillboards, SOUP_STRIDE, VERTS_PER_PARTICLE } from './billboards.ts
 export type { CameraBasis, BillboardOptions } from './billboards.ts'
 export type { PackOptions, InstanceField } from './instances.ts'
 export { packInstances, INSTANCE_STRIDE, INSTANCE_LAYOUT } from './instances.ts'
+export { sortDepthBackToFront } from './sort.ts'
 export {
   gpuSimWgsl, gpuRampLUT, GPU_STATE_STRIDE, GPU_SIM_UNIFORM_BYTES, GPU_SIM_UNIFORM_FLOATS,
   GPU_SIM_U32_FIELDS, GPU_SIM_F32_FIELDS, GPU_SIM_VEC4_FIELDS, GPU_FORCE_MASK, GPU_SIM_ENTRIES,
 } from './gpuSim.ts'
+export {
+  gpuSimGlAdvanceGlsl, gpuSimGlPackGlsl, gpuRampLUTTexture, GPU_GL_STATE_STRIDE,
+  GPU_GL_TEXELS_PER_PARTICLE, GPU_GL_STATE_TEXTURE_W, gpuGlStateTextureH,
+  GPU_GL_ADVANCE_UNIFORMS, GPU_GL_ADVANCE_F, GPU_GL_PACK_UNIFORMS, GPU_GL_PACK_F,
+  GPU_GL_ADVANCE_OUTPUTS, GPU_GL_PACK_OUTPUTS,
+} from './gpuSimGl.ts'
 export type { TrailOptions, TrailHistory, TrailBakeOptions } from './trails.ts'
 export { createTrailHistory, fillTrails } from './trails.ts'
 export type { MeshGeometry, MeshOptions } from './meshes.ts'

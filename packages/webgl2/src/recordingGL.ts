@@ -21,6 +21,7 @@ export function createRecordingGL(): RecordingGL {
   let nextTexture = 1
   let nextTarget = 1
   let nextTextureView = 1_000_000 // disjoint namespace with textureId (<1M)
+  let nextTransformPass = 1 // Task 132 — the TF family's id space
   let currentTarget = 0
 
   const gl: GLFacade & {
@@ -169,6 +170,20 @@ export function createRecordingGL(): RecordingGL {
     },
     deleteProgram: programId => calls.push(`deleteProgram(${programId})`),
     deleteBuffer: bufferId => calls.push(`deleteBuffer(${bufferId})`),
+    // Task 132 — the transform-feedback family (the recording twin).
+    createTransformPass: desc => {
+      calls.push(`createTransformPass(out:${desc.outputs.length},attrs:${desc.attributes?.length ?? 0},tex:${desc.textures?.length ?? 0},uni:${desc.uniforms?.length ?? 0})`)
+      return nextTransformPass++
+    },
+    runTransformPass: (passId, vertexCount, output) => {
+      const attribs = output.attribBuffers !== undefined ? `,a:${output.attribBuffers.length}` : ''
+      const textures = output.textures !== undefined ? `,t:${output.textures.length}` : ''
+      const uniforms = output.uniformData !== undefined ? `,u:${output.uniformData.length}` : ''
+      calls.push(`runTransformPass(${passId},${vertexCount},buf:${output.bufferId}${attribs}${textures}${uniforms})`)
+    },
+    deleteTransformPass: passId => calls.push(`deleteTransformPass(${passId})`),
+    texSubImage2DBuffer: (textureId, x, y, width, height, bufferId, byteOffset) =>
+      calls.push(`texSubImage2DBuffer(${textureId},${x},${y},${width},${height},buf:${bufferId},off:${byteOffset ?? 0})`),
   }
 
   return { gl, calls }

@@ -81,7 +81,12 @@ export interface GLFacade {
     height: number,
     options?: { mipLevels?: number; maxAnisotropy?: number; format?: GLTextureFormat },
   ): number
-  texSubImage2D(textureId: number, x: number, y: number, width: number, height: number, bytes: Uint8Array): void
+  /** Task 67/132: `bytes` — a Uint8Array for rgba8 textures, or a
+   *  Float32Array VIEW when the texture's storage format is rgba32f (the
+   *  WebGL2 rule: the view's element type must match the upload `type` —
+   *  FLOAT demands Float32Array; a Uint8Array view over float bits is
+   *  INVALID_OPERATION on strict drivers/ANGLE). */
+  texSubImage2D(textureId: number, x: number, y: number, width: number, height: number, bytes: Uint8Array | Float32Array): void
   /** Atomic upload from bitmap/canvas/video — no streaming, a single call.
    *  Uses the texImage2D overload with TexImageSource (overwrites the texture).
    *
@@ -230,6 +235,76 @@ export interface GLFacade {
    *  surface.read(). Reads the contents AFTER the last executed frame
    *  (inside the frame callback — an intermediate state). */
   readTargetPixels(targetId: number): Uint8Array
+
+  // ─── Task 132 — the TRANSFORM-FEEDBACK family ────────────────────────────
+  // The GLSL twin of the WebGPU compute contract (@rune/webgpu's
+  // createCompute): the SSBO-gather simulation runs as TF vertex passes on
+  // WebGL2 — the SAME per-frame handoff (a packed uniform array, buffer
+  // inputs, texture inputs) and the SAME output contract (a buffer the next
+  // pass or the draw consumes directly). This is the "common point" the
+  // GPGPU particle tier is built on: WebGPU = compute + storage buffers,
+  // WebGL2 = transform feedback — one orchestrator (@rune/gl
+  // createGpuParticles) drives both.
+
+  /** Creates a transform-feedback pass: a vertex-only GLSL ES 3.00 program
+   *  with its TF varyings (INTERLEAVED_ATTRIBS into ONE output buffer).
+   *
+   *  desc.vertex   — the GLSL source; it declares `out` varyings matching
+   *                  desc.outputs, reads its per-vertex attribute inputs
+   *                  (desc.attributes, bound by bufferId at run time),
+   *                  texelFetch-s its texture inputs (desc.textures, bound
+   *                  by textureId at run time) and its uniforms (packed
+   *                  into ONE Float32Array at run time, walked per
+   *                  desc.uniforms' declared sizes). gl_VertexID addresses
+   *                  the pass's element.
+   *  desc.outputs  — the TF varying names, in declaration order; the
+   *                  interleaved output stride = the sum of their sizes.
+   *  The fragment stage is a trivial `void main() {}` (rasterization is
+   *  discarded during the pass — the rasterizer never runs it).
+   *  NOT journaled (the same contract as the WebGPU compute family: the
+   *  orchestrator recreates it on re-attach). */
+  createTransformPass(desc: {
+    readonly vertex: string
+    readonly outputs: readonly string[]
+    readonly attributes?: readonly { readonly name: string; readonly size: number; readonly stride?: number; readonly offset?: number; readonly divisor?: number }[]
+    readonly textures?: readonly string[]
+    readonly uniforms?: readonly { readonly name: string; readonly size: 1 | 2 | 3 | 4 }[]
+  }): number
+
+  /** Runs a transform-feedback pass: `vertexCount` vertices (POINTS), the
+   *  outputs streamed into `output.bufferId` (a buffer created via
+   *  createBuffer — its storage must cover vertexCount × the declared
+   *  output stride).
+   *
+   *  The state contract (pinned by tests): the pass enables
+   *  RASTERIZER_DISCARD, binds the TF object + its output buffer, binds the
+   *  attribute/texture/uniform inputs, draws POINTS, and RESTORES — the TF
+   *  object unbound, the TF buffer binding point cleared, RASTERIZER_DISCARD
+   *  off, PIXEL_UNPACK_BUFFER untouched — so the render executor's own
+   *  per-draw state assertions never see the pass.
+   *  attribBuffers/textures are per-declaration-entry bufferIds/textureIds
+   *  (undefined entries are skipped). uniformData is the packed float array
+   *  (uniform1f/2f/3f/4fv per the declared {name, size} sequence). */
+  runTransformPass(passId: number, vertexCount: number, output: {
+    readonly bufferId: number
+    readonly attribBuffers?: readonly (number | undefined)[]
+    readonly textures?: readonly (number | undefined)[]
+    readonly uniformData?: Float32Array
+  }): void
+
+  /** Deletes a transform pass (the program + the TF object). Idempotent. */
+  deleteTransformPass(passId: number): void
+
+  /** Task 132 — the PBO texture upload: texSubImage2D with the pixel source
+   *  in a GL BUFFER (PIXEL_UNPACK_BUFFER) instead of a CPU array. The TF
+   *  output of one pass becomes the texture the next pass samples — the
+   *  GPU→GPU state round-trip with ZERO CPU traffic (the WebGL2 twin of the
+   *  WebGPU storage-buffer ping-pong).
+   *  The (format, type) pair derives from the TEXTURE's storage format (the
+   *  Task 67 contract — rgba32f → RGBA/FLOAT). The buffer's contents from
+   *  byteOffset are read as width×height tightly-packed texels. The
+   *  PIXEL_UNPACK_BUFFER binding is saved and restored (no leak). */
+  texSubImage2DBuffer(textureId: number, x: number, y: number, width: number, height: number, bufferId: number, byteOffset?: number): void
 
   // ─── Disposal (M1 §9.9 disposal discipline) ─────────────────────────────
   // Every delete* frees the GPU resource and removes the entry from the facade's

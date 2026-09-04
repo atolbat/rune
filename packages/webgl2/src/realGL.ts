@@ -26,7 +26,14 @@ interface FormatInfo {
 const ENUM = {
   RGBA8: 0x8058,
   RGBA16F: 0x881a,
-  RGBA32F: 0x8816,
+  // Task 132 — THE ENUM FIX: GL_RGBA32F is 0x8814 (the GL registry), NOT
+  // 0x8816 (a dormant typo since the Task 67 HDR work — the mock-based
+  // tests never validate internal formats, and no demo allocated a
+  // rgba32f texture until the TF tier's state texture. The wrong enum
+  // made every rgba32f texImage2D fail with "invalid internalformat" on
+  // real browsers, leaving the texture level-less and every texSubImage2D
+  // "Level of detail outside of range").
+  RGBA32F: 0x8814,
   RGBA: 0x1908,
   UNSIGNED_BYTE: 0x1401,
   HALF_FLOAT: 0x140b,
@@ -363,7 +370,7 @@ export function createRealGL(
     return id
   }
 
-  function texSubImage2D(textureId: number, x: number, y: number, width: number, height: number, bytes: Uint8Array): void {
+  function texSubImage2D(textureId: number, x: number, y: number, width: number, height: number, bytes: Uint8Array | Float32Array): void {
     gl.bindTexture(gl.TEXTURE_2D, textures.get(textureId) ?? null)
     // Task 75b (driver-proofing): the raw-byte upload contract is EXACT bytes
     // — no browser conversion. UNPACK_* are per-context global state: if
@@ -882,6 +889,218 @@ export function createRealGL(
     buffers.delete(bufferId)
   }
 
+  // ─── Task 132 — the TRANSFORM-FEEDBACK family ────────────────────────────
+  // The GLSL twin of the WebGPU compute contract: a vertex-only program +
+  // TF varyings (INTERLEAVED into ONE buffer) + the per-run inputs. The
+  // state contract: RASTERIZER_DISCARD only between begin/endTransformFeedback,
+  // the TF object + its buffer binding UNBOUND after the pass — the render
+  // executor's per-draw state never sees the TF family.
+
+  interface TransformPassRecord {
+    readonly program: WebGLProgram
+    readonly tf: WebGLTransformFeedback
+    /** Task 132 — a DEDICATED VAO: the TF draws never touch the default
+     *  vertex array's attrib bindings (the renderer's instance-attribute
+     *  captures of the records buffer live there — WebGL2 forbids a TF
+     *  output buffer overlapping ANY live vertex binding, and the strict
+     *  drivers check the whole vertex array state, not just the enabled
+     *  arrays). The pass binds ONLY its own attribute inputs here; the
+     *  renderer re-binds its own per draw as always. */
+    readonly vao: WebGLVertexArrayObject
+    readonly uniforms: Map<string, WebGLUniformLocation | null>
+    /** Attribute locations by declaration index (getAttribLocation). */
+    readonly attribLocations: readonly number[]
+    /** The declared uniform layout (name + size), walked over the packed array. */
+    readonly uniformDecl: readonly { readonly name: string; readonly size: 1 | 2 | 3 | 4 }[]
+    /** The declared attribute layout (for runTransformPass's binds). */
+    readonly attribDecl: readonly { readonly name: string; readonly size: number; readonly stride?: number; readonly offset?: number; readonly divisor?: number }[]
+    /** The declared texture sampler names (units 0..N-1). */
+    readonly textureDecl: readonly string[]
+  }
+  const transformPasses = new Map<number, TransformPassRecord>()
+  let nextTransformPass = 1
+  /** The transform passes' program registry ALSO lives in `programs` (the
+   *  useProgram cache + deleteProgram interplay stay coherent); this set
+   *  marks which of them are TF passes (deleteTransformPass disposes the TF
+   *  object too). */
+  const transformProgramIds = new Set<number>()
+
+  function createTransformPass(desc: {
+    readonly vertex: string
+    readonly outputs: readonly string[]
+    readonly attributes?: readonly { readonly name: string; readonly size: number; readonly stride?: number; readonly offset?: number; readonly divisor?: number }[]
+    readonly textures?: readonly string[]
+    readonly uniforms?: readonly { readonly name: string; readonly size: 1 | 2 | 3 | 4 }[]
+  }): number {
+    // A vertex-only program with the TF varyings set BEFORE the link (the
+    // WebGL2 contract: transformFeedbackVaryings must precede linkProgram).
+    // The fragment stage is a trivial no-op — rasterization is discarded
+    // during the pass, but a program still needs a fragment shader to link
+    // on strict drivers.
+    const program = gl.createProgram()
+    gl.attachShader(program, compile(gl.VERTEX_SHADER, desc.vertex))
+    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, '#version 300 es\nprecision lowp float;\nvoid main() {}\n'))
+    gl.transformFeedbackVaryings(program, desc.outputs as unknown as string[], gl.INTERLEAVED_ATTRIBS)
+    gl.linkProgram(program)
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error(`rune: transform pass linking: ${gl.getProgramInfoLog(program)}`)
+    }
+    const tf = gl.createTransformFeedback()
+    const vao = gl.createVertexArray()
+    const attribDecl = desc.attributes ?? []
+    const attribLocations = attribDecl.map(a => gl.getAttribLocation(program, a.name))
+    const id = nextTransformPass++
+    transformPasses.set(id, {
+      program,
+      tf,
+      vao,
+      uniforms: new Map(),
+      attribLocations,
+      attribDecl,
+      uniformDecl: desc.uniforms ?? [],
+      textureDecl: desc.textures ?? [],
+    })
+    // Register in the shared program registry (useProgram's cache); the
+    // numeric id is the facade's next program id (kept in lockstep).
+    const programId = nextProgram++
+    programs.set(programId, { program, uniforms: transformPasses.get(id)!.uniforms })
+    transformProgramIds.add(programId)
+    transformPassIds.set(id, programId)
+    return id
+  }
+  /** passId → the shared program registry id (useProgram cache coherence). */
+  const transformPassIds = new Map<number, number>()
+
+  /** One cached uniform location (the same probe/cache shape as `location`). */
+  function tfLocation(record: TransformPassRecord, name: string): WebGLUniformLocation | null {
+    const cached = record.uniforms.get(name)
+    if (cached !== undefined) return cached
+    const loc = gl.getUniformLocation(record.program, name)
+    record.uniforms.set(name, loc)
+    return loc
+  }
+
+  function runTransformPass(passId: number, vertexCount: number, output: {
+    readonly bufferId: number
+    readonly attribBuffers?: readonly (number | undefined)[]
+    readonly textures?: readonly (number | undefined)[]
+    readonly uniformData?: Float32Array
+  }): void {
+    const record = transformPasses.get(passId)
+    if (record === undefined) {
+      throw new Error(`rune: runTransformPass(${passId}) — no such transform pass`)
+    }
+    if (vertexCount <= 0) return
+    const outBuffer = buffers.get(output.bufferId)
+    if (outBuffer === undefined) {
+      throw new Error(`rune: runTransformPass(${passId}, out ${output.bufferId}) — no such output buffer`)
+    }
+    // The program switch goes through the shared cache (the numeric
+    // early-out + the current-program coherence with the render executor).
+    const programId = transformPassIds.get(passId)
+    if (programId !== undefined) useProgram(programId)
+    else gl.useProgram(record.program)
+    // THE DEDICATED VAO: the pass's draws see an EMPTY vertex array (plus
+    // this pass's own attribute inputs, bound below) — the default VAO's
+    // captured bindings (the renderer's instance attributes — possibly
+    // THIS pass's output buffer!) are invisible and untouched. The WebGL2
+    // rule (a TF output buffer must not overlap any vertex binding) is
+    // satisfied by construction; the renderer re-binds its own per draw.
+    gl.bindVertexArray(record.vao)
+    // The attribute inputs: per-declaration-entry bufferId → the location
+    // resolved at creation. bindVertexBuffer re-establishes enable + the
+    // pointer + the divisor (the same path the render executor uses per
+    // draw — the state after this pass is exactly what the executor fixes
+    // up anyway, so no restore dance is needed for the ARRAY attributes).
+    const ab = output.attribBuffers
+    if (ab !== undefined) {
+      for (let i = 0; i < record.attribLocations.length && i < ab.length; i++) {
+        const bufferId = ab[i]
+        if (bufferId === undefined) continue
+        const a = record.attribDecl[i]
+        bindVertexBuffer(bufferId, record.attribLocations[i], a.size, a.stride, a.offset, a.divisor)
+      }
+    }
+    // The texture inputs: units 0..N-1 (bindTexture resets the LOD clamps
+    // per call — the no-leak contract).
+    const tex = output.textures
+    if (tex !== undefined) {
+      for (let i = 0; i < record.textureDecl.length && i < tex.length; i++) {
+        const textureId = tex[i]
+        if (textureId === undefined) continue
+        bindTexture(textureId, i)
+      }
+    }
+    // The packed uniforms: uniform1f/2f/3f/4fv per the declared sequence.
+    const data = output.uniformData
+    if (data !== undefined) {
+      let at = 0
+      for (const u of record.uniformDecl) {
+        const loc = tfLocation(record, u.name)
+        if (loc === null) continue
+        if (u.size === 1) gl.uniform1f(loc, data[at] ?? 0)
+        else if (u.size === 2) gl.uniform2f(loc, data[at] ?? 0, data[at + 1] ?? 0)
+        else if (u.size === 3) gl.uniform3f(loc, data[at] ?? 0, data[at + 1] ?? 0, data[at + 2] ?? 0)
+        else gl.uniform4f(loc, data[at] ?? 0, data[at + 1] ?? 0, data[at + 2] ?? 0, data[at + 3] ?? 0)
+        at += u.size
+      }
+    }
+    // THE PASS: rasterizer off, the TF object + the output buffer bound,
+    // POINTS drawn, everything restored — the render executor's own state
+    // assertions never observe the TF family (pinned by tests).
+    gl.enable(gl.RASTERIZER_DISCARD)
+    gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, record.tf)
+    gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, outBuffer)
+    gl.beginTransformFeedback(gl.POINTS)
+    gl.drawArrays(gl.POINTS, 0, vertexCount)
+    gl.endTransformFeedback()
+    gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null)
+    gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null)
+    gl.disable(gl.RASTERIZER_DISCARD)
+    gl.bindVertexArray(null)
+  }
+
+  function deleteTransformPass(passId: number): void {
+    const record = transformPasses.get(passId)
+    if (record === undefined) return
+    const programId = transformPassIds.get(passId)
+    if (programId !== undefined) {
+      if (currentProgramId === programId) {
+        gl.useProgram(null)
+        currentProgram = null
+        currentProgramId = -1
+      }
+      programs.delete(programId)
+      transformProgramIds.delete(programId)
+    }
+    gl.deleteTransformFeedback(record.tf)
+    gl.deleteVertexArray(record.vao)
+    gl.deleteProgram(record.program)
+    transformPassIds.delete(passId)
+    transformPasses.delete(passId)
+  }
+
+  function texSubImage2DBuffer(textureId: number, x: number, y: number, width: number, height: number, bufferId: number, byteOffset = 0): void {
+    const texture = textures.get(textureId)
+    if (texture === undefined) {
+      throw new Error(`rune: texSubImage2DBuffer — no such texture ${textureId}`)
+    }
+    const buffer = buffers.get(bufferId)
+    if (buffer === undefined) {
+      throw new Error(`rune: texSubImage2DBuffer — no such buffer ${bufferId}`)
+    }
+    const pair = uploadPair(textureId)
+    gl.bindTexture(gl.TEXTURE_2D, texture)
+    // The PBO contract: PIXEL_UNPACK_BUFFER bound, the offset into it as
+    // the data pointer, UNPACK_ALIGNMENT pinned to 4 (rgba32f rows are
+    // 16-byte aligned by construction — the row-alignment trap the WebGPU
+    // tier already fixed once stays closed), the binding restored after.
+    gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, buffer)
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4)
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, width, height, pair.format, pair.type, byteOffset)
+    gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null)
+  }
+
   return {
     createProgram,
     useProgram,
@@ -915,5 +1134,10 @@ export function createRealGL(
     deleteTarget,
     deleteProgram,
     deleteBuffer,
+    // Task 132 — the transform-feedback family (the GLSL compute twin)
+    createTransformPass,
+    runTransformPass,
+    deleteTransformPass,
+    texSubImage2DBuffer,
   }
 }

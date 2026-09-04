@@ -1,16 +1,17 @@
 // gpuEmbers.js — the GPGPU TIER SHOWCASE (Task 131, the optimization
-// program's Phase 2): ONE HUNDRED SIXTY THOUSAND embers simulated ON THE
-// GPU — the compute-shader advance, the storage-buffer state, the
-// GPU-side record pack, ZERO per-frame CPU→GPU particle traffic. The
-// page's perf readout (the pill + window.__vfxPerf) tells the tier story.
+// program's Phase 2; Task 132 — the tier now runs on BOTH backends): ONE
+// HUNDRED SIXTY THOUSAND embers simulated ON THE GPU — the compute-shader
+// advance over a storage buffer (WebGPU) or the transform-feedback passes
+// over a float texture (WebGL2 — the SSBO's twin, the SAME handoff and
+// the SAME 16-float instance records), the GPU-side record pack, ZERO
+// per-frame CPU→GPU particle traffic. The page's perf readout (the pill +
+// window.__vfxPerf) tells the tier story.
 //
-//   · THE TIER SPLIT (the dual-backend contract): WebGPU runs the compute
-//     tier (sim:'gpu' — 160k embers; the forces, the aging, the wrap and
-//     the instance-record pack all run as compute passes; the CPU keeps
-//     emission + death + compaction — a few tenths of a millisecond).
-//     WebGL2 HAS NO COMPUTE — the same demo runs the CPU tier
-//     (sim:'cpu', 32k: the same look, the density the software GL can
-//     carry). The LOOK is the same class of storm; the COUNT is the tier.
+//   · THE COMMON POINT (Task 132): createGpuParticles(facade, backend)
+//     dispatches by the facade's shape — WebGPU compute (the SSBO tier,
+//     160k) or WebGL2 transform feedback (the TF tier, 16k — the software
+//     GL's budget; real GPUs carry the same tier). The LOOK is the same
+//     class of storm; the COUNT is the backend's budget.
 //
 //   · THE STORM: a wrapped kiln-volume of embers — buoyant lift (negative
 //     gravity), drag, the simplex flow field, the sine turbulence — embers
@@ -21,23 +22,25 @@
 //   · THE HOOKS: window.__vfxPerf = { tier, capacity, count, ms } — the
 //     probe gate (scripts/task131-sim-probe.mjs) pins the tier + the
 //     frame cost; window.__vfxCounters.embers — the emission counters.
-import { createGpuParticles } from '../../../dist/rune.esm.js?v=131'
+import { createGpuParticles } from '../../../dist/rune.esm.js?v=132'
 
 const GPU_CAPACITY = 160_000
-const CPU_CAPACITY = 32_000
+const TF_CAPACITY = 16_000
 const BOX = [46, 22, 46] // the wrap volume (the kiln)
 
 export default {
   title: 'GPU Embers',
-  sub: 'the compute tier · 160k GPU-simmed embers (WebGL2: the CPU tier at 32k) · zero per-frame particle uploads',
+  sub: 'the GPGPU tier · 160k compute-simmed embers (WebGL2: the transform-feedback tier at 16k) · zero per-frame particle uploads',
   camera: { yaw: 0.6, pitch: 0.34, dist: 13, orbit: 0.05, target: [0, 4.5, 0] },
 
   make(env) {
-    const gpu = env.backend === 'webgpu'
-    const tier = gpu ? 'gpu' : 'cpu'
-    const capacity = gpu ? GPU_CAPACITY : CPU_CAPACITY
+    // THE TIER: WebGPU → the compute tier (160k); WebGL2 → the
+    // TRANSFORM-FEEDBACK tier (32k — the software GL's budget). Both are
+    // sim:'gpu' — the facade contract is backend-neutral.
+    const compute = env.backend === 'webgpu'
+    const capacity = compute ? GPU_CAPACITY : TF_CAPACITY
     const counters = (typeof window !== 'undefined' && window.__vfxCounters) || {}
-    counters.tier = tier
+    counters.tier = 'gpu'
     if (typeof window !== 'undefined') window.__vfxCounters = counters
 
     // ── the embers: one facade, tiered by the backend ──
@@ -70,19 +73,19 @@ export default {
         },
         spawner: EMBER_S,
         render: { kind: 'billboard', draw: 'instance', mode: 'camera', spin: 0.8 },
-        sim: gpu ? 'gpu' : 'cpu',
+        sim: 'gpu',
       }),
       material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
       texture: () => env.sparkTexture,
     })
 
-    // ── the GPU tier's backend: the buffers + the compute passes ──
-    let gpuBackend = null
-    if (gpu) {
-      gpuBackend = createGpuParticles(embers.facade, env.renderer.inner.gpu)
-      embers.gpuBackend = gpuBackend
-    }
+    // ── the GPU tier's backend: the buffers + the passes ──
+    // THE COMMON POINT: one call — the WebGPU compute tier or the WebGL2
+    // transform-feedback tier, dispatched by the facade's shape.
+    const backendFacade = env.renderer.inner[compute ? 'gpu' : 'gl']
+    const gpuBackend = createGpuParticles(embers.facade, backendFacade)
+    embers.gpuBackend = gpuBackend
 
     // ── the ground: a dark ember-lit floor (the storm's context) ──
     env.addMesh({
@@ -116,7 +119,7 @@ export default {
     void pool
 
     // ── the perf report (the probe gate reads it) ──
-    const perf = { tier, capacity, count: 0, ms: 0 }
+    const perf = { tier: 'gpu', capacity, count: 0, ms: 0 }
     if (typeof window !== 'undefined') window.__vfxPerf = perf
     let msAvg = 16
     let last = 0
@@ -127,7 +130,7 @@ export default {
         // CPU) → the GPU step (the compact replay, the force walk, the
         // record pack) → the harness draws from the external buffer.
         embers.facade.advance(ctx.dt)
-        if (gpuBackend !== null) gpuBackend.step(ctx.dt)
+        gpuBackend.step(ctx.dt)
         // the perf: a 30-frame moving average of the frame callback's own
         // cost (the sim + the step — the rasterization rides on top)
         const now = performance.now()
@@ -140,7 +143,7 @@ export default {
         perf.ms = +msAvg.toFixed(2)
       },
       dispose() {
-        if (gpuBackend !== null) gpuBackend.dispose()
+        gpuBackend.dispose()
       },
     }
   },

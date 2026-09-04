@@ -40,6 +40,7 @@ import {
 import { createTrailHistory, fillTrails, type TrailOptions, type TrailBakeOptions, type TrailHistory } from './trails.ts'
 import { fillMeshes, MESH_STRIDE, type MeshGeometry, type MeshOptions } from './meshes.ts'
 import { hash01 } from './spawn.ts'
+import { sortDepthBackToFront } from './sort.ts'
 
 /** Task 126 — the WRAP VOLUME: the endless, emitter-anchored field. Each
  *  axis with size > 0 wraps the live positions into a box of that size
@@ -67,9 +68,11 @@ export interface BurstDesc {
  *  Task 131 — the billboard kind's `draw` picks the record format:
  *  'soup' (the classic 6-vertex expansion, the LCD of every draw path) or
  *  'instance' (16-float records + the BILLBOARD material's GPU expansion —
- *  the optimization program's Phase 1; see instances.ts). */
+ *  the optimization program's Phase 1; see instances.ts).
+ *  Task 132 — the billboard kind's `sort`: the painter's order for
+ *  alpha-blended layers (back to front, far first — see sort.ts). */
 export type RenderDesc =
-  | ({ readonly kind: 'billboard'; readonly draw?: 'soup' | 'instance' } & Omit<BillboardOptions, 'ramp'>)
+  | ({ readonly kind: 'billboard'; readonly draw?: 'soup' | 'instance'; readonly sort?: boolean } & Omit<BillboardOptions, 'ramp'>)
   | ({ readonly kind: 'trail' } & TrailOptions & Omit<TrailBakeOptions, 'ramp'>)
   | ({ readonly kind: 'mesh'; readonly geometry: MeshGeometry } & Omit<MeshOptions, 'ramp'>)
 
@@ -122,17 +125,18 @@ export interface ParticlesDesc {
   /** The retire hook (Task 122 — sub-emitters): called per dead particle
    *  with its final state (a REUSED record — copy what you need). */
   readonly onRetire?: (record: RetireRecord) => void
-  /** Task 131 — THE SIMULATION TIER: 'cpu' (the default — the reference,
-   *  bit-identical on both backends) or 'gpu' (the WebGPU compute tier —
-   *  the state lives in a storage buffer, the forces/aging run as compute
-   *  passes, the CPU keeps emission + death + compaction; see
-   *  docs/particles-optimization.md Phase 2). Requires render.draw:
-   *  'instance'; rejects the CPU-coupled features (onRetire, collide,
-   *  seek, speedCurve, attract.killRadius, prewarm — the death site and
-   *  the contact events are CPU-blind on the GPU tier). WebGL2 has no
-   *  compute: attach the GPU backend (@rune/gl createGpuParticles) or the
-   *  first advance() fails LOUDLY. The CPU tier stays the demos' default
-   *  (the dual-backend visual-parity contract). */
+  /** Task 131/132 — THE SIMULATION TIER: 'cpu' (the default — the
+   *  reference, bit-identical on both backends) or 'gpu' (the GPGPU tier —
+   *  the state lives GPU-side, the forces/aging and the record pack run
+   *  ON THE GPU; the CPU keeps emission + death + compaction; see
+   *  docs/particles-optimization.md Phases 2–3). Runs on BOTH backends:
+   *  WebGPU compute over a storage buffer, WebGL2 transform feedback over
+   *  a float texture — attach the orchestrator (@rune/gl
+   *  createGpuParticles(facade, inner.gpu | inner.gl)) or the first
+   *  advance() fails LOUDLY. Requires render.draw:'instance'; rejects the
+   *  CPU-coupled features (onRetire, collide, seek, speedCurve,
+   *  attract.killRadius, prewarm — the death site and the contact events
+   *  are CPU-blind on the GPU tier). */
   readonly sim?: 'cpu' | 'gpu'
 }
 
@@ -318,6 +322,14 @@ export function createParticles(desc: ParticlesDesc): Particles {
   if (kind === 'trail') {
     history = createTrailHistory(capacity, render as TrailOptions)
   }
+  // Task 132 — THE PAINTER'S ORDER: render.sort on the billboard kinds.
+  // The trail kind is one continuous ribbon (a per-particle order makes no
+  // sense there); the mesh kind is opaque/lit (the depth buffer already
+  // resolves it). Both reject sort loudly rather than ignore it.
+  const sortOn = (render as { sort?: boolean }).sort === true
+  if (sortOn && kind !== 'billboard') {
+    throw new Error(`rune/particles: render.sort is a billboard-kind option (a ${kind} layer cannot take a painter's order — trails are one continuous ribbon, meshes resolve through the depth buffer)`)
+  }
   // Task 131 — THE SIMULATION TIER. 'gpu': the WebGPU compute advance (the
   // CPU keeps emission/death/compaction; the state lives in a storage
   // buffer). Validated loudly against the CPU-coupled features.
@@ -326,6 +338,13 @@ export function createParticles(desc: ParticlesDesc): Particles {
   let gpuHandoff: GpuHandoff | null = null
   let gpuSwaps: Uint32Array | null = null
   let gpuSwapCount = 0
+  // Task 132 — the CPU/GPU slot-sync mark: the state on the GPU is live
+  // through THIS slot (the previous advance's post-compaction count). The
+  // next advance's emit gather starts HERE, not at the current count — a
+  // MANUAL burst() between advances would otherwise never be uploaded
+  // (the handoff saw emitBase = the count that already includes it, and
+  // silently lost the newborns on the GPU — the catch-up closes it).
+  let gpuSynced = 0
   if (gpuMode) {
     if (kind !== 'billboard' || (render as { draw?: string }).draw !== 'instance') {
       throw new Error('rune/particles: sim:"gpu" requires render { kind: "billboard", draw: "instance" } (the GPU tier packs the instance records itself — the soup/trail/mesh kinds are CPU-baked)')
@@ -347,6 +366,9 @@ export function createParticles(desc: ParticlesDesc): Particles {
     }
     if ((desc.prewarm ?? 0) > 0) {
       throw new Error('rune/particles: sim:"gpu" rejects prewarm (the GPU state cannot be fast-forwarded synchronously — emit a burst and let a few frames pass instead)')
+    }
+    if (sortOn) {
+      throw new Error('rune/particles: sim:"gpu" rejects render.sort (the records are packed GPU-side — the CPU mirror holds no positions to sort; sorted alpha layers stay on sim:"cpu" — see sort.ts)')
     }
     gpuSwaps = new Uint32Array(2 * capacity) // the pairs ≤ the deaths ≤ capacity
     gpuHandoff = {
@@ -473,6 +495,15 @@ export function createParticles(desc: ParticlesDesc): Particles {
     instanceCount: 0,
     instanceLayout: drawFormat === 'instance' ? INSTANCE_LAYOUT : null,
   }
+  // Task 132 — the painter's-order scratch (allocated ONCE, only for sorted
+  // billboard layers; the sort runs in-place on these arrays — zero
+  // per-frame allocation, the package's hot-path contract). `sortOrder` is
+  // a plain array REUSED via in-place truncation (length = count): its
+  // backing store survives the truncation, so the per-frame regrow to the
+  // live count allocates nothing.
+  const sortIndices = sortOn ? new Int32Array(capacity) : null
+  const sortKeys = sortOn ? new Float32Array(capacity) : null
+  const sortOrder: number[] | null = sortOn ? new Array<number>(capacity).fill(0) : null
 
   // ── the burst schedule state (Task 122) ────────────────────────────────
   let time = 0 // the facade's own clock (per-facade closure state; the prewarm shares it)
@@ -576,6 +607,25 @@ export function createParticles(desc: ParticlesDesc): Particles {
       } else {
         const renderOpts = render as Omit<BillboardOptions, 'ramp'>
         const o = options?.billboard ?? {}
+        // Task 132 — THE PAINTER'S ORDER: the back-to-front index sequence
+        // (far first — the alpha layers composite correctly, the near sprite
+        // blending over everything behind it). The SAME sequence feeds BOTH
+        // bakers: the soup's quad stream and the instance-record stream get
+        // the identical order (the draw-format parity contract).
+        let order: readonly number[] | null = null
+        if (sortOn) {
+          const forward = basis.forward
+          if (forward === undefined) {
+            throw new Error('rune/particles: render.sort needs the camera basis forward (the depth key is dot(forward, position) — pass a full CameraBasis)')
+          }
+          const n = sortDepthBackToFront(system.fields, system.count, forward, sortIndices!, sortKeys!)
+          // The bakers walk order.length entries — hand them the exact LIVE
+          // prefix, not the capacity-sized scratch (the tail is stale zeros
+          // that would bake duplicate quads).
+          for (let i = 0; i < n; i++) sortOrder![i] = sortIndices![i]
+          sortOrder!.length = n
+          order = sortOrder!
+        }
         if (gpuMode) {
           // Task 131 — the GPU tier: the records are PACKED ON THE GPU (the
           // pack dispatch of the orchestrator's step()); view() reports the
@@ -592,6 +642,7 @@ export function createParticles(desc: ParticlesDesc): Particles {
             ramp,
             tiles: o.tiles ?? renderOpts.tiles,
             frameJitter: o.frameJitter ?? renderOpts.frameJitter,
+            order,
           }
           view.vertexCount = packInstances(system, vertices, packOpts)
           view.instanceCount = view.vertexCount
@@ -606,6 +657,7 @@ export function createParticles(desc: ParticlesDesc): Particles {
             axis: o.axis ?? renderOpts.axis,
             spin3d: o.spin3d ?? renderOpts.spin3d,
             frameJitter: o.frameJitter ?? renderOpts.frameJitter,
+            order,
           })
           view.instanceCount = 0
         }
@@ -631,6 +683,7 @@ export function createParticles(desc: ParticlesDesc): Particles {
         gpuHandoff.emitCount = 0
         gpuHandoff.swapCount = 0
         gpuSwapCount = 0
+        gpuSynced = 0
       }
       return facade
     },
@@ -640,13 +693,15 @@ export function createParticles(desc: ParticlesDesc): Particles {
    *  scratch), the emit rows gathered PRE-COMPACTION, then the aging walk
    *  (NO forces — the GPU owns them), the compaction swap list collected,
    *  and NO wrap (the GPU's positions are authoritative). The orchestrator
-   *  reads facade.gpuHandoff between this call and the draw. */
+   *  reads facade.gpuHandoff between this call and the draw. Task 132: the
+   *  GPU tier runs on BOTH backends — WebGPU compute (the SSBO tier) or
+   *  WebGL2 transform feedback (the TF tier — the same handoff). */
   function advanceGpu(dt: number): void {
     const handoff = gpuHandoff!
     if (!handoff.attached) {
-      throw new Error('rune/particles: sim:"gpu" needs the GPU backend — createGpuParticles(facade, gpuFacade) from @rune/gl (WebGL2 has no compute; pass sim:"cpu" there)')
+      throw new Error('rune/particles: sim:"gpu" needs the GPU backend — createGpuParticles(facade, gpuOrGlFacade) from @rune/gl (WebGPU: the compute tier; WebGL2: the transform-feedback tier)')
     }
-    const emitBase = system.count
+    const emitBase = gpuSynced
     handoff.emitBase = emitBase
     handoff.emitCount = 0
     gpuSwapCount = 0
@@ -696,9 +751,11 @@ export function createParticles(desc: ParticlesDesc): Particles {
         state.next += burst.interval
       }
     }
-    // THE EMIT GATHER (pre-compaction): the fresh rows at their slots —
-    // the GPU upload lands BEFORE the swap replay, so the GPU state ends
-    // up matching the CPU's post-compaction structure exactly.
+    // THE EMIT GATHER (pre-compaction): the rows at their slots — the
+    // catch-up [synced, count-at-advance-start) PLUS the fresh in-advance
+    // emissions [count-at-start, count). The upload lands BEFORE the swap
+    // replay, so the GPU state ends up matching the CPU's post-compaction
+    // structure exactly.
     const n = system.count - emitBase
     if (n > 0) {
       const f = system.fields
@@ -726,6 +783,7 @@ export function createParticles(desc: ParticlesDesc): Particles {
       system.advance(dt, NO_FORCES)
     }
     handoff.swapCount = gpuSwapCount
+    gpuSynced = system.count
     time += dt
   }
 

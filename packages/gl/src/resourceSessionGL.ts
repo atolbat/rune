@@ -286,6 +286,15 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
     drawArrays: (mode, first, count, instances) => raw.drawArrays(mode, first, count, instances),
     deleteProgram: programId => raw.deleteProgram(programId),
     deleteBuffer: bufferId => raw.deleteBuffer(bufferId),
+
+    // Task 132 — the transform-feedback family: raw pass-throughs (the TF
+    // pass is not a journaled resource; the buffers/textures it touches go
+    // through the mapped paths above).
+    createTransformPass: desc => raw.createTransformPass(desc),
+    runTransformPass: (passId, vertexCount, output) => raw.runTransformPass(passId, vertexCount, output),
+    deleteTransformPass: passId => raw.deleteTransformPass(passId),
+    texSubImage2DBuffer: (textureId, x, y, width, height, bufferId, byteOffset) =>
+      raw.texSubImage2DBuffer(rawTex(textureId), x, y, width, height, bufferId, byteOffset),
   }
 
   // ─── Task 65: applying a single op on the raw facade WITHOUT journaling ─────

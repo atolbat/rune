@@ -64,8 +64,13 @@ export interface WgpuCommand {
 export interface WgpuCompileContext {
   readonly arena: SliceArena
   readonly commands: WgpuCommand[]
-  /** Structural pipeline cache: (descriptor, shader) → stable id. */
-  pipelineOf(desc: GpuPipelineDesc | undefined, wgsl: string): number
+  /** Structural pipeline cache: (descriptor, shader, VERTEX LAYOUT) → a
+   *  stable id. Task 132: the layout — the per-slot stride/offset/step —
+   *  is part of the pipeline's identity on WebGPU (it is baked into the
+   *  GPURenderPipeline); omitting it let a soup command and an instance
+   *  command sharing one shader+desc collide on one pipeline (the Sword
+   *  Slash crash). */
+  pipelineOf(desc: GpuPipelineDesc | undefined, wgsl: string, layoutKey?: string): number
   nextPipelineId(): number
 }
 
@@ -77,13 +82,13 @@ export function createWgpuContext(arena: SliceArena): WgpuCompileContext {
   return {
     arena,
     commands: [],
-    pipelineOf(desc: GpuPipelineDesc | undefined, wgsl: string): number {
+    pipelineOf(desc: GpuPipelineDesc | undefined, wgsl: string, layoutKey?: string): number {
       let shaderId = shaderIds.get(wgsl)
       if (shaderId === undefined) {
         shaderId = nextShaderId++
         shaderIds.set(wgsl, shaderId)
       }
-      return cache.idOf(desc ?? {}, shaderId)
+      return cache.idOf(desc ?? {}, shaderId, layoutKey)
     },
     nextPipelineId: () => nextPipeline++,
   }
@@ -106,7 +111,8 @@ interface RichCommand extends WgpuCommand {
 export function compileWgslSpec(spec: WgpuDrawSpec, ctx: WgpuCompileContext): WgpuCommand {
   const reflection: WgslReflection = reflectWgsl(spec.shader.wgsl)
   const id = ctx.commands.length
-  const pipelineId = ctx.pipelineOf(spec.pipeline, spec.shader.wgsl)
+  const attrOrder = orderedAttributes(reflection, spec)
+  const pipelineId = ctx.pipelineOf(spec.pipeline, spec.shader.wgsl, vertexLayoutKey(attrOrder))
   const uniformBytes = Math.max(256, reflection.uniformBytes)
   const sliceOffset = ctx.arena.alloc(uniformBytes)
   const sliceBytes = uniformBytes
@@ -125,7 +131,7 @@ export function compileWgslSpec(spec: WgpuDrawSpec, ctx: WgpuCompileContext): Wg
     id,
     pipelineId,
     wgsl: spec.shader.wgsl,
-    attrOrder: orderedAttributes(reflection, spec),
+    attrOrder,
     pipeline: spec.pipeline ?? {},
     textureIds: boundTextures(reflection, spec),
     fields: reflection.uniforms,
@@ -189,6 +195,21 @@ function orderedAttributes(reflection: WgslReflection, spec: WgpuDrawSpec): { da
     step: spec.attributes?.[attr.name]?.step,
     bufferId: spec.attributes?.[attr.name]?.bufferId,
   }))
+}
+
+/** Task 132 — the VERTEX BUFFER LAYOUT signature: one `size:stride:offset:
+ *  step` token per pipeline slot, in @location order. This is exactly the
+ *  part of a command that WebGPU bakes into the GPURenderPipeline — the
+ *  pipeline cache key must include it or the first command to draw with a
+ *  given (shader, desc) dictates the vertex layout for EVERY command
+ *  sharing them (the Sword Slash crash: an instance-record command and a
+ *  soup command both used the bbSprite shader + the additive pipeline;
+ *  whichever drew first baked a 64-byte instance layout, and the other's
+ *  draw then validated — or misread — against it). The bufferId is
+ *  deliberately NOT part of the signature: it names a buffer, not a
+ *  layout. */
+export function vertexLayoutKey(attrOrder: readonly { readonly size: number; readonly stride?: number; readonly offset?: number; readonly step?: 'vertex' | 'instance' }[]): string {
+  return attrOrder.map(a => `${a.size}:${a.stride ?? a.size * 4}:${a.offset ?? 0}:${a.step === 'instance' ? 'i' : 'v'}`).join(',')
 }
 
 /** Textures: texture_2d names from reflection → textureId from the spec. */

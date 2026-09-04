@@ -81,6 +81,12 @@ export const INSTANCE_LAYOUT: {
 export interface PackOptions {
   /** The over-life ramp (size + color + frame); default: the identity. */
   readonly ramp?: Ramp
+  /** Task 132 — the DRAW ORDER: an index sequence (the output of
+   *  sortDepthBackToFront) — the records are packed in this order instead
+   *  of slot order. Omitted/null — the natural [0, count) walk. The
+   *  parity contract with fillBillboards pins the SAME order in both
+   *  bakers (the soup's quad stream and this record stream). */
+  readonly order?: readonly number[] | null
   /** The sprite sheet split [u, v] — the ramp's frame channel picks the
    *  tile (the same contract as fillBillboards). */
   readonly tiles?: readonly [number, number]
@@ -112,7 +118,13 @@ export function packInstances(
   const count = system.count
   const s: Float32Array = SCRATCH
   let n = 0
-  for (let i = 0; i < count; i++) {
+  // Task 132 — the draw order: `order` (the sorted index sequence) walks
+  // the particles in the given sequence; the default — the slot order.
+  const order = options.order
+  const ordered = order !== undefined && order !== null
+  const total = ordered ? order!.length : count
+  for (let j = 0; j < total; j++) {
+    const i = ordered ? order![j] : j
     const age = f.age[i]
     const life = f.life[i]
     const t = life > 0 ? age / life : 0

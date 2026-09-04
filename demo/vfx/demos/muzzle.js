@@ -159,7 +159,7 @@ export default {
         ]),
         spin: 1.1,
         spawner: SMOKE_S,
-        render: { kind: 'billboard', draw: 'instance', tiles: TILES },
+        render: { kind: 'billboard', draw: 'instance', tiles: TILES, sort: true },
       }),
       // the dithered translucent material — the smoke's low-alpha tail
       // stays smooth (no 8-bit staircase)
@@ -442,7 +442,7 @@ export default {
         ]),
         spin: 1.3,
         spawner: IMPACT_SMOKE_S,
-        render: { kind: 'billboard', draw: 'instance', tiles: TILES },
+        render: { kind: 'billboard', draw: 'instance', tiles: TILES, sort: true },
       }),
       material: env.materials.bbHaze,
       pipeline: env.pipelines.alpha,
