@@ -39,7 +39,13 @@ export function hash01(seed: number, index: number, salt: number): number {
  *  Task 126 — `path`: a POLYLINE spawner (lightning bolts, laser beams,
  *  wall-of-fire walls): one burst of `segments` particles covers the whole
  *  path exactly ('lattice' — index → segment), the velocity follows the
- *  LOCAL segment direction (mode 'axis'), `scatter` jitters sideways. */
+ *  LOCAL segment direction (mode 'axis'), `scatter` jitters sideways.
+ *
+ *  Task 130 — the `line` LATTICE: index → station (u = (i % count + 0.5) /
+ *  count) — one burst of `count` particles covers the segment gap-free;
+ *  re-bursted every frame with a live from/to it is the CONTINUOUS-BEAM
+ *  primitive (the hash-random positions of a sparse line burst read as a
+ *  dashed train of blobs — the laser demo's "discrete beam" bug). */
 export type SpawnShape =
   | { readonly kind: 'point'; readonly origin: readonly number[] }
   | { readonly kind: 'sphere'; readonly origin: readonly number[]; readonly radius: readonly [number, number] }
@@ -71,7 +77,22 @@ export type SpawnShape =
        *  'lattice' — index → cell (col = i % columns): one burst of
        *  rows×columns fills the grid PERFECTLY, deterministically. */
       readonly mode?: 'random' | 'lattice' }
-  | { readonly kind: 'line'; readonly from: readonly number[]; readonly to: readonly number[] }
+  | { readonly kind: 'line'; readonly from: readonly number[]; readonly to: readonly number[]
+      /** Task 130 — 'lattice': index → station (u = (i % count + 0.5) / count):
+       *  one burst of `count` particles covers the WHOLE segment gap-free,
+       *  deterministically — the CONTINUOUS-BEAM primitive (re-burst every
+       *  frame with a live from/to and the segment stays solid; a cyclic
+       *  shift of the global stream still covers every station exactly).
+       *  'random' — a hash position per particle (the default, unchanged). */
+      readonly mode?: 'random' | 'lattice'
+      /** The station spacing, world units (lattice, default 0.25) — the count
+       *  derives from the CURRENT segment length: round(len / spacing), so
+       *  the coverage tracks a live from/to. Ignored when `count` is set. */
+      readonly spacing?: number
+      /** An explicit station count (lattice) — overrides `spacing`; the
+       *  stations stretch with the live segment length (uniform coverage at
+       *  any length). Integer >= 1. */
+      readonly count?: number }
   | { readonly kind: 'path'
       /** The flat polyline [x0,y0,z0, x1,y1,z1, …] — ≥ 2 points (1 segment).
        *  Repeated consecutive points are rejected (a zero-length segment has
@@ -201,6 +222,7 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
   const oy = shape.kind === 'line' ? shape.from[1] : shape.kind === 'path' ? shape.points[1] : shape.origin[1]
   const oz = shape.kind === 'line' ? shape.from[2] : shape.kind === 'path' ? shape.points[2] : shape.origin[2]
   let ax = 0, ay = 0, az = 1
+  let lineLen = 0 // the live segment length (the line lattice derives count from it)
   const hasAxis = shape.kind === 'cone' || shape.kind === 'disc' || shape.kind === 'line'
     || shape.kind === 'hemisphere' || shape.kind === 'donut' || shape.kind === 'rectangle' || shape.kind === 'grid'
   if (hasAxis) {
@@ -210,6 +232,25 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
     const l = Math.hypot(vx, vy, vz)
     if (l === 0 || !Number.isFinite(l)) throw new Error('rune/particles: the shape axis (or the line endpoints) must be a finite non-zero vector')
     ax = vx / l; ay = vy / l; az = vz / l
+    if (shape.kind === 'line') lineLen = l
+  }
+  // Task 130 — the LINE lattice constants: the station count is EXPLICIT
+  // (`count`) or derived from the live segment length (`spacing` — the
+  // coverage tracks a from/to that changes every burst). 'random' lines
+  // are untouched (bit-identical).
+  let lineLattice = false, lineCount = 0
+  if (shape.kind === 'line') {
+    const sp = shape.spacing ?? 0.25
+    if (shape.spacing !== undefined && (!Number.isFinite(sp) || sp <= 0)) {
+      throw new Error(`rune/particles: line spacing must be a finite > 0 (got ${shape.spacing})`)
+    }
+    if (shape.count !== undefined && (!Number.isInteger(shape.count) || shape.count < 1)) {
+      throw new Error(`rune/particles: line count must be an integer >= 1 (got ${shape.count})`)
+    }
+    lineLattice = shape.mode === 'lattice'
+    lineCount = lineLattice
+      ? (shape.count ?? Math.max(1, Math.round(lineLen / sp)))
+      : 0
   }
   let rMin = 0, rMax = 0
   if (shape.kind === 'sphere' || shape.kind === 'disc' || shape.kind === 'hemisphere') {
@@ -519,9 +560,14 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
       py = oy + t1y * gx + t2y * gy
       pz = oz + t1z * gx + t2z * gy
     } else if (shape.kind === 'line') {
-      px = ox + (shape.to[0] - ox) * u
-      py = oy + (shape.to[1] - oy) * u
-      pz = oz + (shape.to[2] - oz) * u
+      // Task 130 — the lattice: u = (index % count + 0.5) / count — every
+      // station exactly once per `count` particles, gap-free (a cyclic shift
+      // of the global stream still covers them all); 'random' keeps the
+      // hash draw.
+      const lu = lineLattice ? ((index % lineCount) + 0.5) / lineCount : u
+      px = ox + (shape.to[0] - ox) * lu
+      py = oy + (shape.to[1] - oy) * lu
+      pz = oz + (shape.to[2] - oz) * lu
     } else if (shape.kind === 'path') {
       // Task 126 — the polyline: 'lattice' maps the call index onto segments
       // (a cyclic shift of the global stream still covers ALL segments in

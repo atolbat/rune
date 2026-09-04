@@ -15,14 +15,14 @@
 //
 // EVERY sprite on this page is OURS — generated in this file (deterministic
 // pure functions → raw RGBA uploads; no image assets, no browser
-// premultiply semantics). The dist imports carry ?v=128 (the stale-cache
-// guard — bump on release; Task 129 changed the renderer viewport logic).
-import { createRenderer, capsule, cube, plane, torusKnot } from '../../dist/rune.esm.js?v=128'
+// premultiply semantics). The dist imports carry ?v=129 (the stale-cache
+// guard — bump on release; Task 130 changed @rune/particles: the line lattice).
+import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=129'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER,
-} from '../../dist/rune-materials.esm.js?v=128'
-import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=128'
+} from '../../dist/rune-materials.esm.js?v=129'
+import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=129'
 
 /* ─── the demo registry (the carousel order) ────────────────────────────── */
 
@@ -766,7 +766,7 @@ const env = {
   LIGHT_COLOR: [1.05, 1.0, 0.92, 1],
   AMBIENT: [0.16, 0.18, 0.24, 1],
   // geometry for the scene meshes
-  geometry: { capsule, cube, plane, torusKnot },
+  geometry: { capsule, cube, plane, sphere, torusKnot },
 
   /** Registers a particle layer: { facade, material, pipeline, textures?,
    *  uniforms?, render? (in the facade desc), id }. Returns the layer. */

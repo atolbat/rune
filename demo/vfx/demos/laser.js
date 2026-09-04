@@ -4,24 +4,33 @@
 // beam"). The turret here is a CUTTING laser: it acquires a hovering
 // drone, CHARGES (a thin flickering beam), then BURNS it — a continuous
 // particle beam drawn along the exact muzzle→hit segment (the LINE
-// spawner shape, re-burst every frame), whose aim point WANDERS over the
+// spawner's Task-130 LATTICE mode: one burst per frame covers every
+// station of the segment gap-free, so the beam reads as a SOLID line of
+// light, not a dashed train of blobs — the "the beam is discrete, many
+// projectiles flying in a row" report), whose aim point WANDERS over the
 // drone's face so the surface normal at the hit keeps changing — and the
 // impact sparks fly along the REFLECTION of the beam direction off that
 // normal, exactly as the curvature dictates: a glancing hit sprays
 // sideways wide, a head-on hit sprays back toward the turret. The drone
-// overheats for a beat and detonates (flash + ring + bouncing debris +
-// smoke), the turret picks the next one, and when the patrol is gone a
-// fresh wave flies in.
+// is a BRIGHT sphere whose radius IS the reflection sphere — the beam
+// terminates ON the visible surface (the old invisible cube + the
+// oversized hit proxy made the beam bite empty air — the "can't see what
+// it hits, there's emptiness" report); a small tracking reticle rides
+// the acquired drone so the target is never lost. The drone overheats
+// for a beat and detonates (flash + ring + bouncing debris + smoke), the
+// turret picks the next one, and when the patrol is gone a fresh wave
+// flies in.
 //
-// The library surface this demo adds to the page: the LINE emitter shape
-// driven LIVE per frame (from/to override inside the burst), a continuous
-// per-frame burst schedule (the manual rate channel), the reflection cone
-// (a world-space cone spawner whose axis is recomputed every burst), the
-// same die-at-the-target sub-emitter chain the sentry uses, and tumbling
+// The library surface this demo adds to the page: the LINE LATTICE
+// emitter shape (the continuous-beam primitive — a live from/to re-burst
+// every frame at a frame-scaled life), a continuous per-frame burst
+// schedule (the manual rate channel), the reflection cone (a world-space
+// cone spawner whose axis is recomputed every burst), the same
+// die-at-the-target sub-emitter chain the sentry uses, and breathing
 // manual meshes with a collapsing scale (the death animation).
 export default {
   title: 'Laser Beam',
-  sub: 'rune original · continuous beam · reflection sparks off the curvature · burn → destroy loop',
+  sub: 'rune original · continuous lattice beam · reflection sparks off the curvature · burn → destroy loop',
   camera: { yaw: 0.7, pitch: 0.3, dist: 14.5, orbit: 0.035, target: [0, 1.8, 0] },
 
   make(env) {
@@ -75,24 +84,31 @@ export default {
     const headModel = M(), barrelModel = M()
     const tip = [0, 1.35, 0]
 
-    // ── the drones: three tumbling cubes on offset orbits ──
+    // ── the drones: three bright spheres on offset orbits — the mesh IS the
+    //    reflection sphere (DRONE_R): the beam lands ON the visible surface,
+    //    never in the air around it. The old dark cubes vs the oversized
+    //    0.62 hit proxy put the bite up to 0.35u OUTSIDE the cube — "it hits
+    //    emptiness". Rust-orange reads loud on the dark floor. ──
     const DRONES = [
-      { r: 7.6, h: 2.3, w: 0.36, phase: 0.0, alive: true, x: 0, y: 0, z: 0, scale: 1 },
-      { r: 9.6, h: 3.2, w: -0.21, phase: 2.1, alive: true, x: 0, y: 0, z: 0, scale: 1 },
-      { r: 6.2, h: 1.6, w: 0.5, phase: 4.4, alive: true, x: 0, y: 0, z: 0, scale: 1 },
+      { r: 6.8, h: 2.2, w: 0.34, phase: 0.0, alive: true, x: 0, y: 0, z: 0, scale: 1 },
+      { r: 8.0, h: 3.0, w: -0.2, phase: 2.1, alive: true, x: 0, y: 0, z: 0, scale: 1 },
+      { r: 5.6, h: 1.6, w: 0.46, phase: 4.4, alive: true, x: 0, y: 0, z: 0, scale: 1 },
     ]
-    const DRONE_R = 0.62 // the reflection sphere (the curvature that bends the sparks)
+    const DRONE_R = 0.7 // the reflection sphere (the curvature that bends the sparks) = the mesh
     const droneModels = [M(), M(), M()]
-    const DT = M(), DRY = M(), DRX = M(), DRS = M(), D1 = M(), D2 = M()
+    const DT = M()
     const drones = DRONES.map((d, i) => env.addMesh({
       id: `ls-drone-${i}`,
-      geometry: env.geometry.cube(0.5),
+      geometry: env.geometry.sphere({ radius: DRONE_R, widthSegments: 28, heightSegments: 20 }),
       material: env.materials.lambert,
-      uniforms: { u_albedo: [0.3, 0.26, 0.2, 1] },
+      uniforms: { u_albedo: [0.85, 0.5, 0.2, 1] },
       manual: true,
     }))
 
-    // ── the lock ring on the acquired drone ──
+    // ── the lock on the acquired drone: the one-shot expanding ring (the
+    //    acquire beat) + a small TRACKING reticle re-burst every frame that
+    //    rides the drone's orbit (the old single ring burst stayed behind
+    //    in space while the target flew on) ──
     const LOCK_S = {
       shape: { kind: 'point', origin: [0, 0, 0] },
       velocity: { mode: 'fixed', dir: [0, 1, 0] },
@@ -102,7 +118,7 @@ export default {
     const lock = env.addLayer({
       id: 'ls-lock',
       facade: env.createParticles({
-        capacity: 4,
+        capacity: 16,
         ramp: env.createRamp([
           { t: 0, size: 0.55, r: 0.6, g: 0.9, b: 1, a: 0.9, frame: 5 },
           { t: 1, size: 1, r: 0.45, g: 0.75, b: 1, a: 0, frame: 5 },
@@ -115,22 +131,28 @@ export default {
       texture: () => env.atlasTexture,
     })
 
-    // ── the beam: TWO line-spawned systems, re-burst every frame along the
-    //    exact muzzle→hit segment (the LINE shape with a live from/to —
-    //    the same override-in-shape contract the lightning path uses) ──
+    // ── the beam: TWO line-LATTICE systems, re-burst every frame along the
+    //    exact muzzle→hit segment (Task 130: mode 'lattice' maps the call
+    //    index → station, so ONE burst covers every station of the segment
+    //    gap-free — a SOLID line of light, not the old hash-random scatter
+    //    of ~36 blobs that read as "many projectiles flying in a row").
+    //    The life is dt-scaled (~2-3 FRAMES whatever the refresh rate), so
+    //    2-3 staggered full covers are always alive; the per-frame seed
+    //    re-hashes only the size/life (positions are lattice), a stable
+    //    geometry with an organic shimmer. ──
     const BEAM_CORE_S = {
-      shape: { kind: 'line', from: [0, 1.35, 0], to: [8, 2.3, 0] },
+      shape: { kind: 'line', from: [0, 1.35, 0], to: [8, 2.3, 0], mode: 'lattice', spacing: 0.1 },
       velocity: { mode: 'fixed', dir: [0, 1, 0] },
-      speed: [0, 0], life: [0.07, 0.1], size: [0.3, 0.36],
+      speed: [0, 0], life: [0.05, 0.06], size: [0.5, 0.58],
       color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 21,
     }
     const beamCore = env.addLayer({
       id: 'ls-core',
       facade: env.createParticles({
-        capacity: 128,
+        capacity: 384,
         ramp: env.createRamp([
           { t: 0, size: 1, r: 1, g: 1, b: 1, a: 1 },
-          { t: 1, size: 0.9, r: 0.9, g: 0.97, b: 1, a: 0.85 },
+          { t: 1, size: 0.8, r: 0.9, g: 0.97, b: 1, a: 0.45 },
         ]),
         spawner: BEAM_CORE_S,
         render: { kind: 'billboard', mode: 'camera' },
@@ -140,17 +162,17 @@ export default {
       texture: () => env.glowTexture,
     })
     const BEAM_HALO_S = {
-      shape: { kind: 'line', from: [0, 1.35, 0], to: [8, 2.3, 0] },
+      shape: { kind: 'line', from: [0, 1.35, 0], to: [8, 2.3, 0], mode: 'lattice', spacing: 0.16 },
       velocity: { mode: 'fixed', dir: [0, 1, 0] },
-      speed: [0, 0], life: [0.1, 0.14], size: [0.9, 1.1],
+      speed: [0, 0], life: [0.05, 0.07], size: [0.95, 1.15],
       color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 23,
     }
     const beamHalo = env.addLayer({
       id: 'ls-halo',
       facade: env.createParticles({
-        capacity: 128,
+        capacity: 256,
         ramp: env.createRamp([
-          { t: 0, size: 1, r: 0.55, g: 0.85, b: 1, a: 0.4 },
+          { t: 0, size: 1, r: 0.55, g: 0.85, b: 1, a: 0.5 },
           { t: 1, size: 1.15, r: 0.4, g: 0.7, b: 1, a: 0 },
         ]),
         spawner: BEAM_HALO_S,
@@ -161,11 +183,12 @@ export default {
       texture: () => env.glowTexture,
     })
 
-    // ── the impact flare: the hot spot where the beam bites ──
+    // ── the impact flare: the hot spot where the beam bites the drone's
+    //    face — the "the beam is HITTING something" cue ──
     const FLARE_S = {
       shape: { kind: 'point', origin: [0, 0, 0] },
       velocity: { mode: 'fixed', dir: [0, 1, 0] },
-      speed: [0, 0], life: [0.1, 0.14], size: [0.9, 1.25],
+      speed: [0, 0], life: [0.1, 0.14], size: [1.1, 1.5],
       color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 25,
     }
     const flare = env.addLayer({
@@ -450,7 +473,8 @@ export default {
         const dt = ctx.dt
         const t = ctx.time
 
-        // the drone patrol: positions + tumble
+        // the drone patrol: positions + the hover breathe (a uniform sphere
+        // has no tumble to show — a ±4% scale pulse keeps them ALIVE)
         for (let i = 0; i < DRONES.length; i++) {
           const d = DRONES[i]
           const a = d.w * t + d.phase
@@ -460,27 +484,13 @@ export default {
           // the death collapse: the scale implodes over the boom
           if (!d.alive) d.scale = Math.max(0, d.scale - dt * 7)
           else if (d.scale < 1) d.scale = Math.min(1, d.scale + dt * 3)
-          // the model: T(pos) · Ry · Rx · S — a tumble around two slow axes
+          // the model: T(pos) · S — the breathe rides the death scale
+          const s = Math.max(0.0001, d.scale * (1 + 0.04 * Math.sin(1.7 * t + d.phase * 2)))
           DT.fill(0)
-          DT[0] = DT[5] = DT[10] = 1
-          DT[12] = d.x; DT[13] = d.y; DT[14] = d.z; DT[15] = 1
-          const ra = 0.6 * t + d.phase, rb = 0.42 * t + d.phase * 2
-          DRY.fill(0)
-          DRY[0] = Math.cos(ra); DRY[2] = Math.sin(ra)
-          DRY[5] = 1
-          DRY[8] = -Math.sin(ra); DRY[10] = Math.cos(ra)
-          DRX.fill(0)
-          DRX[0] = 1
-          DRX[5] = Math.cos(rb); DRX[6] = Math.sin(rb)
-          DRX[9] = -Math.sin(rb); DRX[10] = Math.cos(rb)
-          const s = Math.max(0.0001, 1.05 * d.scale)
-          DRS.fill(0)
-          DRS[0] = s; DRS[5] = s; DRS[10] = s; DRS[15] = 1
-          // distinct out matrices (mul is NOT safe in place: column c reads
-          // the already-rewritten column 0 of `a`)
-          mul(DT, DRY, D1)
-          mul(D1, DRX, D2)
-          mul(D2, DRS, droneModels[i])
+          DT[0] = s; DT[5] = s; DT[10] = s; DT[15] = 1
+          DT[12] = d.x; DT[13] = d.y; DT[14] = d.z
+          // a full T·S in one write: the rotation-free drone frame
+          droneModels[i].set(DT)
           ctx.record(drones[i].command, { mvp: ctx.modelMvp(droneModels[i]), model: droneModels[i], camPos: ctx.camEye })
         }
 
@@ -542,6 +552,16 @@ export default {
 
         // ── the phases ──
         phaseT += dt
+        // the tracking reticle: a small ring re-burst EVERY frame that rides
+        // the acquired drone's orbit (a live target marker, not a one-shot
+        // ring left behind in space). Only while the drone is alive.
+        if (d.alive && phase !== 'boom') {
+          lock.facade.at(d.x, d.y, d.z)
+          lock.facade.burst(1, { ...LOCK_S, life: [dt * 3, dt * 3], size: [0.5, 0.5], seed: 13 + droneIdx })
+        }
+        // the live beam segment (the lattice re-derives the station count
+        // from THIS frame's length — the burst size follows it)
+        const segLen = Math.hypot(hit[0] - tip[0], hit[1] - tip[1], hit[2] - tip[2])
         if (phase === 'acquire') {
           if (Math.abs(dyaw) < 0.06 && Math.abs(dpitch) < 0.06 && phaseT > 0.3) {
             phase = 'charge'
@@ -549,26 +569,31 @@ export default {
             env.log.event(`laser: locked drone ${droneIdx + 1} (${d.x.toFixed(1)}, ${d.y.toFixed(1)}, ${d.z.toFixed(1)})`)
           }
         } else if (phase === 'charge') {
-          // a thin flickering beam + the muzzle charge flare growing
+          // a THIN continuous lattice beam + the muzzle charge flare growing
           charge.facade.at(tip[0], tip[1], tip[2])
           charge.facade.burst(1, { ...CHARGE_S, seed: 40 + ((phaseT * 60) | 0), size: [0.25 + phaseT * 1.1, 0.4 + phaseT * 1.4] })
-          beamCore.facade.burst(2, {
+          beamCore.facade.burst(Math.ceil(segLen / 0.16) + 2, {
             ...BEAM_CORE_S,
-            shape: { kind: 'line', from: [tip[0], tip[1], tip[2]], to: [hit[0], hit[1], hit[2]] },
-            size: [0.12, 0.16], seed: 44 + ((phaseT * 60) | 0),
+            shape: { kind: 'line', from: [tip[0], tip[1], tip[2]], to: [hit[0], hit[1], hit[2]], mode: 'lattice', spacing: 0.16 },
+            life: [dt * 1.6, dt * 2], size: [0.12, 0.16], seed: 44 + ((phaseT * 60) | 0),
           })
           if (phaseT > CHARGE_T) { phase = 'burn'; phaseT = 0; popT = 0; wispT = 0; recoil = 0.1 }
         } else if (phase === 'burn') {
           C.laserFrames = (C.laserFrames ?? 0) + 1
-          // the beam: core + halo, line-spawned along the exact segment
-          beamCore.facade.burst(7, {
+          // THE BEAM: core + halo, the line LATTICE along the exact segment —
+          // every station covered every frame (a solid line of light; the
+          // 2-frame life keeps 2 staggered covers alive at any refresh rate)
+          C.beamAlive = beamCore.facade.count
+          beamCore.facade.burst(Math.min(160, Math.ceil(segLen / 0.1) + 2), {
             ...BEAM_CORE_S,
-            shape: { kind: 'line', from: [tip[0], tip[1], tip[2]], to: [hit[0], hit[1], hit[2]] },
+            shape: { kind: 'line', from: [tip[0], tip[1], tip[2]], to: [hit[0], hit[1], hit[2]], mode: 'lattice', spacing: 0.1 },
+            life: [dt * 1.8, dt * 2.4],
             seed: 50 + ((t * 60) | 0),
           })
-          beamHalo.facade.burst(5, {
+          beamHalo.facade.burst(Math.min(96, Math.ceil(segLen / 0.16) + 2), {
             ...BEAM_HALO_S,
-            shape: { kind: 'line', from: [tip[0], tip[1], tip[2]], to: [hit[0], hit[1], hit[2]] },
+            shape: { kind: 'line', from: [tip[0], tip[1], tip[2]], to: [hit[0], hit[1], hit[2]], mode: 'lattice', spacing: 0.16 },
+            life: [dt * 2.6, dt * 3.4],
             seed: 60 + ((t * 60) | 0),
           })
           // the hot spot at the bite

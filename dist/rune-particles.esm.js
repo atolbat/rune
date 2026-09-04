@@ -809,6 +809,7 @@ function createSpawner(desc) {
   const oy = shape.kind === "line" ? shape.from[1] : shape.kind === "path" ? shape.points[1] : shape.origin[1];
   const oz = shape.kind === "line" ? shape.from[2] : shape.kind === "path" ? shape.points[2] : shape.origin[2];
   let ax = 0, ay = 0, az = 1;
+  let lineLen = 0;
   const hasAxis = shape.kind === "cone" || shape.kind === "disc" || shape.kind === "line" || shape.kind === "hemisphere" || shape.kind === "donut" || shape.kind === "rectangle" || shape.kind === "grid";
   if (hasAxis) {
     const vx = shape.kind === "line" ? shape.to[0] - ox : shape.axis[0];
@@ -820,6 +821,20 @@ function createSpawner(desc) {
     ax = vx / l;
     ay = vy / l;
     az = vz / l;
+    if (shape.kind === "line")
+      lineLen = l;
+  }
+  let lineLattice = false, lineCount = 0;
+  if (shape.kind === "line") {
+    const sp = shape.spacing ?? 0.25;
+    if (shape.spacing !== undefined && (!Number.isFinite(sp) || sp <= 0)) {
+      throw new Error(`rune/particles: line spacing must be a finite > 0 (got ${shape.spacing})`);
+    }
+    if (shape.count !== undefined && (!Number.isInteger(shape.count) || shape.count < 1)) {
+      throw new Error(`rune/particles: line count must be an integer >= 1 (got ${shape.count})`);
+    }
+    lineLattice = shape.mode === "lattice";
+    lineCount = lineLattice ? shape.count ?? Math.max(1, Math.round(lineLen / sp)) : 0;
   }
   let rMin = 0, rMax = 0;
   if (shape.kind === "sphere" || shape.kind === "disc" || shape.kind === "hemisphere") {
@@ -1148,9 +1163,10 @@ function createSpawner(desc) {
       py = oy + t1y * gx + t2y * gy;
       pz = oz + t1z * gx + t2z * gy;
     } else if (shape.kind === "line") {
-      px = ox + (shape.to[0] - ox) * u;
-      py = oy + (shape.to[1] - oy) * u;
-      pz = oz + (shape.to[2] - oz) * u;
+      const lu = lineLattice ? (index % lineCount + 0.5) / lineCount : u;
+      px = ox + (shape.to[0] - ox) * lu;
+      py = oy + (shape.to[1] - oy) * lu;
+      pz = oz + (shape.to[2] - oz) * lu;
     } else if (shape.kind === "path") {
       let seg;
       if (pathLattice)
