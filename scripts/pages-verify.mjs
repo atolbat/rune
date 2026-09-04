@@ -184,7 +184,7 @@ try {
   await page.screenshot({ path: join(OUT, 'live-vfx.png'), fullPage: true })
   console.log(`vfx cycle: ${names.join(' → ')}`)
   console.log(`vfx GPU log: ${gpuClean ? 'clean' : 'ERRORS'}`)
-  vfxLiveOk = names.length === 22 && !shotA.equals(shotB) && gpuClean
+  vfxLiveOk = names.length === 23 && !shotA.equals(shotB) && gpuClean // the boot demo + 23 pushes = the 24-demo cycle
 } catch (error) {
   console.log(`vfx check failed: ${error instanceof Error ? error.message : String(error)}`)
 }
