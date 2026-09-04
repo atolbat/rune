@@ -224,7 +224,7 @@ export const EMISSIVE: FeatureBit = 1 << 26
  *  (view-space depth — needs the u_view matrix). */
 export const FOG: FeatureBit = 1 << 27
 
-/** Soft particles (Task 122 — three.quarks' softParticles): the fragment
+/** Soft particles (the depth-fade technique): the fragment
  *  compares its own window depth against a DEPTH PREPASS texture
  *  (u_depth — a scene-only pass with the depth packed into RGB) and fades
  *  base.a to zero within u_softParams.z units of the scene surface — no
@@ -234,8 +234,19 @@ export const FOG: FeatureBit = 1 << 27
  *  fadeRange, 0). */
 export const SOFT_PARTICLES: FeatureBit = 1 << 28
 
+/** Task 127 — OUTPUT_DITHER: a ±0.5/255 per-pixel output noise (interleaved
+ *  gradient noise, RGB only). Breaks the 8-bit quantization stair-steps
+ *  that stacked low-alpha translucent layers produce (a fog card at ~5%
+ *  alpha over a dark scene: every overlap lands on the same handful of
+ *  quantized values — a visible "brightness staircase" across the card).
+ *  The classic ordered/screen dithering trick, one ALU op, no texture, no
+ *  state. Combine with TEXTURE | VERTEX_COLOR for the translucent soup
+ *  layers that need it; it composes with any light model or post effect
+ *  (the dither folds into the final color write). */
+export const OUTPUT_DITHER: FeatureBit = 1 << 30
+
 /** The analytic studio environment (the env-map stand-in for PBR metals —
- *  three.quarks' meshMaterialDemo ships a cube envMap; ours is a cheap
+ *  the classic mesh-material demos ship a cube envMap; ours is a cheap
  *  CLOSED-FORM environment on the reflect vector: a sky/ground gradient,
  *  the sun glint and an overhead softbox, tinted by the albedo for
  *  metals and broadened by roughness). With one sun + ambient alone, a

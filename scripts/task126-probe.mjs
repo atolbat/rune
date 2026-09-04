@@ -35,7 +35,7 @@ const browser = await chromium.launch({
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
 const errors = []
 page.on('pageerror', (e) => errors.push(String(e)))
-await page.goto(`http://localhost:${port}/demo/quarks/`, { waitUntil: 'networkidle' })
+await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
 await page.waitForFunction(() => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 30000 })
 await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
 
@@ -60,7 +60,7 @@ const targets = [
   { title: 'Rainstorm', settle: 4200, name: 'storm' },
   { title: 'Sword Slash', settle: 8200, name: 'slash' },
   { title: 'Vortex', settle: 4200, name: 'vortex' },
-  { title: 'Alpha Test (leaves)', settle: 4200, name: 'alphatest' },
+  { title: 'Alpha Test (petals)', settle: 4200, name: 'alphatest' },
 ]
 
 for (const t of targets) {

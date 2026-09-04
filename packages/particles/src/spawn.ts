@@ -31,7 +31,7 @@ export function hash01(seed: number, index: number, salt: number): number {
  *  `armSpread` radians of uniform scatter within an arm. Omitted arms →
  *  the uniform annulus (the previous behavior, bit-identical).
  *
- *  Task 122 — the three.quarks emitter family: `hemisphere` (the upper
+ *  The emitter family: `hemisphere` (the upper
  *  dome around the axis), `donut` (a torus: the ring + the tube circle),
  *  `rectangle` (a plane patch ⊥ axis), `grid` (a lattice — 'random' cells
  *  like theirs, or 'lattice' index→cell for perfect full-grid bursts).
@@ -67,7 +67,7 @@ export type SpawnShape =
   | { readonly kind: 'rectangle'; readonly origin: readonly number[]; readonly axis: readonly number[]; readonly width: number; readonly height: number }
   | { readonly kind: 'grid'; readonly origin: readonly number[]; readonly axis: readonly number[]; readonly width: number; readonly height: number
       readonly rows: number; readonly columns: number
-      /** 'random' — a random cell per particle (three.quarks' GridEmitter).
+      /** 'random' — a random cell per particle (the grid emitter).
        *  'lattice' — index → cell (col = i % columns): one burst of
        *  rows×columns fills the grid PERFECTLY, deterministically. */
       readonly mode?: 'random' | 'lattice' }
@@ -90,7 +90,7 @@ export type SpawnShape =
  *  radial     — away from the shape origin (the sphere burst; any shape).
  *                             DEGENERATE at the origin (a point shape, a
  *               zero-radius sphere): a uniform RANDOM unit-sphere direction
- *               — three.quarks' PointEmitter, exactly (theta = u·τ,
+ *               — the point emitter, exactly (theta = u·τ,
  *               phi = acos(2v−1)): a point burst SCATTERS, never jets.
  *  lobe       — the cone's axis fanned by its halfAngle (cone only);
  *  axis       — along the shape axis (cone / disc / line);
@@ -104,7 +104,7 @@ export type VelocityMode =
   | { readonly mode: 'tangential' }
   | { readonly mode: 'fixed'; readonly dir: readonly number[] }
 
-/** The seek TARGET source (Task 122 — three.quarks' TextureSequencer/
+/** The seek TARGET source (the image-sequencer /
  *  ApplySequences): where a newborn particle is HEADING (see forces.seek
  *  in system.ts). Omitted → NaN → the store defaults the target to the
  *  spawn position (a particle that holds still). */
@@ -558,7 +558,7 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
       if (l > 1e-12) { dx /= l; dy /= l; dz /= l }
       else {
         // Task 124 — the degenerate case (a particle AT the shape origin: a
-        // point burst, or a zero-radius sphere — three.quarks' PointEmitter
+        // point burst, or a zero-radius sphere — the point emitter
         // and their ps.json's r=0.0001 sphere): their direction is a UNIFORM
         // RANDOM UNIT-SPHERE vector (theta = u·τ, phi = acos(2v−1)), so the
         // burst SCATTERS in every direction. The old axis fallback produced a

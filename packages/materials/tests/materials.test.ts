@@ -9,6 +9,7 @@ import {
   INSTANCED,
   NORMALMAP,
   TEXTURE,
+  OUTPUT_DITHER,
   FLAT_ALBEDO,
   VERTEX_COLOR,
   DOUBLE_SIDED,
@@ -753,5 +754,41 @@ describe('pbrEnv (Task 18)', () => {
     resetMaterials()
     const material = materialOf({ features: ENV_MASK })
     expect(material.wgsl).toMatch(/var lit =/)
+  })
+})
+
+describe('Task 127: OUTPUT_DITHER', () => {
+  it('folds a ±0.5/255 interleaved-gradient noise into BOTH final writes', () => {
+    resetMaterials()
+    const material = materialOf({ features: TEXTURE | VERTEX_COLOR | OUTPUT_DITHER })
+    // the GLSL: the noise from gl_FragCoord, folded into the final write
+    expect(material.glsl.fragment).toContain('float ditherN = (fract(52.9829189')
+    expect(material.glsl.fragment).toContain('gl_FragCoord.xy')
+    expect(material.glsl.fragment).toMatch(/o_color = vec4\(base\.rgb \+ ditherN, base\.a\);/)
+    // the WGSL twin: @builtin(position) in the fragment input + the noise
+    expect(material.wgsl).toContain('let ditherN = (fract(52.9829189')
+    expect(material.wgsl).toContain('frag.pos.xy')
+    expect(material.wgsl).toMatch(/return vec4<f32>\(base\.rgb \+ ditherN, base\.a\);/)
+    // the WGSL fragment signature gained FSIn with the position builtin
+    expect(material.wgsl).toMatch(/fn fsMain\(frag : FSIn\)/)
+    expect(material.wgsl).toContain('@builtin(position) pos : vec4<f32>')
+  })
+
+  it('composes with a light model (the dither rides the `lit` write) and is absent without the bit', () => {
+    resetMaterials()
+    const lit = materialOf({ features: FLAT_ALBEDO | LAMBERT | OUTPUT_DITHER })
+    expect(lit.glsl.fragment).toMatch(/o_color = vec4\(lit \+ ditherN, base\.a\);/)
+    expect(lit.wgsl).toMatch(/return vec4<f32>\(lit \+ ditherN, base\.a\);/)
+    resetMaterials()
+    const plain = materialOf({ features: TEXTURE | VERTEX_COLOR })
+    expect(plain.glsl.fragment).not.toContain('ditherN')
+    expect(plain.wgsl).not.toContain('ditherN')
+    expect(plain.wgsl).not.toMatch(/fn fsMain\(frag : FSIn\)/)
+  })
+
+  it('the dither path compiles highp (a mediump ±0.5/255 noise rounds away)', () => {
+    resetMaterials()
+    const material = materialOf({ features: TEXTURE | VERTEX_COLOR | OUTPUT_DITHER })
+    expect(material.glsl.fragment).toContain('precision highp float;')
   })
 })

@@ -30,7 +30,7 @@ const browser = await chromium.launch({
 })
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
 page.on('pageerror', (e) => console.log('PAGE ERROR:', String(e).slice(0, 300)))
-await page.goto(`http://localhost:${port}/demo/quarks/`, { waitUntil: 'networkidle' })
+await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
 await page.waitForFunction(() => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 20000 })
 await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
 await page.keyboard.press('ArrowRight')
@@ -54,7 +54,7 @@ async function freshInstance() {
 for (const [ms, label] of [[150, 't≈0.15'], [450, 't≈0.45'], [1250, 't≈1.25']]) {
   await freshInstance()
   await page.waitForTimeout(ms)
-  const layers = await page.evaluate(() => (window.__quarksLayers ?? []).map(l => ({
+  const layers = await page.evaluate(() => (window.__vfxLayers ?? []).map(l => ({
     id: l.id, count: l.facade?.count ?? 0,
   })))
   console.log(`${label}:`, JSON.stringify(layers))

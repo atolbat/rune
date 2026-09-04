@@ -1,5 +1,5 @@
 /** scripts/smoke-scatter-probe.mjs — Task 124 validation: the explosion's
- *  smoke must SCATTER in every direction (three.quarks' PointEmitter: a
+ *  smoke must SCATTER in every direction (three.vfx' PointEmitter: a
  *  uniform random unit-sphere direction), not jet along +Z (the old
  *  degenerate-radial fallback bug).
  *
@@ -42,7 +42,7 @@ async function probe(backend) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
   const errors = []
   page.on('pageerror', (e) => errors.push(String(e)))
-  await page.goto(`http://localhost:${port}/demo/quarks/`, { waitUntil: 'networkidle' })
+  await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
   if (backend !== 'auto') {
     await page.click('#rd-fab')
     await page.click(`label[for="mode-${backend}"]`)
@@ -69,7 +69,7 @@ async function probe(backend) {
   await page.waitForTimeout(450)
 
   const stats = await page.evaluate(() => {
-    const layer = (window.__quarksLayers ?? []).find(l => l.id === 'ex-smoke')
+    const layer = (window.__vfxLayers ?? []).find(l => l.id === 'ex-smoke')
     if (!layer) return { error: 'no ex-smoke layer' }
     const f = layer.facade.fields
     const n = layer.facade.count

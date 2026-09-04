@@ -153,10 +153,10 @@ try {
 }
 console.log(particlesLiveOk ? 'PARTICLES LIVE OK' : 'PARTICLES LIVE FAIL')
 
-// ─── quarks: the 22-demo carousel on the LIVE page (Task 122 + 124 + 126) ───────
-let quarksLiveOk = false
+// ─── vfx: the 22-demo carousel on the LIVE page (Task 122 + 124 + 126) ───────
+let vfxLiveOk = false
 try {
-  await page.goto(`${BASE}/demo/quarks/`, { waitUntil: 'networkidle' })
+  await page.goto(`${BASE}/demo/vfx/`, { waitUntil: 'networkidle' })
   await page.waitForFunction(() => document.querySelector('#backend')?.textContent !== '…', null, { timeout: 20_000 })
   await page.waitForFunction(
     () => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
@@ -181,14 +181,14 @@ try {
   const shotB = await page.locator('#canvas').screenshot()
   const logText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
   const gpuClean = !/too small|Invalid CommandBuffer|rendering stopped|GL: GL_|GPU: |failed/i.test(logText)
-  await page.screenshot({ path: join(OUT, 'live-quarks.png'), fullPage: true })
-  console.log(`quarks cycle: ${names.join(' → ')}`)
-  console.log(`quarks GPU log: ${gpuClean ? 'clean' : 'ERRORS'}`)
-  quarksLiveOk = names.length === 21 && !shotA.equals(shotB) && gpuClean
+  await page.screenshot({ path: join(OUT, 'live-vfx.png'), fullPage: true })
+  console.log(`vfx cycle: ${names.join(' → ')}`)
+  console.log(`vfx GPU log: ${gpuClean ? 'clean' : 'ERRORS'}`)
+  vfxLiveOk = names.length === 21 && !shotA.equals(shotB) && gpuClean
 } catch (error) {
-  console.log(`quarks check failed: ${error instanceof Error ? error.message : String(error)}`)
+  console.log(`vfx check failed: ${error instanceof Error ? error.message : String(error)}`)
 }
-console.log(quarksLiveOk ? 'QUARKS LIVE OK' : 'QUARKS LIVE FAIL')
+console.log(vfxLiveOk ? 'VFX LIVE OK' : 'VFX LIVE FAIL')
 
 await browser.close()
-process.exit(cubeOk && viewerOk && sambaOk && matcapOk && particlesLiveOk && quarksLiveOk && errors.length === 0 ? 0 : 1)
+process.exit(cubeOk && viewerOk && sambaOk && matcapOk && particlesLiveOk && vfxLiveOk && errors.length === 0 ? 0 : 1)

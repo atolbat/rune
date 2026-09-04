@@ -73,7 +73,7 @@ const page = await browser.newPage({ viewport: { width: 1280, height: 800 } })
 const errors = []
 page.on('pageerror', (e) => errors.push(String(e)))
 page.on('console', (m) => { if (m.type() === 'error') console.log('  [console.error]', m.text().slice(0, 160)) })
-await page.goto(`http://localhost:${port}/demo/quarks/`, { waitUntil: 'networkidle' })
+await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
 await page.waitForFunction(() => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 30000 })
 await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
 
@@ -92,7 +92,7 @@ async function gotoDemo(page, title) {
 }
 
 async function layerStats(page) {
-  return page.evaluate(() => (window.__quarksLayers ?? []).map(l => {
+  return page.evaluate(() => (window.__vfxLayers ?? []).map(l => {
     const f = l.facade?.fields
     const n = l.facade?.count ?? 0
     if (!f || n === 0) return { id: l.id, count: 0 }
@@ -242,15 +242,15 @@ for (let d = 0; d < NEW_DEMOS.length; d++) {
     // Task 126 — the SINK: the disc's retire counter climbs (the funnel
     // CONSUMES its matter at the core, it no longer flies through)
     const consumed = await page.evaluate(() =>
-      (window.__quarksLayers ?? []).find(x => x.id === 'vx-disc')?.facade?.stats?.().retired ?? 0)
+      (window.__vfxLayers ?? []).find(x => x.id === 'vx-disc')?.facade?.stats?.().retired ?? 0)
     if (consumed < 100) { ok = false; why.push(`the sink consumed too little (retired ${consumed})`) }
   }
   if (title === 'Fireflies') {
     const meanDist = await page.evaluate(() => {
-      const l = (window.__quarksLayers ?? []).find(x => x.id === 'ff-flies')
+      const l = (window.__vfxLayers ?? []).find(x => x.id === 'ff-flies')
       if (!l || l.facade.count === 0) return -1
       const f = l.facade.fields
-      const halo = (window.__quarksLayers ?? []).find(x => x.id === 'ff-halo')
+      const halo = (window.__vfxLayers ?? []).find(x => x.id === 'ff-halo')
       const hf = halo?.facade?.fields
       const hx = halo && halo.facade.count > 0 ? hf.px[0] : 0
       const hy = halo && halo.facade.count > 0 ? hf.py[0] : 1.35
@@ -293,9 +293,9 @@ for (let d = 0; d < NEW_DEMOS.length; d++) {
     // segments retire per strike — sampling the 0.16-s life directly is
     // too flaky on SwiftShader)
     const retired = await page.evaluate(() =>
-      (window.__quarksLayers ?? []).find(x => x.id === 'lt-bolt')?.facade?.stats?.().retired ?? 0)
+      (window.__vfxLayers ?? []).find(x => x.id === 'lt-bolt')?.facade?.stats?.().retired ?? 0)
     const glowRetired = await page.evaluate(() =>
-      (window.__quarksLayers ?? []).find(x => x.id === 'lt-glow')?.facade?.stats?.().retired ?? 0)
+      (window.__vfxLayers ?? []).find(x => x.id === 'lt-glow')?.facade?.stats?.().retired ?? 0)
     if (!(retired >= 11 && glowRetired >= 11)) { ok = false; why.push(`strikes thin (bolt retired ${retired}, glow ${glowRetired})`) }
     if (!ever('lt-mist', 20)) { ok = false; why.push('mist never dense') }
   }

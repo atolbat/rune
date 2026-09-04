@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'bun:test'
 import { createParticles, createSpawner, createRamp, createGrassField, hash01 } from '../src/index.ts'
 import type { SpawnerDesc, SpawnRecord } from '../src/index.ts'
+import { FIELD_NAMES, PARTICLE_FLOATS } from '../src/system.ts'
 
 const BASIS = { right: [1, 0, 0], up: [0, 1, 0], forward: [0, 0, -1] }
 
@@ -371,5 +372,44 @@ describe('Task 126: the grass field', () => {
     expect(f.glsl.vertex).toContain('gl_VertexID')
     expect(f.wgsl).toContain('27.00')
     expect(f.glsl.vertex).toContain('27.00')
+  })
+
+  it('Task 127: the far fade DISSOLVES stochastically, not a hard pop', () => {
+    const f = createGrassField({ count: 4, radius: 30, height: [0.3, 0.8], fade: 27 })
+    // BOTH fragments: the interleaved-gradient noise vs. the fade factor —
+    // the screen-door dissolve (near = the hard silhouette mask, far =
+    // per-pixel stochastic thinning). The old `a < 0.5` pop is gone.
+    expect(f.glsl.fragment).toContain('fract(52.9829189')
+    expect(f.glsl.fragment).toContain('n > v_fade')
+    expect(f.wgsl).toContain('n > frag.fade')
+    expect(f.glsl.fragment).not.toContain('a < 0.5) discard')
+    // the fade BAND baked into both vertex stages (fade·band = the
+    // dissolve width; default band 0.35 → 27·0.35)
+    expect(f.glsl.vertex).toContain('/ 9.45')
+    expect(f.wgsl).toContain('/ 9.45')
+    // a custom band reaches the shaders
+    const g = createGrassField({ count: 4, radius: 30, height: [0.3, 0.8], fade: 40, fadeBand: 0.5 })
+    expect(g.glsl.vertex).toContain('/ 20.00')
+    expect(g.wgsl).toContain('/ 20.00')
+    expect(() => createGrassField({ count: 4, radius: 5, height: [0.3, 0.8], fadeBand: 1.5 })).toThrow(/fadeBand/)
+  })
+})
+
+// ─── Task 127: the SoA seam for the GPU program (docs/particles-optimization.md) ──
+
+describe('Task 127: the SoA field-name seam', () => {
+  it('FIELD_NAMES matches the store exactly (same names, same count)', () => {
+    const f = createParticles({ capacity: 4 }).fields
+    expect(FIELD_NAMES.length).toBe(17)
+    expect(PARTICLE_FLOATS).toBe(FIELD_NAMES.length)
+    for (const name of FIELD_NAMES) {
+      expect((f as unknown as Record<string, Float32Array>)[name]).toBeInstanceOf(Float32Array)
+    }
+    // the documented set, pinned: positions, velocities, age/life/size,
+    // color, seed, the seek targets
+    expect([...FIELD_NAMES.slice(0, 14)]).toEqual([
+      'px', 'py', 'pz', 'vx', 'vy', 'vz', 'age', 'life', 'size', 'cr', 'cg', 'cb', 'ca', 'seed',
+    ])
+    expect([...FIELD_NAMES.slice(14)]).toEqual(['tx', 'ty', 'tz'])
   })
 })

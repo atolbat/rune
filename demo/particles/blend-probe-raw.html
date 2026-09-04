@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>raw webgpu blend probe (internal)</title>
+<style>body{margin:0;background:#040509;color:#cfd6e4;font:13px/1.5 ui-monospace,monospace}#out{padding:12px;white-space:pre}</style>
+</head>
+<body>
+<div id="out">booting…</div>
+<!--
+  RAW WebGPU GPUBlendOperation probe (Task 127 — internal). No engine, no
+  canvas: renders into an offscreen rgba8unorm texture, copies it to a
+  buffer, maps it. Settles the DIRECTION of operation 'subtract' etc.
+  on real (SwiftShader) WebGPU. Red (1,0,0) over gray (0.5,0.5,0.5), One/One:
+    src − dst → (0.5, 0, 0)   → "src-minus-dst"
+    dst − src → (0, 0.5, 0.5) → "dst-minus-src"
+  Query: equation=subtract|reverse-subtract|min|max
+-->
+<script>
+const EQ = new URLSearchParams(location.search).get('equation') ?? 'subtract'
+const out = document.getElementById('out')
+;(async () => {
+  try {
+    const adapter = await navigator.gpu.requestAdapter()
+    const device = await adapter.requestDevice()
+    const SIZE = 64
+    const module = device.createShaderModule({ code: `
+      struct VSOut { @builtin(position) pos : vec4<f32> }
+      @vertex fn vs(@builtin(vertex_index) vi : u32) -> VSOut {
+        var p : array<vec2<f32>, 3> = array<vec2<f32>, 3>(
+          vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+        var o : VSOut; o.pos = vec4<f32>(p[vi], 0.0, 1.0); return o;
+      }
+      @fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0, 0.0, 0.0, 1.0); }` })
+    const pipeline = device.createRenderPipeline({
+      layout: 'auto',
+      vertex: { module, entryPoint: 'vs' },
+      fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba8unorm', blend: {
+        color: { srcFactor: 'one', dstFactor: 'one', operation: EQ },
+        alpha: { srcFactor: 'one', dstFactor: 'one', operation: EQ },
+      } }] },
+      primitive: { topology: 'triangle-list' },
+    })
+    const tex = device.createTexture({ size: [SIZE, SIZE], format: 'rgba8unorm', usage: 0x11 }) // RENDER_ATTACHMENT (0x10) | COPY_SRC (0x01)
+    const buf = device.createBuffer({ size: SIZE * SIZE * 4, usage: 0x1 | 0x8 }) // MAP_READ | COPY_DST
+    const enc = device.createCommandEncoder()
+    const pass = enc.beginRenderPass({
+      colorAttachments: [{
+        view: tex.createView(),
+        clearValue: { r: 0.5, g: 0.5, b: 0.5, a: 1 },
+        loadOp: 'clear', storeOp: 'store',
+      }],
+    })
+    pass.setPipeline(pipeline)
+    pass.draw(3)
+    pass.end()
+    enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow: SIZE * 4 }, [SIZE, SIZE])
+    device.queue.submit([enc.finish()])
+    await buf.mapAsync(1) // MAP_READ
+    const bytes = new Uint8Array(buf.getMappedRange()).slice()
+    buf.unmap()
+    const i = (32 * SIZE + 32) * 4
+    const px = [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]
+    const verdict = px[0] > 90 && px[1] < 40 ? 'src-minus-dst' : px[1] > 90 && px[0] < 40 ? 'dst-minus-src' : 'unexpected'
+    const line = `raw-webgpu operation=${EQ} → rgb(${px.join(',')}) = ${verdict}`
+    out.textContent = line
+    document.title = line
+    window.__probe = { line, px }
+  } catch (error) {
+    const line = `FAIL raw-webgpu/${EQ}: ${error && error.message ? error.message : String(error)}`
+    out.textContent = line
+    document.title = line
+    window.__probe = { line, px: null }
+  }
+})()
+</script>
+</body>
+</html>

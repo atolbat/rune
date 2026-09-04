@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>rune — vfx demos</title>
+  <link rel="stylesheet" href="../shared/demo-shell.css" />
+  <style>
+    /* The demo picker: the pill + bottom sheet pattern of the particles
+       demo, plus ◀ ▶ arrows (the carousel). */
+    .pt-bar {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+      z-index: 15;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      max-width: calc(100% - 24px);
+    }
+    .pt-arrow {
+      width: 40px;
+      height: 40px;
+      border-radius: 999px;
+      border: 1px solid #2c3855;
+      background: rgb(11 13 19 / 0.78);
+      color: #dfe5f1;
+      font: 16px/1 system-ui, -apple-system, 'Segoe UI', sans-serif;
+      cursor: pointer;
+      touch-action: manipulation;
+      flex: 0 0 auto;
+    }
+    .pt-arrow:hover { border-color: #3b4a70; }
+    .pt-pill {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 40px;
+      padding: 6px 14px;
+      border-radius: 999px;
+      border: 1px solid #2c3855;
+      background: rgb(11 13 19 / 0.78);
+      color: #dfe5f1;
+      font: 13px/1.2 system-ui, -apple-system, 'Segoe UI', sans-serif;
+      backdrop-filter: blur(6px);
+      cursor: pointer;
+      touch-action: manipulation;
+      white-space: nowrap;
+      overflow: hidden;
+      flex: 0 1 auto;
+    }
+    .pt-pill::after { content: '\25BE'; font-size: 10px; color: #6b7691; }
+    .pt-pill .pt-live { color: #6b7691; }
+
+    /* Bottom sheet: demo list + the note. */
+    .pt-sheet {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);
+      z-index: 16;
+      width: min(430px, calc(100% - 16px));
+      max-height: min(60vh, 520px);
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px;
+      border-radius: 14px;
+      background: rgb(11 13 19 / 0.9);
+      border: 1px solid #26304a;
+      backdrop-filter: blur(10px);
+    }
+    .pt-sheet[hidden] { display: none; }
+
+    .pt-head { display: flex; align-items: center; justify-content: space-between; }
+    .pt-title { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: #6b7691; }
+    .pt-close {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      border: 1px solid #2c3855;
+      background: #121826;
+      color: #6b7691;
+      font: 14px/1 system-ui, -apple-system, 'Segoe UI', sans-serif;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      touch-action: manipulation;
+    }
+    .pt-close:hover { color: #dfe5f1; border-color: #3b4a70; }
+
+    .pt-rows { display: flex; flex-direction: column; gap: 4px; }
+    .pt-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 44px;
+      width: 100%;
+      padding: 6px 10px;
+      border-radius: 10px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+    .pt-row .pt-main { flex: 1; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+    .pt-row b { font-size: 13px; font-weight: 600; color: #dfe5f1; }
+    .pt-row .pt-sub { font-size: 11px; color: #6b7691; }
+    .pt-row[aria-pressed="true"] { border-color: #7aa2f7; background: rgb(26 35 54 / 0.8); }
+    .pt-row[aria-pressed="true"] b { color: #9ecbff; }
+
+    .pt-note { font: 11px/1.5 system-ui, sans-serif; color: #6b7691; }
+    .pt-note code { color: #9ecbff; }
+
+    /* The drag hint (fades at the first touch). */
+    .pt-hint {
+      position: absolute;
+      left: 50%;
+      top: calc(env(safe-area-inset-top, 0px) + 18px);
+      transform: translateX(-50%);
+      z-index: 14;
+      padding: 6px 14px;
+      border-radius: 999px;
+      background: rgb(11 13 19 / 0.7);
+      color: #8a94ad;
+      font: 12px/1.2 system-ui, -apple-system, 'Segoe UI', sans-serif;
+      pointer-events: none;
+      transition: opacity 0.5s;
+    }
+    .pt-hint.pt-gone { opacity: 0; }
+
+    /* World-anchored labels (the emitter-shapes demo): positioned per
+       frame via projection, small monospace chips. */
+    .fx-label {
+      position: absolute;
+      left: 0;
+      top: 0;
+      z-index: 13;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: rgb(11 13 19 / 0.72);
+      border: 1px solid #26304a;
+      color: #9ecbff;
+      font: 11px/1.2 ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+      pointer-events: none;
+      white-space: nowrap;
+      transform: translate(-50%, -140%);
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script src="../shared/demo-shell.js"></script>
+  <script type="module" src="./main.js?v=127"></script>
+</body>
+</html>

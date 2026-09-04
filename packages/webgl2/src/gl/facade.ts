@@ -5,7 +5,7 @@ export type BlendFactor =
   | 'zero' | 'one' | 'src-color' | 'one-minus-src-color'
   | 'src-alpha' | 'one-minus-src-alpha' | 'dst-color' | 'one-minus-dst-color'
   | 'dst-alpha' | 'one-minus-dst-alpha' | 'src-alpha-saturated'
-/** The blend equation (Task 122 — three.quarks' customBlending): how the
+/** The blend equation (the custom-blending feature): how the
  *  scaled source and destination combine. 'add' is the default (the
  *  classic transparency/additive); 'max'/'subtract' make the
  *  CustomBlending demos. WebGPU's GPUBlendOperation names map 1:1. */

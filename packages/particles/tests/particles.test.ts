@@ -132,7 +132,7 @@ describe('createParticleSystem (the SoA store)', () => {
     expect(ps.fields.vx[0]).toBeCloseTo(10 * Math.exp(-2), 5)
   })
 
-  it('limitSpeed: three.quarks LimitSpeedOverLife — the excess above the limit is damped, below is untouched', () => {
+  it('limitSpeed: the excess above the limit is damped, below is untouched', () => {
     const ps = createParticleSystem(2)
     ps.emit(2, fixedSpawner({ vx: 10, life: 10 }))
     ps.fields.vx[1] = 0.4 // below the limit
@@ -213,7 +213,7 @@ describe('createParticleSystem (the SoA store)', () => {
   })
 })
 
-// ─── the point attractor (Task 119 — three-nebula's Gravity behavior) ───────
+// ─── the point attractor (the gravity/attraction behavior) ───────────────
 
 describe('the point attractor', () => {
   it('pulls toward the point: accel = strength / (r² + soft²), direction = dir/r', () => {
@@ -940,7 +940,7 @@ describe('the integration clamp (Task 18)', () => {
   })
 })
 
-// ─── Task 124: the degenerate-radial SCATTER (three.quarks' PointEmitter) ───
+// ─── Task 124: the degenerate-radial SCATTER (the point emitter) ───
 
 describe('the degenerate radial (Task 124 — the explosion smoke scatter)', () => {
   const rec: SpawnRecord = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, life: 1, size: 1, r: 1, g: 1, b: 1, a: 1, seed: 0, tx: NaN, ty: NaN, tz: NaN }
@@ -957,7 +957,7 @@ describe('the degenerate radial (Task 124 — the explosion smoke scatter)', () 
   it('a point burst SCATTERS over the full sphere (every octant hit, no +Z jet)', () => {
     // THE bug: the ps.json smoke is a sphere r=0.0001 (a point) with radial
     // velocity — our degenerate fallback used to return the shape AXIS
-    // (0,0,1), so all 30 smoke puffs jetted +Z in one direction. three.quarks'
+    // (0,0,1), so all 30 smoke puffs jetted +Z in one direction. The
     // PointEmitter draws theta = u·τ, phi = acos(2v−1) — a uniform random
     // unit-sphere direction. 512 draws: every octant populated, the mean
     // direction ≈ 0, and a good share of DOWNWARD directions.

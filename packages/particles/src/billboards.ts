@@ -12,11 +12,11 @@
  *   [3..4] uv        — the sprite corner, or the ATLAS tile corner (Task 122)
  *   [5..8] color     — spawn tint × ramp: rgb × rgb, a × a
  *
- * THE RENDER MODES (Task 122 — three.quarks' RenderMode family):
+ * THE RENDER MODES:
  *   camera     — the classic: the quad plane ⊥ the view direction (default)
  *   vertical   — upright: up = world +Y, turns around Y to face the camera
  *   horizontal — flat: the quad lies in the XZ plane (a ground decal)
- *   stretched  — velocity-aligned, three.quarks' StretchedBillBoard EXACTLY:
+ *   stretched  — velocity-aligned (the one-sided stretched billboard):
  *                a ONE-SIDDED quad — the head (u=0) sits on the particle,
  *                the tail (u=1) trails behind along the motion, and BOTH
  *                extents scale with the particle's own size:
@@ -94,7 +94,7 @@ export interface BillboardOptions {
    *  1 — pass 0 for a pure velocity streak like the cfxr sparks). */
   readonly lengthFactor?: number
   /** A per-particle random tile offset added to the ramp's frame before
-   *  the floor: frame + seed·frameJitter. three.quarks' startTileIndex
+   *  the floor: frame + seed·frameJitter. The startTileIndex
    *  IntervalValue(0, N) — each particle picks its own atlas tile (their
    *  fractional tiles also cross-blend neighbors; ours floors). Default 0. */
   readonly frameJitter?: number
@@ -245,7 +245,7 @@ export function fillBillboards(
     }
 
     if (mode === 'stretched') {
-      // Velocity-aligned, three.quarks' stretched_bb EXACTLY: the HEAD
+      // Velocity-aligned, the one-sided stretched quad: the HEAD
       // (u = 0) sits ON the particle, the TAIL (u = 1) trails BEHIND along
       // −dir; both extents scale with the particle's own size (their
       // avgSize). A particle at rest (|v| ≈ 0) falls back to the camera-

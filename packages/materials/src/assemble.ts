@@ -52,6 +52,7 @@ import {
   PBR_ENV,
   SKIN,
   SOFT_PARTICLES,
+  OUTPUT_DITHER,
   TEXTURE,
   type AsmCtx,
   type AttrDecl,
@@ -145,11 +146,29 @@ export function assemble(mask: number, jointCount: number): AssembledMaterial {
   sc.vertGlsl.push(`gl_Position = u_mvp * ${pos};`)
 
   // The single final color write (the light models / post effects own `lit`).
+  // Task 127 — OUTPUT_DITHER: a ±0.5/255 interleaved-gradient noise folded
+  // into the final RGB write (alpha untouched — the canvas alpha is opaque).
+  // The request flips fragPosition (the WGSL fragment input gains
+  // @builtin(position); GLSL reads gl_FragCoord directly).
+  const hasDither = (mask & OUTPUT_DITHER) !== 0
+  if (hasDither) {
+    fragPosition = true
+    sc.fragGlsl.push(
+      'float ditherN = (fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715)))) - 0.5) * (1.0 / 255.0);',
+    )
+    sc.fragWgsl.push(
+      'let ditherN = (fract(52.9829189 * fract(dot(frag.pos.xy, vec2<f32>(0.06711056, 0.00583715)))) - 0.5) * (1.0 / 255.0);',
+    )
+  }
+  const ditherTail = hasDither ? ' + ditherN' : ''
   if (hasLight || hasPost) {
     // Demo-tuned parity: the object-space normal-map materials are opaque.
     const alpha = (mask & NORMALMAP) !== 0 ? '1.0' : 'base.a'
-    sc.fragGlsl.push(`o_color = vec4(lit, ${alpha});`)
-    sc.fragWgsl.push(`return vec4<f32>(lit, ${alpha});`)
+    sc.fragGlsl.push(`o_color = vec4(lit${ditherTail}, ${alpha});`)
+    sc.fragWgsl.push(`return vec4<f32>(lit${ditherTail}, ${alpha});`)
+  } else if (hasDither) {
+    sc.fragGlsl.push('o_color = vec4(base.rgb + ditherN, base.a);')
+    sc.fragWgsl.push('return vec4<f32>(base.rgb + ditherN, base.a);')
   } else {
     sc.fragGlsl.push('o_color = base;')
     sc.fragWgsl.push('return base;')
@@ -310,7 +329,7 @@ function buildGlsl(
   // GLES3/WebGL2, so this is free correctness. The plain light models stay
   // mediump (the mobile win the demo tuning relies on). WGSL has no
   // precision qualifiers (f32 IS highp there), so this is GLSL-only.
-  const highp = (mask & (PBR | TEXTURE | SOFT_PARTICLES)) !== 0
+  const highp = (mask & (PBR | TEXTURE | SOFT_PARTICLES | OUTPUT_DITHER)) !== 0
   frag.push('#version 300 es', highp ? 'precision highp float;' : 'precision mediump float;')
   // NORMALMAP reads u_model in the fragment (object-space → world).
   if ((mask & NORMALMAP) !== 0) frag.push('uniform mat4 u_model;')

@@ -328,49 +328,49 @@ async function assertSpriteContour() {
 // run the contour gate right after the preset shots
 await assertSpriteContour()
 
-// ─── quarks: the 14-demo suite (Task 122) — a shot per demo + gates ───────
+// ─── vfx: the 14-demo suite (Task 122) — a shot per demo + gates ───────
 // Task 18: the sweep runs FORCED on WebGL2 (the Task 121 lesson — an AUTO
 // sweep exercises whatever this machine can create, not the reported path),
 // and each demo gains a MOTION gate (two screenshots, 300 ms apart: a
 // frozen canvas fails even when the pill counts alive — the WebGPU
 // stale-binding freeze class) — plus a BACKEND-TOGGLE round trip at the end.
 {
-  const qk = await browser.newPage({ viewport: { width: 1280, height: 800 } })
+  const vfxPage = await browser.newPage({ viewport: { width: 1280, height: 800 } })
   const qkErrors = []
-  qk.on('pageerror', (e) => qkErrors.push(String(e)))
-  await qk.goto(`http://localhost:${port}/demo/quarks/`, { waitUntil: 'networkidle' })
+  vfxPage.on('pageerror', (e) => qkErrors.push(String(e)))
+  await vfxPage.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
   // force WebGL2 via the shell FAB toggle (the demo re-boots on the backend)
-  await qk.click('#rd-fab')
-  await qk.click('label[for="mode-webgl2"]')
-  await qk.mouse.click(640, 60)
-  await qk.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
+  await vfxPage.click('#rd-fab')
+  await vfxPage.click('label[for="mode-webgl2"]')
+  await vfxPage.mouse.click(640, 60)
+  await vfxPage.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
   for (let i = 0; i < 40; i++) {
-    await qk.waitForTimeout(500)
-    const badge = await qk.textContent('#backend').catch(() => '…')
-    const pill = await qk.textContent('.pt-pill').catch(() => '')
+    await vfxPage.waitForTimeout(500)
+    const badge = await vfxPage.textContent('#backend').catch(() => '…')
+    const pill = await vfxPage.textContent('.pt-pill').catch(() => '')
     if (badge === 'WebGL2' && /[1-9][\d,]* particles/.test(pill)) break
   }
-  await qk.waitForFunction(() => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 20000 })
+  await vfxPage.waitForFunction(() => /Muzzle Flash ×100 · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 20000 })
 
-  const QK_NAMES = ['muzzle', 'explosion', 'shapes', 'trail', 'sequencer', 'mesh', 'subemitter',
+  const VFX_NAMES = ['muzzle', 'explosion', 'shapes', 'trail', 'sequencer', 'mesh', 'subemitter',
     'noise', 'alphatest', 'plugin', 'billboard', 'soft', 'blending', 'follow',
     'rocket', 'storm', 'slash', 'vortex', 'fireflies', 'dust', 'grass', 'lightning']
-  const QK_SETTLE = { muzzle: 2500, explosion: 2100, trail: 1300, grass: 2600, lightning: 2600 }
+  const VFX_SETTLE = { muzzle: 2500, explosion: 2100, trail: 1300, grass: 2600, lightning: 2600 }
   // The SEQUENCER is a still formation by design (hold phases) — its motion
   // pair brackets the t=6.5 s MORPH: we wait for the demo's own "morph →
   // spiral" log line, then shoot the pair mid-flight (300 ms apart).
   const shotPills = []
-  for (let i = 0; i < QK_NAMES.length; i++) {
-    const name = QK_NAMES[i]
-    if (i > 0) await qk.click('.pt-arrow:last-child')
-    await qk.waitForTimeout(QK_SETTLE[name] ?? 1700)
+  for (let i = 0; i < VFX_NAMES.length; i++) {
+    const name = VFX_NAMES[i]
+    if (i > 0) await vfxPage.click('.pt-arrow:last-child')
+    await vfxPage.waitForTimeout(VFX_SETTLE[name] ?? 1700)
     if (name === 'sequencer') {
       // The morph, caught IN-PAGE at rAF cadence (window.__seqLayer is
       // exposed for this gate): an in-page promise resolves the FRAME the
       // retarget rewrites tx[0] — no Playwright polling latency — so the
       // pixel pair brackets the actual flight (the demo is a still
       // formation by design; a plain 300 ms pair lands on a hold).
-      const morphed = qk.evaluate(() => new Promise(resolve => {
+      const morphed = vfxPage.evaluate(() => new Promise(resolve => {
         const f = window.__seqLayer?.facade?.fields
         if (f === undefined) { resolve(false); return }
         const t0 = f.tx[0]
@@ -380,7 +380,7 @@ await assertSpriteContour()
         }
         requestAnimationFrame(check)
       }))
-      await Promise.race([morphed, qk.waitForTimeout(25000)])
+      await Promise.race([morphed, vfxPage.waitForTimeout(25000)])
     }
     if (name === 'explosion') {
       // PHASE-LOCKED (the blast is periodic, the effect lives ~1.6 s of
@@ -389,14 +389,22 @@ await assertSpriteContour()
       // land the pair in the dead gap). Wait for the NEXT "explosion #"
       // log line, then shoot mid-blast: the pair always brackets live
       // fire, exactly like the explosion-shots tool's MutationObserver.
-      const before = await qk.evaluate(() =>
+      const before = await vfxPage.evaluate(() =>
         (document.querySelector('#log-list')?.textContent ?? '').match(/explosion #(\d+)/g)?.length ?? 0)
-      await qk.waitForFunction(
+      await vfxPage.waitForFunction(
         (n) => ((document.querySelector('#log-list')?.textContent ?? '').match(/explosion #\d+/g)?.length ?? 0) > n,
         before,
         { timeout: 15000 },
       ).catch(() => {})
-      await qk.waitForTimeout(400) // mid-blast: the flash + sparks + young smoke
+      // mid-blast, CONFIRMED alive: wait until the pill itself shows live
+      // particles (a slow runner's 400 ms can overshoot the whole blast
+      // into the quiet tail — the pill is the truth, not the clock)
+      await vfxPage.waitForFunction(
+        () => /Explosion \(composed\) \u00b7 [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
+        null,
+        { timeout: 12000 },
+      ).catch(() => {})
+      await vfxPage.waitForTimeout(400) // mid-blast: the flash + sparks + young smoke
     }
     if (name === 'slash') {
       // PHASE-LOCKED (the same class as the explosion): the swing cycle
@@ -404,47 +412,47 @@ await assertSpriteContour()
       // (glints/ribbon/impact alive in the pill) before the canonical
       // shot (the demo OPENS mid-slash, but the settle can overshoot
       // into the next windup's quiet beat).
-      await qk.waitForFunction(
+      await vfxPage.waitForFunction(
         () => /Sword Slash · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
         null,
         { timeout: 12000 },
       ).catch(() => {})
-      await qk.waitForTimeout(250)
+      await vfxPage.waitForTimeout(250)
     }
     if (name === 'trail') {
       // PHASE-LOCKED (the same class as the explosion): the firework burst
       // is periodic (t=0.6 then every 5 s) — wait until comets are LIVE in
       // the pill, then shoot mid-flight (a fixed settle can land the
       // pre-burst beat under the 22-demo module-load lag).
-      await qk.waitForFunction(
+      await vfxPage.waitForFunction(
         () => /Trails & Collision · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
         null,
         { timeout: 12000 },
       ).catch(() => {})
-      await qk.waitForTimeout(500)
+      await vfxPage.waitForTimeout(500)
     }
-    await qk.screenshot({ path: join(out, `quarks-${name}.png`) })
+    await vfxPage.screenshot({ path: join(out, `vfx-${name}.png`) })
     // the ALIVE pill is read at SHOT A's moment (the canonical shot): the
     // motion pair's later shot can legitimately land in a burst-free window
     // (the sequencer's dissolve, the trail's pre-burst beat) — that is not
     // a dead demo.
-    shotPills.push(await qk.textContent('.pt-pill'))
+    shotPills.push(await vfxPage.textContent('.pt-pill'))
     // THE MOTION GATE: a second shot LATER — a healthy animated demo
     // changes pixels; a frozen canvas (the stale-binding class) does not.
     // THE PAIR WINDOW: wait for at least TWO NEW RENDERED FRAMES (the
-    // page's own __quarksFrame tick) instead of a fixed 300 ms — a slow
+    // page's own __vfxFrame tick) instead of a fixed 300 ms — a slow
     // rasterizer (SwiftShader) can take > 300 ms per frame, and a fixed
     // window would sample the SAME frame twice: a live canvas read as
     // FROZEN. Capped at 1.8 s (a genuinely frozen canvas never ticks).
-    const tickA = await qk.evaluate(() => window.__quarksFrame ?? 0)
-    await qk.waitForFunction(
-      (t) => (window.__quarksFrame ?? 0) >= t + 2,
+    const tickA = await vfxPage.evaluate(() => window.__vfxFrame ?? 0)
+    await vfxPage.waitForFunction(
+      (t) => (window.__vfxFrame ?? 0) >= t + 2,
       tickA,
       { timeout: 1800 },
     ).catch(() => {})
-    await qk.waitForTimeout(name === 'sequencer' ? 450 : 120)
-    const f2 = await qk.screenshot()
-    const f1 = await import('pngjs').then(m => m.PNG.sync.read(readFileSync(join(out, `quarks-${QK_NAMES[i]}.png`))))
+    await vfxPage.waitForTimeout(name === 'sequencer' ? 450 : 120)
+    const f2 = await vfxPage.screenshot()
+    const f1 = await import('pngjs').then(m => m.PNG.sync.read(readFileSync(join(out, `vfx-${VFX_NAMES[i]}.png`))))
     const f2png = await import('pngjs').then(m => m.PNG.sync.read(f2))
     let changed = 0
     const n = f1.data.length
@@ -454,21 +462,21 @@ await assertSpriteContour()
     }
     const motionFrac = changed / (n / 64)
     const pill = shotPills[i]
-    console.log(`[shots] quarks ${QK_NAMES[i]}: motion ${(motionFrac * 100).toFixed(2)}% — ${pill}`)
+    console.log(`[shots] vfx ${VFX_NAMES[i]}: motion ${(motionFrac * 100).toFixed(2)}% — ${pill}`)
     if (motionFrac < 0.002) {
-      throw new Error(`[shots] quarks ${QK_NAMES[i]}: FROZEN canvas (${(motionFrac * 100).toFixed(3)}% pixels changed in 300 ms) — ${pill}`)
+      throw new Error(`[shots] vfx ${VFX_NAMES[i]}: FROZEN canvas (${(motionFrac * 100).toFixed(3)}% pixels changed in 300 ms) — ${pill}`)
     }
   }
   if (qkErrors.length > 0) {
-    throw new Error(`[shots] quarks page errors: ${qkErrors.slice(0, 3).join(' | ')}`)
+    throw new Error(`[shots] vfx page errors: ${qkErrors.slice(0, 3).join(' | ')}`)
   }
 
   // THE GATES (the same class the particles presets use — per-demo pixel
   // liveness: every demo's shot must carry content above the clear color;
   // the SOFT shot (the knots) additionally must show the LIT meshes).
-  for (const [i, name] of QK_NAMES.entries()) {
+  for (const [i, name] of VFX_NAMES.entries()) {
     const { PNG } = await import('pngjs')
-    const png = PNG.sync.read(readFileSync(join(out, `quarks-${name}.png`)))
+    const png = PNG.sync.read(readFileSync(join(out, `vfx-${name}.png`)))
     let bright = 0
     const { width, height, data } = png
     for (let p = 0; p < width * height; p++) {
@@ -476,11 +484,11 @@ await assertSpriteContour()
     }
     const pct = (bright / (width * height)) * 100
     const alive = / · [1-9][\d,]* particles · [1-9][\d,]* verts/.test(shotPills[i])
-    console.log(`[shots] quarks ${name}: bright ${pct.toFixed(2)}% — ${shotPills[i]} (${alive ? 'alive' : 'DEAD'})`)
-    if (!alive) throw new Error(`[shots] quarks ${name}: the pill shows no live particles — ${shotPills[i]}`)
-    if (pct < 0.15) throw new Error(`[shots] quarks ${name}: only ${pct.toFixed(2)}% bright pixels — the demo renders nothing`)
+    console.log(`[shots] vfx ${name}: bright ${pct.toFixed(2)}% — ${shotPills[i]} (${alive ? 'alive' : 'DEAD'})`)
+    if (!alive) throw new Error(`[shots] vfx ${name}: the pill shows no live particles — ${shotPills[i]}`)
+    if (pct < 0.15) throw new Error(`[shots] vfx ${name}: only ${pct.toFixed(2)}% bright pixels — the demo renders nothing`)
   }
-  await qk.close()
+  await vfxPage.close()
 }
 
 // ─── Task 18: the BACKEND-TOGGLE round trip (the stale-binding gate) ──────
@@ -490,40 +498,40 @@ await assertSpriteContour()
 // page error may have escaped. (On machines without a WebGPU device the
 // middle leg boots or fails loudly — either way the LAST leg is WebGL2.)
 {
-  const qk = await browser.newPage({ viewport: { width: 1280, height: 800 } })
+  const vfxPage = await browser.newPage({ viewport: { width: 1280, height: 800 } })
   const errors = []
-  qk.on('pageerror', e => errors.push(String(e)))
-  await qk.goto(`http://localhost:${port}/demo/quarks/`, { waitUntil: 'networkidle' })
+  vfxPage.on('pageerror', e => errors.push(String(e)))
+  await vfxPage.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
   const settleBackend = async (want, tries = 40) => {
     for (let i = 0; i < tries; i++) {
-      await qk.waitForTimeout(500)
-      const badge = await qk.textContent('#backend').catch(() => '…')
-      const pill = await qk.textContent('.pt-pill').catch(() => '')
+      await vfxPage.waitForTimeout(500)
+      const badge = await vfxPage.textContent('#backend').catch(() => '…')
+      const pill = await vfxPage.textContent('.pt-pill').catch(() => '')
       if (badge === want && /[1-9][\d,]* particles/.test(pill)) return true
     }
     return false
   }
   // leg 1: WebGL2
-  await qk.click('#rd-fab')
-  await qk.click('label[for="mode-webgl2"]')
-  await qk.mouse.click(640, 60)
+  await vfxPage.click('#rd-fab')
+  await vfxPage.click('label[for="mode-webgl2"]')
+  await vfxPage.mouse.click(640, 60)
   if (!(await settleBackend('WebGL2'))) throw new Error('[shots] toggle: WebGL2 leg never came alive')
   // leg 2: WebGPU (may fail on this machine — the badge then says so)
-  await qk.click('#rd-fab')
-  await qk.click('label[for="mode-webgpu"]')
-  await qk.mouse.click(640, 60)
-  await qk.waitForTimeout(2500)
-  const midBadge = await qk.textContent('#backend').catch(() => '…')
+  await vfxPage.click('#rd-fab')
+  await vfxPage.click('label[for="mode-webgpu"]')
+  await vfxPage.mouse.click(640, 60)
+  await vfxPage.waitForTimeout(2500)
+  const midBadge = await vfxPage.textContent('#backend').catch(() => '…')
   // leg 3: back to WebGL2 — the canvas must ANIMATE (the stale-binding gate)
-  await qk.click('#rd-fab')
-  await qk.click('label[for="mode-webgl2"]')
-  await qk.mouse.click(640, 60)
+  await vfxPage.click('#rd-fab')
+  await vfxPage.click('label[for="mode-webgl2"]')
+  await vfxPage.mouse.click(640, 60)
   if (!(await settleBackend('WebGL2'))) throw new Error('[shots] toggle: the WebGL2 return leg never came alive')
-  await qk.waitForTimeout(1200)
+  await vfxPage.waitForTimeout(1200)
   const { PNG } = await import('pngjs')
-  const a = PNG.sync.read(await qk.screenshot())
-  await qk.waitForTimeout(300)
-  const b = PNG.sync.read(await qk.screenshot())
+  const a = PNG.sync.read(await vfxPage.screenshot())
+  await vfxPage.waitForTimeout(300)
+  const b = PNG.sync.read(await vfxPage.screenshot())
   let changed = 0
   for (let p = 0; p < a.data.length; p += 64) {
     const dd = Math.abs(a.data[p] - b.data[p]) + Math.abs(a.data[p + 1] - b.data[p + 1]) + Math.abs(a.data[p + 2] - b.data[p + 2])
@@ -537,7 +545,7 @@ await assertSpriteContour()
   if (errors.length > 0) {
     throw new Error(`[shots] toggle: page errors — ${errors.slice(0, 3).join(' | ')}`)
   }
-  await qk.close()
+  await vfxPage.close()
 }
 
 // phone: the preset sheet as the entry point

@@ -42,7 +42,7 @@ export interface ParticleFields {
   readonly ca: Float32Array
   /** Per-particle variation seed in [0, 1) — spin phase, turbulence phase. */
   readonly seed: Float32Array
-  /** SEEK TARGET, world space (Task 122 — three.quarks' sequencers): the
+  /** SEEK TARGET, world space (the sequencer family): the
    *  `seek` force pulls the particle here; defaults to the spawn position
    *  (a particle that holds still). WRITE DIRECTLY to retarget — the
    *  arrays are public views (the composable-core pattern). */
@@ -74,7 +74,7 @@ export interface SpawnRecord {
   tz: number
 }
 
-/** A point attractor — three-nebula's Gravity/Attraction behavior.
+/** A point attractor (the gravity/attraction behavior).
  *  accel = strength / (r² + softening²), pointing at `point`; a NEGATIVE
  *  strength repels (a repulsor). `softening` (default 0.25) caps the force
  *  at the center: no singularity, no NaN, no slingshot through the origin.
@@ -90,7 +90,7 @@ export interface Attractor {
   readonly killRadius?: number
 }
 
-/** A collision plane (three.quarks' ApplyCollision, declarative): an
+/** A collision plane (declarative): an
  *  infinite plane with restitution + friction. The collision response:
  *  reflect the velocity about the normal, damp the tangential part, snap
  *  the position back to the surface. */
@@ -134,7 +134,7 @@ export interface CollideRecord {
   plane: number
 }
 
-/** The seek spring (three.quarks' sequencer pull): a critically-damped-ish
+/** The seek spring (the sequencer pull): a critically-damped-ish
  *  attraction toward the per-particle TARGET (fields.tx/ty/tz).
  *  accel = strength·(target − pos) − damping·v — a particle launched at its
  *  own target with zero velocity stays put; retarget and it glides over. */
@@ -143,7 +143,7 @@ export interface SeekForce {
   readonly damping: number
 }
 
-/** The speed limiter — three.quarks' LimitSpeedOverLife, exactly: while the
+/** The speed limiter (LimitSpeedOverLife), exactly: while the
  *  speed is above `limit`, the EXCESS is damped toward it every frame by
  *  v *= 1 − ((|v| − limit)/|v|)·dampen·dt·20 (their frame-rate-bound 20·dt
  *  factor, kept verbatim — at 60 fps it reads as a brisk friction).
@@ -162,14 +162,14 @@ export interface LimitSpeedForce {
  *  turbulence — the strength of the deterministic per-particle wander
  *  (units/s² of hash-phased sine drift — cheap, allocation-free);
  *  attract — an optional point attractor/repulsor (see Attractor);
- *  speedCurve — three.quarks' SpeedOverLife: the speed multiplier curve
+ *  speedCurve — SpeedOverLife: the speed multiplier curve
  *  over the normalized age (the ramp's size channel is the scalar); the
  *  velocity magnitude tracks v(0)·curve(t) by the per-frame telescoping
  *  rescale v *= c(t)/c(t−dt);
  *  collide — collision planes with restitution/friction (see Collision);
  *  noise — the simplex flow field (see NoiseField);
  *  seek — the target spring (see SeekForce);
- *  limitSpeed — three.quarks' LimitSpeedOverLife (see LimitSpeedForce). */
+ *  limitSpeed — LimitSpeedOverLife (see LimitSpeedForce). */
 export interface ForceFields {
   readonly gravity: readonly number[]
   readonly drag: number
@@ -183,6 +183,22 @@ export interface ForceFields {
 }
 
 /** The default force fields (all zero — a ballistic void). */
+/**
+ * The SoA field names, in store order — the GPU-mapping seam (the
+ * optimization program's Phase 1/2: a packer or a storage-buffer backend
+ * maps `facade.fields[name][i]` onto instance attributes / buffer strides
+ * by NAME, without reaching into this module's internals). Keep in sync
+ * with the `f` object in createParticleSystem.
+ */
+export const FIELD_NAMES: readonly string[] = [
+  'px', 'py', 'pz', 'vx', 'vy', 'vz',
+  'age', 'life', 'size', 'cr', 'cg', 'cb', 'ca', 'seed',
+  'tx', 'ty', 'tz',
+]
+
+/** The per-particle float count across the SoA store (FIELD_NAMES.length). */
+export const PARTICLE_FLOATS = FIELD_NAMES.length
+
 export const NO_FORCES: ForceFields = {
   gravity: [0, 0, 0], drag: 0, turbulence: 0, attract: null,
   speedCurve: null, collide: null, noise: null, seek: null, limitSpeed: null,
@@ -400,7 +416,7 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
       const hasSeek = seek !== null
       const seekK = hasSeek ? seek!.strength : 0
       const seekC = hasSeek ? seek!.damping : 0
-      // three.quarks' LimitSpeedOverLife — the speed governor over the
+      // LimitSpeedOverLife — the speed governor over the
       // EXCESS above the limit (their per-frame dampen·20·dt multiply).
       const limitSpeed = forces.limitSpeed ?? null
       const hasLimit = limitSpeed !== null
@@ -415,7 +431,7 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
         const age = f.age[i] + dt
         const life = f.life[i]
         let vx = f.vx[i], vy = f.vy[i], vz = f.vz[i]
-        // The speed governor (three.quarks' SpeedOverLife): the per-frame
+        // The speed governor (SpeedOverLife): the per-frame
         // telescoping rescale — v(t) = v(0)·c(t)/c(0) EXACTLY when applied
         // every frame from birth (the product telescopes). Two ramp samples
         // per particle into two STATIC scratches; the ε floor keeps a zero
@@ -469,7 +485,7 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
           vz += Math.cos(t * 0.9 + 4.7) * turbulence * dt
         }
         if (hasNoise) {
-          // The simplex flow (three.quarks' TurbulenceField): the field is
+          // The simplex flow (the turbulence field): the field is
           // sampled at position·scale advected by age·speed; the per-axis
           // coordinate offsets (and the seed offset) decorrelate the axes.
           // Three simplex evals per particle — the price of real curl-ish
@@ -491,8 +507,8 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
           vz += ((f.tz[i] - f.pz[i]) * seekK - vz * seekC) * dt
         }
         f.px[i] += vx * dt; f.py[i] += vy * dt; f.pz[i] += vz * dt
-        // The collision response AFTER the integration (three.quarks'
-        // ApplyCollision): a penetrating particle snaps to the surface and
+        // The collision response AFTER the integration (the
+        // apply-collision contract): a penetrating particle snaps to the surface and
         // reflects — only when it is MOVING INTO the plane (a resting or
         // separating particle keeps its velocity). Friction damps the
         // TANGENTIAL part of the reflected velocity only.

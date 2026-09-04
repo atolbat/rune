@@ -40,7 +40,7 @@
  *     - binary-search ramp sampling (the clip-sampling pattern of
  *       @rune/animation)
  *
- *   THE EMITTER FAMILY (Task 122 — three.quarks parity): the shapes
+ *   THE EMITTER FAMILY: the shapes
  *   point/sphere/cone/disc(+arms)/line/hemisphere/donut/rectangle/grid;
  *   the seek TARGETS (point / image masks — the TextureSequencer);
  *   declarative bursts {time, count, cycle, interval, probability};
@@ -90,7 +90,7 @@ export type {
   ParticleFields, SpawnRecord, ForceFields, Attractor, ParticleSystem,
   CollisionPlane, Collision, CollideRecord, SeekForce, LimitSpeedForce, RetireRecord, StoreOptions,
 } from './system.ts'
-export { createParticleSystem, NO_FORCES, MAX_PLANES } from './system.ts'
+export { createParticleSystem, NO_FORCES, MAX_PLANES, FIELD_NAMES, PARTICLE_FLOATS } from './system.ts'
 export type { SpawnShape, VelocityMode, SpawnerDesc, Spawner, TargetDesc, ImageMask } from './spawn.ts'
 export { createSpawner, hash01 } from './spawn.ts'
 export type { RampPoint, Ramp } from './ramp.ts'

@@ -22,7 +22,7 @@ export interface RampPoint {
   readonly g: number
   readonly b: number
   readonly a: number
-  /** ATLAS FRAME index at t (the sprite sheet tile — three.quarks'
+  /** ATLAS FRAME index at t (the sprite sheet tile — the
    *  FrameOverLife). Interpolated linearly between the points, floored
    *  by the baker. Omitted points interpolate from the neighbors (0 when
    *  no point carries a frame). Default: no frames — the full sprite. */

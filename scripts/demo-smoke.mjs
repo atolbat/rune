@@ -396,7 +396,7 @@ try {
   console.log(`[smoke] particles preset switch: ${galaxyPill}`)
 
   // Task 119: the three new presets — Drift (the user's standing dust),
-  // Snow (three-nebula's example) and Orbit (the point attractor)
+  // Snow and Orbit (the point attractor)
   for (const name of ['Drift', 'Snow', 'Orbit']) {
     await page.evaluate((n) => {
       const rows = [...document.querySelectorAll('.pt-row')]
@@ -468,8 +468,8 @@ try {
     !mobileParticles.bodyScrolls
   await page.setViewportSize({ width: 960, height: 720 })
 
-  // ─── quarks: the 22-demo carousel (Task 122 + the rune originals) ──
-  await page.goto(`http://localhost:${port}/demo/quarks/`, { waitUntil: 'networkidle' })
+  // ─── vfx: the 22-demo carousel (Task 122 + the rune originals) ──
+  await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
   await page.waitForFunction(
     () => document.querySelector('.pt-pill')?.textContent.includes('Muzzle'),
     null,
@@ -480,13 +480,13 @@ try {
     null,
     { timeout: 20_000 },
   )
-  const quarksFirst = await framesDiffer(page)
-  const quarksPill1 = await page.textContent('.pt-pill')
-  console.log(`[smoke] quarks first demo: ${quarksPill1} — ${quarksFirst ? 'alive' : 'STATIC'}`)
+  const vfxFirst = await framesDiffer(page)
+  const vfxPill1 = await page.textContent('.pt-pill')
+  console.log(`[smoke] vfx first demo: ${vfxPill1} — ${vfxFirst ? 'alive' : 'STATIC'}`)
 
   // cycle ALL 22 demos via the ▶ arrow; each goes live (particles > 0)
   await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
-  let quarksAllLive = true
+  let vfxAllLive = true
   const seenDemos = []
   for (let i = 1; i < 22; i++) {
     await page.click('.pt-arrow:last-child')
@@ -498,10 +498,10 @@ try {
     const pill = await page.textContent('.pt-pill')
     seenDemos.push(pill.split(' · ')[0])
     const live = await framesDiffer(page)
-    if (!live) quarksAllLive = false
+    if (!live) vfxAllLive = false
   }
-  console.log(`[smoke] quarks cycle: ${seenDemos.join(' → ')}`)
-  console.log(`[smoke] quarks all 22 live: ${quarksAllLive ? 'yes' : 'SOME STATIC'}`)
+  console.log(`[smoke] vfx cycle: ${seenDemos.join(' → ')}`)
+  console.log(`[smoke] vfx all 22 live: ${vfxAllLive ? 'yes' : 'SOME STATIC'}`)
   // the labels overlay (the emitter-shapes demo) projects into the viewport
   await page.evaluate(() => {
     const rows = [...document.querySelectorAll('.pt-row')]
@@ -512,39 +512,39 @@ try {
   // the FIRST frame callback — checking immediately after the click races
   // that frame (0/9 on a slow CI runner).
   await page.waitForFunction(
-    () => [...document.querySelectorAll('.qk-label')].filter(el => el.style.opacity === '1').length >= 9,
+    () => [...document.querySelectorAll('.fx-label')].filter(el => el.style.opacity === '1').length >= 9,
     null,
     { timeout: 10_000 },
   )
-  const quarksLabels = await page.evaluate(() => {
-    const els = [...document.querySelectorAll('.qk-label')]
+  const vfxLabels = await page.evaluate(() => {
+    const els = [...document.querySelectorAll('.fx-label')]
     const visible = els.filter(el => el.style.opacity === '1' && el.style.transform.includes('px'))
     return { total: els.length, visible: visible.length }
   })
-  console.log(`[smoke] quarks labels: ${quarksLabels.visible}/${quarksLabels.total} projected`)
-  const quarksLogText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
-  const quarksGpuClean = !/too small|Invalid CommandBuffer|rendering stopped|GL: GL_|GPU: |failed/i.test(quarksLogText)
-  console.log(`[smoke] quarks GPU health: ${quarksGpuClean ? 'clean' : 'GPU ERRORS in the log'}`)
-  if (!quarksGpuClean) console.log(`[smoke] log tail: ${quarksLogText.slice(-600)}`)
+  console.log(`[smoke] vfx labels: ${vfxLabels.visible}/${vfxLabels.total} projected`)
+  const vfxLogText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
+  const vfxGpuClean = !/too small|Invalid CommandBuffer|rendering stopped|GL: GL_|GPU: |failed/i.test(vfxLogText)
+  console.log(`[smoke] vfx GPU health: ${vfxGpuClean ? 'clean' : 'GPU ERRORS in the log'}`)
+  if (!vfxGpuClean) console.log(`[smoke] log tail: ${vfxLogText.slice(-600)}`)
   // mobile: the arrows/pill stay in the viewport
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto(`http://localhost:${port}/demo/quarks/`, { waitUntil: 'networkidle' })
+  await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
   await page.waitForFunction(
     () => document.querySelector('.pt-pill')?.textContent.includes('Muzzle'),
     null,
     { timeout: 20_000 },
   )
-  const mobileQuarks = await page.evaluate(() => {
+  const mobileVfx = await page.evaluate(() => {
     const overflow = document.documentElement.scrollWidth - document.documentElement.clientWidth
     const arrow = document.querySelector('.pt-arrow')?.getBoundingClientRect()
     const canvas = document.querySelector('#canvas')?.getBoundingClientRect()
     return { overflow, touchTarget: Math.round(arrow?.height ?? 0), canvasW: Math.round(canvas?.width ?? 0) }
   })
   console.log(
-    `[smoke] quarks mobile: overflow ${mobileQuarks.overflow}px, arrow target ${mobileQuarks.touchTarget}px, ` +
-    `canvas width ${mobileQuarks.canvasW}`,
+    `[smoke] vfx mobile: overflow ${mobileVfx.overflow}px, arrow target ${mobileVfx.touchTarget}px, ` +
+    `canvas width ${mobileVfx.canvasW}`,
   )
-  const mobileQuarksOk = mobileQuarks.overflow <= 1 && mobileQuarks.touchTarget >= 40
+  const mobileVfxOk = mobileVfx.overflow <= 1 && mobileVfx.touchTarget >= 40
   await page.setViewportSize({ width: 960, height: 720 })
 
   if (errors.length) {
@@ -574,11 +574,11 @@ try {
     particlesAlive &&
     particlesGpuClean &&
     mobileParticlesOk &&
-    quarksFirst &&
-    quarksAllLive &&
-    quarksLabels.visible >= 9 &&
-    quarksGpuClean &&
-    mobileQuarksOk &&
+    vfxFirst &&
+    vfxAllLive &&
+    vfxLabels.visible >= 9 &&
+    vfxGpuClean &&
+    mobileVfxOk &&
     viewerLogEntries > 0 &&
     mobileViewerOk &&
     errors.length === 0

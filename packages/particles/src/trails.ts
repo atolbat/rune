@@ -1,5 +1,5 @@
 /**
- * @rune/particles — trails: the ribbon view (three.quarks' RenderMode.Trail).
+ * @rune/particles — trails: the ribbon view (the trail render mode).
  *
  * ══════════════════════════════════════════════════════════════════════════
  * A trail is a RIBBON following each particle: a decimated history of past

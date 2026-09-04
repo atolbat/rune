@@ -231,6 +231,26 @@ function sampleRamp(ramp, t, out) {
 }
 
 // packages/particles/src/system.ts
+var FIELD_NAMES = [
+  "px",
+  "py",
+  "pz",
+  "vx",
+  "vy",
+  "vz",
+  "age",
+  "life",
+  "size",
+  "cr",
+  "cg",
+  "cb",
+  "ca",
+  "seed",
+  "tx",
+  "ty",
+  "tz"
+];
+var PARTICLE_FLOATS = FIELD_NAMES.length;
 var NO_FORCES = {
   gravity: [0, 0, 0],
   drag: 0,
@@ -1630,6 +1650,10 @@ function createGrassField(desc) {
   if (!Number.isFinite(fade) || fade <= 0) {
     throw new Error(`rune/particles: grass fade must be a finite > 0 (got ${fade})`);
   }
+  const fadeBand = desc.fadeBand ?? 0.35;
+  if (!Number.isFinite(fadeBand) || fadeBand <= 0 || fadeBand >= 1) {
+    throw new Error(`rune/particles: grass fadeBand must be in (0, 1) (got ${fadeBand})`);
+  }
   const seed = (desc.seed ?? 1) | 0;
   const pos = new Float32Array(count * 3);
   const par = new Float32Array(count * 4);
@@ -1650,10 +1674,11 @@ function createGrassField(desc) {
     tint[i * 4 + 2] = c0[2] + (c1[2] - c0[2]) * mix;
     tint[i * 4 + 3] = 0.8 + 0.4 * hash01(seed, i, 28);
   }
-  return { pos, par, tint, count, fade, glsl: glslOf(fade), wgsl: wgslOf(fade) };
+  return { pos, par, tint, count, fade, glsl: glslOf(fade, fadeBand), wgsl: wgslOf(fade, fadeBand) };
 }
-function glslOf(fade) {
+function glslOf(fade, band) {
   const F = fade.toFixed(2);
+  const B = (fade * band).toFixed(2);
   const vertex = `#version 300 es
 // The grass vertex: one quad per blade from gl_VertexID, cylindrical
 // billboard, the gust field + the per-blade flutter bend.
@@ -1698,7 +1723,7 @@ void main() {
   gl_Position = u_mvp * vec4(world, 1.0);
   v_uv = vec2(cu.x, t);
   v_tint = i_tint;
-  v_fade = clamp((${F} - length(u_camPos - i_pos)) / (${F} * 0.25), 0.0, 1.0);
+  v_fade = clamp((${F} - length(u_camPos - i_pos)) / ${B}, 0.0, 1.0);
 }`;
   const fragment = `#version 300 es
 precision highp float;
@@ -1710,14 +1735,21 @@ out vec4 o_color;
 void main() {
   vec4 texel = texture(u_tex, v_uv);
   // The blade gradient: dark base -> bright tip (the texture owns it).
-  float a = texel.a * v_fade;
-  if (a < 0.5) discard; // alpha MASK: the far blades thin out (the LOD)
+  // THE SMOOTH FAR FADE (the density LOD): near (v_fade = 1) the classic
+  // hard silhouette mask; through the fade band each pixel survives with
+  // probability ~ v_fade — a screen-door dissolve driven by interleaved
+  // gradient noise. At range a blade is a few pixels, so the stochastic
+  // holes average into a smooth density falloff — no hard pop at the
+  // fade distance, no sorting, no blending, depth-write stays on.
+  float n = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+  if (texel.a < 0.5 || n > v_fade) discard;
   o_color = vec4(texel.rgb * v_tint.rgb * v_tint.a, 1.0);
 }`;
   return { vertex, fragment };
 }
-function wgslOf(fade) {
+function wgslOf(fade, band) {
   const F = fade.toFixed(2);
+  const B = (fade * band).toFixed(2);
   return `
 struct Params {
   u_mvp : mat4x4<f32>,
@@ -1771,15 +1803,18 @@ fn vsMain(@builtin(vertex_index) vi : u32,
   out.pos = params.u_mvp * vec4<f32>(world, 1.0);
   out.uv = vec2<f32>(cu.x, t);
   out.tint = i_tint;
-  out.fade = clamp((${F} - length(params.u_camPos.xyz - i_pos)) / (${F} * 0.25), 0.0, 1.0);
+  out.fade = clamp((${F} - length(params.u_camPos.xyz - i_pos)) / ${B}, 0.0, 1.0);
   return out;
 }
 
 @fragment
 fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
   let texel = textureSample(texTexture, texSampler, frag.uv);
-  let a = texel.a * frag.fade;
-  if (a < 0.5) { discard; }
+  // THE SMOOTH FAR FADE — the WGSL twin of the GLSL screen-door dissolve
+  // (interleaved gradient noise vs. the blade's fade factor; near = the
+  // hard silhouette mask, far = stochastic thinning into the ground).
+  let n = fract(52.9829189 * fract(dot(frag.pos.xy, vec2<f32>(0.06711056, 0.00583715))));
+  if (texel.a < 0.5 || n > frag.fade) { discard; }
   return vec4<f32>(texel.rgb * frag.tint.rgb * frag.tint.a, 1.0);
 }`;
 }
@@ -2255,8 +2290,10 @@ export {
   VERTS_PER_PARTICLE,
   SOUP_STRIDE,
   RAMP_STRIDE,
+  PARTICLE_FLOATS,
   NO_FORCES,
   MESH_STRIDE,
   MAX_PLANES,
+  FIELD_NAMES,
   CONSTANT_RAMP
 };

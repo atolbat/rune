@@ -48,7 +48,7 @@ async function shoot(backend) {
   const errors = []
   page.on('pageerror', (e) => errors.push(String(e)))
   page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') console.log(`[${backend} console.${m.type()}]`, m.text().slice(0, 200)) })
-  await page.goto(`http://localhost:${port}/demo/quarks/`, { waitUntil: 'networkidle' })
+  await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
   if (backend !== 'auto') {
     await page.click('#rd-fab')
     await page.click(`label[for="mode-${backend}"]`)

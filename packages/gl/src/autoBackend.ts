@@ -34,7 +34,7 @@ export interface AutoDrawSpec {
     readonly depth?: { readonly test?: 'less' | 'lequal' | 'always'; readonly write?: boolean } | false
     /** Task 75: blending (additive/transparency; premultiplied output).
      *  Task 122: the equation — 'add' (default) | 'subtract' |
-     *  'reverse-subtract' | 'min' | 'max' (three.quarks' custom blending). */
+     *  'reverse-subtract' | 'min' | 'max' (the custom blend equations). */
     readonly blend?: { readonly src: string; readonly dst: string; readonly equation?: string } | false
     readonly raster?: { readonly cull?: 'none' | 'back' | 'front' }
   }

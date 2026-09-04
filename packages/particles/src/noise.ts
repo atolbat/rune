@@ -2,7 +2,7 @@
  * @rune/particles — the deterministic 3D simplex noise field.
  *
  * ══════════════════════════════════════════════════════════════════════════
- * three.quarks' TurbulenceField pushes particles through a simplex-noise
+ * The turbulence field pushes particles through a simplex-noise
  * flow; our sine drift (system.ts `turbulence`) is cheap but visibly
  * periodic. This module is the real thing: classic Gustavson-style 3D
  * simplex noise, evaluated per particle at (position·scale + time·drift).

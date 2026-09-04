@@ -344,7 +344,7 @@ const PRESETS = {
     title: 'Orbit',
     sub: 'point attractor · tangential launch · additive',
     pipeline: ADDITIVE_PIPELINE,
-    // three-nebula's Gravity/Attraction example (Task 119): a central mass
+    // the gravity/attraction preset: a central mass
     // (forces.attract) + particles born on a ring with tangential velocity —
     // the near-circular speed, so they SWARM around the center instead of
     // falling in or flying away; a whisper of drag makes them slowly decay

@@ -1,6 +1,6 @@
 /**
  * @rune/particles — mesh particles: a real 3D geometry per particle
- * (three.quarks' RenderMode.Mesh with instancingGeometry).
+ * (the mesh render mode with a shared instancing geometry).
  *
  * ══════════════════════════════════════════════════════════════════════════
  * Each particle bakes a FULL triangle-soup geometry (a capsule, a platonic

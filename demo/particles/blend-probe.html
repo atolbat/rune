@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rune — blend equation probe (internal)</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #040509; color: #cfd6e4; font: 13px/1.5 ui-monospace, monospace; }
+  #out { padding: 12px; white-space: pre; }
+</style>
+</head>
+<body>
+<canvas id="c" width="64" height="64"></canvas>
+<div id="out">booting…</div>
+<!--
+  THE BLEND EQUATION PROBE (Task 127 — internal, not linked from any UI).
+  Settles, on REAL hardware per backend, the DIRECTION of the custom blend
+  equations: a constant red (1,0,0) quad drawn over a gray (0.5,0.5,0.5)
+  surface with One/One + equation E.
+    src − dst  →  (0.5, 0, 0)     → "srccolor"
+    dst − src  →  (0, 0.5, 0.5)   → "dstcolor"
+  Also probes 'max'/'min' sanity (255,0,0)/(128,128,128).
+  Query: backend=webgl2|webgpu, equation=subtract|reverse-subtract|min|max.
+  The result lands in document.title and window.__probe.
+-->
+<script type="module">
+import { createRenderer } from '../../dist/rune.esm.js?v=126'
+
+const Q = new URLSearchParams(location.search)
+const BACKEND = Q.get('backend') ?? 'webgl2'
+const EQUATION = Q.get('equation') ?? 'subtract'
+const out = document.getElementById('out')
+
+const VERT_GLSL = `#version 300 es
+layout(location = 0) in vec2 position;
+void main() { gl_Position = vec4(position, 0.0, 1.0); }`
+const FRAG_GLSL = `#version 300 es
+precision highp float;
+out vec4 o_color;
+void main() { o_color = vec4(1.0, 0.0, 0.0, 1.0); }`
+const WGSL = `
+struct VSOut { @builtin(position) pos : vec4<f32> }
+@vertex fn vsMain(@location(0) position : vec2<f32>) -> VSOut {
+  var o : VSOut; o.pos = vec4<f32>(position, 0.0, 1.0); return o;
+}
+@fragment fn fsMain() -> @location(0) vec4<f32> {
+  return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+}`
+// one big triangle covering the surface
+const TRI = new Float32Array([-1, -1, 3, -1, -1, 3])
+
+try {
+  const renderer = createRenderer({ canvas: document.getElementById('c'), backend: BACKEND, onGpuError: (m) => console.warn('GPUERR: ' + m), onGlError: (m) => console.warn('GLERR: ' + m) })
+  await renderer.start()
+  try { renderer.inner.gpu.device.lost.then((info) => console.warn('DEVICE LOST:', JSON.stringify(info))) } catch (e) { console.warn('no device handle', String(e)) }
+  const cmd = renderer.command({
+    id: 'blend-probe',
+    shader: { glsl: { vertex: VERT_GLSL, fragment: FRAG_GLSL }, wgsl: WGSL },
+    pipeline: { depth: false, raster: { cull: 'none' }, blend: { src: 'one', dst: 'one', equation: EQUATION } },
+    attributes: { position: { data: TRI, size: 2 } },
+    count: 3,
+  })
+  const surface = renderer.inner.surface({ width: 64, height: 64, color: [0.5, 0.5, 0.5, 1] })
+  const captured = surface.capture(cmd, { clear: true })
+  let frames = 0
+  // PROBE-MODE: no frame loop (uncomment to re-enable)
+  // renderer.frame((ctx, record) => { record(captured, {}); if (++frames === 3) out.textContent = 'frames done' })
+  await new Promise((r) => setTimeout(r, 700))
+  const read = await surface.read()
+  const i = (32 * read.width + 32) * 4
+  const px = [read.data[i], read.data[i + 1], read.data[i + 2], read.data[i + 3]]
+  const verdict = px[0] > 90 && px[1] < 40 ? 'src-minus-dst' : px[1] > 90 && px[0] < 40 ? 'dst-minus-src' : 'unexpected'
+  const line = `${BACKEND} equation=${EQUATION} → rgb(${px.join(',')}) = ${verdict}`
+  out.textContent = line
+  document.title = line
+  window.__probe = { line, px }
+  renderer.stop?.()
+} catch (error) {
+  const line = `FAIL ${BACKEND}/${EQUATION}: ${error instanceof Error ? error.message : String(error)}`
+  out.textContent = line
+  document.title = line
+  window.__probe = { line, px: null }
+}
+</script>
+</body>
+</html>

@@ -45,7 +45,7 @@ export interface WrapDesc {
   readonly size: readonly [number, number, number]
 }
 
-/** One scheduled burst (three.quarks' emissionBursts): fires `count`
+/** One scheduled burst (the emission-burst schedule): fires `count`
  *  particles at `time`, then every `interval` seconds, `cycle` times
  *  (0 = forever). Each firing passes a `probability` gate (deterministic:
  *  hash01(seed, burst index, cycle index)). */
@@ -162,7 +162,7 @@ export interface Particles {
    *  (x, y, z). The VELOCITY is untouched — a moving emitter leaves a
    *  trail of its spawn cloud. Chainable. */
   at(x: number, y: number, z: number): this
-  /** Task 126 — the emitter ORIENTATION (three.quarks' worldSpace:false —
+  /** Task 126 — the emitter ORIENTATION (the local-space emission —
    *  a RIGID attachment): a rotation applied to every spawn CLOUD and
    *  VELOCITY before the at() translation. A column-major 3×3 or 4×4
    *  matrix (the upper-left 3×3 is read — the translation column is
@@ -682,7 +682,7 @@ function validateSeek(seek: SeekForce | null | undefined): SeekForce | null {
   return seek
 }
 
-/** LimitSpeed validation (three.quarks' LimitSpeedOverLife). */
+/** LimitSpeed validation (the over-life speed limiter). */
 function validateLimitSpeed(ls: LimitSpeedForce | null | undefined): LimitSpeedForce | null {
   if (ls === undefined || ls === null) return null
   if (!Number.isFinite(ls.limit) || ls.limit < 0) {

@@ -737,7 +737,7 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
   }
 
   /** Task 75: facade BlendFactor string → GLenum. Task 122: the
-   *  dst-alpha family + src-alpha-saturated (three.quarks' custom
+   *  dst-alpha family + src-alpha-saturated (the custom
    *  blending demos use them). */
   const BLEND_FACTORS: Record<string, number> = {
     'zero': 0, 'one': 1, 'src-color': 0x0300, 'one-minus-src-color': 0x0301,
