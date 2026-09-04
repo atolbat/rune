@@ -151,7 +151,6 @@ const DEFAULT_CLEAR = { color: [0.07, 0.08, 0.11, 1] as const, depth: 1 }
  * Storm protection: after ERROR_STORM_LIMIT GPU errors the loop stops. */
 export async function createWebGpuRenderer(options: WebGpuRendererOptions): Promise<WebGpuRenderer> {
   const canvas = resolveCanvasAny(options.canvas)
-  const dpr = canvasDpr(canvas, options.dpr)
   const storm = createErrorStorm(options.onGpuError)
   const rawGpu = options.createGPU !== undefined
     ? await options.createGPU(canvas, storm.handle)
@@ -187,6 +186,9 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
   let cancelScheduled: (() => void) | null = null
   let lastCssWidth = -1
   let lastCssHeight = -1
+  // Task 129 parity: the live-DPR guard (a browser zoom change moves
+  // devicePixelRatio mid-session; the boot snapshot would mis-size buffers).
+  let lastDpr = canvasDpr(canvas, options.dpr)
 
   await gpu.configure(canvas.width, canvas.height)
   // Task 116: the canvas clear from the `clear` option — the facade state
@@ -247,7 +249,9 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
   function pass(fragment: string, passOptions: PassOptions = {}): WgpuCommand {
     return createPassCommand(fragment, passOptions, 0, () => {
       const [w, h] = size.peek()
-      return [Math.max(1, Math.round(w * dpr)), Math.max(1, Math.round(h * dpr))]
+      // Task 129 parity: the live DPR read (see the GL twin).
+      const dprNow = canvasDpr(canvas, options.dpr)
+      return [Math.max(1, Math.round(w * dprNow)), Math.max(1, Math.round(h * dprNow))]
     })
   }
 
@@ -287,11 +291,15 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
   }
 
   function resize(cssWidth: number, cssHeight: number): void {
-    if (cssWidth === lastCssWidth && cssHeight === lastCssHeight) return
+    // Task 129 parity: the DPR is RE-READ live (see the GL twin) — a mid-session
+    // zoom change must re-derive the backing store with the new DPR.
+    const dprNow = canvasDpr(canvas, options.dpr)
+    if (cssWidth === lastCssWidth && cssHeight === lastCssHeight && dprNow === lastDpr) return
     lastCssWidth = cssWidth
     lastCssHeight = cssHeight
-    const bufferWidth = Math.max(1, Math.round(cssWidth * dpr))
-    const bufferHeight = Math.max(1, Math.round(cssHeight * dpr))
+    lastDpr = dprNow
+    const bufferWidth = Math.max(1, Math.round(cssWidth * dprNow))
+    const bufferHeight = Math.max(1, Math.round(cssHeight * dprNow))
     if (canvas.width !== bufferWidth) canvas.width = bufferWidth
     if (canvas.height !== bufferHeight) canvas.height = bufferHeight
     size.value = [cssWidth, cssHeight]
@@ -365,6 +373,9 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
     if (isOffscreenCanvas(canvas)) return null
     if (typeof ResizeObserver === 'undefined') return null
     const observer = new ResizeObserver(() => {
+      // Task 129 parity: skip hidden-canvas firings (clientWidth 0 — the
+      // buffer-size fallback must not be read as CSS).
+      if (canvas.clientWidth <= 0 || canvas.clientHeight <= 0) return
       const [cssW, cssH] = getCanvasCssSize(canvas)
       const verdict = layoutGuard.classify(cssW, cssH)
       if (verdict.verdict !== 'apply') return

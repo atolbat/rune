@@ -321,11 +321,16 @@ const DEFAULT_CLEAR = { color: [0.07, 0.08, 0.11, 1] as const, depth: 1 }
 /** Creates a WebGL2 renderer with an auto-loop (the explicit path without auto-selection). */
 export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Renderer {
   const canvas = resolveCanvasAny(options.canvas)
-  const dpr = canvasDpr(canvas, options.dpr)
   // acquireWebGL2 yields a raw WebGL2RenderingContext — kept for caps-probing.
   // If createGL is injected (headless tests) — probing is skipped (no raw gl).
   const rawContext = options.createGL === undefined ? acquireWebGL2(canvas) : null
-  const rawGl = options.createGL !== undefined ? options.createGL(canvas) : createRealGL(rawContext!)
+  // Task 129: the viewport-heal sink is wired into the raw facade — a
+  // drawing-buffer divergence (the live "everything in the bottom-left
+  // corner, as if the canvas shrank 4x" report) lands in the GL error log
+  // with its numbers, once per divergence.
+  const rawGl = options.createGL !== undefined
+    ? options.createGL(canvas)
+    : createRealGL(rawContext!, message => options.onGlError?.(message))
   // Task 62: resourceSession (v2) takes priority over journal (v1):
   // stable ids + content in the journal + restoreResources(). The v1 path
   // (withJournal) is kept for backward compatibility of existing tests.
@@ -366,6 +371,12 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
   let cancelScheduled: (() => void) | null = null
   let lastCssWidth = -1
   let lastCssHeight = -1
+  // Task 129: the buffer size + DPR we last applied — the per-frame canvas
+  // state check (syncCanvasState) and the live-DPR re-read diverge from these.
+  let lastBufferW = -1
+  let lastBufferH = -1
+  let lastDpr = canvasDpr(canvas, options.dpr)
+  let dprPollFrame = 0
   let disposed = false
 
   const [startW, startH] = getCanvasCssSize(canvas)
@@ -443,7 +454,10 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
   function pass(fragment: string, passOptions: PassOptions = {}): CompiledCommand {
     return createPassCommand(fragment, passOptions, 0, () => {
       const [w, h] = size.peek()
-      return [Math.max(1, Math.round(w * dpr)), Math.max(1, Math.round(h * dpr))]
+      // Task 129: the live DPR read (not the boot snapshot) — a zoom change
+      // mid-session must re-derive the pass resolution with the new DPR.
+      const dprNow = canvasDpr(canvas, options.dpr)
+      return [Math.max(1, Math.round(w * dprNow)), Math.max(1, Math.round(h * dprNow))]
     })
   }
 
@@ -609,23 +623,65 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
   }
 
   function resize(cssWidth: number, cssHeight: number): void {
-    // Idempotency: repeated observer firings with the same CSS size
-    // do not touch the backing store (every canvas.width write resets the buffer).
-    if (cssWidth === lastCssWidth && cssHeight === lastCssHeight) return
+    // Idempotency: repeated observer firings with the same CSS size (and
+    // the same DPR) do not touch the backing store (every canvas.width
+    // write resets the buffer). The DPR is RE-READ live on every call: a
+    // browser zoom / display move changes devicePixelRatio mid-session,
+    // and the boot-time snapshot would mis-size every later buffer.
+    const dprNow = canvasDpr(canvas, options.dpr)
+    if (cssWidth === lastCssWidth && cssHeight === lastCssHeight && dprNow === lastDpr) return
     lastCssWidth = cssWidth
     lastCssHeight = cssHeight
-    const bufferWidth = Math.max(1, Math.round(cssWidth * dpr))
-    const bufferHeight = Math.max(1, Math.round(cssHeight * dpr))
+    lastDpr = dprNow
+    const bufferWidth = Math.max(1, Math.round(cssWidth * dprNow))
+    const bufferHeight = Math.max(1, Math.round(cssHeight * dprNow))
     if (canvas.width !== bufferWidth) canvas.width = bufferWidth
     if (canvas.height !== bufferHeight) canvas.height = bufferHeight
+    lastBufferW = canvas.width
+    lastBufferH = canvas.height
     size.value = [cssWidth, cssHeight]
     gl.setViewport(bufferWidth, bufferHeight)
+  }
+
+  /** Task 129: the per-frame canvas-state check. The canvas attributes are
+   *  the AUTHORITATIVE drawing-buffer size — if anything moved them without
+   *  our resize() seeing it (an external canvas.width write, a mobile
+   *  URL-bar relayout racing the ResizeObserver, a blocked layout-guard
+   *  verdict), our viewport notion is stale and a stale viewport draws the
+   *  whole scene into the bottom-left corner. We adopt the real size, re-open
+   *  the CSS guard (the next observer callback re-derives the buffer from
+   *  CSS × DPR), and say so through the error sink — once per divergence. */
+  function syncCanvasState(): void {
+    const w = canvas.width
+    const h = canvas.height
+    if (w !== lastBufferW || h !== lastBufferH) {
+      options.onGlError?.(
+        `canvas state heal: the drawing buffer moved to ${w}x${h} (tracked ${lastBufferW}x${lastBufferH}) without our resize — the viewport re-synced`,
+      )
+      lastBufferW = w
+      lastBufferH = h
+      lastCssWidth = -1 // force the next resize() to re-derive from CSS
+      gl.setViewport(w, h)
+    }
+    // A DPR change WITHOUT a CSS-size change (a browser zoom that keeps the
+    // CSS layout, rare but permanent once it happens) would leave the buffer
+    // at the boot DPR forever: poll it cheaply (a property read every 64th
+    // frame) and re-derive when it moves. OffscreenCanvas has no DPR (it is
+    // always 1) — the HTML path only.
+    if ((++dprPollFrame & 63) === 0 && options.dpr === undefined && !isOffscreenCanvas(canvas) && canvas.clientWidth > 0) {
+      const live = canvasDpr(canvas, undefined)
+      if (live !== lastDpr) {
+        lastCssWidth = -1 // force the guard open
+        resize(canvas.clientWidth, canvas.clientHeight)
+      }
+    }
   }
 
   function step(nowMs: number): void {
     updateFrameContext(nowMs)
     statsCollector?.beginFrame()
     transients.beginFrame() // the previous frame's scratch starts aging
+    syncCanvasState() // Task 129: the buffer/viewport self-heal, every frame
     try {
       stepFrame()
       frameErrorCount = 0 // a clean frame resets the consecutive count
@@ -739,6 +795,11 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     if (isOffscreenCanvas(canvas)) return null
     if (typeof ResizeObserver === 'undefined') return null
     const observer = new ResizeObserver(() => {
+      // Task 129: a HIDDEN canvas (clientWidth 0 — the slot folded during a
+      // backend re-boot, a display:none interlude) must not poison the CSS
+      // guard: getCanvasCssSize would fall back to the BUFFER size as "CSS"
+      // and resize() would multiply it by the DPR again. Skip those firings.
+      if (canvas.clientWidth <= 0 || canvas.clientHeight <= 0) return
       const [cssW, cssH] = getCanvasCssSize(canvas)
       const verdict = layoutGuard.classify(cssW, cssH)
       if (verdict.verdict !== 'apply') return // ignore: jitter; runaway: the loop is blocked

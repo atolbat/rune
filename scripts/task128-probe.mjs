@@ -1,8 +1,9 @@
 /**
- * scripts/task128-probe.mjs — the Task 128 verification probe: walks ALL 22
+ * scripts/task128-probe.mjs — the Task 128 verification probe: walks ALL 23
  * vfx demos, checks each for page errors, and runs the per-demo MECHANIC
  * invariants where the page exposes counters (the turret shots, the trail
- * colliders, the grass mask). One process: serve + drive.
+ * colliders, the grass mask, the laser reflection sparks). One process:
+ * serve + drive.
  */
 import { join, resolve } from 'node:path'
 import { chromium } from 'playwright'
@@ -49,13 +50,13 @@ await page.waitForTimeout(3000)
 // close the demo-picker sheet if it booted open (it covers the arrows)
 await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
 
-// cycle through all 22 demos, 2.6 s each — enough for the muzzle turret to
-// fire, the trails to rain, the lightning to strike
+// cycle through all 23 demos, 2.6 s each — enough for the muzzle turret to
+// fire, the trails to rain, the lightning to strike, the laser to burn
 const labelSel = '.pt-label'
 const results = []
 const perDemo = []
 page.on('crash', () => console.log('!! PAGE CRASHED (renderer process died)'))
-for (let i = 0; i < 22; i++) {
+for (let i = 0; i < 23; i++) {
   const before = errors.length
   try {
     await page.click('.pt-arrow:last-child', { timeout: 15000 }).catch((e) => console.log(`  click #${i + 1} failed: ${String(e).slice(0, 120)}`))

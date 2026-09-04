@@ -1,4 +1,4 @@
-// "vfx" demo — the game-VFX study: 22 demos on @rune/particles + the rune
+// "vfx" demo — the game-VFX study: 23 demos on @rune/particles + the rune
 //   renderer, one page with a carousel (◀ ▶ through the set).
 //
 // The library surface this page exercises end to end:
@@ -15,14 +15,14 @@
 //
 // EVERY sprite on this page is OURS — generated in this file (deterministic
 // pure functions → raw RGBA uploads; no image assets, no browser
-// premultiply semantics). The dist imports carry ?v=127 (the stale-cache
-// guard — bump on release).
-import { createRenderer, capsule, cube, plane, torusKnot } from '../../dist/rune.esm.js?v=127'
+// premultiply semantics). The dist imports carry ?v=128 (the stale-cache
+// guard — bump on release; Task 129 changed the renderer viewport logic).
+import { createRenderer, capsule, cube, plane, torusKnot } from '../../dist/rune.esm.js?v=128'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER,
-} from '../../dist/rune-materials.esm.js?v=127'
-import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=127'
+} from '../../dist/rune-materials.esm.js?v=128'
+import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=128'
 
 /* ─── the demo registry (the carousel order) ────────────────────────────── */
 
@@ -50,14 +50,15 @@ import vortex from './demos/vortex.js'
 import fireflies from './demos/fireflies.js'
 
 // the rune originals #2 (the GPU-static grass field, the endless wrapped
-// dust, the procedural lightning bolts)
+// dust, the procedural lightning bolts, the cutting laser)
 import dust from './demos/dust.js'
 import grass from './demos/grass.js'
 import lightning from './demos/lightning.js'
+import laser from './demos/laser.js'
 
 const DEMOS = [muzzle, explosion, shapes, trail, sequencer, mesh, subemitter,
   noise, alphatest, plugin, billboard, soft, blending, follow,
-  rocket, storm, slash, vortex, fireflies, dust, grass, lightning]
+  rocket, storm, slash, vortex, fireflies, dust, grass, lightning, laser]
 
 /* ─── materials & pipelines ────────────────────────────────────────────── */
 
@@ -127,9 +128,18 @@ function makeAtlasBytes() {
         // shapes below all live inside it (the arrow/leaf were shrunk to
         // fit). Border pixels ≈ 0, no square edges, no cross-tile bleed —
         // for EVERY sprite on the page, by construction.
+        // Task 129 — the guard covers RGB TOO: the live "the turret fire
+        // shows its texture borders as a highlighted line" report is the
+        // bilinear mixing at a shared border landing on (127,127,127,127)
+        // when one side carries white-rgb/zero-alpha and the other zero-
+        // rgb/white-alpha — a gray line that GLOWS under additive. Fading
+        // both channels makes every mixed sample black, whatever blend
+        // mode reads the tile. (The interior keeps the solid-white spark
+        // convention — only the outer strip fades.)
         const guard = Math.min(1, Math.max(0, Math.min((0.5 - Math.abs(u)) / 0.1, (0.5 - Math.abs(v)) / 0.1)))
         const i = ((oy + y) * ATLAS_SIZE + ox + x) * 4
-        bytes[i] = r; bytes[i + 1] = g; bytes[i + 2] = b; bytes[i + 3] = Math.round(a * guard)
+        bytes[i] = Math.round(r * guard); bytes[i + 1] = Math.round(g * guard)
+        bytes[i + 2] = Math.round(b * guard); bytes[i + 3] = Math.round(a * guard)
       }
     }
   }
@@ -378,6 +388,14 @@ function makeFlashBytes() {
 const SMOKE_ATLAS_N = 256, SMOKE_TILE = 128
 function makeSmokeAtlasBytes() {
   const bytes = new Uint8Array(SMOKE_ATLAS_N * SMOKE_ATLAS_N * 4)
+  // Task 129 — the FULL border guard (rgb AND alpha): smoke keeps SOLID
+  // WHITE rgb (the alpha-blend convention), but a shared-border bilinear
+  // mix of white-rgb with an adjacent tile's alpha payload lands on a
+  // visible gray line under any additive reader. The outer strip of every
+  // frame fades BOTH channels to black — cross-frame mixes are black by
+  // construction.
+  const borderGuard = (tu, tv) =>
+    Math.min(1, Math.max(0, Math.min((0.5 - Math.abs(tu)) / 0.09, (0.5 - Math.abs(tv)) / 0.09)))
   for (let f = 0; f < 4; f++) {
     const ox = (f % 2) * SMOKE_TILE, oy = Math.floor(f / 2) * SMOKE_TILE
     // the lobes widen + fade as the frame advances (the puff ages)
@@ -407,8 +425,10 @@ function makeSmokeAtlasBytes() {
         const edge = Math.max(0, 1 - Math.max(0, (r - 0.3) / 0.17))
         const a = Math.min(1, Math.max(0, k * gain * erode)) * edge
         const i = ((oy + y) * SMOKE_ATLAS_N + ox + x) * 4
-        bytes[i] = bytes[i + 1] = bytes[i + 2] = 255
-        bytes[i + 3] = Math.round(255 * a)
+        const guard = borderGuard(tu, tv)
+        const w = Math.round(255 * guard)
+        bytes[i] = bytes[i + 1] = bytes[i + 2] = w
+        bytes[i + 3] = Math.round(255 * a * guard)
       }
     }
   }
@@ -461,8 +481,20 @@ function makeMuzzleSheetBytes() {
       for (let x = 0; x < MUZZLE_TILE; x++) {
         const u = (x + 0.5) / MUZZLE_TILE - 0.5, v = (y + 0.5) / MUZZLE_TILE - 0.5
         const [r, g, b, a] = fn(u, v, Math.hypot(u, v), Math.atan2(v, u))
+        // Task 129 — THE FULL BORDER GUARD (rgb AND alpha, every frame, BOTH
+        // sides of every shared border). THE ROOT of the live report ("the
+        // fire at the cannon shows the texture borders, the last pixels
+        // read as a highlighted line"): the additive frames carry alpha 255
+        // with rgb fading, while their smoke neighbors carry SOLID WHITE rgb
+        // with alpha fading — a bilinear sample at the shared border mixes
+        // the two and lands on ~(127,127,127,127), a gray line that ADDS
+        // onto the scene. Fading both channels over the outer ~0.09 strip
+        // makes every mixed sample black: no line, by construction, for
+        // every blend mode that reads the sheet.
+        const guard = Math.min(1, Math.max(0, Math.min((0.5 - Math.abs(u)) / 0.09, (0.5 - Math.abs(v)) / 0.09)))
         const i = ((oy + y) * MUZZLE_N_W + ox + x) * 4
-        bytes[i] = r; bytes[i + 1] = g; bytes[i + 2] = b; bytes[i + 3] = a
+        bytes[i] = Math.round(r * guard); bytes[i + 1] = Math.round(g * guard)
+        bytes[i + 2] = Math.round(b * guard); bytes[i + 3] = Math.round(a * guard)
       }
     }
   }
@@ -684,7 +716,7 @@ DEMOS.forEach((demo, index) => {
 
 const note = document.createElement('div')
 note.className = 'pt-note'
-note.innerHTML = 'Sim: <code>@rune/particles</code> · 22 demos · every sprite procedural · drag to orbit, pinch to zoom'
+note.innerHTML = 'Sim: <code>@rune/particles</code> · 23 demos · every sprite procedural · drag to orbit, pinch to zoom'
 sheet.append(sheetHead, rows, note)
 
 const dragHint = document.createElement('div')
@@ -1193,6 +1225,6 @@ async function boot(mode) {
 /* ─── Go ───────────────────────────────────────────────────────────────── */
 
 shell.log.info(`WebGL2: ${typeof WebGL2RenderingContext !== 'undefined' ? 'present in the browser' : 'missing'}`)
-shell.log.info('22 demos on @rune/particles — the library surface end to end + the rune originals (rocket, rainstorm, slash, vortex, fireflies, dust, grass, lightning)')
+shell.log.info('23 demos on @rune/particles — the library surface end to end + the rune originals (rocket, rainstorm, slash, vortex, fireflies, dust, grass, lightning, laser)')
 switchDemo(0)
 void boot(shell.mode ?? 'auto')

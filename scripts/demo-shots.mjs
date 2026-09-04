@@ -354,8 +354,8 @@ await assertSpriteContour()
 
   const VFX_NAMES = ['muzzle', 'explosion', 'shapes', 'trail', 'sequencer', 'mesh', 'subemitter',
     'noise', 'alphatest', 'plugin', 'billboard', 'soft', 'blending', 'follow',
-    'rocket', 'storm', 'slash', 'vortex', 'fireflies', 'dust', 'grass', 'lightning']
-  const VFX_SETTLE = { muzzle: 2500, explosion: 2100, trail: 1300, grass: 2600, lightning: 2600 }
+    'rocket', 'storm', 'slash', 'vortex', 'fireflies', 'dust', 'grass', 'lightning', 'laser']
+  const VFX_SETTLE = { muzzle: 2500, explosion: 2100, trail: 1300, grass: 2600, lightning: 2600, laser: 3000 }
   // The SEQUENCER is a still formation by design (hold phases) — its motion
   // pair brackets the t=6.5 s MORPH: we wait for the demo's own "morph →
   // spiral" log line, then shoot the pair mid-flight (300 ms apart).

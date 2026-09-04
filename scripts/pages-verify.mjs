@@ -153,7 +153,7 @@ try {
 }
 console.log(particlesLiveOk ? 'PARTICLES LIVE OK' : 'PARTICLES LIVE FAIL')
 
-// ─── vfx: the 22-demo carousel on the LIVE page (Task 122 + 124 + 126) ───────
+// ─── vfx: the 23-demo carousel on the LIVE page (Task 122 + 124 + 126 + 129) ───────
 let vfxLiveOk = false
 try {
   await page.goto(`${BASE}/demo/vfx/`, { waitUntil: 'networkidle' })
@@ -164,10 +164,10 @@ try {
     { timeout: 30_000 },
   )
   await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
-  // cycle through ALL 22 demos; each must go live
+  // cycle through ALL 23 demos; each must go live
   let allLive = true
   const names = []
-  for (let i = 1; i < 22; i++) {
+  for (let i = 1; i < 23; i++) {
     await page.click('.pt-arrow:last-child')
     await page.waitForFunction(
       () => / · [1-9][\d,]* particles · [1-9][\d,]* verts/.test(document.querySelector('.pt-pill')?.textContent ?? ''),

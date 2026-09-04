@@ -142,8 +142,10 @@ export function createRecordingGL(): RecordingGL {
       return nextTarget++
     },
     bindTarget: (targetId, clear) => {
-      // The same skip contract as realGL: no duplicate bindTarget
-      if (targetId === currentTarget && !clear) return
+      // Task 129: the CANVAS bind always goes through (realGL re-asserts
+      // the viewport there — the bottom-left-corner heal); surfaces keep
+      // the skip contract (a redundant bind of the same surface is a no-op).
+      if (targetId !== 0 && targetId === currentTarget && !clear) return
       currentTarget = targetId
       calls.push(`bindTarget(${targetId},${clear ? 1 : 0})`)
     },

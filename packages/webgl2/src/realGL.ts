@@ -59,7 +59,14 @@ interface TargetRecord {
   readonly color: readonly number[]
 }
 
-export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
+export function createRealGL(
+  gl: WebGL2RenderingContext,
+  /** Task 129: the viewport-heal sink — fires ONCE per divergence between
+   *  the real drawing buffer and the renderer's notion of it (the live
+   *  "everything drawn in the bottom-left corner" report). Routed to the
+   *  GL error sink so the demo log carries the diagnosis. */
+  onViewportHeal?: (message: string) => void,
+): GLFacade {
   const programs = new Map<number, ProgramRecord>()
   const buffers = new Map<number, WebGLBuffer>()
   const textures = new Map<number, WebGLTexture>()
@@ -654,13 +661,36 @@ export function createRealGL(gl: WebGL2RenderingContext): GLFacade {
   }
 
   function bindTarget(targetId: number, clear: boolean): void {
-    if (targetId === currentTarget && !clear) return
-    currentTarget = targetId
     if (targetId === 0) {
+      // Task 129 — THE SELF-HEALING CANVAS BIND. The GL viewport is global
+      // mutable state: anything that touched this context between our
+      // passes (an offscreen probe on some driver, a browser-driven canvas
+      // relayout, an extension, a context loss+restore) can leave it stale
+      // — and a stale viewport confines the whole frame to the BOTTOM-LEFT
+      // corner, "as if the canvas shrank" (the live report). The old early
+      // return (`targetId === currentTarget && !clear`) skipped exactly
+      // this re-assert when we were "already" on the canvas, so one
+      // external viewport change lived on forever. Re-asserting on every
+      // canvas bind is one bindFramebuffer + one viewport per pass start —
+      // free. The drawing buffer is re-read too: if it moved without our
+      // resize() seeing it (canvas.width written behind our back), we
+      // adopt the real size and report the heal once.
+      currentTarget = 0
+      const bufferW = gl.drawingBufferWidth
+      const bufferH = gl.drawingBufferHeight
+      if (bufferW > 0 && bufferH > 0 && (bufferW !== canvasWidth || bufferH !== canvasHeight)) {
+        onViewportHeal?.(
+          `viewport heal: the drawing buffer is ${bufferW}x${bufferH} but the renderer tracked ${canvasWidth}x${canvasHeight} — adopted the real size (an external canvas resize?)`,
+        )
+        canvasWidth = bufferW
+        canvasHeight = bufferH
+      }
       gl.bindFramebuffer(gl.FRAMEBUFFER, null)
       gl.viewport(0, 0, canvasWidth, canvasHeight)
       return
     }
+    if (targetId === currentTarget && !clear) return
+    currentTarget = targetId
     const target = targets.get(targetId)
     if (target === undefined) return
     // Feedback-loop prevention: the TARGET texture must not stay bound to

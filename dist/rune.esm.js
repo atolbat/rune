@@ -3956,7 +3956,7 @@ function formatInfo(format) {
       return { internalFormat: ENUM.RGBA8, uploadFormat: ENUM.RGBA, uploadType: ENUM.UNSIGNED_BYTE };
   }
 }
-function createRealGL(gl) {
+function createRealGL(gl, onViewportHeal) {
   const programs = new Map;
   const buffers = new Map;
   const textures = new Map;
@@ -4292,14 +4292,22 @@ function createRealGL(gl) {
     return id;
   }
   function bindTarget(targetId, clear2) {
-    if (targetId === currentTarget && !clear2)
-      return;
-    currentTarget = targetId;
     if (targetId === 0) {
+      currentTarget = 0;
+      const bufferW = gl.drawingBufferWidth;
+      const bufferH = gl.drawingBufferHeight;
+      if (bufferW > 0 && bufferH > 0 && (bufferW !== canvasWidth || bufferH !== canvasHeight)) {
+        onViewportHeal?.(`viewport heal: the drawing buffer is ${bufferW}x${bufferH} but the renderer tracked ${canvasWidth}x${canvasHeight} — adopted the real size (an external canvas resize?)`);
+        canvasWidth = bufferW;
+        canvasHeight = bufferH;
+      }
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, canvasWidth, canvasHeight);
       return;
     }
+    if (targetId === currentTarget && !clear2)
+      return;
+    currentTarget = targetId;
     const target = targets.get(targetId);
     if (target === undefined)
       return;
@@ -7339,9 +7347,8 @@ function computeMipLevels(w, h) {
 var DEFAULT_CLEAR2 = { color: [0.07, 0.08, 0.11, 1], depth: 1 };
 function createWebGL2Renderer(options) {
   const canvas = resolveCanvasAny(options.canvas);
-  const dpr = canvasDpr(canvas, options.dpr);
   const rawContext = options.createGL === undefined ? acquireWebGL2(canvas) : null;
-  const rawGl = options.createGL !== undefined ? options.createGL(canvas) : createRealGL(rawContext);
+  const rawGl = options.createGL !== undefined ? options.createGL(canvas) : createRealGL(rawContext, (message) => options.onGlError?.(message));
   const session = options.resources !== undefined ? createResourceSessionGL(rawGl, options.resources) : null;
   const gl = session !== null ? session.facade : options.journal !== undefined ? withJournal(rawGl, options.journal) : rawGl;
   const arena = createUniformArena(64 * 1024);
@@ -7376,6 +7383,10 @@ function createWebGL2Renderer(options) {
   let cancelScheduled = null;
   let lastCssWidth = -1;
   let lastCssHeight = -1;
+  let lastBufferW = -1;
+  let lastBufferH = -1;
+  let lastDpr = canvasDpr(canvas, options.dpr);
+  let dprPollFrame = 0;
   let disposed = false;
   const [startW, startH] = getCanvasCssSize(canvas);
   resize(startW, startH);
@@ -7432,7 +7443,8 @@ function createWebGL2Renderer(options) {
   function pass(fragment, passOptions = {}) {
     return createPassCommand(fragment, passOptions, 0, () => {
       const [w, h] = size.peek();
-      return [Math.max(1, Math.round(w * dpr)), Math.max(1, Math.round(h * dpr))];
+      const dprNow = canvasDpr(canvas, options.dpr);
+      return [Math.max(1, Math.round(w * dprNow)), Math.max(1, Math.round(h * dprNow))];
     });
   }
   function createPassCommand(fragment, passOptions, targetId, resolutionSource) {
@@ -7537,23 +7549,46 @@ function createWebGL2Renderer(options) {
     return { cancel: () => removeItem(frameCallbacks, callback) };
   }
   function resize(cssWidth, cssHeight) {
-    if (cssWidth === lastCssWidth && cssHeight === lastCssHeight)
+    const dprNow = canvasDpr(canvas, options.dpr);
+    if (cssWidth === lastCssWidth && cssHeight === lastCssHeight && dprNow === lastDpr)
       return;
     lastCssWidth = cssWidth;
     lastCssHeight = cssHeight;
-    const bufferWidth = Math.max(1, Math.round(cssWidth * dpr));
-    const bufferHeight = Math.max(1, Math.round(cssHeight * dpr));
+    lastDpr = dprNow;
+    const bufferWidth = Math.max(1, Math.round(cssWidth * dprNow));
+    const bufferHeight = Math.max(1, Math.round(cssHeight * dprNow));
     if (canvas.width !== bufferWidth)
       canvas.width = bufferWidth;
     if (canvas.height !== bufferHeight)
       canvas.height = bufferHeight;
+    lastBufferW = canvas.width;
+    lastBufferH = canvas.height;
     size.value = [cssWidth, cssHeight];
     gl.setViewport(bufferWidth, bufferHeight);
+  }
+  function syncCanvasState() {
+    const w = canvas.width;
+    const h = canvas.height;
+    if (w !== lastBufferW || h !== lastBufferH) {
+      options.onGlError?.(`canvas state heal: the drawing buffer moved to ${w}x${h} (tracked ${lastBufferW}x${lastBufferH}) without our resize — the viewport re-synced`);
+      lastBufferW = w;
+      lastBufferH = h;
+      lastCssWidth = -1;
+      gl.setViewport(w, h);
+    }
+    if ((++dprPollFrame & 63) === 0 && options.dpr === undefined && !isOffscreenCanvas(canvas) && canvas.clientWidth > 0) {
+      const live2 = canvasDpr(canvas, undefined);
+      if (live2 !== lastDpr) {
+        lastCssWidth = -1;
+        resize(canvas.clientWidth, canvas.clientHeight);
+      }
+    }
   }
   function step(nowMs) {
     updateFrameContext(nowMs);
     statsCollector?.beginFrame();
     transients.beginFrame();
+    syncCanvasState();
     try {
       stepFrame();
       frameErrorCount = 0;
@@ -7650,6 +7685,8 @@ function createWebGL2Renderer(options) {
     if (typeof ResizeObserver === "undefined")
       return null;
     const observer = new ResizeObserver(() => {
+      if (canvas2.clientWidth <= 0 || canvas2.clientHeight <= 0)
+        return;
       const [cssW, cssH] = getCanvasCssSize(canvas2);
       const verdict = layoutGuard.classify(cssW, cssH);
       if (verdict.verdict !== "apply")
@@ -10028,7 +10065,6 @@ var ERROR_STORM_LIMIT = 3;
 var DEFAULT_CLEAR3 = { color: [0.07, 0.08, 0.11, 1], depth: 1 };
 async function createWebGpuRenderer(options) {
   const canvas = resolveCanvasAny(options.canvas);
-  const dpr = canvasDpr(canvas, options.dpr);
   const storm = createErrorStorm(options.onGpuError);
   const rawGpu = options.createGPU !== undefined ? await options.createGPU(canvas, storm.handle) : await createRealGPU(canvas, storm.handle);
   const session = options.resources !== undefined ? createResourceSessionGPU(rawGpu, options.resources) : null;
@@ -10055,6 +10091,7 @@ async function createWebGpuRenderer(options) {
   let cancelScheduled = null;
   let lastCssWidth = -1;
   let lastCssHeight = -1;
+  let lastDpr = canvasDpr(canvas, options.dpr);
   await gpu.configure(canvas.width, canvas.height);
   const clear = options.clear ?? DEFAULT_CLEAR3;
   gpu.setCanvasClearColor(clear.color, clear.depth ?? 1);
@@ -10102,7 +10139,8 @@ async function createWebGpuRenderer(options) {
   function pass(fragment, passOptions = {}) {
     return createPassCommand(fragment, passOptions, 0, () => {
       const [w, h] = size.peek();
-      return [Math.max(1, Math.round(w * dpr)), Math.max(1, Math.round(h * dpr))];
+      const dprNow = canvasDpr(canvas, options.dpr);
+      return [Math.max(1, Math.round(w * dprNow)), Math.max(1, Math.round(h * dprNow))];
     });
   }
   function createPassCommand(fragment, passOptions, targetId, resolutionSource) {
@@ -10133,12 +10171,14 @@ async function createWebGpuRenderer(options) {
     command2.record(props, frameCtx, writer);
   }
   function resize(cssWidth, cssHeight) {
-    if (cssWidth === lastCssWidth && cssHeight === lastCssHeight)
+    const dprNow = canvasDpr(canvas, options.dpr);
+    if (cssWidth === lastCssWidth && cssHeight === lastCssHeight && dprNow === lastDpr)
       return;
     lastCssWidth = cssWidth;
     lastCssHeight = cssHeight;
-    const bufferWidth = Math.max(1, Math.round(cssWidth * dpr));
-    const bufferHeight = Math.max(1, Math.round(cssHeight * dpr));
+    lastDpr = dprNow;
+    const bufferWidth = Math.max(1, Math.round(cssWidth * dprNow));
+    const bufferHeight = Math.max(1, Math.round(cssHeight * dprNow));
     if (canvas.width !== bufferWidth)
       canvas.width = bufferWidth;
     if (canvas.height !== bufferHeight)
@@ -10210,6 +10250,8 @@ async function createWebGpuRenderer(options) {
     if (typeof ResizeObserver === "undefined")
       return null;
     const observer = new ResizeObserver(() => {
+      if (canvas2.clientWidth <= 0 || canvas2.clientHeight <= 0)
+        return;
       const [cssW, cssH] = getCanvasCssSize(canvas2);
       const verdict = layoutGuard.classify(cssW, cssH);
       if (verdict.verdict !== "apply")

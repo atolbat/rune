@@ -468,7 +468,7 @@ try {
     !mobileParticles.bodyScrolls
   await page.setViewportSize({ width: 960, height: 720 })
 
-  // ─── vfx: the 22-demo carousel (Task 122 + the rune originals) ──
+  // ─── vfx: the 23-demo carousel (Task 122 + the rune originals + the laser) ──
   await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
   await page.waitForFunction(
     () => document.querySelector('.pt-pill')?.textContent.includes('Sentry'),
@@ -484,11 +484,11 @@ try {
   const vfxPill1 = await page.textContent('.pt-pill')
   console.log(`[smoke] vfx first demo: ${vfxPill1} — ${vfxFirst ? 'alive' : 'STATIC'}`)
 
-  // cycle ALL 22 demos via the ▶ arrow; each goes live (particles > 0)
+  // cycle ALL 23 demos via the ▶ arrow; each goes live (particles > 0)
   await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
   let vfxAllLive = true
   const seenDemos = []
-  for (let i = 1; i < 22; i++) {
+  for (let i = 1; i < 23; i++) {
     await page.click('.pt-arrow:last-child')
     await page.waitForFunction(
       () => / · [1-9][\d,]* particles · [1-9][\d,]* verts/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
@@ -501,7 +501,7 @@ try {
     if (!live) vfxAllLive = false
   }
   console.log(`[smoke] vfx cycle: ${seenDemos.join(' → ')}`)
-  console.log(`[smoke] vfx all 22 live: ${vfxAllLive ? 'yes' : 'SOME STATIC'}`)
+  console.log(`[smoke] vfx all 23 live: ${vfxAllLive ? 'yes' : 'SOME STATIC'}`)
   // the labels overlay (the emitter-shapes demo) projects into the viewport
   await page.evaluate(() => {
     const rows = [...document.querySelectorAll('.pt-row')]

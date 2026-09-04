@@ -130,6 +130,79 @@ describe('realGL: clear is masked by depthMask (demo-10 regression)', () => {
   })
 })
 
+// Task 129 — THE SELF-HEALING CANVAS BIND. The live report: "WebGL at some
+// point starts drawing everything in the bottom-left corner, as if the
+// canvas shrank 4x". A GL viewport that is smaller than the drawing buffer
+// does exactly that (the viewport origin is the bottom-left corner), and
+// the old bindTarget early-return let ANY external viewport/buffer change
+// live forever. These tests pin the new contract.
+describe('realGL: the self-healing canvas bind (Task 129)', () => {
+  type CanvasGL = WebGL2RenderingContext & { drawingBufferWidth: number; drawingBufferHeight: number }
+
+  /** The minimal canvas-path mock: bindTarget(0) touches only the
+   *  framebuffer binding, the viewport and the drawing-buffer size. */
+  function canvasMock(): { calls: string[]; gl: CanvasGL } {
+    const calls: string[] = []
+    const gl = {
+      drawingBufferWidth: 800,
+      drawingBufferHeight: 600,
+      bindFramebuffer: (_target: number, fbo: unknown) => calls.push(`bindFramebuffer(${fbo === null ? 'null' : 'fbo'})`),
+      viewport: (x: number, y: number, w: number, h: number) => calls.push(`viewport(${x},${y},${w},${h})`),
+    }
+    return { calls, gl: gl as unknown as CanvasGL }
+  }
+
+  test('bindTarget(0) re-asserts the viewport on EVERY call (a stale external viewport dies at the pass start)', () => {
+    const { calls, gl } = canvasMock()
+    const facade = createRealGL(gl)
+    facade.setViewport(800, 600)
+    calls.length = 0
+    facade.bindTarget(0, false)
+    facade.bindTarget(0, false) // the OLD contract skipped this exact call
+    expect(calls.filter(call => call.startsWith('viewport('))).toEqual([
+      'viewport(0,0,800,600)',
+      'viewport(0,0,800,600)',
+    ])
+    expect(calls.filter(call => call === 'bindFramebuffer(null)').length).toBe(2)
+  })
+
+  test('a drawing-buffer move behind our back is adopted (the heal) and reported ONCE', () => {
+    const { calls, gl } = canvasMock()
+    const healed: string[] = []
+    const facade = createRealGL(gl, message => healed.push(message))
+    facade.setViewport(800, 600)
+    // something resized the drawing buffer without our resize() seeing it
+    gl.drawingBufferWidth = 1080
+    gl.drawingBufferHeight = 1989
+    calls.length = 0
+    facade.bindTarget(0, false)
+    expect(calls).toContain('viewport(0,0,1080,1989)')
+    expect(healed.length).toBe(1)
+    expect(healed[0]).toContain('1080x1989')
+    // adopted — the next bind is quiet (no heal spam every frame), though
+    // the viewport re-assert itself still happens (that is the contract)
+    facade.bindTarget(0, false)
+    expect(healed.length).toBe(1)
+    expect(calls.filter(call => call.startsWith('viewport('))).toEqual([
+      'viewport(0,0,1080,1989)',
+      'viewport(0,0,1080,1989)',
+    ])
+  })
+
+  test('a mock without drawingBufferWidth (headless) skips the heal and still re-asserts', () => {
+    const calls: string[] = []
+    const gl = {
+      bindFramebuffer: (_t: number, fbo: unknown) => calls.push(`bindFramebuffer(${fbo === null ? 'null' : 'fbo'})`),
+      viewport: (x: number, y: number, w: number, h: number) => calls.push(`viewport(${x},${y},${w},${h})`),
+    }
+    const facade = createRealGL(gl as unknown as WebGL2RenderingContext)
+    facade.setViewport(800, 600)
+    calls.length = 0
+    facade.bindTarget(0, false)
+    expect(calls).toEqual(['bindFramebuffer(null)', 'viewport(0,0,800,600)'])
+  })
+})
+
 describe('realGL: blend driver-proofing (Task 75b — the particles transparency class)', () => {
   test('setBlend enables BLEND, asserts FUNC_ADD, then the factors — in this order', () => {
     const { calls, gl } = mockGL()

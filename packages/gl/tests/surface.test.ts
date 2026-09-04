@@ -78,12 +78,13 @@ describe('surface/pass — WebGL2', () => {
     expect(calls).toContain('createTexture(256,256)')
     expect(calls).toContain('createTarget(1,256,256,depth)')
 
-    // Frame order: clear the canvas → bindTarget(surface,clear) → scene →
-    // bindTarget(canvas) → fullscreen pass
+    // Frame order: bindTarget(canvas re-assert, BeginPass) → clear the
+    // canvas → bindTarget(surface,clear) → scene → bindTarget(canvas) →
+    // fullscreen pass
     const clearAt = calls.findIndex(call => call.startsWith('clear('))
     const intoSurfaceAt = calls.indexOf('bindTarget(1,1)')
     const sceneDrawAt = calls.indexOf('drawArrays(triangles,0,3,1)')
-    const backToCanvasAt = calls.indexOf('bindTarget(0,0)')
+    const backToCanvasAt = calls.indexOf('bindTarget(0,0)', sceneDrawAt)
     const presentDrawAt = calls.indexOf('drawArrays(triangles,0,6,1)')
     expect(clearAt).toBeGreaterThanOrEqual(0)
     expect(intoSurfaceAt).toBeGreaterThan(clearAt)
@@ -103,8 +104,10 @@ describe('surface/pass — WebGL2', () => {
     expect(calls).toContain('bindTexture(1,0)') // textureId 1, unit 0
     expect(calls).toContain('uniform1i(u_src,0)')
     expect(calls).toContain('drawArrays(triangles,0,6,1)')
-    // A pure canvas frame: no target switches (skip in the facade)
-    expect(calls.filter(call => call.startsWith('bindTarget(')).length).toBe(0)
+    // A pure canvas frame: the only target binds are the pass-start canvas
+    // re-assert (Task 129 — the viewport heal) and the pass command's own
+    // canvas bind — no SURFACE switches
+    expect(calls.filter(call => call.startsWith('bindTarget('))).toEqual(['bindTarget(0,0)', 'bindTarget(0,0)'])
     renderer.stop()
   })
 
@@ -161,8 +164,9 @@ describe('surface/pass — WebGL2', () => {
     renderer.step(16)
 
     const order = calls.filter(call => call.startsWith('bindTarget('))
-    // The surfaces got targetId 1 and 2; order: A → B → canvas
-    expect(order).toEqual(['bindTarget(1,0)', 'bindTarget(2,0)', 'bindTarget(0,0)'])
+    // The surfaces got targetId 1 and 2; order: the pass-start canvas
+    // re-assert (Task 129) → A → B → canvas
+    expect(order).toEqual(['bindTarget(0,0)', 'bindTarget(1,0)', 'bindTarget(2,0)', 'bindTarget(0,0)'])
     // The input of the second pass is the first surface's texture
     expect(calls).toContain('bindTexture(1,0)')
     renderer.stop()

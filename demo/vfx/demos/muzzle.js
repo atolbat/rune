@@ -5,12 +5,19 @@
 // (flash 0→1→2, beam 3, smoke 4→7), the stretched sparks, the smoke —
 // but now on a ROTATING emitter (facade.at() + facade.orient() with a
 // LIVE matrix: every system rides the turret's frame wherever it aims),
-// plus three interactions the range never showed:
+// plus the interactions the range never showed:
 //
 //   · TRACERS — a fast streak particle per round, its LIFE sized to the
 //     exact muzzle→target distance: it dies AT the target, and onRetire
-//     bursts the IMPACT package there (flash card + radial sparks + a
-//     shock ring + a smoke puff — the sub-emitter chain);
+//     bursts the IMPACT package there (flash card + REFLECTION sparks +
+//     a shock ring + a smoke puff — the sub-emitter chain);
+//   · BEAM VOLLEYS (Task 129 — the live request): every third burst is
+//     three fat energy BOLTS aimed at offset points ON the target's
+//     sphere — and every impact (bolt OR tracer) sprays its sparks off
+//     the REFLECTION of the arrival direction off the surface normal:
+//     grazing hits scatter WIDE to the side, head-on hits bounce tight
+//     back at the shooter — the curvature under which the target was
+//     hit decides where the sparks fly;
 //   · SHELL CASINGS — a chip ejected sideways on every round, gravity,
 //     BOUNCING off the floor (the collision planes) and spinning out;
 //   · RECOIL — the head meshes kick back along the barrel and recover
@@ -21,7 +28,7 @@
 // lock ring. The camera orbits slowly, watching the sweeps.
 export default {
   title: 'Sentry Turret',
-  sub: 'rotating emitter · frame kit · tracers with impact bursts · bouncing shells',
+  sub: 'rotating emitter · tracers + BEAM volleys · reflection sparks · bouncing shells',
   camera: { yaw: 0.9, pitch: 0.3, dist: 16, orbit: 0.04, target: [0, 1.3, 0] },
 
   make(env) {
@@ -268,14 +275,16 @@ export default {
 
     // ── the tracer: a world-space layer (NO orient — the burst passes the
     //    exact muzzle→target direction), life sized to the distance: the
-    //    streak dies AT the target and onRetire queues the impact ──
+    //    streak dies AT the target and onRetire queues the impact (with
+    //    the arrival direction — the reflection math reads it back) ──
     const TRACER_S = {
       shape: { kind: 'point', origin: [0, 0, 0] },
       velocity: { mode: 'fixed', dir: [1, 0, 0] },
       speed: [55, 55], life: [0.2, 0.2], size: [0.16, 0.16],
       color: [[1, 0.9, 0.6, 1], [1, 0.9, 0.6, 1]], seed: 51,
     }
-    const impacts = [] // the queued impact points (copied — the record is reused)
+    const impacts = [] // the TRACER impacts queued: x, y, z, vx, vy, vz (the record is reused)
+    const boltImpacts = [] // the BOLT impacts: the same 6 scalars, tagged by queue
     const tracer = env.addLayer({
       id: 'sn-tracer',
       facade: env.createParticles({
@@ -285,7 +294,7 @@ export default {
           { t: 0.92, size: 1, r: 1, g: 0.95, b: 0.7, a: 0.9 },
           { t: 1, size: 1, r: 1, g: 0.95, b: 0.7, a: 0 },
         ]),
-        onRetire: (rec) => { impacts.push(rec.x, rec.y, rec.z) },
+        onRetire: (rec) => { impacts.push(rec.x, rec.y, rec.z, rec.vx, rec.vy, rec.vz) },
         spawner: TRACER_S,
         render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.028, lengthFactor: 0.4 },
       }),
@@ -294,7 +303,87 @@ export default {
       texture: () => env.sparkTexture,
     })
 
-    // ── the impact package (burst at the target on the tracer's retire) ──
+    // ── the BEAM BOLT (Task 129 — the live request): a fat energy round
+    //    per volley shot. Same die-at-the-target trick as the tracer (the
+    //    life is the exact distance/speed), but slower, thicker and
+    //    aimed at an OFFSET point of the target's sphere — the arrival
+    //    angle varies, and the impact sparks REFLECT off that curvature ──
+    const BOLT_S = {
+      shape: { kind: 'point', origin: [0, 0, 0] },
+      velocity: { mode: 'fixed', dir: [1, 0, 0] },
+      speed: [26, 26], life: [0.5, 0.5], size: [0.52, 0.62],
+      color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 57,
+    }
+    const bolt = env.addLayer({
+      id: 'sn-bolt',
+      facade: env.createParticles({
+        capacity: 8,
+        ramp: env.createRamp([
+          { t: 0, size: 0.5, r: 1, g: 1, b: 1, a: 1 },
+          { t: 0.8, size: 1, r: 0.72, g: 0.92, b: 1, a: 0.95 },
+          { t: 1, size: 0.85, r: 0.45, g: 0.7, b: 1, a: 0 },
+        ]),
+        onRetire: (rec) => { boltImpacts.push(rec.x, rec.y, rec.z, rec.vx, rec.vy, rec.vz) },
+        spawner: BOLT_S,
+        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.1, lengthFactor: 1.15 },
+      }),
+      material: env.materials.sprite,
+      pipeline: env.pipelines.additive,
+      texture: () => env.sparkTexture,
+    })
+
+    // ── the reflection sparks: the impact package's directional half. The
+    //    cone's axis is set PER BURST to the reflected arrival direction —
+    //    grazing hits scatter wide to the side, head-on hits bounce tight
+    //    back toward the shooter ("the curvature under which the target
+    //    was hit") ──
+    const RSPARKS_S = {
+      shape: { kind: 'cone', origin: [0, 0, 0], axis: [0, 1, 0], halfAngle: 0.3, baseRadius: 0.05, length: [0, 0.2] },
+      velocity: { mode: 'lobe' },
+      speed: [4, 11], life: [0.3, 0.55], size: [0.07, 0.16],
+      color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 77,
+    }
+    const refSparks = env.addLayer({
+      id: 'nirsparks',
+      facade: env.createParticles({
+        capacity: 320,
+        ramp: env.createRamp([
+          { t: 0, size: 1, r: 1, g: 1, b: 1, a: 1 },
+          { t: 0.4, size: 0.9, r: 0.85, g: 0.95, b: 1, a: 0.9 },
+          { t: 1, size: 0.1, r: 0.55, g: 0.75, b: 1, a: 0 },
+        ]),
+        forces: { gravity: [0, -7, 0], drag: 0.55 },
+        spawner: RSPARKS_S,
+        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.14 },
+      }),
+      material: env.materials.sprite,
+      pipeline: env.pipelines.additive,
+      texture: () => env.sparkTexture,
+    })
+    // the beam impact's own flash card — cyan-hot (the energy read)
+    const BOLT_FLASH_S = {
+      shape: { kind: 'point', origin: [0, 0, 0] },
+      velocity: { mode: 'fixed', dir: [0, 1, 0] },
+      speed: [0, 0], life: [0.16, 0.22], size: [1.5, 2.1],
+      color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 79,
+    }
+    const boltFlash = env.addLayer({
+      id: 'nibflash',
+      facade: env.createParticles({
+        capacity: 16,
+        ramp: env.createRamp([
+          { t: 0, size: 1, r: 0.85, g: 0.97, b: 1, a: 1, frame: 0 },
+          { t: 1, size: 0.7, r: 0.4, g: 0.7, b: 1, a: 0, frame: 2 },
+        ]),
+        spawner: BOLT_FLASH_S,
+        render: { kind: 'billboard', tiles: TILES },
+      }),
+      material: env.materials.sprite,
+      pipeline: env.pipelines.additive,
+      texture: () => env.muzzleSheet,
+    })
+
+    // ── the impact package (burst at the target on the retire) ──
     const IMPACT_FLASH_S = {
       shape: { kind: 'point', origin: [0, 0, 0] },
       velocity: { mode: 'fixed', dir: [0, 1, 0] },
@@ -315,28 +404,6 @@ export default {
       material: env.materials.sprite,
       pipeline: env.pipelines.additive,
       texture: () => env.muzzleSheet,
-    })
-    const IMPACT_SPARKS_S = {
-      shape: { kind: 'sphere', origin: [0, 0, 0], radius: [0, 0.25] },
-      velocity: { mode: 'radial' },
-      speed: [3, 8], life: [0.25, 0.5], size: [0.06, 0.13],
-      color: [[1, 0.95, 0.7, 1], [1, 0.6, 0.25, 1]], seed: 67,
-    }
-    const impactSparks = env.addLayer({
-      id: 'nisparks',
-      facade: env.createParticles({
-        capacity: 256,
-        ramp: env.createRamp([
-          { t: 0, size: 1, r: 1, g: 1, b: 1, a: 1 },
-          { t: 1, size: 0.1, r: 1, g: 0.6, b: 0.3, a: 0 },
-        ]),
-        forces: { gravity: [0, -7, 0], drag: 0.6 },
-        spawner: IMPACT_SPARKS_S,
-        render: { kind: 'billboard', mode: 'stretched', speedFactor: 0.14 },
-      }),
-      material: env.materials.sprite,
-      pipeline: env.pipelines.additive,
-      texture: () => env.sparkTexture,
     })
     const IMPACT_RING_S = {
       shape: { kind: 'point', origin: [0, 0, 0] },
@@ -382,10 +449,12 @@ export default {
       texture: () => env.muzzleSheet,
     })
 
-    // ── the behavior: acquire → aim → 4-round burst → dwell → next ──
+    // ── the behavior: acquire → aim → burst (every third = a BEAM volley) → dwell → next ──
     const AIM_RATE = 2.4 // rad/s
     const ROUNDS = 4
     const ROUND_DT = 0.095
+    const BOLT_ROUNDS = 3
+    const BOLT_DT = 0.17
     const DWELL = 0.85
     let yaw = 0.6
     let targetIdx = 0
@@ -396,6 +465,7 @@ export default {
     let recoil = 0
     let shotSeed = 500
     let burstN = 0
+    let volley = false // every third burst fires BEAM BOLTS instead of tracers
     const tip = [0, 1.35, 0]
     // the probe counters (scripts/task128-probe.mjs reads them)
     const C = (typeof window !== 'undefined' ? (window.__vfxCounters ??= {}) : {})
@@ -421,6 +491,37 @@ export default {
       recoil = 0.11
     }
 
+    // the BEAM bolt: aimed at an OFFSET point of the target's sphere so
+    // the arrival ANGLE varies — grazing hits and head-on hits look
+    // different in the sparks that fly off (the curvature decides)
+    const fireBolt = () => {
+      const s = shotSeed++
+      C.bolts = (C.bolts ?? 0) + 1
+      const t = TARGETS[targetIdx]
+      // a random surface offset (inside r≈0.45 of the target center)
+      let ox = 0, oy = 0, oz = 0
+      do {
+        ox = Math.random() * 0.9 - 0.45
+        oy = Math.random() * 0.9 - 0.45
+        oz = Math.random() * 0.9 - 0.45
+      } while (ox * ox + oy * oy + oz * oz > 0.45 * 0.45)
+      const ax = t[0] + ox, ay = t[1] + oy, az = t[2] + oz
+      const dx = ax - tip[0], dy = ay - tip[1], dz = az - tip[2]
+      const dist = Math.hypot(dx, dy, dz)
+      bolt.facade.at(tip[0], tip[1], tip[2])
+      bolt.facade.burst(1, {
+        ...BOLT_S,
+        velocity: { mode: 'fixed', dir: [dx / dist, dy / dist, dz / dist] },
+        speed: [26, 26], life: [dist / 26, dist / 26], seed: s,
+      })
+      // the launch package: a fatter beam card + a hot flash (no shells —
+      // the energy weapon does not eject brass)
+      beam.facade.burst(1, { ...BEAM_S, seed: s + 1, size: [1.5, 1.8] })
+      flash.facade.burst(2, { ...FLASH_S, seed: s + 2, size: [1.9, 2.6] })
+      sparks.facade.burst(5, { ...SPARKS_S, seed: s + 3, speed: [10, 24] })
+      recoil = 0.17
+    }
+
     return {
       frame(ctx) {
         const dt = ctx.dt
@@ -437,19 +538,22 @@ export default {
           yaw += step
           if (Math.abs(d) < 0.03) {
             phase = 'fire'
-            burstLeft = ROUNDS
-            shotT = 0
             burstN++
-            env.log.event(`sentry burst #${burstN} → target ${targetIdx + 1} (${t[0].toFixed(1)}, ${t[1].toFixed(1)}, ${t[2].toFixed(1)})`)
+            volley = burstN % 3 === 0 // every third burst: the energy weapon
+            burstLeft = volley ? BOLT_ROUNDS : ROUNDS
+            shotT = 0
+            const t = TARGETS[targetIdx]
+            env.log.event(`sentry ${volley ? 'BEAM volley' : 'burst'} #${burstN} → target ${targetIdx + 1} (${t[0].toFixed(1)}, ${t[1].toFixed(1)}, ${t[2].toFixed(1)})`)
           }
         } else if (phase === 'fire') {
           shotT -= dt
           if (shotT <= 0 && burstLeft > 0) {
-            fireRound()
+            if (volley) fireBolt()
+            else fireRound()
             burstLeft--
-            shotT = ROUND_DT
+            shotT = volley ? BOLT_DT : ROUND_DT
           }
-          if (burstLeft === 0) { phase = 'cool'; phaseT = DWELL }
+          if (burstLeft === 0) { phase = 'cool'; phaseT = volley ? 1.15 : DWELL }
         } else {
           phaseT -= dt
           if (phaseT <= 0) {
@@ -496,22 +600,67 @@ export default {
         sparks.facade.orient(F)
         shells.facade.orient(F)
 
-        // the impact queue: the tracers that DIED at their targets
-        while (impacts.length > 0) {
-          const ix = impacts.shift(), iy = impacts.shift(), iz = impacts.shift()
+        // the impact queues: the tracers/bolts that DIED at their targets.
+        // Every record carries the ARRIVAL DIRECTION — the sparks fly off
+        // the REFLECTION of it against the target's surface sphere:
+        //   n   = normalize(hit − center)     (the surface normal — the curvature)
+        //   r   = d − 2(d·n)n                (the mirror direction)
+        //   cone half-angle / count scale with the incidence: grazing hits
+        //   (|d·n| small) scatter WIDE and plentiful, head-on hits bounce
+        //   back at the shooter in a tight narrow spray
+        const burstImpact = (ix, iy, iz, ivx, ivy, ivz, beamHit) => {
           C.impacts = (C.impacts ?? 0) + 1
+          C.reflections = (C.reflections ?? 0) + 1
+          // the sphere we hit: the nearest target
+          let bx = TARGETS[0][0], by = TARGETS[0][1], bz = TARGETS[0][2]
+          let bd = Infinity
+          for (const [tx, ty, tz] of TARGETS) {
+            const dd = (ix - tx) * (ix - tx) + (iy - ty) * (iy - ty) + (iz - tz) * (iz - tz)
+            if (dd < bd) { bd = dd; bx = tx; by = ty; bz = tz }
+          }
+          let nx = ix - bx, ny = iy - by, nz = iz - bz
+          const nl = Math.hypot(nx, ny, nz) || 1
+          nx /= nl; ny /= nl; nz /= nl
+          const vl = Math.hypot(ivx, ivy, ivz) || 1
+          const dX = ivx / vl, dY = ivy / vl, dZ = ivz / vl
+          const dn = dX * nx + dY * ny + dZ * nz
+          let rx = dX - 2 * dn * nx, ry = dY - 2 * dn * ny, rz = dZ - 2 * dn * nz
+          const rl = Math.hypot(rx, ry, rz) || 1
+          rx /= rl; ry /= rl; rz /= rl
+          const incidence = Math.min(1, Math.abs(dn)) // 1 = head-on, →0 = grazing
+          const half = 0.13 + 0.5 * (1 - incidence)
+          const count = 7 + Math.round(9 * (1 - incidence))
+          const s = shotSeed + 7
+          // the reflection sparks: the cone rides the mirror direction
+          refSparks.facade.at(ix, iy, iz)
+          refSparks.facade.burst(count, {
+            ...RSPARKS_S,
+            shape: { kind: 'cone', origin: [0, 0, 0], axis: [rx, ry, rz], halfAngle: half, baseRadius: 0.05, length: [0, 0.2] },
+            seed: s,
+          })
+          if (beamHit) {
+            // the cyan bolt-flash (the energy read) over the warm package
+            boltFlash.facade.at(ix, iy, iz)
+            boltFlash.facade.burst(1, { ...BOLT_FLASH_S, seed: s + 1 })
+          }
           impactFlash.facade.at(ix, iy, iz)
-          impactFlash.facade.burst(1, { ...IMPACT_FLASH_S, seed: shotSeed + 7 })
-          impactSparks.facade.at(ix, iy, iz)
-          impactSparks.facade.burst(10, { ...IMPACT_SPARKS_S, seed: shotSeed + 8 })
+          impactFlash.facade.burst(1, { ...IMPACT_FLASH_S, seed: s + 2, size: beamHit ? [1.6, 2.2] : [1.2, 1.7] })
           impactRing.facade.at(ix, iy, iz)
-          impactRing.facade.burst(1, { ...IMPACT_RING_S, seed: shotSeed + 9 })
+          impactRing.facade.burst(1, { ...IMPACT_RING_S, seed: s + 3, size: beamHit ? [1.1, 1.3] : [0.9, 1.1] })
           impactSmoke.facade.at(ix, iy, iz)
-          impactSmoke.facade.burst(3, { ...IMPACT_SMOKE_S, seed: shotSeed + 10 })
+          impactSmoke.facade.burst(beamHit ? 4 : 3, { ...IMPACT_SMOKE_S, seed: s + 4 })
+        }
+        while (impacts.length > 0) {
+          burstImpact(impacts.shift(), impacts.shift(), impacts.shift(),
+            impacts.shift(), impacts.shift(), impacts.shift(), false)
+        }
+        while (boltImpacts.length > 0) {
+          burstImpact(boltImpacts.shift(), boltImpacts.shift(), boltImpacts.shift(),
+            boltImpacts.shift(), boltImpacts.shift(), boltImpacts.shift(), true)
         }
 
-        for (const l of [markers, lock, smoke, flash, beam, sparks, shells, tracer,
-          impactFlash, impactSparks, impactRing, impactSmoke]) l.facade.advance(dt)
+        for (const l of [markers, lock, smoke, flash, beam, sparks, shells, tracer, bolt, refSparks, boltFlash,
+          impactFlash, impactRing, impactSmoke]) l.facade.advance(dt)
       },
     }
   },

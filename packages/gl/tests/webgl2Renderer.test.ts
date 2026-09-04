@@ -137,4 +137,71 @@ void main() { o_color = u_tint; }`
     expect(stats.frames).toBe(20)
     renderer.stop()
   })
+
+  // Task 129 — the live report: "WebGL at some point starts drawing
+  // everything in the bottom-left corner, as if the canvas shrank 4x".
+  // The per-frame canvas-state check must adopt an external drawing-buffer
+  // move (anything wrote canvas.width behind our resize) and re-sync the
+  // viewport — once, not every frame.
+  it('Task 129: an external canvas.width write is healed — the viewport re-syncs, once', () => {
+    const { gl, calls } = createRecordingGL()
+    const errors: string[] = []
+    const canvas = fakeCanvas()
+    const renderer = createWebGL2Renderer({
+      canvas,
+      createGL: () => gl,
+      observeResize: false,
+      now: () => 0,
+      requestFrame: () => () => {},
+      onGlError: message => errors.push(message),
+    })
+    renderer.step(16) // a normal frame — nothing to heal
+    expect(errors.length).toBe(0)
+
+    canvas.width = 1234 // an external write (browser/extension/driver path)
+    renderer.step(32)
+    expect(calls).toContain('setViewport(1234,600)')
+    expect(errors.some(message => message.includes('canvas state heal'))).toBe(true)
+
+    const heals = errors.length
+    renderer.step(48) // adopted — quiet now
+    expect(errors.length).toBe(heals)
+    renderer.stop()
+  })
+
+  it('Task 129: a DPR change without a CSS change re-derives the buffer (the live-DPR poll)', () => {
+    const { gl, calls } = createRecordingGL()
+    const canvas = fakeCanvas()
+    const windowRef = (globalThis as Record<string, unknown>).window as { devicePixelRatio: number } | undefined
+    // a fake live DPR: bun tests have no window — install one for the poll
+    const hadWindow = windowRef !== undefined
+    const hadDpr = windowRef?.devicePixelRatio
+    ;(globalThis as Record<string, unknown>).window = { devicePixelRatio: 2 }
+    try {
+      const renderer = createWebGL2Renderer({
+        canvas,
+        createGL: () => gl,
+        observeResize: false,
+        now: () => 0,
+        requestFrame: () => () => {},
+        onGlError: () => {},
+      })
+      // boot: no window yet? — the boot read sees dpr 2 (canvasDpr reads window)
+      const bootViewports = calls.filter(call => call.startsWith('setViewport(')).length
+      expect(bootViewports).toBe(1)
+      expect(calls[0]).toBe('setViewport(1600,1200)') // 800×600 CSS × 2
+      // the DPR moves 2 → 3 WITHOUT any CSS change; the poll fires every 64 frames
+      ;(globalThis as unknown as { window: { devicePixelRatio: number } }).window.devicePixelRatio = 3
+      for (let frame = 0; frame < 64; frame++) renderer.step(16)
+      expect(calls).toContain('setViewport(2400,1800)') // re-derived at the live DPR
+      renderer.stop()
+    } finally {
+      if (hadWindow) {
+        ;(globalThis as Record<string, unknown>).window = windowRef
+        if (hadDpr !== undefined) windowRef!.devicePixelRatio = hadDpr
+      } else {
+        delete (globalThis as Record<string, unknown>).window
+      }
+    }
+  })
 })
