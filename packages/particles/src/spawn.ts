@@ -12,16 +12,13 @@
  * ══════════════════════════════════════════════════════════════════════════
  */
 
+import { hash01 } from '@rune/core'
 import type { SpawnRecord } from './system.ts'
 
-/** A deterministic uniform in [0, 1): a Wang-style integer hash of
- *  (seed, index, salt). All inputs are integers. */
-export function hash01(seed: number, index: number, salt: number): number {
-  let h = (Math.imul(seed | 0, 374761393) + Math.imul(index | 0, 668265263) + Math.imul(salt | 0, 2246822519)) | 0
-  h = Math.imul(h ^ (h >>> 13), 1274126177)
-  h ^= h >>> 16
-  return (h >>> 0) / 4294967296
-}
+// Task 133: hash01 moved to @rune/core (random.ts — the repo-standard
+// deterministic uniform, bit-identical); re-exported here (the public API
+// and the tests' import sites are unchanged).
+export { hash01 }
 
 /** The spawn shape. `axis` vectors are normalized ONCE at spawner
  *  creation (the emit path only reads them).

@@ -1,8 +1,18 @@
 /**
- * particlesGpu — the GPGPU orchestrator (Task 131, Phase 2: the WebGPU
- * compute tier of @rune/particles — see docs/particles-optimization.md).
+ * particlesGpu — the GPGPU orchestrator binding (Task 131/132, rebuilt on
+ * the core tier controller in Task 133).
  *
  * ══════════════════════════════════════════════════════════════════════════
+ * THE ARCHITECTURE (Task 133 — the extraction):
+ * The SSBO↔transform-feedback COMMON POINT moved to @rune/core
+ * (gpgpu.ts — createGpgpu): the dispatch by backend shape, the tracked
+ * resource lifecycle (dispose() — reverse creation order, exactly once)
+ * and the f32/u32 uniform scratch. It is particles-agnostic — any GPGPU
+ * consumer (an ocean pass, GPU skinning) gets the same control. THIS
+ * module is the particles binding: it owns the buffers' shapes, the
+ * kernel/passes (the WGSL/GLSL twins live in @rune/particles) and the
+ * per-frame sequence.
+ *
  * THE FRAME SEQUENCE (called from the demo's frame callback, BETWEEN
  * facade.advance(dt) and the layer's record/draw — the tape contract
  * guarantees the compute passes enqueue before the render pass opens):
@@ -25,32 +35,23 @@
  * buffer — ZERO per-frame CPU→GPU particle traffic; the records never
  * touch a Float32Array upload path).
  *
- * DISPOSAL: the buffers and the compute family live in the GPUFacade's
- * registries — dispose() deletes them explicitly (a facade dispose also
- * cleans everything).
+ * DISPOSAL: the tier's tracked registry (reverse creation order — the
+ * compute family's staging uniform buffer dies with the kernel, the
+ * Task 133 leak fix: before it, only the external buffers were deleted).
  * ══════════════════════════════════════════════════════════════════════════
  */
 
-import type { GPUFacade } from '@rune/webgpu'
-import type { GLFacade } from '@rune/webgl2'
+import {
+  createGpgpu, GPU_BUFFER_USAGE,
+  type SsboComputeFacade, type TfComputeFacade, type SsboComputeTier,
+} from '@rune/core'
 import type { Particles } from '@rune/particles'
 import {
   gpuSimWgsl, gpuRampLUT, GPU_STATE_STRIDE, GPU_SIM_UNIFORM_FLOATS,
   GPU_SIM_U32_FIELDS, GPU_SIM_F32_FIELDS, GPU_SIM_VEC4_FIELDS, GPU_FORCE_MASK,
 } from '@rune/particles'
 import { createGpuParticlesTf } from './particlesGpuGl.ts'
-
-/** The GPUBufferUsage bits (the spec's stable values — the orchestrator
- *  composes them for the external buffers; the facade stays
- *  usage-agnostic). */
-const BUF = {
-  /** 128 — bind as a storage buffer (read or read_write). */
-  STORAGE: 128,
-  /** 8 — queue.writeBuffer target. */
-  COPY_DST: 8,
-  /** 32 — bind as a vertex buffer (the records). */
-  VERTEX: 32,
-} as const
+import { readGpuTierConfig } from './particlesGpuConfig.ts'
 
 /** The workgroup size of the advance/pack entries (the WGSL's own). */
 const WORKGROUP = 64
@@ -68,88 +69,81 @@ export interface GpuParticles {
   dispose(): void
 }
 
-/** Attaches the GPU tier to a sim:'gpu' facade — THE COMMON POINT (Task
- *  132): the WebGPU compute tier (createCompute — the SSBO path, this file)
- *  or the WebGL2 transform-feedback tier (createTransformPass —
- *  particlesGpuGl.ts, the SSBO's twin), dispatched by the facade's shape.
- *  The facade's handoff becomes `attached` — its advance() stops throwing.
- *  The demo code is identical for both backends — the tier is the
- *  library's business, not the demo's. */
-export function createGpuParticles(facade: Particles, backend: GPUFacade | GLFacade): GpuParticles {
-  if (typeof (backend as GPUFacade).createCompute === 'function') {
-    return createGpuParticlesCompute(facade, backend as GPUFacade)
-  }
-  if (typeof (backend as GLFacade).createTransformPass === 'function') {
-    return createGpuParticlesTf(facade, backend as GLFacade)
-  }
-  throw new Error('rune/gl: createGpuParticles needs a WebGPU GPUFacade (createCompute) or a WebGL2 GLFacade (createTransformPass)')
+/** Attaches the GPU tier to a sim:'gpu' facade — the particles binding of
+ *  THE COMMON POINT (now @rune/core's createGpgpu — the abstract
+ *  dual-backend GPGPU controller): the WebGPU compute tier (the SSBO path)
+ *  or the WebGL2 transform-feedback tier (the SSBO's twin), dispatched by
+ *  the facade's shape. The facade's handoff becomes `attached` — its
+ *  advance() stops throwing. The demo code is identical for both backends
+ *  — the tier is the library's business, not the demo's. */
+export function createGpuParticles(facade: Particles, backend: SsboComputeFacade | TfComputeFacade): GpuParticles {
+  const tier = createGpgpu(backend)
+  return tier.kind === 'transform-feedback'
+    ? createGpuParticlesTf(facade, tier)
+    : createGpuParticlesCompute(facade, tier)
 }
 
-/** The WebGPU compute tier (the SSBO path — dispatched by
- *  createGpuParticles when the facade exposes createCompute). */
-function createGpuParticlesCompute(facade: Particles, gpu: GPUFacade): GpuParticles {
+/** The WebGPU compute tier (the SSBO path — the kernel dispatches of
+ *  @rune/particles' WGSL twin over the tracked external buffers). */
+function createGpuParticlesCompute(facade: Particles, gpu: SsboComputeTier): GpuParticles {
   const handoff = facade.gpuHandoff
   if (handoff === null) {
     throw new Error('rune/gl: createGpuParticles needs a sim:"gpu" facade (this one runs the CPU tier)')
   }
   const ho = handoff
   const capacity = facade.capacity
-  // ── the buffers: the interleaved state, the swap list, the records, the ramp LUT
-  const stateId = gpu.createExternalBuffer(GPU_STATE_STRIDE * capacity * 4, BUF.STORAGE | BUF.COPY_DST)
-  const swapsId = gpu.createExternalBuffer(2 * capacity * 4, BUF.STORAGE | BUF.COPY_DST)
-  const recordsId = gpu.createExternalBuffer(16 * capacity * 4, BUF.STORAGE | BUF.VERTEX)
+  // ── the buffers: the interleaved state, the swap list, the records, the
+  //    ramp LUT — all tracked (the tier's dispose() deletes them)
+  const stateId = gpu.createBuffer(GPU_STATE_STRIDE * capacity * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST)
+  const swapsId = gpu.createBuffer(2 * capacity * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST)
+  const recordsId = gpu.createBuffer(16 * capacity * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.VERTEX)
   const lut = gpuRampLUT(facade.ramp.points)
-  const rampId = gpu.createExternalBuffer(lut.byteLength, BUF.STORAGE | BUF.COPY_DST)
-  gpu.writeExternalBuffer(rampId, lut)
-  const computeId = gpu.createCompute(gpuSimWgsl(), GPU_SIM_UNIFORM_FLOATS * 4, [stateId, swapsId, recordsId, rampId])
+  const rampId = gpu.createBuffer(lut.byteLength, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST)
+  gpu.writeBuffer(rampId, lut)
+  const computeId = gpu.createKernel(gpuSimWgsl(), GPU_SIM_UNIFORM_FLOATS * 4, [stateId, swapsId, recordsId, rampId])
   if (computeId < 0 || stateId < 0 || swapsId < 0 || recordsId < 0 || rampId < 0) {
+    gpu.dispose() // the tracked partial state dies with the failed attach
     throw new Error('rune/gl: createGpuParticles — the facade rejected a buffer (see the GPU error log)')
   }
   ho.attached = true
 
-  // ── the uniform: one ArrayBuffer, the f32 + u32 views (the count /
-  //    swapCount / forceMask are u32 fields)
-  const uniBuf = new ArrayBuffer(GPU_SIM_UNIFORM_FLOATS * 4)
-  const uni = new Float32Array(uniBuf)
-  const u32 = new Uint32Array(uniBuf)
+  // ── the uniform: the controller's scratch — one ArrayBuffer, the f32 +
+  //    u32 views (the count / swapCount / forceMask are u32 fields)
+  const scratch = gpu.scratch(GPU_SIM_UNIFORM_FLOATS)
+  const uni = scratch.f32
+  const u32 = scratch.u32
 
-  // ── the STATIC force config (read once from the facade — the GPU tier
-  //    runs the same forces; dynamic retargeting is rejected upstream)
-  const forces = facade.forces
+  // ── the STATIC force config — the shared interpretation
+  //    (particlesGpuConfig.ts — ONE read, both orchestrators pack it)
+  const cfg = readGpuTierConfig(facade)
   const F = GPU_SIM_F32_FIELDS
   const V = GPU_SIM_VEC4_FIELDS
-  const render = facade.render as { tiles?: readonly [number, number]; frameJitter?: number }
+  const a = cfg.active
   let mask = 0
-  const gravity = forces.gravity ?? [0, 0, 0]
-  if (gravity[0] !== 0 || gravity[1] !== 0 || gravity[2] !== 0) {
+  if (a.gravity) {
     mask |= GPU_FORCE_MASK.gravity
-    uni[V.gravity] = gravity[0]; uni[V.gravity + 1] = gravity[1]; uni[V.gravity + 2] = gravity[2]
+    uni[V.gravity] = cfg.gravity[0]; uni[V.gravity + 1] = cfg.gravity[1]; uni[V.gravity + 2] = cfg.gravity[2]
   }
-  if (forces.drag > 0) { mask |= GPU_FORCE_MASK.drag; uni[F.drag] = forces.drag }
-  if (forces.turbulence !== 0) { mask |= GPU_FORCE_MASK.turbulence; uni[F.turbulence] = forces.turbulence }
-  const attract = forces.attract ?? null
-  if (attract !== null) {
+  if (a.drag) { mask |= GPU_FORCE_MASK.drag; uni[F.drag] = cfg.drag }
+  if (a.turbulence) { mask |= GPU_FORCE_MASK.turbulence; uni[F.turbulence] = cfg.turbulence }
+  if (a.attract) {
     mask |= GPU_FORCE_MASK.attract
-    uni[V.attractPoint] = attract.point[0]; uni[V.attractPoint + 1] = attract.point[1]; uni[V.attractPoint + 2] = attract.point[2]
-    uni[F.attractStrength] = attract.strength
-    uni[F.softening2] = (attract.softening ?? 0.25) ** 2
+    uni[V.attractPoint] = cfg.attract.point[0]; uni[V.attractPoint + 1] = cfg.attract.point[1]; uni[V.attractPoint + 2] = cfg.attract.point[2]
+    uni[F.attractStrength] = cfg.attract.strength
+    uni[F.softening2] = cfg.attract.softening2
   }
-  const noise = forces.noise ?? null
-  if (noise !== null && noise.strength !== 0) {
+  if (a.noise) {
     mask |= GPU_FORCE_MASK.noise
-    uni[F.noiseStrength] = noise.strength; uni[F.noiseScale] = noise.scale; uni[F.noiseSpeed] = noise.speed
+    uni[F.noiseStrength] = cfg.noise.strength; uni[F.noiseScale] = cfg.noise.scale; uni[F.noiseSpeed] = cfg.noise.speed
   }
-  const limit = forces.limitSpeed ?? null
-  if (limit !== null) { mask |= GPU_FORCE_MASK.limitSpeed; uni[F.limit] = limit.limit; uni[F.dampen] = limit.dampen }
-  const wrapSize = ho.wrapSize
-  if (wrapSize !== null && (wrapSize[0] > 0 || wrapSize[1] > 0 || wrapSize[2] > 0)) {
+  if (a.limit) { mask |= GPU_FORCE_MASK.limitSpeed; uni[F.limit] = cfg.limit.limit; uni[F.dampen] = cfg.limit.dampen }
+  if (a.wrap) {
     mask |= GPU_FORCE_MASK.wrap
-    uni[V.wrapSize] = wrapSize[0]; uni[V.wrapSize + 1] = wrapSize[1]; uni[V.wrapSize + 2] = wrapSize[2]
+    uni[V.wrapSize] = cfg.wrapSize[0]; uni[V.wrapSize + 1] = cfg.wrapSize[1]; uni[V.wrapSize + 2] = cfg.wrapSize[2]
   }
-  const tiles = render.tiles ?? [1, 1]
-  uni[F.tileU] = tiles[0]
-  uni[F.tileV] = tiles[1]
-  uni[F.frameJitter] = render.frameJitter ?? 0
+  uni[F.tileU] = cfg.tiles[0]
+  uni[F.tileV] = cfg.tiles[1]
+  uni[F.frameJitter] = cfg.frameJitter
   u32[GPU_SIM_U32_FIELDS.forceMask] = mask
   const staticMask = mask
 
@@ -165,18 +159,18 @@ function createGpuParticlesCompute(facade: Particles, gpu: GPUFacade): GpuPartic
     uni[V.wrapCenter] = wc[0]; uni[V.wrapCenter + 1] = wc[1]; uni[V.wrapCenter + 2] = wc[2]
     // 1. the swap list
     if (ho.swapCount > 0) {
-      gpu.writeExternalBuffer(swapsId, ho.swaps, 0, ho.swapCount * 8)
+      gpu.writeBuffer(swapsId, ho.swaps, 0, ho.swapCount * 8)
     }
     // 2. the emit block (the pre-compaction slots)
     if (ho.emitCount > 0) {
-      gpu.writeExternalBuffer(stateId, ho.emitRows, ho.emitBase * GPU_STATE_STRIDE * 4, ho.emitCount * GPU_STATE_STRIDE * 4)
+      gpu.writeBuffer(stateId, ho.emitRows, ho.emitBase * GPU_STATE_STRIDE * 4, ho.emitCount * GPU_STATE_STRIDE * 4)
     }
     // 3-5. the passes
-    if (ho.swapCount > 0) gpu.runCompute(computeId, 'compact', uni, 1)
+    if (ho.swapCount > 0) gpu.runKernel(computeId, 'compact', uni, 1)
     const workgroups = Math.ceil(count / WORKGROUP)
     if (workgroups > 0) {
-      gpu.runCompute(computeId, 'advance', uni, workgroups)
-      gpu.runCompute(computeId, 'pack', uni, workgroups)
+      gpu.runKernel(computeId, 'advance', uni, workgroups)
+      gpu.runKernel(computeId, 'pack', uni, workgroups)
     }
   }
 
@@ -185,10 +179,7 @@ function createGpuParticlesCompute(facade: Particles, gpu: GPUFacade): GpuPartic
     get recordsBufferId() { return recordsId },
     get stateBufferId() { return stateId },
     dispose() {
-      gpu.deleteExternalBuffer(stateId)
-      gpu.deleteExternalBuffer(swapsId)
-      gpu.deleteExternalBuffer(recordsId)
-      gpu.deleteExternalBuffer(rampId)
+      gpu.dispose()
       ho.attached = false
     },
   }

@@ -23,8 +23,10 @@
  *    Task 132: the GPGPU simulation tier — sim:'gpu' — runs the forces,
  *   the aging and the record pack ON THE GPU on BOTH backends: compute
  *   passes over a storage buffer (WebGPU) or transform-feedback passes
- *   over a float texture (WebGL2 — the SSBO's twin, ONE dispatch point in
- *   @rune/gl's createGpuParticles; see gpuSim.ts/gpuSimGl.ts).
+ *   over a float texture (WebGL2 — the SSBO's twin; the ONE dispatch
+ *   point — the tier controller — lives in @rune/core's gpgpu.ts (Task
+ *   133), and @rune/gl's createGpuParticles is the particles binding;
+ *   see gpuSim.ts/gpuSimGl.ts).
  *    Task 132: render.sort — the painter's order for alpha-blended
  *   billboards (back to front, both bakers, deterministic; see sort.ts).)
  *
@@ -102,6 +104,7 @@ export type {
 } from './system.ts'
 export { createParticleSystem, NO_FORCES, MAX_PLANES, MAX_SPHERES, MAX_BOXES, FIELD_NAMES, PARTICLE_FLOATS } from './system.ts'
 export type { SpawnShape, VelocityMode, SpawnerDesc, Spawner, TargetDesc, ImageMask } from './spawn.ts'
+// Task 133 re-export origin: @rune/core's random.ts (bit-identical).
 export { createSpawner, hash01 } from './spawn.ts'
 export type { RampPoint, Ramp } from './ramp.ts'
 export { createRamp, sampleRamp, CONSTANT_RAMP, RAMP_STRIDE } from './ramp.ts'
@@ -126,6 +129,7 @@ export { createTrailHistory, fillTrails } from './trails.ts'
 export type { MeshGeometry, MeshOptions } from './meshes.ts'
 export { fillMeshes, MESH_STRIDE } from './meshes.ts'
 export type { NoiseField } from './noise.ts'
+// Task 133 re-export origin: @rune/core's noise.ts (bit-identical).
 export { simplex3, validateNoise } from './noise.ts'
 export type { GrassFieldDesc, GrassField } from './field.ts'
 export { createGrassField } from './field.ts'

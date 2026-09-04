@@ -3499,6 +3499,277 @@ var init_caps = __esm(() => {
   };
 });
 
+// packages/core/src/gpgpu.ts
+function createGpuScratch(floats) {
+  if (!Number.isInteger(floats) || floats <= 0) {
+    throw new Error(`rune/core: createGpuScratch — floats must be a positive integer (got ${floats})`);
+  }
+  const bytes = new ArrayBuffer(floats * 4);
+  return { bytes, f32: new Float32Array(bytes), u32: new Uint32Array(bytes) };
+}
+function createResourceSet() {
+  const disposers = [];
+  let disposed = false;
+  return {
+    add(disposer) {
+      if (!disposed)
+        disposers.push(disposer);
+    },
+    dispose() {
+      if (disposed)
+        return;
+      disposed = true;
+      for (let i = disposers.length - 1;i >= 0; i--)
+        disposers[i]();
+      disposers.length = 0;
+    }
+  };
+}
+function createSsboTier(backend) {
+  const resources = createResourceSet();
+  return {
+    kind: "ssbo",
+    backend,
+    createBuffer(byteLength, usage) {
+      const id = backend.createExternalBuffer(byteLength, usage);
+      resources.add(() => backend.deleteExternalBuffer(id));
+      return id;
+    },
+    writeBuffer(bufferId, data, byteOffset, byteLength) {
+      backend.writeExternalBuffer(bufferId, data, byteOffset, byteLength);
+    },
+    createKernel(wgsl, uniformBytes, bufferIds) {
+      const id = backend.createCompute(wgsl, uniformBytes, bufferIds);
+      resources.add(() => backend.deleteCompute(id));
+      return id;
+    },
+    runKernel(computeId, entry, uniformData, workgroups) {
+      backend.runCompute(computeId, entry, uniformData, workgroups);
+    },
+    scratch: createGpuScratch,
+    dispose() {
+      resources.dispose();
+    }
+  };
+}
+function createTfTier(backend) {
+  const resources = createResourceSet();
+  return {
+    kind: "transform-feedback",
+    backend,
+    createBuffer(init) {
+      const id = backend.createBuffer(init);
+      resources.add(() => backend.deleteBuffer(id));
+      return id;
+    },
+    updateBuffer(bufferId, data, byteOffset) {
+      backend.updateBuffer(bufferId, data, byteOffset);
+    },
+    createTexture(width, height, options) {
+      const id = backend.createTexture(width, height, options);
+      resources.add(() => backend.deleteTexture(id));
+      return id;
+    },
+    texSubImage2D(textureId, x, y, width, height, bytes) {
+      backend.texSubImage2D(textureId, x, y, width, height, bytes);
+    },
+    texSubImage2DBuffer(textureId, x, y, width, height, bufferId, byteOffset) {
+      backend.texSubImage2DBuffer(textureId, x, y, width, height, bufferId, byteOffset);
+    },
+    createPass(desc) {
+      const id = backend.createTransformPass(desc);
+      resources.add(() => backend.deleteTransformPass(id));
+      return id;
+    },
+    runPass(passId, vertexCount, bindings) {
+      backend.runTransformPass(passId, vertexCount, bindings);
+    },
+    scratch: createGpuScratch,
+    dispose() {
+      resources.dispose();
+    }
+  };
+}
+function createGpgpu(backend) {
+  if (typeof backend.createCompute === "function") {
+    return createSsboTier(backend);
+  }
+  if (typeof backend.createTransformPass === "function") {
+    return createTfTier(backend);
+  }
+  throw new Error("rune/core: createGpgpu needs a WebGPU compute facade (createCompute) or a WebGL2 transform-feedback facade (createTransformPass)");
+}
+var GPU_BUFFER_USAGE;
+var init_gpgpu = __esm(() => {
+  GPU_BUFFER_USAGE = {
+    MAP_READ: 1,
+    MAP_WRITE: 2,
+    COPY_SRC: 4,
+    COPY_DST: 8,
+    INDEX: 16,
+    VERTEX: 32,
+    UNIFORM: 64,
+    STORAGE: 128,
+    INDIRECT: 256
+  };
+});
+
+// packages/core/src/noise.ts
+function buildPerm() {
+  const p = new Uint8Array(256);
+  for (let i = 0;i < 256; i++)
+    p[i] = i;
+  let state = 2654435769;
+  for (let i = 255;i > 0; i--) {
+    state = Math.imul(state ^ state >>> 15, 2246822507) | 0;
+    state = Math.imul(state ^ state >>> 13, 3266489909) | 0;
+    const j = (state >>> 24) % (i + 1);
+    const t = p[i];
+    p[i] = p[j];
+    p[j] = t;
+  }
+  const wrapped = new Uint8Array(512);
+  for (let i = 0;i < 512; i++)
+    wrapped[i] = p[i & 255];
+  return wrapped;
+}
+function simplex3(x, y, z) {
+  const s = (x + y + z) * F3;
+  const i = Math.floor(x + s), j = Math.floor(y + s), k = Math.floor(z + s);
+  const t = (i + j + k) * G3;
+  const x0 = x - (i - t), y0 = y - (j - t), z0 = z - (k - t);
+  let i1, j1, k1, i2, j2, k2;
+  if (x0 >= y0) {
+    if (y0 >= z0) {
+      i1 = 1;
+      j1 = 0;
+      k1 = 0;
+      i2 = 1;
+      j2 = 1;
+      k2 = 0;
+    } else if (x0 >= z0) {
+      i1 = 1;
+      j1 = 0;
+      k1 = 0;
+      i2 = 1;
+      j2 = 0;
+      k2 = 1;
+    } else {
+      i1 = 0;
+      j1 = 0;
+      k1 = 1;
+      i2 = 1;
+      j2 = 0;
+      k2 = 1;
+    }
+  } else {
+    if (y0 < z0) {
+      i1 = 0;
+      j1 = 0;
+      k1 = 1;
+      i2 = 0;
+      j2 = 1;
+      k2 = 1;
+    } else if (x0 < z0) {
+      i1 = 0;
+      j1 = 1;
+      k1 = 0;
+      i2 = 0;
+      j2 = 1;
+      k2 = 1;
+    } else {
+      i1 = 0;
+      j1 = 1;
+      k1 = 0;
+      i2 = 1;
+      j2 = 1;
+      k2 = 0;
+    }
+  }
+  const x1 = x0 - i1 + G3, y1 = y0 - j1 + G3, z1 = z0 - k1 + G3;
+  const x2 = x0 - i2 + 2 * G3, y2 = y0 - j2 + 2 * G3, z2 = z0 - k2 + 2 * G3;
+  const x3 = x0 - 1 + 3 * G3, y3 = y0 - 1 + 3 * G3, z3 = z0 - 1 + 3 * G3;
+  const ii = i & 255, jj = j & 255, kk = k & 255;
+  let n = 0;
+  let t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
+  if (t0 > 0) {
+    const g = PERM[ii + PERM[jj + PERM[kk]]] % 12 * 3;
+    t0 *= t0;
+    n += t0 * t0 * (GRAD3[g] * x0 + GRAD3[g + 1] * y0 + GRAD3[g + 2] * z0);
+  }
+  let t1 = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;
+  if (t1 > 0) {
+    const g = PERM[ii + i1 + PERM[jj + j1 + PERM[kk + k1]]] % 12 * 3;
+    t1 *= t1;
+    n += t1 * t1 * (GRAD3[g] * x1 + GRAD3[g + 1] * y1 + GRAD3[g + 2] * z1);
+  }
+  let t2 = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;
+  if (t2 > 0) {
+    const g = PERM[ii + i2 + PERM[jj + j2 + PERM[kk + k2]]] % 12 * 3;
+    t2 *= t2;
+    n += t2 * t2 * (GRAD3[g] * x2 + GRAD3[g + 1] * y2 + GRAD3[g + 2] * z2);
+  }
+  let t3 = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;
+  if (t3 > 0) {
+    const g = PERM[ii + 1 + PERM[jj + 1 + PERM[kk + 1]]] % 12 * 3;
+    t3 *= t3;
+    n += t3 * t3 * (GRAD3[g] * x3 + GRAD3[g + 1] * y3 + GRAD3[g + 2] * z3);
+  }
+  return 32 * n;
+}
+var F3, G3, PERM, GRAD3;
+var init_noise = __esm(() => {
+  F3 = 1 / 3;
+  G3 = 1 / 6;
+  PERM = buildPerm();
+  GRAD3 = new Int8Array([
+    1,
+    1,
+    0,
+    -1,
+    1,
+    0,
+    1,
+    -1,
+    0,
+    -1,
+    -1,
+    0,
+    1,
+    0,
+    1,
+    -1,
+    0,
+    1,
+    1,
+    0,
+    -1,
+    -1,
+    0,
+    -1,
+    0,
+    1,
+    1,
+    0,
+    -1,
+    1,
+    0,
+    1,
+    -1,
+    0,
+    -1,
+    -1
+  ]);
+});
+
+// packages/core/src/random.ts
+function hash01(seed, index, salt) {
+  let h = Math.imul(seed | 0, 374761393) + Math.imul(index | 0, 668265263) + Math.imul(salt | 0, 2246822519) | 0;
+  h = Math.imul(h ^ h >>> 13, 1274126177);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+
 // packages/core/src/index.ts
 var exports_src = {};
 __export(exports_src, {
@@ -3509,6 +3780,7 @@ __export(exports_src, {
   textureFormatInfo: () => textureFormatInfo,
   textureFormatBytesPerPixel: () => textureFormatBytesPerPixel,
   streamTexture: () => streamTexture,
+  simplex3: () => simplex3,
   signal: () => signal,
   serializeTape: () => serializeTape,
   selectResidentOps: () => selectResidentOps,
@@ -3520,6 +3792,7 @@ __export(exports_src, {
   parseTape: () => parseTape,
   normalizeTextureFormat: () => normalizeTextureFormat,
   nameHash: () => nameHash,
+  hash01: () => hash01,
   hasSharedArrayBuffer: () => hasSharedArrayBuffer,
   feedStride: () => feedStride,
   feedFieldSize: () => feedFieldSize,
@@ -3535,8 +3808,10 @@ __export(exports_src, {
   createTransportHost: () => createTransportHost,
   createTransport: () => createTransport,
   createTransientPool: () => createTransientPool,
+  createTfTier: () => createTfTier,
   createTapeWriter: () => createTapeWriter,
   createStatsCollector: () => createStatsCollector,
+  createSsboTier: () => createSsboTier,
   createSharedRegistry: () => createSharedRegistry,
   createSegmentStore: () => createSegmentStore,
   createResourceJournal: () => createResourceJournal,
@@ -3546,6 +3821,8 @@ __export(exports_src, {
   createLiveCommand: () => createLiveCommand,
   createLayoutGuard: () => createLayoutGuard,
   createJournal: () => createJournal,
+  createGpuScratch: () => createGpuScratch,
+  createGpgpu: () => createGpgpu,
   createFrequencyArena: () => createFrequencyArena,
   createFeed: () => createFeed,
   createEpoch: () => createEpoch,
@@ -3562,9 +3839,12 @@ __export(exports_src, {
   attachFeed: () => attachFeed,
   TEXTURE_FORMATS: () => TEXTURE_FORMATS,
   SHARED_MAGIC: () => SHARED_MAGIC,
+  PERM: () => PERM,
   OpCode: () => OpCode,
   LOSS_STORM_WINDOW_MS: () => LOSS_STORM_WINDOW_MS,
-  LOSS_STORM_MAX: () => LOSS_STORM_MAX
+  LOSS_STORM_MAX: () => LOSS_STORM_MAX,
+  GRAD3: () => GRAD3,
+  GPU_BUFFER_USAGE: () => GPU_BUFFER_USAGE
 });
 var init_src = __esm(() => {
   init_signal();
@@ -3586,6 +3866,8 @@ var init_src = __esm(() => {
   init_residency();
   init_caps();
   init_formats();
+  init_gpgpu();
+  init_noise();
 });
 
 // packages/gl/src/autoBackend.ts
@@ -9512,6 +9794,15 @@ async function createRealGPU(canvas, onGpuError) {
     computeFamilies.set(id, { module, layout, group, uniform, uniformBytes: uniformSize, pipelines: new Map });
     return id;
   }
+  function deleteCompute(computeId) {
+    const family = computeFamilies.get(computeId);
+    if (family === undefined)
+      return;
+    computeFamilies.delete(computeId);
+    try {
+      family.uniform.destroy();
+    } catch {}
+  }
   function runCompute(computeId, entry, uniformData, workgroups) {
     const family = computeFamilies.get(computeId);
     if (family === undefined) {
@@ -9573,6 +9864,7 @@ async function createRealGPU(canvas, onGpuError) {
     externalBufferOf,
     createCompute,
     runCompute,
+    deleteCompute,
     readTargetPixels,
     createTarget,
     bindTarget,
@@ -9869,6 +10161,7 @@ function withJournalGpu(gpu, journal) {
     externalBufferOf: (id) => gpu.externalBufferOf(id),
     createCompute: (wgsl, uniformBytes2, bufferIds) => gpu.createCompute(wgsl, uniformBytes2, bufferIds),
     runCompute: (computeId, entry, uniformData, workgroups) => gpu.runCompute(computeId, entry, uniformData, workgroups),
+    deleteCompute: (computeId) => gpu.deleteCompute(computeId),
     bindTexture: (textureOrViewId) => gpu.bindTexture(textureOrViewId),
     beginPass: (clearIndex) => gpu.beginPass(clearIndex),
     draw: (count, instances) => gpu.draw(count, instances),
@@ -10074,6 +10367,7 @@ function createResourceSessionGPU(raw, journal) {
     externalBufferOf: (id) => raw.externalBufferOf(id),
     createCompute: (wgsl, uniformBytes2, bufferIds) => raw.createCompute(wgsl, uniformBytes2, bufferIds),
     runCompute: (computeId, entry, uniformData, workgroups) => raw.runCompute(computeId, entry, uniformData, workgroups),
+    deleteCompute: (computeId) => raw.deleteCompute(computeId),
     bindTexture: (textureOrViewId) => {
       touchTexOrView(textureOrViewId);
       raw.bindTexture(rawTexOrView(textureOrViewId));
@@ -11042,66 +11336,11 @@ function removeItem3(list, item) {
   if (at >= 0)
     list.splice(at, 1);
 }
+// packages/gl/src/particlesGpu.ts
+init_src();
+
 // packages/particles/src/noise.ts
-var F3 = 1 / 3;
-var G3 = 1 / 6;
-var PERM = buildPerm();
-var GRAD3 = new Int8Array([
-  1,
-  1,
-  0,
-  -1,
-  1,
-  0,
-  1,
-  -1,
-  0,
-  -1,
-  -1,
-  0,
-  1,
-  0,
-  1,
-  -1,
-  0,
-  1,
-  1,
-  0,
-  -1,
-  -1,
-  0,
-  -1,
-  0,
-  1,
-  1,
-  0,
-  -1,
-  1,
-  0,
-  1,
-  -1,
-  0,
-  -1,
-  -1
-]);
-function buildPerm() {
-  const p = new Uint8Array(256);
-  for (let i = 0;i < 256; i++)
-    p[i] = i;
-  let state = 2654435769;
-  for (let i = 255;i > 0; i--) {
-    state = Math.imul(state ^ state >>> 15, 2246822507) | 0;
-    state = Math.imul(state ^ state >>> 13, 3266489909) | 0;
-    const j = (state >>> 24) % (i + 1);
-    const t = p[i];
-    p[i] = p[j];
-    p[j] = t;
-  }
-  const wrapped = new Uint8Array(512);
-  for (let i = 0;i < 512; i++)
-    wrapped[i] = p[i & 255];
-  return wrapped;
-}
+init_src();
 
 // packages/particles/src/ramp.ts
 var COMPILED = new WeakMap;
@@ -11127,6 +11366,8 @@ var FIELD_NAMES = [
   "tz"
 ];
 var PARTICLE_FLOATS = FIELD_NAMES.length;
+// packages/particles/src/spawn.ts
+init_src();
 // packages/particles/src/billboards.ts
 var SCRATCH = new Float32Array(6);
 // packages/particles/src/instances.ts
@@ -11810,6 +12051,42 @@ var SCRATCH3 = new Float32Array(6);
 var SCRATCH4 = new Float32Array(6);
 // packages/particles/src/facade.ts
 var MAX_STEP = 1 / 20;
+// packages/gl/src/particlesGpuConfig.ts
+function readGpuTierConfig(facade) {
+  const forces = facade.forces;
+  const gravity = forces.gravity ?? [0, 0, 0];
+  const attract = forces.attract ?? null;
+  const noise = forces.noise ?? null;
+  const limit = forces.limitSpeed ?? null;
+  const wrap = facade.gpuHandoff?.wrapSize ?? null;
+  const render = facade.render;
+  const wrapSize = wrap ?? [0, 0, 0];
+  return {
+    gravity,
+    drag: forces.drag,
+    turbulence: forces.turbulence,
+    attract: attract === null ? { point: [0, 0, 0], strength: 0, softening2: 0 } : {
+      point: attract.point,
+      strength: attract.strength,
+      softening2: (attract.softening ?? 0.25) ** 2
+    },
+    noise: noise === null ? { strength: 0, scale: 0, speed: 0 } : { strength: noise.strength, scale: noise.scale, speed: noise.speed },
+    limit: limit === null ? { limit: 0, dampen: 0 } : { limit: limit.limit, dampen: limit.dampen },
+    wrapSize,
+    active: {
+      gravity: gravity[0] !== 0 || gravity[1] !== 0 || gravity[2] !== 0,
+      drag: forces.drag > 0,
+      turbulence: forces.turbulence !== 0,
+      attract: attract !== null,
+      noise: noise !== null && noise.strength !== 0,
+      limit: limit !== null,
+      wrap: wrap !== null && (wrap[0] > 0 || wrap[1] > 0 || wrap[2] > 0)
+    },
+    tiles: render.tiles ?? [1, 1],
+    frameJitter: render.frameJitter ?? 0
+  };
+}
+
 // packages/gl/src/particlesGpuGl.ts
 function gpuGlProvenance(preCount, swaps, swapCount, prov) {
   for (let i = 0;i < preCount; i++)
@@ -11820,7 +12097,7 @@ function gpuGlProvenance(preCount, swaps, swapCount, prov) {
     prov[to] = prov[from];
   }
 }
-function createGpuParticlesTf(facade, gl) {
+function createGpuParticlesTf(facade, gpu) {
   const handoff = facade.gpuHandoff;
   if (handoff === null) {
     throw new Error('rune/gl: createGpuParticlesTf needs a sim:"gpu" facade (this one runs the CPU tier)');
@@ -11829,91 +12106,77 @@ function createGpuParticlesTf(facade, gl) {
   const capacity = facade.capacity;
   const W = GPU_GL_STATE_TEXTURE_W;
   const H = gpuGlStateTextureH(capacity);
-  const stateTex = gl.createTexture(W, H, { format: "rgba32f" });
+  const stateTex = gpu.createTexture(W, H, { format: "rgba32f" });
   const lut = gpuRampLUTTexture(facade.ramp.points);
   const rampW = Math.max(2, facade.ramp.points.length * 2);
-  const rampTex = gl.createTexture(rampW, 1, { format: "rgba32f" });
-  gl.texSubImage2D(rampTex, 0, 0, rampW, 1, lut);
-  const stateOut = gl.createBuffer(new Float32Array(W * H * 4));
-  const records = gl.createBuffer(new Float32Array(capacity * 16));
-  const mapBuf = gl.createBuffer(new Float32Array(capacity));
-  const advPass = gl.createTransformPass({
+  const rampTex = gpu.createTexture(rampW, 1, { format: "rgba32f" });
+  gpu.texSubImage2D(rampTex, 0, 0, rampW, 1, lut);
+  const stateOut = gpu.createBuffer(new Float32Array(W * H * 4));
+  const records = gpu.createBuffer(new Float32Array(capacity * 16));
+  const mapBuf = gpu.createBuffer(new Float32Array(capacity));
+  const advPass = gpu.createPass({
     vertex: gpuSimGlAdvanceGlsl(),
     outputs: GPU_GL_ADVANCE_OUTPUTS,
     attributes: [{ name: "a_map", size: 1, stride: 4 }],
     textures: ["u_state"],
     uniforms: GPU_GL_ADVANCE_UNIFORMS
   });
-  const packPass = gl.createTransformPass({
+  const packPass = gpu.createPass({
     vertex: gpuSimGlPackGlsl(),
     outputs: GPU_GL_PACK_OUTPUTS,
     textures: ["u_state", "u_ramp"],
     uniforms: GPU_GL_PACK_UNIFORMS
   });
   ho.attached = true;
-  const advUni = new Float32Array(GPU_GL_ADVANCE_UNIFORMS.reduce((n, u) => n + u.size, 0));
-  const packUni = new Float32Array(GPU_GL_PACK_UNIFORMS.reduce((n, u) => n + u.size, 0));
+  const advUni = gpu.scratch(GPU_GL_ADVANCE_UNIFORMS.reduce((n, u) => n + u.size, 0)).f32;
+  const packUni = gpu.scratch(GPU_GL_PACK_UNIFORMS.reduce((n, u) => n + u.size, 0)).f32;
   const packF = GPU_GL_PACK_F;
-  const render = facade.render;
-  const tiles = render.tiles ?? [1, 1];
-  packUni[packF.tileU] = tiles[0];
-  packUni[packF.tileV] = tiles[1];
-  packUni[packF.frameJitter] = render.frameJitter ?? 0;
+  const cfg = readGpuTierConfig(facade);
+  packUni[packF.tileU] = cfg.tiles[0];
+  packUni[packF.tileV] = cfg.tiles[1];
+  packUni[packF.frameJitter] = cfg.frameJitter;
   packUni[packF.rampN] = facade.ramp.points.length;
-  const forces = facade.forces;
   const A = GPU_GL_ADVANCE_F;
-  let fDrag = 0, fLimit = 0, fGravity = 0, fAttract = 0, fTurb = 0, fNoise = 0, fWrap = 0;
-  const gravity = forces.gravity ?? [0, 0, 0];
-  if (gravity[0] !== 0 || gravity[1] !== 0 || gravity[2] !== 0) {
-    fGravity = 1;
-    advUni[A.gravity] = gravity[0];
-    advUni[A.gravity + 1] = gravity[1];
-    advUni[A.gravity + 2] = gravity[2];
+  const a = cfg.active;
+  advUni[A.fDrag] = a.drag ? 1 : 0;
+  advUni[A.fLimit] = a.limit ? 1 : 0;
+  advUni[A.fGravity] = a.gravity ? 1 : 0;
+  advUni[A.fAttract] = a.attract ? 1 : 0;
+  advUni[A.fTurb] = a.turbulence ? 1 : 0;
+  advUni[A.fNoise] = a.noise ? 1 : 0;
+  advUni[A.fWrap] = a.wrap ? 1 : 0;
+  if (a.gravity) {
+    advUni[A.gravity] = cfg.gravity[0];
+    advUni[A.gravity + 1] = cfg.gravity[1];
+    advUni[A.gravity + 2] = cfg.gravity[2];
   }
-  if (forces.drag > 0) {
-    fDrag = 1;
-    advUni[A.drag] = forces.drag;
+  if (a.drag) {
+    advUni[A.drag] = cfg.drag;
   }
-  if (forces.turbulence !== 0) {
-    fTurb = 1;
-    advUni[A.turbulence] = forces.turbulence;
+  if (a.turbulence) {
+    advUni[A.turbulence] = cfg.turbulence;
   }
-  const attract = forces.attract ?? null;
-  if (attract !== null) {
-    fAttract = 1;
-    advUni[A.attractPoint] = attract.point[0];
-    advUni[A.attractPoint + 1] = attract.point[1];
-    advUni[A.attractPoint + 2] = attract.point[2];
-    advUni[A.attractStrength] = attract.strength;
-    advUni[A.softening2] = (attract.softening ?? 0.25) ** 2;
+  if (a.attract) {
+    advUni[A.attractPoint] = cfg.attract.point[0];
+    advUni[A.attractPoint + 1] = cfg.attract.point[1];
+    advUni[A.attractPoint + 2] = cfg.attract.point[2];
+    advUni[A.attractStrength] = cfg.attract.strength;
+    advUni[A.softening2] = cfg.attract.softening2;
   }
-  const noise = forces.noise ?? null;
-  if (noise !== null && noise.strength !== 0) {
-    fNoise = 1;
-    advUni[A.noiseStrength] = noise.strength;
-    advUni[A.noiseScale] = noise.scale;
-    advUni[A.noiseSpeed] = noise.speed;
+  if (a.noise) {
+    advUni[A.noiseStrength] = cfg.noise.strength;
+    advUni[A.noiseScale] = cfg.noise.scale;
+    advUni[A.noiseSpeed] = cfg.noise.speed;
   }
-  const limit = forces.limitSpeed ?? null;
-  if (limit !== null) {
-    fLimit = 1;
-    advUni[A.limit] = limit.limit;
-    advUni[A.dampen] = limit.dampen;
+  if (a.limit) {
+    advUni[A.limit] = cfg.limit.limit;
+    advUni[A.dampen] = cfg.limit.dampen;
   }
-  const wrapSize = ho.wrapSize;
-  if (wrapSize !== null && (wrapSize[0] > 0 || wrapSize[1] > 0 || wrapSize[2] > 0)) {
-    fWrap = 1;
-    advUni[A.wrapSize] = wrapSize[0];
-    advUni[A.wrapSize + 1] = wrapSize[1];
-    advUni[A.wrapSize + 2] = wrapSize[2];
+  if (a.wrap) {
+    advUni[A.wrapSize] = cfg.wrapSize[0];
+    advUni[A.wrapSize + 1] = cfg.wrapSize[1];
+    advUni[A.wrapSize + 2] = cfg.wrapSize[2];
   }
-  advUni[A.fDrag] = fDrag;
-  advUni[A.fLimit] = fLimit;
-  advUni[A.fGravity] = fGravity;
-  advUni[A.fAttract] = fAttract;
-  advUni[A.fTurb] = fTurb;
-  advUni[A.fNoise] = fNoise;
-  advUni[A.fWrap] = fWrap;
   const emitPacked = new Float32Array(capacity * 20);
   const prov = new Int32Array(capacity);
   const mapFloats = new Float32Array(capacity);
@@ -11947,22 +12210,22 @@ function createGpuParticlesTf(facade, gl) {
         const x1 = y === y1 ? end - y * W : W;
         const byteOffset = (y * W + x0 - start) * 16;
         const byteLength = (x1 - x0) * 16;
-        gl.texSubImage2D(stateTex, x0, y, x1 - x0, 1, new Float32Array(emitPacked.buffer, byteOffset, byteLength / 4));
+        gpu.texSubImage2D(stateTex, x0, y, x1 - x0, 1, new Float32Array(emitPacked.buffer, byteOffset, byteLength / 4));
       }
     }
     const preCount = ho.emitBase + ho.emitCount;
     gpuGlProvenance(preCount, ho.swaps, ho.swapCount, prov);
     for (let i = 0;i < count; i++)
       mapFloats[i] = prov[i];
-    gl.updateBuffer(mapBuf, mapFloats.subarray(0, count));
-    gl.runTransformPass(advPass, count, {
+    gpu.updateBuffer(mapBuf, mapFloats.subarray(0, count));
+    gpu.runPass(advPass, count, {
       bufferId: stateOut,
       attribBuffers: [mapBuf],
       textures: [stateTex],
       uniformData: advUni
     });
-    gl.texSubImage2DBuffer(stateTex, 0, 0, W, H, stateOut, 0);
-    gl.runTransformPass(packPass, count, {
+    gpu.texSubImage2DBuffer(stateTex, 0, 0, W, H, stateOut, 0);
+    gpu.runPass(packPass, count, {
       bufferId: records,
       textures: [stateTex, rampTex],
       uniformData: packUni
@@ -11977,33 +12240,17 @@ function createGpuParticlesTf(facade, gl) {
       return stateOut;
     },
     dispose() {
-      gl.deleteTransformPass(advPass);
-      gl.deleteTransformPass(packPass);
-      gl.deleteBuffer(stateOut);
-      gl.deleteBuffer(records);
-      gl.deleteBuffer(mapBuf);
-      gl.deleteTexture(stateTex);
-      gl.deleteTexture(rampTex);
+      gpu.dispose();
       ho.attached = false;
     }
   };
 }
 
 // packages/gl/src/particlesGpu.ts
-var BUF = {
-  STORAGE: 128,
-  COPY_DST: 8,
-  VERTEX: 32
-};
 var WORKGROUP = 64;
 function createGpuParticles(facade, backend) {
-  if (typeof backend.createCompute === "function") {
-    return createGpuParticlesCompute(facade, backend);
-  }
-  if (typeof backend.createTransformPass === "function") {
-    return createGpuParticlesTf(facade, backend);
-  }
-  throw new Error("rune/gl: createGpuParticles needs a WebGPU GPUFacade (createCompute) or a WebGL2 GLFacade (createTransformPass)");
+  const tier = createGpgpu(backend);
+  return tier.kind === "transform-feedback" ? createGpuParticlesTf(facade, tier) : createGpuParticlesCompute(facade, tier);
 }
 function createGpuParticlesCompute(facade, gpu) {
   const handoff = facade.gpuHandoff;
@@ -12012,73 +12259,68 @@ function createGpuParticlesCompute(facade, gpu) {
   }
   const ho = handoff;
   const capacity = facade.capacity;
-  const stateId = gpu.createExternalBuffer(GPU_STATE_STRIDE * capacity * 4, BUF.STORAGE | BUF.COPY_DST);
-  const swapsId = gpu.createExternalBuffer(2 * capacity * 4, BUF.STORAGE | BUF.COPY_DST);
-  const recordsId = gpu.createExternalBuffer(16 * capacity * 4, BUF.STORAGE | BUF.VERTEX);
+  const stateId = gpu.createBuffer(GPU_STATE_STRIDE * capacity * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST);
+  const swapsId = gpu.createBuffer(2 * capacity * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST);
+  const recordsId = gpu.createBuffer(16 * capacity * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.VERTEX);
   const lut = gpuRampLUT(facade.ramp.points);
-  const rampId = gpu.createExternalBuffer(lut.byteLength, BUF.STORAGE | BUF.COPY_DST);
-  gpu.writeExternalBuffer(rampId, lut);
-  const computeId = gpu.createCompute(gpuSimWgsl(), GPU_SIM_UNIFORM_FLOATS * 4, [stateId, swapsId, recordsId, rampId]);
+  const rampId = gpu.createBuffer(lut.byteLength, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST);
+  gpu.writeBuffer(rampId, lut);
+  const computeId = gpu.createKernel(gpuSimWgsl(), GPU_SIM_UNIFORM_FLOATS * 4, [stateId, swapsId, recordsId, rampId]);
   if (computeId < 0 || stateId < 0 || swapsId < 0 || recordsId < 0 || rampId < 0) {
+    gpu.dispose();
     throw new Error("rune/gl: createGpuParticles — the facade rejected a buffer (see the GPU error log)");
   }
   ho.attached = true;
-  const uniBuf = new ArrayBuffer(GPU_SIM_UNIFORM_FLOATS * 4);
-  const uni = new Float32Array(uniBuf);
-  const u32 = new Uint32Array(uniBuf);
-  const forces = facade.forces;
+  const scratch = gpu.scratch(GPU_SIM_UNIFORM_FLOATS);
+  const uni = scratch.f32;
+  const u32 = scratch.u32;
+  const cfg = readGpuTierConfig(facade);
   const F = GPU_SIM_F32_FIELDS;
   const V = GPU_SIM_VEC4_FIELDS;
-  const render = facade.render;
+  const a = cfg.active;
   let mask = 0;
-  const gravity = forces.gravity ?? [0, 0, 0];
-  if (gravity[0] !== 0 || gravity[1] !== 0 || gravity[2] !== 0) {
+  if (a.gravity) {
     mask |= GPU_FORCE_MASK.gravity;
-    uni[V.gravity] = gravity[0];
-    uni[V.gravity + 1] = gravity[1];
-    uni[V.gravity + 2] = gravity[2];
+    uni[V.gravity] = cfg.gravity[0];
+    uni[V.gravity + 1] = cfg.gravity[1];
+    uni[V.gravity + 2] = cfg.gravity[2];
   }
-  if (forces.drag > 0) {
+  if (a.drag) {
     mask |= GPU_FORCE_MASK.drag;
-    uni[F.drag] = forces.drag;
+    uni[F.drag] = cfg.drag;
   }
-  if (forces.turbulence !== 0) {
+  if (a.turbulence) {
     mask |= GPU_FORCE_MASK.turbulence;
-    uni[F.turbulence] = forces.turbulence;
+    uni[F.turbulence] = cfg.turbulence;
   }
-  const attract = forces.attract ?? null;
-  if (attract !== null) {
+  if (a.attract) {
     mask |= GPU_FORCE_MASK.attract;
-    uni[V.attractPoint] = attract.point[0];
-    uni[V.attractPoint + 1] = attract.point[1];
-    uni[V.attractPoint + 2] = attract.point[2];
-    uni[F.attractStrength] = attract.strength;
-    uni[F.softening2] = (attract.softening ?? 0.25) ** 2;
+    uni[V.attractPoint] = cfg.attract.point[0];
+    uni[V.attractPoint + 1] = cfg.attract.point[1];
+    uni[V.attractPoint + 2] = cfg.attract.point[2];
+    uni[F.attractStrength] = cfg.attract.strength;
+    uni[F.softening2] = cfg.attract.softening2;
   }
-  const noise = forces.noise ?? null;
-  if (noise !== null && noise.strength !== 0) {
+  if (a.noise) {
     mask |= GPU_FORCE_MASK.noise;
-    uni[F.noiseStrength] = noise.strength;
-    uni[F.noiseScale] = noise.scale;
-    uni[F.noiseSpeed] = noise.speed;
+    uni[F.noiseStrength] = cfg.noise.strength;
+    uni[F.noiseScale] = cfg.noise.scale;
+    uni[F.noiseSpeed] = cfg.noise.speed;
   }
-  const limit = forces.limitSpeed ?? null;
-  if (limit !== null) {
+  if (a.limit) {
     mask |= GPU_FORCE_MASK.limitSpeed;
-    uni[F.limit] = limit.limit;
-    uni[F.dampen] = limit.dampen;
+    uni[F.limit] = cfg.limit.limit;
+    uni[F.dampen] = cfg.limit.dampen;
   }
-  const wrapSize = ho.wrapSize;
-  if (wrapSize !== null && (wrapSize[0] > 0 || wrapSize[1] > 0 || wrapSize[2] > 0)) {
+  if (a.wrap) {
     mask |= GPU_FORCE_MASK.wrap;
-    uni[V.wrapSize] = wrapSize[0];
-    uni[V.wrapSize + 1] = wrapSize[1];
-    uni[V.wrapSize + 2] = wrapSize[2];
+    uni[V.wrapSize] = cfg.wrapSize[0];
+    uni[V.wrapSize + 1] = cfg.wrapSize[1];
+    uni[V.wrapSize + 2] = cfg.wrapSize[2];
   }
-  const tiles = render.tiles ?? [1, 1];
-  uni[F.tileU] = tiles[0];
-  uni[F.tileV] = tiles[1];
-  uni[F.frameJitter] = render.frameJitter ?? 0;
+  uni[F.tileU] = cfg.tiles[0];
+  uni[F.tileV] = cfg.tiles[1];
+  uni[F.frameJitter] = cfg.frameJitter;
   u32[GPU_SIM_U32_FIELDS.forceMask] = mask;
   const staticMask = mask;
   function step(dt) {
@@ -12094,17 +12336,17 @@ function createGpuParticlesCompute(facade, gpu) {
     uni[V.wrapCenter + 1] = wc[1];
     uni[V.wrapCenter + 2] = wc[2];
     if (ho.swapCount > 0) {
-      gpu.writeExternalBuffer(swapsId, ho.swaps, 0, ho.swapCount * 8);
+      gpu.writeBuffer(swapsId, ho.swaps, 0, ho.swapCount * 8);
     }
     if (ho.emitCount > 0) {
-      gpu.writeExternalBuffer(stateId, ho.emitRows, ho.emitBase * GPU_STATE_STRIDE * 4, ho.emitCount * GPU_STATE_STRIDE * 4);
+      gpu.writeBuffer(stateId, ho.emitRows, ho.emitBase * GPU_STATE_STRIDE * 4, ho.emitCount * GPU_STATE_STRIDE * 4);
     }
     if (ho.swapCount > 0)
-      gpu.runCompute(computeId, "compact", uni, 1);
+      gpu.runKernel(computeId, "compact", uni, 1);
     const workgroups = Math.ceil(count / WORKGROUP);
     if (workgroups > 0) {
-      gpu.runCompute(computeId, "advance", uni, workgroups);
-      gpu.runCompute(computeId, "pack", uni, workgroups);
+      gpu.runKernel(computeId, "advance", uni, workgroups);
+      gpu.runKernel(computeId, "pack", uni, workgroups);
     }
   }
   return {
@@ -12116,10 +12358,7 @@ function createGpuParticlesCompute(facade, gpu) {
       return stateId;
     },
     dispose() {
-      gpu.deleteExternalBuffer(stateId);
-      gpu.deleteExternalBuffer(swapsId);
-      gpu.deleteExternalBuffer(recordsId);
-      gpu.deleteExternalBuffer(rampId);
+      gpu.dispose();
       ho.attached = false;
     }
   };

@@ -17,6 +17,7 @@
 
 import { describe, expect, it, test } from 'bun:test'
 import { createRecordingGL } from '@rune/webgl2'
+import { createTfTier } from '@rune/core'
 import {
   createParticles,
   gpuSimGlAdvanceGlsl,
@@ -159,7 +160,7 @@ describe('Task 132 — the TF orchestrator (the recording sequence)', () => {
       render: { kind: 'billboard', draw: 'instance' },
       sim: 'gpu',
     })
-    const backend = createGpuParticlesTf(facade, gl)
+    const backend = createGpuParticlesTf(facade, createTfTier(gl))
     // THE MANUAL BURST between advances — the catch-up path (Task 132): the
     // rows MUST reach the handoff on the next advance
     facade.burst(4, { shape: { kind: 'point', origin: [0, 0, 0] }, velocity: { mode: 'fixed', dir: [0, 1, 0] }, speed: [0, 0], life: [100, 100], size: [1, 1], color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 1 })
@@ -196,7 +197,7 @@ describe('Task 132 — the TF orchestrator (the recording sequence)', () => {
       render: { kind: 'billboard', draw: 'instance' },
       sim: 'gpu',
     })
-    const backend = createGpuParticlesTf(facade, gl)
+    const backend = createGpuParticlesTf(facade, createTfTier(gl))
     expect(backend.recordsBufferId).toBeGreaterThan(0)
     // the record contract: 16 floats — the BILLBOARD material's instance layout
     expect(INSTANCE_STRIDE).toBe(16)
@@ -209,7 +210,7 @@ describe('Task 132 — the TF orchestrator (the recording sequence)', () => {
       render: { kind: 'billboard', draw: 'instance' },
       sim: 'gpu',
     })
-    const backend = createGpuParticlesTf(facade, gl)
+    const backend = createGpuParticlesTf(facade, createTfTier(gl))
     expect(facade.gpuHandoff!.attached).toBe(true)
     backend.dispose()
     expect(facade.gpuHandoff!.attached).toBe(false)
@@ -225,7 +226,8 @@ describe('Task 132 — the TF orchestrator (the recording sequence)', () => {
     })
     const backend = createGpuParticles(facade, gl) // the GL shape → the TF tier
     expect(typeof backend.step).toBe('function')
-    // the recording facade has no createCompute — a non-GPU, non-GL object throws
-    expect(() => createGpuParticles(facade, {} as never)).toThrow('needs a WebGPU GPUFacade')
+    // the recording facade has no createCompute — a non-GPU, non-GL object
+    // throws (the core controller's dispatch error)
+    expect(() => createGpuParticles(facade, {} as never)).toThrow('needs a WebGPU compute facade')
   })
 })

@@ -23,7 +23,7 @@ page.on('console', msg => {
 })
 page.on('pageerror', err => errors.push(`[pageerror] ${String(err).slice(0, 300)}`))
 
-await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
+await page.goto(process.env.BASE ?? `http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
 // force the backend via the boot select
 await page.evaluate(b => {
   const sel = document.querySelector('select')

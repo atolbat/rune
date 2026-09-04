@@ -115,6 +115,7 @@ export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
     externalBufferOf: id => gpu.externalBufferOf(id),
     createCompute: (wgsl, uniformBytes, bufferIds) => gpu.createCompute(wgsl, uniformBytes, bufferIds),
     runCompute: (computeId, entry, uniformData, workgroups) => gpu.runCompute(computeId, entry, uniformData, workgroups),
+    deleteCompute: computeId => gpu.deleteCompute(computeId),
     bindTexture: textureOrViewId => gpu.bindTexture(textureOrViewId),
     beginPass: clearIndex => gpu.beginPass(clearIndex),
     draw: (count, instances) => gpu.draw(count, instances),

@@ -1273,6 +1273,21 @@ export async function createRealGPU(
     return id
   }
 
+  // Task 133 — the compute family teardown: the staging uniform buffer is
+  // the only explicitly-destroyable resource (modules/layouts/bind groups/
+  // pipelines are GC'd with the entry). Idempotent; a no-op for a family
+  // that never existed (the facade's own delete discipline).
+  function deleteCompute(computeId: number): void {
+    const family = computeFamilies.get(computeId)
+    if (family === undefined) return
+    computeFamilies.delete(computeId)
+    try {
+      family.uniform.destroy()
+    } catch {
+      // an already-destroyed buffer (device loss) — the entry is gone either way
+    }
+  }
+
   function runCompute(computeId: number, entry: string, uniformData: Float32Array, workgroups: number): void {
     const family = computeFamilies.get(computeId)
     if (family === undefined) {
@@ -1337,6 +1352,7 @@ export async function createRealGPU(
     externalBufferOf,
     createCompute,
     runCompute,
+    deleteCompute,
     readTargetPixels,
     createTarget,
     bindTarget,

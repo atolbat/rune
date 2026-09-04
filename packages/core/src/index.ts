@@ -145,3 +145,22 @@ export type {
   TextureFormat,
 } from './formats.ts'
 export { TEXTURE_FORMATS, textureFormatInfo, normalizeTextureFormat } from './formats.ts'
+
+// ─── Task 133: the foundation primitives moved out of @rune/particles ──────
+// The dual-backend GPGPU tier controller (the SSBO↔transform-feedback
+// common point: the dispatch, the tracked-resource lifecycle, the uniform
+// scratch) + the deterministic simplex noise (the CPU↔GPU-parity tables)
+// + the repo-standard integer-hash uniform. Abstract, consumer-agnostic.
+export { createGpgpu, createSsboTier, createTfTier, createGpuScratch, GPU_BUFFER_USAGE } from './gpgpu.ts'
+export type {
+  GpgpuTier,
+  SsboComputeFacade,
+  TfComputeFacade,
+  SsboComputeTier,
+  TfComputeTier,
+  TfPassDesc,
+  TfRunBindings,
+  GpuUniformScratch,
+} from './gpgpu.ts'
+export { simplex3, PERM, GRAD3 } from './noise.ts'
+export { hash01 } from './random.ts'

@@ -171,6 +171,7 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
     externalBufferOf: id => raw.externalBufferOf(id),
     createCompute: (wgsl, uniformBytes, bufferIds) => raw.createCompute(wgsl, uniformBytes, bufferIds),
     runCompute: (computeId, entry, uniformData, workgroups) => raw.runCompute(computeId, entry, uniformData, workgroups),
+    deleteCompute: computeId => raw.deleteCompute(computeId),
     bindTexture: textureOrViewId => {
       touchTexOrView(textureOrViewId)
       raw.bindTexture(rawTexOrView(textureOrViewId))

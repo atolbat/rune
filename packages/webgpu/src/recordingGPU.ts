@@ -87,6 +87,7 @@ export function createRecordingGPU(): RecordingGPU {
     },
     runCompute: (computeId, entry, uniformData, workgroups) =>
       calls.push(`runCompute(${computeId},${entry},${uniformData.length},${workgroups})`),
+    deleteCompute: computeId => calls.push(`deleteCompute(${computeId})`),
     bindTexture: textureId => calls.push(`bindTexture(${textureId})`),
     beginPass: clearIndex => {
       currentTarget = 0
@@ -197,6 +198,7 @@ export function createCountingGPU(): GPUFacade & { totalCalls: number } {
     externalBufferOf: bump,
     createCompute: alloc as never,
     runCompute: bump,
+    deleteCompute: bump,
     bindTexture: bump,
     beginPass: bump,
     draw: bump,

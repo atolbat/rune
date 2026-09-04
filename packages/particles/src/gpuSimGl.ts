@@ -6,12 +6,14 @@
  * THE COMMON POINT: the WebGPU tier runs the simulation as compute passes
  * over a storage buffer (gpuSim.ts — "the SSBO"); WebGL2 has no compute —
  * the SAME simulation runs here as TRANSFORM-FEEDBACK vertex passes over a
- * float texture. One orchestrator (@rune/gl createGpuParticles) drives
- * both: it reads the same facade.gpuHandoff, uploads the same emit rows,
- * and produces the SAME 16-float instance records the BILLBOARD material
- * draws. The parity contract is semantic, not bit-exact (f32 both sides,
- * each backend's own transcendentals) — the same constants, the same force
- * order, the same noise table, the same ramp walk.
+ * float texture. One tier controller drives both (Task 133: the
+ * controller is @rune/core's createGpgpu; @rune/gl's createGpuParticles
+ * binds the particles facade to it): it reads the same facade.gpuHandoff,
+ * uploads the same emit rows, and produces the SAME 16-float instance
+ * records the BILLBOARD material draws. The parity contract is semantic,
+ * not bit-exact (f32 both sides, each backend's own transcendentals) —
+ * the same constants, the same force order, the same noise table, the
+ * same ramp walk.
  *
  * THE STATE (WebGL2 layout — the texture, not the buffer):
  *   ONE rgba32f texture, a flat texel array W × H. Particle p's 17

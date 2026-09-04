@@ -244,7 +244,9 @@ export interface GLFacade {
   // pass or the draw consumes directly). This is the "common point" the
   // GPGPU particle tier is built on: WebGPU = compute + storage buffers,
   // WebGL2 = transform feedback — one orchestrator (@rune/gl
-  // createGpuParticles) drives both.
+  // createGpuParticles) drives both, through the dual-backend tier
+  // controller extracted in Task 133 (@rune/core's gpgpu.ts —
+  // createGpgpu).
 
   /** Creates a transform-feedback pass: a vertex-only GLSL ES 3.00 program
    *  with its TF varyings (INTERLEAVED_ATTRIBS into ONE output buffer).

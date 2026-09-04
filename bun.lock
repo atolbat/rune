@@ -73,6 +73,9 @@
     "packages/particles": {
       "name": "@rune/particles",
       "version": "0.1.0",
+      "dependencies": {
+        "@rune/core": "workspace:*",
+      },
     },
     "packages/prims": {
       "name": "@rune/prims",

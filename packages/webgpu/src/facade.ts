@@ -198,6 +198,14 @@ export interface GPUFacade {
    *  render pass is a loud onGpuError, never a silent no-op. */
   createCompute(wgsl: string, uniformBytes: number, bufferIds: readonly number[]): number
   runCompute(computeId: number, entry: string, uniformData: Float32Array, workgroups: number): void
+  /** Task 133 — deletes a compute family: the staging uniform buffer is
+   *  destroyed (the family's only explicitly-destroyable resource — the
+   *  module/layout/bind group/pipelines are GC'd with the entry), the
+   *  registry entry dropped. Idempotent. The GPGPU tier controller
+   *  (@rune/core gpgpu.ts) tracks every kernel and calls this on dispose
+   *  — before Task 133 the families (staging buffers included) leaked on
+   *  every orchestrator re-attach. */
+  deleteCompute(computeId: number): void
   bindTexture(textureId: number): void
   beginPass(clearIndex: number): void
   draw(count: number, instances: number): void

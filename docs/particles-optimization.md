@@ -82,7 +82,9 @@ CPU→GPU particle traffic is the emit block + the swap list only.
 **The SSBO's twin — the common point**: `createGpuParticles(facade,
 backend)` now dispatches by the facade's shape — a WebGPU `GPUFacade`
 (`createCompute`) runs the compute tier above; a WebGL2 `GLFacade`
-(`createTransformPass`) runs the **transform-feedback tier**. The demo
+(`createTransformPass`) runs the **transform-feedback tier** (Task 133:
+the dispatch itself moved to `@rune/core`'s `gpgpu.ts` — `createGpgpu`;
+`@rune/gl`'s `createGpuParticles` is the particles binding). The demo
 code is identical for both backends; the tier is the library's business.
 
 - **The state** lives in one rgba32f texture (a flat texel array, 5 texels
@@ -92,7 +94,8 @@ code is identical for both backends; the tier is the library's business.
   upload) round-trips the state buffer→texture with zero CPU traffic,
   the WebGL2 twin of the storage-buffer ping-pong.
 - **The passes** (`gpuSimGl.ts`'s GLSL, dispatched by `@rune/gl`'s
-  `createGpuParticlesTf`): `compactAdvance` (ONE gather pass — vertex i =
+  `createGpuParticlesTf`, now over the `@rune/core` TF tier — Task 133):
+  `compactAdvance` (ONE gather pass — vertex i =
   final slot i reads the pre-state of particle `map[i]` through the
   texture, integrates it, writes slot i; the WGSL compact + advance
   composed) → the PBO round-trip → `pack` (vertex i = `gl_VertexID` — the
@@ -146,7 +149,9 @@ dust, the soft, the slash dust, the laser's charge wisps and boom smoke.
 - The WGPU command/executor: an attribute with `bufferId` binds the
   external buffer (the GL side already had the contract — the feed's
   dual-bind).
-- `@rune/gl`: `createGpuParticles(facade, gpuFacade)` — the orchestrator.
+- `@rune/gl`: `createGpuParticles(facade, gpuFacade)` — the orchestrator
+  (Task 133: the particles binding; the tier controller itself is
+  `@rune/core`'s `createGpgpu`).
 
 ## 5. What remains (the opportunistic list)
 
@@ -193,3 +198,18 @@ dust, the soft, the slash dust, the laser's charge wisps and boom smoke.
 - The full demo gates: demo-smoke (24 live), demo-shots (24 ×
   motion+alive+bright + the round trip), task128-probe (24 cycling on the
   WebGPU flags, the GPU tier live at 104k, GPU log clean).
+
+## Task 133 — the tier controller extracted to @rune/core
+
+The SSBO↔transform-feedback common point left the particles stack and became a
+backend-agnostic primitive: `@rune/core`'s `gpgpu.ts` (`createGpgpu`) — the
+dispatch by facade shape, the tracked-resource lifecycle (dispose in reverse
+creation order, once), and the f32/u32 uniform scratch. `@rune/gl`'s
+`createGpuParticles` is now the particles binding on top of it
+(`particlesGpu.ts` / `particlesGpuGl.ts` / the shared `particlesGpuConfig.ts`
+force interpretation). The WebGPU facade gained `deleteCompute` (the compute
+family's staging uniform buffer was leaked on every orchestrator re-attach
+before). The deterministic simplex noise (`simplex3`/`PERM`/`GRAD3`) moved to
+`@rune/core/noise.ts` and `hash01` to `@rune/core/random.ts` (bit-identical,
+re-exported by @rune/particles) — the CPU↔GPU parity tables are a
+cross-backend contract, not a consumer's property.

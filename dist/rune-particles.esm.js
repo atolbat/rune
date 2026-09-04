@@ -1,4 +1,230 @@
-// packages/particles/src/noise.ts
+// packages/core/src/transport/seqlock.ts
+var MAX_READ_ATTEMPTS = 1 << 16;
+var atomicsViews = new WeakMap;
+// packages/core/src/transport/transport.ts
+var byteOffsetCache = new WeakMap;
+// packages/core/src/shader/glslReflect.ts
+var reflectionCache = new Map;
+// packages/core/src/shader/wgslReflect.ts
+var reflectionCache2 = new Map;
+// packages/core/src/formats.ts
+function unorm(channels, bytesPerChannel, srgb = false) {
+  return {
+    texelBytes: channels * bytesPerChannel,
+    blockWidth: 1,
+    blockHeight: 1,
+    blockBytes: channels * bytesPerChannel,
+    srgb,
+    kind: "color",
+    numeric: "unorm",
+    channels,
+    sampleType: "float",
+    family: "uncompressed"
+  };
+}
+function snorm(channels, bytesPerChannel) {
+  return {
+    texelBytes: channels * bytesPerChannel,
+    blockWidth: 1,
+    blockHeight: 1,
+    blockBytes: channels * bytesPerChannel,
+    srgb: false,
+    kind: "color",
+    numeric: "snorm",
+    channels,
+    sampleType: "float",
+    family: "uncompressed"
+  };
+}
+function intFormat(channels, bytesPerChannel, signed) {
+  return {
+    texelBytes: channels * bytesPerChannel,
+    blockWidth: 1,
+    blockHeight: 1,
+    blockBytes: channels * bytesPerChannel,
+    srgb: false,
+    kind: "color",
+    numeric: signed ? "sint" : "uint",
+    channels,
+    sampleType: signed ? "sint" : "uint",
+    family: "uncompressed"
+  };
+}
+function floatFormat(channels, bytesPerChannel) {
+  return {
+    texelBytes: channels * bytesPerChannel,
+    blockWidth: 1,
+    blockHeight: 1,
+    blockBytes: channels * bytesPerChannel,
+    srgb: false,
+    kind: "color",
+    numeric: "float",
+    channels,
+    sampleType: "float",
+    family: "uncompressed"
+  };
+}
+function packed(numeric, channels, texelBytes, sampleType = "float") {
+  return {
+    texelBytes,
+    blockWidth: 1,
+    blockHeight: 1,
+    blockBytes: texelBytes,
+    srgb: false,
+    kind: "color",
+    numeric,
+    channels,
+    sampleType,
+    family: "uncompressed"
+  };
+}
+function compressed(family, blockWidth, blockHeight, blockBytes, srgb, channels, numeric = "unorm") {
+  return {
+    texelBytes: 0,
+    blockWidth,
+    blockHeight,
+    blockBytes,
+    srgb,
+    kind: "color",
+    numeric,
+    channels,
+    sampleType: "float",
+    family
+  };
+}
+function depthFormat(kind, texelBytes) {
+  return {
+    texelBytes,
+    blockWidth: 1,
+    blockHeight: 1,
+    blockBytes: texelBytes,
+    srgb: false,
+    kind,
+    numeric: "float",
+    channels: 0,
+    sampleType: "depth",
+    family: "uncompressed"
+  };
+}
+var TEXTURE_FORMATS = {
+  r8unorm: unorm(1, 1),
+  r8snorm: snorm(1, 1),
+  r8uint: intFormat(1, 1, false),
+  r8sint: intFormat(1, 1, true),
+  rg8unorm: unorm(2, 1),
+  rg8snorm: snorm(2, 1),
+  rg8uint: intFormat(2, 1, false),
+  rg8sint: intFormat(2, 1, true),
+  rgba8unorm: unorm(4, 1),
+  "rgba8unorm-srgb": unorm(4, 1, true),
+  rgba8snorm: snorm(4, 1),
+  rgba8uint: intFormat(4, 1, false),
+  rgba8sint: intFormat(4, 1, true),
+  bgra8unorm: unorm(4, 1),
+  "bgra8unorm-srgb": unorm(4, 1, true),
+  rgb8unorm: unorm(3, 1),
+  "rgb8unorm-srgb": unorm(3, 1, true),
+  rgb8snorm: snorm(3, 1),
+  rgb8uint: intFormat(3, 1, false),
+  rgb8sint: intFormat(3, 1, true),
+  rgb565: packed("unorm", 3, 2),
+  rgba4: packed("unorm", 4, 2),
+  rgb5a1: packed("unorm", 4, 2),
+  r16uint: intFormat(1, 2, false),
+  r16sint: intFormat(1, 2, true),
+  r16float: floatFormat(1, 2),
+  rg16uint: intFormat(2, 2, false),
+  rg16sint: intFormat(2, 2, true),
+  rg16float: floatFormat(2, 2),
+  rgba16uint: intFormat(4, 2, false),
+  rgba16sint: intFormat(4, 2, true),
+  rgba16float: floatFormat(4, 2),
+  rgb16uint: intFormat(3, 2, false),
+  rgb16sint: intFormat(3, 2, true),
+  rgb16float: floatFormat(3, 2),
+  r16unorm: unorm(1, 2),
+  r16snorm: snorm(1, 2),
+  rg16unorm: unorm(2, 2),
+  rg16snorm: snorm(2, 2),
+  rgba16unorm: unorm(4, 2),
+  rgba16snorm: snorm(4, 2),
+  r32uint: intFormat(1, 4, false),
+  r32sint: intFormat(1, 4, true),
+  r32float: floatFormat(1, 4),
+  rg32uint: intFormat(2, 4, false),
+  rg32sint: intFormat(2, 4, true),
+  rg32float: floatFormat(2, 4),
+  rgba32uint: intFormat(4, 4, false),
+  rgba32sint: intFormat(4, 4, true),
+  rgba32float: floatFormat(4, 4),
+  rgb32uint: intFormat(3, 4, false),
+  rgb32sint: intFormat(3, 4, true),
+  rgb32float: floatFormat(3, 4),
+  rgb10a2uint: packed("uint", 4, 4, "uint"),
+  rgb10a2unorm: packed("unorm", 4, 4),
+  rg11b10ufloat: packed("float", 3, 4),
+  rgb9e5ufloat: packed("float", 3, 4),
+  stencil8: { texelBytes: 1, blockWidth: 1, blockHeight: 1, blockBytes: 1, srgb: false, kind: "stencil", numeric: "uint", channels: 0, sampleType: "uint", family: "uncompressed" },
+  depth16unorm: depthFormat("depth", 2),
+  depth24plus: depthFormat("depth", 4),
+  "depth24plus-stencil8": depthFormat("depth-stencil", 4),
+  depth32float: depthFormat("depth", 4),
+  "depth32float-stencil8": depthFormat("depth-stencil", 4),
+  "bc1-rgba-unorm": compressed("bc1", 4, 4, 8, false, 4),
+  "bc1-rgba-unorm-srgb": compressed("bc1", 4, 4, 8, true, 4),
+  "bc2-rgba-unorm": compressed("bc2", 4, 4, 16, false, 4),
+  "bc2-rgba-unorm-srgb": compressed("bc2", 4, 4, 16, true, 4),
+  "bc3-rgba-unorm": compressed("bc3", 4, 4, 16, false, 4),
+  "bc3-rgba-unorm-srgb": compressed("bc3", 4, 4, 16, true, 4),
+  "bc4-r-unorm": compressed("bc4", 4, 4, 8, false, 1),
+  "bc4-r-snorm": compressed("bc4", 4, 4, 8, false, 1, "snorm"),
+  "bc5-rg-unorm": compressed("bc5", 4, 4, 16, false, 2),
+  "bc5-rg-snorm": compressed("bc5", 4, 4, 16, false, 2, "snorm"),
+  "bc6h-rgb-ufloat": compressed("bc6h", 4, 4, 16, false, 3, "ufloat"),
+  "bc6h-rgb-float": compressed("bc6h", 4, 4, 16, false, 3, "float"),
+  "bc7-rgba-unorm": compressed("bc7", 4, 4, 16, false, 4),
+  "bc7-rgba-unorm-srgb": compressed("bc7", 4, 4, 16, true, 4),
+  "etc2-rgb8unorm": compressed("etc2", 4, 4, 8, false, 3),
+  "etc2-rgb8unorm-srgb": compressed("etc2", 4, 4, 8, true, 3),
+  "etc2-rgb8a1unorm": compressed("etc2", 4, 4, 8, false, 4),
+  "etc2-rgb8a1unorm-srgb": compressed("etc2", 4, 4, 8, true, 4),
+  "etc2-rgba8unorm": compressed("etc2", 4, 4, 16, false, 4),
+  "etc2-rgba8unorm-srgb": compressed("etc2", 4, 4, 16, true, 4),
+  "eac-r11unorm": compressed("eac", 4, 4, 8, false, 1),
+  "eac-r11snorm": compressed("eac", 4, 4, 8, false, 1, "snorm"),
+  "eac-rg11unorm": compressed("eac", 4, 4, 16, false, 2),
+  "eac-rg11snorm": compressed("eac", 4, 4, 16, false, 2, "snorm"),
+  "astc-4x4-unorm": compressed("astc", 4, 4, 16, false, 4),
+  "astc-4x4-unorm-srgb": compressed("astc", 4, 4, 16, true, 4),
+  "astc-5x4-unorm": compressed("astc", 5, 4, 16, false, 4),
+  "astc-5x4-unorm-srgb": compressed("astc", 5, 4, 16, true, 4),
+  "astc-5x5-unorm": compressed("astc", 5, 5, 16, false, 4),
+  "astc-5x5-unorm-srgb": compressed("astc", 5, 5, 16, true, 4),
+  "astc-6x5-unorm": compressed("astc", 6, 5, 16, false, 4),
+  "astc-6x5-unorm-srgb": compressed("astc", 6, 5, 16, true, 4),
+  "astc-6x6-unorm": compressed("astc", 6, 6, 16, false, 4),
+  "astc-6x6-unorm-srgb": compressed("astc", 6, 6, 16, true, 4),
+  "astc-8x5-unorm": compressed("astc", 8, 5, 16, false, 4),
+  "astc-8x5-unorm-srgb": compressed("astc", 8, 5, 16, true, 4),
+  "astc-8x6-unorm": compressed("astc", 8, 6, 16, false, 4),
+  "astc-8x6-unorm-srgb": compressed("astc", 8, 6, 16, true, 4),
+  "astc-8x8-unorm": compressed("astc", 8, 8, 16, false, 4),
+  "astc-8x8-unorm-srgb": compressed("astc", 8, 8, 16, true, 4),
+  "astc-10x5-unorm": compressed("astc", 10, 5, 16, false, 4),
+  "astc-10x5-unorm-srgb": compressed("astc", 10, 5, 16, true, 4),
+  "astc-10x6-unorm": compressed("astc", 10, 6, 16, false, 4),
+  "astc-10x6-unorm-srgb": compressed("astc", 10, 6, 16, true, 4),
+  "astc-10x8-unorm": compressed("astc", 10, 8, 16, false, 4),
+  "astc-10x8-unorm-srgb": compressed("astc", 10, 8, 16, true, 4),
+  "astc-10x10-unorm": compressed("astc", 10, 10, 16, false, 4),
+  "astc-10x10-unorm-srgb": compressed("astc", 10, 10, 16, true, 4),
+  "astc-12x10-unorm": compressed("astc", 12, 10, 16, false, 4),
+  "astc-12x10-unorm-srgb": compressed("astc", 12, 10, 16, true, 4),
+  "astc-12x12-unorm": compressed("astc", 12, 12, 16, false, 4),
+  "astc-12x12-unorm-srgb": compressed("astc", 12, 12, 16, true, 4)
+};
+var TEXTURE_FORMAT_IDS = Object.keys(TEXTURE_FORMATS);
+// packages/core/src/noise.ts
 var F3 = 1 / 3;
 var G3 = 1 / 6;
 var PERM = buildPerm();
@@ -142,6 +368,14 @@ function simplex3(x, y, z) {
   }
   return 32 * n;
 }
+// packages/core/src/random.ts
+function hash01(seed, index, salt) {
+  let h = Math.imul(seed | 0, 374761393) + Math.imul(index | 0, 668265263) + Math.imul(salt | 0, 2246822519) | 0;
+  h = Math.imul(h ^ h >>> 13, 1274126177);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+// packages/particles/src/noise.ts
 function validateNoise(noise) {
   if (!Number.isFinite(noise.strength)) {
     throw new Error(`rune/particles: noise.strength must be finite (got ${noise.strength})`);
@@ -789,12 +1023,6 @@ function createParticleSystem(capacity, options = {}) {
   return system;
 }
 // packages/particles/src/spawn.ts
-function hash01(seed, index, salt) {
-  let h = Math.imul(seed | 0, 374761393) + Math.imul(index | 0, 668265263) + Math.imul(salt | 0, 2246822519) | 0;
-  h = Math.imul(h ^ h >>> 13, 1274126177);
-  h ^= h >>> 16;
-  return (h >>> 0) / 4294967296;
-}
 var TAU = 6.283185307179586;
 var S_DIR = 1;
 var S_SPD = 2;

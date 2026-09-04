@@ -13,7 +13,9 @@
  *     position/velocity live GPU-authoritative (the CPU mirror holds the
  *     emission scratch only).
  *
- *   THE FRAME (createGpuParticles' step(), after facade.advance):
+ *   THE FRAME (the tier controller's step(), after facade.advance —
+ *     Task 133: the controller is @rune/core's createGpgpu; @rune/gl's
+ *     createGpuParticles binds the particles facade to it):
  *     1. upload the EMIT BLOCK — the new particles' rows at their
  *        PRE-COMPACTION slots [emitBase, emitBase + emitCount);
  *     2. dispatch `compact` — replays the CPU's swap-remove list (to,
