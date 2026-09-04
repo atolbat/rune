@@ -153,7 +153,7 @@ try {
 }
 console.log(particlesLiveOk ? 'PARTICLES LIVE OK' : 'PARTICLES LIVE FAIL')
 
-// ─── quarks: the 19-demo carousel on the LIVE page (Task 122 + 124) ────────────
+// ─── quarks: the 22-demo carousel on the LIVE page (Task 122 + 124 + 126) ───────
 let quarksLiveOk = false
 try {
   await page.goto(`${BASE}/demo/quarks/`, { waitUntil: 'networkidle' })
@@ -164,10 +164,10 @@ try {
     { timeout: 30_000 },
   )
   await page.evaluate(() => document.querySelector('.pt-sheet [aria-label=Close]')?.click())
-  // cycle through ALL 19 demos; each must go live
+  // cycle through ALL 22 demos; each must go live
   let allLive = true
   const names = []
-  for (let i = 1; i < 19; i++) {
+  for (let i = 1; i < 22; i++) {
     await page.click('.pt-arrow:last-child')
     await page.waitForFunction(
       () => / · [1-9][\d,]* particles · [1-9][\d,]* verts/.test(document.querySelector('.pt-pill')?.textContent ?? ''),
@@ -184,7 +184,7 @@ try {
   await page.screenshot({ path: join(OUT, 'live-quarks.png'), fullPage: true })
   console.log(`quarks cycle: ${names.join(' → ')}`)
   console.log(`quarks GPU log: ${gpuClean ? 'clean' : 'ERRORS'}`)
-  quarksLiveOk = names.length === 18 && !shotA.equals(shotB) && gpuClean
+  quarksLiveOk = names.length === 21 && !shotA.equals(shotB) && gpuClean
 } catch (error) {
   console.log(`quarks check failed: ${error instanceof Error ? error.message : String(error)}`)
 }
