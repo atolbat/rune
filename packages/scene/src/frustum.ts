@@ -8,8 +8,26 @@
  * d = n·c + p; the sphere is fully outside ⟺ d < −r; fully inside all
  * planes ⟺ d ≥ +r — a "trivial accept" for hierarchically culling
  * whole subtrees in one stroke.
+ *
+ * Task 141: THE MOVE — the extraction and the classification were the
+ * SECOND copy of @rune/particles' Task 134 cull machinery (the same
+ * Gribb–Hartmann, the same p-vertex test, written twice). Both now live
+ * in @rune/core's frustum.ts — ONE contract for the scene culler, the
+ * particle bakers and the GPU render tier's shader test. This module is
+ * the scene binding: the public names and signatures are unchanged
+ * (extractFrustumPlanes' out-first order, the PLANE_* index constants,
+ * writeCameraPlanes into the worker views).
  */
+import {
+  frustumPlanes,
+  classifySphere,
+  SPHERE_OUTSIDE,
+  SPHERE_INTERSECT,
+  SPHERE_INSIDE,
+} from '@rune/core'
 import type { SceneViews } from './layout.ts'
+
+export { classifySphere, SPHERE_OUTSIDE, SPHERE_INTERSECT, SPHERE_INSIDE }
 
 /** Plane order in planes[24]: L, R, B, T, N, F. */
 export const PLANE_LEFT = 0
@@ -19,48 +37,12 @@ export const PLANE_TOP = 3
 export const PLANE_NEAR = 4
 export const PLANE_FAR = 5
 
-/** Classification of a sphere relative to the frustum. */
-export const SPHERE_OUTSIDE = 0
-export const SPHERE_INTERSECT = 1
-export const SPHERE_INSIDE = 2
-
 /**
  * Extracts 6 normalized planes from a column-major VP.
  * out: 24 floats (a0,b0,c0,d0, a1,b1,c1,d1, …).
  */
 export function extractFrustumPlanes(out: Float32Array, vp: Float32Array): Float32Array {
-  // Rows of a column-major m: row_i = (m[i], m[4+i], m[8+i], m[12+i]).
-  for (let i = 0; i < 6; i++) {
-    // i: 0=L(row3+row0) 1=R(row3−row0) 2=B(row3+row1) 3=T(row3−row1) 4=N(row3+row2) 5=F(row3−row2)
-    const row = i >> 1
-    const sign = (i & 1) === 0 ? 1 : -1
-    const o = i * 4
-    const a = vp[3] + sign * vp[row]
-    const b = vp[7] + sign * vp[4 + row]
-    const c = vp[11] + sign * vp[8 + row]
-    const d = vp[15] + sign * vp[12 + row]
-    const inv = 1 / Math.sqrt(a * a + b * b + c * c)
-    out[o] = a * inv
-    out[o + 1] = b * inv
-    out[o + 2] = c * inv
-    out[o + 3] = d * inv
-  }
-  return out
-}
-
-/** Test of a single sphere: OUTSIDE / INTERSECT / INSIDE (all 6 planes). */
-export function classifySphere(
-  planes: Float32Array,
-  cx: number, cy: number, cz: number, radius: number,
-): number {
-  let insideAll = true
-  for (let i = 0; i < 6; i++) {
-    const o = i * 4
-    const d = planes[o] * cx + planes[o + 1] * cy + planes[o + 2] * cz + planes[o + 3]
-    if (d < -radius) return SPHERE_OUTSIDE
-    if (d < radius) insideAll = false
-  }
-  return insideAll ? SPHERE_INSIDE : SPHERE_INTERSECT
+  return frustumPlanes(vp, out)
 }
 
 /**

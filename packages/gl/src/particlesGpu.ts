@@ -51,6 +51,7 @@
 
 import {
   createGpgpu, GPU_BUFFER_USAGE,
+  bitonicPadCount, bitonicPassSequence, frustumPlanes,
   type SsboComputeFacade, type TfComputeFacade, type SsboComputeTier,
 } from '@rune/core'
 import type { Particles } from '@rune/particles'
@@ -58,7 +59,7 @@ import {
   gpuSimWgsl, gpuRampLUT, GPU_STATE_STRIDE, GPU_SIM_UNIFORM_FLOATS,
   GPU_SIM_U32_FIELDS, GPU_SIM_F32_FIELDS, GPU_SIM_VEC4_FIELDS, GPU_FORCE_MASK,
   gpuSortWgsl, GPU_SORT_UNIFORM_FLOATS, GPU_SORT_U32_FIELDS, GPU_SORT_F32_FIELDS,
-  GPU_SORT_RENDER_MASK, gpuSortPadCount, gpuSortPassSequence, gpuRampMaxSize, gpuRenderFrustum,
+  GPU_SORT_RENDER_MASK, gpuRampMaxSize,
   readGpuEmitConfig, gpuEmitPackStatic, GPU_EMIT_U32_FIELDS, GPU_EMIT_VEC4_FIELDS,
 } from '@rune/particles'
 import { createGpuParticlesTf } from './particlesGpuGl.ts'
@@ -151,7 +152,7 @@ function createGpuParticlesCompute(facade: Particles, gpu: SsboComputeTier): Gpu
   const sortScratch = gpu.scratch(GPU_SORT_UNIFORM_FLOATS)
   const frustumScratch = new Float32Array(24)
   if (tiered) {
-    const maxPadN = gpuSortPadCount(capacity)
+    const maxPadN = bitonicPadCount(capacity)
     const pairsId = gpu.createBuffer(maxPadN * 8, GPU_BUFFER_USAGE.STORAGE)
     sortId = gpu.createKernel(gpuSortWgsl(), GPU_SORT_UNIFORM_FLOATS * 4, [pairsId, stateId, recordsId, rampId])
     if (sortId < 0 || pairsId < 0) {
@@ -288,7 +289,7 @@ function createGpuParticlesCompute(facade: Particles, gpu: SsboComputeTier): Gpu
         const sUni = sortScratch.f32
         const sU32 = sortScratch.u32
         const SU = GPU_SORT_F32_FIELDS
-        const padN = gpuSortPadCount(count)
+        const padN = bitonicPadCount(count)
         sU32[GPU_SORT_U32_FIELDS.count] = count
         sU32[GPU_SORT_U32_FIELDS.padN] = padN
         sU32[GPU_SORT_U32_FIELDS.renderMask] = cfg.cull ? GPU_SORT_RENDER_MASK.cull : 0
@@ -297,7 +298,7 @@ function createGpuParticlesCompute(facade: Particles, gpu: SsboComputeTier): Gpu
           sUni[SU.forward] = fw[0]; sUni[SU.forward + 1] = fw[1]; sUni[SU.forward + 2] = fw[2]
         }
         if (camViewProj !== null) {
-          gpuRenderFrustum(camViewProj, frustumScratch)
+          frustumPlanes(camViewProj, frustumScratch)
           sUni.set(frustumScratch, SU.planes)
         }
         // 1. sortKeys — the (key, index) pairs for [0, padN) AND the
@@ -310,12 +311,12 @@ function createGpuParticlesCompute(facade: Particles, gpu: SsboComputeTier): Gpu
         //    uniform would collapse to the LAST queue.writeBuffer (all the
         //    writes land before ANY dispatch runs), so the pass state must
         //    travel in a BOUND buffer. [bitonic, sortStep] × the canonical
-        //    pass count — the SAME (k, j) sequence gpuSortPassSequence walks
+        //    pass count — the SAME (k, j) sequence bitonicPassSequence walks
         //    (the GLSL twin's uniforms are set at pass EXECUTION time on
         //    the immediate GL path — it takes the direct form).
         if (cfg.sort) {
           let passes = 0
-          gpuSortPassSequence(padN, () => { passes++ })
+          bitonicPassSequence(padN, () => { passes++ })
           for (let p = 0; p < passes; p++) {
             gpu.runKernel(sortId, 'bitonic', sUni, netWorkgroups)
             gpu.runKernel(sortId, 'sortStep', sUni, 1)

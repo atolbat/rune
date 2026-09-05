@@ -164,3 +164,18 @@ export type {
 } from './gpgpu.ts'
 export { simplex3, PERM, GRAD3 } from './noise.ts'
 export { hash01 } from './random.ts'
+
+// ─── Task 141: the sort/cull foundation moved out of @rune/particles ───────
+// The Gribb–Hartmann frustum (one extraction for the scene culler, the
+// particle bakers and the GPU render tier's shader test), the bitonic
+// sort network's plan (the (k, j) sequence + the pad/sentinel pair — the
+// stockham.ts precedent: a plan as pure data, backends execute), and the
+// SoA painter's order. Abstract, consumer-agnostic.
+export {
+  frustumPlanes, classifySphere, sphereOutsideFrustum,
+  SPHERE_OUTSIDE, SPHERE_INTERSECT, SPHERE_INSIDE, FRUSTUM_PLANE_COUNT,
+} from './frustum.ts'
+export {
+  bitonicPadCount, bitonicPassSequence, BITONIC_PAD_KEY, BITONIC_SENTINEL,
+} from './gpu/bitonic.ts'
+export { sortBackToFront } from './sort.ts'

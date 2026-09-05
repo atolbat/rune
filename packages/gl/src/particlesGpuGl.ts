@@ -36,7 +36,10 @@
  * ══════════════════════════════════════════════════════════════════════════
  */
 
-import type { TfComputeTier, TfRunBindings } from '@rune/core'
+import {
+  bitonicPadCount, bitonicPassSequence, frustumPlanes,
+  type TfComputeTier, type TfRunBindings,
+} from '@rune/core'
 import type { Particles } from '@rune/particles'
 import {
   gpuSimGlAdvanceGlsl, gpuSimGlPackGlsl, gpuSimGlSortKeysGlsl, gpuSimGlBitonicGlsl, gpuSimGlPackSortedGlsl,
@@ -47,7 +50,7 @@ import {
   GPU_GL_ADVANCE_OUTPUTS, GPU_GL_PACK_OUTPUTS, GPU_GL_SORT_OUTPUTS,
   GPU_GL_SORTKEYS_UNIFORMS, GPU_GL_SORTKEYS_F, GPU_GL_BITONIC_UNIFORMS, GPU_GL_BITONIC_F,
   GPU_GL_EMIT_UNIFORMS, GPU_GL_EMIT_F,
-  gpuSortPadCount, gpuSortPassSequence, gpuRampMaxSize, gpuRenderFrustum,
+  gpuRampMaxSize,
   readGpuEmitConfig, type GpuEmitConfig,
 } from '@rune/particles'
 import { readGpuTierConfig } from './particlesGpuConfig.ts'
@@ -207,7 +210,7 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
   //    bitonic network, the sorted pack). Each pairs-writing pass ends in
   //    a PBO round-trip (the TF shape's own cost — the WebGL2 twin of the
   //    compute tier's in-place storage buffer).
-  const maxPadN = gpuSortPadCount(capacity)
+  const maxPadN = bitonicPadCount(capacity)
   const pairsH = gpuGlPairsTextureH(capacity)
   const pairsTex = tiered ? gpu.createTexture(W, pairsH, { format: 'rgba32f' }) : -1
   const pairsOut = tiered ? gpu.createBuffer(new Float32Array(maxPadN * 4), 'dynamic') : -1
@@ -454,7 +457,7 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
         camViewProj = vp
       }
       const K = GPU_GL_SORTKEYS_F
-      const padN = gpuSortPadCount(count)
+      const padN = bitonicPadCount(count)
       skUni[K.count] = count
       skUni[K.cull] = cfg.cull ? 1 : 0
       if (camForward !== null) {
@@ -462,7 +465,7 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
         skUni[K.forward] = fw[0]; skUni[K.forward + 1] = fw[1]; skUni[K.forward + 2] = fw[2]
       }
       if (camViewProj !== null) {
-        gpuRenderFrustum(camViewProj, frustumScratch)
+        frustumPlanes(camViewProj, frustumScratch)
         skUni.set(frustumScratch, K.planes)
       }
       // 5a. sortKeys — the (key, index) pairs for [0, padN), then the PBO
@@ -477,7 +480,7 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
       //     one TF run + one PBO round-trip.
       if (cfg.sort) {
         const B = GPU_GL_BITONIC_F
-        gpuSortPassSequence(padN, (k, j) => {
+        bitonicPassSequence(padN, (k, j) => {
           btUni[B.k] = k
           btUni[B.j] = j
           gpu.runPass(bitonicPass, padN, {

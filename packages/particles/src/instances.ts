@@ -45,6 +45,7 @@
  * ══════════════════════════════════════════════════════════════════════════
  */
 
+import { sphereOutsideFrustum } from '@rune/core'
 import type { ParticleSystem } from './system.ts'
 import { sampleRamp, CONSTANT_RAMP, type Ramp } from './ramp.ts'
 
@@ -130,6 +131,8 @@ export function packInstances(
   let n = 0
   // Task 136 — the CPU-tier frustum gate (fillBillboards' exact twin —
   // the parity contract: the same particle set survives both bakers).
+  // Task 141 — the walk itself is @rune/core's sphereOutsideFrustum (the
+  // same six planes, the same arithmetic shape — ONE gate for the repo).
   const frustum = options.frustum ?? null
   const radiusK = options.cullRadiusK ?? 0.5
   // Task 132 — the draw order: `order` (the sorted index sequence) walks
@@ -139,17 +142,7 @@ export function packInstances(
   const total = ordered ? order!.length : count
   for (let j = 0; j < total; j++) {
     const i = ordered ? order![j] : j
-    if (frustum !== null) {
-      const F = frustum // narrowed: the six-plane walk is assertion-free
-      const cx = f.px[i], cy = f.py[i], cz = f.pz[i]
-      const radius = f.size[i] * radiusK
-      if (cx * F[0] + cy * F[1] + cz * F[2] + F[3] <= -radius) continue
-      if (cx * F[4] + cy * F[5] + cz * F[6] + F[7] <= -radius) continue
-      if (cx * F[8] + cy * F[9] + cz * F[10] + F[11] <= -radius) continue
-      if (cx * F[12] + cy * F[13] + cz * F[14] + F[15] <= -radius) continue
-      if (cx * F[16] + cy * F[17] + cz * F[18] + F[19] <= -radius) continue
-      if (cx * F[20] + cy * F[21] + cz * F[22] + F[23] <= -radius) continue
-    }
+    if (frustum !== null && sphereOutsideFrustum(frustum, f.px[i], f.py[i], f.pz[i], f.size[i] * radiusK)) continue
     const age = f.age[i]
     const life = f.life[i]
     const t = life > 0 ? age / life : 0

@@ -114,6 +114,11 @@ export type { CameraBasis, BillboardOptions } from './billboards.ts'
 export type { PackOptions, InstanceField } from './instances.ts'
 export { packInstances, INSTANCE_STRIDE, INSTANCE_LAYOUT } from './instances.ts'
 export { sortDepthBackToFront } from './sort.ts'
+// Task 134's sort/cull family: the network plan + the frustum extraction
+// moved to @rune/core (Task 141 — gpu/bitonic.ts, frustum.ts, sort.ts);
+// the names below are the particles API (re-exports, one source). The
+// uniform layouts (GPU_SORT_UNIFORM_FLOATS/U32/F32/RENDER_MASK) and
+// gpuRampMaxSize are particle-domain — they stay here.
 export {
   gpuSimWgsl, gpuRampLUT, GPU_STATE_STRIDE, GPU_SIM_UNIFORM_BYTES, GPU_SIM_UNIFORM_FLOATS,
   GPU_SIM_U32_FIELDS, GPU_SIM_F32_FIELDS, GPU_SIM_VEC4_FIELDS, GPU_FORCE_MASK, GPU_SIM_ENTRIES,

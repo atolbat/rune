@@ -375,6 +375,66 @@ function hash01(seed, index, salt) {
   h ^= h >>> 16;
   return (h >>> 0) / 4294967296;
 }
+// packages/core/src/frustum.ts
+function frustumPlanes(viewProj, out) {
+  if (viewProj.length !== 16) {
+    throw new Error(`rune/core: frustumPlanes — the view-projection is 16 numbers, column-major (got ${viewProj.length})`);
+  }
+  const o = out ?? new Float32Array(24);
+  for (let p = 0;p < 6; p++) {
+    const axis = p >> 1;
+    const sign = (p & 1) === 0 ? 1 : -1;
+    const nx = viewProj[3] + sign * viewProj[axis];
+    const ny = viewProj[7] + sign * viewProj[4 + axis];
+    const nz = viewProj[11] + sign * viewProj[8 + axis];
+    const d = viewProj[15] + sign * viewProj[12 + axis];
+    const len = Math.hypot(nx, ny, nz);
+    const inv = len > 0.000000000001 ? 1 / len : 0;
+    o[p * 4] = nx * inv;
+    o[p * 4 + 1] = ny * inv;
+    o[p * 4 + 2] = nz * inv;
+    o[p * 4 + 3] = d * inv;
+  }
+  return o;
+}
+function sphereOutsideFrustum(planes, cx, cy, cz, radius) {
+  for (let i = 0;i < 6; i++) {
+    const o = i * 4;
+    if (planes[o] * cx + planes[o + 1] * cy + planes[o + 2] * cz + planes[o + 3] <= -radius) {
+      return true;
+    }
+  }
+  return false;
+}
+// packages/core/src/gpu/bitonic.ts
+var BITONIC_PAD_KEY = 1000000000000000000000000000000;
+var BITONIC_SENTINEL = 33554432;
+function bitonicPadCount(count) {
+  if (!Number.isFinite(count) || count < 0) {
+    throw new Error(`rune/core: bitonicPadCount — count must be a finite number ≥ 0 (got ${count})`);
+  }
+  if (count <= 1)
+    return 1;
+  return 1 << Math.ceil(Math.log2(count));
+}
+function bitonicPassSequence(padN, run) {
+  for (let k = 2;k <= padN; k <<= 1) {
+    for (let j = k >> 1;j > 0; j >>= 1)
+      run(k, j);
+  }
+}
+// packages/core/src/sort.ts
+function sortBackToFront(px, py, pz, count, forward, indices, keys) {
+  if (count <= 0)
+    return 0;
+  const fx = forward[0], fy = forward[1], fz = forward[2];
+  for (let i = 0;i < count; i++) {
+    indices[i] = i;
+    keys[i] = fx * px[i] + fy * py[i] + fz * pz[i];
+  }
+  indices.subarray(0, count).sort((a, b) => keys[b] - keys[a] || b - a);
+  return count;
+}
 // packages/particles/src/noise.ts
 function validateNoise(noise) {
   if (!Number.isFinite(noise.strength)) {
@@ -1649,23 +1709,8 @@ function fillBillboards(system, basis, out, options = {}) {
   const n = ordered ? order.length : count;
   for (let j = 0;j < n; j++) {
     const i = ordered ? order[j] : j;
-    if (frustum !== null) {
-      const F = frustum;
-      const cx = f.px[i], cy = f.py[i], cz = f.pz[i];
-      const radius = f.size[i] * radiusK;
-      if (cx * F[0] + cy * F[1] + cz * F[2] + F[3] <= -radius)
-        continue;
-      if (cx * F[4] + cy * F[5] + cz * F[6] + F[7] <= -radius)
-        continue;
-      if (cx * F[8] + cy * F[9] + cz * F[10] + F[11] <= -radius)
-        continue;
-      if (cx * F[12] + cy * F[13] + cz * F[14] + F[15] <= -radius)
-        continue;
-      if (cx * F[16] + cy * F[17] + cz * F[18] + F[19] <= -radius)
-        continue;
-      if (cx * F[20] + cy * F[21] + cz * F[22] + F[23] <= -radius)
-        continue;
-    }
+    if (frustum !== null && sphereOutsideFrustum(frustum, f.px[i], f.py[i], f.pz[i], f.size[i] * radiusK))
+      continue;
     const age = f.age[i];
     const life = f.life[i];
     const t = life > 0 ? age / life : 0;
@@ -1858,23 +1903,8 @@ function packInstances(system, out, options = {}) {
   const total = ordered ? order.length : count;
   for (let j = 0;j < total; j++) {
     const i = ordered ? order[j] : j;
-    if (frustum !== null) {
-      const F = frustum;
-      const cx = f.px[i], cy = f.py[i], cz = f.pz[i];
-      const radius = f.size[i] * radiusK;
-      if (cx * F[0] + cy * F[1] + cz * F[2] + F[3] <= -radius)
-        continue;
-      if (cx * F[4] + cy * F[5] + cz * F[6] + F[7] <= -radius)
-        continue;
-      if (cx * F[8] + cy * F[9] + cz * F[10] + F[11] <= -radius)
-        continue;
-      if (cx * F[12] + cy * F[13] + cz * F[14] + F[15] <= -radius)
-        continue;
-      if (cx * F[16] + cy * F[17] + cz * F[18] + F[19] <= -radius)
-        continue;
-      if (cx * F[20] + cy * F[21] + cz * F[22] + F[23] <= -radius)
-        continue;
-    }
+    if (frustum !== null && sphereOutsideFrustum(frustum, f.px[i], f.py[i], f.pz[i], f.size[i] * radiusK))
+      continue;
     const age = f.age[i];
     const life = f.life[i];
     const t = life > 0 ? age / life : 0;
@@ -1918,15 +1948,7 @@ function packInstances(system, out, options = {}) {
 var SCRATCH2 = new Float32Array(6);
 // packages/particles/src/sort.ts
 function sortDepthBackToFront(fields, count, forward, indices, keys) {
-  if (count <= 0)
-    return 0;
-  const fx = forward[0], fy = forward[1], fz = forward[2];
-  for (let i = 0;i < count; i++) {
-    indices[i] = i;
-    keys[i] = fx * fields.px[i] + fy * fields.py[i] + fz * fields.pz[i];
-  }
-  indices.subarray(0, count).sort((a, b) => keys[b] - keys[a] || b - a);
-  return count;
+  return sortBackToFront(fields.px, fields.py, fields.pz, count, forward, indices, keys);
 }
 // packages/particles/src/gpuEmit.ts
 var GPU_EMIT_SHAPE = {
@@ -2447,51 +2469,15 @@ var GPU_SORT_F32_FIELDS = {
   rampMaxSize: 35
 };
 var GPU_SORT_RENDER_MASK = { cull: 1 };
-var GPU_SORT_PAD_KEY = 1000000000000000000000000000000;
-var GPU_SORT_SENTINEL = 33554432;
+var GPU_SORT_PAD_KEY = BITONIC_PAD_KEY;
+var GPU_SORT_SENTINEL = BITONIC_SENTINEL;
 var GPU_SORT_ENTRIES = ["sortKeys", "bitonic", "sortStep", "pack"];
-function gpuSortPadCount(count) {
-  if (!Number.isFinite(count) || count < 0) {
-    throw new Error(`rune/particles: gpuSortPadCount — count must be a finite number ≥ 0 (got ${count})`);
-  }
-  if (count <= 1)
-    return 1;
-  return 1 << Math.ceil(Math.log2(count));
-}
-function gpuSortPassSequence(padN, run) {
-  for (let k = 2;k <= padN; k <<= 1) {
-    for (let j = k >> 1;j > 0; j >>= 1)
-      run(k, j);
-  }
-}
 function gpuRampMaxSize(points) {
   let max = 1;
   for (const p of points)
     if (p.size > max)
       max = p.size;
   return max;
-}
-function gpuRenderFrustum(viewProj, out) {
-  if (viewProj.length !== 16) {
-    throw new Error(`rune/particles: gpuRenderFrustum — the view-projection is 16 numbers, column-major (got ${viewProj.length})`);
-  }
-  const o = out ?? new Float32Array(24);
-  const m = viewProj;
-  for (let p = 0;p < 6; p++) {
-    const axis = p >> 1;
-    const sign = (p & 1) === 0 ? 1 : -1;
-    const nx = m[3] + sign * m[axis];
-    const ny = m[7] + sign * m[4 + axis];
-    const nz = m[11] + sign * m[8 + axis];
-    const d = m[15] + sign * m[12 + axis];
-    const len = Math.hypot(nx, ny, nz);
-    const inv = len > 0.000000000001 ? 1 / len : 0;
-    o[p * 4] = nx * inv;
-    o[p * 4 + 1] = ny * inv;
-    o[p * 4 + 2] = nz * inv;
-    o[p * 4 + 3] = d * inv;
-  }
-  return o;
 }
 var PACK_BODY_WGSL = `
   let age = state[b + 6u];
@@ -3173,8 +3159,8 @@ var GPU_GL_BITONIC_F = {
   j: 1
 };
 var GPU_GL_SORT_OUTPUTS = ["v_pair"];
-var GPU_GL_SORT_PAD_KEY = 1000000000000000000000000000000;
-var GPU_GL_SORT_SENTINEL = 33554432;
+var GPU_GL_SORT_PAD_KEY = BITONIC_PAD_KEY;
+var GPU_GL_SORT_SENTINEL = BITONIC_SENTINEL;
 function gpuGlPairsTextureH(capacity) {
   return Math.max(1, Math.ceil((1 << Math.ceil(Math.log2(Math.max(2, capacity)))) / GPU_GL_STATE_TEXTURE_W));
 }
@@ -4860,7 +4846,7 @@ function createParticles(desc) {
           if (vp === undefined || vp.length !== 16) {
             throw new Error("rune/particles: render.cull needs the camera basis viewProj (the six frustum planes come from the frame view-projection, column-major — pass a full CameraBasis: { right, up, forward, viewProj })");
           }
-          frustum = gpuRenderFrustum(vp, frustumScratch);
+          frustum = frustumPlanes(vp, frustumScratch);
         }
         if (gpuMode) {
           view.vertexCount = system.count;
@@ -5136,8 +5122,8 @@ export {
   packInstances,
   hash01,
   gpuSortWgsl,
-  gpuSortPassSequence,
-  gpuSortPadCount,
+  bitonicPassSequence as gpuSortPassSequence,
+  bitonicPadCount as gpuSortPadCount,
   gpuSimWgsl,
   gpuSimGlSortKeysGlsl,
   gpuSimGlPackSortedGlsl,
@@ -5145,7 +5131,7 @@ export {
   gpuSimGlEmitGlsl,
   gpuSimGlBitonicGlsl,
   gpuSimGlAdvanceGlsl,
-  gpuRenderFrustum,
+  frustumPlanes as gpuRenderFrustum,
   gpuRampMaxSize,
   gpuRampLUTTexture,
   gpuRampLUT,

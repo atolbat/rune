@@ -57,6 +57,7 @@
  * ══════════════════════════════════════════════════════════════════════════
  */
 
+import { BITONIC_PAD_KEY, BITONIC_SENTINEL } from '@rune/core'
 import { PERM, GRAD3 } from './noise.ts'
 import { FIELD_NAMES } from './system.ts'
 import { GPU_EMIT_SALTS } from './gpuEmit.ts'
@@ -147,6 +148,12 @@ export function gpuRampLUT(points: readonly { t: number; size: number; r: number
 export const GPU_SIM_ENTRIES = ['emit', 'compact', 'advance', 'pack'] as const
 
 // ─── Task 134 — THE GPU RENDER TIER: the bitonic sort + the frustum cull ───
+//
+// Task 141: the network's own machinery — the (k, j) plan, the pad/sentinel
+// pair, the Gribb–Hartmann frustum — moved to @rune/core (gpu/bitonic.ts,
+// frustum.ts): consumer-agnostic plans, two backends executing them here.
+// The names below stay THIS package's public API (the orchestrators, the
+// tests, the WGSL template's interpolation) — re-exports, one source.
 
 /** The sort/cull family's uniform FLOAT count (SortParams in the WGSL below
  *  — the family is a SECOND compute kernel over the SAME four buffers; its
@@ -180,42 +187,33 @@ export const GPU_SORT_F32_FIELDS: Record<'forward' | 'planes' | 'tileU' | 'tileV
 /** The render-mask bit: 1 — the frustum cull is ON in sortKeys. */
 export const GPU_SORT_RENDER_MASK = { cull: 1 } as const
 
-/** The pad/cull key: +1e30 — far above any real |dot(forward, p)|, so the
- *  pads AND the frustum-culled slots sort LAST in the ascending network
- *  (behind every drawn particle, in front of nothing). */
-export const GPU_SORT_PAD_KEY = 1e30
+/** The pad/cull key (Task 141 origin: @rune/core's BITONIC_PAD_KEY — the
+ *  network is a consumer-agnostic plan): +1e30 — far above any real
+ *  |dot(forward, p)|, so the pads AND the frustum-culled slots sort LAST in
+ *  the ascending network (behind every drawn particle, in front of
+ *  nothing). The WGSL below interpolates THIS value. */
+export const GPU_SORT_PAD_KEY = BITONIC_PAD_KEY
 
-/** The pad/cull INDEX sentinel: 2^25 — a float-exact integer greater than
- *  any particle index. A slot whose pair carries it packs the ZERO record
- *  (half extent 0 — the degenerate instance draws nothing). */
-export const GPU_SORT_SENTINEL = 33554432
+/** The pad/cull INDEX sentinel (core's BITONIC_SENTINEL): 2^25 — a
+ *  float-exact integer greater than any particle index. A slot whose pair
+ *  carries it packs the ZERO record (half extent 0 — the degenerate
+ *  instance draws nothing). */
+export const GPU_SORT_SENTINEL = BITONIC_SENTINEL
 
 /** The four sort-family entries (dispatch names). */
 export const GPU_SORT_ENTRIES = ['sortKeys', 'bitonic', 'sortStep', 'pack'] as const
 
-/** The padded network size: the next power of two ≥ count (the bitonic
- *  network's own requirement — the orchestrator dispatches over [0, padN);
- *  the tail [count, padN) is sentinel pads). ≥ 1: a single live particle
- *  sorts trivially (zero network passes). */
-export function gpuSortPadCount(count: number): number {
-  if (!Number.isFinite(count) || count < 0) {
-    throw new Error(`rune/particles: gpuSortPadCount — count must be a finite number ≥ 0 (got ${count})`)
-  }
-  if (count <= 1) return 1
-  return 1 << Math.ceil(Math.log2(count))
-}
+/** The padded network size (core's bitonicPadCount, the old name kept —
+ *  the orchestrators and the tests import it from here): the next power of
+ *  two ≥ count. */
+export { bitonicPadCount as gpuSortPadCount } from '@rune/core'
 
-/** The canonical bitonic (k, j) sequence for a padded network size —
- *  k = 2 → padN (the block being bitonized), j = k/2 → 1 (the compare
- *  distance): log₂(padN)·(log₂(padN)+1)/2 passes, each ONE dispatch/pass
- *  with its (k, j) in the uniforms. Both orchestrators walk THIS sequence
- *  (the WGSL entry and the GLSL pass evaluate the same (k, j) — the test
- *  suite pins the sequence's MODEL against Array.sort). */
-export function gpuSortPassSequence(padN: number, run: (k: number, j: number) => void): void {
-  for (let k = 2; k <= padN; k <<= 1) {
-    for (let j = k >> 1; j > 0; j >>= 1) run(k, j)
-  }
-}
+/** The canonical bitonic (k, j) sequence (core's bitonicPassSequence, the
+ *  old name kept): k = 2 → padN (the block being bitonized), j = k/2 → 1
+ *  (the compare distance) — the WGSL entry and the GLSL pass evaluate the
+ *  same (k, j) — the test suite pins the sequence's MODEL against
+ *  Array.sort. */
+export { bitonicPassSequence as gpuSortPassSequence } from '@rune/core'
 
 /** The ramp's largest size sample — the cull radius factor: every drawn
  *  extent is spawnSize · rampSize · 0.5 ≤ spawnSize · rampMax · 0.5, so the
@@ -227,37 +225,16 @@ export function gpuRampMaxSize(points: readonly { size: number }[]): number {
   return max
 }
 
-/** The six frustum planes from a COLUMN-MAJOR view-projection (Gribb–
- *  Hartmann: the clip matrix's row3 ± row_i, normalized so the shader's
- *  sphere test dot(n, p) + d > −r carries a real radius). Plane order:
+/** The six frustum planes from a COLUMN-MAJOR view-projection (Task 141
+ *  origin: @rune/core's frustumPlanes — ONE Gribb–Hartmann for the repo;
+ *  the old name kept for the orchestrators and the tests). Plane order:
  *  +x, −x, +y, −y, +z, −z (left, right, bottom, top, near, far). The
  *  z pair uses the GL [−1, 1] clip convention — on WebGPU's [0, 1] z this
  *  is CONSERVATIVE (a near/far test may keep a WebGPU-clipped particle —
  *  the rasterizer clips it anyway; no visible particle is ever culled).
  *  Writes into `out` (24 floats) when given — the orchestrators pass their
  *  per-frame scratch (the zero-allocation hot-path contract). */
-export function gpuRenderFrustum(viewProj: readonly number[], out?: Float32Array): Float32Array {
-  if (viewProj.length !== 16) {
-    throw new Error(`rune/particles: gpuRenderFrustum — the view-projection is 16 numbers, column-major (got ${viewProj.length})`)
-  }
-  const o = out ?? new Float32Array(24)
-  const m = viewProj
-  for (let p = 0; p < 6; p++) {
-    const axis = p >> 1                  // the row the plane cuts: 0 = x, 1 = y, 2 = z
-    const sign = (p & 1) === 0 ? 1 : -1  // the + plane, then the − plane
-    const nx = m[3] + sign * m[axis]
-    const ny = m[7] + sign * m[4 + axis]
-    const nz = m[11] + sign * m[8 + axis]
-    const d = m[15] + sign * m[12 + axis]
-    const len = Math.hypot(nx, ny, nz)
-    const inv = len > 1e-12 ? 1 / len : 0
-    o[p * 4] = nx * inv
-    o[p * 4 + 1] = ny * inv
-    o[p * 4 + 2] = nz * inv
-    o[p * 4 + 3] = d * inv
-  }
-  return o
-}
+export { frustumPlanes as gpuRenderFrustum } from '@rune/core'
 
 /** The pack body shared by BOTH families' pack entries (the sim family's
  *  `pack` and the sort family's `pack`): the ramp LUT walk, the tile math,

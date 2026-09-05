@@ -30,11 +30,12 @@ import {
   validateInherit, validateRateOverDistance, validateWrap, validateBurst,
 } from './validate.ts'
 import { createSpawner, type Spawner, type SpawnerDesc } from './spawn.ts'
+import { frustumPlanes } from '@rune/core'
 import { GPU_EMIT_SALTS } from './gpuEmit.ts'
 import { CONSTANT_RAMP, type Ramp } from './ramp.ts'
 import { validateNoise, type NoiseField } from './noise.ts'
 import { packInstances, INSTANCE_STRIDE, INSTANCE_LAYOUT, type PackOptions } from './instances.ts'
-import { GPU_STATE_STRIDE, gpuRenderFrustum, gpuRampMaxSize } from './gpuSim.ts'
+import { GPU_STATE_STRIDE, gpuRampMaxSize } from './gpuSim.ts'
 import {
   fillBillboards, SOUP_STRIDE, VERTS_PER_PARTICLE, type CameraBasis, type BillboardOptions,
 } from './billboards.ts'
@@ -757,17 +758,18 @@ export function createParticles(desc: ParticlesDesc): Particles {
           order = sortOrder!
         }
         // Task 136 — render.cull on the CPU tier: the six frustum planes
-        // from the basis view-projection (gpuRenderFrustum — Gribb–Hartmann
-        // over the column-major mvp, normalized), extracted ONCE per
-        // view() and handed to both bakers. The loud contract mirrors the
-        // GPU tier's step() camera throw.
+        // from the basis view-projection (Task 141: @rune/core's
+        // frustumPlanes — Gribb–Hartmann over the column-major mvp,
+        // normalized), extracted ONCE per view() and handed to both
+        // bakers. The loud contract mirrors the GPU tier's step() camera
+        // throw.
         let frustum: Float32Array | null = null
         if (cullOn && !gpuMode) {
           const vp = basis.viewProj
           if (vp === undefined || vp.length !== 16) {
             throw new Error('rune/particles: render.cull needs the camera basis viewProj (the six frustum planes come from the frame view-projection, column-major — pass a full CameraBasis: { right, up, forward, viewProj })')
           }
-          frustum = gpuRenderFrustum(vp, frustumScratch!)
+          frustum = frustumPlanes(vp, frustumScratch!)
         }
         if (gpuMode) {
           // Task 131 — the GPU tier: the records are PACKED ON THE GPU (the

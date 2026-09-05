@@ -3773,6 +3773,81 @@ function hash01(seed, index, salt) {
   return (h >>> 0) / 4294967296;
 }
 
+// packages/core/src/frustum.ts
+function frustumPlanes(viewProj, out) {
+  if (viewProj.length !== 16) {
+    throw new Error(`rune/core: frustumPlanes — the view-projection is 16 numbers, column-major (got ${viewProj.length})`);
+  }
+  const o = out ?? new Float32Array(24);
+  for (let p = 0;p < 6; p++) {
+    const axis = p >> 1;
+    const sign = (p & 1) === 0 ? 1 : -1;
+    const nx = viewProj[3] + sign * viewProj[axis];
+    const ny = viewProj[7] + sign * viewProj[4 + axis];
+    const nz = viewProj[11] + sign * viewProj[8 + axis];
+    const d = viewProj[15] + sign * viewProj[12 + axis];
+    const len = Math.hypot(nx, ny, nz);
+    const inv = len > 0.000000000001 ? 1 / len : 0;
+    o[p * 4] = nx * inv;
+    o[p * 4 + 1] = ny * inv;
+    o[p * 4 + 2] = nz * inv;
+    o[p * 4 + 3] = d * inv;
+  }
+  return o;
+}
+function classifySphere(planes, cx, cy, cz, radius) {
+  let insideAll = true;
+  for (let i = 0;i < 6; i++) {
+    const o = i * 4;
+    const d = planes[o] * cx + planes[o + 1] * cy + planes[o + 2] * cz + planes[o + 3];
+    if (d < -radius)
+      return SPHERE_OUTSIDE;
+    if (d < radius)
+      insideAll = false;
+  }
+  return insideAll ? SPHERE_INSIDE : SPHERE_INTERSECT;
+}
+function sphereOutsideFrustum(planes, cx, cy, cz, radius) {
+  for (let i = 0;i < 6; i++) {
+    const o = i * 4;
+    if (planes[o] * cx + planes[o + 1] * cy + planes[o + 2] * cz + planes[o + 3] <= -radius) {
+      return true;
+    }
+  }
+  return false;
+}
+var SPHERE_OUTSIDE = 0, SPHERE_INTERSECT = 1, SPHERE_INSIDE = 2, FRUSTUM_PLANE_COUNT = 6;
+
+// packages/core/src/gpu/bitonic.ts
+function bitonicPadCount(count) {
+  if (!Number.isFinite(count) || count < 0) {
+    throw new Error(`rune/core: bitonicPadCount — count must be a finite number ≥ 0 (got ${count})`);
+  }
+  if (count <= 1)
+    return 1;
+  return 1 << Math.ceil(Math.log2(count));
+}
+function bitonicPassSequence(padN, run) {
+  for (let k = 2;k <= padN; k <<= 1) {
+    for (let j = k >> 1;j > 0; j >>= 1)
+      run(k, j);
+  }
+}
+var BITONIC_PAD_KEY = 1000000000000000000000000000000, BITONIC_SENTINEL = 33554432;
+
+// packages/core/src/sort.ts
+function sortBackToFront(px, py, pz, count, forward, indices, keys) {
+  if (count <= 0)
+    return 0;
+  const fx = forward[0], fy = forward[1], fz = forward[2];
+  for (let i = 0;i < count; i++) {
+    indices[i] = i;
+    keys[i] = fx * px[i] + fy * py[i] + fz * pz[i];
+  }
+  indices.subarray(0, count).sort((a, b) => keys[b] - keys[a] || b - a);
+  return count;
+}
+
 // packages/core/src/index.ts
 var exports_src = {};
 __export(exports_src, {
@@ -3783,6 +3858,8 @@ __export(exports_src, {
   textureFormatInfo: () => textureFormatInfo,
   textureFormatBytesPerPixel: () => textureFormatBytesPerPixel,
   streamTexture: () => streamTexture,
+  sphereOutsideFrustum: () => sphereOutsideFrustum,
+  sortBackToFront: () => sortBackToFront,
   simplex3: () => simplex3,
   signal: () => signal,
   serializeTape: () => serializeTape,
@@ -3797,6 +3874,7 @@ __export(exports_src, {
   nameHash: () => nameHash,
   hash01: () => hash01,
   hasSharedArrayBuffer: () => hasSharedArrayBuffer,
+  frustumPlanes: () => frustumPlanes,
   feedStride: () => feedStride,
   feedFieldSize: () => feedFieldSize,
   estimateTextureBytes: () => estimateTextureBytes,
@@ -3831,23 +3909,32 @@ __export(exports_src, {
   createEpoch: () => createEpoch,
   createCaps: () => createCaps,
   countTiles: () => countTiles,
+  classifySphere: () => classifySphere,
   classifyGpuError: () => classifyGpuError,
   classifyDeviceLost: () => classifyDeviceLost,
   chunkRect: () => chunkRect,
   buildFrameReRecording: () => buildFrameReRecording,
   buildFrame: () => buildFrame,
+  bitonicPassSequence: () => bitonicPassSequence,
+  bitonicPadCount: () => bitonicPadCount,
   batch: () => batch,
   attachTransport: () => attachTransport,
   attachSharedRegistry: () => attachSharedRegistry,
   attachFeed: () => attachFeed,
   TEXTURE_FORMATS: () => TEXTURE_FORMATS,
+  SPHERE_OUTSIDE: () => SPHERE_OUTSIDE,
+  SPHERE_INTERSECT: () => SPHERE_INTERSECT,
+  SPHERE_INSIDE: () => SPHERE_INSIDE,
   SHARED_MAGIC: () => SHARED_MAGIC,
   PERM: () => PERM,
   OpCode: () => OpCode,
   LOSS_STORM_WINDOW_MS: () => LOSS_STORM_WINDOW_MS,
   LOSS_STORM_MAX: () => LOSS_STORM_MAX,
   GRAD3: () => GRAD3,
-  GPU_BUFFER_USAGE: () => GPU_BUFFER_USAGE
+  GPU_BUFFER_USAGE: () => GPU_BUFFER_USAGE,
+  FRUSTUM_PLANE_COUNT: () => FRUSTUM_PLANE_COUNT,
+  BITONIC_SENTINEL: () => BITONIC_SENTINEL,
+  BITONIC_PAD_KEY: () => BITONIC_PAD_KEY
 });
 var init_src = __esm(() => {
   init_signal();
@@ -11432,9 +11519,16 @@ var PARTICLE_FLOATS = FIELD_NAMES.length;
 // packages/particles/src/spawn.ts
 init_src();
 // packages/particles/src/billboards.ts
+init_src();
 var SCRATCH = new Float32Array(6);
 // packages/particles/src/instances.ts
+init_src();
 var SCRATCH2 = new Float32Array(6);
+// packages/particles/src/sort.ts
+init_src();
+// packages/particles/src/gpuSim.ts
+init_src();
+
 // packages/particles/src/gpuEmit.ts
 init_src();
 var GPU_EMIT_SHAPE = {
@@ -11721,6 +11815,9 @@ function gpuEmitPackStatic(f32, u32, cfg) {
 }
 
 // packages/particles/src/gpuSim.ts
+init_src();
+init_src();
+init_src();
 var GPU_STATE_STRIDE = FIELD_NAMES.length;
 var GPU_SIM_UNIFORM_BYTES = 448;
 var GPU_SIM_UNIFORM_FLOATS = GPU_SIM_UNIFORM_BYTES / 4;
@@ -11794,50 +11891,14 @@ var GPU_SORT_F32_FIELDS = {
   rampMaxSize: 35
 };
 var GPU_SORT_RENDER_MASK = { cull: 1 };
-var GPU_SORT_PAD_KEY = 1000000000000000000000000000000;
-var GPU_SORT_SENTINEL = 33554432;
-function gpuSortPadCount(count) {
-  if (!Number.isFinite(count) || count < 0) {
-    throw new Error(`rune/particles: gpuSortPadCount — count must be a finite number ≥ 0 (got ${count})`);
-  }
-  if (count <= 1)
-    return 1;
-  return 1 << Math.ceil(Math.log2(count));
-}
-function gpuSortPassSequence(padN, run) {
-  for (let k = 2;k <= padN; k <<= 1) {
-    for (let j = k >> 1;j > 0; j >>= 1)
-      run(k, j);
-  }
-}
+var GPU_SORT_PAD_KEY = BITONIC_PAD_KEY;
+var GPU_SORT_SENTINEL = BITONIC_SENTINEL;
 function gpuRampMaxSize(points) {
   let max = 1;
   for (const p of points)
     if (p.size > max)
       max = p.size;
   return max;
-}
-function gpuRenderFrustum(viewProj, out) {
-  if (viewProj.length !== 16) {
-    throw new Error(`rune/particles: gpuRenderFrustum — the view-projection is 16 numbers, column-major (got ${viewProj.length})`);
-  }
-  const o = out ?? new Float32Array(24);
-  const m = viewProj;
-  for (let p = 0;p < 6; p++) {
-    const axis = p >> 1;
-    const sign = (p & 1) === 0 ? 1 : -1;
-    const nx = m[3] + sign * m[axis];
-    const ny = m[7] + sign * m[4 + axis];
-    const nz = m[11] + sign * m[8 + axis];
-    const d = m[15] + sign * m[12 + axis];
-    const len = Math.hypot(nx, ny, nz);
-    const inv = len > 0.000000000001 ? 1 / len : 0;
-    o[p * 4] = nx * inv;
-    o[p * 4 + 1] = ny * inv;
-    o[p * 4 + 2] = nz * inv;
-    o[p * 4 + 3] = d * inv;
-  }
-  return o;
 }
 var PACK_BODY_WGSL = `
   let age = state[b + 6u];
@@ -12425,6 +12486,7 @@ ${PACK_BODY_WGSL}}
 `;
 }
 // packages/particles/src/gpuSimGl.ts
+init_src();
 var GPU_GL_TEXELS_PER_PARTICLE = 5;
 var GPU_GL_STATE_TEXTURE_W = 2048;
 function gpuGlStateTextureH(capacity) {
@@ -12518,8 +12580,8 @@ var GPU_GL_BITONIC_F = {
   j: 1
 };
 var GPU_GL_SORT_OUTPUTS = ["v_pair"];
-var GPU_GL_SORT_PAD_KEY = 1000000000000000000000000000000;
-var GPU_GL_SORT_SENTINEL = 33554432;
+var GPU_GL_SORT_PAD_KEY = BITONIC_PAD_KEY;
+var GPU_GL_SORT_SENTINEL = BITONIC_SENTINEL;
 function gpuGlPairsTextureH(capacity) {
   return Math.max(1, Math.ceil((1 << Math.ceil(Math.log2(Math.max(2, capacity)))) / GPU_GL_STATE_TEXTURE_W));
 }
@@ -13149,7 +13211,11 @@ var SCRATCH3 = new Float32Array(6);
 // packages/particles/src/meshes.ts
 var SCRATCH4 = new Float32Array(6);
 // packages/particles/src/facade.ts
+init_src();
 var MAX_STEP = 1 / 20;
+// packages/gl/src/particlesGpuGl.ts
+init_src();
+
 // packages/gl/src/particlesGpuConfig.ts
 function readGpuTierConfig(facade) {
   const forces = facade.forces;
@@ -13302,7 +13368,7 @@ function createGpuParticlesTf(facade, gpu) {
     textures: ["u_state", "u_ramp"],
     uniforms: GPU_GL_PACK_UNIFORMS
   });
-  const maxPadN = gpuSortPadCount(capacity);
+  const maxPadN = bitonicPadCount(capacity);
   const pairsH = gpuGlPairsTextureH(capacity);
   const pairsTex = tiered ? gpu.createTexture(W, pairsH, { format: "rgba32f" }) : -1;
   const pairsOut = tiered ? gpu.createBuffer(new Float32Array(maxPadN * 4), "dynamic") : -1;
@@ -13528,7 +13594,7 @@ function createGpuParticlesTf(facade, gpu) {
         camViewProj = vp;
       }
       const K = GPU_GL_SORTKEYS_F;
-      const padN = gpuSortPadCount(count);
+      const padN = bitonicPadCount(count);
       skUni[K.count] = count;
       skUni[K.cull] = cfg.cull ? 1 : 0;
       if (camForward !== null) {
@@ -13538,7 +13604,7 @@ function createGpuParticlesTf(facade, gpu) {
         skUni[K.forward + 2] = fw[2];
       }
       if (camViewProj !== null) {
-        gpuRenderFrustum(camViewProj, frustumScratch);
+        frustumPlanes(camViewProj, frustumScratch);
         skUni.set(frustumScratch, K.planes);
       }
       gpu.runPass(sortKeysPass, padN, {
@@ -13549,7 +13615,7 @@ function createGpuParticlesTf(facade, gpu) {
       gpu.texSubImage2DBuffer(pairsTex, 0, 0, W, pairsH, pairsOut, 0);
       if (cfg.sort) {
         const B = GPU_GL_BITONIC_F;
-        gpuSortPassSequence(padN, (k, j) => {
+        bitonicPassSequence(padN, (k, j) => {
           btUni[B.k] = k;
           btUni[B.j] = j;
           gpu.runPass(bitonicPass, padN, {
@@ -13621,7 +13687,7 @@ function createGpuParticlesCompute(facade, gpu) {
   const sortScratch = gpu.scratch(GPU_SORT_UNIFORM_FLOATS);
   const frustumScratch = new Float32Array(24);
   if (tiered) {
-    const maxPadN = gpuSortPadCount(capacity);
+    const maxPadN = bitonicPadCount(capacity);
     const pairsId = gpu.createBuffer(maxPadN * 8, GPU_BUFFER_USAGE.STORAGE);
     sortId = gpu.createKernel(gpuSortWgsl(), GPU_SORT_UNIFORM_FLOATS * 4, [pairsId, stateId, recordsId, rampId]);
     if (sortId < 0 || pairsId < 0) {
@@ -13758,7 +13824,7 @@ function createGpuParticlesCompute(facade, gpu) {
         const sUni = sortScratch.f32;
         const sU32 = sortScratch.u32;
         const SU = GPU_SORT_F32_FIELDS;
-        const padN = gpuSortPadCount(count);
+        const padN = bitonicPadCount(count);
         sU32[GPU_SORT_U32_FIELDS.count] = count;
         sU32[GPU_SORT_U32_FIELDS.padN] = padN;
         sU32[GPU_SORT_U32_FIELDS.renderMask] = cfg.cull ? GPU_SORT_RENDER_MASK.cull : 0;
@@ -13769,14 +13835,14 @@ function createGpuParticlesCompute(facade, gpu) {
           sUni[SU.forward + 2] = fw[2];
         }
         if (camViewProj !== null) {
-          gpuRenderFrustum(camViewProj, frustumScratch);
+          frustumPlanes(camViewProj, frustumScratch);
           sUni.set(frustumScratch, SU.planes);
         }
         const netWorkgroups = Math.ceil(padN / WORKGROUP);
         gpu.runKernel(sortId, "sortKeys", sUni, netWorkgroups);
         if (cfg.sort) {
           let passes = 0;
-          gpuSortPassSequence(padN, () => {
+          bitonicPassSequence(padN, () => {
             passes++;
           });
           for (let p = 0;p < passes; p++) {

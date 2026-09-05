@@ -11,12 +11,11 @@
  * everything behind it. Additive layers do not need it (the blend is
  * commutative) — sorting them only costs CPU time.
  *
- * THE KEY: depth = dot(forward, position) — the camera basis's forward
- * (the unit direction the camera LOOKS, toward the target) is passed to
- * view() by the caller already (it orients the billboards). The dot
- * product grows monotonically with the view-axis depth, so a camera-
- * consistent ordering needs no eye position, no matrices, and no
- * per-particle sqrt.
+ * Task 141: THE MOVE — the painter's order is the property of every
+ * depth-less alpha-blended renderer, not of particles; the SoA body now
+ * lives in @rune/core (sort.ts — sortBackToFront). This module is the
+ * particles binding: the ParticleFields wrapper (the same public name
+ * and contract, zero changes for the callers).
  *
  * THE ORDER: BACK TO FRONT — the key DESCENDING (the farthest particle
  * first). The sorted index list feeds `order` of packInstances() /
@@ -38,6 +37,7 @@
  * ══════════════════════════════════════════════════════════════════════════
  */
 
+import { sortBackToFront } from '@rune/core'
 import type { ParticleFields } from './system.ts'
 
 /** Sorts the live [0, count) particles BACK TO FRONT (far first) by the
@@ -53,16 +53,5 @@ export function sortDepthBackToFront(
   indices: Int32Array,
   keys: Float32Array,
 ): number {
-  if (count <= 0) return 0
-  const fx = forward[0], fy = forward[1], fz = forward[2]
-  for (let i = 0; i < count; i++) {
-    indices[i] = i
-    keys[i] = fx * fields.px[i] + fy * fields.py[i] + fz * fields.pz[i]
-  }
-  // Back to front = the key DESCENDING (dot(forward, p) grows with the
-  // view-axis depth). The tie-break (b − a) makes the comparator a TOTAL
-  // order: equal depths resolve to the higher slot first, the same bytes
-  // on every engine — the parity contract.
-  indices.subarray(0, count).sort((a, b) => keys[b] - keys[a] || b - a)
-  return count
+  return sortBackToFront(fields.px, fields.py, fields.pz, count, forward, indices, keys)
 }

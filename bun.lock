@@ -85,6 +85,7 @@
       "name": "@rune/scene",
       "version": "0.1.0",
       "dependencies": {
+        "@rune/core": "workspace:*",
         "@rune/math": "workspace:*",
       },
     },

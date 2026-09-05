@@ -15,14 +15,14 @@
 //
 // EVERY sprite on this page is OURS — generated in this file (deterministic
 // pure functions → raw RGBA uploads; no image assets, no browser
-// premultiply semantics). The dist imports carry ?v=140 (the stale-cache
+// premultiply semantics). The dist imports carry ?v=141 (the stale-cache
 // guard — bump on release; Task 130 changed @rune/particles: the line lattice).
-import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=140'
+import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=141'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER, BILLBOARD,
-} from '../../dist/rune-materials.esm.js?v=140'
-import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=140'
+} from '../../dist/rune-materials.esm.js?v=141'
+import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=141'
 
 /* ─── the demo registry (the carousel order) ────────────────────────────── */
 

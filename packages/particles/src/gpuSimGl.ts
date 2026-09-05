@@ -53,6 +53,7 @@
  * ══════════════════════════════════════════════════════════════════════════
  */
 
+import { BITONIC_PAD_KEY, BITONIC_SENTINEL } from '@rune/core'
 import { PERM, GRAD3 } from './noise.ts'
 import { GPU_EMIT_SALTS } from './gpuEmit.ts'
 
@@ -203,13 +204,15 @@ export const GPU_GL_BITONIC_F: Record<'k' | 'j', number> = {
  *  the sentinel 2^25 is above every index. */
 export const GPU_GL_SORT_OUTPUTS = ['v_pair'] as const
 
-/** The pad/cull key (shared with the WGSL twin — gpuSim.ts's
- *  GPU_SORT_PAD_KEY): sorts LAST in the ascending network. */
-export const GPU_GL_SORT_PAD_KEY = 1e30
+/** The pad/cull key (Task 141 origin: @rune/core's BITONIC_PAD_KEY — one
+ *  network plan, two backends; the WGSL twin's GPU_SORT_PAD_KEY is the
+ *  same value): sorts LAST in the ascending network. */
+export const GPU_GL_SORT_PAD_KEY = BITONIC_PAD_KEY
 
-/** The pad/cull INDEX sentinel (the WGSL twin's GPU_SORT_SENTINEL): a
- *  float-exact 2^25 — the sorted pack's zero-record marker. */
-export const GPU_GL_SORT_SENTINEL = 33554432
+/** The pad/cull INDEX sentinel (core's BITONIC_SENTINEL, the WGSL twin's
+ * GPU_SORT_SENTINEL): a float-exact 2^25 — the sorted pack's zero-record
+ * marker. */
+export const GPU_GL_SORT_SENTINEL = BITONIC_SENTINEL
 
 /** The pairs texture height for a capacity: the network's padded size
  *  nextPow2(capacity) laid out W-wide (the same 2048 convention as the
