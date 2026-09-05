@@ -1,8 +1,7 @@
 // gpuEmbers.js — the GPGPU TIER SHOWCASE (Task 131, the optimization
 // program's Phase 2; Task 132 — the tier now runs on BOTH backends; Task
-// 134 — THE RENDER TIER: the per-particle frustum cull rides the compute
-// leg by default (?cull=1 forces it on the TF leg) and the BITONIC SORT
-// is ?sort=1 (the 160k-particle painter's order — the records land
+// 134 — THE RENDER TIER: the per-particle frustum cull and the BITONIC
+// SORT (?sort=1 — the 160k-particle painter's order, the records land
 // far-to-near); Task 135 — GPU-SIDE EMISSION: the newborns are GENERATED
 // ON THE GPU (the hash-RNG append pass — the same hash stream the CPU
 // reference spawns through; the CPU keeps the life ledger only, and the
@@ -13,12 +12,25 @@
 // twin, the SAME handoff and the SAME 16-float instance records), the
 // GPU-side record pack, ZERO per-frame CPU→GPU particle traffic. The
 // page's perf readout (the pill + window.__vfxPerf) tells the tier story.
+// Task 138 — THE REAL-GPU TF PIPELINE BY DEFAULT: the hardware oracle
+// (the user's live re-run confirmation on a real GPU) closed the last
+// remaining item — on anything but the software-GL class, the WebGL2 TF
+// leg takes the FULL GPU pipeline with no opt-ins (emit:'gpu' + the
+// frustum cull — the dedicated emitOut buffer keeps the barrier
+// discipline, and the PBO round-trips are hardware paths off the
+// software GL); SwiftShader/llvmpipe keep the proven conservative
+// defaults. The value-aware flags override BOTH branches: ?emit=1 /
+// ?cull=1 force the GPU path on any hardware, ?emit=0 / ?cull=0 force
+// the CPU path (the escape hatch — a real-GPU regression falls back
+// without a code change).
 //
 //   · THE COMMON POINT (Task 132): createGpuParticles(facade, backend)
 //     dispatches by the facade's shape — WebGPU compute (the SSBO tier,
-//     160k) or WebGL2 transform feedback (the TF tier, 16k — the software
-//     GL's budget; real GPUs carry the same tier). The LOOK is the same
-//     class of storm; the COUNT is the backend's budget.
+//     160k) or WebGL2 transform feedback (the TF tier — 16k on the
+//     software-GL class, 160k on a real GPU [Task 137]; the full GPU
+//     pipeline — GPU emission + the cull — on both real legs [Task 138]).
+//     The LOOK is the same class of storm; the COUNT is the backend's
+//     budget.
 //
 //   · THE STORM: a wrapped kiln-volume of embers — buoyant lift (negative
 //     gravity), drag, the simplex flow field, the sine turbulence — embers
@@ -26,10 +38,11 @@
 //     through the walls (the ENDLESS volume). A deep ember-lit floor
 //     grounds it; a slow camera orbit reads the depth.
 //
-//   · THE HOOKS: window.__vfxPerf = { tier, capacity, count, ms } — the
-//     probe gate (scripts/task131-sim-probe.mjs) pins the tier + the
-//     frame cost; window.__vfxCounters.embers — the emission counters.
-import { createGpuParticles } from '../../../dist/rune.esm.js?v=137'
+//   · THE HOOKS: window.__vfxPerf = { tier, capacity, count, ms, emit,
+//     cull, softwareGL } — the probe gates pin the tier + the frame cost
+//     + the hardware-policy branch; window.__vfxCounters.embers — the
+//     emission counters.
+import { createGpuParticles } from '../../../dist/rune.esm.js?v=138'
 
 // Task 137 — the WebGL2 TF budget is now HARDWARE-AWARE: the 16k cap was
 // the SwiftShader/software-GL budget (the container's gate-hostile class:
@@ -57,28 +70,33 @@ const SOFTWARE_GL = (() => {
 })()
 const TF_CAPACITY = SOFTWARE_GL ? 16_000 : 160_000
 const BOX = [46, 22, 46] // the wrap volume (the kiln)
-// Task 134 — the render tier's opt-ins: the bitonic painter's order is
-// ?sort=1 (the additive blend composites order-independently; the network
-// is the ALPHABLEND tier's tool); the frustum cull rides the COMPUTE leg
-// by default (two cheap dispatches) and is ?cull=1 on the TF leg — the
-// software GL's PBO round-trips are copied on CPU (the "TexSubImage with
-// unpack buffer" performance warning — the documented container class;
-// real GPUs take the hardware path). The smoke gate runs the WebGL2 leg
-// AS TUNED (Task 132's 16k budget); the probe (task134-vfx-probe.mjs)
-// exercises BOTH flags with generous JS-side aliveness checks.
-const WANT_SORT = typeof location !== 'undefined' && new URLSearchParams(location.search).has('sort')
-const FORCE_CULL = typeof location !== 'undefined' && new URLSearchParams(location.search).has('cull')
-// Task 135 — the GPU emission: ON for the COMPUTE leg (WebGPU — fully
-// gated: the raw-device parity gate + the live probes); the TF leg keeps
-// emit:'cpu' by default with ?emit=1 as the opt-in (the software GL's
-// queue serialization stalls the interleaved TF/PBO cycles — the
-// documented container class; a real-GPU WebGL2 leg takes the GPU path —
-// the values themselves are pinned by the in-page GLSL gate).
-const FORCE_EMIT = typeof location !== 'undefined' && new URLSearchParams(location.search).has('emit')
+// Task 138 — the value-aware flags (the override mechanics for BOTH
+// hardware branches): ?emit=1 / ?cull=1 force the GPU pipeline on, the
+// bare ?emit / ?cull keep the old force-on meaning, and ?emit=0 /
+// ?cull=0 force the conservative path off — the escape hatch for a
+// real-GPU regression (no code change needed to fall back). ?sort stays
+// the pure opt-in (the additive blend composites order-independently —
+// the network is the ALPHABLEND tier's tool).
+const PARAMS = typeof location !== 'undefined' ? new URLSearchParams(location.search) : null
+const flagOn = (name) => PARAMS !== null && PARAMS.has(name) && (PARAMS.get(name) === '' || PARAMS.get(name) === '1')
+const flagOff = (name) => PARAMS !== null && PARAMS.get(name) === '0'
+const WANT_SORT = flagOn('sort')
+const FORCE_EMIT = flagOn('emit')
+const FORCE_EMIT_OFF = flagOff('emit')
+const FORCE_CULL = flagOn('cull')
+const FORCE_CULL_OFF = flagOff('cull')
+// Task 138 — THE REAL-GPU TF PIPELINE: a real GPU takes the full GPU
+// pipeline by DEFAULT now — emit:'gpu' + the frustum cull (the hardware
+// oracle: the user's live confirmation on a real GPU; the dedicated
+// emitOut buffer keeps the one-producer/one-consumer barrier discipline,
+// and the pairs/emit PBO round-trips are hardware paths off the software
+// GL). The software-GL class keeps the proven CPU defaults (Task 135's
+// queue-serialization constraint) — the flags above override both.
+const TF_GPU_PIPELINE = !SOFTWARE_GL
 
 export default {
   title: 'GPU Embers',
-  sub: 'the GPGPU tier · 160k compute-simmed, GPU-EMITTED embers (WebGL2: the transform-feedback tier — 160k on real GPUs, 16k on software GL) · zero per-frame particle uploads',
+  sub: 'the GPGPU tier · 160k compute-simmed, GPU-EMITTED embers · the full GPU pipeline on BOTH backends by default (WebGL2: the transform-feedback tier — 160k + GPU emission + the frustum cull on real GPUs; SwiftShader/llvmpipe keep the conservative CPU defaults) · zero per-frame particle uploads',
   camera: { yaw: 0.6, pitch: 0.34, dist: 13, orbit: 0.05, target: [0, 4.5, 0] },
 
   make(env) {
@@ -93,6 +111,13 @@ export default {
     if (typeof window !== 'undefined') window.__vfxCounters = counters
 
     // ── the embers: one facade, tiered by the backend ──
+    // Task 138 — the pipeline policy (explicit HERE, where the compute leg
+    // is known): the compute leg always took the GPU pipeline; the TF leg
+    // takes it by default on a real GPU (the hardware oracle) and keeps the
+    // conservative CPU path on the software-GL class; the value-aware
+    // flags override both branches in both directions.
+    const emitGpu = (compute || TF_GPU_PIPELINE || FORCE_EMIT) && !FORCE_EMIT_OFF
+    const cullOn = (compute || TF_GPU_PIPELINE || FORCE_CULL) && !FORCE_CULL_OFF
     const EMBER_S = {
       shape: { kind: 'disc', origin: [0, -1.5, 0], axis: [0, 1, 0], radius: [2, 16] },
       velocity: { mode: 'fixed', dir: [0.06, 1, 0.04] },
@@ -121,16 +146,18 @@ export default {
           noise: { strength: 1.6, scale: 0.16, speed: 0.21 },
         },
         spawner: EMBER_S,
-        // Task 135 — THE GPU EMISSION: the newborns' rows are generated
+        // Task 135/138 — THE GPU EMISSION: the newborns' rows are generated
         // ON the GPU (the hash-RNG append pass — the same hash stream, the
         // same salt order; the CPU keeps the life ledger only). The
         // opening 53k burst and the 20k/s stream cost ~0 CPU — on the
-        // COMPUTE leg; the TF leg takes it with ?emit=1.
-        emit: compute || FORCE_EMIT ? 'gpu' : 'cpu',
-        // Task 134 — THE RENDER TIER: cull (the frustum gate — the
-        // off-screen kiln walls stop drawing; the compute leg by default,
-        // ?cull=1 forces it on the TF leg) + the opt-in sort (?sort=1).
-        render: { kind: 'billboard', draw: 'instance', mode: 'camera', spin: 0.8, cull: compute || FORCE_CULL, sort: WANT_SORT },
+        // COMPUTE leg and on a REAL-GPU TF leg (Task 138's default); the
+        // software-GL TF leg keeps emit:'cpu' (?emit=1 forces it on).
+        emit: emitGpu ? 'gpu' : 'cpu',
+        // Task 134/138 — THE RENDER TIER: cull (the frustum gate — the
+        // off-screen kiln walls stop drawing; the compute leg and the
+        // real-GPU TF leg by default, ?cull=0 the escape hatch) + the
+        // opt-in sort (?sort=1 — the additive blend needs no order).
+        render: { kind: 'billboard', draw: 'instance', mode: 'camera', spin: 0.8, cull: cullOn, sort: WANT_SORT },
         sim: 'gpu',
       }),
       material: env.materials.bbSprite,
@@ -177,7 +204,10 @@ export default {
     void pool
 
     // ── the perf report (the probe gate reads it) ──
-    const perf = { tier: 'gpu', capacity, count: 0, ms: 0, emit: compute || FORCE_EMIT ? 'gpu' : 'cpu' }
+    // Task 138 — the policy fields: `emit`, `cull`, `softwareGL` pin the
+    // hardware branch the page took (the probe asserts the software leg
+    // stays conservative in the container and the flags flip it).
+    const perf = { tier: 'gpu', capacity, count: 0, ms: 0, emit: emitGpu ? 'gpu' : 'cpu', cull: cullOn, sort: WANT_SORT, softwareGL: SOFTWARE_GL }
     if (typeof window !== 'undefined') window.__vfxPerf = perf
     let msAvg = 16
     let last = 0

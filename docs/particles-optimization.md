@@ -2,8 +2,9 @@
 
 Status: **Phase 1 (the instanced draw), Phase 2 (the GPGPU tier), Phase
 3 (the WebGL2 transform-feedback twin + the painter's order), the GPU
-render tier (Task 134: the bitonic sort + the frustum cull) and the
-GPU-side emission (Task 135) are SHIPPED** (Tasks 131–135). The etalons below carry the before/after; the
+render tier (Task 134: the bitonic sort + the frustum cull), the GPU-side
+emission (Task 135) and the real-GPU TF pipeline defaults (Task 138) are
+SHIPPED — the program is COMPLETE** (Tasks 131–138). The etalons below carry the before/after; the
 phases describe what moved where, and what remains.
 
 ---
@@ -402,3 +403,85 @@ verification: the ember timeline (warm 1.6–1.8% STABLE for 20 s — was
 0.00% + the white flash), demo-smoke 24/24, demo-shots ALL alive (dust
 motion 72.68%), the raw-device gates (sim/sort/emit WGSL + GLSL) PASS,
 `task134-vfx-probe` (?sort=1&cull=1 on the TF leg) PASS.
+
+## Task 137 — a retro note (the re-run roots + the real-GPU capacity)
+
+The re-run blackout (the user's report: "the 2nd and further WebGL runs
+show NO particles while the pill keeps counting") had two roots, both
+outside the particles package proper, both fatal to the TF tier's story.
+**The dangling enabled attribs**: `deleteBuffer` never severed the VAO's
+`vertexAttribPointer` associations (the GLES3/WebGL2 spec leaves them),
+so the GPU particle tier's dispose (toggle / demo-switch / re-boot) left
+2–4 enabled locations pointing at DELETED buffers — the next `drawArrays`
+DROPS with INVALID_OPERATION on strict drivers (ANGLE/D3D, Vulkan GL;
+SwiftShader validates only a subset, which is why the container could not
+reproduce the user's symptoms). The fix lives in `@rune/webgl2`: the
+bind-time attrib ledger (the post-delete GL query is ambiguous — a real
+context returns null for a deleted buffer's location) + the deleteBuffer
+disarm — 7 dropped draws per demo-switch cycle → 0. **The context-life
+contract**: every backend toggle used to LEAK a live context (past the
+browser's per-page cap the eviction race can land on the ACTIVE context —
+the "2nd run is black" class); dispose now loses the context
+(`WEBGL_lose_context`) and `webglcontextlost` is handled honestly (the
+loop stops, the report lands — no zombie). The capacity went
+HARDWARE-AWARE the same way: the 16k cap was the SwiftShader budget
+(32k at 1280×800 ≈ 12 fps); a real GPU carries the same 160k as the
+compute tier (the `UNMASKED_RENDERER_WEBGL` probe — the user's "way
+fewer particles on WebGL" was exactly a real browser hitting the
+software-GL budget). Gates: `scripts/task137-vfx-probe.mjs` (the re-run
+gate: the 1st run warm + the capacity pin, the demo-switch cycles with
+ZERO drops, the verified-WebGPU round trip, the synthetic context-loss
+leg), 7 renderer tests.
+
+## Task 138 — THE REAL-GPU TF PIPELINE BY DEFAULT: the program closes
+
+The last remaining item ("the real-GPU story is expected to take
+`?emit=1` as the default once a hardware oracle confirms the queue
+behavior") is closed by the hardware oracle itself: the user's live
+confirmation on a real GPU ("работает щас"). The WebGL2
+transform-feedback leg now takes the FULL GPU pipeline with NO opt-ins
+on anything but the software-GL class — `emit:'gpu'` (the hash-RNG
+append pass; the dedicated emitOut buffer keeps the
+one-producer/one-consumer barrier discipline) + the frustum cull (the
+pairs round-trips are hardware paths off the software GL). The
+SwiftShader/llvmpipe class keeps the proven conservative defaults — the
+forced combination saturates the software raster (measured again by this
+task's gate: ~460 ms/frame at 16k, the compositor falls >90 s behind
+while the JS loop and the emission ledger stay alive — the
+busy-rasterizer class). The value-aware flags override BOTH branches in
+BOTH directions: `?emit=1`/`?cull=1` force the GPU path on any hardware,
+`?emit=0`/`?cull=0` force the CPU path (the escape hatch — a real-GPU
+regression falls back without a code change), the bare `?emit`/`?cull`
+keep the Task 135/134 force-on meaning, and `?sort` stays the pure
+opt-in (the additive blend composites order-independently — the network
+is the ALPHABLEND tier's tool). The perf report grew the policy fields
+(`emit`, `cull`, `sort`, `softwareGL` — `window.__vfxPerf`) so the gates
+pin the branch the page took.
+
+**Gates**: `scripts/task138-vfx-probe.mjs` — five legs, each a FRESH
+page (a saturated SwiftShader renderer chokes even a follow-up
+navigation — a 60 s goto timeout at `domcontentloaded`): (A) the default
+stays conservative (emit cpu, cull false, capacity 16000, warm pixels,
+the count alive, zero drops); (B) `?emit=1&cull=1` (the policy flips,
+the emission ledger alive, zero drops — the JS-side aliveness convention;
+the VALUES are task135-glsl-emit's job); (C) the escape hatch parses AND
+renders; (D) the bare `?emit`; (E) `?sort=1`. THE HARNESS LESSONS
+pinned in the gate's header: a leg's demo can be made several times in
+quick succession (the toggle's reboot re-makes the active demo) — reads
+must settle on a STABLE perf-object generation (the identity check, up
+to 4 windows); and the aliveness oracle under a saturated raster is
+"the count is not FROZEN", not "the count climbs" (the burst's natural
+retirement declines the count from ~4 s; an exact equality across 1 s
+means a dead loop — the zombie class).
+
+**The program is COMPLETE.** Every item of the original optimization
+list has shipped: the instanced draw (Phase 1), the GPGPU compute tier
+(Phase 2), the WebGL2 transform-feedback twin + the painter's order
+(Phase 3), the GPU render tier (the bitonic sort + the frustum cull),
+the GPU-side emission, the CPU-tier cull, the re-run roots, and the
+hardware-aware full-pipeline defaults. What remains is deliberately NOT
+here: the closed-form spawner surface for `emit:'gpu'` (path/lattice/
+seek reject loudly — the v1 boundary, documented in Task 135), the
+stretched-mode cull conservatism (the velocity tail outside the sphere,
+Task 136), and the next GPGPU consumers (ocean, skinning, fields —
+`@rune/core`'s `createGpgpu` is waiting for them).
