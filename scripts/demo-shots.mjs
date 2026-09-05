@@ -334,6 +334,28 @@ await assertSpriteContour()
 // and each demo gains a MOTION gate (two screenshots, 300 ms apart: a
 // frozen canvas fails even when the pill counts alive — the WebGPU
 // stale-binding freeze class) — plus a BACKEND-TOGGLE round trip at the end.
+
+/** Task 135 — the vfx SHOT's clip form: the canvas region only (the
+ * full-page screenshot starves under the busy software rasterizer on the
+ * heaviest demos — the same class the smoke gate's framesDiffer fixed:
+ * the box is read synchronously via getBoundingClientRect, the page
+ * screenshot with that clip captures the canvas region directly).
+ * Task 137 — HOISTED to module scope: it was born INSIDE the vfx-sweep
+ * block, but the toggle leg (a sibling block) references it too — a
+ * block-scoped function declaration is invisible to sibling blocks in an
+ * ES module, and the toggle leg died with "vfxCanvasClip is not defined"
+ * the moment it reached its clip (a latent Task 135 harness bug, surfaced
+ * now that the toggle leg survives to that line). */
+async function vfxCanvasClip(page) {
+  const box = await page.evaluate(() => {
+    const el = document.querySelector('#canvas')
+    if (el === null) return null
+    const r = el.getBoundingClientRect()
+    return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }
+  })
+  return box === null ? undefined : (box.width > 0 && box.height > 0 ? box : undefined)
+}
+
 {
   const vfxPage = await browser.newPage({ viewport: { width: 1280, height: 800 } })
   const qkErrors = []
@@ -351,21 +373,6 @@ await assertSpriteContour()
     if (badge === 'WebGL2' && /[1-9][\d,]* particles/.test(pill)) break
   }
   await vfxPage.waitForFunction(() => /Sentry Turret · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 20000 })
-
-/** Task 135 — the vfx SHOT's clip form: the canvas region only (the
- * full-page screenshot starves under the busy software rasterizer on the
- * heaviest demos — the same class the smoke gate's framesDiffer fixed:
- * the box is read synchronously via getBoundingClientRect, the page
- * screenshot with that clip captures the canvas region directly). */
-async function vfxCanvasClip(page) {
-  const box = await page.evaluate(() => {
-    const el = document.querySelector('#canvas')
-    if (el === null) return null
-    const r = el.getBoundingClientRect()
-    return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }
-  })
-  return box === null ? undefined : (box.width > 0 && box.height > 0 ? box : undefined)
-}
 
   const VFX_NAMES = ['muzzle', 'explosion', 'shapes', 'trail', 'sequencer', 'mesh', 'subemitter',
     'noise', 'alphatest', 'plugin', 'billboard', 'soft', 'blending', 'follow',

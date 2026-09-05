@@ -38,6 +38,8 @@ function mockGL(): MockCallLog {
   let tf = 0
   let vao = 0
   let linkedProgram: unknown = null
+  let currentArrayBuffer: { id?: number } | null = null
+  const attribBindings = new Map<number, { id?: number } | null>()
   const gl = {
     // constants realGL reads
     FRAMEBUFFER: 36009, FRAMEBUFFER_COMPLETE: 36053, COLOR_ATTACHMENT0: 36064, DEPTH_ATTACHMENT: 36096,
@@ -83,13 +85,24 @@ function mockGL(): MockCallLog {
     endTransformFeedback: () => calls.push('endTransformFeedback'),
     createBuffer: () => ({ id: ++buffer }),
     deleteBuffer: (b: unknown) => calls.push(`deleteBuffer(${(b as { id?: number }).id})`),
-    bindBuffer: (target: number, b: unknown) =>
-      calls.push(`bindBuffer(${target === PIXEL_UNPACK_BUFFER ? 'PBO' : target === ARRAY_BUFFER ? 'ARRAY' : target},${(b as { id?: number } | null)?.id ?? 'null'})`),
+    bindBuffer: (target: number, b: unknown) => {
+      calls.push(`bindBuffer(${target === PIXEL_UNPACK_BUFFER ? 'PBO' : target === ARRAY_BUFFER ? 'ARRAY' : target},${(b as { id?: number } | null)?.id ?? 'null'})`)
+      if (target === ARRAY_BUFFER) currentArrayBuffer = b as { id?: number } | null
+    },
     bufferData: () => {},
     bufferSubData: () => {},
-    enableVertexAttribArray: () => {},
-    vertexAttribPointer: () => {},
+    // Task 137 — the disarm tests' introspection: the attrib→buffer
+    // associations as vertexAttribPointer captures them (the CURRENT
+    // ARRAY_BUFFER binding — the GLES3 semantics; mock-level approximation,
+    // one map — the ledger logic under test lives in realGL).
+    VERTEX_ATTRIB_ARRAY_ENABLED: 34338,
+    VERTEX_ATTRIB_ARRAY_BUFFER_BINDING: 34975,
+    enableVertexAttribArray: (loc: number) => calls.push(`enableVertexAttribArray(${loc})`),
+    vertexAttribPointer: (loc: number) => { attribBindings.set(loc, currentArrayBuffer) },
     vertexAttribDivisor: () => {},
+    getVertexAttrib: (index: number, pname: number) =>
+      pname === 34975 ? (attribBindings.get(index) ?? null) : undefined,
+    disableVertexAttribArray: (loc: number) => calls.push(`disableVertexAttribArray(${loc})`),
     createTexture: () => ({ id: ++texture }),
     bindTexture: () => {},
     texImage2D: () => {},
@@ -305,6 +318,84 @@ describe('realGL: the transform-feedback family', () => {
     expect(() => facade.texSubImage2DBuffer(999, 0, 0, 4, 1, buffer)).toThrow('no such texture')
     const tex = facade.createTexture(4, 1, { format: 'rgba32f' })
     expect(() => facade.texSubImage2DBuffer(tex, 0, 0, 4, 1, 999)).toThrow('no such buffer')
+  })
+})
+
+// Task 137 — THE DANGLING ENABLED ATTRIB. The live report class: "the 2nd
+// WebGL run shows NO particles while the pill keeps counting" — a buffer
+// deleted while its vertexAttribPointer association lives on in the DEFAULT
+// VAO leaves the next drawArrays failing INVALID_OPERATION ("no buffer is
+// bound to enabled attribute") — the draw is DROPPED silently on strict
+// drivers (ANGLE/D3D, Vulkan GL); SwiftShader validates only a subset,
+// which is why the software-GL container mostly rendered through it. The
+// forensics: the GPU particle tier's records buffer sits at the 5
+// instance-attribute locations; the demo-switch dispose deletes it; the
+// neighbor demos' soup commands (3 locations) leave 2-4 dangling → every
+// laser draw dropped for the first frames (pinned live by the VAO probe).
+// The contract: deleteBuffer DISARMS every enabled location whose current
+// association IS the deleted buffer (the next command's binds re-enable
+// what it uses — bindVertexBuffer enables unconditionally).
+describe('realGL: deleteBuffer disarms the dangling enabled attribs (Task 137)', () => {
+  test('a location associated with the deleted buffer is disabled', () => {
+    const { calls, gl } = mockGL()
+    const facade = createRealGL(gl)
+    const b = facade.createBuffer(new Float32Array(64))
+    facade.bindVertexBuffer(b, 2, 4) // the executor's per-draw bind
+    calls.length = 0
+    facade.deleteBuffer(b)
+    expect(calls).toContain('disableVertexAttribArray(2)')
+    expect(calls).toContain('deleteBuffer(1)')
+  })
+
+  test('a re-pointed location survives the OLD buffer deletion (the association moved)', () => {
+    const { calls, gl } = mockGL()
+    const facade = createRealGL(gl)
+    const b1 = facade.createBuffer(new Float32Array(64))
+    const b2 = facade.createBuffer(new Float32Array(64))
+    facade.bindVertexBuffer(b1, 2, 4)
+    facade.bindVertexBuffer(b2, 2, 4) // the next command re-pointed loc 2
+    calls.length = 0
+    facade.deleteBuffer(b1) // the OLD buffer — loc 2 now lives on b2
+    expect(calls.filter(c => c.startsWith('disableVertexAttribArray')).length).toBe(0)
+    expect(calls).toContain('deleteBuffer(1)')
+    // and the LIVE buffer's deletion disarms it
+    facade.deleteBuffer(b2)
+    expect(calls).toContain('disableVertexAttribArray(2)')
+  })
+
+  test('the pass-VAO locations are exempt (they die with their pass, not with deleteBuffer)', () => {
+    const { calls, gl } = mockGL()
+    const facade = createRealGL(gl)
+    const stateTex = facade.createTexture(64, 4, { format: 'rgba32f' })
+    const mapBuf = facade.createBuffer(new Float32Array(64))
+    const outBuf = facade.createBuffer(new Float32Array(256))
+    const passId = facade.createTransformPass({
+      vertex: VERT,
+      outputs: ['v_s0'],
+      attributes: [{ name: 'a_map', size: 1 }], // getAttribLocation → 3 (the mock)
+      textures: ['u_state'],
+      uniforms: [{ name: 'u_dt', size: 1 }],
+    })
+    facade.runTransformPass(passId, 8, { bufferId: outBuf, attribBuffers: [mapBuf], textures: [stateTex], uniformData: new Float32Array([0.016]) })
+    calls.length = 0
+    facade.deleteBuffer(mapBuf) // the pass's own attribute source
+    // the pass location (3) never entered the DEFAULT VAO's ledger — no disable
+    expect(calls.filter(c => c.startsWith('disableVertexAttribArray')).length).toBe(0)
+    expect(calls).toContain('deleteBuffer(1)')
+  })
+
+  test('multiple locations on one buffer all disarm (the instance-record layout)', () => {
+    const { calls, gl } = mockGL()
+    const facade = createRealGL(gl)
+    const records = facade.createBuffer(new Float32Array(160))
+    facade.bindVertexBuffer(records, 0, 4)
+    facade.bindVertexBuffer(records, 1, 4)
+    facade.bindVertexBuffer(records, 2, 4)
+    calls.length = 0
+    facade.deleteBuffer(records)
+    expect(calls).toContain('disableVertexAttribArray(0)')
+    expect(calls).toContain('disableVertexAttribArray(1)')
+    expect(calls).toContain('disableVertexAttribArray(2)')
   })
 })
 

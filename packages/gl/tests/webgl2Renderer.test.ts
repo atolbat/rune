@@ -205,3 +205,107 @@ void main() { o_color = u_tint; }`
     }
   })
 })
+
+// Task 137 — THE CONTEXT-LIFE CONTRACT. Two live-report classes:
+//   1. THE LEAK: dispose() freed the feeds but never lost the CONTEXT — a
+//      re-booting shell (the vfx backend toggle) detaches the old canvas
+//      while the JS graph keeps it reachable: every toggle leaked a live
+//      context, and past the browser's per-page cap the eviction race can
+//      land on the ACTIVE context ("the 2nd and further WebGL runs show
+//      nothing while the counter counts"). dispose() now loses the context
+//      explicitly (WEBGL_lose_context) — the driver frees NOW.
+//   2. THE ZOMBIE: a lost context makes every GL call a silent no-op — the
+//      canvas stays black while the JS loop keeps "running". The renderer
+//      now listens for webglcontextlost: preventDefault (restorable),
+//      the loop stops, a loud report through the GL error sink.
+describe('createWebGL2Renderer: the context-life contract (Task 137)', () => {
+  /** A canvas stub whose getContext returns a raw context stub — the
+   *  non-injected path (acquireWebGL2), so rawContext exists and the
+   *  loseContext/listener wiring engages. The raw stub carries only what
+   *  realGL's constructor probes (getExtension) + the lose_context
+   *  extension double. */
+  function rawContextCanvas(): {
+    canvas: HTMLCanvasElement
+    raw: { getExtension: (name: string) => unknown }
+    loseCalls: string[]
+    lostEvents: Array<[string, (event: Event) => void]>
+    removed: string[]
+  } {
+    const loseCalls: string[] = []
+    const lostEvents: Array<[string, (event: Event) => void]> = []
+    const removed: string[] = []
+    const raw = {
+      getExtension: (name: string) =>
+        name === 'WEBGL_lose_context' ? { loseContext: () => { loseCalls.push('lose') } } : null,
+      getParameter: () => 4096,
+      viewport: () => {},
+    }
+    const canvas = {
+      clientWidth: 800,
+      clientHeight: 600,
+      width: 0,
+      height: 0,
+      getContext: () => raw,
+      addEventListener: (name: string, cb: (event: Event) => void) => { lostEvents.push([name, cb]) },
+      removeEventListener: (name: string) => { removed.push(name) },
+    } as unknown as HTMLCanvasElement
+    return { canvas, raw, loseCalls, lostEvents, removed }
+  }
+
+  it('dispose() loses the raw context (WEBGL_lose_context) and detaches its own listener first', () => {
+    const { canvas, loseCalls, lostEvents, removed } = rawContextCanvas()
+    const errors: string[] = []
+    const renderer = createWebGL2Renderer({
+      canvas,
+      caps: null,
+      observeResize: false,
+      now: () => 0,
+      requestFrame: () => () => {},
+      onGlError: (message) => { errors.push(message) },
+    })
+    expect(lostEvents.length).toBe(1)
+    expect(lostEvents[0][0]).toBe('webglcontextlost')
+    renderer.dispose()
+    // the listener removed BEFORE the loss — the dead renderer stays silent
+    expect(removed).toContain('webglcontextlost')
+    expect(loseCalls).toEqual(['lose'])
+    // the intentional loss must not have fired the "context lost" report
+    expect(errors.filter(e => e.includes('context lost')).length).toBe(0)
+  })
+
+  it('webglcontextlost: preventDefault, the loop stops, the report lands in the error sink', () => {
+    const { canvas, lostEvents } = rawContextCanvas()
+    const errors: string[] = []
+    const renderer = createWebGL2Renderer({
+      canvas,
+      caps: null,
+      observeResize: false,
+      now: () => 0,
+      requestFrame: () => () => {},
+      onGlError: (message) => { errors.push(message) },
+    })
+    let prevented = 0
+    const event = { preventDefault: () => { prevented++ } } as unknown as Event
+    lostEvents[0][1](event)
+    expect(prevented).toBe(1)
+    expect(errors.some(e => e.includes('WebGL context lost'))).toBe(true)
+    // the zombie guard: start() on the dead context refuses with a report
+    errors.length = 0
+    renderer.start()
+    expect(errors.some(e => e.includes('context loss'))).toBe(true)
+  })
+
+  it('dispose() without a raw context (the injected-GL test path) stays a no-op', () => {
+    const { gl } = createRecordingGL()
+    const canvas = fakeCanvas()
+    const renderer = createWebGL2Renderer({
+      canvas,
+      createGL: () => gl,
+      observeResize: false,
+      now: () => 0,
+      requestFrame: () => () => {},
+    })
+    renderer.dispose()
+    expect(typeof renderer.start).toBe('function') // no throw, no loss (nothing to lose)
+  })
+})

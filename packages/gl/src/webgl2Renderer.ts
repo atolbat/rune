@@ -378,6 +378,23 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
   let lastDpr = canvasDpr(canvas, options.dpr)
   let dprPollFrame = 0
   let disposed = false
+  // Task 137 — the CONTEXT-LOSS contract: a lost context makes every GL
+  // call a silent no-op — the canvas stays black while the JS loop
+  // (facade ledgers, pills) keeps "running": the exact "particles gone,
+  // the counter counts" zombie. The listener stops the loop HONESTLY and
+  // reports through the error sink; preventDefault keeps the context
+  // RESTORABLE for a future restoreResources() re-attach (the journal is
+  // the restore source; the auto-restore wiring stays the documented TODO).
+  let contextLost = false
+  const onContextLost = (event: Event): void => {
+    event.preventDefault?.()
+    contextLost = true
+    running = false
+    options.onGlError?.('WebGL context lost — rendering stopped (the browser/driver dropped this canvas\'s context; re-boot the backend toggle to recover)')
+  }
+  if (rawContext !== null && typeof (canvas as { addEventListener?: unknown }).addEventListener === 'function') {
+    (canvas as HTMLCanvasElement).addEventListener('webglcontextlost', onContextLost)
+  }
 
   const [startW, startH] = getCanvasCssSize(canvas)
   resize(startW, startH) // synchronous initial viewport
@@ -771,6 +788,12 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
 
   function start(): void {
     if (running) return
+    // Task 137 — a lost context does not restart: every GL call would be a
+    // silent no-op (the zombie loop — a counting pill over a black canvas).
+    if (contextLost) {
+      options.onGlError?.('renderer.start() after a WebGL context loss — the context is dead; re-boot the renderer on a NEW canvas to recover')
+      return
+    }
     running = true
     scheduleNext()
   }
@@ -778,8 +801,9 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
   function scheduleNext(): void {
     const request = options.requestFrame ?? requestFrameDefault
     cancelScheduled = request(timestamp => {
-      if (!running) return
+      if (!running || contextLost) return
       step(timestamp)
+      if (!running || contextLost) return
       scheduleNext()
     })
   }
@@ -835,6 +859,33 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     // themselves. renderer.dispose() is "close the loop + tear down the
     // ResizeObserver + reset the frame context". Full destruction of the GL
     // context is done by the browser when the page goes away.
+    //
+    // Task 137 — ...except the browser only reclaims the context with the
+    // CANVAS, and a re-booting shell (the vfx backend toggle) detaches the
+    // old canvas but the JS graph (the frame callbacks, the demo state)
+    // can keep it reachable for a long time: every toggle LEAKED a live
+    // context, and browsers cap the simultaneous WebGL contexts per page
+    // (Chrome ~16, some ANGLE stacks fewer) — past the cap the browser
+    // force-loses the least-recently-used context, and the eviction race
+    // can land on the ACTIVE one (a black canvas with a counting loop —
+    // the "the 2nd and further WebGL runs show nothing" report class).
+    // THE FIX: dispose() explicitly loses the context (WEBGL_lose_context)
+    // — the driver resources free NOW, the context count stays at ONE per
+    // live renderer, and a later boot never evicts. GL calls on a lost
+    // context are silently ignored, so the tier teardowns that follow a
+    // renderer.dispose() (the vfx shell's activateDemo → state.dispose)
+    // remain no-ops — harmless by design.
+    if (rawContext !== null) {
+      // OUR listener first: the intentional loss below must not fire the
+      // "context lost" report from THIS (already disposed) renderer.
+      try { (canvas as HTMLCanvasElement).removeEventListener?.('webglcontextlost', onContextLost) } catch { /* best-effort */ }
+      try {
+        const lose = (rawContext as unknown as { getExtension?: (name: string) => { loseContext?: () => void } | null })
+          .getExtension?.('WEBGL_lose_context')
+        lose?.loseContext?.()
+        contextLost = true
+      } catch { /* best-effort — the canvas is going away anyway */ }
+    }
   }
 
   // Caps probing: on the real gl context (if present). Headless mode (createGL

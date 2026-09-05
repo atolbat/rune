@@ -29,10 +29,33 @@
 //   · THE HOOKS: window.__vfxPerf = { tier, capacity, count, ms } — the
 //     probe gate (scripts/task131-sim-probe.mjs) pins the tier + the
 //     frame cost; window.__vfxCounters.embers — the emission counters.
-import { createGpuParticles } from '../../../dist/rune.esm.js?v=136'
+import { createGpuParticles } from '../../../dist/rune.esm.js?v=137'
 
+// Task 137 — the WebGL2 TF budget is now HARDWARE-AWARE: the 16k cap was
+// the SwiftShader/software-GL budget (the container's gate-hostile class:
+// 32k at 1280×800 SwiftShader ≈ 12 fps) — but a REAL GPU carries the SAME
+// 160k as the compute tier (the TF path's per-frame cost is driver-bound,
+// not fill-bound). The user's report — "way fewer particles on WebGL" —
+// was exactly this: a real browser hitting the software-GL budget. Probe
+// the renderer string (UNMASKED_RENDERER_WEBGL — Chrome exposes it for
+// debugging; Firefox 44+ too); a SwiftShader/llvmpipe/software match keeps
+// the conservative 16k, anything else takes the full tier. The probe's
+// own context is lost immediately (the browser's per-page context budget
+// is finite — see the renderer dispose fix in the same task).
 const GPU_CAPACITY = 160_000
-const TF_CAPACITY = 16_000
+const SOFTWARE_GL = (() => {
+  try {
+    if (typeof document === 'undefined') return false
+    const probe = document.createElement('canvas').getContext('webgl2')
+    if (probe === null) return false
+    const dbg = probe.getExtension('WEBGL_debug_renderer_info')
+    const name = dbg !== null ? String(probe.getParameter(dbg.UNMASKED_RENDERER_WEBGL) ?? '') : ''
+    const software = /swiftshader|software|llvmpipe|softpipe|basic render|angle \(google/i.test(name)
+    probe.getExtension('WEBGL_lose_context')?.loseContext()
+    return software
+  } catch { return false }
+})()
+const TF_CAPACITY = SOFTWARE_GL ? 16_000 : 160_000
 const BOX = [46, 22, 46] // the wrap volume (the kiln)
 // Task 134 — the render tier's opt-ins: the bitonic painter's order is
 // ?sort=1 (the additive blend composites order-independently; the network
@@ -55,13 +78,14 @@ const FORCE_EMIT = typeof location !== 'undefined' && new URLSearchParams(locati
 
 export default {
   title: 'GPU Embers',
-  sub: 'the GPGPU tier · 160k compute-simmed, GPU-EMITTED embers (WebGL2: the transform-feedback tier at 16k) · zero per-frame particle uploads',
+  sub: 'the GPGPU tier · 160k compute-simmed, GPU-EMITTED embers (WebGL2: the transform-feedback tier — 160k on real GPUs, 16k on software GL) · zero per-frame particle uploads',
   camera: { yaw: 0.6, pitch: 0.34, dist: 13, orbit: 0.05, target: [0, 4.5, 0] },
 
   make(env) {
     // THE TIER: WebGPU → the compute tier (160k); WebGL2 → the
-    // TRANSFORM-FEEDBACK tier (32k — the software GL's budget). Both are
-    // sim:'gpu' — the facade contract is backend-neutral.
+    // TRANSFORM-FEEDBACK tier (Task 137: hardware-aware — 160k on a real
+    // GPU, 16k on the software-GL class). Both are sim:'gpu' — the facade
+    // contract is backend-neutral.
     const compute = env.backend === 'webgpu'
     const capacity = compute ? GPU_CAPACITY : TF_CAPACITY
     const counters = (typeof window !== 'undefined' && window.__vfxCounters) || {}

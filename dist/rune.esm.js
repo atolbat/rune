@@ -4261,6 +4261,8 @@ function createRealGL(gl, onViewportHeal) {
     }
   }
   let nextProgram = 1;
+  const defaultAttribBindings = new Map;
+  let passVaoActive = false;
   let nextBuffer = 1;
   let nextTexture = 1;
   let nextTarget = 1;
@@ -4353,6 +4355,8 @@ function createRealGL(gl, onViewportHeal) {
   function bindVertexBuffer(bufferId, location2, size, stride, byteOffset, divisor) {
     gl.bindBuffer(gl.ARRAY_BUFFER, buffers.get(bufferId) ?? null);
     gl.enableVertexAttribArray(location2);
+    if (!passVaoActive)
+      defaultAttribBindings.set(location2, bufferId);
     gl.vertexAttribPointer(location2, size, gl.FLOAT, false, stride ?? 0, byteOffset ?? 0);
     gl.vertexAttribDivisor(location2, divisor ?? 0);
   }
@@ -4751,6 +4755,12 @@ function createRealGL(gl, onViewportHeal) {
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
     gl.deleteBuffer(buffer);
     buffers.delete(bufferId);
+    for (const [location2, boundId] of defaultAttribBindings) {
+      if (boundId === bufferId) {
+        gl.disableVertexAttribArray(location2);
+        defaultAttribBindings.delete(location2);
+      }
+    }
   }
   const transformPasses = new Map;
   let nextTransformPass = 1;
@@ -4814,6 +4824,7 @@ void main() {}
     else
       gl.useProgram(record.program);
     gl.bindVertexArray(record.vao);
+    passVaoActive = true;
     const ab = output.attribBuffers;
     if (ab !== undefined) {
       for (let i = 0;i < record.attribLocations.length && i < ab.length; i++) {
@@ -4864,6 +4875,7 @@ void main() {}
     gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
     gl.disable(gl.RASTERIZER_DISCARD);
     gl.bindVertexArray(null);
+    passVaoActive = false;
   }
   function deleteTransformPass(passId) {
     const record = transformPasses.get(passId);
@@ -7831,6 +7843,16 @@ function createWebGL2Renderer(options) {
   let lastDpr = canvasDpr(canvas, options.dpr);
   let dprPollFrame = 0;
   let disposed = false;
+  let contextLost = false;
+  const onContextLost = (event) => {
+    event.preventDefault?.();
+    contextLost = true;
+    running = false;
+    options.onGlError?.("WebGL context lost — rendering stopped (the browser/driver dropped this canvas's context; re-boot the backend toggle to recover)");
+  };
+  if (rawContext !== null && typeof canvas.addEventListener === "function") {
+    canvas.addEventListener("webglcontextlost", onContextLost);
+  }
   const [startW, startH] = getCanvasCssSize(canvas);
   resize(startW, startH);
   const resizeObserver = observeSize(canvas, options);
@@ -8103,15 +8125,21 @@ function createWebGL2Renderer(options) {
   function start() {
     if (running)
       return;
+    if (contextLost) {
+      options.onGlError?.("renderer.start() after a WebGL context loss — the context is dead; re-boot the renderer on a NEW canvas to recover");
+      return;
+    }
     running = true;
     scheduleNext();
   }
   function scheduleNext() {
     const request = options.requestFrame ?? requestFrameDefault;
     cancelScheduled = request((timestamp) => {
-      if (!running)
+      if (!running || contextLost)
         return;
       step(timestamp);
+      if (!running || contextLost)
+        return;
       scheduleNext();
     });
   }
@@ -8153,6 +8181,16 @@ function createWebGL2Renderer(options) {
     for (const rendererFeed of feeds)
       rendererFeed.dispose();
     feeds.clear();
+    if (rawContext !== null) {
+      try {
+        canvas.removeEventListener?.("webglcontextlost", onContextLost);
+      } catch {}
+      try {
+        const lose = rawContext.getExtension?.("WEBGL_lose_context");
+        lose?.loseContext?.();
+        contextLost = true;
+      } catch {}
+    }
   }
   const probedCaps = (() => {
     if (options.caps !== undefined)

@@ -138,6 +138,16 @@ export function createRealGL(
     }
   }
   let nextProgram = 1
+  // Task 137 — the DEFAULT VAO's attrib LEDGER: location → the facade
+  // bufferId bindVertexBuffer last pointed there (the DEFAULT VAO only —
+  // a pass VAO is current during the transform-feedback family and its
+  // locations die with the pass). Kept at BIND time because the GL query
+  // is ambiguous AFTER a delete: getVertexAttrib(BUFFER_BINDING) returns
+  // null for a deleted buffer's location on real contexts (the forensics
+  // probe pinned it — "2:DELETED"), so a post-delete walk could never
+  // match the object; the bind-time map matches by FACADE ID instead.
+  const defaultAttribBindings = new Map<number, number>()
+  let passVaoActive = false
   let nextBuffer = 1
   let nextTexture = 1
   let nextTarget = 1
@@ -249,6 +259,11 @@ export function createRealGL(
   function bindVertexBuffer(bufferId: number, location: number, size: number, stride?: number, byteOffset?: number, divisor?: number): void {
     gl.bindBuffer(gl.ARRAY_BUFFER, buffers.get(bufferId) ?? null)
     gl.enableVertexAttribArray(location)
+    // Task 137 — the enabled-location LEDGER of the DEFAULT VAO (the
+    // deleteBuffer disarm's bookkeeping; see the ledger's declaration
+    // comment). A pass VAO is bound during the transform-feedback family —
+    // its locations live and die with the pass, never with the default VAO.
+    if (!passVaoActive) defaultAttribBindings.set(location, bufferId)
     // M5: feed interleaving — the record's stride/offset (default: tight 0/0).
     gl.vertexAttribPointer(location, size, gl.FLOAT, false, stride ?? 0, byteOffset ?? 0)
     // Task 75: the instance step (star quads: one feed record = one instance).
@@ -887,6 +902,29 @@ export function createRealGL(
     gl.bindBuffer(gl.ARRAY_BUFFER, null)
     gl.deleteBuffer(buffer)
     buffers.delete(bufferId)
+    // Task 137 — THE DANGLING ENABLED ATTRIB (the live "the 2nd WebGL run
+    // shows nothing while the counter counts" class): a vertex attrib
+    // location enabled by bindVertexBuffer KEEPS its vertexAttribPointer
+    // association in the DEFAULT VAO after the buffer is deleted — per the
+    // GLES3/WebGL2 spec the association is not severed by deleteBuffer, and
+    // the next drawArrays with that location still enabled fails with
+    // INVALID_OPERATION ("no buffer is bound to enabled attribute") — the
+    // draw is DROPPED, silently, on strict drivers (ANGLE/D3D, Vulkan GL);
+    // SwiftShader validates only a subset, which is why the software-GL
+    // container mostly rendered through it (the forensics: the GPU particle
+    // tier's records buffer at the 5 instance-attribute locations — the
+    // demo-switch dispose deletes it — the neighbor demos' soup commands
+    // cover 3 locations → 2-4 dangle → every draw dropped). THE FIX: every
+    // LEDGERED location whose last binding IS this buffer gets disabled —
+    // the next command's own binds re-enable what it uses (bindVertexBuffer
+    // enables unconditionally). The ledger is maintained at BIND time (the
+    // post-delete GL query is ambiguous — see the declaration comment).
+    for (const [location, boundId] of defaultAttribBindings) {
+      if (boundId === bufferId) {
+        gl.disableVertexAttribArray(location)
+        defaultAttribBindings.delete(location)
+      }
+    }
   }
 
   // ─── Task 132 — the TRANSFORM-FEEDBACK family ────────────────────────────
@@ -1007,6 +1045,10 @@ export function createRealGL(
     // rule (a TF output buffer must not overlap any vertex binding) is
     // satisfied by construction; the renderer re-binds its own per draw.
     gl.bindVertexArray(record.vao)
+    // Task 137 — the pass VAO is current: bindVertexBuffer's location
+    // bookkeeping stays OUT of the default VAO's ledger (the pass's
+    // locations die with the pass; see deleteBuffer's disarm comment).
+    passVaoActive = true
     // The attribute inputs: per-declaration-entry bufferId → the location
     // resolved at creation. bindVertexBuffer re-establishes enable + the
     // pointer + the divisor (the same path the render executor uses per
@@ -1070,6 +1112,7 @@ export function createRealGL(
     gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null)
     gl.disable(gl.RASTERIZER_DISCARD)
     gl.bindVertexArray(null)
+    passVaoActive = false
   }
 
   function deleteTransformPass(passId: number): void {
