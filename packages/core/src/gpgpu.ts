@@ -109,7 +109,14 @@ export interface TfRunBindings {
  *  vertex binding — the texture is the authoritative state, moved through
  *  a PBO round-trip). */
 export interface TfComputeFacade {
-  createBuffer(data: Float32Array): number
+  /** Task 140 — the usage hint: 'dynamic' for the per-frame-rewritten
+   *  stream-output buffers (DYNAMIC_DRAW under WebGL2); 'static' (the
+   *  default) for one-shot uploads. */
+  createBuffer(data: Float32Array, usage?: 'static' | 'dynamic'): number
+  /** Task 140 — the diagnostic readback: `dst.length` floats from a buffer
+   *  (COPY_READ_BUFFER under WebGL2 — one-shot diagnostics, a synchronous
+   *  stall). false = refused — "unknown", not "degenerate". */
+  readBuffer(bufferId: number, dst: Float32Array): boolean
   updateBuffer(bufferId: number, data: Float32Array, byteOffset?: number): void
   createTexture(
     width: number,
@@ -275,8 +282,12 @@ export interface TfComputeTier {
   /** The wrapped facade (raw passthrough for the surface this tier does
    *  not own — draw commands, targets, journal wrapping). */
   readonly backend: TfComputeFacade
-  /** A data buffer, tracked for dispose(). */
-  createBuffer(init: Float32Array): number
+  /** A data buffer, tracked for dispose(). Task 140 — `usage:'dynamic'`
+   *  for the per-frame stream-output buffers. */
+  createBuffer(init: Float32Array, usage?: 'static' | 'dynamic'): number
+  /** Task 140 — the diagnostic readback (a one-shot synchronous stall;
+   *  false = refused/unknown). */
+  readBuffer(bufferId: number, dst: Float32Array): boolean
   updateBuffer(bufferId: number, data: Float32Array, byteOffset?: number): void
   /** A float texture (the TF tier's state store — 'rgba32f' for the
    *  simulation state), tracked for dispose(). */
@@ -319,10 +330,13 @@ export function createTfTier(backend: TfComputeFacade): TfComputeTier {
   return {
     kind: 'transform-feedback',
     backend,
-    createBuffer(init) {
-      const id = backend.createBuffer(init)
+    createBuffer(init, usage) {
+      const id = backend.createBuffer(init, usage)
       resources.add(() => backend.deleteBuffer(id))
       return id
+    },
+    readBuffer(bufferId, dst) {
+      return backend.readBuffer(bufferId, dst)
     },
     updateBuffer(bufferId, data, byteOffset) {
       backend.updateBuffer(bufferId, data, byteOffset)

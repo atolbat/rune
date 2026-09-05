@@ -50,7 +50,8 @@ function ssboBackend(log: string[]) {
 function tfBackend(log: string[]) {
   let buf = 1, tex = 1, pass = 1
   return {
-    createBuffer: (init: Float32Array) => { const id = buf++; log.push(`createBuffer(${init.length})`); return id },
+    createBuffer: (init: Float32Array, usage?: 'static' | 'dynamic') => { const id = buf++; log.push(`createBuffer(${init.length}${usage === 'dynamic' ? ',dynamic' : ''})`); return id },
+    readBuffer: (id: number, dst: Float32Array) => { log.push(`readBuffer(${id},${dst.length})`); return true },
     updateBuffer: (id: number) => log.push(`updateBuffer(${id})`),
     createTexture: (w: number, h: number, opts?: { format?: string }) => {
       const id = tex++

@@ -42,7 +42,24 @@
 //     cull, softwareGL } — the probe gates pin the tier + the frame cost
 //     + the hardware-policy branch; window.__vfxCounters.embers — the
 //     emission counters.
-import { createGpuParticles } from '../../../dist/rune.esm.js?v=139'
+import { createGpuParticles } from '../../../dist/rune.esm.js?v=140'
+
+// Task 140 — THE AUTO-FALLBACK CHANNEL (the real-GPU invisible-particles
+// report: "no freeze anymore, but the particles are gone while the counter
+// keeps counting"). The container validated the whole pipeline end-to-end
+// (records SANE, the instanced draw issued, the framebuffer warm) — so a
+// live-driver drop of the transform-feedback write (or a draw-side
+// staleness the software raster never sees) is the remaining suspect
+// class, and a blank screen tells the user nothing. THE CONTRACT: when this
+// demo's own two-stage self-check (the tier's one-shot records readback at
+// frame ~30, then the in-frame canvas pixel sample at frame ~45) verdicts
+// the GPU pipeline BROKEN on this driver, the demo sets
+// window.__embersFallback and asks the shell for a one-time re-make — the
+// fresh make reads the flag and takes the CONSERVATIVE path (emit:'cpu',
+// cull off — the Task-137-era configuration the user's GPU demonstrably
+// rendered), with a console warning that says exactly what happened and
+// how to retry the GPU pipeline (?emit=1). A reload clears the flag.
+const FALLBACK_FLAG = '__embersFallback'
 
 // Task 137 — the WebGL2 TF budget is now HARDWARE-AWARE: the 16k cap was
 // the SwiftShader/software-GL budget (the container's gate-hostile class:
@@ -93,6 +110,12 @@ const FORCE_CULL_OFF = flagOff('cull')
 // GL). The software-GL class keeps the proven CPU defaults (Task 135's
 // queue-serialization constraint) — the flags above override both.
 const TF_GPU_PIPELINE = !SOFTWARE_GL
+// Task 140 — the one-time conservative re-make: after a self-check verdict
+// the flag sticks until the page reloads (the fallback session stays
+// conservative — no flapping between modes mid-run). READ AT MAKE TIME —
+// the flag lands DURING a live session (the re-make must see it; a
+// module-scope constant would freeze the import-time value).
+const fellBack = () => typeof window !== 'undefined' && window[FALLBACK_FLAG] === true
 
 export default {
   title: 'GPU Embers',
@@ -116,8 +139,9 @@ export default {
     // takes it by default on a real GPU (the hardware oracle) and keeps the
     // conservative CPU path on the software-GL class; the value-aware
     // flags override both branches in both directions.
-    const emitGpu = (compute || TF_GPU_PIPELINE || FORCE_EMIT) && !FORCE_EMIT_OFF
-    const cullOn = (compute || TF_GPU_PIPELINE || FORCE_CULL) && !FORCE_CULL_OFF
+    const fell = fellBack()
+    const emitGpu = (compute || TF_GPU_PIPELINE || FORCE_EMIT) && !FORCE_EMIT_OFF && !fell
+    const cullOn = (compute || TF_GPU_PIPELINE || FORCE_CULL) && !FORCE_CULL_OFF && !fell
     const EMBER_S = {
       shape: { kind: 'disc', origin: [0, -1.5, 0], axis: [0, 1, 0], radius: [2, 16] },
       velocity: { mode: 'fixed', dir: [0.06, 1, 0.04] },
@@ -207,10 +231,72 @@ export default {
     // Task 138 — the policy fields: `emit`, `cull`, `softwareGL` pin the
     // hardware branch the page took (the probe asserts the software leg
     // stays conservative in the container and the flags flip it).
-    const perf = { tier: 'gpu', capacity, count: 0, ms: 0, emit: emitGpu ? 'gpu' : 'cpu', cull: cullOn, sort: WANT_SORT, softwareGL: SOFTWARE_GL }
+    // Task 140 — `fallback: 'selfcheck'` when the one-time conservative
+    // re-make happened (the two-stage self-check verdicted the GPU
+    // pipeline broken on this driver).
+    const perf = { tier: 'gpu', capacity, count: 0, ms: 0, emit: emitGpu ? 'gpu' : 'cpu', cull: cullOn, sort: WANT_SORT, softwareGL: SOFTWARE_GL, ...(fell ? { fallback: 'selfcheck' } : {}) }
     if (typeof window !== 'undefined') window.__vfxPerf = perf
     let msAvg = 16
     let last = 0
+
+    // ── Task 140 — THE TWO-STAGE SELF-CHECK + THE AUTO-FALLBACK ─────────
+    //    Stage 1 (records): the TF tier's one-shot diagnostic (frame ~30) —
+    //    it read the records buffer back and verdicted it (a driver that
+    //    dropped the transform-feedback write leaves it degenerate while
+    //    the CPU ledger counts).
+    //    Stage 2 (pixels): at frame ~45 — with records SANE or unreadable
+    //    — sample the CANVAS itself, in-frame, right after the ember draw:
+    //    a live additive ember swarm at count > 1000 leaves bright pixels
+    //    in the center; a blank canvas with a counting ledger = the draw
+    //    or the raster side of the pipeline died. The sample reads the
+    //    SAME WebGL2 context the renderer owns (canvas.getContext returns
+    //    the cached one) — a one-shot wrapper on drawArraysInstanced that
+    //    snapshots the framebuffer AFTER the ember draw (pre-swap, when
+    //    the content is guaranteed present), then removes itself.
+    //    THE REACTION: set the fallback flag, tell the console the whole
+    //    story, and ask the shell for a one-time re-make (window.
+    //    __vfxRemakeRequested — the main harness polls it at frame top).
+    //    Gates: the compute leg never checks (SSBOs are not the class);
+    //    the already-fallen-back session never checks; a LOW count never
+    //    verdicts (the swarm might legitimately be empty).
+    let checkStage = 0 // 0 = waiting for the records verdict, 1 = pixels, 2 = done
+    let pixelsArmed = false
+    let pixelsWarm = -1
+    let frameCount = 0
+    function armPixelCheck() {
+      if (pixelsArmed || compute) return
+      pixelsArmed = true
+      const canvasEl = document.querySelector('canvas')
+      const gl2 = canvasEl != null ? canvasEl.getContext('webgl2') : null
+      if (gl2 == null) return
+      const RW = Math.min(256, gl2.drawingBufferWidth)
+      const RH = Math.min(256, gl2.drawingBufferHeight)
+      const px = new Uint8Array(RW * RH * 4)
+      const origDraw = gl2.drawArraysInstanced.bind(gl2)
+      const unwrap = () => { gl2.drawArraysInstanced = origDraw }
+      gl2.drawArraysInstanced = function (mode, first, count, instances) {
+        const r = origDraw(mode, first, count, instances)
+        if (instances > 1000) {
+          unwrap()
+          try {
+            gl2.readPixels(Math.floor((gl2.drawingBufferWidth - RW) / 2), Math.floor((gl2.drawingBufferHeight - RH) / 2), RW, RH, gl2.RGBA, gl2.UNSIGNED_BYTE, px)
+            let warm = 0
+            for (let i = 0; i < px.length; i += 4) {
+              if (px[i] + px[i + 1] + px[i + 2] > 90) warm++
+            }
+            pixelsWarm = warm
+          } catch { pixelsWarm = -1 }
+        }
+        return r
+      }
+    }
+    function triggerFallback(reason) {
+      if (fellBack() || compute) return
+      window[FALLBACK_FLAG] = true
+      window.__vfxRemakeRequested = true
+      perf.fallback = 'selfcheck'
+      console.warn(`[rune/vfx] GPU Embers: ${reason} — this driver is dropping the WebGL2 transform-feedback pipeline. Falling back ONCE to the conservative path (CPU emission, no cull — the proven configuration). Reload to retry the GPU pipeline, or force it with ?emit=1&cull=1.`)
+    }
 
     return {
       frame(ctx) {
@@ -221,6 +307,30 @@ export default {
         // from the external buffer.
         embers.facade.advance(ctx.dt)
         gpuBackend.step(ctx.dt, { forward: ctx.basis.forward, viewProj: ctx.mvp })
+        // Task 140 — the self-check ladder: stage 1 polls the tier's
+        // one-shot records verdict; stage 2 arms the in-frame pixel
+        // sample, then polls it; either failure triggers the one-time
+        // conservative re-make.
+        frameCount++
+        if (!fellBack() && !compute) {
+          if (checkStage === 0 && gpuBackend.diagnostics !== undefined && gpuBackend.diagnostics.checked) {
+            const d = gpuBackend.diagnostics
+            if (!d.sane) {
+              triggerFallback(`the GPU tier's records read back degenerate at frame ${d.atFrame} (count ${d.count}, zeroRows ${d.zeroRows}, nan ${d.nan})`)
+            } else {
+              checkStage = 1
+            }
+          }
+          if (checkStage === 1 && frameCount >= 45) {
+            if (!pixelsArmed) armPixelCheck()
+            else if (pixelsWarm >= 0) {
+              if (pixelsWarm === 0 && embers.facade.count > 1000) {
+                triggerFallback('the ember draw left ZERO bright pixels in the canvas while the ledger counted live particles')
+              }
+              checkStage = 2
+            }
+          }
+        }
         // the perf: a 30-frame moving average of the frame callback's own
         // cost (the sim + the step — the rasterization rides on top)
         const now = performance.now()

@@ -80,6 +80,14 @@ export interface GpuParticles {
   readonly recordsBufferId: number
   /** The state buffer id (the parity probes read it back). */
   readonly stateBufferId: number
+  /** Task 140 — the WebGL2 TF tier's ONE-SHOT self-diagnostic (present on
+   *  the TF tier only; undefined on the compute tier — SSBO writes are not
+   *  the silent-drop class): after ~30 stepped frames it read the records
+   *  buffer back once and verdicted it — `checked && !sane` = the records
+   *  the draw reads are degenerate while the CPU ledger counts (a driver
+   *  dropped/poisoned the transform-feedback write). The consumer may
+   *  rebuild the tier in a conservative mode when it flips. */
+  readonly diagnostics?: { readonly checked: boolean; readonly readable: boolean; readonly sane: boolean; readonly atFrame: number; readonly count: number; readonly zeroRows: number; readonly nan: number; readonly halfMax: number; readonly caMax: number }
   /** Full teardown (the facade's own dispose also cleans). */
   dispose(): void
 }

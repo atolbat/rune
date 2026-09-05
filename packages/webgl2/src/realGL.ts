@@ -247,10 +247,20 @@ export function createRealGL(
     return loc
   }
 
-  function createBuffer(data: Float32Array): number {
+  /** The buffer usage hint. Task 140 — the GPGPU TF tier's buffers are
+   *  REWRITTEN EVERY FRAME (a TF pass's stream output, then read back as a
+   *  vertex/PBO source on the same frame) — 'dynamic' maps to DYNAMIC_DRAW,
+   *  the semantically correct hint for that cycle. 'static' (the default,
+   *  the historical behavior) keeps STATIC_DRAW for the one-shot upload
+   *  buffers (geometry, feeds). ANGLE's buffer-backends read the hint when
+   *  they pick the D3D11/Vulkan resource type; a frame-rewritten 'static'
+   *  buffer takes the immutable-leaning path on some backends — the
+   *  dual-use (write+read per frame) works on both, but the dynamic hint
+   *  is what the usage was invented for. */
+  function createBuffer(data: Float32Array, usage: 'static' | 'dynamic' = 'static'): number {
     const buffer = gl.createBuffer()
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer)
-    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW)
+    gl.bufferData(gl.ARRAY_BUFFER, data, usage === 'dynamic' ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW)
     // Task 139 — the TF-capture overlap discipline: WebGL2 forbids a buffer
     // sitting on the generic ARRAY_BUFFER binding at the moment it is
     // captured by bindBufferBase(TRANSFORM_FEEDBACK_BUFFER) — the capture
@@ -290,6 +300,28 @@ export function createRealGL(
     gl.bindBuffer(gl.ARRAY_BUFFER, buffers.get(bufferId) ?? null)
     gl.bufferSubData(gl.ARRAY_BUFFER, byteOffset, data)
     gl.bindBuffer(gl.ARRAY_BUFFER, null)
+  }
+
+  /** Task 140 — THE GPU-SIDE READBACK (the diagnostics surface): reads
+   *  `dst.length` floats from a buffer into `dst` through COPY_READ_BUFFER
+   *  (a target neither the vertex path nor the PBO path ever leaves bound).
+   *  One producer's truth, for the GPGPU tiers' self-diagnostics and the
+   *  parity probes — a SYNCHRONOUS stall, so the callers keep it one-shot
+   *  (a diagnostic frame), never per-frame. Returns false (and leaves dst
+   *  untouched) when the read is refused — a deleted buffer, a driver
+   *  error — the caller treats "unreadable" as "unknown", not "degenerate". */
+  function readBuffer(bufferId: number, dst: Float32Array): boolean {
+    const buffer = buffers.get(bufferId)
+    if (buffer === undefined) return false
+    gl.bindBuffer(gl.COPY_READ_BUFFER, buffer)
+    try {
+      gl.getBufferSubData(gl.COPY_READ_BUFFER, 0, dst)
+    } catch {
+      gl.bindBuffer(gl.COPY_READ_BUFFER, null)
+      return false
+    }
+    gl.bindBuffer(gl.COPY_READ_BUFFER, null)
+    return true
   }
 
   function setUniformMatrix4(programId: number, name: string, values: Float32Array): void {
@@ -1186,6 +1218,7 @@ export function createRealGL(
     createBuffer,
     bindVertexBuffer,
     updateBuffer,
+    readBuffer,
     setUniformMatrix4,
     setUniform4fv,
     setUniform3fv,

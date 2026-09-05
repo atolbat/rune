@@ -57,7 +57,7 @@ export type DeclOp =
   | { readonly kind: 'destroyTexture'; readonly id: number }
   | { readonly kind: 'createProgram'; readonly id: number; readonly vertex: string; readonly fragment: string }
   | { readonly kind: 'destroyProgram'; readonly id: number }
-  | { readonly kind: 'createBuffer'; readonly id: number; readonly data: Float32Array }
+  | { readonly kind: 'createBuffer'; readonly id: number; readonly data: Float32Array; readonly usage?: 'static' | 'dynamic' }
   | { readonly kind: 'destroyBuffer'; readonly id: number }
   | { readonly kind: 'createTarget'; readonly id: number; readonly textureId: number; readonly width: number; readonly height: number; readonly depth: boolean; readonly color: ClearColor }
   | { readonly kind: 'destroyTarget'; readonly id: number }

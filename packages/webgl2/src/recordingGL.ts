@@ -43,9 +43,13 @@ export function createRecordingGL(): RecordingGL {
       return nextProgram++
     },
     useProgram: id => calls.push(`useProgram(${id})`),
-    createBuffer: data => {
-      calls.push(`createBuffer(${data.length})`)
+    createBuffer: (data, usage) => {
+      calls.push(usage === 'dynamic' ? `createBuffer(${data.length},dynamic)` : `createBuffer(${data.length})`)
       return nextBuffer++
+    },
+    readBuffer: (bufferId, dst) => {
+      calls.push(`readBuffer(${bufferId},${dst.length})`)
+      return true
     },
     updateBuffer: (bufferId, data, byteOffset = 0) =>
       calls.push(`updateBuffer(${bufferId},${data.length},${byteOffset})`),

@@ -66,6 +66,18 @@ export interface GpuParticlesTf {
   /** The TF state-pass buffer (the TEXTURE is the authoritative state —
    *  this buffer is its per-frame staging; exposed for the parity probes). */
   readonly stateBufferId: number
+  /** Task 140 — THE ONE-SHOT SELF-DIAGNOSTIC (the real-GPU invisible-particles
+   *  report class): after ~30 stepped frames the tier reads the FIRST 64
+   *  floats of the records buffer back (readBuffer — one synchronous stall,
+   *  once) and scans them for the DEGENERATE signature (all-zero or NaN
+   *  rows while the CPU ledger holds live particles — the transform
+   *  feedback's write silently dropped or poisoned by a driver, while the
+   *  emission itself keeps counting on the CPU). The consumer reads this
+   *  once per frame and can rebuild the tier in a conservative mode when
+   *  `sane === false` (the demo's auto-fallback). `checked === false` —
+   *  not yet sampled (too few frames); `readable === false` — the readback
+   *  itself was refused ("unknown", NOT a failure verdict). */
+  readonly diagnostics: { readonly checked: boolean; readonly readable: boolean; readonly sane: boolean; readonly atFrame: number; readonly count: number; readonly zeroRows: number; readonly nan: number; readonly halfMax: number; readonly caMax: number }
   /** Full teardown. */
   dispose(): void
 }
@@ -138,10 +150,16 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
   const rampTex = gpu.createTexture(rampW, 1, { format: 'rgba32f' })
   gpu.texSubImage2D(rampTex, 0, 0, rampW, 1, lut) // a Float32Array — FLOAT uploads demand it (ANGLE)
 
-  // ── the buffers: the TF state staging, the records, the map (tracked) ─
-  const stateOut = gpu.createBuffer(new Float32Array(W * H * 4))
-  const records = gpu.createBuffer(new Float32Array(capacity * 16))
-  const mapBuf = gpu.createBuffer(new Float32Array(capacity))
+  // ── the buffers: the TF state staging, the records, the map (tracked).
+  //    Task 140 — THE DYNAMIC HINT: every buffer in this tier is REWRITTEN
+  //    EVERY FRAME (a TF pass's stream output, read back the same frame as a
+  //    vertex/PBO source) — 'dynamic' (DYNAMIC_DRAW) is the semantically
+  //    correct usage for that cycle; 'static' (the old default) takes the
+  //    immutable-leaning allocation path on some ANGLE backends — the exact
+  //    class a per-frame dual-use buffer should not ride.
+  const stateOut = gpu.createBuffer(new Float32Array(W * H * 4), 'dynamic')
+  const records = gpu.createBuffer(new Float32Array(capacity * 16), 'dynamic')
+  const mapBuf = gpu.createBuffer(new Float32Array(capacity), 'dynamic')
 
   // ── Task 135 — THE GPU EMISSION (emit:'gpu'): the append pass — the
   //    GLSL twin of the WGSL emit entry, vertex i = the window-local
@@ -163,7 +181,7 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
     outputs: GPU_GL_ADVANCE_OUTPUTS, // the same 20-float state row the advance pass writes
     uniforms: GPU_GL_EMIT_UNIFORMS,
   }) : -1
-  const emitOut = emitOn ? gpu.createBuffer(new Float32Array(capacity * 20)) : -1
+  const emitOut = emitOn ? gpu.createBuffer(new Float32Array(capacity * 20), 'dynamic') : -1
   const emitUni = gpu.scratch(GPU_GL_EMIT_UNIFORMS.reduce((n, u) => n + u.size, 0)).f32
   if (emitOn) packGlEmitStatic(emitUni, readGpuEmitConfig(facade.spawnerDesc))
 
@@ -192,7 +210,7 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
   const maxPadN = gpuSortPadCount(capacity)
   const pairsH = gpuGlPairsTextureH(capacity)
   const pairsTex = tiered ? gpu.createTexture(W, pairsH, { format: 'rgba32f' }) : -1
-  const pairsOut = tiered ? gpu.createBuffer(new Float32Array(maxPadN * 4)) : -1
+  const pairsOut = tiered ? gpu.createBuffer(new Float32Array(maxPadN * 4), 'dynamic') : -1
   const sortKeysPass = tiered ? gpu.createPass({
     vertex: gpuSimGlSortKeysGlsl(),
     outputs: GPU_GL_SORT_OUTPUTS,
@@ -267,6 +285,66 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
     const K = GPU_GL_SORTKEYS_F
     skUni[K.radiusK] = gpuRampMaxSize(facade.ramp.points) * 0.5
   }
+
+  // ── Task 140 — THE ONE-SHOT RECORDS DIAGNOSTIC state ─────────────────
+  //    (the real-GPU "particles invisible while the counter grows" report
+  //    class: the container's pipeline validates end-to-end — records SANE,
+  //    the draw issued, the framebuffer warm — so a live-driver drop of the
+  //    TF write is the remaining suspect; this surfaces it ON the user's
+  //    machine instead of a silent blank screen). The scan mirrors the
+  //    forensic probes' degenerate signature: a row of 16 floats is ZERO
+  //    when every float is 0 (the cull sentinel OR a dropped write — told
+  //    apart by how many: the sentinels zero only the off-screen fraction);
+  //    NaN anywhere is garbage, full stop.
+  const DIAG_AT = 30
+  let diagDone = false
+  const diag = { checked: false, readable: true, sane: true, atFrame: 0, count: 0, zeroRows: 0, nan: 0, halfMax: 0, caMax: 0 }
+  const diagScratch = new Float32Array(64) // 4 record rows
+
+  function runDiagnostics(frame: number, count: number): void {
+    diagDone = true
+    diag.atFrame = frame
+    diag.count = count
+    const read = gpu.readBuffer(records, diagScratch)
+    diag.checked = true
+    diag.readable = read
+    if (!read) return // "unknown", not "degenerate" — no verdict
+    let zeroRows = 0
+    let nan = 0
+    let halfMax = 0
+    let caMax = 0
+    const rows = Math.floor(diagScratch.length / 16)
+    for (let i = 0; i < rows; i++) {
+      const b = i * 16
+      let allZero = true
+      for (let k = 0; k < 16; k++) {
+        const v = diagScratch[b + k]
+        if (v !== 0) { allZero = false; if (Number.isNaN(v)) nan++ }
+      }
+      if (allZero) { zeroRows++; continue }
+      const half = Math.abs(diagScratch[b + 10])
+      const ca = Math.abs(diagScratch[b + 9])
+      if (half > halfMax) halfMax = half
+      if (ca > caMax) caMax = ca
+    }
+    diag.zeroRows = zeroRows
+    diag.nan = nan
+    diag.halfMax = halfMax
+    diag.caMax = caMax
+    // THE VERDICT: live particles on the ledger but every sampled row
+    // zero/NaN — the records the DRAW reads are degenerate (the sentinels
+    // zero only the off-screen fraction; 4 all-zero rows of 4 at a count
+    // ≥ 64 rows means the write never landed or was poisoned).
+    const rowsSeen = rows - zeroRows
+    diag.sane = !(nan > 0 || (count >= rows * 16 && rowsSeen === 0))
+    if (!diag.sane) {
+      console.warn(
+        `[rune/particles] GPGPU TF diagnostics: the records buffer read back DEGENERATE at frame ${frame} (count ${count}, zeroRows ${zeroRows}/${rows}, nan ${nan}) — the transform-feedback write was dropped or poisoned on this driver; the consumer should fall back to the conservative path (emit:'cpu', render.cull off).`,
+      )
+    }
+  }
+
+  let frameIndex = 0
 
   function step(dt: number, camera?: GpuRenderCamera): void {
     const count = facade.count
@@ -426,12 +504,21 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
         uniformData: packUni,
       } satisfies TfRunBindings)
     }
+
+    // Task 140 — THE ONE-SHOT DIAGNOSTIC: after the pack of the 30th busy
+    //    frame (the records fresh in the buffer, count ≥ 64 floats of
+    //    sample context). One synchronous stall for the tier's lifetime.
+    frameIndex++
+    if (!diagDone && frameIndex >= DIAG_AT && count >= diagScratch.length) {
+      runDiagnostics(frameIndex, count)
+    }
   }
 
   return {
     step,
     get recordsBufferId() { return records },
     get stateBufferId() { return stateOut },
+    get diagnostics() { return diag },
     dispose() {
       gpu.dispose()
       ho.attached = false

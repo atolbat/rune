@@ -39,6 +39,7 @@ function mockGL(): MockCallLog {
   let vao = 0
   let linkedProgram: unknown = null
   let currentArrayBuffer: { id?: number } | null = null
+  let currentCopyReadBuffer: { id?: number; data?: Float32Array } | null = null
   const attribBindings = new Map<number, { id?: number } | null>()
   const gl = {
     // constants realGL reads
@@ -51,6 +52,8 @@ function mockGL(): MockCallLog {
     VERTEX_SHADER: 0x8b31, FRAGMENT_SHADER: 0x8b30, LINK_STATUS: 0x8b82, COMPILE_STATUS: 0x8b81,
     RASTERIZER_DISCARD, TRANSFORM_FEEDBACK, TRANSFORM_FEEDBACK_BUFFER, INTERLEAVED_ATTRIBS,
     PIXEL_UNPACK_BUFFER, ARRAY_BUFFER, POINTS,
+    // Task 140 — the usage hint + the readback path's constants
+    COPY_READ_BUFFER: 36662, STATIC_DRAW: 35044, DYNAMIC_DRAW: 35048,
     RGBA8: 0x8058, RGBA16F: 0x881a, RGBA32F: 0x8816, RGBA: 0x1908, UNSIGNED_BYTE: 0x1401, HALF_FLOAT: 0x140b, FLOAT: 0x1406,
     NEAREST: 0x2600, LINEAR: 0x2601, TEXTURE_MIN_FILTER: 0x2801, TEXTURE_MAG_FILTER: 0x2800,
     TEXTURE_WRAP_S: 0x2802, TEXTURE_WRAP_T: 0x2803, CLAMP_TO_EDGE: 0x812f,
@@ -86,11 +89,26 @@ function mockGL(): MockCallLog {
     createBuffer: () => ({ id: ++buffer }),
     deleteBuffer: (b: unknown) => calls.push(`deleteBuffer(${(b as { id?: number }).id})`),
     bindBuffer: (target: number, b: unknown) => {
-      calls.push(`bindBuffer(${target === PIXEL_UNPACK_BUFFER ? 'PBO' : target === ARRAY_BUFFER ? 'ARRAY' : target},${(b as { id?: number } | null)?.id ?? 'null'})`)
+      calls.push(`bindBuffer(${target === PIXEL_UNPACK_BUFFER ? 'PBO' : target === 36662 ? 'COPY_READ' : target === ARRAY_BUFFER ? 'ARRAY' : target},${(b as { id?: number } | null)?.id ?? 'null'})`)
       if (target === ARRAY_BUFFER) currentArrayBuffer = b as { id?: number } | null
+      if (target === 36662) currentCopyReadBuffer = b as { id?: number; data?: Float32Array } | null
     },
-    bufferData: () => {},
+    // Task 140 — the contents ride the object (the readBuffer round-trip
+    // tests); the usage lands in the call log (the hint contract).
+    bufferData: (target: number, data: Float32Array, usage: number) => {
+      const b = currentArrayBuffer as { id?: number; data?: Float32Array } | null
+      if (b != null) b.data = data
+      calls.push(`bufferData(${data.length},${usage === 35048 ? 'DYNAMIC_DRAW' : 'STATIC_DRAW'})`)
+    },
     bufferSubData: () => {},
+    getBufferSubData: (target: number, srcByteOffset: number, dst: Float32Array) => {
+      const b = (currentCopyReadBuffer ?? null) as { id?: number; data?: Float32Array } | null
+      calls.push(`getBufferSubData(${(b as { id?: number } | null)?.id ?? 'null'},${srcByteOffset},${dst.length})`)
+      if (b?.data != null) {
+        const src = b.data.subarray(srcByteOffset / 4, srcByteOffset / 4 + dst.length)
+        dst.set(src)
+      }
+    },
     // Task 137 — the disarm tests' introspection: the attrib→buffer
     // associations as vertexAttribPointer captures them (the CURRENT
     // ARRAY_BUFFER binding — the GLES3 semantics; mock-level approximation,
@@ -487,5 +505,46 @@ describe('recordingGL: the transform-feedback family', () => {
     expect(calls).toContain('deleteTransformPass(1)')
     gl.texSubImage2DBuffer(1, 0, 0, 64, 4, buffer, 16)
     expect(calls).toContain('texSubImage2DBuffer(1,0,0,64,4,buf:1,off:16)')
+  })
+})
+
+// ─── Task 140 — the usage hint + the readback surface ────────────────────
+
+describe('realGL: Task 140 — the buffer usage hint + the readback', () => {
+  test('createBuffer defaults to STATIC_DRAW; the dynamic hint maps to DYNAMIC_DRAW', () => {
+    const { calls, gl } = mockGL()
+    const facade = createRealGL(gl)
+    facade.createBuffer(new Float32Array(8))
+    facade.createBuffer(new Float32Array(8), 'dynamic')
+    expect(calls).toContain('bufferData(8,STATIC_DRAW)')
+    expect(calls).toContain('bufferData(8,DYNAMIC_DRAW)')
+    // the ARRAY_BUFFER discipline holds for BOTH paths (the Task 139 contract)
+    const tail = calls.filter(c => c.startsWith('bindBuffer(ARRAY'))
+    expect(tail[tail.length - 1]).toBe('bindBuffer(ARRAY,null)')
+  })
+
+  test('readBuffer round-trips the contents through COPY_READ_BUFFER and restores the binding', () => {
+    const { calls, gl } = mockGL()
+    const facade = createRealGL(gl)
+    const src = new Float32Array([1, 2, 3, 4, 5, 6, 7, 8])
+    const id = facade.createBuffer(src)
+    const dst = new Float32Array(8)
+    const ok = facade.readBuffer(id, dst)
+    expect(ok).toBe(true)
+    expect(Array.from(dst)).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
+    // the read rode COPY_READ (never ARRAY — the TF-capture discipline),
+    // and the binding is restored to null after the read
+    expect(calls.filter(c => c.startsWith('bindBuffer(COPY_READ')).pop()).toBe('bindBuffer(COPY_READ,null)')
+    expect(calls.some(c => c.startsWith('getBufferSubData('))).toBe(true)
+  })
+
+  test('readBuffer returns false for a deleted buffer (unknown, not degenerate)', () => {
+    const { gl } = mockGL()
+    const facade = createRealGL(gl)
+    const id = facade.createBuffer(new Float32Array(4))
+    facade.deleteBuffer(id)
+    const dst = new Float32Array(4)
+    expect(facade.readBuffer(id, dst)).toBe(false)
+    expect(Array.from(dst)).toEqual([0, 0, 0, 0])
   })
 })

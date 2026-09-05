@@ -23,7 +23,16 @@ export type GLTextureFormat = 'rgba8' | 'rgba16f' | 'rgba32f'
 export interface GLFacade {
   createProgram(vertex: string, fragment: string): number
   useProgram(programId: number): void
-  createBuffer(data: Float32Array): number
+  /** Task 140 — the usage hint: 'dynamic' (DYNAMIC_DRAW) for a buffer the
+   *  GPU rewrites every frame (the GPGPU TF tier's stream-output buffers,
+   *  read back as vertex/PBO sources the same frame); 'static' (the
+   *  default, the historical behavior) for one-shot uploads. */
+  createBuffer(data: Float32Array, usage?: 'static' | 'dynamic'): number
+  /** Task 140 — the GPU-side readback (a diagnostics surface): `dst.length`
+   *  floats from the buffer into `dst`, through COPY_READ_BUFFER. A
+   *  SYNCHRONOUS stall — one-shot diagnostic use, never per-frame. false =
+   *  refused (deleted buffer / driver error) — "unknown", not "degenerate". */
+  readBuffer(bufferId: number, dst: Float32Array): boolean
   /** M5 (Task 73): dynamic buffer update (feed dual-bind) —
    *  bufferSubData on top of the existing storage. The feed renderer
    *  calls it once per frame with a dirty range of records. */

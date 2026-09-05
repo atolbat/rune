@@ -151,8 +151,10 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
     // ─── Derived state: pass-through raw ids, WITHOUT the journal ─────────
     createProgram: (vertex, fragment) => raw.createProgram(vertex, fragment),
     useProgram: programId => raw.useProgram(programId),
-    createBuffer: data => raw.createBuffer(data),
+    createBuffer: (data, usage) => raw.createBuffer(data, usage),
     bindVertexBuffer: (bufferId, location, size, stride, byteOffset, divisor) => raw.bindVertexBuffer(bufferId, location, size, stride, byteOffset, divisor),
+    // Task 140 — the diagnostic readback: a frame op, passthrough.
+    readBuffer: (bufferId, dst) => raw.readBuffer(bufferId, dst),
     // M5 (Task 73): feed dual-bind — a frame op (per-frame dirty range), not journaled.
     updateBuffer: (bufferId, data, byteOffset) => raw.updateBuffer(bufferId, data, byteOffset),
     setUniformMatrix4: (programId, name, values) => raw.setUniformMatrix4(programId, name, values),

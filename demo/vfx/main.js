@@ -15,14 +15,14 @@
 //
 // EVERY sprite on this page is OURS — generated in this file (deterministic
 // pure functions → raw RGBA uploads; no image assets, no browser
-// premultiply semantics). The dist imports carry ?v=139 (the stale-cache
+// premultiply semantics). The dist imports carry ?v=140 (the stale-cache
 // guard — bump on release; Task 130 changed @rune/particles: the line lattice).
-import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=139'
+import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=140'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER, BILLBOARD,
-} from '../../dist/rune-materials.esm.js?v=139'
-import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=139'
+} from '../../dist/rune-materials.esm.js?v=140'
+import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=140'
 
 /* ─── the demo registry (the carousel order) ────────────────────────────── */
 
@@ -1019,6 +1019,18 @@ function attachLayers() {
 /* ─── The frame ───────────────────────────────────────────────────────── */
 
 function frameCallback(ctx, record) {
+  // Task 140 — THE ONE-TIME SELF-REMAKE CHANNEL: a demo's self-check (the
+  // GPU Embers two-stage fallback) sets window.__vfxRemakeRequested after
+  // verdicting its GPU pipeline broken on this driver; the re-make runs
+  // through the standard activateDemo path (teardown + fresh make — the
+  // demo reads its fallback flag and takes the conservative branch). The
+  // poll is a flag read per frame — free; the return skips THIS frame's
+  // bake/draw (the fresh demo starts clean on the next).
+  if (window.__vfxRemakeRequested === true) {
+    window.__vfxRemakeRequested = undefined
+    activateDemo('reboot')
+    return
+  }
   // auto-orbit: paused while dragging and for 1.5 s after
   if (!dragging && performance.now() - lastInteraction > 1500) camYaw += ctx.dt * presetOrbit
 

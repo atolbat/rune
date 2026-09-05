@@ -37,11 +37,14 @@ export function withJournal(gl: GLFacade, journal: Journal): GLFacade {
       return id
     },
     useProgram: id => gl.useProgram(id),
-    createBuffer: data => {
-      const id = gl.createBuffer(data)
-      journal.record({ kind: 'createBuffer', id, data })
+    createBuffer: (data, usage) => {
+      const id = gl.createBuffer(data, usage)
+      journal.record({ kind: 'createBuffer', id, data, usage })
       return id
     },
+    // Task 140 — readBuffer: a DIAGNOSTIC read (one-shot, frame-independent)
+    // — a frame op, not a journaled one. Passthrough.
+    readBuffer: (bufferId, dst) => gl.readBuffer(bufferId, dst),
     bindVertexBuffer: (bufferId, location, size, stride, byteOffset, divisor) => gl.bindVertexBuffer(bufferId, location, size, stride, byteOffset, divisor),
     // M5 (Task 73): feed dual-bind — a frame op (per-frame dirty range), not journaled.
     updateBuffer: (bufferId, data, byteOffset) => gl.updateBuffer(bufferId, data, byteOffset),
@@ -189,7 +192,7 @@ function applyOp(op: DeclOp, gl: GLFacade, sourceFor?: (kind: string) => GLImage
       // plain-object {"0":v0,...} or number[]. Coerce to Float32Array BEFORE
       // passing to the facade — gl.bufferData with a plain object is incompatible, and
       // the withJournal decorator would have written a stale op into the journal.
-      gl.createBuffer(op.data instanceof Float32Array ? op.data : toFloat32Array(op.data))
+      gl.createBuffer(op.data instanceof Float32Array ? op.data : toFloat32Array(op.data), op.usage)
       break
     case 'createTarget':
       gl.createTarget(op.textureId, op.width, op.height, op.depth, op.color as ClearColor)

@@ -554,3 +554,60 @@ in the same window (the saturation is gone), warm pixels on every leg,
 zero GL errors, zero dropped draws. 1593 tests (+2: the packed-slot
 contract, the ARRAY_BUFFER discipline), task135-glsl-emit PASS (the
 values gate), task137-vfx-probe PASS, task138-vfx-probe PASS, ?v=139.
+
+### Task 140 — THE SELF-HEALING EMBERS (the real-GPU invisible report)
+
+The user's post-?v=139 report: **"no freeze anymore, but the particles
+are not visible, while the counter at the bottom keeps counting."** The
+freeze fix landed; the visible output died with it.
+
+**The forensics arc** (`scripts/task140-*.mjs` — 10 probes, each killing
+a hypothesis): the renderer-string spoof reproduced the user's EXACT page
+config in-container (160k + emit:'gpu' + cull, no flags); the records
+read back SANE at every capacity; the ember `drawArraysInstanced` was
+issued with the live count every frame; zero GL errors. The pixel
+verdicts kept flipping cold/starved — **until `--enable-unsafe-swiftshader`
+joined the launch flags and the 40k screenshot landed WARM, matching the
+in-frame `readPixels` oracle that had read warm all along** (the
+drawing-buffer truth, read INSIDE the frame, before the swap — the
+compositor was the liar, not the pipeline). The container cannot
+reproduce the user's symptom: at every capacity and branch combination
+the pipeline validates end-to-end. The verdict: a live-driver-only drop
+(the transform-feedback write silently failing, or a draw-side
+staleness, on the real ANGLE-D3D11 class the software raster never
+exercises) — invisible, un reproducible, and telling the user nothing.
+
+**The fix — defense in depth, three layers:**
+1. **`createBuffer(data, usage)`** — the TF tier's five buffers
+   (stateOut/records/mapBuf/emitOut/pairsOut) are rewritten EVERY frame
+   (a TF pass's stream output, read back the same frame as a
+   vertex/PBO source) — they now take `'dynamic'` (DYNAMIC_DRAW), the
+   semantically correct hint; `'static'` (the default) keeps the
+   historical one-shot-upload behavior.
+2. **`readBuffer(bufferId, dst)`** — the facade's GPU-side readback
+   surface (COPY_READ_BUFFER, one-shot diagnostics; false = refused =
+   "unknown", never "degenerate") — through the journal/session wrappers
+   and `@rune/core`'s TfComputeTier.
+3. **THE SELF-HEALING DEMO** — `GpuParticles.diagnostics`: the TF tier's
+   one-shot records check (frame ~30: read 64 floats, scan for the
+   degenerate signature — all-zero/NaN rows while the ledger counts).
+   The demo's two-stage ladder: stage 1 polls the records verdict;
+   stage 2 (frame ~45) arms an in-frame canvas pixel sample right after
+   the ember draw (a one-shot `drawArraysInstanced` wrapper, removed
+   after first fire). Either failure → ONE console warning with the
+   whole story → `window.__embersFallback` (read at MAKE time — the
+   module-scope constant would freeze the import-time value; found by
+   the trigger probe) → the shell's `__vfxRemakeRequested` channel →
+   `activateDemo` re-makes the demo in the CONSERVATIVE mode (emit:'cpu',
+   cull off — the Task-137-era configuration the user's GPU
+   demonstrably rendered). `perf.fallback: 'selfcheck'` pins the branch
+   for the probes; a reload retries the GPU pipeline; `?emit=1&cull=1`
+   forces it back on.
+
+**The gates** (`task140n`/`task140p`): the healthy leg — diagnostics
+fire at frame 30, verdict SANE, NO false fallback, warm pixels; the
+forced-fallback leg — the conservative branch with warm pixels; the
+trigger leg — a simulated dropping driver (the readback zeroed at the
+source) → the warning → the re-make → the conservative branch → warm
+pixels. 1596 tests (+3: the usage-hint contract, the readBuffer
+round-trip + refusal), ?v=140.

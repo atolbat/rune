@@ -3557,10 +3557,13 @@ function createTfTier(backend) {
   return {
     kind: "transform-feedback",
     backend,
-    createBuffer(init) {
-      const id = backend.createBuffer(init);
+    createBuffer(init, usage) {
+      const id = backend.createBuffer(init, usage);
       resources.add(() => backend.deleteBuffer(id));
       return id;
+    },
+    readBuffer(bufferId, dst) {
+      return backend.readBuffer(bufferId, dst);
     },
     updateBuffer(bufferId, data, byteOffset) {
       backend.updateBuffer(bufferId, data, byteOffset);
@@ -4344,10 +4347,10 @@ function createRealGL(gl, onViewportHeal) {
     record.uniforms.set(name, loc);
     return loc;
   }
-  function createBuffer(data) {
+  function createBuffer(data, usage = "static") {
     const buffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, data, usage === "dynamic" ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
     const id = nextBuffer++;
     buffers.set(id, buffer);
@@ -4365,6 +4368,20 @@ function createRealGL(gl, onViewportHeal) {
     gl.bindBuffer(gl.ARRAY_BUFFER, buffers.get(bufferId) ?? null);
     gl.bufferSubData(gl.ARRAY_BUFFER, byteOffset, data);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  }
+  function readBuffer(bufferId, dst) {
+    const buffer = buffers.get(bufferId);
+    if (buffer === undefined)
+      return false;
+    gl.bindBuffer(gl.COPY_READ_BUFFER, buffer);
+    try {
+      gl.getBufferSubData(gl.COPY_READ_BUFFER, 0, dst);
+    } catch {
+      gl.bindBuffer(gl.COPY_READ_BUFFER, null);
+      return false;
+    }
+    gl.bindBuffer(gl.COPY_READ_BUFFER, null);
+    return true;
   }
   function setUniformMatrix4(programId, name, values) {
     useProgram(programId);
@@ -4921,6 +4938,7 @@ void main() {}
     createBuffer,
     bindVertexBuffer,
     updateBuffer,
+    readBuffer,
     setUniformMatrix4,
     setUniform4fv,
     setUniform3fv,
@@ -7015,11 +7033,12 @@ function withJournal(gl, journal) {
       return id;
     },
     useProgram: (id) => gl.useProgram(id),
-    createBuffer: (data) => {
-      const id = gl.createBuffer(data);
-      journal.record({ kind: "createBuffer", id, data });
+    createBuffer: (data, usage) => {
+      const id = gl.createBuffer(data, usage);
+      journal.record({ kind: "createBuffer", id, data, usage });
       return id;
     },
+    readBuffer: (bufferId, dst) => gl.readBuffer(bufferId, dst),
     bindVertexBuffer: (bufferId, location, size, stride, byteOffset, divisor) => gl.bindVertexBuffer(bufferId, location, size, stride, byteOffset, divisor),
     updateBuffer: (bufferId, data, byteOffset) => gl.updateBuffer(bufferId, data, byteOffset),
     setUniformMatrix4: (programId, name, values) => gl.setUniformMatrix4(programId, name, values),
@@ -7112,7 +7131,7 @@ function applyOp(op, gl, sourceFor) {
       gl.createProgram(op.vertex, op.fragment);
       break;
     case "createBuffer":
-      gl.createBuffer(op.data instanceof Float32Array ? op.data : toFloat32Array(op.data));
+      gl.createBuffer(op.data instanceof Float32Array ? op.data : toFloat32Array(op.data), op.usage);
       break;
     case "createTarget":
       gl.createTarget(op.textureId, op.width, op.height, op.depth, op.color);
@@ -7218,8 +7237,9 @@ function createResourceSessionGL(raw, journal) {
   const facade = {
     createProgram: (vertex, fragment) => raw.createProgram(vertex, fragment),
     useProgram: (programId) => raw.useProgram(programId),
-    createBuffer: (data) => raw.createBuffer(data),
+    createBuffer: (data, usage) => raw.createBuffer(data, usage),
     bindVertexBuffer: (bufferId, location, size, stride, byteOffset, divisor) => raw.bindVertexBuffer(bufferId, location, size, stride, byteOffset, divisor),
+    readBuffer: (bufferId, dst) => raw.readBuffer(bufferId, dst),
     updateBuffer: (bufferId, data, byteOffset) => raw.updateBuffer(bufferId, data, byteOffset),
     setUniformMatrix4: (programId, name, values) => raw.setUniformMatrix4(programId, name, values),
     setUniform4fv: (programId, name, values) => raw.setUniform4fv(programId, name, values),
@@ -13254,16 +13274,16 @@ function createGpuParticlesTf(facade, gpu) {
   const rampW = Math.max(2, facade.ramp.points.length * 2);
   const rampTex = gpu.createTexture(rampW, 1, { format: "rgba32f" });
   gpu.texSubImage2D(rampTex, 0, 0, rampW, 1, lut);
-  const stateOut = gpu.createBuffer(new Float32Array(W * H * 4));
-  const records = gpu.createBuffer(new Float32Array(capacity * 16));
-  const mapBuf = gpu.createBuffer(new Float32Array(capacity));
+  const stateOut = gpu.createBuffer(new Float32Array(W * H * 4), "dynamic");
+  const records = gpu.createBuffer(new Float32Array(capacity * 16), "dynamic");
+  const mapBuf = gpu.createBuffer(new Float32Array(capacity), "dynamic");
   const emitOn = facade.emitGpu;
   const emitPass = emitOn ? gpu.createPass({
     vertex: gpuSimGlEmitGlsl(),
     outputs: GPU_GL_ADVANCE_OUTPUTS,
     uniforms: GPU_GL_EMIT_UNIFORMS
   }) : -1;
-  const emitOut = emitOn ? gpu.createBuffer(new Float32Array(capacity * 20)) : -1;
+  const emitOut = emitOn ? gpu.createBuffer(new Float32Array(capacity * 20), "dynamic") : -1;
   const emitUni = gpu.scratch(GPU_GL_EMIT_UNIFORMS.reduce((n, u) => n + u.size, 0)).f32;
   if (emitOn)
     packGlEmitStatic(emitUni, readGpuEmitConfig(facade.spawnerDesc));
@@ -13285,7 +13305,7 @@ function createGpuParticlesTf(facade, gpu) {
   const maxPadN = gpuSortPadCount(capacity);
   const pairsH = gpuGlPairsTextureH(capacity);
   const pairsTex = tiered ? gpu.createTexture(W, pairsH, { format: "rgba32f" }) : -1;
-  const pairsOut = tiered ? gpu.createBuffer(new Float32Array(maxPadN * 4)) : -1;
+  const pairsOut = tiered ? gpu.createBuffer(new Float32Array(maxPadN * 4), "dynamic") : -1;
   const sortKeysPass = tiered ? gpu.createPass({
     vertex: gpuSimGlSortKeysGlsl(),
     outputs: GPU_GL_SORT_OUTPUTS,
@@ -13363,6 +13383,57 @@ function createGpuParticlesTf(facade, gpu) {
     const K = GPU_GL_SORTKEYS_F;
     skUni[K.radiusK] = gpuRampMaxSize(facade.ramp.points) * 0.5;
   }
+  const DIAG_AT = 30;
+  let diagDone = false;
+  const diag = { checked: false, readable: true, sane: true, atFrame: 0, count: 0, zeroRows: 0, nan: 0, halfMax: 0, caMax: 0 };
+  const diagScratch = new Float32Array(64);
+  function runDiagnostics(frame, count) {
+    diagDone = true;
+    diag.atFrame = frame;
+    diag.count = count;
+    const read = gpu.readBuffer(records, diagScratch);
+    diag.checked = true;
+    diag.readable = read;
+    if (!read)
+      return;
+    let zeroRows = 0;
+    let nan = 0;
+    let halfMax = 0;
+    let caMax = 0;
+    const rows = Math.floor(diagScratch.length / 16);
+    for (let i = 0;i < rows; i++) {
+      const b = i * 16;
+      let allZero = true;
+      for (let k = 0;k < 16; k++) {
+        const v = diagScratch[b + k];
+        if (v !== 0) {
+          allZero = false;
+          if (Number.isNaN(v))
+            nan++;
+        }
+      }
+      if (allZero) {
+        zeroRows++;
+        continue;
+      }
+      const half = Math.abs(diagScratch[b + 10]);
+      const ca = Math.abs(diagScratch[b + 9]);
+      if (half > halfMax)
+        halfMax = half;
+      if (ca > caMax)
+        caMax = ca;
+    }
+    diag.zeroRows = zeroRows;
+    diag.nan = nan;
+    diag.halfMax = halfMax;
+    diag.caMax = caMax;
+    const rowsSeen = rows - zeroRows;
+    diag.sane = !(nan > 0 || count >= rows * 16 && rowsSeen === 0);
+    if (!diag.sane) {
+      console.warn(`[rune/particles] GPGPU TF diagnostics: the records buffer read back DEGENERATE at frame ${frame} (count ${count}, zeroRows ${zeroRows}/${rows}, nan ${nan}) — the transform-feedback write was dropped or poisoned on this driver; the consumer should fall back to the conservative path (emit:'cpu', render.cull off).`);
+    }
+  }
+  let frameIndex = 0;
   function step(dt, camera) {
     const count = facade.count;
     if (count <= 0 && ho.emitCount === 0 && ho.swapCount === 0)
@@ -13501,6 +13572,10 @@ function createGpuParticlesTf(facade, gpu) {
         uniformData: packUni
       });
     }
+    frameIndex++;
+    if (!diagDone && frameIndex >= DIAG_AT && count >= diagScratch.length) {
+      runDiagnostics(frameIndex, count);
+    }
   }
   return {
     step,
@@ -13509,6 +13584,9 @@ function createGpuParticlesTf(facade, gpu) {
     },
     get stateBufferId() {
       return stateOut;
+    },
+    get diagnostics() {
+      return diag;
     },
     dispose() {
       gpu.dispose();
