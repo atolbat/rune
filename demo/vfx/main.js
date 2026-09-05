@@ -15,14 +15,14 @@
 //
 // EVERY sprite on this page is OURS — generated in this file (deterministic
 // pure functions → raw RGBA uploads; no image assets, no browser
-// premultiply semantics). The dist imports carry ?v=135 (the stale-cache
+// premultiply semantics). The dist imports carry ?v=136 (the stale-cache
 // guard — bump on release; Task 130 changed @rune/particles: the line lattice).
-import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=135'
+import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=136'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER, BILLBOARD,
-} from '../../dist/rune-materials.esm.js?v=135'
-import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=135'
+} from '../../dist/rune-materials.esm.js?v=136'
+import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=136'
 
 /* ─── the demo registry (the carousel order) ────────────────────────────── */
 
@@ -572,7 +572,7 @@ const MODEL = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
 // normals/worldPos). Without the composition a "translated" plane renders
 // at the ORIGIN and occludes everything behind it.
 const MODEL_MVP = M()
-const BASIS = { right: [1, 0, 0], up: [0, 1, 0], forward: [0, 0, -1] }
+const BASIS = { right: [1, 0, 0], up: [0, 1, 0], forward: [0, 0, -1], viewProj: mvp }
 // The camera orbit target (the follow demo moves it).
 const TARGET = [0, 0.2, 0]
 
@@ -1034,7 +1034,10 @@ function frameCallback(ctx, record) {
 
   // The billboard basis: the view matrix ROWS (right, up, forward) — the
   // quads are built in the camera plane; forward feeds the stretched/
-  // trail/vertical modes.
+  // trail/vertical modes. Task 136 — viewProj (the frame's mvp, aliased by
+  // the BASIS object) feeds render.cull on the CPU tier: the facade
+  // extracts the six frustum planes at view() and the bakers skip the
+  // off-screen particles (the GPU tier's gate, mirrored).
   BASIS.right[0] = view[0]; BASIS.right[1] = view[4]; BASIS.right[2] = view[8]
   BASIS.up[0] = view[1]; BASIS.up[1] = view[5]; BASIS.up[2] = view[9]
   BASIS.forward[0] = -view[2]; BASIS.forward[1] = -view[5]; BASIS.forward[2] = -view[10]

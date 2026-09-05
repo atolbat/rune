@@ -106,6 +106,7 @@ function mockGL(): MockCallLog {
     uniform2f: (loc: unknown, a: number, b: number) => calls.push(`uniform2f(${(loc as { name: string }).name},${a},${b})`),
     uniform3f: (loc: unknown, a: number, b: number, c: number) => calls.push(`uniform3f(${(loc as { name: string }).name},${a},${b},${c})`),
     uniform4f: (loc: unknown, a: number, b: number, c: number, d: number) => calls.push(`uniform4f(${(loc as { name: string }).name},${a},${b},${c},${d})`),
+    uniform1i: (loc: unknown, v: number) => calls.push(`uniform1i(${(loc as { name: string }).name},${v})`),
     deleteProgram: (p: unknown) => calls.push(`deleteProgram(${(p as { id?: number }).id})`),
     getError: () => 0,
     // unused by the TF path but present for realGL's constructor probing
@@ -232,6 +233,52 @@ describe('realGL: the transform-feedback family', () => {
     facade.deleteTransformPass(passId)
     expect(calls.filter(c => c.startsWith('deleteTransformFeedback(')).length).toBe(1)
     expect(() => facade.runTransformPass(passId, 4, { bufferId: 1 })).toThrow('no such transform pass')
+  })
+
+  test('runTransformPass: THE SAMPLER UNITS (Task 136 — the black-screen root cause) — every declared texture sampler gets its unit via uniform1i, before the draw', () => {
+    // GLSL samplers default to unit 0: a multi-texture pass (the particle
+    // pack pass's u_state/u_ramp) silently sampled the WRONG texture — the
+    // ramp LUT lookups read the STATE texture and the records came out as
+    // garbage (the additive black screen + the full-screen white quads of
+    // the WebGL2 TF tier). The fix: uniform1i(sampler, unit) per binding.
+    const { calls, gl } = mockGL()
+    const facade = createRealGL(gl)
+    const outBuffer = facade.createBuffer(new Float32Array(64))
+    const stateTex = facade.createTexture(64, 4, { format: 'rgba32f' })
+    const rampTex = facade.createTexture(8, 1, { format: 'rgba32f' })
+    const passId = facade.createTransformPass({
+      vertex: VERT,
+      outputs: ['v_s0'],
+      textures: ['u_state', 'u_ramp'],
+    })
+    calls.length = 0
+    facade.runTransformPass(passId, 4, { bufferId: outBuffer, textures: [stateTex, rampTex] })
+    // BOTH samplers are pinned to their units — u_ramp to unit 1 (the bug:
+    // it stayed at the default 0 and read the state texture).
+    expect(calls).toContain('uniform1i(u_state,0)')
+    expect(calls).toContain('uniform1i(u_ramp,1)')
+    // the units are set BEFORE the TF draw (a sampler set after the draw
+    // would bind the wrong texture for THIS pass).
+    const rampUnit = calls.indexOf('uniform1i(u_ramp,1)')
+    const draw = calls.indexOf('drawArrays(POINTS,0,4)')
+    expect(draw).toBeGreaterThan(rampUnit)
+    expect(rampUnit).toBeGreaterThanOrEqual(0)
+  })
+
+  test('runTransformPass: an undefined texture slot skips its sampler (partial bindings)', () => {
+    const { calls, gl } = mockGL()
+    const facade = createRealGL(gl)
+    const outBuffer = facade.createBuffer(new Float32Array(64))
+    const stateTex = facade.createTexture(64, 4, { format: 'rgba32f' })
+    const passId = facade.createTransformPass({
+      vertex: VERT,
+      outputs: ['v_s0'],
+      textures: ['u_state', 'u_ramp'],
+    })
+    calls.length = 0
+    facade.runTransformPass(passId, 4, { bufferId: outBuffer, textures: [stateTex, undefined] })
+    expect(calls).toContain('uniform1i(u_state,0)')
+    expect(calls.filter(c => c === 'uniform1i(u_ramp,1)').length).toBe(0)
   })
 
   test('texSubImage2DBuffer: the PBO bound, the offset as the data pointer, UNPACK_ALIGNMENT pinned, the binding restored', () => {

@@ -346,3 +346,59 @@ no camera planes today — the option rejects loudly instead); the TF
 leg's GPU emission on the software-GL container (the real-GPU story is
 expected to take `?emit=1` as the default once a hardware oracle
 confirms the queue behavior).
+
+## Task 136 — the WebGL2 TF sampler-units fix + the CPU-tier cull
+
+**THE BLACK SCREEN OF THE TF TIER** (the user's report: "Embers на вебгл
+работают некорректно — не видны, исчезают, другой цвет, текстуры видны
+квадами"). The container reproduced it dead-on: the WebGL2
+transform-feedback leg of GPU Embers rendered 0.00% ember-tinted pixels
+(black) with an occasional full-screen WHITE flash (37% of the canvas at
+240,240,240 — the "quads"). The CPU half was healthy (13–15k live) — the
+RECORDS were the garbage. Root cause, found by instrumenting the live GL
+context: **`runTransformPass` bound the pass's textures to units 0..N−1
+but never set the sampler uniforms** — GLSL samplers DEFAULT TO UNIT 0,
+so the pack pass's `u_ramp` sampled the STATE texture. The ramp LUT
+binary search then walked unsorted state values (px/vy/age/tx, ±23) —
+`span` degenerated, the lerp factor extrapolated, `halfExtent` exploded
+to full-screen scale with rgb up to ±23 (the white quads), and the
+records' colors read state texels instead of the ramp (wrong/negative
+colors; additive black). The packSorted twin was hit twice (`u_ramp` AND
+`u_pairs`); the single-texture passes (advance/sortKeys/bitonic) worked
+only by the luck of the default. THE FIX: one `gl.uniform1i(sampler, i)`
+per bound texture in `realGL.ts` — the DRAW path has set its units since
+Task 118 (the executor's `setUniform1i`); the TF family finally matches.
+The gate blindness (motion 99.5% on a BLACK page): the camera orbit and
+the pool glow moved pixels — the ember-tint gate now lives in the
+timeline probe (`scripts/ember-timeline.mjs`, warm-pixel time series).
+
+**THE CPU-TIER CULL** (the remaining list's own item — "the packers have
+no camera planes today"): `render.cull` now runs on BOTH tiers. The CPU
+tier's gate lives at `view()`: the basis carries `viewProj` (16 floats,
+column-major — the frame's mvp), the facade extracts the six normalized
+frustum planes ONCE per view (`gpuRenderFrustum` — the GPU tier's own
+Gribb–Hartmann), and BOTH bakers (fillBillboards' soup + packInstances'
+records) skip every particle whose conservative sphere (spawn size ×
+rampMax · 0.5) is fully outside any plane — the GPU sortKeys test
+mirrored EXACTLY (dot(n,p)+d ≤ −radius, all six planes; the parity is
+pinned by an oracle test). The semantics per tier: the GPU tier packs
+ZERO records for the culled (no readback, the draw count holds); the CPU
+tier just SKIPS them — the soup's vertex count and the record count drop
+(the upload shrinks with the view; strictly better than zero-records).
+The stretched mode's velocity tail is NOT covered by the sphere (the
+GPU tier's own documented conservatism) — the demo adoption stays on
+camera-mode layers. Where it landed: the vfx dust motes (1,500 wrapped
+motes, the fly-through volume — 140 visible records of 1,297 live in the
+gate), the noise jet (3,000, the far end off-screen), and the particles
+demo's fireworks + meteor presets (the soup upload shrinks).
+
+**Gates**: `webgl2/tests/transformFeedback.test.ts` += 2 (the sampler
+units, before the draw; the partial-bindings skip); `tests/task136.test.ts`
+(12: the bakers' gate, the survivors-byte-identity, the soup/instance
+parity under the gate, the GPU-oracle match, the order interplay, the
+facade's loud viewProj contract, the radius factor); the task134
+"CPU-tier rejects cull" test retired to the new acceptance. The live
+verification: the ember timeline (warm 1.6–1.8% STABLE for 20 s — was
+0.00% + the white flash), demo-smoke 24/24, demo-shots ALL alive (dust
+motion 72.68%), the raw-device gates (sim/sort/emit WGSL + GLSL) PASS,
+`task134-vfx-probe` (?sort=1&cull=1 on the TF leg) PASS.

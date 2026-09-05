@@ -27,9 +27,9 @@
 //   Pages serves with max-age=600, and a browser that keeps an OLD bundle
 //   for those 10 minutes shows an OLD bug even after a deploy — a changed
 //   query string forces a fresh fetch. Bump the suffix on every release.
-import { createRenderer } from '../../dist/rune.esm.js?v=124'
-import { materialOf, TEXTURE, VERTEX_COLOR } from '../../dist/rune-materials.esm.js?v=124'
-import { createParticles, createRamp } from '../../dist/rune-particles.esm.js?v=124'
+import { createRenderer } from '../../dist/rune.esm.js?v=136'
+import { materialOf, TEXTURE, VERTEX_COLOR } from '../../dist/rune-materials.esm.js?v=136'
+import { createParticles, createRamp } from '../../dist/rune-particles.esm.js?v=136'
 
 /* ─── Materials: the unlit sprite pair × 2 blend modes ─────────────────── */
 
@@ -183,6 +183,8 @@ const PRESETS = {
     make: () => createParticles({
       capacity: CAPACITY,
       rate: 0, // the rhythm lives in the tick
+      // Task 136 — the CPU-tier frustum gate (viewProj rides the BASIS)
+      render: { kind: 'billboard', cull: true },
       ramp: createRamp([
         { t: 0, size: 1.2, r: 1, g: 1, b: 1, a: 1 },
         { t: 0.55, size: 1, r: 1, g: 0.8, b: 0.4, a: 0.9 },
@@ -382,6 +384,9 @@ const PRESETS = {
     make: () => createParticles({
       capacity: CAPACITY,
       rate: 0, // the rhythm lives in the tick
+      // Task 136 — the CPU-tier frustum gate (the sparks sweep +X, far
+      // past the view's edge — the off-screen soup never uploads)
+      render: { kind: 'billboard', cull: true },
       ramp: createRamp([
         { t: 0, size: 1.1, r: 1, g: 1, b: 1, a: 1 },
         { t: 0.5, size: 0.9, r: 1, g: 0.75, b: 0.45, a: 0.9 },
@@ -453,7 +458,10 @@ const projection = M()
 const mvp = M()
 const MODEL = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
 // The billboard basis — written from the view matrix rows each frame.
-const BASIS = { right: [1, 0, 0], up: [0, 1, 0] }
+// Task 136 — viewProj (the frame's mvp) feeds the presets' render.cull:
+// the CPU tier's frustum gate (the bakers skip the off-screen particles —
+// the soup upload shrinks with the view).
+const BASIS = { right: [1, 0, 0], up: [0, 1, 0], viewProj: mvp }
 
 function mat4Perspective(out, fovY, aspect, near, far) {
   const f = 1 / Math.tan(fovY / 2)

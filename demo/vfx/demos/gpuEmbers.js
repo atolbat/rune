@@ -29,7 +29,7 @@
 //   · THE HOOKS: window.__vfxPerf = { tier, capacity, count, ms } — the
 //     probe gate (scripts/task131-sim-probe.mjs) pins the tier + the
 //     frame cost; window.__vfxCounters.embers — the emission counters.
-import { createGpuParticles } from '../../../dist/rune.esm.js?v=135'
+import { createGpuParticles } from '../../../dist/rune.esm.js?v=136'
 
 const GPU_CAPACITY = 160_000
 const TF_CAPACITY = 16_000

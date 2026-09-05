@@ -93,6 +93,16 @@ export interface PackOptions {
   /** The per-particle random tile offset added before the floor:
    *  frame + seed·frameJitter. Default 0. */
   readonly frameJitter?: number
+  /** Task 136 — render.cull (the CPU tier): the six frustum planes (24
+   *  floats, normalized — gpuRenderFrustum's output; the facade extracts
+   *  them once per view()). A particle whose conservative sphere (spawn
+   *  size × cullRadiusK) is fully outside ANY plane is skipped — the GPU
+   *  render tier's exact test (dot(p.xyz, pos) + p.w <= −radius, all six
+   *  planes). Omitted/null — everything packs. */
+  readonly frustum?: ReadonlyArray<number> | Float32Array | null
+  /** The cull radius factor — rampMax · 0.5 (every drawn half-extent);
+   *  the facade computes it from the ramp. Default 0.5 (rampMax = 1). */
+  readonly cullRadiusK?: number
 }
 
 /** Packs the live particles into `out` (a Float32Array of at least
@@ -118,6 +128,10 @@ export function packInstances(
   const count = system.count
   const s: Float32Array = SCRATCH
   let n = 0
+  // Task 136 — the CPU-tier frustum gate (fillBillboards' exact twin —
+  // the parity contract: the same particle set survives both bakers).
+  const frustum = options.frustum ?? null
+  const radiusK = options.cullRadiusK ?? 0.5
   // Task 132 — the draw order: `order` (the sorted index sequence) walks
   // the particles in the given sequence; the default — the slot order.
   const order = options.order
@@ -125,6 +139,17 @@ export function packInstances(
   const total = ordered ? order!.length : count
   for (let j = 0; j < total; j++) {
     const i = ordered ? order![j] : j
+    if (frustum !== null) {
+      const F = frustum // narrowed: the six-plane walk is assertion-free
+      const cx = f.px[i], cy = f.py[i], cz = f.pz[i]
+      const radius = f.size[i] * radiusK
+      if (cx * F[0] + cy * F[1] + cz * F[2] + F[3] <= -radius) continue
+      if (cx * F[4] + cy * F[5] + cz * F[6] + F[7] <= -radius) continue
+      if (cx * F[8] + cy * F[9] + cz * F[10] + F[11] <= -radius) continue
+      if (cx * F[12] + cy * F[13] + cz * F[14] + F[15] <= -radius) continue
+      if (cx * F[16] + cy * F[17] + cz * F[18] + F[19] <= -radius) continue
+      if (cx * F[20] + cy * F[21] + cz * F[22] + F[23] <= -radius) continue
+    }
     const age = f.age[i]
     const life = f.life[i]
     const t = life > 0 ? age / life : 0

@@ -57,7 +57,7 @@ export default {
           noise: { strength: 0.55, scale: 0.22, speed: 0.07 },
         },
         spawner: MOTE_S,
-        render: { kind: 'billboard', draw: 'instance', mode: 'camera', spin: 0.3 },
+        render: { kind: 'billboard', draw: 'instance', mode: 'camera', spin: 0.3, cull: true },
       }),
       material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,

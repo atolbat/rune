@@ -4831,6 +4831,9 @@ void main() {}
         if (textureId === undefined)
           continue;
         bindTexture(textureId, i);
+        const loc = tfLocation(record, record.textureDecl[i]);
+        if (loc !== null)
+          gl.uniform1i(loc, i);
       }
     }
     const data = output.uniformData;

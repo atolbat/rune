@@ -34,7 +34,7 @@ import { GPU_EMIT_SALTS } from './gpuEmit.ts'
 import { CONSTANT_RAMP, type Ramp } from './ramp.ts'
 import { validateNoise, type NoiseField } from './noise.ts'
 import { packInstances, INSTANCE_STRIDE, INSTANCE_LAYOUT, type PackOptions } from './instances.ts'
-import { GPU_STATE_STRIDE } from './gpuSim.ts'
+import { GPU_STATE_STRIDE, gpuRenderFrustum, gpuRampMaxSize } from './gpuSim.ts'
 import {
   fillBillboards, SOUP_STRIDE, VERTS_PER_PARTICLE, type CameraBasis, type BillboardOptions,
 } from './billboards.ts'
@@ -72,9 +72,11 @@ export interface BurstDesc {
  *  the optimization program's Phase 1; see instances.ts).
  *  Task 132 — the billboard kind's `sort`: the painter's order for
  *  alpha-blended layers (back to front, far first — see sort.ts).
- *  Task 134 — the billboard kind's `cull`: the GPU tier's per-particle
- *  frustum gate (sim:"gpu" only — the off-screen slots pack the zero
- *  record; see gpuSim's sort family). */
+ *  Task 134 — the billboard kind's `cull`: the per-particle frustum
+ *  gate. Task 136 — BOTH tiers: the GPU tier packs the zero record for
+ *  the off-screen slots (sim:"gpu" — see gpuSim's sort family); the CPU
+ *  tier's bakers skip the off-screen particles at view() (the soup/
+ *  record stream shrinks — pass the basis viewProj). */
 export type RenderDesc =
   | ({ readonly kind: 'billboard'; readonly draw?: 'soup' | 'instance'; readonly sort?: boolean; readonly cull?: boolean } & Omit<BillboardOptions, 'ramp'>)
   | ({ readonly kind: 'trail' } & TrailOptions & Omit<TrailBakeOptions, 'ramp'>)
@@ -142,7 +144,8 @@ export interface ParticlesDesc {
    *  attract.killRadius, prewarm — the death site and the contact events
    *  are CPU-blind on the GPU tier). Task 134: render.sort and render.cull
    *  are the GPU render tier's own options here (the bitonic sort + the
-   *  frustum gate — the orchestrator's step() takes the camera). */
+   *  frustum gate — the orchestrator's step() takes the camera). Task 136 —
+   *  render.cull also runs CPU-side (the baker gate at view()). */
   readonly sim?: 'cpu' | 'gpu'
   /** Task 135 — THE EMISSION TIER: 'cpu' (the default — the reference
    *  spawner walk, the rows uploaded per frame) or 'gpu' (the hash-RNG
@@ -371,9 +374,14 @@ export function createParticles(desc: ParticlesDesc): Particles {
   if (sortOn && kind !== 'billboard') {
     throw new Error(`rune/particles: render.sort is a billboard-kind option (a ${kind} layer cannot take a painter's order — trails are one continuous ribbon, meshes resolve through the depth buffer)`)
   }
+  // Task 136 — render.cull runs on BOTH tiers now: the GPU render tier's
+  // frustum gate (the sort family's zero-records at step()) and the CPU
+  // tier's baker gate (the planes extracted at view() — the bakers skip
+  // the off-screen particles; the soup/record stream shrinks). Both are
+  // billboard-kind (the per-particle sphere test needs the record shape).
   const cullOn = (render as { cull?: boolean }).cull === true
   if (cullOn && kind !== 'billboard') {
-    throw new Error(`rune/particles: render.cull is a billboard-kind option (a ${kind} layer's records are not per-particle gates — the frustum test lives in the GPU render tier)`)
+    throw new Error(`rune/particles: render.cull is a billboard-kind option (a ${kind} layer's records are not per-particle gates — trails are one continuous ribbon, meshes resolve through the depth buffer)`)
   }
   // Task 131 — THE SIMULATION TIER. 'gpu': the WebGPU compute advance (the
   // CPU keeps emission/death/compaction; the state lives in a storage
@@ -446,12 +454,13 @@ export function createParticles(desc: ParticlesDesc): Particles {
       wrapSize: hasWrap ? [wrapX, wrapY, wrapZ] : null,
     }
   }
-  // Task 134 — render.cull is the GPU tier's frustum gate: the CPU tier
-  // bakes EVERY live particle (its packers have no camera planes to test —
-  // the zero-record trick belongs to the GPU render tier's sorted pack).
-  if (cullOn && !gpuMode) {
-    throw new Error('rune/particles: render.cull is the GPU tier\'s frustum gate (the CPU tier bakes every live particle — take sim:"gpu" + createGpuParticles; see gpuSim\'s sort family)')
-  }
+  // Task 136 — render.cull on the CPU tier: the frustum planes (24 floats
+  // — gpuRenderFrustum's extraction, once per view()) and the conservative
+  // radius factor (rampMax · 0.5 — the GPU render tier's own u_radiusK,
+  // shared semantics across the tiers). The GPU tier culls at step() —
+  // view() there reports the count only.
+  const cullRadiusK = cullOn ? gpuRampMaxSize(ramp.points) * 0.5 : 0.5
+  const frustumScratch = cullOn && !gpuMode ? new Float32Array(24) : null
   const system: ParticleSystem = createParticleSystem(capacity, {
     onRetire: desc.onRetire,
     onSwap: gpuSwaps !== null
@@ -747,6 +756,19 @@ export function createParticles(desc: ParticlesDesc): Particles {
           sortOrder!.length = n
           order = sortOrder!
         }
+        // Task 136 — render.cull on the CPU tier: the six frustum planes
+        // from the basis view-projection (gpuRenderFrustum — Gribb–Hartmann
+        // over the column-major mvp, normalized), extracted ONCE per
+        // view() and handed to both bakers. The loud contract mirrors the
+        // GPU tier's step() camera throw.
+        let frustum: Float32Array | null = null
+        if (cullOn && !gpuMode) {
+          const vp = basis.viewProj
+          if (vp === undefined || vp.length !== 16) {
+            throw new Error('rune/particles: render.cull needs the camera basis viewProj (the six frustum planes come from the frame view-projection, column-major — pass a full CameraBasis: { right, up, forward, viewProj })')
+          }
+          frustum = gpuRenderFrustum(vp, frustumScratch!)
+        }
         if (gpuMode) {
           // Task 131 — the GPU tier: the records are PACKED ON THE GPU (the
           // pack dispatch of the orchestrator's step()); view() reports the
@@ -764,6 +786,8 @@ export function createParticles(desc: ParticlesDesc): Particles {
             tiles: o.tiles ?? renderOpts.tiles,
             frameJitter: o.frameJitter ?? renderOpts.frameJitter,
             order,
+            frustum,
+            cullRadiusK,
           }
           view.vertexCount = packInstances(system, vertices, packOpts)
           view.instanceCount = view.vertexCount
@@ -779,6 +803,8 @@ export function createParticles(desc: ParticlesDesc): Particles {
             spin3d: o.spin3d ?? renderOpts.spin3d,
             frameJitter: o.frameJitter ?? renderOpts.frameJitter,
             order,
+            frustum,
+            cullRadiusK,
           })
           view.instanceCount = 0
         }

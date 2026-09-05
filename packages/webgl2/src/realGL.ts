@@ -1022,13 +1022,25 @@ export function createRealGL(
       }
     }
     // The texture inputs: units 0..N-1 (bindTexture resets the LOD clamps
-    // per call — the no-leak contract).
+    // per call — the no-leak contract). THE SAMPLER UNIFORMS (Task 136 —
+    // the WebGL2 black-screen root cause): GLSL sampler uniforms DEFAULT
+    // TO UNIT 0, so a multi-texture pass (the pack pass's u_state/u_ramp)
+    // silently sampled the WRONG texture — the ramp LUT lookups read the
+    // STATE texture, the binary search over unsorted garbage extrapolated
+    // halfExtent to full-screen quads with rgb up to ±23 (the white
+    // flashes), and the records' colors came out wrong/negative (the
+    // additive black screen). The DRAW path has always set its units
+    // (the executor's setUniform1i); the TF family never did — single-
+    // texture passes (u_state/u_pairs) worked only by the luck of the
+    // default. Every declared sampler now gets its unit explicitly.
     const tex = output.textures
     if (tex !== undefined) {
       for (let i = 0; i < record.textureDecl.length && i < tex.length; i++) {
         const textureId = tex[i]
         if (textureId === undefined) continue
         bindTexture(textureId, i)
+        const loc = tfLocation(record, record.textureDecl[i])
+        if (loc !== null) gl.uniform1i(loc, i)
       }
     }
     // The packed uniforms: uniform1f/2f/3f/4fv per the declared sequence.

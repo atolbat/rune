@@ -308,11 +308,12 @@ describe('Task 134 — the facade validation (render.cull; the sort flip)', () =
       render: { kind: 'trail' as never, points: 8, cull: true as never },
     })).toThrow('render.cull is a billboard-kind option')
   })
-  it('the CPU tier rejects cull (the GPU render tier owns the frustum gate)', () => {
-    expect(() => createParticles({
+  it('the CPU tier ACCEPTS cull now (Task 136 — the baker gate at view(); the old reject is retired)', () => {
+    const facade = createParticles({
       capacity: 4,
       render: { kind: 'billboard', draw: 'instance', cull: true },
-    })).toThrow('render.cull is the GPU tier')
+    })
+    expect(facade.count).toBe(0) // created, alive, un-gated until view()
   })
   it('sim:"gpu" ACCEPTS sort and cull now (the Task 132 reject is retired)', () => {
     const facade = createParticles({

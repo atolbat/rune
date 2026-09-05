@@ -68,6 +68,13 @@ export interface CameraBasis {
   readonly right: readonly number[]
   readonly up: readonly number[]
   readonly forward?: readonly number[]
+  /** Task 136 — the frame's view-projection (16 floats, column-major):
+   *  render.cull on the CPU tier — the facade extracts the six frustum
+   *  planes once per view() and the baker skips every particle whose
+   *  conservative sphere is fully outside (the GPU render tier's exact
+   *  gate, mirrored CPU-side — off-screen particles emit no quad either
+   *  way; the cull just stops BAKING them, so the soup shrinks). */
+  readonly viewProj?: readonly number[]
 }
 
 /** How the quad is oriented in the world (see the module header). */
@@ -110,6 +117,16 @@ export interface BillboardOptions {
   readonly axis?: readonly number[] | 'random'
   /** 'oriented': the 3D spin speed, radians/second (the seed phases it). */
   readonly spin3d?: number
+  /** Task 136 — render.cull (the CPU tier): the six frustum planes (24
+   *  floats, normalized — gpuRenderFrustum's output; the facade extracts
+   *  them once per view()). A particle whose conservative sphere (spawn
+   *  size × cullRadiusK) is fully outside ANY plane is skipped — the GPU
+   *  render tier's exact test (dot(p.xyz, pos) + p.w <= −radius, all six
+   *  planes). Omitted/null — everything bakes. */
+  readonly frustum?: ReadonlyArray<number> | Float32Array | null
+  /** The cull radius factor — rampMax · 0.5 (every drawn half-extent);
+   *  the facade computes it from the ramp. Default 0.5 (rampMax = 1). */
+  readonly cullRadiusK?: number
 }
 
 /** Bakes the live particles into `out` (a Float32Array of at least
@@ -175,6 +192,12 @@ export function fillBillboards(
   const spin3d = options.spin3d ?? 0
 
   let at = 0
+  // Task 136 — the CPU-tier frustum gate: the six normalized planes + the
+  // conservative radius factor. OUT if ANY plane fails (dot(n, p) + d <=
+  // −radius) — the GPU render tier's sortKeys test, mirrored exactly (the
+  // parity contract: the same particle set survives both bakers).
+  const frustum = options.frustum ?? null
+  const radiusK = options.cullRadiusK ?? 0.5
   // Task 132 — the draw order: `order` (the sorted index sequence) walks
   // the particles in the given sequence; the default — the slot order.
   const order = options.order
@@ -182,6 +205,17 @@ export function fillBillboards(
   const n = ordered ? order!.length : count
   for (let j = 0; j < n; j++) {
     const i = ordered ? order![j] : j
+    if (frustum !== null) {
+      const F = frustum // narrowed: the six-plane walk is assertion-free
+      const cx = f.px[i], cy = f.py[i], cz = f.pz[i]
+      const radius = f.size[i] * radiusK
+      if (cx * F[0] + cy * F[1] + cz * F[2] + F[3] <= -radius) continue
+      if (cx * F[4] + cy * F[5] + cz * F[6] + F[7] <= -radius) continue
+      if (cx * F[8] + cy * F[9] + cz * F[10] + F[11] <= -radius) continue
+      if (cx * F[12] + cy * F[13] + cz * F[14] + F[15] <= -radius) continue
+      if (cx * F[16] + cy * F[17] + cz * F[18] + F[19] <= -radius) continue
+      if (cx * F[20] + cy * F[21] + cz * F[22] + F[23] <= -radius) continue
+    }
     const age = f.age[i]
     const life = f.life[i]
     const t = life > 0 ? age / life : 0

@@ -1642,11 +1642,30 @@ function fillBillboards(system, basis, out, options = {}) {
   }
   const spin3d = options.spin3d ?? 0;
   let at = 0;
+  const frustum = options.frustum ?? null;
+  const radiusK = options.cullRadiusK ?? 0.5;
   const order = options.order;
   const ordered = order !== undefined && order !== null;
   const n = ordered ? order.length : count;
   for (let j = 0;j < n; j++) {
     const i = ordered ? order[j] : j;
+    if (frustum !== null) {
+      const F = frustum;
+      const cx = f.px[i], cy = f.py[i], cz = f.pz[i];
+      const radius = f.size[i] * radiusK;
+      if (cx * F[0] + cy * F[1] + cz * F[2] + F[3] <= -radius)
+        continue;
+      if (cx * F[4] + cy * F[5] + cz * F[6] + F[7] <= -radius)
+        continue;
+      if (cx * F[8] + cy * F[9] + cz * F[10] + F[11] <= -radius)
+        continue;
+      if (cx * F[12] + cy * F[13] + cz * F[14] + F[15] <= -radius)
+        continue;
+      if (cx * F[16] + cy * F[17] + cz * F[18] + F[19] <= -radius)
+        continue;
+      if (cx * F[20] + cy * F[21] + cz * F[22] + F[23] <= -radius)
+        continue;
+    }
     const age = f.age[i];
     const life = f.life[i];
     const t = life > 0 ? age / life : 0;
@@ -1832,11 +1851,30 @@ function packInstances(system, out, options = {}) {
   const count = system.count;
   const s = SCRATCH2;
   let n = 0;
+  const frustum = options.frustum ?? null;
+  const radiusK = options.cullRadiusK ?? 0.5;
   const order = options.order;
   const ordered = order !== undefined && order !== null;
   const total = ordered ? order.length : count;
   for (let j = 0;j < total; j++) {
     const i = ordered ? order[j] : j;
+    if (frustum !== null) {
+      const F = frustum;
+      const cx = f.px[i], cy = f.py[i], cz = f.pz[i];
+      const radius = f.size[i] * radiusK;
+      if (cx * F[0] + cy * F[1] + cz * F[2] + F[3] <= -radius)
+        continue;
+      if (cx * F[4] + cy * F[5] + cz * F[6] + F[7] <= -radius)
+        continue;
+      if (cx * F[8] + cy * F[9] + cz * F[10] + F[11] <= -radius)
+        continue;
+      if (cx * F[12] + cy * F[13] + cz * F[14] + F[15] <= -radius)
+        continue;
+      if (cx * F[16] + cy * F[17] + cz * F[18] + F[19] <= -radius)
+        continue;
+      if (cx * F[20] + cy * F[21] + cz * F[22] + F[23] <= -radius)
+        continue;
+    }
     const age = f.age[i];
     const life = f.life[i];
     const t = life > 0 ? age / life : 0;
@@ -4483,7 +4521,7 @@ function createParticles(desc) {
   }
   const cullOn = render.cull === true;
   if (cullOn && kind !== "billboard") {
-    throw new Error(`rune/particles: render.cull is a billboard-kind option (a ${kind} layer's records are not per-particle gates — the frustum test lives in the GPU render tier)`);
+    throw new Error(`rune/particles: render.cull is a billboard-kind option (a ${kind} layer's records are not per-particle gates — trails are one continuous ribbon, meshes resolve through the depth buffer)`);
   }
   const sim = desc.sim ?? "cpu";
   const gpuMode = sim === "gpu";
@@ -4537,9 +4575,8 @@ function createParticles(desc) {
       wrapSize: hasWrap ? [wrapX, wrapY, wrapZ] : null
     };
   }
-  if (cullOn && !gpuMode) {
-    throw new Error(`rune/particles: render.cull is the GPU tier's frustum gate (the CPU tier bakes every live particle — take sim:"gpu" + createGpuParticles; see gpuSim's sort family)`);
-  }
+  const cullRadiusK = cullOn ? gpuRampMaxSize(ramp.points) * 0.5 : 0.5;
+  const frustumScratch = cullOn && !gpuMode ? new Float32Array(24) : null;
   const system = createParticleSystem(capacity, {
     onRetire: desc.onRetire,
     onSwap: gpuSwaps !== null ? (to, from) => {
@@ -4817,6 +4854,14 @@ function createParticles(desc) {
           sortOrder.length = n;
           order = sortOrder;
         }
+        let frustum = null;
+        if (cullOn && !gpuMode) {
+          const vp = basis.viewProj;
+          if (vp === undefined || vp.length !== 16) {
+            throw new Error("rune/particles: render.cull needs the camera basis viewProj (the six frustum planes come from the frame view-projection, column-major — pass a full CameraBasis: { right, up, forward, viewProj })");
+          }
+          frustum = gpuRenderFrustum(vp, frustumScratch);
+        }
         if (gpuMode) {
           view.vertexCount = system.count;
           view.instanceCount = system.count;
@@ -4825,7 +4870,9 @@ function createParticles(desc) {
             ramp,
             tiles: o.tiles ?? renderOpts.tiles,
             frameJitter: o.frameJitter ?? renderOpts.frameJitter,
-            order
+            order,
+            frustum,
+            cullRadiusK
           };
           view.vertexCount = packInstances(system, vertices, packOpts);
           view.instanceCount = view.vertexCount;
@@ -4840,7 +4887,9 @@ function createParticles(desc) {
             axis: o.axis ?? renderOpts.axis,
             spin3d: o.spin3d ?? renderOpts.spin3d,
             frameJitter: o.frameJitter ?? renderOpts.frameJitter,
-            order
+            order,
+            frustum,
+            cullRadiusK
           });
           view.instanceCount = 0;
         }

@@ -16,7 +16,11 @@ export default {
       id: 'noise-jet',
       facade: env.createParticles({
         capacity: 3000,
-        render: { kind: 'billboard', draw: 'instance' },
+        // Task 136 — the CPU-tier frustum gate: the jet's far end (the
+        // cone at x −7 + ~20 units of travel) leaves the view — the
+        // off-screen records skip the pack (the GPU tier's cull, mirrored
+        // at view(); the basis viewProj rides the shell's BASIS).
+        render: { kind: 'billboard', draw: 'instance', cull: true },
         rate: 500,
         ramp: env.createRamp([
           { t: 0, size: 0.5, r: 0.85, g: 0.95, b: 1, a: 0 },
