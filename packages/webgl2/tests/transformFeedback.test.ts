@@ -294,6 +294,70 @@ describe('realGL: the transform-feedback family', () => {
     expect(calls.filter(c => c === 'uniform1i(u_ramp,1)').length).toBe(0)
   })
 
+  test('runTransformPass: THE PACKED-SLOT CONTRACT (Task 139 — the real-GPU default-path freeze) — an optimized-out uniform still advances the walk', () => {
+    // The emit pass declares u_emitBase/u_emitCount but never READS them
+    // (gl_VertexID drives the rows) — the GLSL compiler optimizes them out
+    // and getUniformLocation returns null. The old walk `continue`d BEFORE
+    // `at += u.size`, so every uniform AFTER the dead pair read floats TWO
+    // SLOTS EARLY: the whole uniform block shifted and the newborn rows
+    // came out as garbage (position (seed−1.5, 0, 0), life from the speed
+    // row, size from the life row — the giant green quads that froze the
+    // real-GPU default path at 160k). The contract: the uniform CALL is
+    // skipped for a null location; the slot WALK never is.
+    const { calls, gl } = mockGL()
+    // the dead-uniform mock: u_deadA/u_deadB report NO location (optimized
+    // out) — everything else resolves normally.
+    const liveLoc = gl.getUniformLocation.bind(gl)
+    ;(gl as unknown as { getUniformLocation: unknown }).getUniformLocation = (p: WebGLProgram, name: string) =>
+      name === 'u_deadA' || name === 'u_deadB' ? null : liveLoc(p, name)
+    const facade = createRealGL(gl)
+    const outBuffer = facade.createBuffer(new Float32Array(64))
+    const passId = facade.createTransformPass({
+      vertex: VERT,
+      outputs: ['v_s0'],
+      uniforms: [
+        { name: 'u_deadA', size: 1 },
+        { name: 'u_deadB', size: 1 },
+        { name: 'u_live1', size: 1 },
+        { name: 'u_live3', size: 3 },
+        { name: 'u_live4', size: 4 },
+      ],
+    })
+    calls.length = 0
+    // packed: [deadA=111, deadB=222, live1=333, live3=(4,5,6), live4=(7,8,9,10)]
+    facade.runTransformPass(passId, 2, {
+      bufferId: outBuffer,
+      uniformData: new Float32Array([111, 222, 333, 4, 5, 6, 7, 8, 9, 10]),
+    })
+    // the LIVE uniforms read THEIR OWN slots — the walk advanced past the
+    // dead pair (the bug: u_live1 got 111, the dead pair's first float).
+    expect(calls).toContain('uniform1f(u_live1,333)')
+    expect(calls).toContain('uniform3f(u_live3,4,5,6)')
+    expect(calls).toContain('uniform4f(u_live4,7,8,9,10)')
+    // the dead uniforms produced NO uniform call (a null location is a
+    // no-op target) — and nothing crashed on them.
+    expect(calls.filter(c => c.startsWith('uniform1f(u_dead')).length).toBe(0)
+  })
+
+  test('createBuffer/updateBuffer: the ARRAY_BUFFER discipline (Task 139) — the generic binding is EMPTY after the calls (a later TF capture never overlaps it)', () => {
+    // WebGL2 forbids a buffer sitting on the generic ARRAY_BUFFER binding
+    // at the moment bindBufferBase(TRANSFORM_FEEDBACK_BUFFER) captures it —
+    // the capture raises INVALID_OPERATION and silently drops the TF write
+    // on strict drivers. The facade's createBuffer used to LEAK the
+    // binding (the task135 raw harness's own pinned lesson: ITS createBuffer
+    // unbinds).
+    const { calls, gl } = mockGL()
+    const facade = createRealGL(gl)
+    calls.length = 0
+    const buf = facade.createBuffer(new Float32Array(16))
+    expect(calls).toContain(`bindBuffer(ARRAY,${(buf as unknown as { id?: number }).id ?? 1})`)
+    expect(calls).toContain('bindBuffer(ARRAY,null)')
+    calls.length = 0
+    facade.updateBuffer(buf, new Float32Array([1, 2, 3]))
+    const lastArrayBind = calls.map((c, i) => ({ c, i })).filter(x => x.c.startsWith('bindBuffer(ARRAY,')).pop()
+    expect(lastArrayBind?.c).toBe('bindBuffer(ARRAY,null)')
+  })
+
   test('texSubImage2DBuffer: the PBO bound, the offset as the data pointer, UNPACK_ALIGNMENT pinned, the binding restored', () => {
     const { calls, gl } = mockGL()
     const facade = createRealGL(gl)

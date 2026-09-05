@@ -4348,6 +4348,7 @@ function createRealGL(gl, onViewportHeal) {
     const buffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
     gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
     const id = nextBuffer++;
     buffers.set(id, buffer);
     return id;
@@ -4363,6 +4364,7 @@ function createRealGL(gl, onViewportHeal) {
   function updateBuffer(bufferId, data, byteOffset = 0) {
     gl.bindBuffer(gl.ARRAY_BUFFER, buffers.get(bufferId) ?? null);
     gl.bufferSubData(gl.ARRAY_BUFFER, byteOffset, data);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
   }
   function setUniformMatrix4(programId, name, values) {
     useProgram(programId);
@@ -4852,16 +4854,16 @@ void main() {}
       let at = 0;
       for (const u of record.uniformDecl) {
         const loc = tfLocation(record, u.name);
-        if (loc === null)
-          continue;
-        if (u.size === 1)
-          gl.uniform1f(loc, data[at] ?? 0);
-        else if (u.size === 2)
-          gl.uniform2f(loc, data[at] ?? 0, data[at + 1] ?? 0);
-        else if (u.size === 3)
-          gl.uniform3f(loc, data[at] ?? 0, data[at + 1] ?? 0, data[at + 2] ?? 0);
-        else
-          gl.uniform4f(loc, data[at] ?? 0, data[at + 1] ?? 0, data[at + 2] ?? 0, data[at + 3] ?? 0);
+        if (loc !== null) {
+          if (u.size === 1)
+            gl.uniform1f(loc, data[at] ?? 0);
+          else if (u.size === 2)
+            gl.uniform2f(loc, data[at] ?? 0, data[at + 1] ?? 0);
+          else if (u.size === 3)
+            gl.uniform3f(loc, data[at] ?? 0, data[at + 1] ?? 0, data[at + 2] ?? 0);
+          else
+            gl.uniform4f(loc, data[at] ?? 0, data[at + 1] ?? 0, data[at + 2] ?? 0, data[at + 3] ?? 0);
+        }
         at += u.size;
       }
     }

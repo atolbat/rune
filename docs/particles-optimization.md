@@ -4,7 +4,9 @@ Status: **Phase 1 (the instanced draw), Phase 2 (the GPGPU tier), Phase
 3 (the WebGL2 transform-feedback twin + the painter's order), the GPU
 render tier (Task 134: the bitonic sort + the frustum cull), the GPU-side
 emission (Task 135) and the real-GPU TF pipeline defaults (Task 138) are
-SHIPPED — the program is COMPLETE** (Tasks 131–138). The etalons below carry the before/after; the
+SHIPPED — the program is COMPLETE** (Tasks 131–138); **Task 139 (the
+packed-slot contract) fixed the real-GPU default-path freeze the Task 138
+flip exposed — see its retro at the bottom.** The etalons below carry the before/after; the
 phases describe what moved where, and what remains.
 
 ---
@@ -485,3 +487,70 @@ seek reject loudly — the v1 boundary, documented in Task 135), the
 stretched-mode cull conservatism (the velocity tail outside the sphere,
 Task 136), and the next GPGPU consumers (ocean, skinning, fields —
 `@rune/core`'s `createGpgpu` is waiting for them).
+
+## Task 139 — THE PACKED-SLOT CONTRACT: the real-GPU default-path freeze
+
+The user's live report, one task after the program "closed": "вебгл эмберс
+полностью зависают; один раз — сверхяркое зеленоватое пятно и всё
+зависло." The Task 138 defaults put the REAL-GPU TF leg on
+`emit:'gpu'` + the cull at 160k — a path the container gates had never
+PIXEL-verified (task138's leg B checked only the JS ledger aliveness by
+design: "no pixel gate on this leg"). The freeze reproduced in the
+container the moment the flags forced the same path, and the forensics
+(`scripts/task139-embers-forensics.mjs`) read the records straight off the
+TF output buffers: **garbage** — halfExtent 2.2 vs the control's 0.05
+(giant quads, ~2000× the drawn area), colors dark green-dominant
+(`cg` up to 0.2 over `cr` 0.07 — the "greenish spot"), alpha 0 — and the
+frame rate collapsed to ~7 fps at 16k (the fill-rate blowup; at the
+user's 160k, seconds per frame — the frozen tab).
+
+**The root cause — one line of `runTransformPass`** (realGL.ts): the
+packed-uniform walk `continue`d on a null location BEFORE `at +=
+u.size`. The emit pass declares `u_emitBase`/`u_emitCount` but never
+READS them (`gl_VertexID` drives the rows) — the GLSL compiler optimizes
+the pair out, `getUniformLocation` returns null, and the skipped advance
+shifted EVERY uniform after the pair two floats early. The whole block
+misread: `u_shapeOrigin` saw `(seedLo, seedHi, origin.x) = (417, 0, 0)`,
+`u_atOrigin` saw `(origin.y, 0, 0) = (−1.5, 0, 0)` — the newborns landed
+at exactly `(415.5, 0, 0)` with life drawn from the SPEED row's range
+and size from the LIFE row's. The fix is the PACKED-SLOT CONTRACT: an
+optimized-out uniform still OCCUPIES its slots — the uniform CALL is
+skipped for a null location, the slot WALK never is. (Why the raw
+emit-values gate never caught it: task135-glsl-emit's own harness walks
+WITHOUT a null-check — `uniform1f(null, v)` is a legal no-op and its
+`at += u.size` always advanced. The facade's walk was the only one with
+the early `continue`. Why the compute leg never had it: the WGSL uniform
+block rides a staging BUFFER — no per-name locations at all.)
+
+The same task closed the latent ARRAY_BUFFER overlap: `createBuffer` /
+`updateBuffer` left the buffer on the generic ARRAY_BUFFER binding —
+WebGL2 raises INVALID_OPERATION if that buffer is later captured by
+`bindBufferBase(TRANSFORM_FEEDBACK_BUFFER)`, silently dropping the TF
+write on strict drivers (the task135 harness's own pinned lesson — its
+createBuffer unbinds; the facade's did not). Both now leave the generic
+binding empty.
+
+**Gates**: `scripts/task139-embers-forensics.mjs` — the isolation matrix
+(F0 default / FE `?emit=1` / FC `?cull=1` / FB `?emit=1&cull=1`), each
+leg a fresh page, a full GL call tracer (cost + getError per call), the
+TF output buffers captured at `bindBufferBase` and read back via
+`getBufferSubData(COPY_READ_BUFFER)` (no library changes), and the
+records' garbage signature scan (NaN/Inf, halfExtent magnitude, color
+ranges, position collapse). THE GATE LESSONS: the forensics readback
+itself can 219-s-block on a saturated ANGLE queue (read the buffers
+BEFORE the screenshots; screenshots can 45-s-timeout — the starve is
+itself freeze evidence, record it and carry on); a leg's page can CRASH
+outright under the load (every step try/catch so the evidence collected
+before the crash still lands); one leg per process (LEG env — a
+saturated renderer eats minutes). `scripts/task139b-emit-diff.mjs` — the
+differential that pinned the root: the demo's emitOut vs the JS
+reference model (gpuEmitRowModel) for the EXACT window, plus a scratch
+re-run of the demo's own shader with the orchestrator's exact uniform
+packing — the scratch reproduced the garbage bit-for-bit (a uniform-layer
+bug, not the round-trip), and the (415.5, 0, 0) arithmetic identified
+the two-slot shift by hand. Post-fix: all four legs' records SANE
+(halfMax ~0.05, in-range colors, zero NaN), FE's frame count 195 vs 39
+in the same window (the saturation is gone), warm pixels on every leg,
+zero GL errors, zero dropped draws. 1593 tests (+2: the packed-slot
+contract, the ARRAY_BUFFER discipline), task135-glsl-emit PASS (the
+values gate), task137-vfx-probe PASS, task138-vfx-probe PASS, ?v=139.

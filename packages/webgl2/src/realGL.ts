@@ -251,6 +251,15 @@ export function createRealGL(
     const buffer = gl.createBuffer()
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer)
     gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW)
+    // Task 139 — the TF-capture overlap discipline: WebGL2 forbids a buffer
+    // sitting on the generic ARRAY_BUFFER binding at the moment it is
+    // captured by bindBufferBase(TRANSFORM_FEEDBACK_BUFFER) — the capture
+    // raises INVALID_OPERATION and silently drops the TF write on strict
+    // drivers (the task135 harness's own pinned lesson: ITS createBuffer
+    // unbinds; the facade's did not). Every consumer rebinds what it needs
+    // (bindVertexBuffer / updateBuffer bind first) — leaving the generic
+    // binding EMPTY is the clean state.
+    gl.bindBuffer(gl.ARRAY_BUFFER, null)
     const id = nextBuffer++
     buffers.set(id, buffer)
     return id
@@ -274,10 +283,13 @@ export function createRealGL(
 
   /** M5 (Task 73): dynamic update (feed dual-bind) — bufferSubData.
    *  The storage is already allocated by createBuffer (bufferData); here — only
-   *  the content: the feed renderer pours the dirty range in a single call. */
+   *  the content: the feed renderer pours the dirty range in a single call.
+   *  Task 139 — the same ARRAY_BUFFER discipline as createBuffer: unbind
+   *  after the sub-data (a later TF capture must never see this binding). */
   function updateBuffer(bufferId: number, data: Float32Array, byteOffset = 0): void {
     gl.bindBuffer(gl.ARRAY_BUFFER, buffers.get(bufferId) ?? null)
     gl.bufferSubData(gl.ARRAY_BUFFER, byteOffset, data)
+    gl.bindBuffer(gl.ARRAY_BUFFER, null)
   }
 
   function setUniformMatrix4(programId: number, name: string, values: Float32Array): void {
@@ -1086,16 +1098,28 @@ export function createRealGL(
       }
     }
     // The packed uniforms: uniform1f/2f/3f/4fv per the declared sequence.
+    // Task 139 — THE PACKED-SLOT CONTRACT: an optimized-out uniform (the
+    // compiler drops a declared-but-never-read one — the emit pass's
+    // u_emitBase/u_emitCount, dead since gl_VertexID drives the rows)
+    // still OCCUPIES its slots in the packed array: the offset advances
+    // for EVERY declaration, set or skipped. The old `continue` skipped
+    // the advance too — every uniform AFTER the dead pair read floats TWO
+    // SLOTS EARLY (the whole block shifted: the newborn rows came out as
+    // (seed−1.5, 0, 0) positions with the speed row's range for life and
+    // the life row's range for size — giant garbage quads, the real-GPU
+    // default-path freeze). A null location is a legal no-op target: the
+    // uniform CALL is skipped, the slot WALK never is.
     const data = output.uniformData
     if (data !== undefined) {
       let at = 0
       for (const u of record.uniformDecl) {
         const loc = tfLocation(record, u.name)
-        if (loc === null) continue
-        if (u.size === 1) gl.uniform1f(loc, data[at] ?? 0)
-        else if (u.size === 2) gl.uniform2f(loc, data[at] ?? 0, data[at + 1] ?? 0)
-        else if (u.size === 3) gl.uniform3f(loc, data[at] ?? 0, data[at + 1] ?? 0, data[at + 2] ?? 0)
-        else gl.uniform4f(loc, data[at] ?? 0, data[at + 1] ?? 0, data[at + 2] ?? 0, data[at + 3] ?? 0)
+        if (loc !== null) {
+          if (u.size === 1) gl.uniform1f(loc, data[at] ?? 0)
+          else if (u.size === 2) gl.uniform2f(loc, data[at] ?? 0, data[at + 1] ?? 0)
+          else if (u.size === 3) gl.uniform3f(loc, data[at] ?? 0, data[at + 1] ?? 0, data[at + 2] ?? 0)
+          else gl.uniform4f(loc, data[at] ?? 0, data[at + 1] ?? 0, data[at + 2] ?? 0, data[at + 3] ?? 0)
+        }
         at += u.size
       }
     }

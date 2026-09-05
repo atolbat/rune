@@ -42,7 +42,7 @@
 //     cull, softwareGL } — the probe gates pin the tier + the frame cost
 //     + the hardware-policy branch; window.__vfxCounters.embers — the
 //     emission counters.
-import { createGpuParticles } from '../../../dist/rune.esm.js?v=138'
+import { createGpuParticles } from '../../../dist/rune.esm.js?v=139'
 
 // Task 137 — the WebGL2 TF budget is now HARDWARE-AWARE: the 16k cap was
 // the SwiftShader/software-GL budget (the container's gate-hostile class:
