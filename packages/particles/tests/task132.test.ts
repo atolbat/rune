@@ -169,12 +169,17 @@ describe('Task 132 — render.sort (the facade)', () => {
     })).toThrow('render.sort is a billboard-kind option')
   })
 
-  it('validation: sim:"gpu" rejects sort', () => {
-    expect(() => createParticles({
+  it('validation: sim:"gpu" ACCEPTS sort (Task 134 — the GPU render tier owns the order now)', () => {
+    // The Task 132 reject ("sim:\"gpu\" rejects render.sort") is RETIRED:
+    // the sort family (gpuSim.ts's sortKeys/bitonic/pack) sorts the pairs
+    // GPU-side — no CPU mirror needed. The orchestrators (gl) pin the pass
+    // sequence; this pins the facade no longer blocks the combination.
+    const facade = createParticles({
       capacity: 4,
       render: { kind: 'billboard', draw: 'instance', sort: true },
       sim: 'gpu',
-    })).toThrow('sim:"gpu" rejects render.sort')
+    })
+    expect(facade.gpuHandoff).not.toBeNull()
   })
 
   it('a basis without forward throws at view() time (the depth key needs it)', () => {

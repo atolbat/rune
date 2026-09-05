@@ -43,7 +43,9 @@ export interface GpuTierLimit {
  *  interpreted once, consumed by both backends' uniform packers. The
  *  optional forces (attract/noise/limit/wrap) are ZERO-FILLED when absent
  *  — the `active` flags carry the presence, the records' shapes stay
- *  uniform (no null-walking at the pack sites). */
+ *  uniform (no null-walking at the pack sites). Task 134: the render
+ *  half (sort/cull) rides the same one-read config — both orchestrators
+ *  gate their sort/cull pipelines on it. */
 export interface GpuTierConfig {
   readonly gravity: readonly number[]
   readonly drag: number
@@ -69,6 +71,12 @@ export interface GpuTierConfig {
   readonly tiles: readonly [number, number]
   /** The per-particle random atlas tile (render.frameJitter ?? 0). */
   readonly frameJitter: number
+  /** Task 134 — render.sort: the bitonic network runs (the records land
+   *  far-to-near — the GPU twin of sortDepthBackToFront). */
+  readonly sort: boolean
+  /** Task 134 — render.cull: the per-particle frustum gate (the culled
+   *  slots pack the zero record — a degenerate instance). */
+  readonly cull: boolean
 }
 
 /** Reads the facade ONCE into the tier config (call after the handoff
@@ -80,7 +88,7 @@ export function readGpuTierConfig(facade: Particles): GpuTierConfig {
   const noise = forces.noise ?? null
   const limit = forces.limitSpeed ?? null
   const wrap = facade.gpuHandoff?.wrapSize ?? null
-  const render = facade.render as { tiles?: readonly [number, number]; frameJitter?: number }
+  const render = facade.render as { tiles?: readonly [number, number]; frameJitter?: number; sort?: boolean; cull?: boolean }
   const wrapSize = wrap ?? [0, 0, 0]
   return {
     gravity,
@@ -111,5 +119,7 @@ export function readGpuTierConfig(facade: Particles): GpuTierConfig {
     },
     tiles: render.tiles ?? [1, 1],
     frameJitter: render.frameJitter ?? 0,
+    sort: render.sort === true,
+    cull: render.cull === true,
   }
 }

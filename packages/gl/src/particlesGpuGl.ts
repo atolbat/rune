@@ -39,18 +39,24 @@
 import type { TfComputeTier, TfRunBindings } from '@rune/core'
 import type { Particles } from '@rune/particles'
 import {
-  gpuSimGlAdvanceGlsl, gpuSimGlPackGlsl, gpuRampLUTTexture,
-  GPU_GL_STATE_TEXTURE_W, gpuGlStateTextureH, GPU_GL_TEXELS_PER_PARTICLE,
+  gpuSimGlAdvanceGlsl, gpuSimGlPackGlsl, gpuSimGlSortKeysGlsl, gpuSimGlBitonicGlsl, gpuSimGlPackSortedGlsl,
+  gpuRampLUTTexture,
+  GPU_GL_STATE_TEXTURE_W, gpuGlStateTextureH, gpuGlPairsTextureH, GPU_GL_TEXELS_PER_PARTICLE,
   GPU_GL_ADVANCE_UNIFORMS, GPU_GL_ADVANCE_F, GPU_GL_PACK_UNIFORMS, GPU_GL_PACK_F,
-  GPU_GL_ADVANCE_OUTPUTS, GPU_GL_PACK_OUTPUTS,
+  GPU_GL_ADVANCE_OUTPUTS, GPU_GL_PACK_OUTPUTS, GPU_GL_SORT_OUTPUTS,
+  GPU_GL_SORTKEYS_UNIFORMS, GPU_GL_SORTKEYS_F, GPU_GL_BITONIC_UNIFORMS, GPU_GL_BITONIC_F,
+  gpuSortPadCount, gpuSortPassSequence, gpuRampMaxSize, gpuRenderFrustum,
 } from '@rune/particles'
 import { readGpuTierConfig } from './particlesGpuConfig.ts'
+import type { GpuRenderCamera } from './particlesGpu.ts'
 
 /** The created TF backend (the same interface as the WebGPU tier's — the
  *  createGpuParticles dispatch contract). */
 export interface GpuParticlesTf {
-  /** Runs this frame's GPU half (after facade.advance, before the draw). */
-  step(dt: number): void
+  /** Runs this frame's GPU half (after facade.advance, before the draw).
+   *  Task 134 — the CAMERA: render.sort needs `camera.forward`, render.cull
+   *  needs `camera.viewProj` (the frame context's basis + mvp). */
+  step(dt: number, camera?: GpuRenderCamera): void
   /** The GL buffer id of the instance records — the layer command's
    *  i_* attributes bind it through bufferId (stride 64, divisor 1). */
   readonly recordsBufferId: number
@@ -103,6 +109,8 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
   const mapBuf = gpu.createBuffer(new Float32Array(capacity))
 
   // ── the passes (tracked) ────────────────────────────────────────────
+  const cfg = readGpuTierConfig(facade)
+  const tiered = cfg.sort || cfg.cull
   const advPass = gpu.createPass({
     vertex: gpuSimGlAdvanceGlsl(),
     outputs: GPU_GL_ADVANCE_OUTPUTS,
@@ -116,13 +124,40 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
     textures: ['u_state', 'u_ramp'],
     uniforms: GPU_GL_PACK_UNIFORMS,
   })
+  // ── Task 134 — THE GPU RENDER TIER: the pairs texture (the network's
+  //    (key, index) store — read via texelFetch), the pairs output buffer
+  //    (ONE vec4 row per vertex) and the three passes (sortKeys, the
+  //    bitonic network, the sorted pack). Each pairs-writing pass ends in
+  //    a PBO round-trip (the TF shape's own cost — the WebGL2 twin of the
+  //    compute tier's in-place storage buffer).
+  const maxPadN = gpuSortPadCount(capacity)
+  const pairsH = gpuGlPairsTextureH(capacity)
+  const pairsTex = tiered ? gpu.createTexture(W, pairsH, { format: 'rgba32f' }) : -1
+  const pairsOut = tiered ? gpu.createBuffer(new Float32Array(maxPadN * 4)) : -1
+  const sortKeysPass = tiered ? gpu.createPass({
+    vertex: gpuSimGlSortKeysGlsl(),
+    outputs: GPU_GL_SORT_OUTPUTS,
+    textures: ['u_state'],
+    uniforms: GPU_GL_SORTKEYS_UNIFORMS,
+  }) : -1
+  const bitonicPass = tiered ? gpu.createPass({
+    vertex: gpuSimGlBitonicGlsl(),
+    outputs: GPU_GL_SORT_OUTPUTS,
+    textures: ['u_pairs'],
+    uniforms: GPU_GL_BITONIC_UNIFORMS,
+  }) : -1
+  const packSortedPass = tiered ? gpu.createPass({
+    vertex: gpuSimGlPackSortedGlsl(),
+    outputs: GPU_GL_PACK_OUTPUTS,
+    textures: ['u_state', 'u_ramp', 'u_pairs'],
+    uniforms: GPU_GL_PACK_UNIFORMS,
+  }) : -1
   ho.attached = true
 
   // ── the uniforms: the controller's scratch (one packed block per pass) ─
   const advUni = gpu.scratch(GPU_GL_ADVANCE_UNIFORMS.reduce((n, u) => n + u.size, 0)).f32
   const packUni = gpu.scratch(GPU_GL_PACK_UNIFORMS.reduce((n, u) => n + u.size, 0)).f32
   const packF = GPU_GL_PACK_F
-  const cfg = readGpuTierConfig(facade)
   packUni[packF.tileU] = cfg.tiles[0]
   packUni[packF.tileV] = cfg.tiles[1]
   packUni[packF.frameJitter] = cfg.frameJitter
@@ -160,8 +195,19 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
   const emitPacked = new Float32Array(capacity * 20)
   const prov = new Int32Array(capacity)
   const mapFloats = new Float32Array(capacity)
+  // Task 134 — the sort family's scratch: the sortKeys uniforms (count,
+  // the cull gate, the camera, the six planes, the radius factor), the
+  // bitonic (k, j) pair, the frustum extraction buffer (unconditional —
+  // a few floats, and the step's hot path walks without null guards).
+  const skUni = gpu.scratch(GPU_GL_SORTKEYS_UNIFORMS.reduce((n, u) => n + u.size, 0)).f32
+  const btUni = gpu.scratch(GPU_GL_BITONIC_UNIFORMS.reduce((n, u) => n + u.size, 0)).f32
+  const frustumScratch = new Float32Array(24)
+  {
+    const K = GPU_GL_SORTKEYS_F
+    skUni[K.radiusK] = gpuRampMaxSize(facade.ramp.points) * 0.5
+  }
 
-  function step(dt: number): void {
+  function step(dt: number, camera?: GpuRenderCamera): void {
     const count = facade.count
     if (count <= 0 && ho.emitCount === 0 && ho.swapCount === 0) return
     advUni[A.dt] = dt
@@ -213,13 +259,77 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
     // 4. the PBO round-trip: the TF output becomes the new state texture.
     gpu.texSubImage2DBuffer(stateTex, 0, 0, W, H, stateOut, 0)
 
-    // 5. pack: slot i + the ramp LUT → the 16-float record i (the draw's
-    //    instance source through recordsBufferId).
-    gpu.runPass(packPass, count, {
-      bufferId: records,
-      textures: [stateTex, rampTex],
-      uniformData: packUni,
-    } satisfies TfRunBindings)
+    if (count > 0 && tiered) {
+      // Task 134 — THE GPU RENDER TIER: the camera contracts (loud, not
+      // silent) — sort needs the forward, cull the view-projection. The
+      // throws narrow the locals — the pack sites walk assertion-free.
+      let camForward: readonly number[] | null = null
+      let camViewProj: readonly number[] | null = null
+      if (cfg.sort) {
+        const fw = camera?.forward
+        if (fw === undefined || fw.length < 3) {
+          throw new Error('rune/gl: render.sort needs the camera forward at step(dt, { forward, viewProj }) — the depth key is dot(forward, position)')
+        }
+        camForward = fw
+      }
+      if (cfg.cull) {
+        const vp = camera?.viewProj
+        if (vp === undefined || vp.length !== 16) {
+          throw new Error('rune/gl: render.cull needs the view-projection at step(dt, { forward, viewProj }) — the six frustum planes come from the frame context mvp (column-major)')
+        }
+        camViewProj = vp
+      }
+      const K = GPU_GL_SORTKEYS_F
+      const padN = gpuSortPadCount(count)
+      skUni[K.count] = count
+      skUni[K.cull] = cfg.cull ? 1 : 0
+      if (camForward !== null) {
+        const fw = camForward
+        skUni[K.forward] = fw[0]; skUni[K.forward + 1] = fw[1]; skUni[K.forward + 2] = fw[2]
+      }
+      if (camViewProj !== null) {
+        gpuRenderFrustum(camViewProj, frustumScratch)
+        skUni.set(frustumScratch, K.planes)
+      }
+      // 5a. sortKeys — the (key, index) pairs for [0, padN), then the PBO
+      //     round-trip (the pairs texture is the network's read side).
+      gpu.runPass(sortKeysPass, padN, {
+        bufferId: pairsOut,
+        textures: [stateTex],
+        uniformData: skUni,
+      } satisfies TfRunBindings)
+      gpu.texSubImage2DBuffer(pairsTex, 0, 0, W, pairsH, pairsOut, 0)
+      // 5b. the bitonic network — the canonical (k, j) sequence, each pass
+      //     one TF run + one PBO round-trip.
+      if (cfg.sort) {
+        const B = GPU_GL_BITONIC_F
+        gpuSortPassSequence(padN, (k, j) => {
+          btUni[B.k] = k
+          btUni[B.j] = j
+          gpu.runPass(bitonicPass, padN, {
+            bufferId: pairsOut,
+            textures: [pairsTex],
+            uniformData: btUni,
+          } satisfies TfRunBindings)
+          gpu.texSubImage2DBuffer(pairsTex, 0, 0, W, pairsH, pairsOut, 0)
+        })
+      }
+      // 5c. the sorted pack — the records [0, count) in draw order (the
+      //     sentinel slots the zero record — a degenerate instance).
+      gpu.runPass(packSortedPass, count, {
+        bufferId: records,
+        textures: [stateTex, rampTex, pairsTex],
+        uniformData: packUni,
+      } satisfies TfRunBindings)
+    } else if (count > 0) {
+      // 5. pack: slot i + the ramp LUT → the 16-float record i (the draw's
+      //    instance source through recordsBufferId).
+      gpu.runPass(packPass, count, {
+        bufferId: records,
+        textures: [stateTex, rampTex],
+        uniformData: packUni,
+      } satisfies TfRunBindings)
+    }
   }
 
   return {

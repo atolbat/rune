@@ -137,6 +137,187 @@ export function gpuRampLUT(points: readonly { t: number; size: number; r: number
 /** The three compute entries (dispatch names). */
 export const GPU_SIM_ENTRIES = ['compact', 'advance', 'pack'] as const
 
+// ─── Task 134 — THE GPU RENDER TIER: the bitonic sort + the frustum cull ───
+
+/** The sort/cull family's uniform FLOAT count (SortParams in the WGSL below
+ *  — the family is a SECOND compute kernel over the SAME four buffers; its
+ *  uniform is PASS-INVARIANT: count/padN/renderMask, the camera forward,
+ *  the six frustum planes, the pack passthrough. The network's (k, j)
+ *  rides the RECORDS buffer's head instead of the uniform — the frame's
+ *  compute dispatches share ONE encoder, and queue.writeBuffer lands
+ *  before every dispatch in it (a per-pass uniform would collapse to the
+ *  LAST write — the self-driving network is the fix; see sortStep). */
+export const GPU_SORT_UNIFORM_FLOATS = 36
+
+/** The u32 fields of SortParams (their FLOAT indices — write via the u32
+ *  view of the same scratch). */
+export const GPU_SORT_U32_FIELDS: Record<'count' | 'padN' | 'renderMask', number> = {
+  count: 0,
+  padN: 1,
+  renderMask: 2,
+}
+
+/** The f32/vec4 fields of SortParams (their FLOAT base indices). */
+export const GPU_SORT_F32_FIELDS: Record<'forward' | 'planes' | 'tileU' | 'tileV' | 'frameJitter' | 'rampMaxSize', number> = {
+  forward: 4,
+  /** The six planes' base — 24 consecutive floats (p·4 + 0..3 = n.xyz, d). */
+  planes: 8,
+  tileU: 32,
+  tileV: 33,
+  frameJitter: 34,
+  rampMaxSize: 35,
+}
+
+/** The render-mask bit: 1 — the frustum cull is ON in sortKeys. */
+export const GPU_SORT_RENDER_MASK = { cull: 1 } as const
+
+/** The pad/cull key: +1e30 — far above any real |dot(forward, p)|, so the
+ *  pads AND the frustum-culled slots sort LAST in the ascending network
+ *  (behind every drawn particle, in front of nothing). */
+export const GPU_SORT_PAD_KEY = 1e30
+
+/** The pad/cull INDEX sentinel: 2^25 — a float-exact integer greater than
+ *  any particle index. A slot whose pair carries it packs the ZERO record
+ *  (half extent 0 — the degenerate instance draws nothing). */
+export const GPU_SORT_SENTINEL = 33554432
+
+/** The four sort-family entries (dispatch names). */
+export const GPU_SORT_ENTRIES = ['sortKeys', 'bitonic', 'sortStep', 'pack'] as const
+
+/** The padded network size: the next power of two ≥ count (the bitonic
+ *  network's own requirement — the orchestrator dispatches over [0, padN);
+ *  the tail [count, padN) is sentinel pads). ≥ 1: a single live particle
+ *  sorts trivially (zero network passes). */
+export function gpuSortPadCount(count: number): number {
+  if (!Number.isFinite(count) || count < 0) {
+    throw new Error(`rune/particles: gpuSortPadCount — count must be a finite number ≥ 0 (got ${count})`)
+  }
+  if (count <= 1) return 1
+  return 1 << Math.ceil(Math.log2(count))
+}
+
+/** The canonical bitonic (k, j) sequence for a padded network size —
+ *  k = 2 → padN (the block being bitonized), j = k/2 → 1 (the compare
+ *  distance): log₂(padN)·(log₂(padN)+1)/2 passes, each ONE dispatch/pass
+ *  with its (k, j) in the uniforms. Both orchestrators walk THIS sequence
+ *  (the WGSL entry and the GLSL pass evaluate the same (k, j) — the test
+ *  suite pins the sequence's MODEL against Array.sort). */
+export function gpuSortPassSequence(padN: number, run: (k: number, j: number) => void): void {
+  for (let k = 2; k <= padN; k <<= 1) {
+    for (let j = k >> 1; j > 0; j >>= 1) run(k, j)
+  }
+}
+
+/** The ramp's largest size sample — the cull radius factor: every drawn
+ *  extent is spawnSize · rampSize · 0.5 ≤ spawnSize · rampMax · 0.5, so the
+ *  radius `size · rampMaxSize · 0.5` is conservative (a particle never pops
+ *  at the screen edge; it stays until its whole sprite clears the plane). */
+export function gpuRampMaxSize(points: readonly { size: number }[]): number {
+  let max = 1
+  for (const p of points) if (p.size > max) max = p.size
+  return max
+}
+
+/** The six frustum planes from a COLUMN-MAJOR view-projection (Gribb–
+ *  Hartmann: the clip matrix's row3 ± row_i, normalized so the shader's
+ *  sphere test dot(n, p) + d > −r carries a real radius). Plane order:
+ *  +x, −x, +y, −y, +z, −z (left, right, bottom, top, near, far). The
+ *  z pair uses the GL [−1, 1] clip convention — on WebGPU's [0, 1] z this
+ *  is CONSERVATIVE (a near/far test may keep a WebGPU-clipped particle —
+ *  the rasterizer clips it anyway; no visible particle is ever culled).
+ *  Writes into `out` (24 floats) when given — the orchestrators pass their
+ *  per-frame scratch (the zero-allocation hot-path contract). */
+export function gpuRenderFrustum(viewProj: readonly number[], out?: Float32Array): Float32Array {
+  if (viewProj.length !== 16) {
+    throw new Error(`rune/particles: gpuRenderFrustum — the view-projection is 16 numbers, column-major (got ${viewProj.length})`)
+  }
+  const o = out ?? new Float32Array(24)
+  const m = viewProj
+  for (let p = 0; p < 6; p++) {
+    const axis = p >> 1                  // the row the plane cuts: 0 = x, 1 = y, 2 = z
+    const sign = (p & 1) === 0 ? 1 : -1  // the + plane, then the − plane
+    const nx = m[3] + sign * m[axis]
+    const ny = m[7] + sign * m[4 + axis]
+    const nz = m[11] + sign * m[8 + axis]
+    const d = m[15] + sign * m[12 + axis]
+    const len = Math.hypot(nx, ny, nz)
+    const inv = len > 1e-12 ? 1 / len : 0
+    o[p * 4] = nx * inv
+    o[p * 4 + 1] = ny * inv
+    o[p * 4 + 2] = nz * inv
+    o[p * 4 + 3] = d * inv
+  }
+  return o
+}
+
+/** The pack body shared by BOTH families' pack entries (the sim family's
+ *  `pack` and the sort family's `pack`): the ramp LUT walk, the tile math,
+ *  the 16-float record writes. Receives `b` (the state row base), `o` (the
+ *  record base) and `i` (the record slot) from its wrapper — the sort
+ *  family's wrapper derives `b` from the sorted pair instead of the slot. */
+const PACK_BODY_WGSL = `
+  let age = state[b + 6u];
+  let life = state[b + 7u];
+  var t = 0.0;
+  if (life > 0.0) { t = age / life; }
+  // the ramp LUT (7-float rows: t, size, r, g, b, a, frame) — sampleRamp's
+  // exact walk: clamp → binary search → lerp
+  let n = arrayLength(&rampLUT) / 7u;
+  var size = 1.0; var r = 1.0; var g = 1.0; var bl = 1.0; var a = 1.0; var frame = 0.0;
+  if (n == 1u) {
+    size = rampLUT[1]; r = rampLUT[2]; g = rampLUT[3]; bl = rampLUT[4]; a = rampLUT[5]; frame = rampLUT[6];
+  } else if (t <= rampLUT[0]) {
+    size = rampLUT[1]; r = rampLUT[2]; g = rampLUT[3]; bl = rampLUT[4]; a = rampLUT[5]; frame = rampLUT[6];
+  } else {
+    let lastR = (n - 1u) * 7u;
+    if (t >= rampLUT[lastR]) {
+      size = rampLUT[lastR + 1u]; r = rampLUT[lastR + 2u]; g = rampLUT[lastR + 3u];
+      bl = rampLUT[lastR + 4u]; a = rampLUT[lastR + 5u]; frame = rampLUT[lastR + 6u];
+    } else {
+      var lo = 0u; var hi = n - 1u;
+      var guard = 0u;
+      while (hi - lo > 1u && guard < 32u) {
+        let mid = (lo + hi) >> 1u;
+        if (rampLUT[mid * 7u] <= t) { lo = mid; } else { hi = mid; }
+        guard++;
+      }
+      let ra = lo * 7u; let rb = hi * 7u;
+      let span = rampLUT[rb] - rampLUT[ra];
+      var k = 0.0;
+      if (span > 0.0) { k = (t - rampLUT[ra]) / span; }
+      size = rampLUT[ra + 1u] + (rampLUT[rb + 1u] - rampLUT[ra + 1u]) * k;
+      r = rampLUT[ra + 2u] + (rampLUT[rb + 2u] - rampLUT[ra + 2u]) * k;
+      g = rampLUT[ra + 3u] + (rampLUT[rb + 3u] - rampLUT[ra + 3u]) * k;
+      bl = rampLUT[ra + 4u] + (rampLUT[rb + 4u] - rampLUT[ra + 4u]) * k;
+      a = rampLUT[ra + 5u] + (rampLUT[rb + 5u] - rampLUT[ra + 5u]) * k;
+      frame = rampLUT[ra + 6u] + (rampLUT[rb + 6u] - rampLUT[ra + 6u]) * k;
+    }
+  }
+  let half = state[b + 8u] * size * 0.5;
+  let seed = state[b + 13u];
+  // the tile origin: frame + seed·jitter → floor → clamp → row-major
+  var fr = floor(frame + seed * P.frameJitter);
+  // NaN-safe: every NaN comparison is FALSE — !(fr >= 0) catches NaN and
+  // the negatives in one branch (WGSL has no isnan builtin)
+  if (!(fr >= 0.0)) { fr = 0.0; }
+  let maxFrame = P.tileU * P.tileV - 1.0;
+  if (fr > maxFrame) { fr = maxFrame; }
+  var u0 = 0.0; var v0 = 0.0;
+  if (P.tileU >= 1.0 && P.tileV >= 1.0) {
+    u0 = (fr % P.tileU) / P.tileU;
+    v0 = floor(fr / P.tileU) / P.tileV;
+  }
+  records[o] = state[b]; records[o + 1u] = state[b + 1u]; records[o + 2u] = state[b + 2u];
+  records[o + 3u] = state[b + 3u]; records[o + 4u] = state[b + 4u]; records[o + 5u] = state[b + 5u];
+  records[o + 6u] = state[b + 9u] * r; records[o + 7u] = state[b + 10u] * g;
+  records[o + 8u] = state[b + 11u] * bl; records[o + 9u] = state[b + 12u] * a;
+  records[o + 10u] = half;
+  records[o + 11u] = seed * 6.283185307179586;
+  records[o + 12u] = age;
+  records[o + 13u] = seed;
+  records[o + 14u] = u0; records[o + 15u] = v0;
+`
+
 /** The full WGSL module (the three entries + the fixed binding contract).
  *  Pure function — deterministic source, cacheable by the caller. */
 export function gpuSimWgsl(): string {
@@ -334,73 +515,181 @@ fn advance(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 
 // ── pack: the 16-float instance records (packInstances' GPU twin — the
-// record layout of the BILLBOARD material / INSTANCE_LAYOUT) ───────────────
+// record layout of the BILLBOARD material / INSTANCE_LAYOUT; the body is
+// PACK_BODY_WGSL — SHARED with the sort family's sorted pack entry) ──────
 @compute @workgroup_size(64)
 fn pack(@builtin(global_invocation_id) gid : vec3<u32>) {
   let i = gid.x;
   if (i >= P.count) { return; }
   let b = i * FSTRIDE;
-  let age = state[b + 6u];
-  let life = state[b + 7u];
-  var t = 0.0;
-  if (life > 0.0) { t = age / life; }
-  // the ramp LUT (7-float rows: t, size, r, g, b, a, frame) — sampleRamp's
-  // exact walk: clamp → binary search → lerp
-  let n = arrayLength(&rampLUT) / 7u;
-  var size = 1.0; var r = 1.0; var g = 1.0; var bl = 1.0; var a = 1.0; var frame = 0.0;
-  if (n == 1u) {
-    size = rampLUT[1]; r = rampLUT[2]; g = rampLUT[3]; bl = rampLUT[4]; a = rampLUT[5]; frame = rampLUT[6];
-  } else if (t <= rampLUT[0]) {
-    size = rampLUT[1]; r = rampLUT[2]; g = rampLUT[3]; bl = rampLUT[4]; a = rampLUT[5]; frame = rampLUT[6];
-  } else {
-    let lastR = (n - 1u) * 7u;
-    if (t >= rampLUT[lastR]) {
-      size = rampLUT[lastR + 1u]; r = rampLUT[lastR + 2u]; g = rampLUT[lastR + 3u];
-      bl = rampLUT[lastR + 4u]; a = rampLUT[lastR + 5u]; frame = rampLUT[lastR + 6u];
-    } else {
-      var lo = 0u; var hi = n - 1u;
-      var guard = 0u;
-      while (hi - lo > 1u && guard < 32u) {
-        let mid = (lo + hi) >> 1u;
-        if (rampLUT[mid * 7u] <= t) { lo = mid; } else { hi = mid; }
-        guard++;
+  let o = i * RSTRIDE;
+${PACK_BODY_WGSL}}
+`
+}
+
+/** The SORT/CULL family's WGSL module (Task 134 — the GPU render tier): a
+ *  SECOND compute kernel over the SAME four external buffers — the bind ids
+ *  shift one slot (1 = the pairs (rw), 2 = the state (ro — the render tier
+ *  only READS positions), 3 = the records (rw), 4 = the ramp LUT (ro)).
+ *  Pure function — deterministic source, cacheable by the caller.
+ *
+ *  THE ENTRIES:
+ *    sortKeys — the (key, index) pairs for [0, padN): the live [0, count)
+ *      get the NEGATED depth key (−dot(forward, position) — an ASCENDING
+ *      network draws far-to-near, the painter's order); the frustum-culled
+ *      and the pads [count, padN) get (PAD_KEY, SENTINEL);
+ *    bitonic — ONE compare-exchange of the network: the (k, j) of THIS
+ *      pass read from the RECORDS buffer's head (records[0] = k,
+ *      records[1] = j — the SELF-DRIVING state: the frame's compute
+ *      dispatches share ONE encoder, and a per-pass uniform would
+ *      collapse to the LAST queue.writeBuffer — the state in a bound
+ *      buffer travels with the dispatches). The LOW thread of each
+ *      (i, i^j) pair owns the exchange (the pairs are disjoint per pass —
+ *      in-place on the pairs buffer, no cross-thread hazard);
+ *    sortStep — the network's clock: ONE thread advances (k, j) to the
+ *      next pass of the canonical sequence (j > 1 → (k, j/2); else →
+ *      (2k, k); k > padN → done, (0, 0)). The orchestrator dispatches
+ *      [bitonic, sortStep] × passCount(padN) — the count of
+ *      gpuSortPassSequence's walk (the SAME sequence the GLSL twin takes
+ *      through its per-pass uniforms — the WebGL2 facade sets GL uniforms
+ *      at pass EXECUTION time, so it can afford the direct form);
+ *    pack — the sorted record pack: slot i gathers the state of
+ *      pairs[i].y (a SENTINEL index — the ZERO record, a degenerate
+ *      instance that draws nothing; the visible prefix [0, V) lands
+ *      far-to-near, the sentinel tail [V, count) draws nothing).
+ *
+ *  THE DIRECTION: an ascending sort over −depth = the FARTHEST FIRST —
+ *  the CPU tier's sortDepthBackToFront contract (the depth key
+ *  dot(forward, position), descending). Ties: the network is not stable —
+ *  equal keys land in an arbitrary order (the CPU tier's total-order
+ *  tie-break is a CPU luxury; the GPU parity contract is the same
+ *  SEMANTICS, not the same tie order). */
+export function gpuSortWgsl(): string {
+  return `
+// @rune/particles — Task 134: the GPU render tier (the sort/cull family).
+// The SAME four buffers as the sim family, one slot shifted: the pairs ride
+// binding 1 (rw), the state drops to binding 2 (ro — read only).
+
+struct SortParams {
+  count : u32,
+  padN : u32,
+  renderMask : u32,
+  _pad0 : u32,
+  forward : vec4<f32>,
+  planes : array<vec4<f32>, 6>,
+  tileU : f32,
+  tileV : f32,
+  frameJitter : f32,
+  rampMaxSize : f32,
+}
+
+@group(0) @binding(0) var<uniform> P : SortParams;
+@group(0) @binding(1) var<storage, read_write> pairs : array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> state : array<f32>;
+@group(0) @binding(3) var<storage, read_write> records : array<f32>;
+@group(0) @binding(4) var<storage, read> rampLUT : array<f32>;
+
+const FSTRIDE : u32 = ${GPU_STATE_STRIDE}u;
+const RSTRIDE : u32 = 16u;
+const PAD_KEY : f32 = ${GPU_SORT_PAD_KEY};
+const SENTINEL : f32 = ${GPU_SORT_SENTINEL}.0;
+
+// ── sortKeys: the (key, index) pairs — the negated depth for the visible
+// live, the sentinel pair for the culled and the pads ───────────────────
+@compute @workgroup_size(64)
+fn sortKeys(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.padN) { return; }
+  var key = PAD_KEY;
+  var idx = SENTINEL;
+  if (i < P.count) {
+    let b = i * FSTRIDE;
+    let px = state[b]; let py = state[b + 1u]; let pz = state[b + 2u];
+    var visible = true;
+    if ((P.renderMask & 1u) != 0u) {
+      // the conservative sphere: spawnSize · rampMax · 0.5 ≥ every drawn
+      // extent — a sprite never pops at the screen edge
+      let radius = state[b + 8u] * P.rampMaxSize * 0.5;
+      for (var pl = 0u; pl < 6u; pl++) {
+        let plane = P.planes[pl];
+        if (plane.x * px + plane.y * py + plane.z * pz + plane.w <= -radius) {
+          visible = false;
+        }
       }
-      let ra = lo * 7u; let rb = hi * 7u;
-      let span = rampLUT[rb] - rampLUT[ra];
-      var k = 0.0;
-      if (span > 0.0) { k = (t - rampLUT[ra]) / span; }
-      size = rampLUT[ra + 1u] + (rampLUT[rb + 1u] - rampLUT[ra + 1u]) * k;
-      r = rampLUT[ra + 2u] + (rampLUT[rb + 2u] - rampLUT[ra + 2u]) * k;
-      g = rampLUT[ra + 3u] + (rampLUT[rb + 3u] - rampLUT[ra + 3u]) * k;
-      bl = rampLUT[ra + 4u] + (rampLUT[rb + 4u] - rampLUT[ra + 4u]) * k;
-      a = rampLUT[ra + 5u] + (rampLUT[rb + 5u] - rampLUT[ra + 5u]) * k;
-      frame = rampLUT[ra + 6u] + (rampLUT[rb + 6u] - rampLUT[ra + 6u]) * k;
+    }
+    if (visible) {
+      key = -(P.forward.x * px + P.forward.y * py + P.forward.z * pz);
+      idx = f32(i);
     }
   }
-  let half = state[b + 8u] * size * 0.5;
-  let seed = state[b + 13u];
-  // the tile origin: frame + seed·jitter → floor → clamp → row-major
-  var fr = floor(frame + seed * P.frameJitter);
-  // NaN-safe: every NaN comparison is FALSE — !(fr >= 0) catches NaN and
-  // the negatives in one branch (WGSL has no isnan builtin)
-  if (!(fr >= 0.0)) { fr = 0.0; }
-  let maxFrame = P.tileU * P.tileV - 1.0;
-  if (fr > maxFrame) { fr = maxFrame; }
-  var u0 = 0.0; var v0 = 0.0;
-  if (P.tileU >= 1.0 && P.tileV >= 1.0) {
-    u0 = (fr % P.tileU) / P.tileU;
-    v0 = floor(fr / P.tileU) / P.tileV;
+  pairs[i] = vec2<f32>(key, idx);
+  // thread 0 seeds the SELF-DRIVING network state: records[0] = k,
+  // records[1] = j (the first canonical pass is (2, 1)). The pack entry
+  // overwrites the records AFTER the network — the scratch is safe.
+  if (i == 0u) {
+    records[0] = 2.0;
+    records[1] = 1.0;
   }
-  let o = i * RSTRIDE;
-  records[o] = state[b]; records[o + 1u] = state[b + 1u]; records[o + 2u] = state[b + 2u];
-  records[o + 3u] = state[b + 3u]; records[o + 4u] = state[b + 4u]; records[o + 5u] = state[b + 5u];
-  records[o + 6u] = state[b + 9u] * r; records[o + 7u] = state[b + 10u] * g;
-  records[o + 8u] = state[b + 11u] * bl; records[o + 9u] = state[b + 12u] * a;
-  records[o + 10u] = half;
-  records[o + 11u] = seed * 6.283185307179586;
-  records[o + 12u] = age;
-  records[o + 13u] = seed;
-  records[o + 14u] = u0; records[o + 15u] = v0;
 }
+
+// ── bitonic: ONE compare-exchange — the (k, j) of this pass read from the
+// records head (the self-driving state); the low thread of (i, i^j) swaps
+// the pair when it violates the block's direction ((i & k) == 0 →
+// ascending). The pairs are disjoint per pass — in-place, no hazard ──────
+@compute @workgroup_size(64)
+fn bitonic(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.padN) { return; }
+  let k = u32(records[0]);
+  let j = u32(records[1]);
+  if (k == 0u || k > P.padN) { return; } // done (a defensive no-op)
+  let p = i ^ j;
+  if (p <= i) { return; }
+  let a = pairs[i];
+  let b = pairs[p];
+  let asc = (i & k) == 0u;
+  if ((a.x > b.x) == asc) {
+    pairs[i] = b;
+    pairs[p] = a;
+  }
+}
+
+// ── sortStep: the network's clock — ONE thread advances (k, j) to the
+// next pass of the canonical sequence: j > 1 → (k, j/2); j == 1 →
+// (2k, k); k > padN → done (0, 0). The GLSL twin walks the SAME sequence
+// through per-pass uniforms (the GL facade sets them at pass EXECUTION
+// time — the batched-encoder collapse is a WebGPU compute shape) ───────
+@compute @workgroup_size(1)
+fn sortStep(@builtin(global_invocation_id) gid : vec3<u32>) {
+  if (gid.x != 0u) { return; }
+  var k = u32(records[0]);
+  var j = u32(records[1]);
+  if (k == 0u || k > P.padN) { return; }
+  if (j > 1u) {
+    j = j >> 1u;
+  } else {
+    k = k << 1u;
+    j = k >> 1u;
+  }
+  if (k > P.padN) { k = 0u; j = 0u; }
+  records[0] = f32(k);
+  records[1] = f32(j);
+}
+
+// ── pack (the sorted twin): the record of slot i gathers the state of
+// pairs[i].y — a SENTINEL writes the zero record (half extent 0, the
+// degenerate instance that draws nothing) ───────────────────────────────
+@compute @workgroup_size(64)
+fn pack(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.count) { return; }
+  let o = i * RSTRIDE;
+  let m = pairs[i].y;
+  if (m >= SENTINEL) {
+    for (var f = 0u; f < RSTRIDE; f++) { records[o + f] = 0.0; }
+    return;
+  }
+  let b = u32(m) * FSTRIDE;
+${PACK_BODY_WGSL}}
 `
 }

@@ -213,3 +213,64 @@ before). The deterministic simplex noise (`simplex3`/`PERM`/`GRAD3`) moved to
 `@rune/core/noise.ts` and `hash01` to `@rune/core/random.ts` (bit-identical,
 re-exported by @rune/particles) — the CPU↔GPU parity tables are a
 cross-backend contract, not a consumer's property.
+
+## Task 134 — the GPU render tier: the bitonic sort + the frustum cull
+
+The render-side half of the GPGPU tier (the list's own remaining items):
+`render.sort` and `render.cull` now run ON THE GPU, on BOTH backends, as a
+SECOND kernel family over the same four buffers.
+
+- **THE SORT FAMILY** (`@rune/particles` `gpuSimWgsl`/`gpuSimGl*`): `sortKeys`
+  builds the (key, index) pairs — the NEGATED depth key (−dot(forward, p):
+  an ascending network draws far-to-near, the painter's order); the culled
+  and the pads carry the sentinel (PAD_KEY 1e30, index 2^25) so they sort to
+  the END. The bitonic network is dispatched over the canonical (k, j)
+  sequence (`gpuSortPassSequence`: log₂N·(log₂N+1)/2 passes). The sorted
+  `pack` gathers `state[pairs[i].y]` — the visible prefix lands far-to-near,
+  the sentinel tail packs the ZERO record (half extent 0 — a degenerate
+  instance that draws nothing; the draw count stays the CPU's count, no
+  readback).
+- **THE CULL**: `gpuRenderFrustum` (Gribb–Hartmann over the frame's
+  column-major mvp, normalized) feeds six planes to `sortKeys`; the test is
+  the conservative sphere `size · rampMax · 0.5 ≥ every drawn extent` — a
+  sprite never pops at the edge. Cull-only mode = sortKeys + the sorted pack
+  (TWO extra passes, no network — the cheap gate).
+- **THE SELF-DRIVING NETWORK** (the WebGPU shape): the frame's compute
+  dispatches share ONE encoder, and `queue.writeBuffer` lands before EVERY
+  dispatch in it — a per-pass (k, j) uniform would collapse to the LAST
+  write (all 171 passes running the same compare-exchange: found by the
+  raw-device gate reading the records back). The fix: the (k, j) state rides
+  the RECORDS buffer's head (`sortKeys` seeds (2, 1); the new `sortStep`
+  entry advances it: j > 1 → (k, j/2), j == 1 → (2k, k), k > padN → done).
+  The orchestrator dispatches `[bitonic, sortStep] × passCount` with a
+  pass-INVARIANT uniform. The GLSL twin keeps the direct per-pass uniforms —
+  the GL facade sets them at pass EXECUTION time (the immediate path has no
+  batched-encoder collapse).
+- **THE CAMERA CONTRACT**: `step(dt, camera?)` — `camera.forward` (the sort
+  axis, loud throw when missing), `camera.viewProj` (the cull planes). The
+  vfx shell's frame context carries both (`ctx.basis.forward`, `ctx.mvp`).
+- **THE DEMO**: GPU Embers takes the cull on the compute leg by default and
+  `?sort=1`/`?cull=1` force both flags on the TF leg (the software GL's PBO
+  round-trips fall back to CPU copies — the "TexSubImage with unpack buffer"
+  performance warning — so the default leg stays at Task 132's tuned 16k).
+  The `?v` cache-bust moved to 134 across the vfx page (one module instance
+  — a split `?v` instantiates the bundle twice and corrupts the shared-state
+  rendering; pinned the hard way).
+
+**Gates**: `tests/task134.test.ts` (the (k, j) model vs Array.sort, the pair
+semantics, the frustum golden, the WGSL/GLSL sources, the facade flips);
+`tests/particlesGpuGl.test.ts` (the TF sort pipeline's recorded sequence +
+the SSBO dispatch sequence via a recording compute facade);
+`scripts/task134-wgsl-sort.mjs` (the raw-device gate: the real WGSL compiled
+and run — the readback records verified far-to-near with the culled slots
+zeroed); `scripts/task134-vfx-probe.mjs` (the live page with both flags,
+JS-side aliveness — the count climbs at 13k with the network running); the
+demo-shots motion gate gained the RETRY (the SwiftShader compositor stalls
+intermittently — a live page measured 0.07% → 0.30% → 73.10% in three
+consecutive windows; the gate takes up to three windows and passes on the
+first moving one — a genuinely frozen canvas never recovers).
+
+**Remaining from the original list**: GPU-side emission (the hash-RNG append
+pass — the last CPU-coupled half of the frame); a `render.cull` mode for the
+CPU tier (the packers' `order` mechanism could filter, but the CPU tier has
+no camera planes today — the option rejects loudly instead).

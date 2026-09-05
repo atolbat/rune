@@ -150,6 +150,147 @@ export const GPU_GL_ADVANCE_OUTPUTS = ['v_s0', 'v_s1', 'v_s2', 'v_s3', 'v_s4'] a
 /** The TF output declarations: the four 16-float record rows. */
 export const GPU_GL_PACK_OUTPUTS = ['v_r0', 'v_r1', 'v_r2', 'v_r3'] as const
 
+// ─── Task 134 — THE GPU RENDER TIER (the GLSL twins of gpuSim.ts's sort
+// family): the bitonic sort + the frustum cull as transform-feedback
+// passes over the pairs texture ───────────────────────────────────────────
+
+/** The sortKeys pass's uniform declaration (packed order). u_forward is
+ *  the camera basis forward (the key axis); u_p0..u_p5 the six frustum
+ *  planes (n.xyz, d — normalized); u_radiusK the cull radius factor
+ *  (rampMaxSize · 0.5). */
+export const GPU_GL_SORTKEYS_UNIFORMS: readonly { readonly name: string; readonly size: 1 | 2 | 3 | 4 }[] = [
+  { name: 'u_count', size: 1 },
+  { name: 'u_cull', size: 1 },
+  { name: 'u_forward', size: 3 },
+  { name: 'u_p0', size: 4 },
+  { name: 'u_p1', size: 4 },
+  { name: 'u_p2', size: 4 },
+  { name: 'u_p3', size: 4 },
+  { name: 'u_p4', size: 4 },
+  { name: 'u_p5', size: 4 },
+  { name: 'u_radiusK', size: 1 },
+]
+
+/** The sortKeys pass's packed-uniform field offsets (FLOAT indices). */
+export const GPU_GL_SORTKEYS_F: Record<
+  'count' | 'cull' | 'forward' | 'planes' | 'radiusK', number
+> = {
+  count: 0,
+  cull: 1,
+  forward: 2,
+  /** The six planes' base — 24 consecutive floats (p·4 + 0..3 = n.xyz, d). */
+  planes: 5,
+  radiusK: 29,
+}
+
+/** The bitonic pass's uniform declaration: the block k and the compare
+ *  distance j of THIS network pass (the orchestrator dispatches the
+ *  canonical (k, j) sequence — k = 2 → padN, j = k/2 → 1). */
+export const GPU_GL_BITONIC_UNIFORMS: readonly { readonly name: string; readonly size: 1 | 2 | 3 | 4 }[] = [
+  { name: 'u_k', size: 1 },
+  { name: 'u_j', size: 1 },
+]
+
+/** The bitonic pass's packed-uniform field offsets. */
+export const GPU_GL_BITONIC_F: Record<'k' | 'j', number> = {
+  k: 0,
+  j: 1,
+}
+
+/** The TF output declaration: ONE vec4 row per pair — (key, index, 0, 0).
+ *  The pair's INDEX rides .y: float32 holds integers exactly to 2^24 —
+ *  the sentinel 2^25 is above every index. */
+export const GPU_GL_SORT_OUTPUTS = ['v_pair'] as const
+
+/** The pad/cull key (shared with the WGSL twin — gpuSim.ts's
+ *  GPU_SORT_PAD_KEY): sorts LAST in the ascending network. */
+export const GPU_GL_SORT_PAD_KEY = 1e30
+
+/** The pad/cull INDEX sentinel (the WGSL twin's GPU_SORT_SENTINEL): a
+ *  float-exact 2^25 — the sorted pack's zero-record marker. */
+export const GPU_GL_SORT_SENTINEL = 33554432
+
+/** The pairs texture height for a capacity: the network's padded size
+ *  nextPow2(capacity) laid out W-wide (the same 2048 convention as the
+ *  state texture — texelOf works for both). */
+export function gpuGlPairsTextureH(capacity: number): number {
+  return Math.max(1, Math.ceil((1 << Math.ceil(Math.log2(Math.max(2, capacity)))) / GPU_GL_STATE_TEXTURE_W))
+}
+
+/** The minimal sort prelude: the precision + the shared texel mapping
+ *  (the W the state texture uses — the pairs texture rides the same
+ *  width). No simplex: the render tier reads positions, never noise. */
+function glslSortPrelude(): string {
+  return `
+precision highp float;
+const int W = ${GPU_GL_STATE_TEXTURE_W};
+ivec2 texelOf(int idx) { return ivec2(idx % W, idx / W); }
+`
+}
+
+/** The pack body shared by BOTH pack passes (the natural walk and the
+ *  sorted gather): the ramp LUT walk, the tile math, the four record rows.
+ *  The state fetches address `${slot}` — `i` (the natural pack) or the
+ *  sorted pair's index (the sorted pack). */
+function packBodyGlsl(slot: string): string {
+  return `  vec4 s0 = fetchState(${slot}, 0);
+  vec4 s1 = fetchState(${slot}, 1);
+  vec4 s2 = fetchState(${slot}, 2);
+  vec4 s3 = fetchState(${slot}, 3);
+  float age = s1.z;
+  float life = s1.w;
+  float t = life > 0.0 ? age / life : 0.0;
+  // the ramp walk — the WGSL pack's exact semantics: clamp → binary
+  // search → lerp (sampleRamp's own walk).
+  int n = int(u_rampN + 0.5);
+  float size = 1.0; float r = 1.0; float g = 1.0; float b = 1.0; float a = 1.0; float frame = 0.0;
+  if (n == 1 || t <= rampT(0)) {
+    vec4 ra = rampA(0); vec4 rb = rampB(0);
+    size = ra.y; r = ra.z; g = ra.w; b = rb.x; a = rb.y; frame = rb.z;
+  } else {
+    int last = n - 1;
+    if (t >= rampT(last)) {
+      vec4 ra = rampA(last); vec4 rb = rampB(last);
+      size = ra.y; r = ra.z; g = ra.w; b = rb.x; a = rb.y; frame = rb.z;
+    } else {
+      int lo = 0; int hi = n - 1;
+      for (int guard = 0; guard < 32 && hi - lo > 1; guard++) {
+        int mid = (lo + hi) / 2;
+        if (rampT(mid) <= t) { lo = mid; } else { hi = mid; }
+      }
+      float span = rampT(hi) - rampT(lo);
+      float k = span > 0.0 ? (t - rampT(lo)) / span : 0.0;
+      vec4 raLo = rampA(lo); vec4 rbLo = rampB(lo);
+      vec4 raHi = rampA(hi); vec4 rbHi = rampB(hi);
+      size = mix(raLo.y, raHi.y, k);
+      r = mix(raLo.z, raHi.z, k);
+      g = mix(raLo.w, raHi.w, k);
+      b = mix(rbLo.x, rbHi.x, k);
+      a = mix(rbLo.y, rbHi.y, k);
+      frame = mix(rbLo.z, rbHi.z, k);
+    }
+  }
+  float halfExtent = s2.x * size * 0.5;
+  float seed = s3.y;
+  // the tile origin: frame + seed·jitter → floor → clamp → row-major
+  // (NaN-safe: every NaN comparison is false — !(fr >= 0.0) catches NaN
+  // and the negatives in one branch).
+  float fr = floor(frame + seed * u_frameJitter);
+  if (!(fr >= 0.0)) { fr = 0.0; }
+  float maxFrame = u_tileU * u_tileV - 1.0;
+  if (fr > maxFrame) { fr = maxFrame; }
+  float u0 = 0.0; float v0 = 0.0;
+  if (u_tileU >= 1.0 && u_tileV >= 1.0) {
+    u0 = mod(fr, u_tileU) / u_tileU;
+    v0 = floor(fr / u_tileU) / u_tileV;
+  }
+  v_r0 = s0;
+  v_r1 = vec4(s1.x, s1.y, s2.y * r, s2.z * g);
+  v_r2 = vec4(s2.w * b, s3.x * a, halfExtent, seed * 6.283185307179586);
+  v_r3 = vec4(age, seed, u0, v0);
+`
+}
+
 /** The ramp LUT in the GL texture layout: TWO rgba32f texels per control
  *  point — point k's (t, size, r, g) at texel 2k, (b, a, frame, 0) at
  *  texel 2k+1 (a width-2·N, height-1 texture; ≤ 256 points, the same cap
@@ -364,7 +505,8 @@ void main() {
 
 /** The pack pass: vertex i = gl_VertexID — the state of slot i + the ramp
  *  LUT texture + the tile math → the 16-float instance records (the
- *  INSTANCE_LAYOUT contract, the WGSL pack's twin). */
+ *  INSTANCE_LAYOUT contract, the WGSL pack's twin; the body is
+ *  packBodyGlsl — SHARED with the sorted pack pass). */
 export function gpuSimGlPackGlsl(): string {
   return `#version 300 es
 // @rune/particles — the GPGPU TF tier (Task 132): the record pack, the
@@ -387,62 +529,141 @@ vec4 rampB(int k) { return texelFetch(u_ramp, ivec2(k * 2 + 1, 0), 0); }
 float rampT(int k) { return rampA(k).x; }
 void main() {
   int i = gl_VertexID;
-  vec4 s0 = fetchState(i, 0);
-  vec4 s1 = fetchState(i, 1);
-  vec4 s2 = fetchState(i, 2);
-  vec4 s3 = fetchState(i, 3);
-  float age = s1.z;
-  float life = s1.w;
-  float t = life > 0.0 ? age / life : 0.0;
-  // the ramp walk — the WGSL pack's exact semantics: clamp → binary
-  // search → lerp (sampleRamp's own walk).
-  int n = int(u_rampN + 0.5);
-  float size = 1.0; float r = 1.0; float g = 1.0; float b = 1.0; float a = 1.0; float frame = 0.0;
-  if (n == 1 || t <= rampT(0)) {
-    vec4 ra = rampA(0); vec4 rb = rampB(0);
-    size = ra.y; r = ra.z; g = ra.w; b = rb.x; a = rb.y; frame = rb.z;
-  } else {
-    int last = n - 1;
-    if (t >= rampT(last)) {
-      vec4 ra = rampA(last); vec4 rb = rampB(last);
-      size = ra.y; r = ra.z; g = ra.w; b = rb.x; a = rb.y; frame = rb.z;
-    } else {
-      int lo = 0; int hi = n - 1;
-      for (int guard = 0; guard < 32 && hi - lo > 1; guard++) {
-        int mid = (lo + hi) / 2;
-        if (rampT(mid) <= t) { lo = mid; } else { hi = mid; }
-      }
-      float span = rampT(hi) - rampT(lo);
-      float k = span > 0.0 ? (t - rampT(lo)) / span : 0.0;
-      vec4 raLo = rampA(lo); vec4 rbLo = rampB(lo);
-      vec4 raHi = rampA(hi); vec4 rbHi = rampB(hi);
-      size = mix(raLo.y, raHi.y, k);
-      r = mix(raLo.z, raHi.z, k);
-      g = mix(raLo.w, raHi.w, k);
-      b = mix(rbLo.x, rbHi.x, k);
-      a = mix(rbLo.y, rbHi.y, k);
-      frame = mix(rbLo.z, rbHi.z, k);
+${packBodyGlsl('i')}  gl_Position = vec4(0.0, 0.0, 0.5, 1.0); // never rasterized (discard on)
+}
+`
+}
+
+// ─── Task 134 — the sort/cull pass sources (the WGSL sort family's GLSL
+// twins: sortKeys, bitonic, the sorted pack) ───────────────────────────────
+
+/** The sortKeys pass: vertex i ∈ [0, padN) — the (key, index) pair of slot
+ *  i: the NEGATED depth key (−dot(forward, position) — an ascending network
+ *  draws far-to-near) for the live visible, the (PAD_KEY, SENTINEL) pair
+ *  for the frustum-culled and the pads [count, padN). */
+export function gpuSimGlSortKeysGlsl(): string {
+  return `#version 300 es
+// @rune/particles — Task 134: the GPU render tier, the sortKeys pass. The
+// uniform set mirrors GPU_GL_SORTKEYS_UNIFORMS.
+${glslSortPrelude()}
+uniform highp sampler2D u_state;
+vec4 fetchState(int slot, int row) { return texelFetch(u_state, texelOf(slot * 5 + row), 0); }
+uniform float u_count;
+uniform float u_cull;
+uniform vec3 u_forward;
+uniform vec4 u_p0;
+uniform vec4 u_p1;
+uniform vec4 u_p2;
+uniform vec4 u_p3;
+uniform vec4 u_p4;
+uniform vec4 u_p5;
+uniform float u_radiusK;
+// the TF output: ONE vec4 row per pair — (key, index, 0, 0).
+out vec4 v_pair;
+const float PAD_KEY = ${GPU_GL_SORT_PAD_KEY};
+const float SENTINEL = ${GPU_GL_SORT_SENTINEL}.0;
+bool planeOut(vec4 p, vec3 pos, float radius) {
+  return dot(p.xyz, pos) + p.w <= -radius;
+}
+void main() {
+  int i = gl_VertexID;
+  float key = PAD_KEY;
+  float idx = SENTINEL;
+  if (float(i) < u_count) {
+    vec4 s0 = fetchState(i, 0); // px, py, pz, vx
+    vec4 s2 = fetchState(i, 2); // size, cr, cg, cb
+    bool visible = true;
+    if (u_cull > 0.5) {
+      // the conservative sphere: size · rampMax · 0.5 ≥ every drawn extent
+      float radius = s2.x * u_radiusK;
+      if (planeOut(u_p0, s0.xyz, radius)) visible = false;
+      if (planeOut(u_p1, s0.xyz, radius)) visible = false;
+      if (planeOut(u_p2, s0.xyz, radius)) visible = false;
+      if (planeOut(u_p3, s0.xyz, radius)) visible = false;
+      if (planeOut(u_p4, s0.xyz, radius)) visible = false;
+      if (planeOut(u_p5, s0.xyz, radius)) visible = false;
+    }
+    if (visible) {
+      key = -(u_forward.x * s0.x + u_forward.y * s0.y + u_forward.z * s0.z);
+      idx = float(i);
     }
   }
-  float halfExtent = s2.x * size * 0.5;
-  float seed = s3.y;
-  // the tile origin: frame + seed·jitter → floor → clamp → row-major
-  // (NaN-safe: every NaN comparison is false — !(fr >= 0.0) catches NaN
-  // and the negatives in one branch).
-  float fr = floor(frame + seed * u_frameJitter);
-  if (!(fr >= 0.0)) { fr = 0.0; }
-  float maxFrame = u_tileU * u_tileV - 1.0;
-  if (fr > maxFrame) { fr = maxFrame; }
-  float u0 = 0.0; float v0 = 0.0;
-  if (u_tileU >= 1.0 && u_tileV >= 1.0) {
-    u0 = mod(fr, u_tileU) / u_tileU;
-    v0 = floor(fr / u_tileU) / u_tileV;
-  }
-  v_r0 = s0;
-  v_r1 = vec4(s1.x, s1.y, s2.y * r, s2.z * g);
-  v_r2 = vec4(s2.w * b, s3.x * a, halfExtent, seed * 6.283185307179586);
-  v_r3 = vec4(age, seed, u0, v0);
+  v_pair = vec4(key, idx, 0.0, 0.0);
   gl_Position = vec4(0.0, 0.0, 0.5, 1.0); // never rasterized (discard on)
+}
+`
+}
+
+/** The bitonic pass: vertex i = ONE compare-exchange — it reads its own
+ *  pair AND its partner's (i ^ u_j) from the pairs texture and writes the
+ *  one that belongs at slot i after the exchange (the low slot takes the
+ *  min/max by the block's direction (i & u_k) == 0 → ascending — the same
+ *  selection the WGSL entry's low thread makes; TF writes one row per
+ *  vertex, so BOTH threads of the pair select rather than one swapping). */
+export function gpuSimGlBitonicGlsl(): string {
+  return `#version 300 es
+// @rune/particles — Task 134: the GPU render tier, ONE bitonic
+// compare-exchange pass. The uniform set mirrors GPU_GL_BITONIC_UNIFORMS.
+${glslSortPrelude()}
+uniform highp sampler2D u_pairs;
+uniform float u_k;
+uniform float u_j;
+out vec4 v_pair;
+void main() {
+  int i = gl_VertexID;
+  int p = i ^ int(u_j + 0.5);
+  vec4 va = texelFetch(u_pairs, texelOf(i), 0);
+  vec4 vb = texelFetch(u_pairs, texelOf(p), 0);
+  bool asc = (i & int(u_k + 0.5)) == 0;
+  // the smaller-KEY and larger-KEY pair of the two (the index rides along)
+  vec4 lo = va.x <= vb.x ? va : vb;
+  vec4 hi = va.x <= vb.x ? vb : va;
+  if (i < p) { v_pair = asc ? lo : hi; } else { v_pair = asc ? hi : lo; }
+  gl_Position = vec4(0.0, 0.0, 0.5, 1.0); // never rasterized (discard on)
+}
+`
+}
+
+/** The sorted pack pass: vertex i ∈ [0, count) — the pair at slot i names
+ *  the source state (pairs[i].y); a SENTINEL index writes the ZERO record
+ *  (half extent 0 — the degenerate instance that draws nothing; the
+ *  visible prefix [0, V) lands far-to-near, the sentinel tail [V, count)
+ *  draws nothing). */
+export function gpuSimGlPackSortedGlsl(): string {
+  return `#version 300 es
+// @rune/particles — Task 134: the GPU render tier, the sorted record pack
+// (the WGSL sort family's pack twin). The uniform set mirrors
+// GPU_GL_PACK_UNIFORMS.
+${glslPrelude(GPU_GL_STATE_TEXTURE_W)}
+uniform highp sampler2D u_ramp;
+uniform highp sampler2D u_pairs;
+uniform float u_tileU;
+uniform float u_tileV;
+uniform float u_frameJitter;
+uniform float u_rampN;
+// the TF outputs: the 16-float instance record (INSTANCE_LAYOUT).
+out vec4 v_r0; // px, py, pz, vx
+out vec4 v_r1; // vy, vz, cr, cg
+out vec4 v_r2; // cb, ca, halfExtent, angle0 (seed·tau)
+out vec4 v_r3; // age, seed, u0, v0
+// the ramp LUT: 2 texels per point k — (t, size, r, g) at 2k, (b, a, frame, 0) at 2k+1.
+vec4 rampA(int k) { return texelFetch(u_ramp, ivec2(k * 2, 0), 0); }
+vec4 rampB(int k) { return texelFetch(u_ramp, ivec2(k * 2 + 1, 0), 0); }
+float rampT(int k) { return rampA(k).x; }
+void main() {
+  int i = gl_VertexID;
+  vec4 pr = texelFetch(u_pairs, texelOf(i), 0);
+  if (pr.y >= ${GPU_GL_SORT_SENTINEL}.0) {
+    // the pad/cull sentinel — the ZERO record (a degenerate instance)
+    v_r0 = vec4(0.0);
+    v_r1 = vec4(0.0);
+    v_r2 = vec4(0.0);
+    v_r3 = vec4(0.0);
+    gl_Position = vec4(0.0, 0.0, 0.5, 1.0);
+    return;
+  }
+  int slot = int(pr.y + 0.5);
+${packBodyGlsl('slot')}  gl_Position = vec4(0.0, 0.0, 0.5, 1.0); // never rasterized (discard on)
 }
 `
 }

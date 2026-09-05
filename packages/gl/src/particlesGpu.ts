@@ -30,6 +30,14 @@
  *        packer writes — the render binds the buffer as the BILLBOARD
  *        material's instance source through `recordsBufferId`).
  *
+ * Task 134 — THE GPU RENDER TIER (render.sort / render.cull): step 5
+ * becomes the SORT FAMILY's pack — `sortKeys` (the (key, index) pairs:
+ * the negated depth key for the live, the sentinel for the culled/pads)
+ * → the bitonic network (gpuSortPassSequence's canonical (k, j) passes)
+ * → the sorted `pack` (records in far-to-near draw order, the sentinel
+ * slots the zero record — a degenerate instance). The camera arrives as
+ * step(dt, { forward, viewProj }) — the sort's axis and the cull's planes.
+ *
  * THE RENDER BINDING: the layer command's five i_* attributes carry
  * bufferId = recordsBufferId (the WebGPU executor binds the external
  * buffer — ZERO per-frame CPU→GPU particle traffic; the records never
@@ -49,6 +57,8 @@ import type { Particles } from '@rune/particles'
 import {
   gpuSimWgsl, gpuRampLUT, GPU_STATE_STRIDE, GPU_SIM_UNIFORM_FLOATS,
   GPU_SIM_U32_FIELDS, GPU_SIM_F32_FIELDS, GPU_SIM_VEC4_FIELDS, GPU_FORCE_MASK,
+  gpuSortWgsl, GPU_SORT_UNIFORM_FLOATS, GPU_SORT_U32_FIELDS, GPU_SORT_F32_FIELDS,
+  GPU_SORT_RENDER_MASK, gpuSortPadCount, gpuSortPassSequence, gpuRampMaxSize, gpuRenderFrustum,
 } from '@rune/particles'
 import { createGpuParticlesTf } from './particlesGpuGl.ts'
 import { readGpuTierConfig } from './particlesGpuConfig.ts'
@@ -58,8 +68,12 @@ const WORKGROUP = 64
 
 /** The created GPU backend: the buffers + the compute family + the step. */
 export interface GpuParticles {
-  /** Runs this frame's GPU half (after facade.advance, before the draw). */
-  step(dt: number): void
+  /** Runs this frame's GPU half (after facade.advance, before the draw).
+   *  Task 134 — the CAMERA: render.sort needs `camera.forward` (the depth
+   *  key's axis), render.cull needs `camera.viewProj` (the frustum planes'
+   *  source); both are loud throws when missing — pass the frame context's
+   *  basis.forward + mvp. */
+  step(dt: number, camera?: GpuRenderCamera): void
   /** The external buffer id of the instance records — the layer command's
    *  i_* attributes bind it through bufferId. */
   readonly recordsBufferId: number
@@ -67,6 +81,18 @@ export interface GpuParticles {
   readonly stateBufferId: number
   /** Full teardown (the facade's own dispose also cleans). */
   dispose(): void
+}
+
+/** Task 134 — the render camera the GPU render tier needs at step() time:
+ *  the sort's depth axis and the cull's frustum source. The vfx shell's
+ *  frame context carries both (ctx.basis.forward, ctx.mvp). */
+export interface GpuRenderCamera {
+  /** The camera basis forward — the depth key's axis (dot(forward,
+   *  position); REQUIRED by render.sort). */
+  readonly forward: readonly number[]
+  /** The view-projection, COLUMN-MAJOR 16 numbers (the frustum planes'
+   *  source — REQUIRED by render.cull). */
+  readonly viewProj?: readonly number[]
 }
 
 /** Attaches the GPU tier to a sim:'gpu' facade — the particles binding of
@@ -92,6 +118,9 @@ function createGpuParticlesCompute(facade: Particles, gpu: SsboComputeTier): Gpu
   }
   const ho = handoff
   const capacity = facade.capacity
+  // ── the shared static interpretation (particlesGpuConfig.ts — ONE read,
+  //    the forces + the wrap + the tiles + Task 134's sort/cull flags)
+  const cfg = readGpuTierConfig(facade)
   // ── the buffers: the interleaved state, the swap list, the records, the
   //    ramp LUT — all tracked (the tier's dispose() deletes them)
   const stateId = gpu.createBuffer(GPU_STATE_STRIDE * capacity * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST)
@@ -101,6 +130,26 @@ function createGpuParticlesCompute(facade: Particles, gpu: SsboComputeTier): Gpu
   const rampId = gpu.createBuffer(lut.byteLength, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST)
   gpu.writeBuffer(rampId, lut)
   const computeId = gpu.createKernel(gpuSimWgsl(), GPU_SIM_UNIFORM_FLOATS * 4, [stateId, swapsId, recordsId, rampId])
+  // ── Task 134 — THE GPU RENDER TIER: render.sort / render.cull attach the
+  //    sort family — a SECOND compute kernel over the SAME four buffers
+  //    (one slot shifted: 1 = the pairs (rw), 2 = the state (ro), 3 = the
+  //    records (rw), 4 = the ramp (ro)). The pairs buffer is the network's
+  //    (key, index) array at nextPow2(capacity).
+  const tiered = cfg.sort || cfg.cull
+  let sortId = -1
+  // the sort family's scratch + the frustum buffer (unconditional — a few
+  // floats, and the step's hot path walks without null guards)
+  const sortScratch = gpu.scratch(GPU_SORT_UNIFORM_FLOATS)
+  const frustumScratch = new Float32Array(24)
+  if (tiered) {
+    const maxPadN = gpuSortPadCount(capacity)
+    const pairsId = gpu.createBuffer(maxPadN * 8, GPU_BUFFER_USAGE.STORAGE)
+    sortId = gpu.createKernel(gpuSortWgsl(), GPU_SORT_UNIFORM_FLOATS * 4, [pairsId, stateId, recordsId, rampId])
+    if (sortId < 0 || pairsId < 0) {
+      gpu.dispose()
+      throw new Error('rune/gl: createGpuParticles — the facade rejected the sort family (see the GPU error log)')
+    }
+  }
   if (computeId < 0 || stateId < 0 || swapsId < 0 || recordsId < 0 || rampId < 0) {
     gpu.dispose() // the tracked partial state dies with the failed attach
     throw new Error('rune/gl: createGpuParticles — the facade rejected a buffer (see the GPU error log)')
@@ -113,9 +162,6 @@ function createGpuParticlesCompute(facade: Particles, gpu: SsboComputeTier): Gpu
   const uni = scratch.f32
   const u32 = scratch.u32
 
-  // ── the STATIC force config — the shared interpretation
-  //    (particlesGpuConfig.ts — ONE read, both orchestrators pack it)
-  const cfg = readGpuTierConfig(facade)
   const F = GPU_SIM_F32_FIELDS
   const V = GPU_SIM_VEC4_FIELDS
   const a = cfg.active
@@ -147,7 +193,18 @@ function createGpuParticlesCompute(facade: Particles, gpu: SsboComputeTier): Gpu
   u32[GPU_SIM_U32_FIELDS.forceMask] = mask
   const staticMask = mask
 
-  function step(dt: number): void {
+  // ── the sort family's statics (tiles/frameJitter/rampMax for the pack
+  //    twin — the SAME values the sim family's pack consumes)
+  {
+    const sUni = sortScratch.f32
+    const SU = GPU_SORT_F32_FIELDS
+    sUni[SU.tileU] = cfg.tiles[0]
+    sUni[SU.tileV] = cfg.tiles[1]
+    sUni[SU.frameJitter] = cfg.frameJitter
+    sUni[SU.rampMaxSize] = gpuRampMaxSize(facade.ramp.points)
+  }
+
+  function step(dt: number, camera?: GpuRenderCamera): void {
     const count = facade.count
     if (count <= 0 && ho.emitCount === 0 && ho.swapCount === 0) return
     u32[GPU_SIM_U32_FIELDS.count] = count
@@ -170,7 +227,68 @@ function createGpuParticlesCompute(facade: Particles, gpu: SsboComputeTier): Gpu
     const workgroups = Math.ceil(count / WORKGROUP)
     if (workgroups > 0) {
       gpu.runKernel(computeId, 'advance', uni, workgroups)
-      gpu.runKernel(computeId, 'pack', uni, workgroups)
+      if (tiered) {
+        // Task 134 — THE GPU RENDER TIER: the camera contracts (loud, not
+        // silent): sort needs the forward, cull the view-projection. The
+        // throws narrow the locals — the pack sites walk assertion-free.
+        let camForward: readonly number[] | null = null
+        let camViewProj: readonly number[] | null = null
+        if (cfg.sort) {
+          const fw = camera?.forward
+          if (fw === undefined || fw.length < 3) {
+            throw new Error('rune/gl: render.sort needs the camera forward at step(dt, { forward, viewProj }) — the depth key is dot(forward, position)')
+          }
+          camForward = fw
+        }
+        if (cfg.cull) {
+          const vp = camera?.viewProj
+          if (vp === undefined || vp.length !== 16) {
+            throw new Error('rune/gl: render.cull needs the view-projection at step(dt, { forward, viewProj }) — the six frustum planes come from the frame context mvp (column-major)')
+          }
+          camViewProj = vp
+        }
+        const sUni = sortScratch.f32
+        const sU32 = sortScratch.u32
+        const SU = GPU_SORT_F32_FIELDS
+        const padN = gpuSortPadCount(count)
+        sU32[GPU_SORT_U32_FIELDS.count] = count
+        sU32[GPU_SORT_U32_FIELDS.padN] = padN
+        sU32[GPU_SORT_U32_FIELDS.renderMask] = cfg.cull ? GPU_SORT_RENDER_MASK.cull : 0
+        if (camForward !== null) {
+          const fw = camForward
+          sUni[SU.forward] = fw[0]; sUni[SU.forward + 1] = fw[1]; sUni[SU.forward + 2] = fw[2]
+        }
+        if (camViewProj !== null) {
+          gpuRenderFrustum(camViewProj, frustumScratch)
+          sUni.set(frustumScratch, SU.planes)
+        }
+        // 1. sortKeys — the (key, index) pairs for [0, padN) AND the
+        //    network's initial (k, j) = (2, 1) seeded into records[0..1]
+        const netWorkgroups = Math.ceil(padN / WORKGROUP)
+        gpu.runKernel(sortId, 'sortKeys', sUni, netWorkgroups)
+        // 2. the bitonic network — SELF-DRIVING: the (k, j) lives in the
+        //    records head (sortKeys seeded it; sortStep advances it). The
+        //    frame's compute dispatches share ONE encoder — a per-pass
+        //    uniform would collapse to the LAST queue.writeBuffer (all the
+        //    writes land before ANY dispatch runs), so the pass state must
+        //    travel in a BOUND buffer. [bitonic, sortStep] × the canonical
+        //    pass count — the SAME (k, j) sequence gpuSortPassSequence walks
+        //    (the GLSL twin's uniforms are set at pass EXECUTION time on
+        //    the immediate GL path — it takes the direct form).
+        if (cfg.sort) {
+          let passes = 0
+          gpuSortPassSequence(padN, () => { passes++ })
+          for (let p = 0; p < passes; p++) {
+            gpu.runKernel(sortId, 'bitonic', sUni, netWorkgroups)
+            gpu.runKernel(sortId, 'sortStep', sUni, 1)
+          }
+        }
+        // 3. the sorted pack — the records [0, count) in draw order (the
+        //    pack overwrites the network's (k, j) scratch at records[0..1])
+        gpu.runKernel(sortId, 'pack', sUni, workgroups)
+      } else {
+        gpu.runKernel(computeId, 'pack', uni, workgroups)
+      }
     }
   }
 

@@ -1,11 +1,14 @@
 // gpuEmbers.js — the GPGPU TIER SHOWCASE (Task 131, the optimization
-// program's Phase 2; Task 132 — the tier now runs on BOTH backends): ONE
-// HUNDRED SIXTY THOUSAND embers simulated ON THE GPU — the compute-shader
-// advance over a storage buffer (WebGPU) or the transform-feedback passes
-// over a float texture (WebGL2 — the SSBO's twin, the SAME handoff and
-// the SAME 16-float instance records), the GPU-side record pack, ZERO
-// per-frame CPU→GPU particle traffic. The page's perf readout (the pill +
-// window.__vfxPerf) tells the tier story.
+// program's Phase 2; Task 132 — the tier now runs on BOTH backends; Task
+// 134 — THE RENDER TIER: the per-particle frustum cull rides the compute
+// leg by default (?cull=1 forces it on the TF leg) and the BITONIC SORT
+// is ?sort=1 (the 160k-particle painter's order — the records land
+// far-to-near): ONE HUNDRED SIXTY THOUSAND embers simulated ON THE GPU —
+// the compute-shader advance over a storage buffer (WebGPU) or the
+// transform-feedback passes over a float texture (WebGL2 — the SSBO's
+// twin, the SAME handoff and the SAME 16-float instance records), the
+// GPU-side record pack, ZERO per-frame CPU→GPU particle traffic. The
+// page's perf readout (the pill + window.__vfxPerf) tells the tier story.
 //
 //   · THE COMMON POINT (Task 132): createGpuParticles(facade, backend)
 //     dispatches by the facade's shape — WebGPU compute (the SSBO tier,
@@ -22,11 +25,22 @@
 //   · THE HOOKS: window.__vfxPerf = { tier, capacity, count, ms } — the
 //     probe gate (scripts/task131-sim-probe.mjs) pins the tier + the
 //     frame cost; window.__vfxCounters.embers — the emission counters.
-import { createGpuParticles } from '../../../dist/rune.esm.js?v=133'
+import { createGpuParticles } from '../../../dist/rune.esm.js?v=134'
 
 const GPU_CAPACITY = 160_000
 const TF_CAPACITY = 16_000
 const BOX = [46, 22, 46] // the wrap volume (the kiln)
+// Task 134 — the render tier's opt-ins: the bitonic painter's order is
+// ?sort=1 (the additive blend composites order-independently; the network
+// is the ALPHABLEND tier's tool); the frustum cull rides the COMPUTE leg
+// by default (two cheap dispatches) and is ?cull=1 on the TF leg — the
+// software GL's PBO round-trips are copied on CPU (the "TexSubImage with
+// unpack buffer" performance warning — the documented container class;
+// real GPUs take the hardware path). The smoke gate runs the WebGL2 leg
+// AS TUNED (Task 132's 16k budget); the probe (task134-vfx-probe.mjs)
+// exercises BOTH flags with generous JS-side aliveness checks.
+const WANT_SORT = typeof location !== 'undefined' && new URLSearchParams(location.search).has('sort')
+const FORCE_CULL = typeof location !== 'undefined' && new URLSearchParams(location.search).has('cull')
 
 export default {
   title: 'GPU Embers',
@@ -72,7 +86,10 @@ export default {
           noise: { strength: 1.6, scale: 0.16, speed: 0.21 },
         },
         spawner: EMBER_S,
-        render: { kind: 'billboard', draw: 'instance', mode: 'camera', spin: 0.8 },
+        // Task 134 — THE RENDER TIER: cull (the frustum gate — the
+        // off-screen kiln walls stop drawing; the compute leg by default,
+        // ?cull=1 forces it on the TF leg) + the opt-in sort (?sort=1).
+        render: { kind: 'billboard', draw: 'instance', mode: 'camera', spin: 0.8, cull: compute || FORCE_CULL, sort: WANT_SORT },
         sim: 'gpu',
       }),
       material: env.materials.bbSprite,
@@ -128,9 +145,11 @@ export default {
       frame(ctx) {
         // THE TIER SEQUENCE: advance (emission/death/compaction on the
         // CPU) → the GPU step (the compact replay, the force walk, the
-        // record pack) → the harness draws from the external buffer.
+        // record pack — Task 134: the sort/cull family with the CAMERA —
+        // the frame context's basis forward + mvp) → the harness draws
+        // from the external buffer.
         embers.facade.advance(ctx.dt)
-        gpuBackend.step(ctx.dt)
+        gpuBackend.step(ctx.dt, { forward: ctx.basis.forward, viewProj: ctx.mvp })
         // the perf: a 30-frame moving average of the frame callback's own
         // cost (the sim + the step — the rasterization rides on top)
         const now = performance.now()

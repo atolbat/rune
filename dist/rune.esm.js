@@ -11431,6 +11431,128 @@ function gpuRampLUT(points) {
   }
   return lut;
 }
+var GPU_SORT_UNIFORM_FLOATS = 36;
+var GPU_SORT_U32_FIELDS = {
+  count: 0,
+  padN: 1,
+  renderMask: 2
+};
+var GPU_SORT_F32_FIELDS = {
+  forward: 4,
+  planes: 8,
+  tileU: 32,
+  tileV: 33,
+  frameJitter: 34,
+  rampMaxSize: 35
+};
+var GPU_SORT_RENDER_MASK = { cull: 1 };
+var GPU_SORT_PAD_KEY = 1000000000000000000000000000000;
+var GPU_SORT_SENTINEL = 33554432;
+function gpuSortPadCount(count) {
+  if (!Number.isFinite(count) || count < 0) {
+    throw new Error(`rune/particles: gpuSortPadCount — count must be a finite number ≥ 0 (got ${count})`);
+  }
+  if (count <= 1)
+    return 1;
+  return 1 << Math.ceil(Math.log2(count));
+}
+function gpuSortPassSequence(padN, run) {
+  for (let k = 2;k <= padN; k <<= 1) {
+    for (let j = k >> 1;j > 0; j >>= 1)
+      run(k, j);
+  }
+}
+function gpuRampMaxSize(points) {
+  let max = 1;
+  for (const p of points)
+    if (p.size > max)
+      max = p.size;
+  return max;
+}
+function gpuRenderFrustum(viewProj, out) {
+  if (viewProj.length !== 16) {
+    throw new Error(`rune/particles: gpuRenderFrustum — the view-projection is 16 numbers, column-major (got ${viewProj.length})`);
+  }
+  const o = out ?? new Float32Array(24);
+  const m = viewProj;
+  for (let p = 0;p < 6; p++) {
+    const axis = p >> 1;
+    const sign = (p & 1) === 0 ? 1 : -1;
+    const nx = m[3] + sign * m[axis];
+    const ny = m[7] + sign * m[4 + axis];
+    const nz = m[11] + sign * m[8 + axis];
+    const d = m[15] + sign * m[12 + axis];
+    const len = Math.hypot(nx, ny, nz);
+    const inv = len > 0.000000000001 ? 1 / len : 0;
+    o[p * 4] = nx * inv;
+    o[p * 4 + 1] = ny * inv;
+    o[p * 4 + 2] = nz * inv;
+    o[p * 4 + 3] = d * inv;
+  }
+  return o;
+}
+var PACK_BODY_WGSL = `
+  let age = state[b + 6u];
+  let life = state[b + 7u];
+  var t = 0.0;
+  if (life > 0.0) { t = age / life; }
+  // the ramp LUT (7-float rows: t, size, r, g, b, a, frame) — sampleRamp's
+  // exact walk: clamp → binary search → lerp
+  let n = arrayLength(&rampLUT) / 7u;
+  var size = 1.0; var r = 1.0; var g = 1.0; var bl = 1.0; var a = 1.0; var frame = 0.0;
+  if (n == 1u) {
+    size = rampLUT[1]; r = rampLUT[2]; g = rampLUT[3]; bl = rampLUT[4]; a = rampLUT[5]; frame = rampLUT[6];
+  } else if (t <= rampLUT[0]) {
+    size = rampLUT[1]; r = rampLUT[2]; g = rampLUT[3]; bl = rampLUT[4]; a = rampLUT[5]; frame = rampLUT[6];
+  } else {
+    let lastR = (n - 1u) * 7u;
+    if (t >= rampLUT[lastR]) {
+      size = rampLUT[lastR + 1u]; r = rampLUT[lastR + 2u]; g = rampLUT[lastR + 3u];
+      bl = rampLUT[lastR + 4u]; a = rampLUT[lastR + 5u]; frame = rampLUT[lastR + 6u];
+    } else {
+      var lo = 0u; var hi = n - 1u;
+      var guard = 0u;
+      while (hi - lo > 1u && guard < 32u) {
+        let mid = (lo + hi) >> 1u;
+        if (rampLUT[mid * 7u] <= t) { lo = mid; } else { hi = mid; }
+        guard++;
+      }
+      let ra = lo * 7u; let rb = hi * 7u;
+      let span = rampLUT[rb] - rampLUT[ra];
+      var k = 0.0;
+      if (span > 0.0) { k = (t - rampLUT[ra]) / span; }
+      size = rampLUT[ra + 1u] + (rampLUT[rb + 1u] - rampLUT[ra + 1u]) * k;
+      r = rampLUT[ra + 2u] + (rampLUT[rb + 2u] - rampLUT[ra + 2u]) * k;
+      g = rampLUT[ra + 3u] + (rampLUT[rb + 3u] - rampLUT[ra + 3u]) * k;
+      bl = rampLUT[ra + 4u] + (rampLUT[rb + 4u] - rampLUT[ra + 4u]) * k;
+      a = rampLUT[ra + 5u] + (rampLUT[rb + 5u] - rampLUT[ra + 5u]) * k;
+      frame = rampLUT[ra + 6u] + (rampLUT[rb + 6u] - rampLUT[ra + 6u]) * k;
+    }
+  }
+  let half = state[b + 8u] * size * 0.5;
+  let seed = state[b + 13u];
+  // the tile origin: frame + seed·jitter → floor → clamp → row-major
+  var fr = floor(frame + seed * P.frameJitter);
+  // NaN-safe: every NaN comparison is FALSE — !(fr >= 0) catches NaN and
+  // the negatives in one branch (WGSL has no isnan builtin)
+  if (!(fr >= 0.0)) { fr = 0.0; }
+  let maxFrame = P.tileU * P.tileV - 1.0;
+  if (fr > maxFrame) { fr = maxFrame; }
+  var u0 = 0.0; var v0 = 0.0;
+  if (P.tileU >= 1.0 && P.tileV >= 1.0) {
+    u0 = (fr % P.tileU) / P.tileU;
+    v0 = floor(fr / P.tileU) / P.tileV;
+  }
+  records[o] = state[b]; records[o + 1u] = state[b + 1u]; records[o + 2u] = state[b + 2u];
+  records[o + 3u] = state[b + 3u]; records[o + 4u] = state[b + 4u]; records[o + 5u] = state[b + 5u];
+  records[o + 6u] = state[b + 9u] * r; records[o + 7u] = state[b + 10u] * g;
+  records[o + 8u] = state[b + 11u] * bl; records[o + 9u] = state[b + 12u] * a;
+  records[o + 10u] = half;
+  records[o + 11u] = seed * 6.283185307179586;
+  records[o + 12u] = age;
+  records[o + 13u] = seed;
+  records[o + 14u] = u0; records[o + 15u] = v0;
+`;
 function gpuSimWgsl() {
   const perm = Array.from(PERM, (v) => `${v}u`).join(", ");
   const grads = [];
@@ -11626,74 +11748,144 @@ fn advance(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 
 // ── pack: the 16-float instance records (packInstances' GPU twin — the
-// record layout of the BILLBOARD material / INSTANCE_LAYOUT) ───────────────
+// record layout of the BILLBOARD material / INSTANCE_LAYOUT; the body is
+// PACK_BODY_WGSL — SHARED with the sort family's sorted pack entry) ──────
 @compute @workgroup_size(64)
 fn pack(@builtin(global_invocation_id) gid : vec3<u32>) {
   let i = gid.x;
   if (i >= P.count) { return; }
   let b = i * FSTRIDE;
-  let age = state[b + 6u];
-  let life = state[b + 7u];
-  var t = 0.0;
-  if (life > 0.0) { t = age / life; }
-  // the ramp LUT (7-float rows: t, size, r, g, b, a, frame) — sampleRamp's
-  // exact walk: clamp → binary search → lerp
-  let n = arrayLength(&rampLUT) / 7u;
-  var size = 1.0; var r = 1.0; var g = 1.0; var bl = 1.0; var a = 1.0; var frame = 0.0;
-  if (n == 1u) {
-    size = rampLUT[1]; r = rampLUT[2]; g = rampLUT[3]; bl = rampLUT[4]; a = rampLUT[5]; frame = rampLUT[6];
-  } else if (t <= rampLUT[0]) {
-    size = rampLUT[1]; r = rampLUT[2]; g = rampLUT[3]; bl = rampLUT[4]; a = rampLUT[5]; frame = rampLUT[6];
-  } else {
-    let lastR = (n - 1u) * 7u;
-    if (t >= rampLUT[lastR]) {
-      size = rampLUT[lastR + 1u]; r = rampLUT[lastR + 2u]; g = rampLUT[lastR + 3u];
-      bl = rampLUT[lastR + 4u]; a = rampLUT[lastR + 5u]; frame = rampLUT[lastR + 6u];
-    } else {
-      var lo = 0u; var hi = n - 1u;
-      var guard = 0u;
-      while (hi - lo > 1u && guard < 32u) {
-        let mid = (lo + hi) >> 1u;
-        if (rampLUT[mid * 7u] <= t) { lo = mid; } else { hi = mid; }
-        guard++;
+  let o = i * RSTRIDE;
+${PACK_BODY_WGSL}}
+`;
+}
+function gpuSortWgsl() {
+  return `
+// @rune/particles — Task 134: the GPU render tier (the sort/cull family).
+// The SAME four buffers as the sim family, one slot shifted: the pairs ride
+// binding 1 (rw), the state drops to binding 2 (ro — read only).
+
+struct SortParams {
+  count : u32,
+  padN : u32,
+  renderMask : u32,
+  _pad0 : u32,
+  forward : vec4<f32>,
+  planes : array<vec4<f32>, 6>,
+  tileU : f32,
+  tileV : f32,
+  frameJitter : f32,
+  rampMaxSize : f32,
+}
+
+@group(0) @binding(0) var<uniform> P : SortParams;
+@group(0) @binding(1) var<storage, read_write> pairs : array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> state : array<f32>;
+@group(0) @binding(3) var<storage, read_write> records : array<f32>;
+@group(0) @binding(4) var<storage, read> rampLUT : array<f32>;
+
+const FSTRIDE : u32 = ${GPU_STATE_STRIDE}u;
+const RSTRIDE : u32 = 16u;
+const PAD_KEY : f32 = ${GPU_SORT_PAD_KEY};
+const SENTINEL : f32 = ${GPU_SORT_SENTINEL}.0;
+
+// ── sortKeys: the (key, index) pairs — the negated depth for the visible
+// live, the sentinel pair for the culled and the pads ───────────────────
+@compute @workgroup_size(64)
+fn sortKeys(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.padN) { return; }
+  var key = PAD_KEY;
+  var idx = SENTINEL;
+  if (i < P.count) {
+    let b = i * FSTRIDE;
+    let px = state[b]; let py = state[b + 1u]; let pz = state[b + 2u];
+    var visible = true;
+    if ((P.renderMask & 1u) != 0u) {
+      // the conservative sphere: spawnSize · rampMax · 0.5 ≥ every drawn
+      // extent — a sprite never pops at the screen edge
+      let radius = state[b + 8u] * P.rampMaxSize * 0.5;
+      for (var pl = 0u; pl < 6u; pl++) {
+        let plane = P.planes[pl];
+        if (plane.x * px + plane.y * py + plane.z * pz + plane.w <= -radius) {
+          visible = false;
+        }
       }
-      let ra = lo * 7u; let rb = hi * 7u;
-      let span = rampLUT[rb] - rampLUT[ra];
-      var k = 0.0;
-      if (span > 0.0) { k = (t - rampLUT[ra]) / span; }
-      size = rampLUT[ra + 1u] + (rampLUT[rb + 1u] - rampLUT[ra + 1u]) * k;
-      r = rampLUT[ra + 2u] + (rampLUT[rb + 2u] - rampLUT[ra + 2u]) * k;
-      g = rampLUT[ra + 3u] + (rampLUT[rb + 3u] - rampLUT[ra + 3u]) * k;
-      bl = rampLUT[ra + 4u] + (rampLUT[rb + 4u] - rampLUT[ra + 4u]) * k;
-      a = rampLUT[ra + 5u] + (rampLUT[rb + 5u] - rampLUT[ra + 5u]) * k;
-      frame = rampLUT[ra + 6u] + (rampLUT[rb + 6u] - rampLUT[ra + 6u]) * k;
+    }
+    if (visible) {
+      key = -(P.forward.x * px + P.forward.y * py + P.forward.z * pz);
+      idx = f32(i);
     }
   }
-  let half = state[b + 8u] * size * 0.5;
-  let seed = state[b + 13u];
-  // the tile origin: frame + seed·jitter → floor → clamp → row-major
-  var fr = floor(frame + seed * P.frameJitter);
-  // NaN-safe: every NaN comparison is FALSE — !(fr >= 0) catches NaN and
-  // the negatives in one branch (WGSL has no isnan builtin)
-  if (!(fr >= 0.0)) { fr = 0.0; }
-  let maxFrame = P.tileU * P.tileV - 1.0;
-  if (fr > maxFrame) { fr = maxFrame; }
-  var u0 = 0.0; var v0 = 0.0;
-  if (P.tileU >= 1.0 && P.tileV >= 1.0) {
-    u0 = (fr % P.tileU) / P.tileU;
-    v0 = floor(fr / P.tileU) / P.tileV;
+  pairs[i] = vec2<f32>(key, idx);
+  // thread 0 seeds the SELF-DRIVING network state: records[0] = k,
+  // records[1] = j (the first canonical pass is (2, 1)). The pack entry
+  // overwrites the records AFTER the network — the scratch is safe.
+  if (i == 0u) {
+    records[0] = 2.0;
+    records[1] = 1.0;
   }
-  let o = i * RSTRIDE;
-  records[o] = state[b]; records[o + 1u] = state[b + 1u]; records[o + 2u] = state[b + 2u];
-  records[o + 3u] = state[b + 3u]; records[o + 4u] = state[b + 4u]; records[o + 5u] = state[b + 5u];
-  records[o + 6u] = state[b + 9u] * r; records[o + 7u] = state[b + 10u] * g;
-  records[o + 8u] = state[b + 11u] * bl; records[o + 9u] = state[b + 12u] * a;
-  records[o + 10u] = half;
-  records[o + 11u] = seed * 6.283185307179586;
-  records[o + 12u] = age;
-  records[o + 13u] = seed;
-  records[o + 14u] = u0; records[o + 15u] = v0;
 }
+
+// ── bitonic: ONE compare-exchange — the (k, j) of this pass read from the
+// records head (the self-driving state); the low thread of (i, i^j) swaps
+// the pair when it violates the block's direction ((i & k) == 0 →
+// ascending). The pairs are disjoint per pass — in-place, no hazard ──────
+@compute @workgroup_size(64)
+fn bitonic(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.padN) { return; }
+  let k = u32(records[0]);
+  let j = u32(records[1]);
+  if (k == 0u || k > P.padN) { return; } // done (a defensive no-op)
+  let p = i ^ j;
+  if (p <= i) { return; }
+  let a = pairs[i];
+  let b = pairs[p];
+  let asc = (i & k) == 0u;
+  if ((a.x > b.x) == asc) {
+    pairs[i] = b;
+    pairs[p] = a;
+  }
+}
+
+// ── sortStep: the network's clock — ONE thread advances (k, j) to the
+// next pass of the canonical sequence: j > 1 → (k, j/2); j == 1 →
+// (2k, k); k > padN → done (0, 0). The GLSL twin walks the SAME sequence
+// through per-pass uniforms (the GL facade sets them at pass EXECUTION
+// time — the batched-encoder collapse is a WebGPU compute shape) ───────
+@compute @workgroup_size(1)
+fn sortStep(@builtin(global_invocation_id) gid : vec3<u32>) {
+  if (gid.x != 0u) { return; }
+  var k = u32(records[0]);
+  var j = u32(records[1]);
+  if (k == 0u || k > P.padN) { return; }
+  if (j > 1u) {
+    j = j >> 1u;
+  } else {
+    k = k << 1u;
+    j = k >> 1u;
+  }
+  if (k > P.padN) { k = 0u; j = 0u; }
+  records[0] = f32(k);
+  records[1] = f32(j);
+}
+
+// ── pack (the sorted twin): the record of slot i gathers the state of
+// pairs[i].y — a SENTINEL writes the zero record (half extent 0, the
+// degenerate instance that draws nothing) ───────────────────────────────
+@compute @workgroup_size(64)
+fn pack(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i = gid.x;
+  if (i >= P.count) { return; }
+  let o = i * RSTRIDE;
+  let m = pairs[i].y;
+  if (m >= SENTINEL) {
+    for (var f = 0u; f < RSTRIDE; f++) { records[o + f] = 0.0; }
+    return;
+  }
+  let b = u32(m) * FSTRIDE;
+${PACK_BODY_WGSL}}
 `;
 }
 // packages/particles/src/gpuSimGl.ts
@@ -11762,6 +11954,104 @@ var GPU_GL_PACK_F = {
 };
 var GPU_GL_ADVANCE_OUTPUTS = ["v_s0", "v_s1", "v_s2", "v_s3", "v_s4"];
 var GPU_GL_PACK_OUTPUTS = ["v_r0", "v_r1", "v_r2", "v_r3"];
+var GPU_GL_SORTKEYS_UNIFORMS = [
+  { name: "u_count", size: 1 },
+  { name: "u_cull", size: 1 },
+  { name: "u_forward", size: 3 },
+  { name: "u_p0", size: 4 },
+  { name: "u_p1", size: 4 },
+  { name: "u_p2", size: 4 },
+  { name: "u_p3", size: 4 },
+  { name: "u_p4", size: 4 },
+  { name: "u_p5", size: 4 },
+  { name: "u_radiusK", size: 1 }
+];
+var GPU_GL_SORTKEYS_F = {
+  count: 0,
+  cull: 1,
+  forward: 2,
+  planes: 5,
+  radiusK: 29
+};
+var GPU_GL_BITONIC_UNIFORMS = [
+  { name: "u_k", size: 1 },
+  { name: "u_j", size: 1 }
+];
+var GPU_GL_BITONIC_F = {
+  k: 0,
+  j: 1
+};
+var GPU_GL_SORT_OUTPUTS = ["v_pair"];
+var GPU_GL_SORT_PAD_KEY = 1000000000000000000000000000000;
+var GPU_GL_SORT_SENTINEL = 33554432;
+function gpuGlPairsTextureH(capacity) {
+  return Math.max(1, Math.ceil((1 << Math.ceil(Math.log2(Math.max(2, capacity)))) / GPU_GL_STATE_TEXTURE_W));
+}
+function glslSortPrelude() {
+  return `
+precision highp float;
+const int W = ${GPU_GL_STATE_TEXTURE_W};
+ivec2 texelOf(int idx) { return ivec2(idx % W, idx / W); }
+`;
+}
+function packBodyGlsl(slot) {
+  return `  vec4 s0 = fetchState(${slot}, 0);
+  vec4 s1 = fetchState(${slot}, 1);
+  vec4 s2 = fetchState(${slot}, 2);
+  vec4 s3 = fetchState(${slot}, 3);
+  float age = s1.z;
+  float life = s1.w;
+  float t = life > 0.0 ? age / life : 0.0;
+  // the ramp walk — the WGSL pack's exact semantics: clamp → binary
+  // search → lerp (sampleRamp's own walk).
+  int n = int(u_rampN + 0.5);
+  float size = 1.0; float r = 1.0; float g = 1.0; float b = 1.0; float a = 1.0; float frame = 0.0;
+  if (n == 1 || t <= rampT(0)) {
+    vec4 ra = rampA(0); vec4 rb = rampB(0);
+    size = ra.y; r = ra.z; g = ra.w; b = rb.x; a = rb.y; frame = rb.z;
+  } else {
+    int last = n - 1;
+    if (t >= rampT(last)) {
+      vec4 ra = rampA(last); vec4 rb = rampB(last);
+      size = ra.y; r = ra.z; g = ra.w; b = rb.x; a = rb.y; frame = rb.z;
+    } else {
+      int lo = 0; int hi = n - 1;
+      for (int guard = 0; guard < 32 && hi - lo > 1; guard++) {
+        int mid = (lo + hi) / 2;
+        if (rampT(mid) <= t) { lo = mid; } else { hi = mid; }
+      }
+      float span = rampT(hi) - rampT(lo);
+      float k = span > 0.0 ? (t - rampT(lo)) / span : 0.0;
+      vec4 raLo = rampA(lo); vec4 rbLo = rampB(lo);
+      vec4 raHi = rampA(hi); vec4 rbHi = rampB(hi);
+      size = mix(raLo.y, raHi.y, k);
+      r = mix(raLo.z, raHi.z, k);
+      g = mix(raLo.w, raHi.w, k);
+      b = mix(rbLo.x, rbHi.x, k);
+      a = mix(rbLo.y, rbHi.y, k);
+      frame = mix(rbLo.z, rbHi.z, k);
+    }
+  }
+  float halfExtent = s2.x * size * 0.5;
+  float seed = s3.y;
+  // the tile origin: frame + seed·jitter → floor → clamp → row-major
+  // (NaN-safe: every NaN comparison is false — !(fr >= 0.0) catches NaN
+  // and the negatives in one branch).
+  float fr = floor(frame + seed * u_frameJitter);
+  if (!(fr >= 0.0)) { fr = 0.0; }
+  float maxFrame = u_tileU * u_tileV - 1.0;
+  if (fr > maxFrame) { fr = maxFrame; }
+  float u0 = 0.0; float v0 = 0.0;
+  if (u_tileU >= 1.0 && u_tileV >= 1.0) {
+    u0 = mod(fr, u_tileU) / u_tileU;
+    v0 = floor(fr / u_tileU) / u_tileV;
+  }
+  v_r0 = s0;
+  v_r1 = vec4(s1.x, s1.y, s2.y * r, s2.z * g);
+  v_r2 = vec4(s2.w * b, s3.x * a, halfExtent, seed * 6.283185307179586);
+  v_r3 = vec4(age, seed, u0, v0);
+`;
+}
 function gpuRampLUTTexture(points) {
   if (points.length === 0)
     throw new Error("rune/particles: the GPU sim needs a ramp with at least one point");
@@ -11986,62 +12276,120 @@ vec4 rampB(int k) { return texelFetch(u_ramp, ivec2(k * 2 + 1, 0), 0); }
 float rampT(int k) { return rampA(k).x; }
 void main() {
   int i = gl_VertexID;
-  vec4 s0 = fetchState(i, 0);
-  vec4 s1 = fetchState(i, 1);
-  vec4 s2 = fetchState(i, 2);
-  vec4 s3 = fetchState(i, 3);
-  float age = s1.z;
-  float life = s1.w;
-  float t = life > 0.0 ? age / life : 0.0;
-  // the ramp walk — the WGSL pack's exact semantics: clamp → binary
-  // search → lerp (sampleRamp's own walk).
-  int n = int(u_rampN + 0.5);
-  float size = 1.0; float r = 1.0; float g = 1.0; float b = 1.0; float a = 1.0; float frame = 0.0;
-  if (n == 1 || t <= rampT(0)) {
-    vec4 ra = rampA(0); vec4 rb = rampB(0);
-    size = ra.y; r = ra.z; g = ra.w; b = rb.x; a = rb.y; frame = rb.z;
-  } else {
-    int last = n - 1;
-    if (t >= rampT(last)) {
-      vec4 ra = rampA(last); vec4 rb = rampB(last);
-      size = ra.y; r = ra.z; g = ra.w; b = rb.x; a = rb.y; frame = rb.z;
-    } else {
-      int lo = 0; int hi = n - 1;
-      for (int guard = 0; guard < 32 && hi - lo > 1; guard++) {
-        int mid = (lo + hi) / 2;
-        if (rampT(mid) <= t) { lo = mid; } else { hi = mid; }
-      }
-      float span = rampT(hi) - rampT(lo);
-      float k = span > 0.0 ? (t - rampT(lo)) / span : 0.0;
-      vec4 raLo = rampA(lo); vec4 rbLo = rampB(lo);
-      vec4 raHi = rampA(hi); vec4 rbHi = rampB(hi);
-      size = mix(raLo.y, raHi.y, k);
-      r = mix(raLo.z, raHi.z, k);
-      g = mix(raLo.w, raHi.w, k);
-      b = mix(rbLo.x, rbHi.x, k);
-      a = mix(rbLo.y, rbHi.y, k);
-      frame = mix(rbLo.z, rbHi.z, k);
+${packBodyGlsl("i")}  gl_Position = vec4(0.0, 0.0, 0.5, 1.0); // never rasterized (discard on)
+}
+`;
+}
+function gpuSimGlSortKeysGlsl() {
+  return `#version 300 es
+// @rune/particles — Task 134: the GPU render tier, the sortKeys pass. The
+// uniform set mirrors GPU_GL_SORTKEYS_UNIFORMS.
+${glslSortPrelude()}
+uniform highp sampler2D u_state;
+vec4 fetchState(int slot, int row) { return texelFetch(u_state, texelOf(slot * 5 + row), 0); }
+uniform float u_count;
+uniform float u_cull;
+uniform vec3 u_forward;
+uniform vec4 u_p0;
+uniform vec4 u_p1;
+uniform vec4 u_p2;
+uniform vec4 u_p3;
+uniform vec4 u_p4;
+uniform vec4 u_p5;
+uniform float u_radiusK;
+// the TF output: ONE vec4 row per pair — (key, index, 0, 0).
+out vec4 v_pair;
+const float PAD_KEY = ${GPU_GL_SORT_PAD_KEY};
+const float SENTINEL = ${GPU_GL_SORT_SENTINEL}.0;
+bool planeOut(vec4 p, vec3 pos, float radius) {
+  return dot(p.xyz, pos) + p.w <= -radius;
+}
+void main() {
+  int i = gl_VertexID;
+  float key = PAD_KEY;
+  float idx = SENTINEL;
+  if (float(i) < u_count) {
+    vec4 s0 = fetchState(i, 0); // px, py, pz, vx
+    vec4 s2 = fetchState(i, 2); // size, cr, cg, cb
+    bool visible = true;
+    if (u_cull > 0.5) {
+      // the conservative sphere: size · rampMax · 0.5 ≥ every drawn extent
+      float radius = s2.x * u_radiusK;
+      if (planeOut(u_p0, s0.xyz, radius)) visible = false;
+      if (planeOut(u_p1, s0.xyz, radius)) visible = false;
+      if (planeOut(u_p2, s0.xyz, radius)) visible = false;
+      if (planeOut(u_p3, s0.xyz, radius)) visible = false;
+      if (planeOut(u_p4, s0.xyz, radius)) visible = false;
+      if (planeOut(u_p5, s0.xyz, radius)) visible = false;
+    }
+    if (visible) {
+      key = -(u_forward.x * s0.x + u_forward.y * s0.y + u_forward.z * s0.z);
+      idx = float(i);
     }
   }
-  float halfExtent = s2.x * size * 0.5;
-  float seed = s3.y;
-  // the tile origin: frame + seed·jitter → floor → clamp → row-major
-  // (NaN-safe: every NaN comparison is false — !(fr >= 0.0) catches NaN
-  // and the negatives in one branch).
-  float fr = floor(frame + seed * u_frameJitter);
-  if (!(fr >= 0.0)) { fr = 0.0; }
-  float maxFrame = u_tileU * u_tileV - 1.0;
-  if (fr > maxFrame) { fr = maxFrame; }
-  float u0 = 0.0; float v0 = 0.0;
-  if (u_tileU >= 1.0 && u_tileV >= 1.0) {
-    u0 = mod(fr, u_tileU) / u_tileU;
-    v0 = floor(fr / u_tileU) / u_tileV;
-  }
-  v_r0 = s0;
-  v_r1 = vec4(s1.x, s1.y, s2.y * r, s2.z * g);
-  v_r2 = vec4(s2.w * b, s3.x * a, halfExtent, seed * 6.283185307179586);
-  v_r3 = vec4(age, seed, u0, v0);
+  v_pair = vec4(key, idx, 0.0, 0.0);
   gl_Position = vec4(0.0, 0.0, 0.5, 1.0); // never rasterized (discard on)
+}
+`;
+}
+function gpuSimGlBitonicGlsl() {
+  return `#version 300 es
+// @rune/particles — Task 134: the GPU render tier, ONE bitonic
+// compare-exchange pass. The uniform set mirrors GPU_GL_BITONIC_UNIFORMS.
+${glslSortPrelude()}
+uniform highp sampler2D u_pairs;
+uniform float u_k;
+uniform float u_j;
+out vec4 v_pair;
+void main() {
+  int i = gl_VertexID;
+  int p = i ^ int(u_j + 0.5);
+  vec4 va = texelFetch(u_pairs, texelOf(i), 0);
+  vec4 vb = texelFetch(u_pairs, texelOf(p), 0);
+  bool asc = (i & int(u_k + 0.5)) == 0;
+  // the smaller-KEY and larger-KEY pair of the two (the index rides along)
+  vec4 lo = va.x <= vb.x ? va : vb;
+  vec4 hi = va.x <= vb.x ? vb : va;
+  if (i < p) { v_pair = asc ? lo : hi; } else { v_pair = asc ? hi : lo; }
+  gl_Position = vec4(0.0, 0.0, 0.5, 1.0); // never rasterized (discard on)
+}
+`;
+}
+function gpuSimGlPackSortedGlsl() {
+  return `#version 300 es
+// @rune/particles — Task 134: the GPU render tier, the sorted record pack
+// (the WGSL sort family's pack twin). The uniform set mirrors
+// GPU_GL_PACK_UNIFORMS.
+${glslPrelude(GPU_GL_STATE_TEXTURE_W)}
+uniform highp sampler2D u_ramp;
+uniform highp sampler2D u_pairs;
+uniform float u_tileU;
+uniform float u_tileV;
+uniform float u_frameJitter;
+uniform float u_rampN;
+// the TF outputs: the 16-float instance record (INSTANCE_LAYOUT).
+out vec4 v_r0; // px, py, pz, vx
+out vec4 v_r1; // vy, vz, cr, cg
+out vec4 v_r2; // cb, ca, halfExtent, angle0 (seed·tau)
+out vec4 v_r3; // age, seed, u0, v0
+// the ramp LUT: 2 texels per point k — (t, size, r, g) at 2k, (b, a, frame, 0) at 2k+1.
+vec4 rampA(int k) { return texelFetch(u_ramp, ivec2(k * 2, 0), 0); }
+vec4 rampB(int k) { return texelFetch(u_ramp, ivec2(k * 2 + 1, 0), 0); }
+float rampT(int k) { return rampA(k).x; }
+void main() {
+  int i = gl_VertexID;
+  vec4 pr = texelFetch(u_pairs, texelOf(i), 0);
+  if (pr.y >= ${GPU_GL_SORT_SENTINEL}.0) {
+    // the pad/cull sentinel — the ZERO record (a degenerate instance)
+    v_r0 = vec4(0.0);
+    v_r1 = vec4(0.0);
+    v_r2 = vec4(0.0);
+    v_r3 = vec4(0.0);
+    gl_Position = vec4(0.0, 0.0, 0.5, 1.0);
+    return;
+  }
+  int slot = int(pr.y + 0.5);
+${packBodyGlsl("slot")}  gl_Position = vec4(0.0, 0.0, 0.5, 1.0); // never rasterized (discard on)
 }
 `;
 }
@@ -12083,7 +12431,9 @@ function readGpuTierConfig(facade) {
       wrap: wrap !== null && (wrap[0] > 0 || wrap[1] > 0 || wrap[2] > 0)
     },
     tiles: render.tiles ?? [1, 1],
-    frameJitter: render.frameJitter ?? 0
+    frameJitter: render.frameJitter ?? 0,
+    sort: render.sort === true,
+    cull: render.cull === true
   };
 }
 
@@ -12114,6 +12464,8 @@ function createGpuParticlesTf(facade, gpu) {
   const stateOut = gpu.createBuffer(new Float32Array(W * H * 4));
   const records = gpu.createBuffer(new Float32Array(capacity * 16));
   const mapBuf = gpu.createBuffer(new Float32Array(capacity));
+  const cfg = readGpuTierConfig(facade);
+  const tiered = cfg.sort || cfg.cull;
   const advPass = gpu.createPass({
     vertex: gpuSimGlAdvanceGlsl(),
     outputs: GPU_GL_ADVANCE_OUTPUTS,
@@ -12127,11 +12479,32 @@ function createGpuParticlesTf(facade, gpu) {
     textures: ["u_state", "u_ramp"],
     uniforms: GPU_GL_PACK_UNIFORMS
   });
+  const maxPadN = gpuSortPadCount(capacity);
+  const pairsH = gpuGlPairsTextureH(capacity);
+  const pairsTex = tiered ? gpu.createTexture(W, pairsH, { format: "rgba32f" }) : -1;
+  const pairsOut = tiered ? gpu.createBuffer(new Float32Array(maxPadN * 4)) : -1;
+  const sortKeysPass = tiered ? gpu.createPass({
+    vertex: gpuSimGlSortKeysGlsl(),
+    outputs: GPU_GL_SORT_OUTPUTS,
+    textures: ["u_state"],
+    uniforms: GPU_GL_SORTKEYS_UNIFORMS
+  }) : -1;
+  const bitonicPass = tiered ? gpu.createPass({
+    vertex: gpuSimGlBitonicGlsl(),
+    outputs: GPU_GL_SORT_OUTPUTS,
+    textures: ["u_pairs"],
+    uniforms: GPU_GL_BITONIC_UNIFORMS
+  }) : -1;
+  const packSortedPass = tiered ? gpu.createPass({
+    vertex: gpuSimGlPackSortedGlsl(),
+    outputs: GPU_GL_PACK_OUTPUTS,
+    textures: ["u_state", "u_ramp", "u_pairs"],
+    uniforms: GPU_GL_PACK_UNIFORMS
+  }) : -1;
   ho.attached = true;
   const advUni = gpu.scratch(GPU_GL_ADVANCE_UNIFORMS.reduce((n, u) => n + u.size, 0)).f32;
   const packUni = gpu.scratch(GPU_GL_PACK_UNIFORMS.reduce((n, u) => n + u.size, 0)).f32;
   const packF = GPU_GL_PACK_F;
-  const cfg = readGpuTierConfig(facade);
   packUni[packF.tileU] = cfg.tiles[0];
   packUni[packF.tileV] = cfg.tiles[1];
   packUni[packF.frameJitter] = cfg.frameJitter;
@@ -12180,7 +12553,14 @@ function createGpuParticlesTf(facade, gpu) {
   const emitPacked = new Float32Array(capacity * 20);
   const prov = new Int32Array(capacity);
   const mapFloats = new Float32Array(capacity);
-  function step(dt) {
+  const skUni = gpu.scratch(GPU_GL_SORTKEYS_UNIFORMS.reduce((n, u) => n + u.size, 0)).f32;
+  const btUni = gpu.scratch(GPU_GL_BITONIC_UNIFORMS.reduce((n, u) => n + u.size, 0)).f32;
+  const frustumScratch = new Float32Array(24);
+  {
+    const K = GPU_GL_SORTKEYS_F;
+    skUni[K.radiusK] = gpuRampMaxSize(facade.ramp.points) * 0.5;
+  }
+  function step(dt, camera) {
     const count = facade.count;
     if (count <= 0 && ho.emitCount === 0 && ho.swapCount === 0)
       return;
@@ -12225,11 +12605,68 @@ function createGpuParticlesTf(facade, gpu) {
       uniformData: advUni
     });
     gpu.texSubImage2DBuffer(stateTex, 0, 0, W, H, stateOut, 0);
-    gpu.runPass(packPass, count, {
-      bufferId: records,
-      textures: [stateTex, rampTex],
-      uniformData: packUni
-    });
+    if (count > 0 && tiered) {
+      let camForward = null;
+      let camViewProj = null;
+      if (cfg.sort) {
+        const fw = camera?.forward;
+        if (fw === undefined || fw.length < 3) {
+          throw new Error("rune/gl: render.sort needs the camera forward at step(dt, { forward, viewProj }) — the depth key is dot(forward, position)");
+        }
+        camForward = fw;
+      }
+      if (cfg.cull) {
+        const vp = camera?.viewProj;
+        if (vp === undefined || vp.length !== 16) {
+          throw new Error("rune/gl: render.cull needs the view-projection at step(dt, { forward, viewProj }) — the six frustum planes come from the frame context mvp (column-major)");
+        }
+        camViewProj = vp;
+      }
+      const K = GPU_GL_SORTKEYS_F;
+      const padN = gpuSortPadCount(count);
+      skUni[K.count] = count;
+      skUni[K.cull] = cfg.cull ? 1 : 0;
+      if (camForward !== null) {
+        const fw = camForward;
+        skUni[K.forward] = fw[0];
+        skUni[K.forward + 1] = fw[1];
+        skUni[K.forward + 2] = fw[2];
+      }
+      if (camViewProj !== null) {
+        gpuRenderFrustum(camViewProj, frustumScratch);
+        skUni.set(frustumScratch, K.planes);
+      }
+      gpu.runPass(sortKeysPass, padN, {
+        bufferId: pairsOut,
+        textures: [stateTex],
+        uniformData: skUni
+      });
+      gpu.texSubImage2DBuffer(pairsTex, 0, 0, W, pairsH, pairsOut, 0);
+      if (cfg.sort) {
+        const B = GPU_GL_BITONIC_F;
+        gpuSortPassSequence(padN, (k, j) => {
+          btUni[B.k] = k;
+          btUni[B.j] = j;
+          gpu.runPass(bitonicPass, padN, {
+            bufferId: pairsOut,
+            textures: [pairsTex],
+            uniformData: btUni
+          });
+          gpu.texSubImage2DBuffer(pairsTex, 0, 0, W, pairsH, pairsOut, 0);
+        });
+      }
+      gpu.runPass(packSortedPass, count, {
+        bufferId: records,
+        textures: [stateTex, rampTex, pairsTex],
+        uniformData: packUni
+      });
+    } else if (count > 0) {
+      gpu.runPass(packPass, count, {
+        bufferId: records,
+        textures: [stateTex, rampTex],
+        uniformData: packUni
+      });
+    }
   }
   return {
     step,
@@ -12259,6 +12696,7 @@ function createGpuParticlesCompute(facade, gpu) {
   }
   const ho = handoff;
   const capacity = facade.capacity;
+  const cfg = readGpuTierConfig(facade);
   const stateId = gpu.createBuffer(GPU_STATE_STRIDE * capacity * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST);
   const swapsId = gpu.createBuffer(2 * capacity * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST);
   const recordsId = gpu.createBuffer(16 * capacity * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.VERTEX);
@@ -12266,6 +12704,19 @@ function createGpuParticlesCompute(facade, gpu) {
   const rampId = gpu.createBuffer(lut.byteLength, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST);
   gpu.writeBuffer(rampId, lut);
   const computeId = gpu.createKernel(gpuSimWgsl(), GPU_SIM_UNIFORM_FLOATS * 4, [stateId, swapsId, recordsId, rampId]);
+  const tiered = cfg.sort || cfg.cull;
+  let sortId = -1;
+  const sortScratch = gpu.scratch(GPU_SORT_UNIFORM_FLOATS);
+  const frustumScratch = new Float32Array(24);
+  if (tiered) {
+    const maxPadN = gpuSortPadCount(capacity);
+    const pairsId = gpu.createBuffer(maxPadN * 8, GPU_BUFFER_USAGE.STORAGE);
+    sortId = gpu.createKernel(gpuSortWgsl(), GPU_SORT_UNIFORM_FLOATS * 4, [pairsId, stateId, recordsId, rampId]);
+    if (sortId < 0 || pairsId < 0) {
+      gpu.dispose();
+      throw new Error("rune/gl: createGpuParticles — the facade rejected the sort family (see the GPU error log)");
+    }
+  }
   if (computeId < 0 || stateId < 0 || swapsId < 0 || recordsId < 0 || rampId < 0) {
     gpu.dispose();
     throw new Error("rune/gl: createGpuParticles — the facade rejected a buffer (see the GPU error log)");
@@ -12274,7 +12725,6 @@ function createGpuParticlesCompute(facade, gpu) {
   const scratch = gpu.scratch(GPU_SIM_UNIFORM_FLOATS);
   const uni = scratch.f32;
   const u32 = scratch.u32;
-  const cfg = readGpuTierConfig(facade);
   const F = GPU_SIM_F32_FIELDS;
   const V = GPU_SIM_VEC4_FIELDS;
   const a = cfg.active;
@@ -12323,7 +12773,15 @@ function createGpuParticlesCompute(facade, gpu) {
   uni[F.frameJitter] = cfg.frameJitter;
   u32[GPU_SIM_U32_FIELDS.forceMask] = mask;
   const staticMask = mask;
-  function step(dt) {
+  {
+    const sUni = sortScratch.f32;
+    const SU = GPU_SORT_F32_FIELDS;
+    sUni[SU.tileU] = cfg.tiles[0];
+    sUni[SU.tileV] = cfg.tiles[1];
+    sUni[SU.frameJitter] = cfg.frameJitter;
+    sUni[SU.rampMaxSize] = gpuRampMaxSize(facade.ramp.points);
+  }
+  function step(dt, camera) {
     const count = facade.count;
     if (count <= 0 && ho.emitCount === 0 && ho.swapCount === 0)
       return;
@@ -12346,7 +12804,56 @@ function createGpuParticlesCompute(facade, gpu) {
     const workgroups = Math.ceil(count / WORKGROUP);
     if (workgroups > 0) {
       gpu.runKernel(computeId, "advance", uni, workgroups);
-      gpu.runKernel(computeId, "pack", uni, workgroups);
+      if (tiered) {
+        let camForward = null;
+        let camViewProj = null;
+        if (cfg.sort) {
+          const fw = camera?.forward;
+          if (fw === undefined || fw.length < 3) {
+            throw new Error("rune/gl: render.sort needs the camera forward at step(dt, { forward, viewProj }) — the depth key is dot(forward, position)");
+          }
+          camForward = fw;
+        }
+        if (cfg.cull) {
+          const vp = camera?.viewProj;
+          if (vp === undefined || vp.length !== 16) {
+            throw new Error("rune/gl: render.cull needs the view-projection at step(dt, { forward, viewProj }) — the six frustum planes come from the frame context mvp (column-major)");
+          }
+          camViewProj = vp;
+        }
+        const sUni = sortScratch.f32;
+        const sU32 = sortScratch.u32;
+        const SU = GPU_SORT_F32_FIELDS;
+        const padN = gpuSortPadCount(count);
+        sU32[GPU_SORT_U32_FIELDS.count] = count;
+        sU32[GPU_SORT_U32_FIELDS.padN] = padN;
+        sU32[GPU_SORT_U32_FIELDS.renderMask] = cfg.cull ? GPU_SORT_RENDER_MASK.cull : 0;
+        if (camForward !== null) {
+          const fw = camForward;
+          sUni[SU.forward] = fw[0];
+          sUni[SU.forward + 1] = fw[1];
+          sUni[SU.forward + 2] = fw[2];
+        }
+        if (camViewProj !== null) {
+          gpuRenderFrustum(camViewProj, frustumScratch);
+          sUni.set(frustumScratch, SU.planes);
+        }
+        const netWorkgroups = Math.ceil(padN / WORKGROUP);
+        gpu.runKernel(sortId, "sortKeys", sUni, netWorkgroups);
+        if (cfg.sort) {
+          let passes = 0;
+          gpuSortPassSequence(padN, () => {
+            passes++;
+          });
+          for (let p = 0;p < passes; p++) {
+            gpu.runKernel(sortId, "bitonic", sUni, netWorkgroups);
+            gpu.runKernel(sortId, "sortStep", sUni, 1);
+          }
+        }
+        gpu.runKernel(sortId, "pack", sUni, workgroups);
+      } else {
+        gpu.runKernel(computeId, "pack", uni, workgroups);
+      }
     }
   }
   return {

@@ -490,27 +490,43 @@ await assertSpriteContour()
     // rasterizer (SwiftShader) can take > 300 ms per frame, and a fixed
     // window would sample the SAME frame twice: a live canvas read as
     // FROZEN. Capped at 1.8 s (a genuinely frozen canvas never ticks).
-    const tickA = await vfxPage.evaluate(() => window.__vfxFrame ?? 0)
-    await vfxPage.waitForFunction(
-      (t) => (window.__vfxFrame ?? 0) >= t + 2,
-      tickA,
-      { timeout: 1800 },
-    ).catch(() => {})
-    await vfxPage.waitForTimeout(name === 'sequencer' ? 450 : 120)
-    const f2 = await vfxPage.screenshot()
+    // Task 134 — THE RETRY: the SwiftShader compositor stalls
+    // INTERMITTENTLY (a live gpuEmbers page measured 0.07% → 0.30% →
+    // 73.10% in three consecutive windows — the canvas recovers within
+    // seconds while the JS loop, the sim and the draw calls stay healthy
+    // the whole time; the pill and __vfxPerf prove the tier alive). ONE
+    // window is a coin flip under that state; the gate's intent is "the
+    // canvas CAN move" — so take up to three windows and pass on the
+    // FIRST moving one (a genuinely frozen canvas — the stale-binding
+    // class this gate exists for — never recovers).
     const f1 = await import('pngjs').then(m => m.PNG.sync.read(readFileSync(join(out, `vfx-${VFX_NAMES[i]}.png`))))
-    const f2png = await import('pngjs').then(m => m.PNG.sync.read(f2))
-    let changed = 0
-    const n = f1.data.length
-    for (let p = 0; p < n; p += 64) {
-      const dd = Math.abs(f1.data[p] - f2png.data[p]) + Math.abs(f1.data[p + 1] - f2png.data[p + 1]) + Math.abs(f1.data[p + 2] - f2png.data[p + 2])
-      if (dd > 12) changed++
+    let motionFrac = 0
+    const motions = []
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await vfxPage.waitForTimeout(2500) // the recovery gap
+      const tickA = await vfxPage.evaluate(() => window.__vfxFrame ?? 0)
+      await vfxPage.waitForFunction(
+        (t) => (window.__vfxFrame ?? 0) >= t + 2,
+        tickA,
+        { timeout: 1800 },
+      ).catch(() => {})
+      await vfxPage.waitForTimeout(name === 'sequencer' ? 450 : 120)
+      const f2 = await vfxPage.screenshot()
+      const f2png = await import('pngjs').then(m => m.PNG.sync.read(f2))
+      let changed = 0
+      const n = f1.data.length
+      for (let p = 0; p < n; p += 64) {
+        const dd = Math.abs(f1.data[p] - f2png.data[p]) + Math.abs(f1.data[p + 1] - f2png.data[p + 1]) + Math.abs(f1.data[p + 2] - f2png.data[p + 2])
+        if (dd > 12) changed++
+      }
+      motionFrac = changed / (n / 64)
+      motions.push((motionFrac * 100).toFixed(2))
+      if (motionFrac >= 0.002) break // a moving window — the canvas is alive
     }
-    const motionFrac = changed / (n / 64)
     const pill = shotPills[i]
-    console.log(`[shots] vfx ${VFX_NAMES[i]}: motion ${(motionFrac * 100).toFixed(2)}% — ${pill}`)
+    console.log(`[shots] vfx ${VFX_NAMES[i]}: motion ${motions.join(' → ')}% — ${pill}`)
     if (motionFrac < 0.002) {
-      throw new Error(`[shots] vfx ${VFX_NAMES[i]}: FROZEN canvas (${(motionFrac * 100).toFixed(3)}% pixels changed in 300 ms) — ${pill}`)
+      throw new Error(`[shots] vfx ${VFX_NAMES[i]}: FROZEN canvas (${(motionFrac * 100).toFixed(3)}% pixels changed across ${motions.length} windows) — ${pill}`)
     }
   }
   if (qkErrors.length > 0) {

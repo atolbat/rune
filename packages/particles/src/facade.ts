@@ -70,9 +70,12 @@ export interface BurstDesc {
  *  'instance' (16-float records + the BILLBOARD material's GPU expansion —
  *  the optimization program's Phase 1; see instances.ts).
  *  Task 132 — the billboard kind's `sort`: the painter's order for
- *  alpha-blended layers (back to front, far first — see sort.ts). */
+ *  alpha-blended layers (back to front, far first — see sort.ts).
+ *  Task 134 — the billboard kind's `cull`: the GPU tier's per-particle
+ *  frustum gate (sim:"gpu" only — the off-screen slots pack the zero
+ *  record; see gpuSim's sort family). */
 export type RenderDesc =
-  | ({ readonly kind: 'billboard'; readonly draw?: 'soup' | 'instance'; readonly sort?: boolean } & Omit<BillboardOptions, 'ramp'>)
+  | ({ readonly kind: 'billboard'; readonly draw?: 'soup' | 'instance'; readonly sort?: boolean; readonly cull?: boolean } & Omit<BillboardOptions, 'ramp'>)
   | ({ readonly kind: 'trail' } & TrailOptions & Omit<TrailBakeOptions, 'ramp'>)
   | ({ readonly kind: 'mesh'; readonly geometry: MeshGeometry } & Omit<MeshOptions, 'ramp'>)
 
@@ -136,7 +139,9 @@ export interface ParticlesDesc {
    *  advance() fails LOUDLY. Requires render.draw:'instance'; rejects the
    *  CPU-coupled features (onRetire, collide, seek, speedCurve,
    *  attract.killRadius, prewarm — the death site and the contact events
-   *  are CPU-blind on the GPU tier). */
+   *  are CPU-blind on the GPU tier). Task 134: render.sort and render.cull
+   *  are the GPU render tier's own options here (the bitonic sort + the
+   *  frustum gate — the orchestrator's step() takes the camera). */
   readonly sim?: 'cpu' | 'gpu'
 }
 
@@ -325,10 +330,16 @@ export function createParticles(desc: ParticlesDesc): Particles {
   // Task 132 — THE PAINTER'S ORDER: render.sort on the billboard kinds.
   // The trail kind is one continuous ribbon (a per-particle order makes no
   // sense there); the mesh kind is opaque/lit (the depth buffer already
-  // resolves it). Both reject sort loudly rather than ignore it.
+  // resolves it). Both reject sort loudly rather than ignore it. Task 134 —
+  // render.cull is the same billboard-kind family (the frustum gate is a
+  // per-particle record decision).
   const sortOn = (render as { sort?: boolean }).sort === true
   if (sortOn && kind !== 'billboard') {
     throw new Error(`rune/particles: render.sort is a billboard-kind option (a ${kind} layer cannot take a painter's order — trails are one continuous ribbon, meshes resolve through the depth buffer)`)
+  }
+  const cullOn = (render as { cull?: boolean }).cull === true
+  if (cullOn && kind !== 'billboard') {
+    throw new Error(`rune/particles: render.cull is a billboard-kind option (a ${kind} layer's records are not per-particle gates — the frustum test lives in the GPU render tier)`)
   }
   // Task 131 — THE SIMULATION TIER. 'gpu': the WebGPU compute advance (the
   // CPU keeps emission/death/compaction; the state lives in a storage
@@ -367,9 +378,9 @@ export function createParticles(desc: ParticlesDesc): Particles {
     if ((desc.prewarm ?? 0) > 0) {
       throw new Error('rune/particles: sim:"gpu" rejects prewarm (the GPU state cannot be fast-forwarded synchronously — emit a burst and let a few frames pass instead)')
     }
-    if (sortOn) {
-      throw new Error('rune/particles: sim:"gpu" rejects render.sort (the records are packed GPU-side — the CPU mirror holds no positions to sort; sorted alpha layers stay on sim:"cpu" — see sort.ts)')
-    }
+    // Task 134 — render.sort + sim:'gpu' is the GPU render tier now (the
+    // bitonic sort over the pairs buffer — see gpuSim's sort family); the
+    // Task 132 reject is retired.
     gpuSwaps = new Uint32Array(2 * capacity) // the pairs ≤ the deaths ≤ capacity
     gpuHandoff = {
       attached: false,
@@ -379,6 +390,12 @@ export function createParticles(desc: ParticlesDesc): Particles {
       emitOrigin: [0, 0, 0],
       wrapSize: hasWrap ? [wrapX, wrapY, wrapZ] : null,
     }
+  }
+  // Task 134 — render.cull is the GPU tier's frustum gate: the CPU tier
+  // bakes EVERY live particle (its packers have no camera planes to test —
+  // the zero-record trick belongs to the GPU render tier's sorted pack).
+  if (cullOn && !gpuMode) {
+    throw new Error('rune/particles: render.cull is the GPU tier\'s frustum gate (the CPU tier bakes every live particle — take sim:"gpu" + createGpuParticles; see gpuSim\'s sort family)')
   }
   const system: ParticleSystem = createParticleSystem(capacity, {
     onRetire: desc.onRetire,
