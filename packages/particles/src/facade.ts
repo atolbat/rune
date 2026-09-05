@@ -23,13 +23,14 @@
 
 import {
   createParticleSystem, NO_FORCES,
-  type ForceFields, type ParticleFields, type ParticleSystem, type RetireRecord,
+  type ForceFields, type ParticleFields, type ParticleSystem, type RetireRecord, type SpawnRecord,
 } from './system.ts'
 import {
   validateAttractor, validateCollision, validateSeek, validateLimitSpeed,
   validateInherit, validateRateOverDistance, validateWrap, validateBurst,
 } from './validate.ts'
 import { createSpawner, type Spawner, type SpawnerDesc } from './spawn.ts'
+import { GPU_EMIT_SALTS } from './gpuEmit.ts'
 import { CONSTANT_RAMP, type Ramp } from './ramp.ts'
 import { validateNoise, type NoiseField } from './noise.ts'
 import { packInstances, INSTANCE_STRIDE, INSTANCE_LAYOUT, type PackOptions } from './instances.ts'
@@ -143,6 +144,16 @@ export interface ParticlesDesc {
    *  are the GPU render tier's own options here (the bitonic sort + the
    *  frustum gate — the orchestrator's step() takes the camera). */
   readonly sim?: 'cpu' | 'gpu'
+  /** Task 135 — THE EMISSION TIER: 'cpu' (the default — the reference
+   *  spawner walk, the rows uploaded per frame) or 'gpu' (the hash-RNG
+   *  append pass — the newborns' rows are generated ON the GPU with the
+   *  SAME hash stream; the CPU keeps the life scalar per newborn for the
+   *  aging ledger). Requires sim:'gpu'; the closed-form subset is
+   *  supported (sphere/cone/disc/hemisphere/donut/rectangle/grid/line —
+   *  path and the lattice modes reject loudly). The CPU win: the
+   *  215 ns/spawn walk and the row upload die; a 100k one-shot burst
+   *  costs ~11 ms CPU before, ~0 after. */
+  readonly emit?: 'cpu' | 'gpu'
 }
 
 /** Task 131 — sim:'gpu' — the per-frame CPU→GPU handoff (read by the
@@ -150,17 +161,32 @@ export interface ParticlesDesc {
  *  advance). The emit rows are the NEW particles at their
  *  PRE-COMPACTION slots — upload them FIRST, then replay the swaps: the
  *  GPU state ends up matching the CPU's post-compaction structure
- *  exactly (the same moves in the same order on the same data). */
+ *  exactly (the same moves in the same order on the same data).
+ *  Task 135 — emit:'gpu': the rows are generated ON THE GPU (the hash-RNG
+ *  append pass) — `emitRows` stays empty (the orchestrator dispatches the
+ *  `emit` entry over the window instead of uploading), and the window's
+ *  hash domain + the inherit source ride along. */
 export interface GpuHandoff {
   /** True once the orchestrator attached (createGpuParticles). The
    *  facade's first advance() without it throws (a loud misconfiguration
    *  — WebGL2 must pass sim:'cpu'). */
   attached: boolean
   /** The interleaved FIELD_NAMES rows of this advance's newborns, at
-   *  their pre-compaction slots [emitBase, emitBase + emitCount). */
+   *  their pre-compaction slots [emitBase, emitBase + emitCount). EMPTY
+   *  in emit:'gpu' mode (the GPU generates the rows — the array is not
+   *  even allocated: 17 × capacity floats would be megabytes). */
   readonly emitRows: Float32Array
   emitBase: number
   emitCount: number
+  /** Task 135 — the window's first GLOBAL stream index (the hash-RNG's
+   *  index domain: hash01(seed, streamBase + i, salt) — the kernel's
+   *  newborns are the same particles the CPU ledger aged). */
+  emitStreamBase: number
+  /** Task 135 — the emitter velocity at this advance (the inherit
+   *  source — the kernel adds emitterV · inheritK to every newborn). */
+  readonly emitterV: readonly number[]
+  /** Task 135 — the inherit fraction (desc.inheritVelocity, static). */
+  emitInheritK: number
   /** The compaction swaps of this advance: (to, from) u32 pairs in the
    *  CPU walk's exact order. */
   readonly swaps: Uint32Array
@@ -240,6 +266,14 @@ export interface Particles {
    *  tier). Read it between advance() and the draw, then run the
    *  orchestrator's step(). */
   readonly gpuHandoff: GpuHandoff | null
+  /** Task 135 — TRUE when the emission itself runs GPU-side (emit:'gpu' —
+   *  the hash-RNG append pass; the CPU keeps the life ledger only). The
+   *  orchestrator gates its emit dispatch/upload on this. */
+  readonly emitGpu: boolean
+  /** Task 135 — the live spawner DESCRIPTION (read-only introspection —
+   *  the GPU emit config's source; a runtime replacement is rejected
+   *  while emit:'gpu' is on). */
+  readonly spawnerDesc: SpawnerDesc
 
   /** Sets the continuous emission: `rate` particles/second through the
    *  spawner (a spawner argument replaces the current one). Chainable. */
@@ -356,6 +390,21 @@ export function createParticles(desc: ParticlesDesc): Particles {
   // (the handoff saw emitBase = the count that already includes it, and
   // silently lost the newborns on the GPU — the catch-up closes it).
   let gpuSynced = 0
+  // Task 135 — the stream-index twin of gpuSynced: the GLOBAL stream
+  // index at the same mark (the GPU emit window's hash-domain base — the
+  // newborn at slot (gpuSynced + i) is stream index (gpuStreamSynced + i)).
+  let gpuStreamSynced = 0
+  // Task 135 — THE EMISSION TIER: 'gpu' runs the hash-RNG append pass (the
+  // kernel generates the rows; the CPU keeps the life ledger). The default
+  // 'cpu' keeps the reference walk + the row upload.
+  const emitMode = desc.emit ?? 'cpu'
+  if (emitMode !== 'cpu' && emitMode !== 'gpu') {
+    throw new Error(`rune/particles: emit must be 'cpu' or 'gpu' (got ${JSON.stringify(emitMode)})`)
+  }
+  const emitGpu = emitMode === 'gpu'
+  if (emitGpu && !gpuMode) {
+    throw new Error('rune/particles: emit:"gpu" requires sim:"gpu" (the hash-RNG append pass is the GPGPU tier\'s own kernel — there is no CPU-tier form)')
+  }
   if (gpuMode) {
     if (kind !== 'billboard' || (render as { draw?: string }).draw !== 'instance') {
       throw new Error('rune/particles: sim:"gpu" requires render { kind: "billboard", draw: "instance" } (the GPU tier packs the instance records itself — the soup/trail/mesh kinds are CPU-baked)')
@@ -384,8 +433,14 @@ export function createParticles(desc: ParticlesDesc): Particles {
     gpuSwaps = new Uint32Array(2 * capacity) // the pairs ≤ the deaths ≤ capacity
     gpuHandoff = {
       attached: false,
-      emitRows: new Float32Array(GPU_STATE_STRIDE * capacity),
+      // Task 135 — emit:'gpu' does NOT allocate the row scratch (17 ×
+      // capacity floats — 11 MiB at 160k; the GPU writes the rows, the
+      // upload path never runs). An EMPTY array keeps the type honest.
+      emitRows: emitGpu ? new Float32Array(0) : new Float32Array(GPU_STATE_STRIDE * capacity),
       emitBase: 0, emitCount: 0,
+      emitStreamBase: 0,
+      emitterV: [0, 0, 0],
+      emitInheritK: 0,
       swaps: gpuSwaps, swapCount: 0,
       emitOrigin: [0, 0, 0],
       wrapSize: hasWrap ? [wrapX, wrapY, wrapZ] : null,
@@ -412,6 +467,17 @@ export function createParticles(desc: ParticlesDesc): Particles {
   })
 
   let spawner: Spawner = createSpawner(desc.spawner ?? DEFAULT_SPAWNER)
+  // Task 135 — the live spawner desc (the GPU emit config's source) + the
+  // life-ledger parameters (the one scalar the CPU computes per newborn
+  // in emit:'gpu' mode — gpuEmitLife's hash draw: lifeMin/lifeMax/seed).
+  const spawnerDescRef: SpawnerDesc = desc.spawner ?? DEFAULT_SPAWNER
+  let emitLedgerLifeMin = 0, emitLedgerLifeMax = 1, emitLedgerSeed = 1
+  function trackEmitLedger(d: SpawnerDesc): void {
+    emitLedgerLifeMin = d.life[0]
+    emitLedgerLifeMax = d.life[1]
+    emitLedgerSeed = (d.seed ?? 1) | 0
+  }
+  trackEmitLedger(spawnerDescRef)
   let ratePerSecond = desc.rate ?? 0
   let carry = 0 // the fractional emission remainder (the time rate)
   // Task 124 — the emitter-motion knobs: the velocity inheritance and the
@@ -463,11 +529,26 @@ export function createParticles(desc: ParticlesDesc): Particles {
       out.vz += emitterVz * inheritK
     }
   }
-  /** emit + stream advance (both call sites use the actual returned count). */
+  /** emit + stream advance (both call sites use the actual returned count).
+   *  Task 135 — emit:'gpu' takes the LIFE-LEDGER path: the fill records
+   *  ONLY the death clock (the kernel generates the full row GPU-side with
+   *  the same hash draw — the mirror's zeros are never read). */
   const emitStream = (n: number): number => {
-    const spawnedCount = system.emit(n, emitWrap)
+    const spawnedCount = emitGpu ? system.emit(n, emitLedgerFill) : system.emit(n, emitWrap)
     streamIndex += spawnedCount
     return spawnedCount
+  }
+  // Task 135 — the life-only fill: the store's validation needs a finite
+  // record (life > 0, size ≥ 0, finite vectors) — everything except life is
+  // a safe constant (the mirror holds the ledger, not the state).
+  const emitLedgerFill = (index: number, out: SpawnRecord): void => {
+    out.x = 0; out.y = 0; out.z = 0
+    out.vx = 0; out.vy = 0; out.vz = 0
+    out.life = emitLedgerLifeMin + (emitLedgerLifeMax - emitLedgerLifeMin) * hash01(emitLedgerSeed, streamIndex + index, GPU_EMIT_SALTS.life)
+    out.size = 1
+    out.r = 1; out.g = 1; out.b = 1; out.a = 1
+    out.seed = 0
+    out.tx = 0; out.ty = 0; out.tz = 0
   }
 
   // ── the soup: one array, sized by the render kind ──────────────────────
@@ -552,18 +633,34 @@ export function createParticles(desc: ParticlesDesc): Particles {
     get forces() { return forces },
     get ramp() { return ramp },
     get gpuHandoff() { return gpuHandoff },
+    get emitGpu() { return emitGpu },
+    get spawnerDesc() { return spawnerDescRef },
 
     rate(perSecond, sp) {
       if (!Number.isFinite(perSecond) || perSecond < 0) {
         throw new Error(`rune/particles: rate must be a finite >= 0 (got ${perSecond})`)
       }
       ratePerSecond = perSecond
-      if (sp !== undefined) spawner = createSpawner(sp)
+      if (sp !== undefined) {
+        // Task 135 — a runtime spawner replacement re-packs the GPU emit
+        // kernel's static uniform; the pending window's rows were hashed
+        // with the OLD stream — recreating the facade is the honest v1
+        // boundary (changing the RATE alone stays free).
+        if (emitGpu) {
+          throw new Error('rune/particles: replacing the spawner at runtime is not supported with emit:"gpu" (the kernel\'s static spawner interpretation is packed at attach — recreate the facade; rate(x) without a spawner is fine)')
+        }
+        spawner = createSpawner(sp)
+      }
       return facade
     },
 
     burst(n, sp) {
-      if (sp !== undefined) spawner = createSpawner(sp)
+      if (sp !== undefined) {
+        if (emitGpu) {
+          throw new Error('rune/particles: replacing the spawner at runtime is not supported with emit:"gpu" (the kernel\'s static spawner interpretation is packed at attach — recreate the facade; burst(n) without a spawner is fine)')
+        }
+        spawner = createSpawner(sp)
+      }
       return emitStream(n)
     },
 
@@ -576,6 +673,13 @@ export function createParticles(desc: ParticlesDesc): Particles {
     },
 
     orient(m) {
+      // Task 135 — the rigid emission frame is CPU-tier territory under
+      // emit:'gpu' (the kernel spawns in the shape's own axes; a rotation
+      // would need a per-frame 3×3 in the emit uniform — v1 keeps the
+      // boundary honest instead).
+      if (emitGpu && m !== null) {
+        throw new Error('rune/particles: orient() is not supported with emit:"gpu" (the kernel\'s generation runs in the spawner\'s own axes — keep emit:"cpu" for rigid attachments)')
+      }
       if (m === null) {
         r00 = 1; r01 = 0; r02 = 0
         r10 = 0; r11 = 1; r12 = 0
@@ -698,21 +802,26 @@ export function createParticles(desc: ParticlesDesc): Particles {
       if (gpuHandoff !== null) {
         gpuHandoff.emitBase = 0
         gpuHandoff.emitCount = 0
+        gpuHandoff.emitStreamBase = 0
         gpuHandoff.swapCount = 0
         gpuSwapCount = 0
         gpuSynced = 0
+        gpuStreamSynced = 0
       }
       return facade
     },
   }
 
-  /** Task 131 — the GPU-tier advance: emission CPU-side (the SoA as the
-   *  scratch), the emit rows gathered PRE-COMPACTION, then the aging walk
-   *  (NO forces — the GPU owns them), the compaction swap list collected,
-   *  and NO wrap (the GPU's positions are authoritative). The orchestrator
-   *  reads facade.gpuHandoff between this call and the draw. Task 132: the
-   *  GPU tier runs on BOTH backends — WebGPU compute (the SSBO tier) or
-   *  WebGL2 transform feedback (the TF tier — the same handoff). */
+  /** Task 131 — the GPU-tier advance: the emission decisions CPU-side, the
+   *  emit rows gathered PRE-COMPACTION (Task 135: emit:'gpu' records ONLY
+   *  the window — the kernel generates the rows), then the aging walk
+   *  (NO forces — the GPU owns them; Task 135: emit:'gpu' walks the LEDGER
+   *  — age/retire/compact, the mirror's dead integration dropped), the
+   *  compaction swap list collected, and NO wrap (the GPU's positions are
+   *  authoritative). The orchestrator reads facade.gpuHandoff between this
+   *  call and the draw. Task 132: the GPU tier runs on BOTH backends —
+   *  WebGPU compute (the SSBO tier) or WebGL2 transform feedback (the TF
+   *  tier — the same handoff). */
   function advanceGpu(dt: number): void {
     const handoff = gpuHandoff!
     if (!handoff.attached) {
@@ -721,10 +830,21 @@ export function createParticles(desc: ParticlesDesc): Particles {
     const emitBase = gpuSynced
     handoff.emitBase = emitBase
     handoff.emitCount = 0
+    // Task 135 — the GPU emit window's hash domain: the global stream
+    // index at the synced mark (the newborn at slot emitBase + i IS stream
+    // index emitStreamBase + i — the kernel and the life ledger hash the
+    // SAME particle).
+    handoff.emitStreamBase = gpuStreamSynced
     gpuSwapCount = 0
     ;(handoff.emitOrigin as unknown as number[])[0] = origin[0]
     ;(handoff.emitOrigin as unknown as number[])[1] = origin[1]
     ;(handoff.emitOrigin as unknown as number[])[2] = origin[2]
+    // Task 135 — the inherit source: the emitter velocity THIS advance (the
+    // kernel adds emitterV · inheritK to every newborn — the CPU order's own).
+    handoff.emitInheritK = inheritK
+    ;(handoff.emitterV as unknown as number[])[0] = emitterVx
+    ;(handoff.emitterV as unknown as number[])[1] = emitterVy
+    ;(handoff.emitterV as unknown as number[])[2] = emitterVz
     // Task 124 — the emitter motion FIRST (this frame's newborns inherit
     // the CURRENT frame's emitter velocity; the distance emission precedes
     // the rate so a swing's trail starts at the swing).
@@ -768,31 +888,40 @@ export function createParticles(desc: ParticlesDesc): Particles {
         state.next += burst.interval
       }
     }
-    // THE EMIT GATHER (pre-compaction): the rows at their slots — the
-    // catch-up [synced, count-at-advance-start) PLUS the fresh in-advance
-    // emissions [count-at-start, count). The upload lands BEFORE the swap
-    // replay, so the GPU state ends up matching the CPU's post-compaction
+    // THE EMIT GATHER (pre-compaction): the catch-up [synced,
+    // count-at-advance-start) PLUS the fresh in-advance emissions
+    // [count-at-start, count). emit:'cpu' gathers the rows for the upload;
+    // emit:'gpu' records ONLY the window (the kernel generates the rows —
+    // no CPU traffic). Either way the newborns land BEFORE the swap replay,
+    // so the GPU state ends up matching the CPU's post-compaction
     // structure exactly.
     const n = system.count - emitBase
     if (n > 0) {
-      const f = system.fields
-      const rows = handoff.emitRows
-      for (let i = 0; i < n; i++) {
-        const s = emitBase + i
-        const at = i * GPU_STATE_STRIDE
-        rows[at] = f.px[s]; rows[at + 1] = f.py[s]; rows[at + 2] = f.pz[s]
-        rows[at + 3] = f.vx[s]; rows[at + 4] = f.vy[s]; rows[at + 5] = f.vz[s]
-        rows[at + 6] = f.age[s]; rows[at + 7] = f.life[s]; rows[at + 8] = f.size[s]
-        rows[at + 9] = f.cr[s]; rows[at + 10] = f.cg[s]; rows[at + 11] = f.cb[s]; rows[at + 12] = f.ca[s]
-        rows[at + 13] = f.seed[s]
-        rows[at + 14] = f.tx[s]; rows[at + 15] = f.ty[s]; rows[at + 16] = f.tz[s]
+      if (!emitGpu) {
+        const f = system.fields
+        const rows = handoff.emitRows
+        for (let i = 0; i < n; i++) {
+          const s = emitBase + i
+          const at = i * GPU_STATE_STRIDE
+          rows[at] = f.px[s]; rows[at + 1] = f.py[s]; rows[at + 2] = f.pz[s]
+          rows[at + 3] = f.vx[s]; rows[at + 4] = f.vy[s]; rows[at + 5] = f.vz[s]
+          rows[at + 6] = f.age[s]; rows[at + 7] = f.life[s]; rows[at + 8] = f.size[s]
+          rows[at + 9] = f.cr[s]; rows[at + 10] = f.cg[s]; rows[at + 11] = f.cb[s]; rows[at + 12] = f.ca[s]
+          rows[at + 13] = f.seed[s]
+          rows[at + 14] = f.tx[s]; rows[at + 15] = f.ty[s]; rows[at + 16] = f.tz[s]
+        }
       }
       handoff.emitCount = n
     }
     // The aging walk: NO forces (the GPU runs them), retirement + the
-    // compaction (the collector fills the swap list). The stall guard's
-    // substeps preserve the age/retirement honesty.
-    if (dt > MAX_STEP) {
+    // compaction (the collector fills the swap list). Task 135 — emit:'gpu'
+    // takes the LEDGER walk (age + retire + compact only — the mirror's
+    // dead integration dies with it; the age arithmetic is exact at any
+    // dt, the substeps were the integrator's own stability guard). The
+    // emit:'cpu' path keeps the substepped advance (the pinned behavior).
+    if (emitGpu) {
+      system.advanceLedger(dt)
+    } else if (dt > MAX_STEP) {
       const steps = Math.min(600, Math.ceil(dt / MAX_STEP))
       const h = dt / steps
       for (let s = 0; s < steps; s++) system.advance(h, NO_FORCES)
@@ -801,6 +930,7 @@ export function createParticles(desc: ParticlesDesc): Particles {
     }
     handoff.swapCount = gpuSwapCount
     gpuSynced = system.count
+    gpuStreamSynced = streamIndex
     time += dt
   }
 

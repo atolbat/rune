@@ -246,7 +246,7 @@ describe('Task 134 — the WGSL sort family (gpuSortWgsl)', () => {
     expect(GPU_SORT_F32_FIELDS.forward).toBe(4)
     expect(GPU_SORT_F32_FIELDS.planes).toBe(8)
     expect(GPU_SORT_F32_FIELDS.rampMaxSize).toBe(35)
-    expect(GPU_SIM_ENTRIES).toEqual(['compact', 'advance', 'pack'])
+    expect(GPU_SIM_ENTRIES).toEqual(['emit', 'compact', 'advance', 'pack'])
   })
 })
 

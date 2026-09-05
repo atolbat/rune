@@ -121,6 +121,14 @@ export {
   GPU_SORT_RENDER_MASK, GPU_SORT_PAD_KEY, GPU_SORT_SENTINEL, GPU_SORT_ENTRIES,
   gpuSortPadCount, gpuSortPassSequence, gpuRampMaxSize, gpuRenderFrustum,
 } from './gpuSim.ts'
+// Task 135 — GPU-side emission: the shared spawner interpretation + the JS
+// reference twin (the parity model) + the WGSL uniform's emit-block layout.
+export type { GpuEmitConfig } from './gpuEmit.ts'
+export {
+  readGpuEmitConfig, gpuEmitPackStatic, gpuEmitLife, gpuEmitRowModel,
+  GPU_EMIT_SHAPE, GPU_EMIT_VEL, GPU_EMIT_SALTS, GPU_EMIT_MASK,
+  GPU_EMIT_BASE, GPU_EMIT_U32_FIELDS, GPU_EMIT_VEC4_FIELDS,
+} from './gpuEmit.ts'
 export {
   gpuSimGlAdvanceGlsl, gpuSimGlPackGlsl, gpuRampLUTTexture, GPU_GL_STATE_STRIDE,
   GPU_GL_TEXELS_PER_PARTICLE, GPU_GL_STATE_TEXTURE_W, gpuGlStateTextureH,
@@ -129,6 +137,7 @@ export {
   gpuSimGlSortKeysGlsl, gpuSimGlBitonicGlsl, gpuSimGlPackSortedGlsl,
   GPU_GL_SORTKEYS_UNIFORMS, GPU_GL_SORTKEYS_F, GPU_GL_BITONIC_UNIFORMS, GPU_GL_BITONIC_F,
   GPU_GL_SORT_OUTPUTS, GPU_GL_SORT_PAD_KEY, GPU_GL_SORT_SENTINEL, gpuGlPairsTextureH,
+  gpuSimGlEmitGlsl, GPU_GL_EMIT_UNIFORMS, GPU_GL_EMIT_F,
 } from './gpuSimGl.ts'
 export type { TrailOptions, TrailHistory, TrailBakeOptions } from './trails.ts'
 export { createTrailHistory, fillTrails } from './trails.ts'

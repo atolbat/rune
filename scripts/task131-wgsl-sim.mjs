@@ -82,7 +82,7 @@ const result = await page.evaluate(async (port) => {
         { binding: 4, visibility: 4, buffer: { type: 'read-only-storage' } },
       ],
     })
-    const uniform = device.createBuffer({ size: 144, usage: 0x40 | 0x8 }) // UNIFORM|COPY_DST
+    const uniform = device.createBuffer({ size: P.GPU_SIM_UNIFORM_BYTES, usage: 0x40 | 0x8 }) // UNIFORM|COPY_DST (448 since Task 135's emit block)
     const group = device.createBindGroup({
       layout,
       entries: [
@@ -100,7 +100,7 @@ const result = await page.evaluate(async (port) => {
     const pipePack = mkPipe('pack')
 
     // the uniform (the gravity + drag mask — the deterministic parity run)
-    const uniBuf = new ArrayBuffer(144)
+    const uniBuf = new ArrayBuffer(P.GPU_SIM_UNIFORM_BYTES)
     const uni = new Float32Array(uniBuf)
     const u32 = new Uint32Array(uniBuf)
     const F = P.GPU_SIM_F32_FIELDS

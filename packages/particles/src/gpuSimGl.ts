@@ -54,6 +54,7 @@
  */
 
 import { PERM, GRAD3 } from './noise.ts'
+import { GPU_EMIT_SALTS } from './gpuEmit.ts'
 
 /** The TF state row: 20 floats (17 FIELD_NAMES + 3 pad — vec4-aligned so
  *  the five TF varyings interleave at 4-float attribute offsets). */
@@ -664,6 +665,246 @@ void main() {
   }
   int slot = int(pr.y + 0.5);
 ${packBodyGlsl('slot')}  gl_Position = vec4(0.0, 0.0, 0.5, 1.0); // never rasterized (discard on)
+}
+`
+}
+
+// ─── Task 135 — GPU-SIDE EMISSION: the emit pass (the WGSL `emit` entry's
+// GLSL twin — the hash-RNG append pass; gpuEmit.ts holds the shared
+// interpretation + the JS reference model) ─────────────────────────────────
+
+/** The emit pass's uniform declaration (packed order). u_streamLo/u_streamHi
+ *  and u_seedLo/u_seedHi carry the 32-bit hash domain as TWO 16-bit float
+ *  halves (float32 holds integers exactly to 2^24 — the stream index grows
+ *  unboundedly, the seed is an arbitrary |0 int; the halves reconstruct the
+ *  exact u32 bits in the shader). */
+export const GPU_GL_EMIT_UNIFORMS: readonly { readonly name: string; readonly size: 1 | 2 | 3 | 4 }[] = [
+  { name: 'u_emitBase', size: 1 },
+  { name: 'u_emitCount', size: 1 },
+  { name: 'u_streamLo', size: 1 },
+  { name: 'u_streamHi', size: 1 },
+  { name: 'u_shapeKind', size: 1 },
+  { name: 'u_velMode', size: 1 },
+  { name: 'u_seedLo', size: 1 },
+  { name: 'u_seedHi', size: 1 },
+  { name: 'u_shapeOrigin', size: 3 },
+  { name: 'u_atOrigin', size: 3 },
+  { name: 'u_axis', size: 3 },
+  { name: 'u_t1', size: 3 },
+  { name: 'u_t2', size: 3 },
+  { name: 'u_fixedDir', size: 3 },
+  { name: 'u_lineTo', size: 3 },
+  { name: 'u_radius', size: 4 },
+  { name: 'u_cone', size: 4 },
+  { name: 'u_donut', size: 4 },
+  { name: 'u_misc', size: 4 },
+  { name: 'u_misc2', size: 4 },
+  { name: 'u_speed', size: 4 },
+  { name: 'u_sizeInherit', size: 3 },
+  { name: 'u_color0', size: 4 },
+  { name: 'u_color1', size: 4 },
+  { name: 'u_emitterV', size: 3 },
+]
+
+/** The emit pass's packed-uniform field offsets (FLOAT indices). */
+export const GPU_GL_EMIT_F: Record<
+  'emitBase' | 'emitCount' | 'streamLo' | 'streamHi' | 'shapeKind' | 'velMode' | 'seedLo' | 'seedHi'
+  | 'shapeOrigin' | 'atOrigin' | 'axis' | 't1' | 't2' | 'fixedDir' | 'lineTo'
+  | 'radius' | 'cone' | 'donut' | 'misc' | 'misc2' | 'speed' | 'sizeInherit' | 'color0' | 'color1' | 'emitterV', number
+> = {
+  emitBase: 0,
+  emitCount: 1,
+  streamLo: 2,
+  streamHi: 3,
+  shapeKind: 4,
+  velMode: 5,
+  seedLo: 6,
+  seedHi: 7,
+  shapeOrigin: 8,
+  atOrigin: 11,
+  axis: 14,
+  t1: 17,
+  t2: 20,
+  fixedDir: 23,
+  lineTo: 26,
+  radius: 29,
+  cone: 33,
+  donut: 37,
+  misc: 41,
+  misc2: 45,
+  speed: 49,
+  sizeInherit: 53,
+  color0: 56,
+  color1: 60,
+  emitterV: 64,
+}
+
+/** The emit pass (the WGSL `emit` entry's GLSL twin): vertex i writes the
+ *  newborn row of window-local index i — gl_VertexID IS the local index,
+ *  slot = u_emitBase + i, the hash index = u_emitStreamBase + i (the
+ *  halves). No attributes, no textures (generation is pure); the five TF
+ *  outputs are the 20-float state row (17 fields + 3 pad — the same layout
+ *  the advance pass writes). The orchestrator PBO-round-trips the rows into
+ *  the state texture's pre-compaction texel range right after. Pure
+ *  function of the source — deterministic, cacheable. */
+export function gpuSimGlEmitGlsl(): string {
+  const S = GPU_EMIT_SALTS
+  return `#version 300 es
+// @rune/particles — Task 135: the GPU-side emission, the GLSL twin of the
+// WGSL emit entry. The uniform set mirrors GPU_GL_EMIT_UNIFORMS (the
+// orchestrator packs them in order).
+precision highp float;
+uniform float u_emitBase;
+uniform float u_emitCount;
+uniform float u_streamLo;
+uniform float u_streamHi;
+uniform float u_shapeKind;
+uniform float u_velMode;
+uniform float u_seedLo;
+uniform float u_seedHi;
+uniform vec3 u_shapeOrigin;
+uniform vec3 u_atOrigin;
+uniform vec3 u_axis;
+uniform vec3 u_t1;
+uniform vec3 u_t2;
+uniform vec3 u_fixedDir;
+uniform vec3 u_lineTo;
+uniform vec4 u_radius;     // (rMin, rMax, hemArc, donR)
+uniform vec4 u_cone;       // (cosHalf, baseRadius, lenMin, lenMax)
+uniform vec4 u_donut;      // (tubeMin, tubeMax, donArc, arms)
+uniform vec4 u_misc;       // (armSpread, twist, rectW, rectH)
+uniform vec4 u_misc2;      // (gridW, gridH, gridRows, gridCols)
+uniform vec4 u_speed;      // (speedMin, speedMax, lifeMin, lifeMax)
+uniform vec3 u_sizeInherit; // (sizeMin, sizeMax, inheritK)
+uniform vec4 u_color0;
+uniform vec4 u_color1;
+uniform vec3 u_emitterV;
+// the TF outputs: the 20-float state row (17 fields + 3 pad).
+out vec4 v_s0; // px, py, pz, vx
+out vec4 v_s1; // vy, vz, age, life
+out vec4 v_s2; // size, cr, cg, cb
+out vec4 v_s3; // ca, seed, tx, ty
+out vec4 v_s4; // tz, pad, pad, pad
+
+// @rune/core random.ts's hash01 — bit-identical in uint (GLSL ES 3.00's
+// uint arithmetic wraps mod 2^32 exactly like Math.imul; the quotient's
+// f32 rounding is the same 1-ULP class as the WGSL twin)
+float hash01f(uint sd, uint gi, uint salt) {
+  uint h = sd * 374761393u + gi * 668265263u + salt * 2246822519u;
+  h = (h ^ (h >> 13u)) * 1274126177u;
+  h = h ^ (h >> 16u);
+  return float(h) / 4294967296.0;
+}
+
+const float TAU = 6.283185307179586;
+
+void main() {
+  // the 32-bit hash domain from the two float halves (exact to 2^24 each —
+  // the halves are 16-bit, the recombination is pure uint) PLUS the
+  // window-local vertex index: gi = streamBase + i (the WGSL twin's own
+  // streamBase + i — every newborn is its own hash draw)
+  uint gi = uint(gl_VertexID) + ((uint(u_streamHi + 0.5) << 16u) | uint(u_streamLo + 0.5));
+  uint sd = (uint(u_seedHi + 0.5) << 16u) | uint(u_seedLo + 0.5);
+  int shapeKind = int(u_shapeKind + 0.5);
+  int velMode = int(u_velMode + 0.5);
+
+  float u = hash01f(sd, gi, ${S.dir}u);
+  float v = hash01f(sd, gi, ${S.dir + 100}u);
+  vec3 p = u_shapeOrigin;
+  vec3 d = u_fixedDir;
+
+  if (shapeKind == 1) { // sphere — a uniform direction + the radius band
+    float z = 1.0 - 2.0 * u;
+    float s = sqrt(max(0.0, 1.0 - z * z));
+    float phi = TAU * v;
+    d = vec3(s * cos(phi), s * sin(phi), z);
+    float r = u_radius.x + (u_radius.y - u_radius.x) * hash01f(sd, gi, ${S.p0}u);
+    p = u_shapeOrigin + d * r;
+  } else if (shapeKind == 2) { // cone — the fan-compressed lobe + the base disc
+    float z = 1.0 - (1.0 - u_cone.x) * u;
+    float s = sqrt(max(0.0, 1.0 - z * z));
+    float phi = TAU * v;
+    d = u_axis * z + (u_t1 * cos(phi) + u_t2 * sin(phi)) * s;
+    float rr = u_cone.y * sqrt(hash01f(sd, gi, ${S.p0}u));
+    float rphi = TAU * hash01f(sd, gi, ${S.p1}u);
+    float stretch = u_cone.z + (u_cone.w - u_cone.z) * hash01f(sd, gi, ${S.p2}u);
+    vec2 c = vec2(cos(rphi) * rr, sin(rphi) * rr);
+    p = u_shapeOrigin + u_t1 * c.x + u_t2 * c.y + u_axis * stretch;
+  } else if (shapeKind == 3) { // disc — the area-uniform annulus (+ the arms)
+    float r2 = u_radius.x * u_radius.x + (u_radius.y * u_radius.y - u_radius.x * u_radius.x) * u;
+    float rr = sqrt(r2);
+    float phi = TAU * v;
+    if (u_donut.w >= 1.0) { // arms
+      float arm = floor(hash01f(sd, gi, ${S.p0}u) * u_donut.w);
+      float scatter = (hash01f(sd, gi, ${S.p1}u) - 0.5) * 2.0 * u_misc.x;
+      float tR = (rr - u_radius.x) / max(1e-6, u_radius.y - u_radius.x);
+      phi = arm * (TAU / u_donut.w) + u_misc.y * tR + scatter;
+    }
+    p = u_shapeOrigin + (u_t1 * cos(phi) + u_t2 * sin(phi)) * rr;
+  } else if (shapeKind == 4) { // hemisphere — the area-correct dome
+    float cosTheta = u;
+    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+    float phi = u_radius.z * v;
+    d = u_axis * cosTheta + (u_t1 * cos(phi) + u_t2 * sin(phi)) * sinTheta;
+    float r = u_radius.x + (u_radius.y - u_radius.x) * hash01f(sd, gi, ${S.p0}u);
+    p = u_shapeOrigin + d * r;
+  } else if (shapeKind == 5) { // donut — the ring + the tube circle
+    float phi = u_donut.z * u;
+    float tr = u_donut.x + (u_donut.y - u_donut.x) * hash01f(sd, gi, ${S.p0}u);
+    float psi = TAU * hash01f(sd, gi, ${S.p1}u);
+    vec3 radial = u_t1 * cos(phi) + u_t2 * sin(phi);
+    p = u_shapeOrigin + radial * (u_radius.w + tr * cos(psi)) + u_axis * (tr * sin(psi));
+  } else if (shapeKind == 6) { // rectangle — the plane patch ⊥ axis
+    vec2 h = vec2((u - 0.5) * u_misc.z, (v - 0.5) * u_misc.w);
+    p = u_shapeOrigin + u_t1 * h.x + u_t2 * h.y;
+  } else if (shapeKind == 7) { // grid — the hash-picked cell ('random')
+    float col = floor(hash01f(sd, gi, ${S.p0}u) * u_misc2.w);
+    float row = floor(hash01f(sd, gi, ${S.p1}u) * u_misc2.z);
+    vec2 g = vec2((col + 0.5) / u_misc2.w - 0.5, (row + 0.5) / u_misc2.z - 0.5);
+    p = u_shapeOrigin + u_t1 * (g.x * u_misc2.x) + u_t2 * (g.y * u_misc2.y);
+  } else if (shapeKind == 8) { // line — the uniform span ('random')
+    p = u_shapeOrigin + (u_lineTo - u_shapeOrigin) * u;
+  }
+
+  // the velocity mode overrides (radial/tangential read the SHAPE-LOCAL
+  // position — the at() translation comes after, the CPU's own order)
+  if (velMode == 2) { // radial
+    vec3 r = p - u_shapeOrigin;
+    float l = length(r);
+    if (l > 1e-12) {
+      d = r / l;
+    } else {
+      // the degenerate scatter (Task 124's fix — a uniform random direction)
+      float theta = TAU * hash01f(sd, gi, ${S.scat0}u);
+      float cphi = 2.0 * hash01f(sd, gi, ${S.scat1}u) - 1.0;
+      float sphi = sqrt(max(0.0, 1.0 - cphi * cphi));
+      d = vec3(sphi * cos(theta), sphi * sin(theta), cphi);
+    }
+  } else if (velMode == 3) { // axis
+    d = u_axis;
+  } else if (velMode == 4) { // tangential — cross(axis, radial)
+    vec3 r = p - u_shapeOrigin;
+    d = cross(u_axis, r);
+    float l = length(d);
+    if (l > 1e-12) { d = d / l; } else { d = u_axis; }
+  }
+  // velMode 1 (fixed) / 5 (lobe): keep the shape branch's direction
+
+  float spd = u_speed.x + (u_speed.y - u_speed.x) * hash01f(sd, gi, ${S.spd}u);
+  float mixC = hash01f(sd, gi, ${S.col}u);
+  float life = u_speed.z + (u_speed.w - u_speed.z) * hash01f(sd, gi, ${S.life}u);
+  float size = u_sizeInherit.x + (u_sizeInherit.y - u_sizeInherit.x) * hash01f(sd, gi, ${S.size}u);
+  float seedF = hash01f(sd, gi, ${S.seed}u);
+
+  vec3 w = p + u_atOrigin;
+  vec3 vel = d * spd + u_emitterV * u_sizeInherit.z;
+  vec4 col = mix(u_color0, u_color1, mixC);
+  v_s0 = vec4(w, vel.x);                       // px, py, pz, vx
+  v_s1 = vec4(vel.y, vel.z, 0.0, life);        // vy, vz, age 0, life
+  v_s2 = vec4(size, col.r, col.g, col.b);      // size, cr, cg, cb
+  v_s3 = vec4(col.a, seedF, w.x, w.y);         // ca, seed, tx, ty (no target — the spawn position)
+  v_s4 = vec4(w.z, 0.0, 0.0, 0.0);            // tz + the pad
+  gl_Position = vec4(0.0, 0.0, 0.5, 1.0); // never rasterized (discard on)
 }
 `
 }

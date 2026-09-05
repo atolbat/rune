@@ -59,6 +59,7 @@ import {
   GPU_SIM_U32_FIELDS, GPU_SIM_F32_FIELDS, GPU_SIM_VEC4_FIELDS, GPU_FORCE_MASK,
   gpuSortWgsl, GPU_SORT_UNIFORM_FLOATS, GPU_SORT_U32_FIELDS, GPU_SORT_F32_FIELDS,
   GPU_SORT_RENDER_MASK, gpuSortPadCount, gpuSortPassSequence, gpuRampMaxSize, gpuRenderFrustum,
+  readGpuEmitConfig, gpuEmitPackStatic, GPU_EMIT_U32_FIELDS, GPU_EMIT_VEC4_FIELDS,
 } from '@rune/particles'
 import { createGpuParticlesTf } from './particlesGpuGl.ts'
 import { readGpuTierConfig } from './particlesGpuConfig.ts'
@@ -193,6 +194,17 @@ function createGpuParticlesCompute(facade: Particles, gpu: SsboComputeTier): Gpu
   u32[GPU_SIM_U32_FIELDS.forceMask] = mask
   const staticMask = mask
 
+  // ── Task 135 — THE GPU EMISSION: the facade's emit:'gpu' packs the
+  //    spawner interpretation ONCE (the static half of the uniform's emit
+  //    block — the per-frame window/origin/emitterV lands in step()).
+  //    readGpuEmitConfig throws LOUDLY on the unsupported constructs (the
+  //    path shape, the lattice modes, the radial modulators — the honest
+  //    v1 boundary; emit:'cpu' is unaffected).
+  const emitOn = facade.emitGpu
+  if (emitOn) {
+    gpuEmitPackStatic(uni, u32, readGpuEmitConfig(facade.spawnerDesc))
+  }
+
   // ── the sort family's statics (tiles/frameJitter/rampMax for the pack
   //    twin — the SAME values the sim family's pack consumes)
   {
@@ -218,9 +230,27 @@ function createGpuParticlesCompute(facade: Particles, gpu: SsboComputeTier): Gpu
     if (ho.swapCount > 0) {
       gpu.writeBuffer(swapsId, ho.swaps, 0, ho.swapCount * 8)
     }
-    // 2. the emit block (the pre-compaction slots)
+    // 2. THE NEWBORNS at their pre-compaction slots. Task 135 — emit:'gpu'
+    //    dispatches the hash-RNG append kernel (the rows generated ON the
+    //    GPU, zero CPU traffic); emit:'cpu' uploads the handoff's row block
+    //    as before. Either way this lands BEFORE the compact replay, so
+    //    the GPU state ends up exactly the CPU's post-compaction structure.
     if (ho.emitCount > 0) {
-      gpu.writeBuffer(stateId, ho.emitRows, ho.emitBase * GPU_STATE_STRIDE * 4, ho.emitCount * GPU_STATE_STRIDE * 4)
+      if (emitOn) {
+        const EU = GPU_EMIT_U32_FIELDS
+        const EV = GPU_EMIT_VEC4_FIELDS
+        u32[EU.emitBase] = ho.emitBase
+        u32[EU.emitCount] = ho.emitCount
+        u32[EU.streamBase] = ho.emitStreamBase | 0 // the low 32 bits — the hash's own domain
+        const eo = ho.emitOrigin
+        uni[EV.atOrigin] = eo[0]; uni[EV.atOrigin + 1] = eo[1]; uni[EV.atOrigin + 2] = eo[2]
+        const ev = ho.emitterV
+        uni[EV.emitterV] = ev[0]; uni[EV.emitterV + 1] = ev[1]; uni[EV.emitterV + 2] = ev[2]
+        uni[EV.sizeInherit + 2] = ho.emitInheritK
+        gpu.runKernel(computeId, 'emit', uni, Math.ceil(ho.emitCount / WORKGROUP))
+      } else {
+        gpu.writeBuffer(stateId, ho.emitRows, ho.emitBase * GPU_STATE_STRIDE * 4, ho.emitCount * GPU_STATE_STRIDE * 4)
+      }
     }
     // 3-5. the passes
     if (ho.swapCount > 0) gpu.runKernel(computeId, 'compact', uni, 1)

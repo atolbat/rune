@@ -3,8 +3,12 @@
 // 134 — THE RENDER TIER: the per-particle frustum cull rides the compute
 // leg by default (?cull=1 forces it on the TF leg) and the BITONIC SORT
 // is ?sort=1 (the 160k-particle painter's order — the records land
-// far-to-near): ONE HUNDRED SIXTY THOUSAND embers simulated ON THE GPU —
-// the compute-shader advance over a storage buffer (WebGPU) or the
+// far-to-near); Task 135 — GPU-SIDE EMISSION: the newborns are GENERATED
+// ON THE GPU (the hash-RNG append pass — the same hash stream the CPU
+// reference spawns through; the CPU keeps the life ledger only, and the
+// 53k-particle opening burst costs ~0 CPU instead of ~11 ms): ONE
+// HUNDRED SIXTY THOUSAND embers simulated AND EMITTED ON THE GPU — the
+// compute-shader advance over a storage buffer (WebGPU) or the
 // transform-feedback passes over a float texture (WebGL2 — the SSBO's
 // twin, the SAME handoff and the SAME 16-float instance records), the
 // GPU-side record pack, ZERO per-frame CPU→GPU particle traffic. The
@@ -25,7 +29,7 @@
 //   · THE HOOKS: window.__vfxPerf = { tier, capacity, count, ms } — the
 //     probe gate (scripts/task131-sim-probe.mjs) pins the tier + the
 //     frame cost; window.__vfxCounters.embers — the emission counters.
-import { createGpuParticles } from '../../../dist/rune.esm.js?v=134'
+import { createGpuParticles } from '../../../dist/rune.esm.js?v=135'
 
 const GPU_CAPACITY = 160_000
 const TF_CAPACITY = 16_000
@@ -41,10 +45,17 @@ const BOX = [46, 22, 46] // the wrap volume (the kiln)
 // exercises BOTH flags with generous JS-side aliveness checks.
 const WANT_SORT = typeof location !== 'undefined' && new URLSearchParams(location.search).has('sort')
 const FORCE_CULL = typeof location !== 'undefined' && new URLSearchParams(location.search).has('cull')
+// Task 135 — the GPU emission: ON for the COMPUTE leg (WebGPU — fully
+// gated: the raw-device parity gate + the live probes); the TF leg keeps
+// emit:'cpu' by default with ?emit=1 as the opt-in (the software GL's
+// queue serialization stalls the interleaved TF/PBO cycles — the
+// documented container class; a real-GPU WebGL2 leg takes the GPU path —
+// the values themselves are pinned by the in-page GLSL gate).
+const FORCE_EMIT = typeof location !== 'undefined' && new URLSearchParams(location.search).has('emit')
 
 export default {
   title: 'GPU Embers',
-  sub: 'the GPGPU tier · 160k compute-simmed embers (WebGL2: the transform-feedback tier at 16k) · zero per-frame particle uploads',
+  sub: 'the GPGPU tier · 160k compute-simmed, GPU-EMITTED embers (WebGL2: the transform-feedback tier at 16k) · zero per-frame particle uploads',
   camera: { yaw: 0.6, pitch: 0.34, dist: 13, orbit: 0.05, target: [0, 4.5, 0] },
 
   make(env) {
@@ -86,6 +97,12 @@ export default {
           noise: { strength: 1.6, scale: 0.16, speed: 0.21 },
         },
         spawner: EMBER_S,
+        // Task 135 — THE GPU EMISSION: the newborns' rows are generated
+        // ON the GPU (the hash-RNG append pass — the same hash stream, the
+        // same salt order; the CPU keeps the life ledger only). The
+        // opening 53k burst and the 20k/s stream cost ~0 CPU — on the
+        // COMPUTE leg; the TF leg takes it with ?emit=1.
+        emit: compute || FORCE_EMIT ? 'gpu' : 'cpu',
         // Task 134 — THE RENDER TIER: cull (the frustum gate — the
         // off-screen kiln walls stop drawing; the compute leg by default,
         // ?cull=1 forces it on the TF leg) + the opt-in sort (?sort=1).
@@ -136,7 +153,7 @@ export default {
     void pool
 
     // ── the perf report (the probe gate reads it) ──
-    const perf = { tier: 'gpu', capacity, count: 0, ms: 0 }
+    const perf = { tier: 'gpu', capacity, count: 0, ms: 0, emit: compute || FORCE_EMIT ? 'gpu' : 'cpu' }
     if (typeof window !== 'undefined') window.__vfxPerf = perf
     let msAvg = 16
     let last = 0

@@ -40,12 +40,15 @@ import type { TfComputeTier, TfRunBindings } from '@rune/core'
 import type { Particles } from '@rune/particles'
 import {
   gpuSimGlAdvanceGlsl, gpuSimGlPackGlsl, gpuSimGlSortKeysGlsl, gpuSimGlBitonicGlsl, gpuSimGlPackSortedGlsl,
+  gpuSimGlEmitGlsl,
   gpuRampLUTTexture,
   GPU_GL_STATE_TEXTURE_W, gpuGlStateTextureH, gpuGlPairsTextureH, GPU_GL_TEXELS_PER_PARTICLE,
   GPU_GL_ADVANCE_UNIFORMS, GPU_GL_ADVANCE_F, GPU_GL_PACK_UNIFORMS, GPU_GL_PACK_F,
   GPU_GL_ADVANCE_OUTPUTS, GPU_GL_PACK_OUTPUTS, GPU_GL_SORT_OUTPUTS,
   GPU_GL_SORTKEYS_UNIFORMS, GPU_GL_SORTKEYS_F, GPU_GL_BITONIC_UNIFORMS, GPU_GL_BITONIC_F,
+  GPU_GL_EMIT_UNIFORMS, GPU_GL_EMIT_F,
   gpuSortPadCount, gpuSortPassSequence, gpuRampMaxSize, gpuRenderFrustum,
+  readGpuEmitConfig, type GpuEmitConfig,
 } from '@rune/particles'
 import { readGpuTierConfig } from './particlesGpuConfig.ts'
 import type { GpuRenderCamera } from './particlesGpu.ts'
@@ -84,6 +87,38 @@ export function gpuGlProvenance(preCount: number, swaps: Uint32Array, swapCount:
   }
 }
 
+/** Task 135 — the emit pass's STATIC uniform half (the spawner
+ *  interpretation, packed once at attach; the per-frame
+ *  window/origin/emitterV halves stay with step()). The 32-bit seed rides
+ *  as TWO 16-bit halves — float32 holds integers exactly to 2^24, and the
+ *  shader recombines the exact bits in uint (the stream index does the
+ *  same trick per frame). */
+function packGlEmitStatic(emitUni: Float32Array, cfg: GpuEmitConfig): void {
+  const E = GPU_GL_EMIT_F
+  emitUni[E.shapeKind] = cfg.shapeKind
+  emitUni[E.velMode] = cfg.velMode
+  const sd = cfg.seed >>> 0
+  emitUni[E.seedLo] = sd & 0xffff
+  emitUni[E.seedHi] = (sd >>> 16) & 0xffff
+  emitUni[E.shapeOrigin] = cfg.shapeOrigin[0]; emitUni[E.shapeOrigin + 1] = cfg.shapeOrigin[1]; emitUni[E.shapeOrigin + 2] = cfg.shapeOrigin[2]
+  emitUni[E.axis] = cfg.axis[0]; emitUni[E.axis + 1] = cfg.axis[1]; emitUni[E.axis + 2] = cfg.axis[2]
+  emitUni[E.t1] = cfg.t1[0]; emitUni[E.t1 + 1] = cfg.t1[1]; emitUni[E.t1 + 2] = cfg.t1[2]
+  emitUni[E.t2] = cfg.t2[0]; emitUni[E.t2 + 1] = cfg.t2[1]; emitUni[E.t2 + 2] = cfg.t2[2]
+  emitUni[E.fixedDir] = cfg.fixedDir[0]; emitUni[E.fixedDir + 1] = cfg.fixedDir[1]; emitUni[E.fixedDir + 2] = cfg.fixedDir[2]
+  if (cfg.lineTo !== null) {
+    emitUni[E.lineTo] = cfg.lineTo[0]; emitUni[E.lineTo + 1] = cfg.lineTo[1]; emitUni[E.lineTo + 2] = cfg.lineTo[2]
+  }
+  emitUni[E.radius] = cfg.rMin; emitUni[E.radius + 1] = cfg.rMax; emitUni[E.radius + 2] = cfg.hemArc; emitUni[E.radius + 3] = cfg.donR
+  emitUni[E.cone] = cfg.cosHalf; emitUni[E.cone + 1] = cfg.baseRadius; emitUni[E.cone + 2] = cfg.lenMin; emitUni[E.cone + 3] = cfg.lenMax
+  emitUni[E.donut] = cfg.tubeMin; emitUni[E.donut + 1] = cfg.tubeMax; emitUni[E.donut + 2] = cfg.donArc; emitUni[E.donut + 3] = cfg.arms
+  emitUni[E.misc] = cfg.armSpread; emitUni[E.misc + 1] = cfg.twist; emitUni[E.misc + 2] = cfg.rectW; emitUni[E.misc + 3] = cfg.rectH
+  emitUni[E.misc2] = cfg.gridW; emitUni[E.misc2 + 1] = cfg.gridH; emitUni[E.misc2 + 2] = cfg.gridRows; emitUni[E.misc2 + 3] = cfg.gridCols
+  emitUni[E.speed] = cfg.speedMin; emitUni[E.speed + 1] = cfg.speedMax; emitUni[E.speed + 2] = cfg.lifeMin; emitUni[E.speed + 3] = cfg.lifeMax
+  emitUni[E.sizeInherit] = cfg.sizeMin; emitUni[E.sizeInherit + 1] = cfg.sizeMax
+  emitUni[E.color0] = cfg.color0[0]; emitUni[E.color0 + 1] = cfg.color0[1]; emitUni[E.color0 + 2] = cfg.color0[2]; emitUni[E.color0 + 3] = cfg.color0[3]
+  emitUni[E.color1] = cfg.color1[0]; emitUni[E.color1 + 1] = cfg.color1[1]; emitUni[E.color1 + 2] = cfg.color1[2]; emitUni[E.color1 + 3] = cfg.color1[3]
+}
+
 /** Attaches the TF tier to a sim:'gpu' facade (the WebGL2 path of
  *  createGpuParticles in particlesGpu.ts — the core controller's tier). */
 export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): GpuParticlesTf {
@@ -107,6 +142,30 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
   const stateOut = gpu.createBuffer(new Float32Array(W * H * 4))
   const records = gpu.createBuffer(new Float32Array(capacity * 16))
   const mapBuf = gpu.createBuffer(new Float32Array(capacity))
+
+  // ── Task 135 — THE GPU EMISSION (emit:'gpu'): the append pass — the
+  //    GLSL twin of the WGSL emit entry, vertex i = the window-local
+  //    newborn; the rows land in a DEDICATED emitOut buffer, then a PBO
+  //    slice round-trip writes them into the state texture's
+  //    PRE-COMPACTION texel range — exactly where the CPU row upload used
+  //    to land. THE BARRIER DISCIPLINE: stateOut keeps its pristine ONE
+  //    write (the advance pass) + ONE read (the full round-trip) per
+  //    frame — each buffer exactly one producer and one consumer (the
+  //    interleaved TF-write → PBO-read → TF-write cycle on one buffer is
+  //    the software-GL queue-serialization class that stalls the
+  //    SwiftShader path; the real-GPU TF leg and the compute leg are
+  //    unaffected). readGpuEmitConfig throws LOUDLY on the unsupported
+  //    constructs (the honest v1 boundary); emit:'cpu' facades skip the
+  //    pass AND the buffer entirely (the recorded id sequence unchanged).
+  const emitOn = facade.emitGpu
+  const emitPass = emitOn ? gpu.createPass({
+    vertex: gpuSimGlEmitGlsl(),
+    outputs: GPU_GL_ADVANCE_OUTPUTS, // the same 20-float state row the advance pass writes
+    uniforms: GPU_GL_EMIT_UNIFORMS,
+  }) : -1
+  const emitOut = emitOn ? gpu.createBuffer(new Float32Array(capacity * 20)) : -1
+  const emitUni = gpu.scratch(GPU_GL_EMIT_UNIFORMS.reduce((n, u) => n + u.size, 0)).f32
+  if (emitOn) packGlEmitStatic(emitUni, readGpuEmitConfig(facade.spawnerDesc))
 
   // ── the passes (tracked) ────────────────────────────────────────────
   const cfg = readGpuTierConfig(facade)
@@ -192,7 +251,9 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
   }
 
   // ── the per-frame scratch (allocated once — the hot-path contract) ───
-  const emitPacked = new Float32Array(capacity * 20)
+  // Task 135 — the row-repack scratch is emit:'cpu'-only (the GPU emission
+  // writes the rows through the TF pass — the CPU never touches them).
+  const emitPacked = emitOn ? null : new Float32Array(capacity * 20)
   const prov = new Int32Array(capacity)
   const mapFloats = new Float32Array(capacity)
   // Task 134 — the sort family's scratch: the sortKeys uniforms (count,
@@ -215,29 +276,64 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
     const wc = ho.emitOrigin
     advUni[A.wrapCenter] = wc[0]; advUni[A.wrapCenter + 1] = wc[1]; advUni[A.wrapCenter + 2] = wc[2]
 
-    // 1. THE EMIT BLOCK — repack the 17-float rows into the 20-float
-    //    texture rows and upload the PRE-COMPACTION texel range.
+    // 1. THE NEWBORNS. Task 135 — emit:'gpu' runs the append pass (the
+    //    rows generated ON the GPU into stateOut[0, emitCount), then the
+    //    PBO slice round-trip into the state texture's PRE-COMPACTION texel
+    //    range); emit:'cpu' repacks + uploads the handoff's rows as before.
+    //    Either way this lands BEFORE the provenance/compact walk, so the
+    //    gather sees the newborns exactly where the CPU walk placed them.
     if (ho.emitCount > 0) {
-      const rows = ho.emitRows
-      const n = ho.emitCount
-      for (let i = 0; i < n; i++) {
-        const s = i * 17
-        const d = i * 20
-        for (let f = 0; f < 17; f++) emitPacked[d + f] = rows[s + f]
-        emitPacked[d + 17] = 0; emitPacked[d + 18] = 0; emitPacked[d + 19] = 0
-      }
-      // the texel range [start, end) — split into row rects (W texels/row;
-      // 16 bytes per rgba32f texel — the source offset in the packed rows)
-      const start = ho.emitBase * GPU_GL_TEXELS_PER_PARTICLE
-      const end = start + n * GPU_GL_TEXELS_PER_PARTICLE
-      const y0 = Math.floor(start / W)
-      const y1 = Math.floor((end - 1) / W)
-      for (let y = y0; y <= y1; y++) {
-        const x0 = y === y0 ? start - y * W : 0
-        const x1 = y === y1 ? end - y * W : W
-        const byteOffset = (y * W + x0 - start) * 16
-        const byteLength = (x1 - x0) * 16
-        gpu.texSubImage2D(stateTex, x0, y, x1 - x0, 1, new Float32Array(emitPacked.buffer, byteOffset, byteLength / 4))
+      if (emitOn) {
+        const E = GPU_GL_EMIT_F
+        emitUni[E.emitBase] = ho.emitBase
+        emitUni[E.emitCount] = ho.emitCount
+        const sb = ho.emitStreamBase | 0
+        emitUni[E.streamLo] = sb & 0xffff
+        emitUni[E.streamHi] = (sb >>> 16) & 0xffff
+        const eo = ho.emitOrigin
+        emitUni[E.atOrigin] = eo[0]; emitUni[E.atOrigin + 1] = eo[1]; emitUni[E.atOrigin + 2] = eo[2]
+        const ev = ho.emitterV
+        emitUni[E.emitterV] = ev[0]; emitUni[E.emitterV + 1] = ev[1]; emitUni[E.emitterV + 2] = ev[2]
+        emitUni[E.sizeInherit + 2] = ho.emitInheritK
+        gpu.runPass(emitPass, ho.emitCount, {
+          bufferId: emitOut,
+          uniformData: emitUni,
+        } satisfies TfRunBindings)
+        // the PBO slice round-trip: the texel range [emitBase·5,
+        // (emitBase+emitCount)·5) read from emitOut (the rows land linearly
+        // [0, n·5) — the same row-splitting the CPU upload took; W texels
+        // per texture row, the source offset relative to the window start)
+        const start = ho.emitBase * GPU_GL_TEXELS_PER_PARTICLE
+        const end = start + ho.emitCount * GPU_GL_TEXELS_PER_PARTICLE
+        const y0 = Math.floor(start / W)
+        const y1 = Math.floor((end - 1) / W)
+        for (let y = y0; y <= y1; y++) {
+          const x0 = y === y0 ? start - y * W : 0
+          const x1 = y === y1 ? end - y * W : W
+          gpu.texSubImage2DBuffer(stateTex, x0, y, x1 - x0, 1, emitOut, (y * W + x0 - start) * 16)
+        }
+      } else {
+        const rows = ho.emitRows
+        const n = ho.emitCount
+        for (let i = 0; i < n; i++) {
+          const s = i * 17
+          const d = i * 20
+          for (let f = 0; f < 17; f++) emitPacked![d + f] = rows[s + f]
+          emitPacked![d + 17] = 0; emitPacked![d + 18] = 0; emitPacked![d + 19] = 0
+        }
+        // the texel range [start, end) — split into row rects (W texels/row;
+        // 16 bytes per rgba32f texel — the source offset in the packed rows)
+        const start = ho.emitBase * GPU_GL_TEXELS_PER_PARTICLE
+        const end = start + n * GPU_GL_TEXELS_PER_PARTICLE
+        const y0 = Math.floor(start / W)
+        const y1 = Math.floor((end - 1) / W)
+        for (let y = y0; y <= y1; y++) {
+          const x0 = y === y0 ? start - y * W : 0
+          const x1 = y === y1 ? end - y * W : W
+          const byteOffset = (y * W + x0 - start) * 16
+          const byteLength = (x1 - x0) * 16
+          gpu.texSubImage2D(stateTex, x0, y, x1 - x0, 1, new Float32Array(emitPacked!.buffer, byteOffset, byteLength / 4))
+        }
       }
     }
 

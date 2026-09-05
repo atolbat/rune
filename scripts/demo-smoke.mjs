@@ -94,7 +94,7 @@ async function framesDiffer(page) {
   })
   const clip = box === null ? undefined : (box.width > 0 && box.height > 0 ? box : undefined)
   await page.waitForTimeout(700)
-  const shotA = await page.screenshot({ clip, timeout: 30_000 })
+  const shotA = await page.screenshot({ clip, timeout: 90_000 })
   await page.waitForTimeout(700)
   const shotB = await page.screenshot({ clip, timeout: 30_000 })
   return (

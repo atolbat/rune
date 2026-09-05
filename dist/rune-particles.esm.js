@@ -1018,6 +1018,63 @@ function createParticleSystem(capacity, options = {}) {
     clear() {
       retired += count;
       count = 0;
+    },
+    advanceLedger(dt) {
+      if (count === 0)
+        return;
+      if (!Number.isFinite(dt) || dt <= 0)
+        return;
+      let i = count - 1;
+      while (i >= 0) {
+        const age = f.age[i] + dt;
+        const life = f.life[i];
+        if (age >= life) {
+          if (onRetire !== undefined) {
+            retireRec.x = f.px[i];
+            retireRec.y = f.py[i];
+            retireRec.z = f.pz[i];
+            retireRec.vx = f.vx[i];
+            retireRec.vy = f.vy[i];
+            retireRec.vz = f.vz[i];
+            retireRec.age = age;
+            retireRec.life = life;
+            retireRec.size = f.size[i];
+            retireRec.r = f.cr[i];
+            retireRec.g = f.cg[i];
+            retireRec.b = f.cb[i];
+            retireRec.a = f.ca[i];
+            retireRec.seed = f.seed[i];
+            onRetire(retireRec);
+          }
+          const last = count - 1;
+          if (last !== i) {
+            if (onSwap !== undefined)
+              onSwap(i, last);
+            f.px[i] = f.px[last];
+            f.py[i] = f.py[last];
+            f.pz[i] = f.pz[last];
+            f.vx[i] = f.vx[last];
+            f.vy[i] = f.vy[last];
+            f.vz[i] = f.vz[last];
+            f.age[i] = f.age[last];
+            f.life[i] = f.life[last];
+            f.size[i] = f.size[last];
+            f.cr[i] = f.cr[last];
+            f.cg[i] = f.cg[last];
+            f.cb[i] = f.cb[last];
+            f.ca[i] = f.ca[last];
+            f.seed[i] = f.seed[last];
+            f.tx[i] = f.tx[last];
+            f.ty[i] = f.ty[last];
+            f.tz[i] = f.tz[last];
+          }
+          count = last;
+          retired++;
+        } else {
+          f.age[i] = age;
+        }
+        i--;
+      }
     }
   };
   return system;
@@ -1833,9 +1890,453 @@ function sortDepthBackToFront(fields, count, forward, indices, keys) {
   indices.subarray(0, count).sort((a, b) => keys[b] - keys[a] || b - a);
   return count;
 }
+// packages/particles/src/gpuEmit.ts
+var GPU_EMIT_SHAPE = {
+  point: 0,
+  sphere: 1,
+  cone: 2,
+  disc: 3,
+  hemisphere: 4,
+  donut: 5,
+  rectangle: 6,
+  grid: 7,
+  line: 8
+};
+var GPU_EMIT_VEL = {
+  fixed: 1,
+  radial: 2,
+  axis: 3,
+  tangential: 4,
+  lobe: 5
+};
+var GPU_EMIT_SALTS = {
+  dir: 1,
+  spd: 2,
+  life: 3,
+  size: 4,
+  col: 5,
+  seed: 6,
+  p0: 7,
+  p1: 8,
+  p2: 9,
+  scat0: 11,
+  scat1: 12
+};
+var TAU2 = 6.283185307179586;
+var GPU_EMIT_BASE = 36;
+var GPU_EMIT_U32_FIELDS = {
+  emitBase: 36,
+  emitCount: 37,
+  streamBase: 38,
+  emitMask: 39,
+  shapeKind: 40,
+  velMode: 41,
+  seed: 42
+};
+var GPU_EMIT_MASK = { on: 1 };
+var GPU_EMIT_VEC4_FIELDS = {
+  shapeOrigin: 44,
+  atOrigin: 48,
+  axis: 52,
+  t1: 56,
+  t2: 60,
+  fixedDir: 64,
+  radius: 68,
+  cone: 72,
+  donut: 76,
+  misc: 80,
+  misc2: 84,
+  lineTo: 88,
+  speed: 92,
+  sizeInherit: 96,
+  color0: 100,
+  color1: 104,
+  emitterV: 108
+};
+function emitFrame(ax, ay, az) {
+  let t1x = -az, t1y = 0, t1z = ax;
+  let tl = Math.hypot(t1x, t1y, t1z);
+  if (tl < 0.000001) {
+    t1x = 1;
+    t1y = 0;
+    t1z = 0;
+    tl = 1;
+  }
+  t1x /= tl;
+  t1y /= tl;
+  t1z /= tl;
+  const t2x = ay * t1z - az * t1y, t2y = az * t1x - ax * t1z, t2z = ax * t1y - ay * t1x;
+  return { t1: [t1x, t1y, t1z], t2: [t2x, t2y, t2z] };
+}
+function readGpuEmitConfig(desc) {
+  const shape = desc.shape;
+  const velocity = desc.velocity;
+  if (shape.kind === "path") {
+    throw new Error('rune/particles: emit:"gpu" rejects the path shape (the per-segment direction/scatter data is CPU-side — take a line or disc emitter, or sim:"cpu")');
+  }
+  if (shape.kind === "line" && shape.mode === "lattice") {
+    throw new Error('rune/particles: emit:"gpu" rejects the line lattice (its station mapping is CALL-local — a GPU window spans calls; take the random line, or sim:"cpu")');
+  }
+  if (shape.kind === "grid" && shape.mode === "lattice") {
+    throw new Error('rune/particles: emit:"gpu" rejects the grid lattice (its cell mapping is CALL-local — a GPU window spans calls; take the random grid, or sim:"cpu")');
+  }
+  if (desc.speedByRadius !== undefined) {
+    throw new Error('rune/particles: emit:"gpu" rejects speedByRadius (the radial speed modulation stays CPU-side in v1 — emit over a plain speed range, or sim:"cpu")');
+  }
+  if (desc.colorByRadius === true) {
+    throw new Error('rune/particles: emit:"gpu" rejects colorByRadius (the radius-driven mix stays CPU-side in v1 — take the per-particle hash mix, or sim:"cpu")');
+  }
+  if (desc.target !== undefined) {
+    throw new Error('rune/particles: emit:"gpu" rejects the seek target (the seek force is already CPU-tier territory on sim:"gpu")');
+  }
+  const shapeKind = GPU_EMIT_SHAPE[shape.kind];
+  const velMode = GPU_EMIT_VEL[velocity.mode];
+  if (shapeKind === undefined) {
+    throw new Error(`rune/particles: emit:"gpu" — unknown shape kind ${JSON.stringify(shape.kind)}`);
+  }
+  if (velMode === undefined) {
+    throw new Error(`rune/particles: emit:"gpu" — unknown velocity mode ${JSON.stringify(velocity.mode)}`);
+  }
+  const ox = shape.kind === "line" ? shape.from[0] : shape.origin[0];
+  const oy = shape.kind === "line" ? shape.from[1] : shape.origin[1];
+  const oz = shape.kind === "line" ? shape.from[2] : shape.origin[2];
+  let ax = 0, ay = 0, az = 1;
+  let lineTo = null;
+  if (shape.kind === "line") {
+    const vx = shape.to[0] - ox, vy = shape.to[1] - oy, vz = shape.to[2] - oz;
+    const l = Math.hypot(vx, vy, vz);
+    if (l === 0 || !Number.isFinite(l)) {
+      throw new Error('rune/particles: emit:"gpu" — the line endpoints must be a finite non-zero vector (createSpawner validated this; a mid-flight desc mutation broke it)');
+    }
+    ax = vx / l;
+    ay = vy / l;
+    az = vz / l;
+    lineTo = [shape.to[0], shape.to[1], shape.to[2]];
+  } else if (shape.kind === "cone" || shape.kind === "disc" || shape.kind === "hemisphere" || shape.kind === "donut" || shape.kind === "rectangle" || shape.kind === "grid") {
+    const l = Math.hypot(shape.axis[0], shape.axis[1], shape.axis[2]);
+    if (l === 0 || !Number.isFinite(l)) {
+      throw new Error('rune/particles: emit:"gpu" — the shape axis must be a finite non-zero vector (createSpawner validated this; a mid-flight desc mutation broke it)');
+    }
+    ax = shape.axis[0] / l;
+    ay = shape.axis[1] / l;
+    az = shape.axis[2] / l;
+  }
+  const { t1, t2 } = emitFrame(ax, ay, az);
+  let fx = 0, fy = 0, fz = 1;
+  if (velocity.mode === "fixed") {
+    const l = Math.hypot(velocity.dir[0], velocity.dir[1], velocity.dir[2]);
+    if (l === 0 || !Number.isFinite(l)) {
+      throw new Error('rune/particles: emit:"gpu" — the fixed velocity dir must be finite non-zero (createSpawner validated this; a mid-flight desc mutation broke it)');
+    }
+    fx = velocity.dir[0] / l;
+    fy = velocity.dir[1] / l;
+    fz = velocity.dir[2] / l;
+  }
+  let rMin = 0, rMax = 0, hemArc = TAU2, donR = 0;
+  if (shape.kind === "sphere" || shape.kind === "disc" || shape.kind === "hemisphere") {
+    rMin = shape.radius[0];
+    rMax = shape.radius[1];
+  }
+  if (shape.kind === "hemisphere")
+    hemArc = shape.arc ?? TAU2;
+  let cosHalf = 0, baseRadius = 0, lenMin = 0, lenMax = 0;
+  if (shape.kind === "cone") {
+    cosHalf = Math.cos(shape.halfAngle);
+    baseRadius = shape.baseRadius;
+    lenMin = shape.length[0];
+    lenMax = shape.length[1];
+  }
+  let tubeMin = 0, tubeMax = 0, donArc = TAU2;
+  if (shape.kind === "donut") {
+    donR = shape.radius;
+    tubeMin = shape.tube[0];
+    tubeMax = shape.tube[1];
+    donArc = shape.arc ?? TAU2;
+  }
+  let rectW = 0, rectH = 0;
+  if (shape.kind === "rectangle") {
+    rectW = shape.width;
+    rectH = shape.height;
+  }
+  let gridW = 0, gridH = 0, gridRows = 1, gridCols = 1;
+  if (shape.kind === "grid") {
+    gridW = shape.width;
+    gridH = shape.height;
+    gridRows = Math.floor(shape.rows);
+    gridCols = Math.floor(shape.columns);
+  }
+  let arms = 0, armSpread = 0.35, twist = 0;
+  if (shape.kind === "disc" && shape.arms !== undefined) {
+    arms = shape.arms;
+    armSpread = shape.armSpread ?? 0.35;
+    twist = shape.twist ?? 0;
+  }
+  const c0 = desc.color[0], c1 = desc.color[1];
+  return {
+    shapeKind,
+    velMode,
+    seed: (desc.seed ?? 1) | 0,
+    shapeOrigin: [ox, oy, oz],
+    axis: [ax, ay, az],
+    t1,
+    t2,
+    fixedDir: [fx, fy, fz],
+    lineTo,
+    rMin,
+    rMax,
+    hemArc,
+    donR,
+    cosHalf,
+    baseRadius,
+    lenMin,
+    lenMax,
+    tubeMin,
+    tubeMax,
+    donArc,
+    arms,
+    armSpread,
+    twist,
+    rectW,
+    rectH,
+    gridW,
+    gridH,
+    gridRows,
+    gridCols,
+    speedMin: desc.speed[0],
+    speedMax: desc.speed[1],
+    lifeMin: desc.life[0],
+    lifeMax: desc.life[1],
+    sizeMin: desc.size[0],
+    sizeMax: desc.size[1],
+    color0: [c0[0], c0[1], c0[2], c0[3]],
+    color1: [c1[0], c1[1], c1[2], c1[3]]
+  };
+}
+function gpuEmitPackStatic(f32, u32, cfg) {
+  const U = GPU_EMIT_U32_FIELDS;
+  const V = GPU_EMIT_VEC4_FIELDS;
+  u32[U.shapeKind] = cfg.shapeKind;
+  u32[U.velMode] = cfg.velMode;
+  u32[U.seed] = cfg.seed >>> 0;
+  u32[U.emitMask] = GPU_EMIT_MASK.on;
+  f32[V.shapeOrigin] = cfg.shapeOrigin[0];
+  f32[V.shapeOrigin + 1] = cfg.shapeOrigin[1];
+  f32[V.shapeOrigin + 2] = cfg.shapeOrigin[2];
+  f32[V.axis] = cfg.axis[0];
+  f32[V.axis + 1] = cfg.axis[1];
+  f32[V.axis + 2] = cfg.axis[2];
+  f32[V.t1] = cfg.t1[0];
+  f32[V.t1 + 1] = cfg.t1[1];
+  f32[V.t1 + 2] = cfg.t1[2];
+  f32[V.t2] = cfg.t2[0];
+  f32[V.t2 + 1] = cfg.t2[1];
+  f32[V.t2 + 2] = cfg.t2[2];
+  f32[V.fixedDir] = cfg.fixedDir[0];
+  f32[V.fixedDir + 1] = cfg.fixedDir[1];
+  f32[V.fixedDir + 2] = cfg.fixedDir[2];
+  f32[V.radius] = cfg.rMin;
+  f32[V.radius + 1] = cfg.rMax;
+  f32[V.radius + 2] = cfg.hemArc;
+  f32[V.radius + 3] = cfg.donR;
+  f32[V.cone] = cfg.cosHalf;
+  f32[V.cone + 1] = cfg.baseRadius;
+  f32[V.cone + 2] = cfg.lenMin;
+  f32[V.cone + 3] = cfg.lenMax;
+  f32[V.donut] = cfg.tubeMin;
+  f32[V.donut + 1] = cfg.tubeMax;
+  f32[V.donut + 2] = cfg.donArc;
+  f32[V.donut + 3] = cfg.arms;
+  f32[V.misc] = cfg.armSpread;
+  f32[V.misc + 1] = cfg.twist;
+  f32[V.misc + 2] = cfg.rectW;
+  f32[V.misc + 3] = cfg.rectH;
+  f32[V.misc2] = cfg.gridW;
+  f32[V.misc2 + 1] = cfg.gridH;
+  f32[V.misc2 + 2] = cfg.gridRows;
+  f32[V.misc2 + 3] = cfg.gridCols;
+  if (cfg.lineTo !== null) {
+    f32[V.lineTo] = cfg.lineTo[0];
+    f32[V.lineTo + 1] = cfg.lineTo[1];
+    f32[V.lineTo + 2] = cfg.lineTo[2];
+  }
+  f32[V.speed] = cfg.speedMin;
+  f32[V.speed + 1] = cfg.speedMax;
+  f32[V.speed + 2] = cfg.lifeMin;
+  f32[V.speed + 3] = cfg.lifeMax;
+  f32[V.sizeInherit] = cfg.sizeMin;
+  f32[V.sizeInherit + 1] = cfg.sizeMax;
+  f32[V.color0] = cfg.color0[0];
+  f32[V.color0 + 1] = cfg.color0[1];
+  f32[V.color0 + 2] = cfg.color0[2];
+  f32[V.color0 + 3] = cfg.color0[3];
+  f32[V.color1] = cfg.color1[0];
+  f32[V.color1 + 1] = cfg.color1[1];
+  f32[V.color1 + 2] = cfg.color1[2];
+  f32[V.color1 + 3] = cfg.color1[3];
+}
+function gpuEmitLife(cfg, globalIndex) {
+  return cfg.lifeMin + (cfg.lifeMax - cfg.lifeMin) * hash01(cfg.seed, globalIndex, GPU_EMIT_SALTS.life);
+}
+function gpuEmitRowModel(cfg, i, atOrigin, emitterV, inheritK, out) {
+  const sd = cfg.seed;
+  const gi = i;
+  const u = hash01(sd, gi, GPU_EMIT_SALTS.dir);
+  const v = hash01(sd, gi, GPU_EMIT_SALTS.dir + 100);
+  let px = cfg.shapeOrigin[0], py = cfg.shapeOrigin[1], pz = cfg.shapeOrigin[2];
+  let dx = cfg.fixedDir[0], dy = cfg.fixedDir[1], dz = cfg.fixedDir[2];
+  const S = GPU_EMIT_SALTS;
+  if (cfg.shapeKind === GPU_EMIT_SHAPE.sphere) {
+    const z = 1 - 2 * u;
+    const s = Math.sqrt(Math.max(0, 1 - z * z));
+    const phi = TAU2 * v;
+    dx = s * Math.cos(phi);
+    dy = s * Math.sin(phi);
+    dz = z;
+    const r = cfg.rMin + (cfg.rMax - cfg.rMin) * hash01(sd, gi, S.p0);
+    px = cfg.shapeOrigin[0] + dx * r;
+    py = cfg.shapeOrigin[1] + dy * r;
+    pz = cfg.shapeOrigin[2] + dz * r;
+  } else if (cfg.shapeKind === GPU_EMIT_SHAPE.cone) {
+    const z = 1 - (1 - cfg.cosHalf) * u;
+    const s = Math.sqrt(Math.max(0, 1 - z * z));
+    const phi = TAU2 * v;
+    const { axis: a, t1, t2 } = cfg;
+    dx = a[0] * z + (t1[0] * Math.cos(phi) + t2[0] * Math.sin(phi)) * s;
+    dy = a[1] * z + (t1[1] * Math.cos(phi) + t2[1] * Math.sin(phi)) * s;
+    dz = a[2] * z + (t1[2] * Math.cos(phi) + t2[2] * Math.sin(phi)) * s;
+    const rr = cfg.baseRadius * Math.sqrt(hash01(sd, gi, S.p0));
+    const rphi = TAU2 * hash01(sd, gi, S.p1);
+    const stretch = cfg.lenMin + (cfg.lenMax - cfg.lenMin) * hash01(sd, gi, S.p2);
+    const cx = Math.cos(rphi) * rr, cy = Math.sin(rphi) * rr;
+    px = cfg.shapeOrigin[0] + t1[0] * cx + t2[0] * cy + a[0] * stretch;
+    py = cfg.shapeOrigin[1] + t1[1] * cx + t2[1] * cy + a[1] * stretch;
+    pz = cfg.shapeOrigin[2] + t1[2] * cx + t2[2] * cy + a[2] * stretch;
+  } else if (cfg.shapeKind === GPU_EMIT_SHAPE.disc) {
+    const r2 = cfg.rMin * cfg.rMin + (cfg.rMax * cfg.rMax - cfg.rMin * cfg.rMin) * u;
+    const rr = Math.sqrt(r2);
+    let phi;
+    if (cfg.arms > 0) {
+      const arm = Math.floor(hash01(sd, gi, S.p0) * cfg.arms);
+      const scatter = (hash01(sd, gi, S.p1) - 0.5) * 2 * cfg.armSpread;
+      const tR = (rr - cfg.rMin) / Math.max(0.000001, cfg.rMax - cfg.rMin);
+      phi = arm * (TAU2 / cfg.arms) + cfg.twist * tR + scatter;
+    } else {
+      phi = TAU2 * v;
+    }
+    const { t1, t2 } = cfg;
+    px = cfg.shapeOrigin[0] + (t1[0] * Math.cos(phi) + t2[0] * Math.sin(phi)) * rr;
+    py = cfg.shapeOrigin[1] + (t1[1] * Math.cos(phi) + t2[1] * Math.sin(phi)) * rr;
+    pz = cfg.shapeOrigin[2] + (t1[2] * Math.cos(phi) + t2[2] * Math.sin(phi)) * rr;
+  } else if (cfg.shapeKind === GPU_EMIT_SHAPE.hemisphere) {
+    const cosTheta = u;
+    const sinTheta = Math.sqrt(Math.max(0, 1 - cosTheta * cosTheta));
+    const phi = cfg.hemArc * v;
+    const { axis: a, t1, t2 } = cfg;
+    dx = a[0] * cosTheta + (t1[0] * Math.cos(phi) + t2[0] * Math.sin(phi)) * sinTheta;
+    dy = a[1] * cosTheta + (t1[1] * Math.cos(phi) + t2[1] * Math.sin(phi)) * sinTheta;
+    dz = a[2] * cosTheta + (t1[2] * Math.cos(phi) + t2[2] * Math.sin(phi)) * sinTheta;
+    const r = cfg.rMin + (cfg.rMax - cfg.rMin) * hash01(sd, gi, S.p0);
+    px = cfg.shapeOrigin[0] + dx * r;
+    py = cfg.shapeOrigin[1] + dy * r;
+    pz = cfg.shapeOrigin[2] + dz * r;
+  } else if (cfg.shapeKind === GPU_EMIT_SHAPE.donut) {
+    const phi = cfg.donArc * u;
+    const tr = cfg.tubeMin + (cfg.tubeMax - cfg.tubeMin) * hash01(sd, gi, S.p0);
+    const psi = TAU2 * hash01(sd, gi, S.p1);
+    const cphi = Math.cos(phi), sphi = Math.sin(phi);
+    const cpsi = Math.cos(psi), spsi = Math.sin(psi);
+    const { t1, t2, axis: a } = cfg;
+    const rrx = t1[0] * cphi + t2[0] * sphi, rry = t1[1] * cphi + t2[1] * sphi, rrz = t1[2] * cphi + t2[2] * sphi;
+    px = cfg.shapeOrigin[0] + rrx * (cfg.donR + tr * cpsi) + a[0] * (tr * spsi);
+    py = cfg.shapeOrigin[1] + rry * (cfg.donR + tr * cpsi) + a[1] * (tr * spsi);
+    pz = cfg.shapeOrigin[2] + rrz * (cfg.donR + tr * cpsi) + a[2] * (tr * spsi);
+  } else if (cfg.shapeKind === GPU_EMIT_SHAPE.rectangle) {
+    const hx = (u - 0.5) * cfg.rectW, hy = (v - 0.5) * cfg.rectH;
+    const { t1, t2 } = cfg;
+    px = cfg.shapeOrigin[0] + t1[0] * hx + t2[0] * hy;
+    py = cfg.shapeOrigin[1] + t1[1] * hx + t2[1] * hy;
+    pz = cfg.shapeOrigin[2] + t1[2] * hx + t2[2] * hy;
+  } else if (cfg.shapeKind === GPU_EMIT_SHAPE.grid) {
+    const col = Math.floor(hash01(sd, gi, S.p0) * cfg.gridCols);
+    const row = Math.floor(hash01(sd, gi, S.p1) * cfg.gridRows);
+    const gx = ((col + 0.5) / cfg.gridCols - 0.5) * cfg.gridW;
+    const gy = ((row + 0.5) / cfg.gridRows - 0.5) * cfg.gridH;
+    const { t1, t2 } = cfg;
+    px = cfg.shapeOrigin[0] + t1[0] * gx + t2[0] * gy;
+    py = cfg.shapeOrigin[1] + t1[1] * gx + t2[1] * gy;
+    pz = cfg.shapeOrigin[2] + t1[2] * gx + t2[2] * gy;
+  } else if (cfg.shapeKind === GPU_EMIT_SHAPE.line) {
+    const lu = u;
+    const to = cfg.lineTo;
+    px = cfg.shapeOrigin[0] + (to[0] - cfg.shapeOrigin[0]) * lu;
+    py = cfg.shapeOrigin[1] + (to[1] - cfg.shapeOrigin[1]) * lu;
+    pz = cfg.shapeOrigin[2] + (to[2] - cfg.shapeOrigin[2]) * lu;
+  }
+  if (cfg.velMode === GPU_EMIT_VEL.radial) {
+    dx = px - cfg.shapeOrigin[0];
+    dy = py - cfg.shapeOrigin[1];
+    dz = pz - cfg.shapeOrigin[2];
+    const l = Math.hypot(dx, dy, dz);
+    if (l > 0.000000000001) {
+      dx /= l;
+      dy /= l;
+      dz /= l;
+    } else {
+      const theta = TAU2 * hash01(sd, gi, S.scat0);
+      const cphi = 2 * hash01(sd, gi, S.scat1) - 1;
+      const sphi = Math.sqrt(Math.max(0, 1 - cphi * cphi));
+      dx = sphi * Math.cos(theta);
+      dy = sphi * Math.sin(theta);
+      dz = cphi;
+    }
+  } else if (cfg.velMode === GPU_EMIT_VEL.axis) {
+    dx = cfg.axis[0];
+    dy = cfg.axis[1];
+    dz = cfg.axis[2];
+  } else if (cfg.velMode === GPU_EMIT_VEL.tangential) {
+    const rx = px - cfg.shapeOrigin[0], ry = py - cfg.shapeOrigin[1], rz = pz - cfg.shapeOrigin[2];
+    dx = cfg.axis[1] * rz - cfg.axis[2] * ry;
+    dy = cfg.axis[2] * rx - cfg.axis[0] * rz;
+    dz = cfg.axis[0] * ry - cfg.axis[1] * rx;
+    const l = Math.hypot(dx, dy, dz);
+    if (l > 0.000000000001) {
+      dx /= l;
+      dy /= l;
+      dz /= l;
+    } else {
+      dx = cfg.axis[0];
+      dy = cfg.axis[1];
+      dz = cfg.axis[2];
+    }
+  }
+  const spd = cfg.speedMin + (cfg.speedMax - cfg.speedMin) * hash01(sd, gi, S.spd);
+  const mixC = hash01(sd, gi, S.col);
+  const life = cfg.lifeMin + (cfg.lifeMax - cfg.lifeMin) * hash01(sd, gi, S.life);
+  const size = cfg.sizeMin + (cfg.sizeMax - cfg.sizeMin) * hash01(sd, gi, S.size);
+  const seedF = hash01(sd, gi, S.seed);
+  const wx = px + atOrigin[0], wy = py + atOrigin[1], wz = pz + atOrigin[2];
+  out[0] = wx;
+  out[1] = wy;
+  out[2] = wz;
+  out[3] = dx * spd + emitterV[0] * inheritK;
+  out[4] = dy * spd + emitterV[1] * inheritK;
+  out[5] = dz * spd + emitterV[2] * inheritK;
+  out[6] = 0;
+  out[7] = life;
+  out[8] = size;
+  out[9] = cfg.color0[0] + (cfg.color1[0] - cfg.color0[0]) * mixC;
+  out[10] = cfg.color0[1] + (cfg.color1[1] - cfg.color0[1]) * mixC;
+  out[11] = cfg.color0[2] + (cfg.color1[2] - cfg.color0[2]) * mixC;
+  out[12] = cfg.color0[3] + (cfg.color1[3] - cfg.color0[3]) * mixC;
+  out[13] = seedF;
+  out[14] = wx;
+  out[15] = wy;
+  out[16] = wz;
+}
+
 // packages/particles/src/gpuSim.ts
 var GPU_STATE_STRIDE = FIELD_NAMES.length;
-var GPU_SIM_UNIFORM_BYTES = 144;
+var GPU_SIM_UNIFORM_BYTES = 448;
 var GPU_SIM_UNIFORM_FLOATS = GPU_SIM_UNIFORM_BYTES / 4;
 var GPU_SIM_U32_FIELDS = {
   count: 0,
@@ -1892,7 +2393,7 @@ function gpuRampLUT(points) {
   }
   return lut;
 }
-var GPU_SIM_ENTRIES = ["compact", "advance", "pack"];
+var GPU_SIM_ENTRIES = ["emit", "compact", "advance", "pack"];
 var GPU_SORT_UNIFORM_FLOATS = 36;
 var GPU_SORT_U32_FIELDS = {
   count: 0,
@@ -2023,10 +2524,12 @@ function gpuSimWgsl() {
     grads.push(`vec3<f32>(${GRAD3[g * 3]}, ${GRAD3[g * 3 + 1]}, ${GRAD3[g * 3 + 2]})`);
   }
   return `
-// @rune/particles — the GPGPU sim tier (Task 131). The state: the FIELD_NAMES
-// rows interleaved (17 floats). The entries: compact (the swap replay),
-// advance (the force walk), pack (the instance records).
-// The uniform layout mirrors GPU_SIM_* in gpuSim.ts (144 bytes).
+// @rune/particles — the GPGPU sim tier (Task 131; Task 135: the emit entry
+// — the GPU-side emission). The state: the FIELD_NAMES rows interleaved
+// (17 floats). The entries: emit (the hash-RNG append pass), compact (the
+// swap replay), advance (the force walk), pack (the instance records).
+// The uniform layout mirrors GPU_SIM_* in gpuSim.ts (448 bytes — the emit
+// block rides the same frame-constant uniform).
 
 struct SimParams {
   count : u32,
@@ -2053,6 +2556,35 @@ struct SimParams {
   _pad1 : u32,
   _pad2 : u32,
   _pad3 : u32,
+  // Task 135 — THE EMIT BLOCK (gpuEmit.ts's layout: 36 floats of forces,
+  // then this — the byte offset 144 is 16-aligned, a legal vec4 boundary).
+  // emitBase/emitCount: the pre-compaction window; streamBase: the window's
+  // first GLOBAL stream index (the hash domain); emitMask: 1 = on.
+  emitBase : u32,
+  emitCount : u32,
+  streamBase : u32,
+  emitMask : u32,
+  shapeKind : u32,
+  velMode : u32,
+  seed : u32,
+  _padE : u32,
+  shapeOrigin : vec4<f32>,  // the spawner's own origin (static)
+  atOrigin : vec4<f32>,     // the at() offset (per frame)
+  axis : vec4<f32>,
+  t1 : vec4<f32>,           // the orthonormal frame (cross(axis, up) / cross(axis, t1))
+  t2 : vec4<f32>,
+  fixedDir : vec4<f32>,
+  radius : vec4<f32>,       // (rMin, rMax, hemArc, donR)
+  cone : vec4<f32>,         // (cosHalf, baseRadius, lenMin, lenMax)
+  donut : vec4<f32>,        // (tubeMin, tubeMax, donArc, arms)
+  misc : vec4<f32>,         // (armSpread, twist, rectW, rectH)
+  misc2 : vec4<f32>,        // (gridW, gridH, gridRows, gridCols)
+  lineTo : vec4<f32>,
+  speed : vec4<f32>,        // (speedMin, speedMax, lifeMin, lifeMax)
+  sizeInherit : vec4<f32>,  // (sizeMin, sizeMax, inheritK, _)
+  color0 : vec4<f32>,
+  color1 : vec4<f32>,
+  emitterV : vec4<f32>,     // the inherit source (per frame)
 }
 
 @group(0) @binding(0) var<uniform> P : SimParams;
@@ -2126,6 +2658,163 @@ fn wrapAxis(d : f32, size : f32) -> f32 {
   var m = (d + size * 0.5) % size;
   if (m < 0.0) { m += size; }
   return m - size * 0.5;
+}
+
+// ── Task 135 — the integer hash (@rune/core random.ts's hash01, bit-
+//    identical in u32: Math.imul wraps mod 2^32 exactly like WGSL's u32
+//    arithmetic; the quotient's f32 rounding may flip the last ULP of a
+//    lerp — the 1-ULP parity class, invisible at life/size scales) ────────
+fn hash01f(seed : u32, index : u32, salt : u32) -> f32 {
+  var h = seed * 374761393u + index * 668265263u + salt * 2246822519u;
+  h = (h ^ (h >> 13u)) * 1274126177u;
+  h = h ^ (h >> 16u);
+  return f32(h) / 4294967296.0;
+}
+
+// ── emit: THE GPU-SIDE EMISSION (Task 135) — the hash-RNG append pass.
+// Thread i writes the newborn row at slot (emitBase + i): the SAME spawner
+// math the CPU reference evaluates (spawn.ts's closed-form shapes, the
+// SAME salt streams — GPU_EMIT_SALTS), the position/velocity/color/seed
+// GPU-authoritative from birth. Runs BEFORE the compact replay, exactly
+// where the CPU emit-block upload used to land. ─────────────────────────
+@compute @workgroup_size(64)
+fn emit(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i = gid.x;
+  if ((P.emitMask & 1u) == 0u) { return; }
+  if (i >= P.emitCount) { return; }
+  let slot = P.emitBase + i;
+  let gi = P.streamBase + i; // the GLOBAL stream index — the hash domain
+  let sd = P.seed;
+  let u = hash01f(sd, gi, ${GPU_EMIT_SALTS.dir}u);
+  let v = hash01f(sd, gi, ${GPU_EMIT_SALTS.dir + 100}u);
+  var px = P.shapeOrigin.x; var py = P.shapeOrigin.y; var pz = P.shapeOrigin.z;
+  var dx = P.fixedDir.x; var dy = P.fixedDir.y; var dz = P.fixedDir.z;
+
+  if (P.shapeKind == 1u) { // sphere — a uniform direction + the radius band
+    let z = 1.0 - 2.0 * u;
+    let s = sqrt(max(0.0, 1.0 - z * z));
+    let phi = 6.283185307179586 * v;
+    dx = s * cos(phi); dy = s * sin(phi); dz = z;
+    let r = P.radius.x + (P.radius.y - P.radius.x) * hash01f(sd, gi, ${GPU_EMIT_SALTS.p0}u);
+    px = P.shapeOrigin.x + dx * r; py = P.shapeOrigin.y + dy * r; pz = P.shapeOrigin.z + dz * r;
+  } else if (P.shapeKind == 2u) { // cone — the fan-compressed lobe + the base disc
+    let z = 1.0 - (1.0 - P.cone.x) * u;
+    let s = sqrt(max(0.0, 1.0 - z * z));
+    let phi = 6.283185307179586 * v;
+    dx = P.axis.x * z + (P.t1.x * cos(phi) + P.t2.x * sin(phi)) * s;
+    dy = P.axis.y * z + (P.t1.y * cos(phi) + P.t2.y * sin(phi)) * s;
+    dz = P.axis.z * z + (P.t1.z * cos(phi) + P.t2.z * sin(phi)) * s;
+    let rr = P.cone.y * sqrt(hash01f(sd, gi, ${GPU_EMIT_SALTS.p0}u));
+    let rphi = 6.283185307179586 * hash01f(sd, gi, ${GPU_EMIT_SALTS.p1}u);
+    let stretch = P.cone.z + (P.cone.w - P.cone.z) * hash01f(sd, gi, ${GPU_EMIT_SALTS.p2}u);
+    let cx = cos(rphi) * rr; let cy = sin(rphi) * rr;
+    px = P.shapeOrigin.x + P.t1.x * cx + P.t2.x * cy + P.axis.x * stretch;
+    py = P.shapeOrigin.y + P.t1.y * cx + P.t2.y * cy + P.axis.y * stretch;
+    pz = P.shapeOrigin.z + P.t1.z * cx + P.t2.z * cy + P.axis.z * stretch;
+  } else if (P.shapeKind == 3u) { // disc — the area-uniform annulus (+ the arms)
+    let r2 = P.radius.x * P.radius.x + (P.radius.y * P.radius.y - P.radius.x * P.radius.x) * u;
+    let rr = sqrt(r2);
+    var phi = 6.283185307179586 * v;
+    if (P.donut.w >= 1.0) { // arms
+      let arm = floor(hash01f(sd, gi, ${GPU_EMIT_SALTS.p0}u) * P.donut.w);
+      let scatter = (hash01f(sd, gi, ${GPU_EMIT_SALTS.p1}u) - 0.5) * 2.0 * P.misc.x;
+      let tR = (rr - P.radius.x) / max(1e-6, P.radius.y - P.radius.x);
+      phi = arm * (6.283185307179586 / P.donut.w) + P.misc.y * tR + scatter;
+    }
+    px = P.shapeOrigin.x + (P.t1.x * cos(phi) + P.t2.x * sin(phi)) * rr;
+    py = P.shapeOrigin.y + (P.t1.y * cos(phi) + P.t2.y * sin(phi)) * rr;
+    pz = P.shapeOrigin.z + (P.t1.z * cos(phi) + P.t2.z * sin(phi)) * rr;
+  } else if (P.shapeKind == 4u) { // hemisphere — the area-correct dome
+    let cosTheta = u;
+    let sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+    let phi = P.radius.z * v;
+    dx = P.axis.x * cosTheta + (P.t1.x * cos(phi) + P.t2.x * sin(phi)) * sinTheta;
+    dy = P.axis.y * cosTheta + (P.t1.y * cos(phi) + P.t2.y * sin(phi)) * sinTheta;
+    dz = P.axis.z * cosTheta + (P.t1.z * cos(phi) + P.t2.z * sin(phi)) * sinTheta;
+    let r = P.radius.x + (P.radius.y - P.radius.x) * hash01f(sd, gi, ${GPU_EMIT_SALTS.p0}u);
+    px = P.shapeOrigin.x + dx * r; py = P.shapeOrigin.y + dy * r; pz = P.shapeOrigin.z + dz * r;
+  } else if (P.shapeKind == 5u) { // donut — the ring + the tube circle
+    let phi = P.donut.z * u;
+    let tr = P.donut.x + (P.donut.y - P.donut.x) * hash01f(sd, gi, ${GPU_EMIT_SALTS.p0}u);
+    let psi = 6.283185307179586 * hash01f(sd, gi, ${GPU_EMIT_SALTS.p1}u);
+    let cphi = cos(phi); let sphi = sin(phi); let cpsi = cos(psi); let spsi = sin(psi);
+    let rrx = P.t1.x * cphi + P.t2.x * sphi;
+    let rry = P.t1.y * cphi + P.t2.y * sphi;
+    let rrz = P.t1.z * cphi + P.t2.z * sphi;
+    px = P.shapeOrigin.x + rrx * (P.radius.w + tr * cpsi) + P.axis.x * (tr * spsi);
+    py = P.shapeOrigin.y + rry * (P.radius.w + tr * cpsi) + P.axis.y * (tr * spsi);
+    pz = P.shapeOrigin.z + rrz * (P.radius.w + tr * cpsi) + P.axis.z * (tr * spsi);
+  } else if (P.shapeKind == 6u) { // rectangle — the plane patch ⊥ axis
+    let hx = (u - 0.5) * P.misc.z; let hy = (v - 0.5) * P.misc.w;
+    px = P.shapeOrigin.x + P.t1.x * hx + P.t2.x * hy;
+    py = P.shapeOrigin.y + P.t1.y * hx + P.t2.y * hy;
+    pz = P.shapeOrigin.z + P.t1.z * hx + P.t2.z * hy;
+  } else if (P.shapeKind == 7u) { // grid — the hash-picked cell ('random')
+    let col = floor(hash01f(sd, gi, ${GPU_EMIT_SALTS.p0}u) * P.misc2.w);
+    let row = floor(hash01f(sd, gi, ${GPU_EMIT_SALTS.p1}u) * P.misc2.z);
+    let gx = ((col + 0.5) / P.misc2.w - 0.5) * P.misc2.x;
+    let gy = ((row + 0.5) / P.misc2.z - 0.5) * P.misc2.y;
+    px = P.shapeOrigin.x + P.t1.x * gx + P.t2.x * gy;
+    py = P.shapeOrigin.y + P.t1.y * gx + P.t2.y * gy;
+    pz = P.shapeOrigin.z + P.t1.z * gx + P.t2.z * gy;
+  } else if (P.shapeKind == 8u) { // line — the uniform span ('random')
+    px = P.shapeOrigin.x + (P.lineTo.x - P.shapeOrigin.x) * u;
+    py = P.shapeOrigin.y + (P.lineTo.y - P.shapeOrigin.y) * u;
+    pz = P.shapeOrigin.z + (P.lineTo.z - P.shapeOrigin.z) * u;
+  }
+
+  // the velocity mode overrides (radial/tangential read the SHAPE-LOCAL
+  // position — the at() translation comes after, the CPU's own order)
+  if (P.velMode == 2u) { // radial
+    let rx = px - P.shapeOrigin.x; let ry = py - P.shapeOrigin.y; let rz = pz - P.shapeOrigin.z;
+    let l = sqrt(rx * rx + ry * ry + rz * rz);
+    if (l > 1e-12) {
+      dx = rx / l; dy = ry / l; dz = rz / l;
+    } else {
+      // the degenerate scatter (Task 124's fix — a uniform random direction)
+      let theta = 6.283185307179586 * hash01f(sd, gi, ${GPU_EMIT_SALTS.scat0}u);
+      let cphi = 2.0 * hash01f(sd, gi, ${GPU_EMIT_SALTS.scat1}u) - 1.0;
+      let sphi = sqrt(max(0.0, 1.0 - cphi * cphi));
+      dx = sphi * cos(theta); dy = sphi * sin(theta); dz = cphi;
+    }
+  } else if (P.velMode == 3u) { // axis
+    dx = P.axis.x; dy = P.axis.y; dz = P.axis.z;
+  } else if (P.velMode == 4u) { // tangential — cross(axis, radial)
+    let rx = px - P.shapeOrigin.x; let ry = py - P.shapeOrigin.y; let rz = pz - P.shapeOrigin.z;
+    dx = P.axis.y * rz - P.axis.z * ry;
+    dy = P.axis.z * rx - P.axis.x * rz;
+    dz = P.axis.x * ry - P.axis.y * rx;
+    let l = sqrt(dx * dx + dy * dy + dz * dz);
+    if (l > 1e-12) { dx = dx / l; dy = dy / l; dz = dz / l; }
+    else { dx = P.axis.x; dy = P.axis.y; dz = P.axis.z; }
+  }
+  // velMode 1 (fixed) / 5 (lobe): keep the shape branch's direction
+
+  let spd = P.speed.x + (P.speed.y - P.speed.x) * hash01f(sd, gi, ${GPU_EMIT_SALTS.spd}u);
+  let mixC = hash01f(sd, gi, ${GPU_EMIT_SALTS.col}u);
+  let life = P.speed.z + (P.speed.w - P.speed.z) * hash01f(sd, gi, ${GPU_EMIT_SALTS.life}u);
+  let size = P.sizeInherit.x + (P.sizeInherit.y - P.sizeInherit.x) * hash01f(sd, gi, ${GPU_EMIT_SALTS.size}u);
+  let seedF = hash01f(sd, gi, ${GPU_EMIT_SALTS.seed}u);
+  let k = P.sizeInherit.z; // inheritK
+
+  let b = slot * FSTRIDE;
+  state[b] = px + P.atOrigin.x;
+  state[b + 1u] = py + P.atOrigin.y;
+  state[b + 2u] = pz + P.atOrigin.z;
+  state[b + 3u] = dx * spd + P.emitterV.x * k;
+  state[b + 4u] = dy * spd + P.emitterV.y * k;
+  state[b + 5u] = dz * spd + P.emitterV.z * k;
+  state[b + 6u] = 0.0; // age — born this frame
+  state[b + 7u] = life;
+  state[b + 8u] = size;
+  state[b + 9u] = P.color0.x + (P.color1.x - P.color0.x) * mixC;
+  state[b + 10u] = P.color0.y + (P.color1.y - P.color0.y) * mixC;
+  state[b + 11u] = P.color0.z + (P.color1.z - P.color0.z) * mixC;
+  state[b + 12u] = P.color0.w + (P.color1.w - P.color0.w) * mixC;
+  state[b + 13u] = seedF;
+  state[b + 14u] = state[b]; // tx/ty/tz: no target → the spawn position
+  state[b + 15u] = state[b + 1u];
+  state[b + 16u] = state[b + 2u];
 }
 
 // ── compact: the CPU's swap list, replayed IN ORDER (a single thread — the
@@ -2854,6 +3543,221 @@ void main() {
   }
   int slot = int(pr.y + 0.5);
 ${packBodyGlsl("slot")}  gl_Position = vec4(0.0, 0.0, 0.5, 1.0); // never rasterized (discard on)
+}
+`;
+}
+var GPU_GL_EMIT_UNIFORMS = [
+  { name: "u_emitBase", size: 1 },
+  { name: "u_emitCount", size: 1 },
+  { name: "u_streamLo", size: 1 },
+  { name: "u_streamHi", size: 1 },
+  { name: "u_shapeKind", size: 1 },
+  { name: "u_velMode", size: 1 },
+  { name: "u_seedLo", size: 1 },
+  { name: "u_seedHi", size: 1 },
+  { name: "u_shapeOrigin", size: 3 },
+  { name: "u_atOrigin", size: 3 },
+  { name: "u_axis", size: 3 },
+  { name: "u_t1", size: 3 },
+  { name: "u_t2", size: 3 },
+  { name: "u_fixedDir", size: 3 },
+  { name: "u_lineTo", size: 3 },
+  { name: "u_radius", size: 4 },
+  { name: "u_cone", size: 4 },
+  { name: "u_donut", size: 4 },
+  { name: "u_misc", size: 4 },
+  { name: "u_misc2", size: 4 },
+  { name: "u_speed", size: 4 },
+  { name: "u_sizeInherit", size: 3 },
+  { name: "u_color0", size: 4 },
+  { name: "u_color1", size: 4 },
+  { name: "u_emitterV", size: 3 }
+];
+var GPU_GL_EMIT_F = {
+  emitBase: 0,
+  emitCount: 1,
+  streamLo: 2,
+  streamHi: 3,
+  shapeKind: 4,
+  velMode: 5,
+  seedLo: 6,
+  seedHi: 7,
+  shapeOrigin: 8,
+  atOrigin: 11,
+  axis: 14,
+  t1: 17,
+  t2: 20,
+  fixedDir: 23,
+  lineTo: 26,
+  radius: 29,
+  cone: 33,
+  donut: 37,
+  misc: 41,
+  misc2: 45,
+  speed: 49,
+  sizeInherit: 53,
+  color0: 56,
+  color1: 60,
+  emitterV: 64
+};
+function gpuSimGlEmitGlsl() {
+  const S = GPU_EMIT_SALTS;
+  return `#version 300 es
+// @rune/particles — Task 135: the GPU-side emission, the GLSL twin of the
+// WGSL emit entry. The uniform set mirrors GPU_GL_EMIT_UNIFORMS (the
+// orchestrator packs them in order).
+precision highp float;
+uniform float u_emitBase;
+uniform float u_emitCount;
+uniform float u_streamLo;
+uniform float u_streamHi;
+uniform float u_shapeKind;
+uniform float u_velMode;
+uniform float u_seedLo;
+uniform float u_seedHi;
+uniform vec3 u_shapeOrigin;
+uniform vec3 u_atOrigin;
+uniform vec3 u_axis;
+uniform vec3 u_t1;
+uniform vec3 u_t2;
+uniform vec3 u_fixedDir;
+uniform vec3 u_lineTo;
+uniform vec4 u_radius;     // (rMin, rMax, hemArc, donR)
+uniform vec4 u_cone;       // (cosHalf, baseRadius, lenMin, lenMax)
+uniform vec4 u_donut;      // (tubeMin, tubeMax, donArc, arms)
+uniform vec4 u_misc;       // (armSpread, twist, rectW, rectH)
+uniform vec4 u_misc2;      // (gridW, gridH, gridRows, gridCols)
+uniform vec4 u_speed;      // (speedMin, speedMax, lifeMin, lifeMax)
+uniform vec3 u_sizeInherit; // (sizeMin, sizeMax, inheritK)
+uniform vec4 u_color0;
+uniform vec4 u_color1;
+uniform vec3 u_emitterV;
+// the TF outputs: the 20-float state row (17 fields + 3 pad).
+out vec4 v_s0; // px, py, pz, vx
+out vec4 v_s1; // vy, vz, age, life
+out vec4 v_s2; // size, cr, cg, cb
+out vec4 v_s3; // ca, seed, tx, ty
+out vec4 v_s4; // tz, pad, pad, pad
+
+// @rune/core random.ts's hash01 — bit-identical in uint (GLSL ES 3.00's
+// uint arithmetic wraps mod 2^32 exactly like Math.imul; the quotient's
+// f32 rounding is the same 1-ULP class as the WGSL twin)
+float hash01f(uint sd, uint gi, uint salt) {
+  uint h = sd * 374761393u + gi * 668265263u + salt * 2246822519u;
+  h = (h ^ (h >> 13u)) * 1274126177u;
+  h = h ^ (h >> 16u);
+  return float(h) / 4294967296.0;
+}
+
+const float TAU = 6.283185307179586;
+
+void main() {
+  // the 32-bit hash domain from the two float halves (exact to 2^24 each —
+  // the halves are 16-bit, the recombination is pure uint) PLUS the
+  // window-local vertex index: gi = streamBase + i (the WGSL twin's own
+  // streamBase + i — every newborn is its own hash draw)
+  uint gi = uint(gl_VertexID) + ((uint(u_streamHi + 0.5) << 16u) | uint(u_streamLo + 0.5));
+  uint sd = (uint(u_seedHi + 0.5) << 16u) | uint(u_seedLo + 0.5);
+  int shapeKind = int(u_shapeKind + 0.5);
+  int velMode = int(u_velMode + 0.5);
+
+  float u = hash01f(sd, gi, ${S.dir}u);
+  float v = hash01f(sd, gi, ${S.dir + 100}u);
+  vec3 p = u_shapeOrigin;
+  vec3 d = u_fixedDir;
+
+  if (shapeKind == 1) { // sphere — a uniform direction + the radius band
+    float z = 1.0 - 2.0 * u;
+    float s = sqrt(max(0.0, 1.0 - z * z));
+    float phi = TAU * v;
+    d = vec3(s * cos(phi), s * sin(phi), z);
+    float r = u_radius.x + (u_radius.y - u_radius.x) * hash01f(sd, gi, ${S.p0}u);
+    p = u_shapeOrigin + d * r;
+  } else if (shapeKind == 2) { // cone — the fan-compressed lobe + the base disc
+    float z = 1.0 - (1.0 - u_cone.x) * u;
+    float s = sqrt(max(0.0, 1.0 - z * z));
+    float phi = TAU * v;
+    d = u_axis * z + (u_t1 * cos(phi) + u_t2 * sin(phi)) * s;
+    float rr = u_cone.y * sqrt(hash01f(sd, gi, ${S.p0}u));
+    float rphi = TAU * hash01f(sd, gi, ${S.p1}u);
+    float stretch = u_cone.z + (u_cone.w - u_cone.z) * hash01f(sd, gi, ${S.p2}u);
+    vec2 c = vec2(cos(rphi) * rr, sin(rphi) * rr);
+    p = u_shapeOrigin + u_t1 * c.x + u_t2 * c.y + u_axis * stretch;
+  } else if (shapeKind == 3) { // disc — the area-uniform annulus (+ the arms)
+    float r2 = u_radius.x * u_radius.x + (u_radius.y * u_radius.y - u_radius.x * u_radius.x) * u;
+    float rr = sqrt(r2);
+    float phi = TAU * v;
+    if (u_donut.w >= 1.0) { // arms
+      float arm = floor(hash01f(sd, gi, ${S.p0}u) * u_donut.w);
+      float scatter = (hash01f(sd, gi, ${S.p1}u) - 0.5) * 2.0 * u_misc.x;
+      float tR = (rr - u_radius.x) / max(1e-6, u_radius.y - u_radius.x);
+      phi = arm * (TAU / u_donut.w) + u_misc.y * tR + scatter;
+    }
+    p = u_shapeOrigin + (u_t1 * cos(phi) + u_t2 * sin(phi)) * rr;
+  } else if (shapeKind == 4) { // hemisphere — the area-correct dome
+    float cosTheta = u;
+    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+    float phi = u_radius.z * v;
+    d = u_axis * cosTheta + (u_t1 * cos(phi) + u_t2 * sin(phi)) * sinTheta;
+    float r = u_radius.x + (u_radius.y - u_radius.x) * hash01f(sd, gi, ${S.p0}u);
+    p = u_shapeOrigin + d * r;
+  } else if (shapeKind == 5) { // donut — the ring + the tube circle
+    float phi = u_donut.z * u;
+    float tr = u_donut.x + (u_donut.y - u_donut.x) * hash01f(sd, gi, ${S.p0}u);
+    float psi = TAU * hash01f(sd, gi, ${S.p1}u);
+    vec3 radial = u_t1 * cos(phi) + u_t2 * sin(phi);
+    p = u_shapeOrigin + radial * (u_radius.w + tr * cos(psi)) + u_axis * (tr * sin(psi));
+  } else if (shapeKind == 6) { // rectangle — the plane patch ⊥ axis
+    vec2 h = vec2((u - 0.5) * u_misc.z, (v - 0.5) * u_misc.w);
+    p = u_shapeOrigin + u_t1 * h.x + u_t2 * h.y;
+  } else if (shapeKind == 7) { // grid — the hash-picked cell ('random')
+    float col = floor(hash01f(sd, gi, ${S.p0}u) * u_misc2.w);
+    float row = floor(hash01f(sd, gi, ${S.p1}u) * u_misc2.z);
+    vec2 g = vec2((col + 0.5) / u_misc2.w - 0.5, (row + 0.5) / u_misc2.z - 0.5);
+    p = u_shapeOrigin + u_t1 * (g.x * u_misc2.x) + u_t2 * (g.y * u_misc2.y);
+  } else if (shapeKind == 8) { // line — the uniform span ('random')
+    p = u_shapeOrigin + (u_lineTo - u_shapeOrigin) * u;
+  }
+
+  // the velocity mode overrides (radial/tangential read the SHAPE-LOCAL
+  // position — the at() translation comes after, the CPU's own order)
+  if (velMode == 2) { // radial
+    vec3 r = p - u_shapeOrigin;
+    float l = length(r);
+    if (l > 1e-12) {
+      d = r / l;
+    } else {
+      // the degenerate scatter (Task 124's fix — a uniform random direction)
+      float theta = TAU * hash01f(sd, gi, ${S.scat0}u);
+      float cphi = 2.0 * hash01f(sd, gi, ${S.scat1}u) - 1.0;
+      float sphi = sqrt(max(0.0, 1.0 - cphi * cphi));
+      d = vec3(sphi * cos(theta), sphi * sin(theta), cphi);
+    }
+  } else if (velMode == 3) { // axis
+    d = u_axis;
+  } else if (velMode == 4) { // tangential — cross(axis, radial)
+    vec3 r = p - u_shapeOrigin;
+    d = cross(u_axis, r);
+    float l = length(d);
+    if (l > 1e-12) { d = d / l; } else { d = u_axis; }
+  }
+  // velMode 1 (fixed) / 5 (lobe): keep the shape branch's direction
+
+  float spd = u_speed.x + (u_speed.y - u_speed.x) * hash01f(sd, gi, ${S.spd}u);
+  float mixC = hash01f(sd, gi, ${S.col}u);
+  float life = u_speed.z + (u_speed.w - u_speed.z) * hash01f(sd, gi, ${S.life}u);
+  float size = u_sizeInherit.x + (u_sizeInherit.y - u_sizeInherit.x) * hash01f(sd, gi, ${S.size}u);
+  float seedF = hash01f(sd, gi, ${S.seed}u);
+
+  vec3 w = p + u_atOrigin;
+  vec3 vel = d * spd + u_emitterV * u_sizeInherit.z;
+  vec4 col = mix(u_color0, u_color1, mixC);
+  v_s0 = vec4(w, vel.x);                       // px, py, pz, vx
+  v_s1 = vec4(vel.y, vel.z, 0.0, life);        // vy, vz, age 0, life
+  v_s2 = vec4(size, col.r, col.g, col.b);      // size, cr, cg, cb
+  v_s3 = vec4(col.a, seedF, w.x, w.y);         // ca, seed, tx, ty (no target — the spawn position)
+  v_s4 = vec4(w.z, 0.0, 0.0, 0.0);            // tz + the pad
+  gl_Position = vec4(0.0, 0.0, 0.5, 1.0); // never rasterized (discard on)
 }
 `;
 }
@@ -3587,6 +4491,15 @@ function createParticles(desc) {
   let gpuSwaps = null;
   let gpuSwapCount = 0;
   let gpuSynced = 0;
+  let gpuStreamSynced = 0;
+  const emitMode = desc.emit ?? "cpu";
+  if (emitMode !== "cpu" && emitMode !== "gpu") {
+    throw new Error(`rune/particles: emit must be 'cpu' or 'gpu' (got ${JSON.stringify(emitMode)})`);
+  }
+  const emitGpu = emitMode === "gpu";
+  if (emitGpu && !gpuMode) {
+    throw new Error(`rune/particles: emit:"gpu" requires sim:"gpu" (the hash-RNG append pass is the GPGPU tier's own kernel — there is no CPU-tier form)`);
+  }
   if (gpuMode) {
     if (kind !== "billboard" || render.draw !== "instance") {
       throw new Error('rune/particles: sim:"gpu" requires render { kind: "billboard", draw: "instance" } (the GPU tier packs the instance records itself — the soup/trail/mesh kinds are CPU-baked)');
@@ -3612,9 +4525,12 @@ function createParticles(desc) {
     gpuSwaps = new Uint32Array(2 * capacity);
     gpuHandoff = {
       attached: false,
-      emitRows: new Float32Array(GPU_STATE_STRIDE * capacity),
+      emitRows: emitGpu ? new Float32Array(0) : new Float32Array(GPU_STATE_STRIDE * capacity),
       emitBase: 0,
       emitCount: 0,
+      emitStreamBase: 0,
+      emitterV: [0, 0, 0],
+      emitInheritK: 0,
       swaps: gpuSwaps,
       swapCount: 0,
       emitOrigin: [0, 0, 0],
@@ -3636,6 +4552,14 @@ function createParticles(desc) {
     } : history !== null ? history.handleSwap : undefined
   });
   let spawner = createSpawner(desc.spawner ?? DEFAULT_SPAWNER);
+  const spawnerDescRef = desc.spawner ?? DEFAULT_SPAWNER;
+  let emitLedgerLifeMin = 0, emitLedgerLifeMax = 1, emitLedgerSeed = 1;
+  function trackEmitLedger(d) {
+    emitLedgerLifeMin = d.life[0];
+    emitLedgerLifeMax = d.life[1];
+    emitLedgerSeed = (d.seed ?? 1) | 0;
+  }
+  trackEmitLedger(spawnerDescRef);
   let ratePerSecond = desc.rate ?? 0;
   let carry = 0;
   const inheritK = validateInherit(desc.inheritVelocity);
@@ -3671,9 +4595,27 @@ function createParticles(desc) {
     }
   };
   const emitStream = (n) => {
-    const spawnedCount = system.emit(n, emitWrap);
+    const spawnedCount = emitGpu ? system.emit(n, emitLedgerFill) : system.emit(n, emitWrap);
     streamIndex += spawnedCount;
     return spawnedCount;
+  };
+  const emitLedgerFill = (index, out) => {
+    out.x = 0;
+    out.y = 0;
+    out.z = 0;
+    out.vx = 0;
+    out.vy = 0;
+    out.vz = 0;
+    out.life = emitLedgerLifeMin + (emitLedgerLifeMax - emitLedgerLifeMin) * hash01(emitLedgerSeed, streamIndex + index, GPU_EMIT_SALTS.life);
+    out.size = 1;
+    out.r = 1;
+    out.g = 1;
+    out.b = 1;
+    out.a = 1;
+    out.seed = 0;
+    out.tx = 0;
+    out.ty = 0;
+    out.tz = 0;
   };
   let soupFloats;
   let stride;
@@ -3762,18 +4704,32 @@ function createParticles(desc) {
     get gpuHandoff() {
       return gpuHandoff;
     },
+    get emitGpu() {
+      return emitGpu;
+    },
+    get spawnerDesc() {
+      return spawnerDescRef;
+    },
     rate(perSecond, sp) {
       if (!Number.isFinite(perSecond) || perSecond < 0) {
         throw new Error(`rune/particles: rate must be a finite >= 0 (got ${perSecond})`);
       }
       ratePerSecond = perSecond;
-      if (sp !== undefined)
+      if (sp !== undefined) {
+        if (emitGpu) {
+          throw new Error(`rune/particles: replacing the spawner at runtime is not supported with emit:"gpu" (the kernel's static spawner interpretation is packed at attach — recreate the facade; rate(x) without a spawner is fine)`);
+        }
         spawner = createSpawner(sp);
+      }
       return facade;
     },
     burst(n, sp) {
-      if (sp !== undefined)
+      if (sp !== undefined) {
+        if (emitGpu) {
+          throw new Error(`rune/particles: replacing the spawner at runtime is not supported with emit:"gpu" (the kernel's static spawner interpretation is packed at attach — recreate the facade; burst(n) without a spawner is fine)`);
+        }
         spawner = createSpawner(sp);
+      }
       return emitStream(n);
     },
     at(x, y, z) {
@@ -3786,6 +4742,9 @@ function createParticles(desc) {
       return facade;
     },
     orient(m) {
+      if (emitGpu && m !== null) {
+        throw new Error(`rune/particles: orient() is not supported with emit:"gpu" (the kernel's generation runs in the spawner's own axes — keep emit:"cpu" for rigid attachments)`);
+      }
       if (m === null) {
         r00 = 1;
         r01 = 0;
@@ -3902,9 +4861,11 @@ function createParticles(desc) {
       if (gpuHandoff !== null) {
         gpuHandoff.emitBase = 0;
         gpuHandoff.emitCount = 0;
+        gpuHandoff.emitStreamBase = 0;
         gpuHandoff.swapCount = 0;
         gpuSwapCount = 0;
         gpuSynced = 0;
+        gpuStreamSynced = 0;
       }
       return facade;
     }
@@ -3917,10 +4878,15 @@ function createParticles(desc) {
     const emitBase = gpuSynced;
     handoff.emitBase = emitBase;
     handoff.emitCount = 0;
+    handoff.emitStreamBase = gpuStreamSynced;
     gpuSwapCount = 0;
     handoff.emitOrigin[0] = origin[0];
     handoff.emitOrigin[1] = origin[1];
     handoff.emitOrigin[2] = origin[2];
+    handoff.emitInheritK = inheritK;
+    handoff.emitterV[0] = emitterVx;
+    handoff.emitterV[1] = emitterVy;
+    handoff.emitterV[2] = emitterVz;
     if (inheritK > 0 || rateOverDist > 0) {
       const mdx = origin[0] - lastOx, mdy = origin[1] - lastOy, mdz = origin[2] - lastOz;
       const moved = Math.hypot(mdx, mdy, mdz);
@@ -3967,32 +4933,36 @@ function createParticles(desc) {
     }
     const n = system.count - emitBase;
     if (n > 0) {
-      const f = system.fields;
-      const rows = handoff.emitRows;
-      for (let i = 0;i < n; i++) {
-        const s = emitBase + i;
-        const at = i * GPU_STATE_STRIDE;
-        rows[at] = f.px[s];
-        rows[at + 1] = f.py[s];
-        rows[at + 2] = f.pz[s];
-        rows[at + 3] = f.vx[s];
-        rows[at + 4] = f.vy[s];
-        rows[at + 5] = f.vz[s];
-        rows[at + 6] = f.age[s];
-        rows[at + 7] = f.life[s];
-        rows[at + 8] = f.size[s];
-        rows[at + 9] = f.cr[s];
-        rows[at + 10] = f.cg[s];
-        rows[at + 11] = f.cb[s];
-        rows[at + 12] = f.ca[s];
-        rows[at + 13] = f.seed[s];
-        rows[at + 14] = f.tx[s];
-        rows[at + 15] = f.ty[s];
-        rows[at + 16] = f.tz[s];
+      if (!emitGpu) {
+        const f = system.fields;
+        const rows = handoff.emitRows;
+        for (let i = 0;i < n; i++) {
+          const s = emitBase + i;
+          const at = i * GPU_STATE_STRIDE;
+          rows[at] = f.px[s];
+          rows[at + 1] = f.py[s];
+          rows[at + 2] = f.pz[s];
+          rows[at + 3] = f.vx[s];
+          rows[at + 4] = f.vy[s];
+          rows[at + 5] = f.vz[s];
+          rows[at + 6] = f.age[s];
+          rows[at + 7] = f.life[s];
+          rows[at + 8] = f.size[s];
+          rows[at + 9] = f.cr[s];
+          rows[at + 10] = f.cg[s];
+          rows[at + 11] = f.cb[s];
+          rows[at + 12] = f.ca[s];
+          rows[at + 13] = f.seed[s];
+          rows[at + 14] = f.tx[s];
+          rows[at + 15] = f.ty[s];
+          rows[at + 16] = f.tz[s];
+        }
       }
       handoff.emitCount = n;
     }
-    if (dt > MAX_STEP) {
+    if (emitGpu) {
+      system.advanceLedger(dt);
+    } else if (dt > MAX_STEP) {
       const steps = Math.min(600, Math.ceil(dt / MAX_STEP));
       const h = dt / steps;
       for (let s = 0;s < steps; s++)
@@ -4002,6 +4972,7 @@ function createParticles(desc) {
     }
     handoff.swapCount = gpuSwapCount;
     gpuSynced = system.count;
+    gpuStreamSynced = streamIndex;
     time += dt;
   }
   function advanceInternal(dt) {
@@ -4112,6 +5083,7 @@ export {
   sortDepthBackToFront,
   simplex3,
   sampleRamp,
+  readGpuEmitConfig,
   packInstances,
   hash01,
   gpuSortWgsl,
@@ -4121,6 +5093,7 @@ export {
   gpuSimGlSortKeysGlsl,
   gpuSimGlPackSortedGlsl,
   gpuSimGlPackGlsl,
+  gpuSimGlEmitGlsl,
   gpuSimGlBitonicGlsl,
   gpuSimGlAdvanceGlsl,
   gpuRenderFrustum,
@@ -4129,6 +5102,9 @@ export {
   gpuRampLUT,
   gpuGlStateTextureH,
   gpuGlPairsTextureH,
+  gpuEmitRowModel,
+  gpuEmitPackStatic,
+  gpuEmitLife,
   fillTrails,
   fillMeshes,
   fillBillboards,
@@ -4174,12 +5150,21 @@ export {
   GPU_GL_PACK_UNIFORMS,
   GPU_GL_PACK_OUTPUTS,
   GPU_GL_PACK_F,
+  GPU_GL_EMIT_UNIFORMS,
+  GPU_GL_EMIT_F,
   GPU_GL_BITONIC_UNIFORMS,
   GPU_GL_BITONIC_F,
   GPU_GL_ADVANCE_UNIFORMS,
   GPU_GL_ADVANCE_OUTPUTS,
   GPU_GL_ADVANCE_F,
   GPU_FORCE_MASK,
+  GPU_EMIT_VEL,
+  GPU_EMIT_VEC4_FIELDS,
+  GPU_EMIT_U32_FIELDS,
+  GPU_EMIT_SHAPE,
+  GPU_EMIT_SALTS,
+  GPU_EMIT_MASK,
+  GPU_EMIT_BASE,
   FIELD_NAMES,
   CONSTANT_RAMP
 };

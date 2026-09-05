@@ -303,6 +303,13 @@ export interface ParticleSystem {
    *  tail — a reverse walk, so no particle is processed twice and none
    *  is skipped). Deterministic: same state + same dt = same result. */
   advance(dt: number, forces: ForceFields): void
+  /** Task 135 — the LEDGER WALK (emit:'gpu'): age + retirement +
+   *  compaction ONLY — no forces, no integration (the positions are
+   *  GPU-authoritative; the mirror holds the age/life ledger + the swap
+   *  list). The aging/retirement semantics are advance()'s own (the
+   *  full-dt call is exact — the substeps existed for the integration's
+   *  stability, and the age arithmetic is exact either way). */
+  advanceLedger(dt: number): void
   /** Kills every particle (count = 0; the fields keep their garbage). */
   clear(): void
 }
@@ -767,6 +774,49 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
     clear() {
       retired += count
       count = 0
+    },
+
+    advanceLedger(dt) {
+      if (count === 0) return
+      if (!Number.isFinite(dt) || dt <= 0) return
+      // The reverse swap-remove walk of advance(), stripped to the ledger:
+      // age += dt, retire when age >= life, compact from the tail. The
+      // hooks fire exactly as advance()'s own (onRetire with the ledger's
+      // fields, onSwap for the external per-slot state — the GPU replay's
+      // swap collector). The position/velocity fields move along with the
+      // compaction (they are the mirror's dead zeros on the emit:'gpu'
+      // path — copying them is harmless and keeps the store's invariant).
+      let i = count - 1
+      while (i >= 0) {
+        const age = f.age[i] + dt
+        const life = f.life[i]
+        if (age >= life) {
+          if (onRetire !== undefined) {
+            retireRec.x = f.px[i]; retireRec.y = f.py[i]; retireRec.z = f.pz[i]
+            retireRec.vx = f.vx[i]; retireRec.vy = f.vy[i]; retireRec.vz = f.vz[i]
+            retireRec.age = age; retireRec.life = life
+            retireRec.size = f.size[i]
+            retireRec.r = f.cr[i]; retireRec.g = f.cg[i]; retireRec.b = f.cb[i]; retireRec.a = f.ca[i]
+            retireRec.seed = f.seed[i]
+            onRetire(retireRec)
+          }
+          const last = count - 1
+          if (last !== i) {
+            if (onSwap !== undefined) onSwap(i, last)
+            f.px[i] = f.px[last]; f.py[i] = f.py[last]; f.pz[i] = f.pz[last]
+            f.vx[i] = f.vx[last]; f.vy[i] = f.vy[last]; f.vz[i] = f.vz[last]
+            f.age[i] = f.age[last]; f.life[i] = f.life[last]; f.size[i] = f.size[last]
+            f.cr[i] = f.cr[last]; f.cg[i] = f.cg[last]; f.cb[i] = f.cb[last]; f.ca[i] = f.ca[last]
+            f.seed[i] = f.seed[last]
+            f.tx[i] = f.tx[last]; f.ty[i] = f.ty[last]; f.tz[i] = f.tz[last]
+          }
+          count = last
+          retired++
+        } else {
+          f.age[i] = age
+        }
+        i--
+      }
     },
   }
   return system

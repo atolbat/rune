@@ -1,8 +1,9 @@
 # @rune/particles — the optimization program
 
-Status: **Phase 1 (the instanced draw), Phase 2 (the GPGPU tier) and
-Phase 3 (the WebGL2 transform-feedback twin + the painter's order) are
-SHIPPED** (Tasks 131–132). The etalons below carry the before/after; the
+Status: **Phase 1 (the instanced draw), Phase 2 (the GPGPU tier), Phase
+3 (the WebGL2 transform-feedback twin + the painter's order), the GPU
+render tier (Task 134: the bitonic sort + the frustum cull) and the
+GPU-side emission (Task 135) are SHIPPED** (Tasks 131–135). The etalons below carry the before/after; the
 phases describe what moved where, and what remains.
 
 ---
@@ -161,8 +162,9 @@ dust, the soft, the slash dust, the laser's charge wisps and boom smoke.
   100k+-sized alpha layers).
 - **Culling**: a per-particle distance cull in the pack loop (one
   comparison) + the per-layer frustum reject.
-- **Emission on the GPU**: a hash-RNG append pass (the 215 ns/spawn CPU
-  cost is fine to ~50k/s).
+- ~~**Emission on the GPU**~~ — ✅ shipped (Task 135 above: the hash-RNG
+  append pass, both backends — the compute leg by default, the TF leg's
+  `?emit=1`).
 - **The GPU-tier sort**: a compute/TF bitonic sort over the records (the
   CPU tier's mirror holds no positions — the GPU-side key pass would
   come with the culling pass above).
@@ -274,3 +276,73 @@ first moving one — a genuinely frozen canvas never recovers).
 pass — the last CPU-coupled half of the frame); a `render.cull` mode for the
 CPU tier (the packers' `order` mechanism could filter, but the CPU tier has
 no camera planes today — the option rejects loudly instead).
+
+## Task 135 — GPU-SIDE EMISSION: the hash-RNG append pass
+
+The last CPU-coupled half of the GPU tier's frame is gone — on the WebGPU
+compute leg entirely, on the WebGL2 TF leg as an opt-in (`?emit=1`):
+`emit: 'gpu'` on the facade. The newborns' rows are GENERATED ON THE GPU
+(one `emit` entry/pass over the window), through the SAME hash stream the
+CPU spawner draws (`@rune/core`'s integer `hash01` — bit-portable to WGSL
+u32 and GLSL uint); the CPU keeps ONE scalar per newborn — the life (the
+death clock of the aging ledger, the same hash draw). The wins: the
+215 ns/spawn CPU walk dies (a 100k one-shot burst: ~11 ms → ~0), the
+per-frame emit-block upload dies (zero CPU→GPU particle traffic for the
+birth rows), the mirror's dead integration dies (the LEDGER walk —
+age/retire/compact only), and the 17×capacity row scratch is not even
+allocated (11 MiB at 160k).
+
+- **THE UNIFORM GREW 144 → 448 bytes** (the sim family's one uniform):
+  the emit block (36 floats of forces, then the window/`streamBase`/
+  discriminants/seed, the shape's frame + scalars, the ranges, the
+  colors, the per-frame `atOrigin`/`emitterV`) — all frame-constant, so
+  the WebGPU batched-encoder uniform collapse class cannot touch it.
+- **THE WINDOW**: `[emitBase, emitBase+emitCount)` at its pre-compaction
+  slots, hash-indexed from the GLOBAL stream counter (the anti-jet fix's
+  own domain — the kernel and the ledger hash the SAME particle). The
+  GLSL twin carries the 32-bit stream/seed as TWO 16-bit float halves
+  (float32 holds integers exactly only to 2^24 — the stream grows
+  unboundedly; the shader recombines the bits in uint).
+- **THE SUPPORT SURFACE**: the closed-form shapes (point/sphere/cone/
+  disc+arms/hemisphere/donut/rectangle/grid-random/line-random) and all
+  five velocity modes; the LOUD rejects: the path shape, the lattice
+  modes (call-local semantics), speedByRadius/colorByRadius, the seek
+  target, `orient()` and the runtime spawner replacement (the static
+  interpretation is packed at attach — `rate(x)` alone stays free).
+- **THE JS REFERENCE TWIN** (`gpuEmitRowModel`) — the parity oracle,
+  pinned BIT-EXACT against the real CPU spawner over 11 shape
+  configurations (task135.test.ts); the raw-device gate
+  (scripts/task135-wgsl-emit.mjs) holds the WGSL to it with a SPLIT
+  tolerance: the hash-lerp fields (life/size/color/seed — pure hash) at
+  2e-7, the position/velocity fields at the f32 trig class (each
+  backend's own transcendentals; SwiftShader's trig runs ~1.5e-4
+  relative). The in-page GLSL gate (scripts/task135-glsl-emit.mjs) does
+  the same for the TF twin on a real WebGL2 context.
+- **THE TF TIER'S OWN LESSON** (three bugs found by the live page): the
+  GLSL hash index FORGOT `+ gl_VertexID` — every newborn of a window got
+  the same particle (one additive pileup at one point → a rasterizer
+  death spiral on SwiftShader); backticks inside a template-literal
+  comment split the shader source; and the interleaved
+  TF-write → PBO-read → TF-write cycle on ONE buffer stalls the
+  software-GL queue (the demo's TF leg now defaults `emit:'cpu'` — the
+  barrier discipline: one producer + one consumer per buffer per frame;
+  the dedicated emitOut buffer keeps the capability for `?emit=1`).
+- **THE DEMO**: GPU Embers — `emit: compute ? 'gpu' : 'cpu'` (the same
+  gating pattern as the cull flag): the compute leg emits GPU-side at
+  160k; the container's software-GL TF leg keeps the proven CPU path
+  (motion 99.5% at 16k in this session's gates). `?emit=1` forces the
+  TF append pass on.
+- **Gates**: `tests/task135.test.ts` (18: the model-vs-spawner parity,
+  the config rejects, the layout maps, the facade's ledger/window/
+  catch-up/replacement contract, the WGSL/GLSL source contracts);
+  `tests/particlesGpuGl.test.ts` += 3 (the emit dispatch sequence —
+  BEFORE compact, no row upload; the emit:'cpu' upload unchanged; the
+  loud attach reject); `scripts/task135-wgsl-emit.mjs` (the raw device);
+  `scripts/task135-glsl-emit.mjs` (the in-page GLSL values).
+
+**Remaining from the original list**: a `render.cull` mode for the CPU
+tier (the packers' `order` mechanism could filter, but the CPU tier has
+no camera planes today — the option rejects loudly instead); the TF
+leg's GPU emission on the software-GL container (the real-GPU story is
+expected to take `?emit=1` as the default once a hardware oracle
+confirms the queue behavior).

@@ -352,6 +352,21 @@ await assertSpriteContour()
   }
   await vfxPage.waitForFunction(() => /Sentry Turret · [1-9][\d,]* particles/.test(document.querySelector('.pt-pill')?.textContent ?? ''), null, { timeout: 20000 })
 
+/** Task 135 — the vfx SHOT's clip form: the canvas region only (the
+ * full-page screenshot starves under the busy software rasterizer on the
+ * heaviest demos — the same class the smoke gate's framesDiffer fixed:
+ * the box is read synchronously via getBoundingClientRect, the page
+ * screenshot with that clip captures the canvas region directly). */
+async function vfxCanvasClip(page) {
+  const box = await page.evaluate(() => {
+    const el = document.querySelector('#canvas')
+    if (el === null) return null
+    const r = el.getBoundingClientRect()
+    return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }
+  })
+  return box === null ? undefined : (box.width > 0 && box.height > 0 ? box : undefined)
+}
+
   const VFX_NAMES = ['muzzle', 'explosion', 'shapes', 'trail', 'sequencer', 'mesh', 'subemitter',
     'noise', 'alphatest', 'plugin', 'billboard', 'soft', 'blending', 'follow',
     'rocket', 'storm', 'slash', 'vortex', 'fireflies', 'dust', 'grass', 'lightning', 'laser', 'gpuEmbers']
@@ -460,7 +475,7 @@ await assertSpriteContour()
     // signal; the motion pair's later shot can still legitimately land in
     // a burst-free window (the sequencer's dissolve, the trail's pre-burst
     // beat) — that is not a dead demo.
-    let shotPill = await vfxPage.textContent('.pt-pill')
+    let shotPill = await vfxPage.textContent('.pt-pill', { timeout: 90_000 })
     if (!/ · [1-9][\d,]* particles · [1-9][\d,]* verts/.test(shotPill)) {
       // THE RE-LOCK (the loaded-runner boot race, the storm class): the
       // phase-locks above can time out while the demo is still filling —
@@ -482,7 +497,8 @@ await assertSpriteContour()
       }
     }
     shotPills.push(shotPill)
-    await vfxPage.screenshot({ path: join(out, `vfx-${name}.png`) })
+    const vClip = await vfxCanvasClip(vfxPage)
+    await vfxPage.screenshot({ path: join(out, `vfx-${name}.png`), clip: vClip, timeout: 90_000 })
     // THE MOTION GATE: a second shot LATER — a healthy animated demo
     // changes pixels; a frozen canvas (the stale-binding class) does not.
     // THE PAIR WINDOW: wait for at least TWO NEW RENDERED FRAMES (the
@@ -511,7 +527,7 @@ await assertSpriteContour()
         { timeout: 1800 },
       ).catch(() => {})
       await vfxPage.waitForTimeout(name === 'sequencer' ? 450 : 120)
-      const f2 = await vfxPage.screenshot()
+      const f2 = await vfxPage.screenshot({ clip: vClip, timeout: 90_000 })
       const f2png = await import('pngjs').then(m => m.PNG.sync.read(f2))
       let changed = 0
       const n = f1.data.length
@@ -591,9 +607,10 @@ await assertSpriteContour()
   if (!(await settleBackend('WebGL2'))) throw new Error('[shots] toggle: the WebGL2 return leg never came alive')
   await vfxPage.waitForTimeout(1200)
   const { PNG } = await import('pngjs')
-  const a = PNG.sync.read(await vfxPage.screenshot())
+  const tClip = await vfxCanvasClip(vfxPage)
+  const a = PNG.sync.read(await vfxPage.screenshot({ clip: tClip, timeout: 90_000 }))
   await vfxPage.waitForTimeout(300)
-  const b = PNG.sync.read(await vfxPage.screenshot())
+  const b = PNG.sync.read(await vfxPage.screenshot({ clip: tClip, timeout: 90_000 }))
   let changed = 0
   for (let p = 0; p < a.data.length; p += 64) {
     const dd = Math.abs(a.data[p] - b.data[p]) + Math.abs(a.data[p + 1] - b.data[p + 1]) + Math.abs(a.data[p + 2] - b.data[p + 2])

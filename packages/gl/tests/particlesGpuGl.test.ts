@@ -409,9 +409,10 @@ describe('Task 134 — the compute render tier (the SSBO dispatch sequence)', ()
     const gpu = createGpuParticles(facade, backend)
     // the ATTACH sequence: the sim family (kernel 1) + the sort family
     // (kernel 2) over the SAME four buffers, one slot shifted:
-    // [pairs 5, state 1, records 3, ramp 4] — both 144-byte uniforms
+    // [pairs 5, state 1, records 3, ramp 4] — the sim family's uniform is
+    // 448 bytes now (Task 135's emit block), the sort family's own 144
     const attachSeq = calls.join('\n')
-    expect(attachSeq).toContain('createCompute(144,1,2,3,4)')
+    expect(attachSeq).toContain('createCompute(448,1,2,3,4)')
     expect(attachSeq).toContain('createCompute(144,5,1,3,4)')
     facade.burst(4, { shape: { kind: 'point', origin: [0, 0, 0] }, velocity: { mode: 'fixed', dir: [0, 1, 0] }, speed: [0, 0], life: [100, 100], size: [1, 1], color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 1 })
     facade.advance(0.016)
@@ -457,5 +458,106 @@ describe('Task 134 — the compute render tier (the SSBO dispatch sequence)', ()
     expect(seq).toContain('runCompute(1,pack,1)')
     expect(seq).not.toContain('sortKeys')
     expect(seq).not.toContain('bitonic')
+  })
+})
+
+describe('Task 135 — the GPU-side emission (the dispatch sequences)', () => {
+  function createRecordingGpu() {
+    const calls: string[] = []
+    let nextBuf = 1
+    let nextCompute = 1
+    const backend = {
+      createExternalBuffer: (byteLength: number) => {
+        calls.push(`createExternalBuffer(${byteLength})`)
+        return nextBuf++
+      },
+      writeExternalBuffer: (bufferId: number, data: Float32Array | Uint32Array, byteOffset?: number, byteLength?: number) => {
+        calls.push(`writeExternalBuffer(${bufferId},${byteLength ?? data.byteLength},${byteOffset ?? 0})`)
+      },
+      createCompute: (wgsl: string, uniformBytes: number, bufferIds: readonly number[]) => {
+        calls.push(`createCompute(${uniformBytes},${bufferIds.join(',')})`)
+        return nextCompute++
+      },
+      runCompute: (computeId: number, entry: string, uniformData: Float32Array, workgroups: number) => {
+        calls.push(`runCompute(${computeId},${entry},${workgroups})`)
+      },
+      deleteCompute: (computeId: number) => { calls.push(`deleteCompute(${computeId})`) },
+      deleteExternalBuffer: (bufferId: number) => { calls.push(`deleteExternalBuffer(${bufferId})`) },
+    }
+    return { backend, calls }
+  }
+
+  it('emit:"gpu": the append kernel dispatches BEFORE compact/advance, and NO emit-row upload ever runs', () => {
+    const { backend, calls } = createRecordingGpu()
+    const facade = createParticles({
+      capacity: 128,
+      rate: 300,
+      spawner: {
+        shape: { kind: 'disc', origin: [0, 0, 0], axis: [0, 1, 0], radius: [1, 4] },
+        velocity: { mode: 'fixed', dir: [0, 1, 0] },
+        speed: [0.5, 1.5], life: [2, 5], size: [0.05, 0.15],
+        color: [[1, 1, 1, 1], [0.5, 0.7, 1, 0.8]], seed: 42,
+      },
+      ramp: { points: [{ t: 0, size: 1, r: 1, g: 1, b: 1, a: 1 }] } as never,
+      render: { kind: 'billboard', draw: 'instance' },
+      sim: 'gpu',
+      emit: 'gpu',
+    })
+    const gpu = createGpuParticles(facade, backend)
+    facade.advance(1 / 60)
+    calls.length = 0
+    gpu.step(1 / 60)
+    const seq = calls.join('\n')
+    // THE APPEND KERNEL: one emit dispatch sized by the window (300/60 = 5
+    // newborns → 1 workgroup), BEFORE the compact replay and the advance
+    expect(seq).toContain('runCompute(1,emit,1)')
+    expect(seq.indexOf('runCompute(1,emit,1)')).toBeLessThan(seq.indexOf('runCompute(1,advance,'))
+    expect(seq).toContain('runCompute(1,pack,1)')
+    // ZERO per-frame CPU→GPU particle traffic: no state writeBuffer (the
+    // swaps list only when deaths happen — none in the first frame)
+    expect(seq).not.toContain('writeExternalBuffer(1,')
+    void gpu
+  })
+
+  it('emit:"cpu": the ORIGINAL upload path (writeExternalBuffer of the row block, no emit dispatch)', () => {
+    const { backend, calls } = createRecordingGpu()
+    const facade = createParticles({
+      capacity: 128,
+      rate: 300,
+      spawner: {
+        shape: { kind: 'disc', origin: [0, 0, 0], axis: [0, 1, 0], radius: [1, 4] },
+        velocity: { mode: 'fixed', dir: [0, 1, 0] },
+        speed: [0.5, 1.5], life: [2, 5], size: [0.05, 0.15],
+        color: [[1, 1, 1, 1], [0.5, 0.7, 1, 0.8]], seed: 42,
+      },
+      ramp: { points: [{ t: 0, size: 1, r: 1, g: 1, b: 1, a: 1 }] } as never,
+      render: { kind: 'billboard', draw: 'instance' },
+      sim: 'gpu',
+    })
+    const gpu = createGpuParticles(facade, backend)
+    facade.advance(1 / 60)
+    calls.length = 0
+    gpu.step(1 / 60)
+    const seq = calls.join('\n')
+    expect(seq).toContain('writeExternalBuffer(1,340,0)') // 5 rows × 17 floats × 4 bytes
+    expect(seq).not.toContain(',emit,')
+    void gpu
+  })
+
+  it('emit:"gpu" + the unsupported spawner: the attach throws LOUDLY (readGpuEmitConfig at the orchestrator)', () => {
+    const { backend } = createRecordingGpu()
+    const facade = createParticles({
+      capacity: 8,
+      spawner: {
+        shape: { kind: 'line', from: [0, 0, 0], to: [1, 0, 0], mode: 'lattice' },
+        velocity: { mode: 'fixed', dir: [0, 1, 0] },
+        speed: [1, 1], life: [1, 1], size: [1, 1], color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 1,
+      },
+      ramp: { points: [{ t: 0, size: 1, r: 1, g: 1, b: 1, a: 1 }] } as never,
+      render: { kind: 'billboard', draw: 'instance' },
+      sim: 'gpu',
+      emit: 'gpu',
+    })
+    expect(() => createGpuParticles(facade, backend)).toThrow('rejects the line lattice')
   })
 })
