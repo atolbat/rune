@@ -118,14 +118,26 @@ export function collectInstancesViews(
   }
 
   // 1) Counting per group (a rank traversal; Task 85 measurements — see the header).
+  // Task 143: the walk is WORD-WISE (the diff walk's own shape — a zero word
+  // costs one load + test instead of 32 rank iterations, the per-rank mask
+  // `1 << (r & 31)` and the per-rank word reload die; ranks are visited in
+  // the SAME ascending order: lowest set bit first, words ascending).
   for (let g = 0; g < groupCount; g++) instCounts[countsBase + g] = 0
   const nodeFlags = views.nodeFlags
-  for (let r = 0; r < n; r++) {
-    if ((bits[bitsBaseV + (r >>> 5)] & (1 << (r & 31))) === 0) continue
-    const slot = order[r]
-    const g = group[slot]
-    if (g < 0 || g >= groupCount) continue
-    if ((nodeFlags[slot] & NF_VISIBLE) !== 0) instCounts[countsBase + g]++
+  for (let w = 0; w < words; w++) {
+    let word = bits[bitsBaseV + w]
+    if (word === 0) continue
+    const rBase = w << 5
+    while (word !== 0) {
+      const lb = word & -word
+      word ^= lb
+      const r = rBase + 31 - Math.clz32(lb)
+      if (r >= n) break // the last word's padding — not nodes
+      const slot = order[r]
+      const g = group[slot]
+      if (g < 0 || g >= groupCount) continue
+      if ((nodeFlags[slot] & NF_VISIBLE) !== 0) instCounts[countsBase + g]++
+    }
   }
 
   // 2) Prefix offsets (the group segments go in id order).
@@ -137,22 +149,49 @@ export function collectInstancesViews(
   }
 
   // 3) Filling the pool.
+  // Task 143: word-wise walk (the counting pass's shape) + the 16-float
+  // matrix copy UNROLLED — JSC did not unroll the k-loop (measured: the
+  // unroll alone is −30% of the fill pass; the sandbox checksums over a
+  // 100k-node / 50%-visible synthetic walk came out bit-identical).
   let dropped = 0
-  for (let r = 0; r < n; r++) {
-    if ((bits[bitsBaseV + (r >>> 5)] & (1 << (r & 31))) === 0) continue
-    const slot = order[r]
-    const g = group[slot]
-    if (g < 0 || g >= groupCount) continue
-    if ((nodeFlags[slot] & NF_VISIBLE) === 0) continue
-    const dst = instOffsets[offsetsBase + g] + cursors[g]
-    if (dst >= maxInstances) {
-      dropped++
-      continue
+  for (let w = 0; w < words; w++) {
+    let word = bits[bitsBaseV + w]
+    if (word === 0) continue
+    const rBase = w << 5
+    while (word !== 0) {
+      const lb = word & -word
+      word ^= lb
+      const r = rBase + 31 - Math.clz32(lb)
+      if (r >= n) break
+      const slot = order[r]
+      const g = group[slot]
+      if (g < 0 || g >= groupCount) continue
+      if ((nodeFlags[slot] & NF_VISIBLE) === 0) continue
+      const dst = instOffsets[offsetsBase + g] + cursors[g]
+      if (dst >= maxInstances) {
+        dropped++
+        continue
+      }
+      cursors[g]++
+      const src = slot * 16
+      const o = pool + dst * 16
+      instPool[o] = world[src]
+      instPool[o + 1] = world[src + 1]
+      instPool[o + 2] = world[src + 2]
+      instPool[o + 3] = world[src + 3]
+      instPool[o + 4] = world[src + 4]
+      instPool[o + 5] = world[src + 5]
+      instPool[o + 6] = world[src + 6]
+      instPool[o + 7] = world[src + 7]
+      instPool[o + 8] = world[src + 8]
+      instPool[o + 9] = world[src + 9]
+      instPool[o + 10] = world[src + 10]
+      instPool[o + 11] = world[src + 11]
+      instPool[o + 12] = world[src + 12]
+      instPool[o + 13] = world[src + 13]
+      instPool[o + 14] = world[src + 14]
+      instPool[o + 15] = world[src + 15]
     }
-    cursors[g]++
-    const src = slot * 16
-    const o = pool + dst * 16
-    for (let k = 0; k < 16; k++) instPool[o + k] = world[src + k]
   }
   if (dropped > 0) views.headerI[H_DROPPED_INSTANCES] += dropped
   return total - dropped

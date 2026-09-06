@@ -662,3 +662,86 @@ The verification: 1624 tests + 7 new (the sampler equality sweep, the
 table parity pin, the scratch override/leak gates), the sha256 A/B walk
 identical (noise field + six bake modes + packs + all fields), the
 vfx/raw-device battery green, ?v=142.
+
+## Task 143 — THE SECOND GENERAL PASS: the frame machinery (transport, executor, tape, scene)
+
+The Task 142 sequel: the same profile-driven, bit-identical method over
+everything OUTSIDE the particles package. The baseline battery (all 18
+benches) + CPU profiles of the five heaviest paths named the targets:
+`msgFieldAt` **68.3%** of the T3 feed bench (an out-of-line
+WeakMap+Map lookup per field write), the webgl2 executor's
+`applyState` building **two template-literal strings per draw call**
+(1000 commands = 2000 string allocations per frame), the tape writer's
+`columns` getter allocating a fresh view object per access, the segment
+`store`'s redundant `delete`+`set` pair, and the scene collect's
+rank-wise bit walk (a per-node mask recompute + word reload).
+
+**The five changes (all bit-identical, all measured on this machine):**
+
+1. **`core/transport.ts` — the field resolution inlined.** The T3
+   writer closures called `msgFieldAt` (out-of-line — the Task-142
+   ramp-sampler lesson) which did `byteOffsets(c.layout).get(name)`:
+   a WeakMap lookup + a Map.get per scalar write. The offsets Map now
+   lives ON the feed core (resolved once at make time), the resolution
+   is inlined into each of the five set* closures (same window check,
+   same error messages, byte-identical arithmetic). **theoryN −19.4%**
+   (80.8→65.1 ms median, interleaved 4×) — 33→37M writes/s.
+2. **`webgl2/command.ts` + `executor.ts` — the state keys precompiled.**
+   `applyState` built `` `${depthTest}/${depthWrite}` `` and the blend
+   key on EVERY draw — pure cache-compare garbage. The keys are now
+   compile-time constants of the command (`readState` fills
+   `depthKey`/`blendKey` once); the executor compares the precomputed
+   strings. **framePath record −32.2%** (0.537→0.364 ms/frame, 1000
+   commands), **live −22.1%** (0.394→0.307). The GL call SEQUENCE is
+   pinned unchanged (the Task-75b pass-start re-assert, the Task-122
+   equation split — gated by the new webgl2 suite + the A/B hash).
+3. **`core/tape/writer.ts` + `segments.ts` — the per-frame allocations
+   die.** The `columns` getter returned a fresh `{op,a,b,c,d}` object
+   per access (the live path asked per dirty command, the full rewrite
+   1000× per frame); the view is now cached per growth epoch (grow()
+   swaps the arrays AND the view). The segment `store`'s `delete`+`set`
+   pair was an insertion-order LRU reordering that nothing consumes
+   (eviction is by TOUCH EPOCH — order-invariant); one Map op replaces
+   two. **segments full-rewrite −21.6%** (1.392→1.091 ms, interleaved
+   5×), cache path unchanged.
+4. **`scene/instances.ts` — the word-wise collect walk.** The counting
+   and filling passes walked rank-wise (a `1 << (r & 31)` mask and a
+   word reload per node); the diff walk's own word-wise shape (a zero
+   word = one load + test; set bits extracted lowest-first — the SAME
+   ascending rank order) replaces them, and the 16-float matrix copy is
+   unrolled (JSC did not unroll the k-loop). **collect 10k nodes
+   −50.0%** (0.922→0.461 ms), **100k −7.9%** (1.497→1.378 — the fill is
+   memcpy-bound at that size).
+5. **`core/feed/feed.ts` — the local feed's `requireOffset` inlined**
+   (the SAB twin of the transport fix: the same out-of-line call +
+   Map.get per field write, now inline in the five closures with the
+   same error message). The local writer has no dedicated bench; the
+   sandbox micro shows −6% on the straight-line shape and the msg twin
+   measured −19.4% through the real closure dispatch — the same class,
+   zero risk (the call simply disappears).
+
+**The proof:** the sha256 A/B walk over ALL five touched surfaces —
+the msg round-trip (writes, mirror bytes, counts, BOTH error paths),
+the local feed writes, the executor's GL call sequence through
+recordingGL (6 pipeline-state regions incl. the equation split),
+the tape/segments/live frames (columns, counters, evictions), and the
+scene cull+collect pools (two camera moves) — **identical digests at
+HEAD and the optimized tree** (`cf56619…`).
+
+**The etalons (A/B, interleaved medians):**
+
+| path | before | after | delta |
+|---|---:|---:|---:|
+| T3 feed round-trip (theoryN, 2.4M writes) | 80.8 ms | 65.1 ms | **−19.4%** |
+| renderer frame, record (1000 cmds) | 0.537 ms | 0.364 ms | **−32.2%** |
+| renderer frame, live (20 dirty) | 0.394 ms | 0.307 ms | **−22.1%** |
+| tape full rewrite (1000 cmds) | 1.392 ms | 1.091 ms | **−21.6%** |
+| scene collect 10k (~50% vis) | 0.922 ms | 0.461 ms | **−50.0%** |
+| scene collect 100k (~50% vis) | 1.497 ms | 1.378 ms | −7.9% |
+
+The verification: 1647 tests + 16 new (the transport byte-landing and
+error-path pins, the local feed offsets, the columns view identity +
+growth epoch, the delete-free store overwrite/LRU, the executor state
+call sequence ×3, the sparse/padding/idempotent collect walks),
+typecheck/lint at the baseline, build OK, demo:smoke 24/24, the
+task134/137/138 probes + the raw-device battery green, ?v=143.

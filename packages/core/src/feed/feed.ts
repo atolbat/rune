@@ -108,26 +108,34 @@ function makeFeed(
   // Task 114 — ONE writer per feed, re-aimed by view()/push(): the write
   // window is closure state (mutable `wFrom`), the methods never allocate.
   let wFrom = 0
+  // Task 143 — the offset resolution is INLINED into each closure (the
+  // Task-142 ramp-sampler / Task-143 msgFieldAt lesson: JSC keeps the small
+  // module-level helper out-of-line, and every field write paid the call on
+  // top of the Map.get). Same error, same message — bit-identical.
   const writer: FeedWriter = {
     setFloat: (name, index, value) => {
-      const offset = requireOffset(offsets, name)
+      const offset = offsets.get(name)
+      if (offset === undefined) throw new Error(`rune: feed field "${name}" is not declared`)
       f32[((wFrom + index) * stride + offset) >> 2] = value
     },
     setVec2: (name, index, x, y) => {
-      const offset = requireOffset(offsets, name)
+      const offset = offsets.get(name)
+      if (offset === undefined) throw new Error(`rune: feed field "${name}" is not declared`)
       const at = ((wFrom + index) * stride + offset) >> 2
       f32[at] = x
       f32[at + 1] = y
     },
     setVec3: (name, index, x, y, z) => {
-      const offset = requireOffset(offsets, name)
+      const offset = offsets.get(name)
+      if (offset === undefined) throw new Error(`rune: feed field "${name}" is not declared`)
       const at = ((wFrom + index) * stride + offset) >> 2
       f32[at] = x
       f32[at + 1] = y
       f32[at + 2] = z
     },
     setVec4: (name, index, x, y, z, w) => {
-      const offset = requireOffset(offsets, name)
+      const offset = offsets.get(name)
+      if (offset === undefined) throw new Error(`rune: feed field "${name}" is not declared`)
       const at = ((wFrom + index) * stride + offset) >> 2
       f32[at] = x
       f32[at + 1] = y
@@ -135,7 +143,8 @@ function makeFeed(
       f32[at + 3] = w
     },
     setVec4Bytes: (name, index, r, g, b, a) => {
-      const offset = requireOffset(offsets, name)
+      const offset = offsets.get(name)
+      if (offset === undefined) throw new Error(`rune: feed field "${name}" is not declared`)
       const at = (wFrom + index) * stride + offset
       u8[at] = r; u8[at + 1] = g; u8[at + 2] = b; u8[at + 3] = a
     },
@@ -187,10 +196,4 @@ function fieldOffsets(layout: FeedLayout): Map<string, number> {
     offset += formatBytes(format)
   }
   return offsets
-}
-
-function requireOffset(offsets: Map<string, number>, name: string): number {
-  const offset = offsets.get(name)
-  if (offset === undefined) throw new Error(`rune: feed field "${name}" is not declared`)
-  return offset
 }

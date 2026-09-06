@@ -113,6 +113,12 @@ interface CompiledState {
   /** Task 75: pipeline blending (null — off). Task 122: the equation
    *  (absent = 'add' — the classic behavior). */
   readonly blend: { readonly src: string; readonly dst: string; readonly equation: string } | null
+  /** Task 143: the state keys PRECOMPILED (the executor previously built
+   *  TWO template-literal strings per DRAW CALL — 1000 commands = 2000
+   *  string allocations per frame, pure cache-compare garbage). Immutable
+   *  after compile — same keys, same compares, zero per-frame allocs. */
+  readonly depthKey: string
+  readonly blendKey: string
 }
 
 export function compileDrawSpec(spec: DrawSpec, ctx: GLCompileContext): CompiledCommand {
@@ -196,11 +202,17 @@ function readState(spec: DrawSpec): CompiledState {
   // Task 75: depth === false → test disabled + write forbidden
   // (setDepthMode('always', false) → gl.disable(DEPTH_TEST)).
   const depthOff = depth === false
+  // Task 143: `b` narrows the false|undefined away — no non-null assertions.
+  const b = blend === undefined || blend === false ? null : blend
   return {
     depthTest: depthOff ? 'always' : (depth?.test ?? 'less'),
     depthWrite: depthOff ? false : (depth?.write ?? true),
     cull: raster?.cull ?? 'back',
-    blend: blend === undefined || blend === false ? null : { src: blend.src, dst: blend.dst, equation: blend.equation ?? 'add' },
+    blend: b === null ? null : { src: b.src, dst: b.dst, equation: b.equation ?? 'add' },
+    // Task 143: the executor's per-draw cache keys, built ONCE here (they
+    // are compile-time constants of the command).
+    depthKey: `${depthOff ? 'always' : (depth?.test ?? 'less')}/${depthOff ? false : (depth?.write ?? true)}`,
+    blendKey: b === null ? 'off' : `${b.src}/${b.dst}/${b.equation ?? 'add'}`,
   }
 }
 

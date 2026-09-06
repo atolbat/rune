@@ -25,6 +25,12 @@ export function createTapeWriter(initialOps: number): TapeWriter {
   let c: Int32Array = new Int32Array(capacity)
   let d: Int32Array = new Int32Array(capacity)
   let count = 0
+  // Task 143: the columns view is CACHED, rebuilt only when grow() swaps the
+  // backing arrays (previously a fresh {op,a,b,c,d} object per ACCESS — the
+  // live path asked once per dirty command, the full-rewrite path 1000× per
+  // frame). Same five arrays, same values — identity is stable per growth
+  // epoch, consumers read it synchronously.
+  let columnsView: WriterColumns | undefined
 
   function reset(): void {
     count = 0
@@ -61,6 +67,7 @@ export function createTapeWriter(initialOps: number): TapeWriter {
     b = growColumn(b)
     c = growColumn(c)
     d = growColumn(d)
+    columnsView = undefined
   }
 
   function growColumn(column: Int32Array): Int32Array {
@@ -74,6 +81,9 @@ export function createTapeWriter(initialOps: number): TapeWriter {
     emit,
     emitPacked,
     get count() { return count },
-    get columns() { return { op, a, b, c, d } },
+    get columns() {
+      if (columnsView === undefined) columnsView = { op, a, b, c, d }
+      return columnsView
+    },
   }
 }

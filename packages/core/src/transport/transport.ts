@@ -382,6 +382,10 @@ interface MsgSlot {
 /** T3 ping-pong feed core: buffers travel writer → reader → writer. */
 interface MsgFeedCore {
   readonly layout: FeedLayout
+  /** Field byte offsets for `layout`, resolved ONCE at make time (Task 143:
+   * the writer closures previously paid a WeakMap lookup PER FIELD WRITE —
+   * `byteOffsets(c.layout)` out-of-line — on top of the Map.get(name)). */
+  readonly offsets: Map<string, number>
   readonly capacity: number
   readonly stride: number
   /** Pool of buffers returned by the reader. */
@@ -606,6 +610,7 @@ function msgFeedFacade(state: MsgState, feedOptions: { layout: FeedLayout; capac
   const current = new ArrayBuffer(feedOptions.capacity * stride)
   const core: MsgFeedCore = {
     layout: feedOptions.layout,
+    offsets: byteOffsets(feedOptions.layout),
     capacity: feedOptions.capacity,
     stride,
     pool: [],
@@ -618,38 +623,57 @@ function msgFeedFacade(state: MsgState, feedOptions: { layout: FeedLayout; capac
     published: 0,
   }
   state.feeds.set(id, core)
-  // Task 114 — ONE writer per feed, re-aimed by view()/push() (the same
-  // contract as feed.ts): `wFrom` is mutable closure state, the entry object
-  // is stable for the feed's lifetime (only its buffer swaps on flush), so
-  // every set* is a direct scalar write — no boxed [x,y,z,w] array, no fresh
-  // Float32Array/Uint8Array view, no Map lookup for the core (previously
-  // PER FIELD WRITE: 2 allocations + a feeds.get(id) round-trip).
+  // Task 143 — the resolution is INLINED into each closure (JSC kept the
+  // msgFieldAt call out-of-line, the Task-142 ramp-sampler lesson): one
+  // property load (core.offsets) + one Map.get(name) per write instead of
+  // an out-of-line call + a WeakMap.get + a Map.get. Same errors, same
+  // messages, same window arithmetic — bit-identical.
   let wFrom = 0
   const writer: FeedWriter = {
     setFloat: (name, index, value) => {
       const c = core
-      const at = msgFieldAt(c, name, wFrom + index)
-      c.f32[at >> 2] = value
+      const fieldAt = c.offsets.get(name)
+      if (fieldAt === undefined) throw new Error(`rune: feed field "${name}" is not declared`)
+      const local = wFrom + index - c.base
+      if (local < 0 || local >= c.capacity) {
+        throw new Error(`rune: T3 feed is append-only — index ${wFrom + index} is outside the window [${c.base}, ${c.base + c.capacity})`)
+      }
+      c.f32[((local * c.stride + fieldAt) >> 2)] = value
     },
     setVec2: (name, index, x, y) => {
       const c = core
-      const at = msgFieldAt(c, name, wFrom + index)
-      const f = at >> 2
+      const fieldAt = c.offsets.get(name)
+      if (fieldAt === undefined) throw new Error(`rune: feed field "${name}" is not declared`)
+      const local = wFrom + index - c.base
+      if (local < 0 || local >= c.capacity) {
+        throw new Error(`rune: T3 feed is append-only — index ${wFrom + index} is outside the window [${c.base}, ${c.base + c.capacity})`)
+      }
+      const f = (local * c.stride + fieldAt) >> 2
       c.f32[f] = x
       c.f32[f + 1] = y
     },
     setVec3: (name, index, x, y, z) => {
       const c = core
-      const at = msgFieldAt(c, name, wFrom + index)
-      const f = at >> 2
+      const fieldAt = c.offsets.get(name)
+      if (fieldAt === undefined) throw new Error(`rune: feed field "${name}" is not declared`)
+      const local = wFrom + index - c.base
+      if (local < 0 || local >= c.capacity) {
+        throw new Error(`rune: T3 feed is append-only — index ${wFrom + index} is outside the window [${c.base}, ${c.base + c.capacity})`)
+      }
+      const f = (local * c.stride + fieldAt) >> 2
       c.f32[f] = x
       c.f32[f + 1] = y
       c.f32[f + 2] = z
     },
     setVec4: (name, index, x, y, z, w) => {
       const c = core
-      const at = msgFieldAt(c, name, wFrom + index)
-      const f = at >> 2
+      const fieldAt = c.offsets.get(name)
+      if (fieldAt === undefined) throw new Error(`rune: feed field "${name}" is not declared`)
+      const local = wFrom + index - c.base
+      if (local < 0 || local >= c.capacity) {
+        throw new Error(`rune: T3 feed is append-only — index ${wFrom + index} is outside the window [${c.base}, ${c.base + c.capacity})`)
+      }
+      const f = (local * c.stride + fieldAt) >> 2
       c.f32[f] = x
       c.f32[f + 1] = y
       c.f32[f + 2] = z
@@ -657,7 +681,13 @@ function msgFeedFacade(state: MsgState, feedOptions: { layout: FeedLayout; capac
     },
     setVec4Bytes: (name, index, r, g, b, a) => {
       const c = core
-      const at = msgFieldAt(c, name, wFrom + index)
+      const fieldAt = c.offsets.get(name)
+      if (fieldAt === undefined) throw new Error(`rune: feed field "${name}" is not declared`)
+      const local = wFrom + index - c.base
+      if (local < 0 || local >= c.capacity) {
+        throw new Error(`rune: T3 feed is append-only — index ${wFrom + index} is outside the window [${c.base}, ${c.base + c.capacity})`)
+      }
+      const at = local * c.stride + fieldAt
       c.u8[at] = r
       c.u8[at + 1] = g
       c.u8[at + 2] = b
@@ -699,18 +729,6 @@ function msgFeedFacade(state: MsgState, feedOptions: { layout: FeedLayout; capac
     },
     publishedCount: () => core.published,
   }
-}
-
-/** Byte offset of a field inside the core's current buffer, with the window
- *  check (the only shared validation of a T3 field write). */
-function msgFieldAt(c: MsgFeedCore, name: string, logicalIndex: number): number {
-  const fieldAt = byteOffsets(c.layout).get(name)
-  if (fieldAt === undefined) throw new Error(`rune: feed field "${name}" is not declared`)
-  const local = logicalIndex - c.base
-  if (local < 0 || local >= c.capacity) {
-    throw new Error(`rune: T3 feed is append-only — index ${logicalIndex} is outside the window [${c.base}, ${c.base + c.capacity})`)
-  }
-  return local * c.stride + fieldAt
 }
 
 /** Copies a delivered chunk's bytes into a mirror — ONE memcpy (set) instead

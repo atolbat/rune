@@ -46,7 +46,11 @@ export function createSegmentStore(capacity: number): SegmentStore {
   }
 
   function store(commandId: number, rows: Int32Array, count: number): void {
-    segments.delete(commandId)
+    // Task 143: the delete is GONE — Map.set replaces an existing entry in
+    // place (the delete+set pair was a Map reordering for an insertion-order
+    // LRU that does not exist here: eviction selects by the minimal TOUCH
+    // EPOCH, which is order-independent, so the pair was two hash operations
+    // where one suffices). Same final state, same counters, same victims.
     segments.set(commandId, { rows, count, writtenAt: ++epoch, touchedAt: epoch })
     evict()
   }

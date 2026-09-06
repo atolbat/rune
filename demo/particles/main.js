@@ -27,9 +27,9 @@
 //   Pages serves with max-age=600, and a browser that keeps an OLD bundle
 //   for those 10 minutes shows an OLD bug even after a deploy — a changed
 //   query string forces a fresh fetch. Bump the suffix on every release.
-import { createRenderer } from '../../dist/rune.esm.js?v=142'
-import { materialOf, TEXTURE, VERTEX_COLOR } from '../../dist/rune-materials.esm.js?v=142'
-import { createParticles, createRamp } from '../../dist/rune-particles.esm.js?v=142'
+import { createRenderer } from '../../dist/rune.esm.js?v=143'
+import { materialOf, TEXTURE, VERTEX_COLOR } from '../../dist/rune-materials.esm.js?v=143'
+import { createParticles, createRamp } from '../../dist/rune-particles.esm.js?v=143'
 
 /* ─── Materials: the unlit sprite pair × 2 blend modes ─────────────────── */
 

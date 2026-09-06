@@ -390,6 +390,7 @@ function createTapeWriter(initialOps) {
   let c = new Int32Array(capacity);
   let d = new Int32Array(capacity);
   let count = 0;
+  let columnsView;
   function reset() {
     count = 0;
   }
@@ -428,6 +429,7 @@ function createTapeWriter(initialOps) {
     b = growColumn(b);
     c = growColumn(c);
     d = growColumn(d);
+    columnsView = undefined;
   }
   function growColumn(column) {
     const next = new Int32Array(capacity);
@@ -442,7 +444,9 @@ function createTapeWriter(initialOps) {
       return count;
     },
     get columns() {
-      return { op, a, b, c, d };
+      if (columnsView === undefined)
+        columnsView = { op, a, b, c, d };
+      return columnsView;
     }
   };
 }
@@ -512,7 +516,6 @@ function createSegmentStore(capacity) {
     return found;
   }
   function store(commandId, rows, count) {
-    segments.delete(commandId);
     segments.set(commandId, { rows, count, writtenAt: ++epoch, touchedAt: epoch });
     evict();
   }
@@ -1453,24 +1456,32 @@ function makeFeed(buffer, layout, capacity, policy) {
   let wFrom = 0;
   const writer = {
     setFloat: (name, index, value) => {
-      const offset = requireOffset(offsets, name);
+      const offset = offsets.get(name);
+      if (offset === undefined)
+        throw new Error(`rune: feed field "${name}" is not declared`);
       f32[(wFrom + index) * stride + offset >> 2] = value;
     },
     setVec2: (name, index, x, y) => {
-      const offset = requireOffset(offsets, name);
+      const offset = offsets.get(name);
+      if (offset === undefined)
+        throw new Error(`rune: feed field "${name}" is not declared`);
       const at = (wFrom + index) * stride + offset >> 2;
       f32[at] = x;
       f32[at + 1] = y;
     },
     setVec3: (name, index, x, y, z) => {
-      const offset = requireOffset(offsets, name);
+      const offset = offsets.get(name);
+      if (offset === undefined)
+        throw new Error(`rune: feed field "${name}" is not declared`);
       const at = (wFrom + index) * stride + offset >> 2;
       f32[at] = x;
       f32[at + 1] = y;
       f32[at + 2] = z;
     },
     setVec4: (name, index, x, y, z, w) => {
-      const offset = requireOffset(offsets, name);
+      const offset = offsets.get(name);
+      if (offset === undefined)
+        throw new Error(`rune: feed field "${name}" is not declared`);
       const at = (wFrom + index) * stride + offset >> 2;
       f32[at] = x;
       f32[at + 1] = y;
@@ -1478,7 +1489,9 @@ function makeFeed(buffer, layout, capacity, policy) {
       f32[at + 3] = w;
     },
     setVec4Bytes: (name, index, r, g, b, a) => {
-      const offset = requireOffset(offsets, name);
+      const offset = offsets.get(name);
+      if (offset === undefined)
+        throw new Error(`rune: feed field "${name}" is not declared`);
       const at = (wFrom + index) * stride + offset;
       u8[at] = r;
       u8[at + 1] = g;
@@ -1522,12 +1535,6 @@ function fieldOffsets(layout) {
     offset += formatBytes(format);
   }
   return offsets;
-}
-function requireOffset(offsets, name) {
-  const offset = offsets.get(name);
-  if (offset === undefined)
-    throw new Error(`rune: feed field "${name}" is not declared`);
-  return offset;
 }
 var HEADER_BYTES2 = 64;
 
@@ -1913,6 +1920,7 @@ function msgFeedFacade(state, feedOptions, forcedId) {
   const current = new ArrayBuffer(feedOptions.capacity * stride);
   const core = {
     layout: feedOptions.layout,
+    offsets: byteOffsets(feedOptions.layout),
     capacity: feedOptions.capacity,
     stride,
     pool: [],
@@ -1929,28 +1937,52 @@ function msgFeedFacade(state, feedOptions, forcedId) {
   const writer = {
     setFloat: (name, index, value) => {
       const c = core;
-      const at = msgFieldAt(c, name, wFrom + index);
-      c.f32[at >> 2] = value;
+      const fieldAt = c.offsets.get(name);
+      if (fieldAt === undefined)
+        throw new Error(`rune: feed field "${name}" is not declared`);
+      const local = wFrom + index - c.base;
+      if (local < 0 || local >= c.capacity) {
+        throw new Error(`rune: T3 feed is append-only — index ${wFrom + index} is outside the window [${c.base}, ${c.base + c.capacity})`);
+      }
+      c.f32[local * c.stride + fieldAt >> 2] = value;
     },
     setVec2: (name, index, x, y) => {
       const c = core;
-      const at = msgFieldAt(c, name, wFrom + index);
-      const f = at >> 2;
+      const fieldAt = c.offsets.get(name);
+      if (fieldAt === undefined)
+        throw new Error(`rune: feed field "${name}" is not declared`);
+      const local = wFrom + index - c.base;
+      if (local < 0 || local >= c.capacity) {
+        throw new Error(`rune: T3 feed is append-only — index ${wFrom + index} is outside the window [${c.base}, ${c.base + c.capacity})`);
+      }
+      const f = local * c.stride + fieldAt >> 2;
       c.f32[f] = x;
       c.f32[f + 1] = y;
     },
     setVec3: (name, index, x, y, z) => {
       const c = core;
-      const at = msgFieldAt(c, name, wFrom + index);
-      const f = at >> 2;
+      const fieldAt = c.offsets.get(name);
+      if (fieldAt === undefined)
+        throw new Error(`rune: feed field "${name}" is not declared`);
+      const local = wFrom + index - c.base;
+      if (local < 0 || local >= c.capacity) {
+        throw new Error(`rune: T3 feed is append-only — index ${wFrom + index} is outside the window [${c.base}, ${c.base + c.capacity})`);
+      }
+      const f = local * c.stride + fieldAt >> 2;
       c.f32[f] = x;
       c.f32[f + 1] = y;
       c.f32[f + 2] = z;
     },
     setVec4: (name, index, x, y, z, w) => {
       const c = core;
-      const at = msgFieldAt(c, name, wFrom + index);
-      const f = at >> 2;
+      const fieldAt = c.offsets.get(name);
+      if (fieldAt === undefined)
+        throw new Error(`rune: feed field "${name}" is not declared`);
+      const local = wFrom + index - c.base;
+      if (local < 0 || local >= c.capacity) {
+        throw new Error(`rune: T3 feed is append-only — index ${wFrom + index} is outside the window [${c.base}, ${c.base + c.capacity})`);
+      }
+      const f = local * c.stride + fieldAt >> 2;
       c.f32[f] = x;
       c.f32[f + 1] = y;
       c.f32[f + 2] = z;
@@ -1958,7 +1990,14 @@ function msgFeedFacade(state, feedOptions, forcedId) {
     },
     setVec4Bytes: (name, index, r, g, b, a) => {
       const c = core;
-      const at = msgFieldAt(c, name, wFrom + index);
+      const fieldAt = c.offsets.get(name);
+      if (fieldAt === undefined)
+        throw new Error(`rune: feed field "${name}" is not declared`);
+      const local = wFrom + index - c.base;
+      if (local < 0 || local >= c.capacity) {
+        throw new Error(`rune: T3 feed is append-only — index ${wFrom + index} is outside the window [${c.base}, ${c.base + c.capacity})`);
+      }
+      const at = local * c.stride + fieldAt;
       c.u8[at] = r;
       c.u8[at + 1] = g;
       c.u8[at + 2] = b;
@@ -2000,16 +2039,6 @@ function msgFeedFacade(state, feedOptions, forcedId) {
     },
     publishedCount: () => core.published
   };
-}
-function msgFieldAt(c, name, logicalIndex) {
-  const fieldAt = byteOffsets(c.layout).get(name);
-  if (fieldAt === undefined)
-    throw new Error(`rune: feed field "${name}" is not declared`);
-  const local = logicalIndex - c.base;
-  if (local < 0 || local >= c.capacity) {
-    throw new Error(`rune: T3 feed is append-only — index ${logicalIndex} is outside the window [${c.base}, ${c.base + c.capacity})`);
-  }
-  return local * c.stride + fieldAt;
 }
 function applyChunkBytes(entry, chunk) {
   const src = new Float32Array(chunk.bytes);
@@ -4170,11 +4199,14 @@ function readState(spec) {
   const raster = spec.pipeline?.raster;
   const blend = spec.pipeline?.blend;
   const depthOff = depth2 === false;
+  const b = blend === undefined || blend === false ? null : blend;
   return {
     depthTest: depthOff ? "always" : depth2?.test ?? "less",
     depthWrite: depthOff ? false : depth2?.write ?? true,
     cull: raster?.cull ?? "back",
-    blend: blend === undefined || blend === false ? null : { src: blend.src, dst: blend.dst, equation: blend.equation ?? "add" }
+    blend: b === null ? null : { src: b.src, dst: b.dst, equation: b.equation ?? "add" },
+    depthKey: `${depthOff ? "always" : depth2?.test ?? "less"}/${depthOff ? false : depth2?.write ?? true}`,
+    blendKey: b === null ? "off" : `${b.src}/${b.dst}/${b.equation ?? "add"}`
   };
 }
 function resolve(declared, props, frameCtx) {
@@ -4268,19 +4300,17 @@ function createExecutor(options) {
   }
   function applyState(command) {
     const state = command.state;
-    const depthKey = `${state.depthTest}/${state.depthWrite}`;
-    if (depthKey !== lastDepthTest) {
+    if (state.depthKey !== lastDepthTest) {
       gl.setDepthMode(state.depthTest, state.depthWrite);
-      lastDepthTest = depthKey;
+      lastDepthTest = state.depthKey;
     }
     if (state.cull !== lastCull) {
       gl.setCull(state.cull);
       lastCull = state.cull;
     }
-    const blendKey = state.blend === null ? "off" : `${state.blend.src}/${state.blend.dst}/${state.blend.equation}`;
-    if (blendKey !== lastBlend) {
+    if (state.blendKey !== lastBlend) {
       gl.setBlend(state.blend === null ? null : state.blend.src, state.blend === null ? null : state.blend.dst, state.blend === null ? undefined : state.blend.equation);
-      lastBlend = blendKey;
+      lastBlend = state.blendKey;
     }
   }
   function uploadUniforms(command) {
