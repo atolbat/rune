@@ -64,6 +64,17 @@ export interface WgpuCommand {
 export interface WgpuCompileContext {
   readonly arena: SliceArena
   readonly commands: WgpuCommand[]
+  /** Task 145: the pending-upload queue shared with the executor — the
+   *  mark bus that replaces the executor's O(ops) tape walk with an
+   *  O(dirty) drain. null until the executor attaches it via
+   *  activateUploadQueue(); commands compiled before activation are caught
+   *  by the seed, commands compiled after — pushed at compile (born-dirty)
+   *  and on every false→true needsUpload transition (writeUniforms). */
+  readonly pendingUploads: WgpuCommand[] | null
+  /** Activates the queue (idempotent): the first call creates it and seeds
+   *  every already-compiled command whose needsUpload is true. Returns the
+   *  live queue — the executor drains it at every run(). */
+  activateUploadQueue(): WgpuCommand[]
   /** Structural pipeline cache: (descriptor, shader, VERTEX LAYOUT) → a
    *  stable id. Task 132: the layout — the per-slot stride/offset/step —
    *  is part of the pipeline's identity on WebGPU (it is baked into the
@@ -79,9 +90,24 @@ export function createWgpuContext(arena: SliceArena): WgpuCompileContext {
   const cache: PipelineCache = createPipelineCache()
   const shaderIds = new Map<string, number>()
   let nextShaderId = 1
+  let pendingUploads: WgpuCommand[] | null = null
+  const commands: WgpuCommand[] = []
   return {
     arena,
-    commands: [],
+    commands,
+    get pendingUploads() { return pendingUploads },
+    activateUploadQueue(): WgpuCommand[] {
+      if (pendingUploads === null) {
+        pendingUploads = []
+        // the seed: every already-compiled born-dirty command (the
+        // compile-before-executor shape — the benches; the renderer creates
+        // its executor before the first compile, so its seed is empty).
+        for (const command of commands) {
+          if ((command as RichCommand).needsUpload) pendingUploads.push(command)
+        }
+      }
+      return pendingUploads
+    },
     pipelineOf(desc: GpuPipelineDesc | undefined, wgsl: string, layoutKey?: string): number {
       let shaderId = shaderIds.get(wgsl)
       if (shaderId === undefined) {
@@ -145,7 +171,7 @@ export function compileWgslSpec(spec: WgpuDrawSpec, ctx: WgpuCompileContext): Wg
     lastProps: undefined,
     record(props: unknown, frameCtx: { time: number; dt: number; aspect: number }, writer: TapeWriter): void {
       command.lastProps = props
-      writeUniforms(command as RichCommand, ctx.arena, spec, props, frameCtx)
+      writeUniforms(command as RichCommand, ctx.arena, spec, props, frameCtx, ctx.pendingUploads)
       const count = resolveNumber(spec.count, props, frameCtx)
       const instances = spec.instances === undefined ? 1 : resolveNumber(spec.instances, props, frameCtx)
       writer.emit(OpCode.Draw, id, 0, count, instances)
@@ -153,6 +179,10 @@ export function compileWgslSpec(spec: WgpuDrawSpec, ctx: WgpuCompileContext): Wg
   } as RichCommand
 
   ctx.commands.push(command)
+  // Task 145: born-dirty registration on the queue (it exists only after the
+  // executor activated it — the renderer compiles lazily, after activation).
+  const queue = ctx.pendingUploads
+  if (queue !== null) queue.push(command)
   return command
 }
 
@@ -223,34 +253,64 @@ function boundTextures(reflection: WgslReflection, spec: WgpuDrawSpec): number[]
   return ids
 }
 
-/** Writes uniforms into the slice with comparison; any change = dirty slice. */
+/** Writes uniforms into the slice with comparison; any change = dirty slice.
+ *  Task 145: the field walk is INDEXED with hoisted uniforms/floats/lanes and
+ *  resolve INLINED (the Task-142/143 lesson: JSC keeps the small out-of-line
+ *  call out-of-line; per-field resolve cost a call per field per frame). The
+ *  semantics are bit-identical to the resolve() form — the spec.uniforms
+ *  record reference is captured once per write and the field values are
+ *  still read live from it (functions re-invoked, signals re-peeked, an
+ *  in-place-mutated array re-read every frame). The false→true needsUpload
+ *  transition pushes onto the pending queue (the executor's O(dirty)
+ *  upload drain); queue === null — the legacy O(ops) walk executor. */
 function writeUniforms(
   command: RichCommand,
   arena: SliceArena,
   spec: WgpuDrawSpec,
   props: unknown,
   frameCtx: { time: number; dt: number; aspect: number },
+  queue: WgpuCommand[] | null,
 ): void {
-  for (const field of command.fields) {
-    const declared = spec.uniforms?.[field.name]
+  const fields = command.fields
+  const uniforms = spec.uniforms
+  if (uniforms === undefined) return
+  const floats = arena.floats
+  const sliceOffset = command.sliceOffset
+  const fieldCount = fields.length
+  for (let f = 0; f < fieldCount; f++) {
+    const field = fields[f]
+    const declared = uniforms[field.name]
     if (declared === undefined) continue
-    const value = resolve(declared, props, frameCtx)
-    if (value === undefined) continue
+    // resolve inlined: function → call, signal → peek, else — the value.
+    // (a `const` value: the `typeof value === 'number'` alias below must
+    // narrow through it — with a `let` TS drops the aliased-condition
+    // narrowing and the lane write stops type-checking)
+    let resolved: unknown
+    if (typeof declared === 'function') resolved = (declared as (p: unknown, c: unknown) => unknown)(props, frameCtx)
+    else if (typeof declared === 'object' && declared !== null && 'peek' in declared) {
+      resolved = (declared as ReadableSignal<unknown>).peek()
+    } else resolved = declared
+    if (resolved === undefined) continue
+    const value: unknown = resolved
     // A scalar f32 is also a valid value (parity with the GL arena: write
     // accepts number and ArrayLike). The scalar path reads the number
     // directly — no [value] array allocation per field per frame.
     const scalar = typeof value === 'number'
     const numbers: ArrayLike<number> = scalar ? EMPTY : (value as ArrayLike<number>)
-    const base = (command.sliceOffset + field.offset) / 4
+    const base = (sliceOffset + field.offset) / 4
+    const lanes = field.size / 4
     let changed = false
-    for (let at = 0; at < field.size / 4; at++) {
+    for (let at = 0; at < lanes; at++) {
       const next = scalar ? (at === 0 ? value : 0) : (numbers[at] ?? 0)
-      if (Math.fround(next) !== arena.floats[base + at]) {
-        arena.floats[base + at] = next
+      if (Math.fround(next) !== floats[base + at]) {
+        floats[base + at] = next
         changed = true
       }
     }
-    if (changed) command.needsUpload = true
+    if (changed && queue !== null && !command.needsUpload) {
+      command.needsUpload = true
+      queue.push(command)
+    } else if (changed) command.needsUpload = true
   }
 }
 

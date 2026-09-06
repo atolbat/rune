@@ -73,7 +73,7 @@ function measureTape(gpu: GPUFacade, repeats: number): number {
   const ctx = createWgpuContext(arena)
   const commands: WgpuCommand[] = []
   for (let i = 0; i < DRAWS; i++) commands.push(compileWgslSpec(makeSpec(), ctx))
-  const executor = createGpuExecutor({ gpu, arena, commands: ctx.commands, clears: [] })
+  const executor = createGpuExecutor({ gpu, arena, commands: ctx.commands, clears: [], context: ctx })
   const writer = createTapeWriter(DRAWS + 4)
 
   return bestOf(repeats, () => {

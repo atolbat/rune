@@ -172,14 +172,26 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
   const writer = createTapeWriter(64)
   const arena: SliceArena = createSliceArena(1 << 16)
   const wgslCtx: WgpuCompileContext = createWgpuContext(arena)
-  // the executor holds THE SAME reference to the command array: compileWgslSpec appends to it
-  const executor: GpuTapeExecutor = createGpuExecutor({ gpu, arena, commands: wgslCtx.commands, clears: [] })
+  // the executor holds THE SAME reference to the command array: compileWgslSpec appends to it.
+  // Task 145: context wiring — the O(dirty) pending-upload queue (the
+  // writeUniforms mark bus replaces the per-frame O(ops) tape walk).
+  const executor: GpuTapeExecutor = createGpuExecutor({ gpu, arena, commands: wgslCtx.commands, clears: [], context: wgslCtx })
   const [initW, initH] = getCanvasCssSize(canvas)
   const size = signal<readonly [number, number]>([initW, initH])
   const aspect = derive(() => size.value[0] / size.value[1])
   const time = signal(0)
   const frameCtx: GpuFrameContext = { time: 0, dt: 0, aspect: 1, size: [1, 1] }
   const callbacks: GpuFrameCallback[] = []
+  // Task 145: the version-guarded callbacks snapshot — step() used to
+  // allocate a fresh [...callbacks] EVERY frame (the mutation-during-
+  // iteration guard); frame()/cancel() bump the version and the snapshot
+  // is rebuilt only when the callback SET actually changed (init/teardown —
+  // rare). Mid-iteration frame()/cancel() keep the old V0 semantics: the
+  // current frame iterates the snapshot it started with, the change lands
+  // next frame.
+  let callbacksVersion = 0
+  let snapshotVersion = -1
+  let callbacksSnapshot: GpuFrameCallback[] = []
   const startedAt = (options.now ?? defaultNow)()
   let lastNow = startedAt
   let running = false
@@ -203,7 +215,13 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
 
   function frame(callback: GpuFrameCallback): { cancel(): void } {
     callbacks.push(callback)
-    return { cancel: () => removeItem(callbacks, callback) }
+    callbacksVersion++
+    return {
+      cancel: () => {
+        removeItem(callbacks, callback)
+        callbacksVersion++
+      },
+    }
   }
 
   function command(spec: WgpuDrawSpec): WgpuCommand {
@@ -319,7 +337,11 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
         time.value = frameCtx.time
         writer.reset()
         writer.emit(OpCode.BeginPass, 0, 0, 0, 0)
-        for (const callback of [...callbacks]) callback(frameCtx, recordIntoWriter)
+        if (snapshotVersion !== callbacksVersion) {
+          callbacksSnapshot = [...callbacks]
+          snapshotVersion = callbacksVersion
+        }
+        for (const callback of callbacksSnapshot) callback(frameCtx, recordIntoWriter)
         writer.emit(OpCode.EndPass, 0, 0, 0, 0)
         executor.run(writerView(writer)) // tapes: the same path as WebGL2
         uploads.drain() // idle slot: streaming after the frame

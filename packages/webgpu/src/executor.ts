@@ -6,6 +6,7 @@
 
 import type { TapeView } from '@rune/core'
 import type { WgpuCommand } from './command.ts'
+import type { WgpuCompileContext } from './command.ts'
 import type { SliceArena } from './sliceArena.ts'
 import type { GPUFacade } from './facade.ts'
 import type { GpuPipelineDesc } from './pipeline/pipelineCache.ts'
@@ -15,6 +16,11 @@ export interface GpuExecutorOptions {
   readonly arena: SliceArena
   readonly commands: readonly WgpuCommand[]
   readonly clears: ReadonlyArray<{ readonly color: readonly [number, number, number, number]; readonly depth: number | null }>
+  /** Task 145: the compile context — activating it switches the upload pass
+   *  from the legacy O(ops) tape walk to the O(dirty) pending-upload queue
+   *  (the mark bus shared with writeUniforms). Absent — the legacy walk
+   *  (backward compatible: every executor built before Task 145). */
+  readonly context?: WgpuCompileContext
 }
 
 export interface GpuTapeExecutor {
@@ -25,6 +31,10 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
   const gpu = options.gpu
   const arena = options.arena
   const commands = options.commands
+  // Task 145: the O(dirty) upload queue — activated by passing the compile
+  // context; commands mark themselves onto it (writeUniforms false→true
+  // transitions + born-dirty pushes at compile).
+  const queue = options.context !== undefined ? options.context.activateUploadQueue() : null
 
   function run(view: TapeView): void {
     uploadDirtySlices(view)
@@ -38,8 +48,32 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
     gpu.submit()
   }
 
-  /** First pass: dirty slices into the UBO before the pass opens. */
+  /** First pass: dirty slices into the UBO before the pass opens.
+   *  Task 145: with the queue attached — an O(dirty) drain in mark order
+   *  (each command's slice is DISJOINT, so inter-command order cannot
+   *  change what lands on the GPU; for well-formed frame flows mark order
+   *  === tape order — pinned by the task145 parity test). Without the
+   *  queue — the legacy O(ops) walk, verbatim. */
   function uploadDirtySlices(view: TapeView): void {
+    if (queue !== null) {
+      for (let at = 0; at < queue.length; at++) {
+        const command = queue[at] as RichWgpuCommand | undefined
+        if (command === undefined || !command.needsUpload) continue
+        // Upload — the actual uniform bytes (without the slice's trailing padding
+        // up to dynamic-offset granularity): writeBuffer allows a multiple-of-4
+        // size, the shader reads exactly as much as declared in the struct.
+        // The subarray view is cached on the command (the slice window is
+        // constant per command — no per-frame view allocation).
+        if (command.sliceView === undefined) {
+          const bytes = Math.min(command.uniformBytes ?? command.sliceBytes, command.sliceBytes)
+          command.sliceView = arena.bytes.subarray(command.sliceOffset, command.sliceOffset + bytes)
+        }
+        gpu.uploadUniforms(command.sliceOffset, command.sliceView)
+        command.needsUpload = false
+      }
+      queue.length = 0
+      return
+    }
     for (let at = 0; at < view.count; at++) {
       if (view.op[at] !== 2) continue
       const command = commands[view.a[at]] as RichWgpuCommand | undefined
@@ -92,7 +126,10 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
       if (attribute.bufferId !== undefined) gpu.bindExternalVertexBuffer(slot, attribute.bufferId)
       else gpu.bindVertexBuffer(slot, attribute.data, attribute.size)
     }
-    for (const textureId of command.textureIds) gpu.bindTexture(textureId)
+    // Task 145: indexed walk (no iterator protocol per draw; JSC usually
+    // inlines array for..of, but the indexed form is guaranteed).
+    const textureIds = command.textureIds
+    for (let t = 0; t < textureIds.length; t++) gpu.bindTexture(textureIds[t])
     gpu.draw(count, instances)
   }
 

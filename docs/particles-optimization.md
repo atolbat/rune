@@ -895,3 +895,89 @@ typecheck 6 (pre-existing, identical), lint 0 errors / 374 warnings
 (baseline), build OK, demo:smoke 24/24, task134/137/138 vfx-probes
 PASS, the raw-device battery 4/4 PASS (bit-exact hashes), demo-shots
 ALL ALIVE (gpuEmbers 11 254 particles), ?v=145.
+
+### Task 145 — the WebGPU deep pass: the O(dirty) upload queue (an algorithmic-class change)
+
+The survey: all 16 WebGPU source files read; CPU profiles of the three
+benches (interval 100 µs) named the frame-path targets — the executor's
+`uploadDirtySlices` walked the WHOLE tape every frame (O(ops) to find
+~O(dirty) commands: a 1000-draw frame paid 1002 iterations to upload 1
+slice), `writeUniforms` paid an out-of-line `resolve()` call + an
+optional-chain property read PER FIELD PER FRAME (the Task-142/143
+lesson), realGPU's per-draw lookups were Map.gets (pipelines, the
+per-record variants Map, textures — all DENSE integer id spaces), and
+the renderer's step() allocated a fresh `[...callbacks]` array every
+frame.
+
+THE CHANGES (all call-log/bit-identical on well-formed flows, sandbox
+parity-gated first):
+
+1. **The pending-upload queue** (`command.ts` + `executor.ts` + the
+   renderer wiring) — the compile context grows a shared mark bus:
+   `writeUniforms` pushes the command on its false→true `needsUpload`
+   transition, `compileWgslSpec` pushes born-dirty compiles, and the
+   executor (given the context) drains O(dirty) entries per frame
+   instead of walking the tape. Upload order: mark order === tape
+   order for well-formed frame flows (each command's slice is disjoint,
+   so inter-command order cannot change what lands on the GPU) —
+   pinned by a randomized call-log parity test. The legacy O(ops) walk
+   survives verbatim for executors built without the context
+   (backward compatible). The ONE documented divergence: an aborted
+   frame (records emitted, run() never called — a frame-callback
+   exception) leaves a stale entry that the next drain uploads with the
+   arena's CURRENT bytes — one extra `uploadUniforms` call the walk
+   would not make, convergent (the GPU slice ends up identical).
+2. **writeUniforms inlined** — indexed field walk, hoisted
+   `uniforms`/`floats`/`lanes`/`sliceOffset`, `resolve()` inlined.
+   The semantics are bit-identical: the spec.uniforms record reference
+   is captured once per write, the VALUES are still read live
+   (functions re-invoked, signals re-peeked, in-place-mutated arrays
+   re-read).
+3. **realGPU dense-id registries** — `pipelines` and `textures` Maps →
+   arrays indexed by the dense ids (1..N); the per-record
+   `variants: Map<'float'|'unfilterable-float', pipeline>` → two
+   nullable fields; `resolveTexture` skips the guaranteed-miss
+   `textureViews` lookup for plain texture ids (the namespaces are
+   disjoint BY DOCUMENT: texture ids from 1, sub-view ids from 1M).
+   The per-draw `usePipeline` lookup: 21.7 ns → 2.8 ns in the sandbox.
+4. **The renderer's callbacks snapshot** — version-guarded
+   (`frame()`/`cancel()` bump it, the snapshot rebuilds only when the
+   callback SET changed — init/teardown, not every frame). Mid-frame
+   `frame()`/`cancel()` keep the old semantics (the change lands next
+   frame).
+
+The A/B (interleaved stash-flip, median of 3 rounds):
+
+| Metric | HEAD | tree | delta |
+|---|---:|---:|---|
+| theoryE stock bench (1000 draws, 60-warmup) | 0.034 ms | 0.013 ms | **−62%** |
+| theoryE with a 300-iteration warmup (tiering controlled) | 0.013 ms | 0.010 ms | **−23%** |
+| theoryD string keys (control, untouched path) | 0.225 ms | 0.227 ms | ±0% |
+| framePath tape (stock) | 0.086–0.144 ms | 0.070–0.124 ms | inside the IQR overlap (±25% run noise, the documented flake class) |
+
+The theoryE −62%/−23% split is the Task-144 lesson applied to the
+measurement itself: the stock 60-warmup bench under-reports the tier-up
+of the smaller loop; the deep-warmup run is the honest number (the
+walk's ~2–3 µs per 1000-op frame plus its tiering interplay). The
+sandbox micro for the walk alone: 2.14 µs → 0.00 µs at 0 dirty, −92%
+at 13 dirty, −7% in the pathological all-dirty-every-frame shape (the
+mark-push overhead) — the dominant real shapes (static uniforms, a
+handful of animated ones) are the 90–100% class.
+
+The verification: 1679 tests + 13 new (the queue-vs-walk call-log
+parity over randomized multi-frame flows, the born-dirty seeding both
+compile orders, the 100-record dedup, the steady-state suppression,
+the live in-place array mutation re-dirty, the aborted-frame
+convergence, the no-queue-growth drain loop, the writeUniforms lane
+pins — scalar/short-array/fround/function/signal/missing-field),
+typecheck 6 (pre-existing, identical), lint 0 errors / 374 warnings
+(baseline), build OK (rune.esm 491.4 KiB), demo:smoke 24/24 GPU-health
+clean, task134-vfx-probe PASS (sort+cull live gate, 12 799 → 13 912),
+task137 drops 0 across all legs (the B2 warmth leg is the documented
+settle-race flake — reproduced at HEAD in the same session, stash-
+flipped), task138 PASS (rerun; the first run hit the documented
+count-threshold flake), the raw-device battery 4/4 PASS (bit-exact
+hashes), demo-shots: every measured vfx row ALIVE with motion (the
+browser's GPU process dies under the screenshot workload on this
+container — reproduced at HEAD with 16 rows vs the tree's 21–24 rows:
+environmental, not a regression). ?v=146.

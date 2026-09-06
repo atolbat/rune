@@ -39,7 +39,7 @@ function measure(repeats: number): number {
   const ctx = createWgpuContext(arena)
   const command = compileWgslSpec(makeSpec(), ctx)
   const gpu = createCountingGPU()
-  const executor = createGpuExecutor({ gpu, arena, commands: ctx.commands, clears: [] })
+  const executor = createGpuExecutor({ gpu, arena, commands: ctx.commands, clears: [], context: ctx })
 
   const writer = createTapeWriter(DRAWS + 4)
   writer.emit(OpCode.BeginPass, 0, 0, 0, 0)

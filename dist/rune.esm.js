@@ -8755,9 +8755,24 @@ function createWgpuContext(arena) {
   const cache = createPipelineCache();
   const shaderIds = new Map;
   let nextShaderId = 1;
+  let pendingUploads = null;
+  const commands = [];
   return {
     arena,
-    commands: [],
+    commands,
+    get pendingUploads() {
+      return pendingUploads;
+    },
+    activateUploadQueue() {
+      if (pendingUploads === null) {
+        pendingUploads = [];
+        for (const command of commands) {
+          if (command.needsUpload)
+            pendingUploads.push(command);
+        }
+      }
+      return pendingUploads;
+    },
     pipelineOf(desc, wgsl, layoutKey) {
       let shaderId = shaderIds.get(wgsl);
       if (shaderId === undefined) {
@@ -8801,13 +8816,16 @@ function compileWgslSpec(spec, ctx) {
     lastProps: undefined,
     record(props, frameCtx, writer) {
       command.lastProps = props;
-      writeUniforms(command, ctx.arena, spec, props, frameCtx);
+      writeUniforms(command, ctx.arena, spec, props, frameCtx, ctx.pendingUploads);
       const count = resolveNumber2(spec.count, props, frameCtx);
       const instances = spec.instances === undefined ? 1 : resolveNumber2(spec.instances, props, frameCtx);
       writer.emit(OpCode.Draw, id, 0, count, instances);
     }
   };
   ctx.commands.push(command);
+  const queue = ctx.pendingUploads;
+  if (queue !== null)
+    queue.push(command);
   return command;
 }
 function shapeOf(type) {
@@ -8863,26 +8881,45 @@ function boundTextures(reflection, spec) {
   }
   return ids;
 }
-function writeUniforms(command, arena, spec, props, frameCtx) {
-  for (const field of command.fields) {
-    const declared = spec.uniforms?.[field.name];
+function writeUniforms(command, arena, spec, props, frameCtx, queue) {
+  const fields = command.fields;
+  const uniforms = spec.uniforms;
+  if (uniforms === undefined)
+    return;
+  const floats = arena.floats;
+  const sliceOffset = command.sliceOffset;
+  const fieldCount = fields.length;
+  for (let f = 0;f < fieldCount; f++) {
+    const field = fields[f];
+    const declared = uniforms[field.name];
     if (declared === undefined)
       continue;
-    const value = resolve2(declared, props, frameCtx);
-    if (value === undefined)
+    let resolved;
+    if (typeof declared === "function")
+      resolved = declared(props, frameCtx);
+    else if (typeof declared === "object" && declared !== null && "peek" in declared) {
+      resolved = declared.peek();
+    } else
+      resolved = declared;
+    if (resolved === undefined)
       continue;
+    const value = resolved;
     const scalar = typeof value === "number";
     const numbers = scalar ? EMPTY : value;
-    const base = (command.sliceOffset + field.offset) / 4;
+    const base = (sliceOffset + field.offset) / 4;
+    const lanes = field.size / 4;
     let changed = false;
-    for (let at = 0;at < field.size / 4; at++) {
+    for (let at = 0;at < lanes; at++) {
       const next = scalar ? at === 0 ? value : 0 : numbers[at] ?? 0;
-      if (Math.fround(next) !== arena.floats[base + at]) {
-        arena.floats[base + at] = next;
+      if (Math.fround(next) !== floats[base + at]) {
+        floats[base + at] = next;
         changed = true;
       }
     }
-    if (changed)
+    if (changed && queue !== null && !command.needsUpload) {
+      command.needsUpload = true;
+      queue.push(command);
+    } else if (changed)
       command.needsUpload = true;
   }
 }
@@ -8892,6 +8929,7 @@ function createGpuExecutor(options) {
   const gpu = options.gpu;
   const arena = options.arena;
   const commands = options.commands;
+  const queue = options.context !== undefined ? options.context.activateUploadQueue() : null;
   function run(view) {
     uploadDirtySlices(view);
     for (let at = 0;at < view.count; at++) {
@@ -8908,6 +8946,21 @@ function createGpuExecutor(options) {
     gpu.submit();
   }
   function uploadDirtySlices(view) {
+    if (queue !== null) {
+      for (let at = 0;at < queue.length; at++) {
+        const command = queue[at];
+        if (command === undefined || !command.needsUpload)
+          continue;
+        if (command.sliceView === undefined) {
+          const bytes = Math.min(command.uniformBytes ?? command.sliceBytes, command.sliceBytes);
+          command.sliceView = arena.bytes.subarray(command.sliceOffset, command.sliceOffset + bytes);
+        }
+        gpu.uploadUniforms(command.sliceOffset, command.sliceView);
+        command.needsUpload = false;
+      }
+      queue.length = 0;
+      return;
+    }
     for (let at = 0;at < view.count; at++) {
       if (view.op[at] !== 2)
         continue;
@@ -8942,8 +8995,9 @@ function createGpuExecutor(options) {
       else
         gpu.bindVertexBuffer(slot, attribute.data, attribute.size);
     }
-    for (const textureId of command.textureIds)
-      gpu.bindTexture(textureId);
+    const textureIds = command.textureIds;
+    for (let t = 0;t < textureIds.length; t++)
+      gpu.bindTexture(textureIds[t]);
     gpu.draw(count, instances);
   }
   return { run };
@@ -9196,9 +9250,9 @@ async function createRealGPU(canvas, onGpuError) {
     throw new Error("rune: webgpu canvas context unavailable");
   const gpuContext = context;
   const format = navigator.gpu.getPreferredCanvasFormat();
-  const textures = new Map;
+  const textureRecords = [undefined];
   const textureViews = new Map;
-  const pipelines = new Map;
+  const pipelineRecords = [undefined];
   const vertexBuffers = new Map;
   const textureBindGroups = new Map;
   const targets = new Map;
@@ -9281,11 +9335,11 @@ async function createRealGPU(canvas, onGpuError) {
       ...appliedAniso > 1 ? { maxAnisotropy: appliedAniso } : {}
     });
     const id = nextTextureId++;
-    textures.set(id, { texture, sampler, view: texture.createView(), format: gpuFormat, filterable });
+    textureRecords[id] = { texture, sampler, view: texture.createView(), format: gpuFormat, filterable };
     return id;
   }
   function texSubImage2D(textureId, x, y, w, h, bytes) {
-    const record = textures.get(textureId);
+    const record = textureRecords[textureId];
     if (record === undefined)
       return;
     const bytesPerPixel2 = record.format === "rgba16float" ? 8 : record.format === "rgba32float" ? 16 : 4;
@@ -9301,13 +9355,13 @@ async function createRealGPU(canvas, onGpuError) {
     device.queue.writeTexture({ texture: record.texture, origin: { x, y, z: 0 } }, data, { bytesPerRow: alignedRow, rowsPerImage: h }, { width: w, height: h, depthOrArrayLayers: 1 });
   }
   function copyExternalImageToTexture(textureId, source, dstX, dstY, copyWidth, copyHeight, flipY) {
-    const record = textures.get(textureId);
+    const record = textureRecords[textureId];
     if (record === undefined)
       return;
     device.queue.copyExternalImageToTexture({ source, flipY: flipY === true }, { texture: record.texture, mipLevel: 0, origin: { x: dstX, y: dstY, z: 0 }, premultipliedAlpha: false }, { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 });
   }
   function copyExternalImageToTextureMip(textureId, mipLevel, source, dstX, dstY, copyWidth, copyHeight, flipY) {
-    const record = textures.get(textureId);
+    const record = textureRecords[textureId];
     if (record === undefined)
       return;
     device.queue.copyExternalImageToTexture({ source, flipY: flipY === true }, { texture: record.texture, mipLevel, origin: { x: dstX, y: dstY, z: 0 }, premultipliedAlpha: false }, { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 });
@@ -9339,7 +9393,7 @@ async function createRealGPU(canvas, onGpuError) {
       uboSize = size;
       uboGroup = null;
       currentPipeline = null;
-      pipelines.clear();
+      pipelineRecords.length = 0;
     }
     const layout = device.createBindGroupLayout({
       entries: [{
@@ -9354,7 +9408,7 @@ async function createRealGPU(canvas, onGpuError) {
     });
   }
   function ensurePipeline(pipelineId, wgsl, attrs, hasTextures, desc) {
-    if (pipelines.has(pipelineId))
+    if (pipelineRecords[pipelineId] !== undefined)
       return;
     const record = {
       wgsl,
@@ -9363,10 +9417,11 @@ async function createRealGPU(canvas, onGpuError) {
       textureBindings: hasTextures ? group1TextureBindings(wgsl) : [],
       textureCount: hasTextures ? countGroup1TextureBindings(wgsl) : 0,
       desc: desc ?? {},
-      variants: new Map
+      variantFloat: null,
+      variantUnfilterable: null
     };
-    pipelines.set(pipelineId, record);
-    record.variants.set("float", buildPipeline(record, "float"));
+    pipelineRecords[pipelineId] = record;
+    record.variantFloat = buildPipeline(record, "float");
   }
   function buildPipeline(record, variant) {
     const wgsl = record.wgsl;
@@ -9470,7 +9525,7 @@ async function createRealGPU(canvas, onGpuError) {
     return "float32";
   }
   function usePipeline(pipelineId) {
-    const record = pipelines.get(pipelineId);
+    const record = pipelineRecords[pipelineId];
     if (record === undefined)
       return;
     currentPipelineId = pipelineId;
@@ -9478,10 +9533,13 @@ async function createRealGPU(canvas, onGpuError) {
     setPipelineVariant(record, "float");
   }
   function setPipelineVariant(record, variant) {
-    let pipeline = record.variants.get(variant);
-    if (pipeline === undefined) {
+    let pipeline = variant === "float" ? record.variantFloat : record.variantUnfilterable;
+    if (pipeline === null) {
       pipeline = buildPipeline(record, variant);
-      record.variants.set(variant, pipeline);
+      if (variant === "float")
+        record.variantFloat = pipeline;
+      else
+        record.variantUnfilterable = pipeline;
     }
     if (pipeline === currentPipeline)
       return;
@@ -9547,13 +9605,13 @@ async function createRealGPU(canvas, onGpuError) {
       pendingTextureIds.push(textureOrViewId);
   }
   function pipelineOfTexture() {
-    return currentPipelineId >= 0 ? pipelines.get(currentPipelineId) : undefined;
+    return currentPipelineId >= 0 ? pipelineRecords[currentPipelineId] : undefined;
   }
   const resolveScratch = { view: null, sampler: null, filterable: false };
   function resolveTexture(textureOrViewId) {
-    const subView = textureViews.get(textureOrViewId);
+    const subView = textureOrViewId >= SUB_VIEW_ID_BASE ? textureViews.get(textureOrViewId) : undefined;
     if (subView !== undefined) {
-      const record2 = textures.get(subView.textureId);
+      const record2 = textureRecords[subView.textureId];
       if (record2 === undefined)
         return;
       resolveScratch.view = subView.view;
@@ -9561,7 +9619,7 @@ async function createRealGPU(canvas, onGpuError) {
       resolveScratch.filterable = record2.filterable;
       return resolveScratch;
     }
-    const record = textures.get(textureOrViewId);
+    const record = textureRecords[textureOrViewId];
     if (record === undefined)
       return;
     resolveScratch.view = record.view;
@@ -9649,7 +9707,7 @@ async function createRealGPU(canvas, onGpuError) {
     canvasDepthClear = depth2 ?? 1;
   }
   function createTarget(textureId, targetWidth, targetHeight, depth2, color) {
-    const record = textures.get(textureId);
+    const record = textureRecords[textureId];
     if (record === undefined)
       throw new Error(`rune: createTarget — texture ${textureId} not found`);
     let targetDepthView = null;
@@ -9741,7 +9799,7 @@ async function createRealGPU(canvas, onGpuError) {
         reject(new Error(`rune: readTargetPixels — target ${targetId} not found (deleted or never created)`));
         return;
       }
-      const record = textures.get(target.textureId);
+      const record = textureRecords[target.textureId];
       if (record === undefined) {
         reject(new Error(`rune: readTargetPixels — texture ${target.textureId} of target ${targetId} not found`));
         return;
@@ -9804,7 +9862,7 @@ async function createRealGPU(canvas, onGpuError) {
     });
   }
   function deleteTexture(textureId) {
-    const record = textures.get(textureId);
+    const record = textureRecords[textureId];
     if (record === undefined)
       return;
     if (flushMemoBox !== null && flushMemoBox.ids.includes(textureId))
@@ -9822,7 +9880,7 @@ async function createRealGPU(canvas, onGpuError) {
       }
     }
     record.texture.destroy();
-    textures.delete(textureId);
+    textureRecords[textureId] = undefined;
   }
   function invalidateTextureViewBindGroups(viewId) {
     if (flushMemoBox !== null && flushMemoBox.ids.includes(viewId))
@@ -9835,7 +9893,7 @@ async function createRealGPU(canvas, onGpuError) {
     }
   }
   function createTextureView(textureId, options) {
-    const record = textures.get(textureId);
+    const record = textureRecords[textureId];
     if (record === undefined) {
       throw new Error(`rune: createTextureView — texture ${textureId} not found`);
     }
@@ -9876,10 +9934,11 @@ async function createRealGPU(canvas, onGpuError) {
       return;
     facadeDisposed = true;
     timerHandle = null;
-    for (const record of textures.values()) {
-      record.texture.destroy();
+    for (const record of textureRecords) {
+      if (record !== undefined)
+        record.texture.destroy();
     }
-    textures.clear();
+    textureRecords.length = 0;
     textureBindGroups.clear();
     textureViews.clear();
     depthTexture?.destroy();
@@ -9898,7 +9957,7 @@ async function createRealGPU(canvas, onGpuError) {
       buf.destroy();
     }
     vertexBuffers.clear();
-    pipelines.clear();
+    pipelineRecords.length = 0;
     encoder = null;
     pass = null;
     currentPipeline = null;
@@ -10108,6 +10167,7 @@ async function createRealGPU(canvas, onGpuError) {
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
+var SUB_VIEW_ID_BASE = 1e6;
 function countGroup1TextureBindings(wgsl) {
   let count = 0;
   for (const _match of wgsl.matchAll(/@group\(1\)[^\n;]*var\s+\w+\s*:\s*texture_2d/g))
@@ -10920,13 +10980,16 @@ async function createWebGpuRenderer(options) {
   const writer = createTapeWriter(64);
   const arena = createSliceArena(1 << 16);
   const wgslCtx = createWgpuContext(arena);
-  const executor = createGpuExecutor({ gpu, arena, commands: wgslCtx.commands, clears: [] });
+  const executor = createGpuExecutor({ gpu, arena, commands: wgslCtx.commands, clears: [], context: wgslCtx });
   const [initW, initH] = getCanvasCssSize(canvas);
   const size = signal([initW, initH]);
   const aspect = derive(() => size.value[0] / size.value[1]);
   const time = signal(0);
   const frameCtx = { time: 0, dt: 0, aspect: 1, size: [1, 1] };
   const callbacks = [];
+  let callbacksVersion = 0;
+  let snapshotVersion = -1;
+  let callbacksSnapshot = [];
   const startedAt = (options.now ?? defaultNow2)();
   let lastNow = startedAt;
   let running = false;
@@ -10943,7 +11006,13 @@ async function createWebGpuRenderer(options) {
   let disposed = false;
   function frame(callback) {
     callbacks.push(callback);
-    return { cancel: () => removeItem2(callbacks, callback) };
+    callbacksVersion++;
+    return {
+      cancel: () => {
+        removeItem2(callbacks, callback);
+        callbacksVersion++;
+      }
+    };
   }
   function command(spec) {
     return compileWgslSpec(spec, wgslCtx);
@@ -11041,7 +11110,11 @@ async function createWebGpuRenderer(options) {
         time.value = frameCtx.time;
         writer.reset();
         writer.emit(OpCode.BeginPass, 0, 0, 0, 0);
-        for (const callback of [...callbacks])
+        if (snapshotVersion !== callbacksVersion) {
+          callbacksSnapshot = [...callbacks];
+          snapshotVersion = callbacksVersion;
+        }
+        for (const callback of callbacksSnapshot)
           callback(frameCtx, recordIntoWriter);
         writer.emit(OpCode.EndPass, 0, 0, 0, 0);
         executor.run(writerView(writer));

@@ -79,7 +79,7 @@ export async function createRealGPU(
   const gpuContext: GPUCanvasContext = context
   const format = navigator.gpu.getPreferredCanvasFormat()
 
-  const textures = new Map<number, { texture: GPUTexture; sampler: GPUSampler; view: GPUTextureView; format: GPUTextureFormat; filterable: boolean }>()
+  const textureRecords: (TextureRecord | undefined)[] = [undefined] // Task 145: dense ids from 1 — array index instead of Map.get
   const textureViews = new Map<number, { textureId: number; view: GPUTextureView }>()
   // Task 69: the pipeline is cached by SPEC + VARIANTS of the texture
   // binding's sampleType. The 'float' variant (sampler 'filtering' +
@@ -88,7 +88,7 @@ export async function createRealGPU(
   // bindTexture on the first bind of rgba32float without the
   // 'float32-filterable' feature. The pipeline layout and bind group must
   // match in sampleType — otherwise setBindGroup validation fails.
-  const pipelines = new Map<number, PipelineRecord>()
+  const pipelineRecords: (PipelineRecord | undefined)[] = [undefined] // Task 145: dense ids from 1 — array index instead of Map.get (per-draw lookup: usePipeline + pipelineOfTexture + flushTextureBindGroup)
   // Vertex buffers: keyed by Float32Array (usually one command = one spec =
   // one data). If the user dropped the reference to data — the GPUBuffer
   // leaks, but only for the whole renderer session. dispose() cleans
@@ -254,12 +254,12 @@ export async function createRealGPU(
       ...(appliedAniso > 1 ? { maxAnisotropy: appliedAniso } : {}),
     })
     const id = nextTextureId++
-    textures.set(id, { texture, sampler, view: texture.createView(), format: gpuFormat, filterable })
+    textureRecords[id] = { texture, sampler, view: texture.createView(), format: gpuFormat, filterable }
     return id
   }
 
   function texSubImage2D(textureId: number, x: number, y: number, w: number, h: number, bytes: Uint8Array): void {
-    const record = textures.get(textureId)
+    const record = textureRecords[textureId]
     if (record === undefined) return
     // Task 67 HDR: bytesPerRow depends on the format (rgba16float — 8 B/pixel,
     // rgba32float — 16). The caller prepares the data: the bytes length must
@@ -297,7 +297,7 @@ export async function createRealGPU(
     copyHeight: number,
     flipY?: boolean,
   ): void {
-    const record = textures.get(textureId)
+    const record = textureRecords[textureId]
     if (record === undefined) return
     // WebGPU ExternalImageCopy — source: ImageBitmap | HTMLcanvasElement | HTMLVideoElement | VideoFrame | OffscreenCanvas
     // destination.origin = where in the texture to write (mip 0 by default).
@@ -337,7 +337,7 @@ export async function createRealGPU(
     copyHeight: number,
     flipY?: boolean,
   ): void {
-    const record = textures.get(textureId)
+    const record = textureRecords[textureId]
     if (record === undefined) return
     // WebGPU copyExternalImageToTexture with destination.mipLevel=level.
     // The source must have size N/(2^level). WebGPU will check it itself —
@@ -385,7 +385,7 @@ export async function createRealGPU(
       uboSize = size
       uboGroup = null
       currentPipeline = null // rebuild layout-dependent pipeline caches
-      pipelines.clear()
+      pipelineRecords.length = 0
     }
     // The shared group-0 bind group: the binding covers the window (not a
     // fixed 256 B). The BGL descriptor is byte-identical to buildPipeline's
@@ -404,8 +404,8 @@ export async function createRealGPU(
   }
 
   function ensurePipeline(pipelineId: number, wgsl: string, attrs: readonly GpuAttrSlot[], hasTextures: boolean, desc?: GpuPipelineDesc): void {
-    if (pipelines.has(pipelineId)) return
-    const record = {
+    if (pipelineRecords[pipelineId] !== undefined) return
+    const record: PipelineRecord = {
       wgsl,
       attrs,
       hasTextures,
@@ -420,12 +420,16 @@ export async function createRealGPU(
       // texture_2d declarations in group 1.
       textureCount: hasTextures ? countGroup1TextureBindings(wgsl) : 0,
       desc: desc ?? {},
-      variants: new Map<TextureSampleVariant, GPURenderPipeline>(),
+      // Task 145: the two lazy variant slots as nullable fields (a Map per
+      // record with string keys cost a hash lookup per draw; the variant set
+      // is exactly two — 'float' and 'unfilterable-float').
+      variantFloat: null,
+      variantUnfilterable: null,
     }
-    pipelines.set(pipelineId, record)
+    pipelineRecords[pipelineId] = record
     // The default 'float' variant — filterable textures (all except
     // rgba32float on devices without 'float32-filterable').
-    record.variants.set('float', buildPipeline(record, 'float'))
+    record.variantFloat = buildPipeline(record, 'float')
   }
 
   /** Task 69: build a pipeline for a specific texture binding sampleType.
@@ -565,7 +569,7 @@ export async function createRealGPU(
   }
 
   function usePipeline(pipelineId: number): void {
-    const record = pipelines.get(pipelineId)
+    const record = pipelineRecords[pipelineId]
     if (record === undefined) return
     currentPipelineId = pipelineId
     // New command — accumulated textures are reset (the bind group is
@@ -578,13 +582,14 @@ export async function createRealGPU(
 
   /** Set the pipeline variant (created lazily on first use). */
   function setPipelineVariant(
-    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; textureBindings: readonly number[]; textureCount: number; desc: GpuPipelineDesc; variants: Map<TextureSampleVariant, GPURenderPipeline> },
+    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; textureBindings: readonly number[]; textureCount: number; desc: GpuPipelineDesc; variantFloat: GPURenderPipeline | null; variantUnfilterable: GPURenderPipeline | null },
     variant: TextureSampleVariant,
   ): void {
-    let pipeline = record.variants.get(variant)
-    if (pipeline === undefined) {
+    let pipeline = variant === 'float' ? record.variantFloat : record.variantUnfilterable
+    if (pipeline === null) {
       pipeline = buildPipeline(record, variant)
-      record.variants.set(variant, pipeline)
+      if (variant === 'float') record.variantFloat = pipeline
+      else record.variantUnfilterable = pipeline
     }
     if (pipeline === currentPipeline) return
     currentPipeline = pipeline
@@ -694,7 +699,7 @@ export async function createRealGPU(
 
   /** The current pipeline record (for variant and texture count). */
   function pipelineOfTexture(): PipelineRecord | undefined {
-    return currentPipelineId >= 0 ? pipelines.get(currentPipelineId) : undefined
+    return currentPipelineId >= 0 ? pipelineRecords[currentPipelineId] : undefined
   }
 
   /** Texture/sub-view by id: view + sampler + filterability. Writes into a
@@ -702,16 +707,21 @@ export async function createRealGPU(
    *  must be consumed before the next call, never retained. */
   const resolveScratch = { view: null as GPUTextureView | null, sampler: null as GPUSampler | null, filterable: false }
   function resolveTexture(textureOrViewId: number): { view: GPUTextureView; sampler: GPUSampler; filterable: boolean } | undefined {
-    const subView = textureViews.get(textureOrViewId)
+    // Task 145: the id namespaces are DISJOINT BY DOCUMENT (texture ids grow
+    // from 1, sub-view ids from 1M) — the boundary check skips the
+    // textureViews Map lookup (a guaranteed miss) for plain texture ids,
+    // the per-bindTexture hot path. Parity with the old lookup order: a
+    // view id always resolves through textureViews, a texture id — never.
+    const subView = textureOrViewId >= SUB_VIEW_ID_BASE ? textureViews.get(textureOrViewId) : undefined
     if (subView !== undefined) {
-      const record = textures.get(subView.textureId)
+      const record = textureRecords[subView.textureId]
       if (record === undefined) return undefined
       resolveScratch.view = subView.view
       resolveScratch.sampler = record.sampler
       resolveScratch.filterable = record.filterable
       return resolveScratch as { view: GPUTextureView; sampler: GPUSampler; filterable: boolean }
     }
-    const record = textures.get(textureOrViewId)
+    const record = textureRecords[textureOrViewId]
     if (record === undefined) return undefined
     resolveScratch.view = record.view
     resolveScratch.sampler = record.sampler
@@ -823,7 +833,7 @@ export async function createRealGPU(
     depth: boolean,
     color: readonly [number, number, number, number],
   ): number {
-    const record = textures.get(textureId)
+    const record = textureRecords[textureId]
     if (record === undefined) throw new Error(`rune: createTarget — texture ${textureId} not found`)
     let targetDepthView: GPUTextureView | null = null
     let targetDepthTexture: GPUTexture | null = null
@@ -926,7 +936,7 @@ export async function createRealGPU(
         reject(new Error(`rune: readTargetPixels — target ${targetId} not found (deleted or never created)`))
         return
       }
-      const record = textures.get(target.textureId)
+      const record = textureRecords[target.textureId]
       if (record === undefined) {
         reject(new Error(`rune: readTargetPixels — texture ${target.textureId} of target ${targetId} not found`))
         return
@@ -999,7 +1009,7 @@ export async function createRealGPU(
   // Idempotency: deleting the same id again — no-op (the record is already gone from the Map).
 
   function deleteTexture(textureId: number): void {
-    const record = textures.get(textureId)
+    const record = textureRecords[textureId]
     if (record === undefined) return
     // Invalidate bind groups (including multi-texture compositions) that
     // involve this texture: on the next draw() the group will be recreated.
@@ -1019,7 +1029,7 @@ export async function createRealGPU(
     }
     record.texture.destroy()
     // GPUSampler has no destroy() — GC will clean it up
-    textures.delete(textureId)
+    textureRecords[textureId] = undefined
   }
 
   /** Evicts from the cache all compositions containing the sub-view (viewId). */
@@ -1037,7 +1047,7 @@ export async function createRealGPU(
     textureId: number,
     options?: { baseMipLevel?: number; mipLevelCount?: number; baseArrayLayer?: number; arrayLayerCount?: number },
   ): number {
-    const record = textures.get(textureId)
+    const record = textureRecords[textureId]
     if (record === undefined) {
       // Texture not found — WebGPU itself would throw; we would silently
       // return 0. The caller should check textureId ∈ textures, but we do
@@ -1088,10 +1098,10 @@ export async function createRealGPU(
     // 0. Remove timer hooks — writeTimestamp after dispose is pointless anyway
     timerHandle = null
     // 1. Destroy all facade textures (color + sampler needs no destroy)
-    for (const record of textures.values()) {
-      record.texture.destroy()
+    for (const record of textureRecords) {
+      if (record !== undefined) record.texture.destroy()
     }
-    textures.clear()
+    textureRecords.length = 0
     textureBindGroups.clear()
     // 1b. Clear the sub-views — GPUTextureView is freed implicitly via
     // device.destroy(), like the parent textures.
@@ -1116,8 +1126,8 @@ export async function createRealGPU(
     }
     vertexBuffers.clear()
     // 5. Pipelines: GPURenderPipeline has no destroy() — device.destroy()
-    //    will free them implicitly. Clear the Map to avoid dragging references.
-    pipelines.clear()
+    //    will free them implicitly. Clear the array to avoid dragging references.
+    pipelineRecords.length = 0
     // 6. The active pass/encoder — reset it (device.destroy() will make
     //    submit throw, but we will not get there — nobody will call submit
     //    after dispose).
@@ -1386,8 +1396,25 @@ interface PipelineRecord {
    *  mirror the shader's own numbering instead of a sequential 1..N. */
   readonly textureBindings: readonly number[]
   readonly desc: GpuPipelineDesc
-  readonly variants: Map<TextureSampleVariant, GPURenderPipeline>
+  /** Task 145: the two lazy sampleType variants as nullable fields (was a
+   *  Map<TextureSampleVariant, GPURenderPipeline> — a string-keyed hash
+   *  lookup per draw; the variant set is exactly two). */
+  variantFloat: GPURenderPipeline | null
+  variantUnfilterable: GPURenderPipeline | null
 }
+
+/** Task 145: texture registry record (the dense textureRecords array). */
+interface TextureRecord {
+  readonly texture: GPUTexture
+  readonly sampler: GPUSampler
+  readonly view: GPUTextureView
+  readonly format: GPUTextureFormat
+  readonly filterable: boolean
+}
+
+/** The sub-view id namespace base (nextTextureViewId starts here — the
+ *  textureView ids are disjoint from texture ids BY DOCUMENT). */
+const SUB_VIEW_ID_BASE = 1_000_000
 
 /** The number of group-1 texture_2d bindings in WGSL — the size of the
  *  multi-texture layout (sampler@0 + tex@1..N). Single-texture shaders
