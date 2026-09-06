@@ -842,3 +842,56 @@ task142.test.ts strictness, identical at HEAD), lint 0 errors /
 health clean, task134/137/138 vfx-probes PASS, the raw-device
 battery (glsl-emit, wgsl-emit, wgsl-sort, wgsl-sim) 4/4 PASS,
 demo-shots ALL ALIVE (gpuEmbers 11 595 particles, warm), ?v=144.
+
+### Task 144 — the WebGPU compile-path leg (the deferred item, closed)
+
+The third pass deferred the WebGPU pipelineCache join as
+"compile-time"; this leg closes it with the profile as the guide. The
+fresh CPU profiles of the three WebGPU benches named the real targets:
+`theoryD` was ~50% `pipelineCache.ts` self (the `join('|')` alone
+42%), and `framePath` was **35.2% `wgslReflect.ts`** — the WebGPU twin
+had NO reflection cache at all, and `reflectWgsl` ran `scanUniforms`
+TWICE per call (the struct parsed once for `uniforms` and again for
+`uniformBytes`), so 100 draws of one shader re-parsed the same source
+200 times.
+
+Two changes, both checksum-gated in the sandbox
+(`scripts/opt144-micro-pipeline.ts` — a 24 000-call id-sequence
+parity walk over randomized descriptors, fresh clones and unknown enum
+strings; deep-equal reflections over adversarial struct bodies):
+
+- `pipelineCache.ts` — `structuralKey` as a CONCAT chain with
+  interned-constant default branches (the array + `join('|')` and the
+  three template literals per lookup die). The string VALUE is
+  byte-identical — `join` ≡ `+` coercion for the defined
+  string/number elements — pinned by the exact-format test.
+- `wgslReflect.ts` — the single `scanUniforms` (folded into one call)
+  + the source-keyed cache (`Map<string, WgslReflection>`, limit 512,
+  stop-adding — the @rune/core `reflectWgsl` precedent) + the
+  slice-based `splitStructFields` (the per-char `current += ch` rope
+  node per character dies; the split points are ASCII).
+
+The REJECTED variant: the object-identity memo on `idOf`
+(WeakMap<desc, shaderId, layoutKey> — 18x on the theoryD stable-object
+shape in the sandbox) REGRESSED the real compile-storm shape +44%
+(fresh structurally-equal descriptors per compile — exactly what
+`compileWgslSpec` produces). Per the discipline (the real bench is
+the oracle, not the isolated loop) it stays in the sandbox only.
+
+| Etalon (interleaved stash-flip A/B, median of 3×3) | HEAD | tree | delta |
+|---|---:|---:|---|
+| compile storm, same source ×100 | 1.267 ms | 0.129 ms | **−90%** |
+| compile storm, 50 variants ×100 | 1.634 ms | 0.209 ms | **−87%** |
+| theoryD string keys (1000 idOf) | 0.431 ms | 0.228 ms | **−47%** |
+| theoryE frame (1000 draws, executor) | 0.033 ms | 0.033 ms | ±0% |
+| framePath direct / tape (stock 30-warmup) | 0.015 / 0.099 ms | 0.020 / 0.137 ms | µs-scale bimodal noise — with a 300-iteration warmup the sign INVERTS (tree 0.087 vs head 0.125): a JIT-tiering artifact of the compile phase shrinking 10x, not a code path (the timed closures call no changed code; the profile's `writeUniforms` self-time halved) |
+
+The compile-checksum (pipelineId sequences, binding/attrOrder/slice
+shapes over 150 compiles) is identical at HEAD and tree. The
+verification: 1666 tests + 6 new (the fresh-object id sharing, the
+exact structuralKey format pins, the reflection cache identity, the
+array-type splitter survival, the 512 stop-adding policy),
+typecheck 6 (pre-existing, identical), lint 0 errors / 374 warnings
+(baseline), build OK, demo:smoke 24/24, task134/137/138 vfx-probes
+PASS, the raw-device battery 4/4 PASS (bit-exact hashes), demo-shots
+ALL ALIVE (gpuEmbers 11 254 particles), ?v=145.

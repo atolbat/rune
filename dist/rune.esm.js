@@ -8514,13 +8514,22 @@ function arrayOf(type) {
     return null;
   return { elem: match[1] === "f32" ? "f32" : `${match[1]}<f32>`, count: Number(match[2]) };
 }
+var reflectionCache3 = new Map;
+var CACHE_LIMIT3 = 512;
 function reflectWgsl2(wgsl) {
-  return {
-    uniforms: scanUniforms2(wgsl),
+  const cached = reflectionCache3.get(wgsl);
+  if (cached !== undefined)
+    return cached;
+  const uniforms = scanUniforms2(wgsl);
+  const reflection = {
+    uniforms,
     attributes: [...scanAttributes2(wgsl)].sort(byLocation2),
     textures: scanTextures(wgsl),
-    uniformBytes: uniformBytes(scanUniforms2(wgsl))
+    uniformBytes: uniformBytes(uniforms)
   };
+  if (reflectionCache3.size < CACHE_LIMIT3)
+    reflectionCache3.set(wgsl, reflection);
+  return reflection;
 }
 function scanUniforms2(wgsl) {
   const varMatch = /@group\(0\)\s*@binding\(0\)\s*var<uniform>\s+(\w+)\s*:\s*(\w+)/.exec(wgsl);
@@ -8548,21 +8557,21 @@ function scanUniforms2(wgsl) {
 function splitStructFields(body) {
   const out = [];
   let depth2 = 0;
-  let current = "";
-  for (const ch of body) {
-    if (ch === "<")
+  let start = 0;
+  for (let i = 0;i < body.length; i++) {
+    const c = body.charCodeAt(i);
+    if (c === 60)
       depth2++;
-    else if (ch === ">")
+    else if (c === 62)
       depth2--;
-    if (ch === "," && depth2 === 0) {
-      out.push(current);
-      current = "";
-    } else {
-      current += ch;
+    else if (c === 44 && depth2 === 0) {
+      out.push(body.slice(start, i));
+      start = i + 1;
     }
   }
-  if (current.trim() !== "")
-    out.push(current);
+  const tail = body.slice(start);
+  if (tail.trim() !== "")
+    out.push(tail);
   return out;
 }
 function scanAttributes2(wgsl) {
@@ -8715,29 +8724,29 @@ function createPipelineCache() {
   };
 }
 function structuralKey(desc, shaderId, layoutKey) {
-  return [
-    shaderId,
-    depthKey(desc.depth),
-    blendKey(desc.blend),
-    rasterKey(desc.raster),
-    desc.primitive ?? "triangles",
-    layoutKey ?? "layout:default"
-  ].join("|");
+  return shaderId + "|" + depthKey(desc.depth) + "|" + blendKey(desc.blend) + "|" + rasterKey(desc.raster) + "|" + (desc.primitive ?? "triangles") + "|" + (layoutKey ?? "layout:default");
 }
 function depthKey(depth2) {
   if (depth2 === false)
     return "off";
-  return `${depth2?.test ?? "less"}:${depth2?.write === false ? 0 : 1}`;
+  if (depth2 === undefined)
+    return "less:1";
+  const test = depth2.test;
+  if (test === undefined || test === null)
+    return depth2.write === false ? "less:0" : "less:1";
+  return test + ":" + (depth2.write === false ? 0 : 1);
 }
 function blendKey(blend) {
   if (blend === false || blend === undefined)
     return "off";
-  return `${blend.src}/${blend.dst}/${blend.equation ?? "add"}`;
+  return blend.src + "/" + blend.dst + "/" + (blend.equation ?? "add");
 }
 function rasterKey(raster) {
   if (raster === undefined)
     return "off";
-  return `${raster.cull ?? "none"}/${raster.frontFace ?? "ccw"}`;
+  const cull = raster.cull;
+  const front = raster.frontFace;
+  return (cull === undefined || cull === null ? "none" : cull) + "/" + (front === undefined || front === null ? "ccw" : front);
 }
 // packages/webgpu/src/command.ts
 init_src();

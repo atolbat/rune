@@ -74,13 +74,29 @@ function arrayOf(type: string): { elem: string; count: number } | null {
   return { elem: match[1] === 'f32' ? 'f32' : `${match[1]}<f32>`, count: Number(match[2]) }
 }
 
+/** WGSL reflection cache: the shader source is the key, parsing happens
+ *  ONCE (the @rune/core reflectWgsl precedent). Task 144: the framePath
+ *  profile had the re-parse at 35% of the compile path — 100 draws of one
+ *  shader re-parsed the same source 100 times, TWICE per call (uniforms +
+ *  uniformBytes both scanned). The result is all-readonly and shared. */
+const reflectionCache = new Map<string, WgslReflection>()
+const CACHE_LIMIT = 512
+
+/** Reflects a WGSL source: uniforms, attributes, textures (cached; the
+ *  scanUniforms double-call of V0 folded into one — bit-identical fields,
+ *  the sandbox parity gate). */
 export function reflectWgsl(wgsl: string): WgslReflection {
-  return {
-    uniforms: scanUniforms(wgsl),
+  const cached = reflectionCache.get(wgsl)
+  if (cached !== undefined) return cached
+  const uniforms = scanUniforms(wgsl)
+  const reflection: WgslReflection = {
+    uniforms,
     attributes: [...scanAttributes(wgsl)].sort(byLocation),
     textures: scanTextures(wgsl),
-    uniformBytes: uniformBytes(scanUniforms(wgsl)),
+    uniformBytes: uniformBytes(uniforms),
   }
+  if (reflectionCache.size < CACHE_LIMIT) reflectionCache.set(wgsl, reflection)
+  return reflection
 }
 
 function scanUniforms(wgsl: string): WgslUniformInfo[] {
@@ -108,22 +124,25 @@ function scanUniforms(wgsl: string): WgslUniformInfo[] {
 }
 
 /** Struct body → field strings, split on TOP-LEVEL commas only (<> depth 0).
- *  A naive `body.split(',')` would cut `array<mat4x4<f32>, 67>` in half. */
+ *  A naive `body.split(',')` would cut `array<mat4x4<f32>, 67>` in half.
+ *  Task 144: slice-based (the V0 per-char `current += ch` built a rope node
+ *  per character; the split points are ASCII, so charCodeAt scanning is
+ *  equivalent — pinned by the task144webgpu splitter test). */
 function splitStructFields(body: string): string[] {
   const out: string[] = []
   let depth = 0
-  let current = ''
-  for (const ch of body) {
-    if (ch === '<') depth++
-    else if (ch === '>') depth--
-    if (ch === ',' && depth === 0) {
-      out.push(current)
-      current = ''
-    } else {
-      current += ch
+  let start = 0
+  for (let i = 0; i < body.length; i++) {
+    const c = body.charCodeAt(i)
+    if (c === 60) depth++ // <
+    else if (c === 62) depth-- // >
+    else if (c === 44 && depth === 0) { // ,
+      out.push(body.slice(start, i))
+      start = i + 1
     }
   }
-  if (current.trim() !== '') out.push(current)
+  const tail = body.slice(start)
+  if (tail.trim() !== '') out.push(tail)
   return out
 }
 

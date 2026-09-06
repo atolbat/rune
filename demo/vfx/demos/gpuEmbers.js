@@ -42,7 +42,7 @@
 //     cull, softwareGL } — the probe gates pin the tier + the frame cost
 //     + the hardware-policy branch; window.__vfxCounters.embers — the
 //     emission counters.
-import { createGpuParticles } from '../../../dist/rune.esm.js?v=144'
+import { createGpuParticles } from '../../../dist/rune.esm.js?v=145'
 
 // Task 140 — THE AUTO-FALLBACK CHANNEL (the real-GPU invisible-particles
 // report: "no freeze anymore, but the particles are gone while the counter

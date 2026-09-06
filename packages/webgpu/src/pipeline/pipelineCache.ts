@@ -43,31 +43,36 @@ export function createPipelineCache(): PipelineCache {
 }
 
 /** Structural key: a canonical string of descriptor fields (+ the Task 132
- *  vertex layout signature when the command declares one). */
+ *  vertex layout signature when the command declares one). Task 144: built
+ *  as a CONCAT CHAIN — the V0 `[...].join('|')` allocated an array + join
+ *  rope per lookup (join alone was 42% of the theoryD profile); the string
+ *  VALUE is byte-identical (join ≡ `+` coercion for the defined string/
+ *  number elements — pinned by the task144webgpu format test), and the
+ *  default branches return interned constants instead of fresh templates. */
 export function structuralKey(desc: GpuPipelineDesc, shaderId: number, layoutKey?: string): string {
-  return [
-    shaderId,
-    depthKey(desc.depth),
-    blendKey(desc.blend),
-    rasterKey(desc.raster),
-    desc.primitive ?? 'triangles',
-    layoutKey ?? 'layout:default',
-  ].join('|')
+  return shaderId + '|' + depthKey(desc.depth) + '|' + blendKey(desc.blend) + '|' +
+    rasterKey(desc.raster) + '|' + (desc.primitive ?? 'triangles') + '|' + (layoutKey ?? 'layout:default')
 }
 
 function depthKey(depth: GpuPipelineDesc['depth']): string {
   if (depth === false) return 'off'
-  return `${depth?.test ?? 'less'}:${depth?.write === false ? 0 : 1}`
+  if (depth === undefined) return 'less:1'
+  const test = depth.test
+  if (test === undefined || test === null) return depth.write === false ? 'less:0' : 'less:1'
+  return test + ':' + (depth.write === false ? 0 : 1)
 }
 
 function blendKey(blend: GpuPipelineDesc['blend']): string {
   if (blend === false || blend === undefined) return 'off'
   // Task 122: the equation is part of the identity — same factors with a
   // different equation is a DIFFERENT pipeline.
-  return `${blend.src}/${blend.dst}/${blend.equation ?? 'add'}`
+  return blend.src + '/' + blend.dst + '/' + (blend.equation ?? 'add')
 }
 
 function rasterKey(raster: GpuPipelineDesc['raster']): string {
   if (raster === undefined) return 'off'
-  return `${raster.cull ?? 'none'}/${raster.frontFace ?? 'ccw'}`
+  const cull = raster.cull
+  const front = raster.frontFace
+  return (cull === undefined || cull === null ? 'none' : cull) + '/' +
+    (front === undefined || front === null ? 'ccw' : front)
 }
