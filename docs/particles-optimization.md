@@ -611,3 +611,54 @@ trigger leg — a simulated dropping driver (the readback zeroed at the
 source) → the warning → the re-make → the conservative branch → warm
 pixels. 1596 tests (+3: the usage-hint contract, the readBuffer
 round-trip + refusal), ?v=140.
+
+## Task 142 — THE GENERAL CPU PASS: bit-identical speed on the hot walks
+
+The post-program sweep over the CPU hot paths (the profile-driven pass —
+no behavior change anywhere, pinned by a sha256 A/B walk). The
+profiler's verdict: the bake (fillBillboards) 20–33% of a frame
+battery, simplex3 ~29% under forces, sampleRamp ~13% — and the facade
+paying a hidden allocation tax.
+
+**The four changes (all bit-identical, all measured):**
+
+1. **`core/noise.ts` — the gradient-offset table.** `GRAD_OFF[i] =
+   (PERM[i] % 12) * 3` baked at module load (a fixed derivation of the
+   pinned PERM table — the WGSL/GLSL twins and their parity contract are
+   untouched). The classic form paid four `% 12` + four `* 3` per
+   sample; the tabled lookup is −17% on the pure sampler (115→96 ms per
+   3M samples, bun/JSC) and bit-exact by construction (the same
+   arithmetic, precomputed).
+2. **`ramp.ts` — `sampleFlatRamp(flat, t, out)`** the sampler over the
+   pre-compiled flat form; `sampleRamp` delegates. The hot loops hoist
+   `flatRamp(ramp)` ONCE per bake/pack/advance — the per-sample WeakMap
+   lookup and the `length / 7` divide die.
+3. **The bakers' inline pass** — `fillBillboards` (camera branch) and
+   `packInstances`: the ramp sampler inlined into the walk (JSC keeps a
+   binary-search call out-of-line — 40M samples per battery paid the
+   call overhead), and the camera branch's six `vert()` calls (11
+   arguments each) written inline. The expressions are the helper's
+   own, verbatim — the A/B hash proves the byte equality.
+4. **`facade.ts` — the bake-options scratch.** `view()` built a fresh
+   options object (plus a fresh `?? {}` for the per-call overrides) on
+   EVERY call — one to four small objects per system per frame, against
+   the package's zero-allocation contract. The scratch objects
+   (billboard/pack/mesh/trail/forwardBasis) live in the closure, are
+   fully re-assigned on every use (nothing stale can leak — pinned by
+   the Task 142 suite), and the bakers never retain them.
+
+**The etalons (A/B, median of 3 interleaved runs, this machine):**
+
+| stage | before | after | delta |
+|---|---:|---:|---:|
+| bake only (the soup, 100k) | 8.55 ms | 7.17 ms | **−16.1%** |
+| pack only (instances, 100k) | 3.79 ms | 2.52 ms | **−33.5%** |
+| full load (advance+bake, 100k) | 10.39 ms | 8.90 ms | **−14.3%** |
+| steady state (~9.5k live) | 1.059 ms | 0.926 ms | **−12.6%** |
+| forces-heavy (100k) | 19.52 ms | 18.63 ms | −4.6% (the simplex −17%) |
+| advance / emission | — | — | ±0.3% (untouched paths) |
+
+The verification: 1624 tests + 7 new (the sampler equality sweep, the
+table parity pin, the scratch override/leak gates), the sha256 A/B walk
+identical (noise field + six bake modes + packs + all fields), the
+vfx/raw-device battery green, ?v=142.

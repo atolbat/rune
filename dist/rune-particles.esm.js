@@ -266,6 +266,9 @@ var GRAD3 = new Int8Array([
   -1,
   -1
 ]);
+var GRAD_OFF = new Uint8Array(512);
+for (let i = 0;i < 512; i++)
+  GRAD_OFF[i] = PERM[i] % 12 * 3;
 function buildPerm() {
   const p = new Uint8Array(256);
   for (let i = 0;i < 256; i++)
@@ -344,25 +347,25 @@ function simplex3(x, y, z) {
   let n = 0;
   let t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
   if (t0 > 0) {
-    const g = PERM[ii + PERM[jj + PERM[kk]]] % 12 * 3;
+    const g = GRAD_OFF[ii + PERM[jj + PERM[kk]]];
     t0 *= t0;
     n += t0 * t0 * (GRAD3[g] * x0 + GRAD3[g + 1] * y0 + GRAD3[g + 2] * z0);
   }
   let t1 = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;
   if (t1 > 0) {
-    const g = PERM[ii + i1 + PERM[jj + j1 + PERM[kk + k1]]] % 12 * 3;
+    const g = GRAD_OFF[ii + i1 + PERM[jj + j1 + PERM[kk + k1]]];
     t1 *= t1;
     n += t1 * t1 * (GRAD3[g] * x1 + GRAD3[g + 1] * y1 + GRAD3[g + 2] * z1);
   }
   let t2 = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;
   if (t2 > 0) {
-    const g = PERM[ii + i2 + PERM[jj + j2 + PERM[kk + k2]]] % 12 * 3;
+    const g = GRAD_OFF[ii + i2 + PERM[jj + j2 + PERM[kk + k2]]];
     t2 *= t2;
     n += t2 * t2 * (GRAD3[g] * x2 + GRAD3[g + 1] * y2 + GRAD3[g + 2] * z2);
   }
   let t3 = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;
   if (t3 > 0) {
-    const g = PERM[ii + 1 + PERM[jj + 1 + PERM[kk + 1]]] % 12 * 3;
+    const g = GRAD_OFF[ii + 1 + PERM[jj + 1 + PERM[kk + 1]]];
     t3 *= t3;
     n += t3 * t3 * (GRAD3[g] * x3 + GRAD3[g + 1] * y3 + GRAD3[g + 2] * z3);
   }
@@ -473,28 +476,7 @@ function flatRamp(ramp) {
   }
   return flat;
 }
-function createRamp(points) {
-  if (points.length === 0)
-    throw new Error("rune/particles: a ramp needs at least one control point");
-  let prev = -Infinity;
-  for (const p of points) {
-    const t = p.t;
-    if (!Number.isFinite(t + p.size + p.r + p.g + p.b + p.a)) {
-      throw new Error("rune/particles: ramp control points must be finite");
-    }
-    if (p.frame !== undefined && !Number.isFinite(p.frame)) {
-      throw new Error("rune/particles: ramp frame must be finite (the atlas tile index)");
-    }
-    if (t < 0 || t > 1)
-      throw new Error(`rune/particles: ramp t must be in [0, 1] (got ${t})`);
-    if (t <= prev)
-      throw new Error("rune/particles: ramp control points must be sorted by ascending t");
-    prev = t;
-  }
-  return { points };
-}
-function sampleRamp(ramp, t, out) {
-  const flat = flatRamp(ramp);
+function sampleFlatRamp(flat, t, out) {
   const n = flat.length / 7;
   if (n === 1) {
     out[0] = flat[1];
@@ -541,6 +523,29 @@ function sampleRamp(ramp, t, out) {
   out[3] = flat[a + 4] + (flat[b + 4] - flat[a + 4]) * k;
   out[4] = flat[a + 5] + (flat[b + 5] - flat[a + 5]) * k;
   out[5] = flat[a + 6] + (flat[b + 6] - flat[a + 6]) * k;
+}
+function createRamp(points) {
+  if (points.length === 0)
+    throw new Error("rune/particles: a ramp needs at least one control point");
+  let prev = -Infinity;
+  for (const p of points) {
+    const t = p.t;
+    if (!Number.isFinite(t + p.size + p.r + p.g + p.b + p.a)) {
+      throw new Error("rune/particles: ramp control points must be finite");
+    }
+    if (p.frame !== undefined && !Number.isFinite(p.frame)) {
+      throw new Error("rune/particles: ramp frame must be finite (the atlas tile index)");
+    }
+    if (t < 0 || t > 1)
+      throw new Error(`rune/particles: ramp t must be in [0, 1] (got ${t})`);
+    if (t <= prev)
+      throw new Error("rune/particles: ramp control points must be sorted by ascending t");
+    prev = t;
+  }
+  return { points };
+}
+function sampleRamp(ramp, t, out) {
+  sampleFlatRamp(flatRamp(ramp), t, out);
 }
 
 // packages/particles/src/system.ts
@@ -725,7 +730,6 @@ function createParticleSystem(capacity, options = {}) {
       const soft2 = hasAttract ? (at.softening ?? 0.25) ** 2 : 1;
       const killR2 = hasAttract ? (at.killRadius ?? 0) ** 2 : 0;
       const speedCurve = forces.speedCurve ?? null;
-      const hasCurve = speedCurve !== null;
       const collide = forces.collide ?? null;
       const planeCount = collide !== null ? Math.min(collide.planes?.length ?? 0, MAX_PLANES) : 0;
       const sphereCount = collide !== null ? Math.min(collide.spheres?.length ?? 0, MAX_SPHERES) : 0;
@@ -802,16 +806,17 @@ function createParticleSystem(capacity, options = {}) {
       const hasLimit = limitSpeed !== null;
       const lsLimit = hasLimit ? limitSpeed.limit : 0;
       const lsDampen = hasLimit ? limitSpeed.dampen : 0;
+      const curveFlat = speedCurve !== null ? flatRamp(speedCurve) : null;
       let i = count - 1;
       while (i >= 0) {
         const age = f.age[i] + dt;
         const life = f.life[i];
         let vx = f.vx[i], vy = f.vy[i], vz = f.vz[i];
-        if (hasCurve) {
+        if (curveFlat !== null) {
           const t = life > 0 ? age / life : 0;
-          sampleRamp(speedCurve, t, curveScratch);
+          sampleFlatRamp(curveFlat, t, curveScratch);
           const tPrev = life > 0 ? Math.max(0, (age - dt) / life) : 0;
-          sampleRamp(speedCurve, tPrev, curvePrev);
+          sampleFlatRamp(curveFlat, tPrev, curvePrev);
           const k = Math.max(0.000001, curveScratch[0]) / Math.max(0.000001, curvePrev[0]);
           vx *= k;
           vy *= k;
@@ -1706,6 +1711,9 @@ function fillBillboards(system, basis, out, options = {}) {
   const radiusK = options.cullRadiusK ?? 0.5;
   const order = options.order;
   const ordered = order !== undefined && order !== null;
+  const rampFlat = flatRamp(ramp);
+  const rampN = rampFlat.length / 7;
+  const rampLast = (rampN - 1) * 7;
   const n = ordered ? order.length : count;
   for (let j = 0;j < n; j++) {
     const i = ordered ? order[j] : j;
@@ -1714,7 +1722,39 @@ function fillBillboards(system, basis, out, options = {}) {
     const age = f.age[i];
     const life = f.life[i];
     const t = life > 0 ? age / life : 0;
-    sampleRamp(ramp, t, s);
+    if (rampN === 1 || t <= rampFlat[0]) {
+      s[0] = rampFlat[1];
+      s[1] = rampFlat[2];
+      s[2] = rampFlat[3];
+      s[3] = rampFlat[4];
+      s[4] = rampFlat[5];
+      s[5] = rampFlat[6];
+    } else if (t >= rampFlat[rampLast]) {
+      s[0] = rampFlat[rampLast + 1];
+      s[1] = rampFlat[rampLast + 2];
+      s[2] = rampFlat[rampLast + 3];
+      s[3] = rampFlat[rampLast + 4];
+      s[4] = rampFlat[rampLast + 5];
+      s[5] = rampFlat[rampLast + 6];
+    } else {
+      let lo = 0, hi = rampN - 1;
+      while (hi - lo > 1) {
+        const mid = lo + hi >> 1;
+        if (rampFlat[mid * 7] <= t)
+          lo = mid;
+        else
+          hi = mid;
+      }
+      const a = lo * 7, b = hi * 7;
+      const span = rampFlat[b] - rampFlat[a];
+      const k = span > 0 ? (t - rampFlat[a]) / span : 0;
+      s[0] = rampFlat[a + 1] + (rampFlat[b + 1] - rampFlat[a + 1]) * k;
+      s[1] = rampFlat[a + 2] + (rampFlat[b + 2] - rampFlat[a + 2]) * k;
+      s[2] = rampFlat[a + 3] + (rampFlat[b + 3] - rampFlat[a + 3]) * k;
+      s[3] = rampFlat[a + 4] + (rampFlat[b + 4] - rampFlat[a + 4]) * k;
+      s[4] = rampFlat[a + 5] + (rampFlat[b + 5] - rampFlat[a + 5]) * k;
+      s[5] = rampFlat[a + 6] + (rampFlat[b + 6] - rampFlat[a + 6]) * k;
+    }
     const half = f.size[i] * s[0] * 0.5;
     if (half <= 0)
       continue;
@@ -1748,12 +1788,61 @@ function fillBillboards(system, basis, out, options = {}) {
       const o1x2 = c1 * half + c2 * -half, o1y2 = s1 * half + s2 * -half;
       const o2x2 = c1 * half + c2 * half, o2y2 = s1 * half + s2 * half;
       const o3x2 = c1 * -half + c2 * half, o3y2 = s1 * -half + s2 * half;
-      at = vert(out, at, px + o0x2 * rx + o0y2 * ux, py + o0x2 * ry + o0y2 * uy, pz + o0x2 * rz + o0y2 * uz, u0, v0, cr, cg, cb, ca);
-      at = vert(out, at, px + o1x2 * rx + o1y2 * ux, py + o1x2 * ry + o1y2 * uy, pz + o1x2 * rz + o1y2 * uz, u0 + uS, v0, cr, cg, cb, ca);
-      at = vert(out, at, px + o2x2 * rx + o2y2 * ux, py + o2x2 * ry + o2y2 * uy, pz + o2x2 * rz + o2y2 * uz, u0 + uS, v0 + vS, cr, cg, cb, ca);
-      at = vert(out, at, px + o0x2 * rx + o0y2 * ux, py + o0x2 * ry + o0y2 * uy, pz + o0x2 * rz + o0y2 * uz, u0, v0, cr, cg, cb, ca);
-      at = vert(out, at, px + o2x2 * rx + o2y2 * ux, py + o2x2 * ry + o2y2 * uy, pz + o2x2 * rz + o2y2 * uz, u0 + uS, v0 + vS, cr, cg, cb, ca);
-      at = vert(out, at, px + o3x2 * rx + o3y2 * ux, py + o3x2 * ry + o3y2 * uy, pz + o3x2 * rz + o3y2 * uz, u0, v0 + vS, cr, cg, cb, ca);
+      out[at] = px + o0x2 * rx + o0y2 * ux;
+      out[at + 1] = py + o0x2 * ry + o0y2 * uy;
+      out[at + 2] = pz + o0x2 * rz + o0y2 * uz;
+      out[at + 3] = u0;
+      out[at + 4] = v0;
+      out[at + 5] = cr;
+      out[at + 6] = cg;
+      out[at + 7] = cb;
+      out[at + 8] = ca;
+      out[at + 9] = px + o1x2 * rx + o1y2 * ux;
+      out[at + 10] = py + o1x2 * ry + o1y2 * uy;
+      out[at + 11] = pz + o1x2 * rz + o1y2 * uz;
+      out[at + 12] = u0 + uS;
+      out[at + 13] = v0;
+      out[at + 14] = cr;
+      out[at + 15] = cg;
+      out[at + 16] = cb;
+      out[at + 17] = ca;
+      out[at + 18] = px + o2x2 * rx + o2y2 * ux;
+      out[at + 19] = py + o2x2 * ry + o2y2 * uy;
+      out[at + 20] = pz + o2x2 * rz + o2y2 * uz;
+      out[at + 21] = u0 + uS;
+      out[at + 22] = v0 + vS;
+      out[at + 23] = cr;
+      out[at + 24] = cg;
+      out[at + 25] = cb;
+      out[at + 26] = ca;
+      out[at + 27] = px + o0x2 * rx + o0y2 * ux;
+      out[at + 28] = py + o0x2 * ry + o0y2 * uy;
+      out[at + 29] = pz + o0x2 * rz + o0y2 * uz;
+      out[at + 30] = u0;
+      out[at + 31] = v0;
+      out[at + 32] = cr;
+      out[at + 33] = cg;
+      out[at + 34] = cb;
+      out[at + 35] = ca;
+      out[at + 36] = px + o2x2 * rx + o2y2 * ux;
+      out[at + 37] = py + o2x2 * ry + o2y2 * uy;
+      out[at + 38] = pz + o2x2 * rz + o2y2 * uz;
+      out[at + 39] = u0 + uS;
+      out[at + 40] = v0 + vS;
+      out[at + 41] = cr;
+      out[at + 42] = cg;
+      out[at + 43] = cb;
+      out[at + 44] = ca;
+      out[at + 45] = px + o3x2 * rx + o3y2 * ux;
+      out[at + 46] = py + o3x2 * ry + o3y2 * uy;
+      out[at + 47] = pz + o3x2 * rz + o3y2 * uz;
+      out[at + 48] = u0;
+      out[at + 49] = v0 + vS;
+      out[at + 50] = cr;
+      out[at + 51] = cg;
+      out[at + 52] = cb;
+      out[at + 53] = ca;
+      at += 6 * SOUP_STRIDE;
       continue;
     }
     if (mode === "vertical" || mode === "horizontal") {
@@ -1900,6 +1989,9 @@ function packInstances(system, out, options = {}) {
   const radiusK = options.cullRadiusK ?? 0.5;
   const order = options.order;
   const ordered = order !== undefined && order !== null;
+  const rampFlat = flatRamp(ramp);
+  const rampN = rampFlat.length / 7;
+  const rampLast = (rampN - 1) * 7;
   const total = ordered ? order.length : count;
   for (let j = 0;j < total; j++) {
     const i = ordered ? order[j] : j;
@@ -1908,7 +2000,39 @@ function packInstances(system, out, options = {}) {
     const age = f.age[i];
     const life = f.life[i];
     const t = life > 0 ? age / life : 0;
-    sampleRamp(ramp, t, s);
+    if (rampN === 1 || t <= rampFlat[0]) {
+      s[0] = rampFlat[1];
+      s[1] = rampFlat[2];
+      s[2] = rampFlat[3];
+      s[3] = rampFlat[4];
+      s[4] = rampFlat[5];
+      s[5] = rampFlat[6];
+    } else if (t >= rampFlat[rampLast]) {
+      s[0] = rampFlat[rampLast + 1];
+      s[1] = rampFlat[rampLast + 2];
+      s[2] = rampFlat[rampLast + 3];
+      s[3] = rampFlat[rampLast + 4];
+      s[4] = rampFlat[rampLast + 5];
+      s[5] = rampFlat[rampLast + 6];
+    } else {
+      let lo = 0, hi = rampN - 1;
+      while (hi - lo > 1) {
+        const mid = lo + hi >> 1;
+        if (rampFlat[mid * 7] <= t)
+          lo = mid;
+        else
+          hi = mid;
+      }
+      const a = lo * 7, b = hi * 7;
+      const span = rampFlat[b] - rampFlat[a];
+      const k = span > 0 ? (t - rampFlat[a]) / span : 0;
+      s[0] = rampFlat[a + 1] + (rampFlat[b + 1] - rampFlat[a + 1]) * k;
+      s[1] = rampFlat[a + 2] + (rampFlat[b + 2] - rampFlat[a + 2]) * k;
+      s[2] = rampFlat[a + 3] + (rampFlat[b + 3] - rampFlat[a + 3]) * k;
+      s[3] = rampFlat[a + 4] + (rampFlat[b + 4] - rampFlat[a + 4]) * k;
+      s[4] = rampFlat[a + 5] + (rampFlat[b + 5] - rampFlat[a + 5]) * k;
+      s[5] = rampFlat[a + 6] + (rampFlat[b + 6] - rampFlat[a + 6]) * k;
+    }
     const half = f.size[i] * s[0] * 0.5;
     if (half <= 0)
       continue;
@@ -3875,13 +3999,14 @@ function fillTrails(system, history, basis, out, options = {}) {
   const stride = points * 3;
   const fx = basis.forward[0], fy = basis.forward[1], fz = basis.forward[2];
   const s = SCRATCH3;
+  const rampFlat = flatRamp(ramp);
   let at = 0;
   for (let i = 0;i < count; i++) {
     const histCount = counts[i];
     if (histCount < 1)
       continue;
     const t = f.life[i] > 0 ? f.age[i] / f.life[i] : 0;
-    sampleRamp(ramp, t, s);
+    sampleFlatRamp(rampFlat, t, s);
     const halfW = Math.max(0, f.size[i] * s[0] * widthK * 0.5);
     if (halfW <= 0)
       continue;
@@ -4005,10 +4130,11 @@ function fillMeshes(system, geometry, out, options = {}) {
     oay = (a[1] ?? 0) / al;
     oaz = (a[2] ?? 0) / al;
   }
+  const rampFlat = flatRamp(ramp);
   let at = 0;
   for (let i = 0;i < count; i++) {
     const t = f.life[i] > 0 ? f.age[i] / f.life[i] : 0;
-    sampleRamp(ramp, t, s);
+    sampleFlatRamp(rampFlat, t, s);
     const scale = f.size[i] * s[0];
     if (scale <= 0)
       continue;
@@ -4684,6 +4810,32 @@ function createParticles(desc) {
   const sortIndices = sortOn ? new Int32Array(capacity) : null;
   const sortKeys = sortOn ? new Float32Array(capacity) : null;
   const sortOrder = sortOn ? new Array(capacity).fill(0) : null;
+  const EMPTY = Object.freeze({});
+  const meshBakeOpts = { ramp, axis: undefined, spin: 0 };
+  const trailBakeOpts = { ramp, length: 0, width: 0 };
+  const packOptsScratch = {
+    ramp,
+    tiles: undefined,
+    frameJitter: 0,
+    order: null,
+    frustum: null,
+    cullRadiusK
+  };
+  const billboardBakeOpts = {
+    ramp,
+    spin,
+    mode: "camera",
+    tiles: undefined,
+    speedFactor: 0,
+    lengthFactor: 1,
+    axis: "random",
+    spin3d: 0,
+    frameJitter: 0,
+    order: null,
+    frustum: null,
+    cullRadiusK
+  };
+  const forwardBasis = { right: [], up: [], forward: [0, 0, 0] };
   let time = 0;
   const bursts = (desc.bursts ?? []).map((burst) => validateBurst(burst));
   const burstState = bursts.map((burst, index) => ({
@@ -4811,23 +4963,19 @@ function createParticles(desc) {
     view(basis, options) {
       if (kind === "mesh") {
         const renderOpts = render;
-        const o = options?.mesh ?? {};
-        view.vertexCount = fillMeshes(system, render.geometry, vertices, {
-          ramp,
-          axis: o.axis ?? renderOpts.axis,
-          spin: o.spin ?? renderOpts.spin
-        });
+        const o = options?.mesh ?? EMPTY;
+        meshBakeOpts.axis = o.axis ?? renderOpts.axis;
+        meshBakeOpts.spin = o.spin ?? renderOpts.spin;
+        view.vertexCount = fillMeshes(system, render.geometry, vertices, meshBakeOpts);
       } else if (kind === "trail") {
         const renderOpts = render;
-        const o = options?.trail ?? {};
-        view.vertexCount = fillTrails(system, history, withForward(basis), vertices, {
-          ramp,
-          length: o.length ?? renderOpts.length,
-          width: o.width ?? renderOpts.width
-        });
+        const o = options?.trail ?? EMPTY;
+        trailBakeOpts.length = o.length ?? renderOpts.length;
+        trailBakeOpts.width = o.width ?? renderOpts.width;
+        view.vertexCount = fillTrails(system, history, withForward(basis), vertices, trailBakeOpts);
       } else {
         const renderOpts = render;
-        const o = options?.billboard ?? {};
+        const o = options?.billboard ?? EMPTY;
         let order = null;
         if (sortOn) {
           const forward = basis.forward;
@@ -4852,31 +5000,23 @@ function createParticles(desc) {
           view.vertexCount = system.count;
           view.instanceCount = system.count;
         } else if (drawFormat === "instance") {
-          const packOpts = {
-            ramp,
-            tiles: o.tiles ?? renderOpts.tiles,
-            frameJitter: o.frameJitter ?? renderOpts.frameJitter,
-            order,
-            frustum,
-            cullRadiusK
-          };
-          view.vertexCount = packInstances(system, vertices, packOpts);
+          packOptsScratch.tiles = o.tiles ?? renderOpts.tiles;
+          packOptsScratch.frameJitter = o.frameJitter ?? renderOpts.frameJitter;
+          packOptsScratch.order = order;
+          packOptsScratch.frustum = frustum;
+          view.vertexCount = packInstances(system, vertices, packOptsScratch);
           view.instanceCount = view.vertexCount;
         } else {
-          view.vertexCount = fillBillboards(system, basis, vertices, {
-            ramp,
-            spin,
-            mode: o.mode ?? renderOpts.mode ?? "camera",
-            tiles: o.tiles ?? renderOpts.tiles,
-            speedFactor: o.speedFactor ?? renderOpts.speedFactor,
-            lengthFactor: o.lengthFactor ?? renderOpts.lengthFactor,
-            axis: o.axis ?? renderOpts.axis,
-            spin3d: o.spin3d ?? renderOpts.spin3d,
-            frameJitter: o.frameJitter ?? renderOpts.frameJitter,
-            order,
-            frustum,
-            cullRadiusK
-          });
+          billboardBakeOpts.mode = o.mode ?? renderOpts.mode ?? "camera";
+          billboardBakeOpts.tiles = o.tiles ?? renderOpts.tiles;
+          billboardBakeOpts.speedFactor = o.speedFactor ?? renderOpts.speedFactor;
+          billboardBakeOpts.lengthFactor = o.lengthFactor ?? renderOpts.lengthFactor;
+          billboardBakeOpts.axis = o.axis ?? renderOpts.axis;
+          billboardBakeOpts.spin3d = o.spin3d ?? renderOpts.spin3d;
+          billboardBakeOpts.frameJitter = o.frameJitter ?? renderOpts.frameJitter;
+          billboardBakeOpts.order = order;
+          billboardBakeOpts.frustum = frustum;
+          view.vertexCount = fillBillboards(system, basis, vertices, billboardBakeOpts);
           view.instanceCount = 0;
         }
       }
@@ -5094,7 +5234,14 @@ function createParticles(desc) {
     const cx = r[1] * u[2] - r[2] * u[1];
     const cy = r[2] * u[0] - r[0] * u[2];
     const cz = r[0] * u[1] - r[1] * u[0];
-    return { right: r, up: u, forward: [-cx, -cy, -cz] };
+    const fb = forwardBasis;
+    fb.right = r;
+    fb.up = u;
+    const fw = fb.forward;
+    fw[0] = -cx;
+    fw[1] = -cy;
+    fw[2] = -cz;
+    return fb;
   }
   return facade;
 }

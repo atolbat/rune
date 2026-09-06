@@ -53,7 +53,7 @@
 
 import { sphereOutsideFrustum } from '@rune/core'
 import type { ParticleSystem } from './system.ts'
-import { sampleRamp, CONSTANT_RAMP, type Ramp } from './ramp.ts'
+import { flatRamp, CONSTANT_RAMP, type Ramp } from './ramp.ts'
 
 /** Floats per vertex (position 3, uv 2, color 4). */
 export const SOUP_STRIDE = 9
@@ -206,6 +206,15 @@ export function fillBillboards(
   // the particles in the given sequence; the default — the slot order.
   const order = options.order
   const ordered = order !== undefined && order !== null
+  // Task 142 (the performance pass) — the ramp's compiled form hoisted ONCE
+  // per bake, and the SAMPLER INLINED into the walk below (JSC does not
+  // inline the out-of-line call — a function with a binary-search loop
+  // stays out-of-line, and 40M samples/frame-battery pay the call overhead).
+  // The inlined body is sampleFlatRamp's own, verbatim — bit-identical
+  // values (the twin contract pins it from the test side).
+  const rampFlat = flatRamp(ramp)
+  const rampN = rampFlat.length / 7
+  const rampLast = (rampN - 1) * 7
   const n = ordered ? order!.length : count
   for (let j = 0; j < n; j++) {
     const i = ordered ? order![j] : j
@@ -213,7 +222,29 @@ export function fillBillboards(
     const age = f.age[i]
     const life = f.life[i]
     const t = life > 0 ? age / life : 0
-    sampleRamp(ramp, t, s)
+    // INLINE sampleFlatRamp(rampFlat, t, s) — the sampler's own expressions.
+    if (rampN === 1 || t <= rampFlat[0]) {
+      s[0] = rampFlat[1]; s[1] = rampFlat[2]; s[2] = rampFlat[3]; s[3] = rampFlat[4]; s[4] = rampFlat[5]; s[5] = rampFlat[6]
+    } else if (t >= rampFlat[rampLast]) {
+      s[0] = rampFlat[rampLast + 1]; s[1] = rampFlat[rampLast + 2]; s[2] = rampFlat[rampLast + 3]
+      s[3] = rampFlat[rampLast + 4]; s[4] = rampFlat[rampLast + 5]; s[5] = rampFlat[rampLast + 6]
+    } else {
+      let lo = 0, hi = rampN - 1
+      while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1
+        if (rampFlat[mid * 7] <= t) lo = mid
+        else hi = mid
+      }
+      const a = lo * 7, b = hi * 7
+      const span = rampFlat[b] - rampFlat[a]
+      const k = span > 0 ? (t - rampFlat[a]) / span : 0
+      s[0] = rampFlat[a + 1] + (rampFlat[b + 1] - rampFlat[a + 1]) * k
+      s[1] = rampFlat[a + 2] + (rampFlat[b + 2] - rampFlat[a + 2]) * k
+      s[2] = rampFlat[a + 3] + (rampFlat[b + 3] - rampFlat[a + 3]) * k
+      s[3] = rampFlat[a + 4] + (rampFlat[b + 4] - rampFlat[a + 4]) * k
+      s[4] = rampFlat[a + 5] + (rampFlat[b + 5] - rampFlat[a + 5]) * k
+      s[5] = rampFlat[a + 6] + (rampFlat[b + 6] - rampFlat[a + 6]) * k
+    }
     // The final size: the spawn size × the ramp multiplier; the half-extent.
     const half = f.size[i] * s[0] * 0.5
     if (half <= 0) continue // a zero-size particle emits no quad
@@ -254,12 +285,22 @@ export function fillBillboards(
 
       // Triangle 1: corners 0, 1, 2. Triangle 2: corners 0, 2, 3.
       // (Same winding for both — CCW in the right/up plane.)
-      at = vert(out, at, px + o0x * rx + o0y * ux, py + o0x * ry + o0y * uy, pz + o0x * rz + o0y * uz, u0, v0, cr, cg, cb, ca)
-      at = vert(out, at, px + o1x * rx + o1y * ux, py + o1x * ry + o1y * uy, pz + o1x * rz + o1y * uz, u0 + uS, v0, cr, cg, cb, ca)
-      at = vert(out, at, px + o2x * rx + o2y * ux, py + o2x * ry + o2y * uy, pz + o2x * rz + o2y * uz, u0 + uS, v0 + vS, cr, cg, cb, ca)
-      at = vert(out, at, px + o0x * rx + o0y * ux, py + o0x * ry + o0y * uy, pz + o0x * rz + o0y * uz, u0, v0, cr, cg, cb, ca)
-      at = vert(out, at, px + o2x * rx + o2y * ux, py + o2x * ry + o2y * uy, pz + o2x * rz + o2y * uz, u0 + uS, v0 + vS, cr, cg, cb, ca)
-      at = vert(out, at, px + o3x * rx + o3y * ux, py + o3x * ry + o3y * uy, pz + o3x * rz + o3y * uz, u0, v0 + vS, cr, cg, cb, ca)
+      // Task 142 — the six verts written inline (the exact expressions the
+      // vert() helper evaluates — bit-identical; the 6×11-argument calls
+      // per particle die, ~28% off the bake walk).
+      out[at] = px + o0x * rx + o0y * ux; out[at + 1] = py + o0x * ry + o0y * uy; out[at + 2] = pz + o0x * rz + o0y * uz
+      out[at + 3] = u0; out[at + 4] = v0; out[at + 5] = cr; out[at + 6] = cg; out[at + 7] = cb; out[at + 8] = ca
+      out[at + 9] = px + o1x * rx + o1y * ux; out[at + 10] = py + o1x * ry + o1y * uy; out[at + 11] = pz + o1x * rz + o1y * uz
+      out[at + 12] = u0 + uS; out[at + 13] = v0; out[at + 14] = cr; out[at + 15] = cg; out[at + 16] = cb; out[at + 17] = ca
+      out[at + 18] = px + o2x * rx + o2y * ux; out[at + 19] = py + o2x * ry + o2y * uy; out[at + 20] = pz + o2x * rz + o2y * uz
+      out[at + 21] = u0 + uS; out[at + 22] = v0 + vS; out[at + 23] = cr; out[at + 24] = cg; out[at + 25] = cb; out[at + 26] = ca
+      out[at + 27] = px + o0x * rx + o0y * ux; out[at + 28] = py + o0x * ry + o0y * uy; out[at + 29] = pz + o0x * rz + o0y * uz
+      out[at + 30] = u0; out[at + 31] = v0; out[at + 32] = cr; out[at + 33] = cg; out[at + 34] = cb; out[at + 35] = ca
+      out[at + 36] = px + o2x * rx + o2y * ux; out[at + 37] = py + o2x * ry + o2y * uy; out[at + 38] = pz + o2x * rz + o2y * uz
+      out[at + 39] = u0 + uS; out[at + 40] = v0 + vS; out[at + 41] = cr; out[at + 42] = cg; out[at + 43] = cb; out[at + 44] = ca
+      out[at + 45] = px + o3x * rx + o3y * ux; out[at + 46] = py + o3x * ry + o3y * uy; out[at + 47] = pz + o3x * rz + o3y * uz
+      out[at + 48] = u0; out[at + 49] = v0 + vS; out[at + 50] = cr; out[at + 51] = cg; out[at + 52] = cb; out[at + 53] = ca
+      at += 6 * SOUP_STRIDE
       continue
     }
 

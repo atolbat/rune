@@ -15,7 +15,7 @@
  */
 
 import { simplex3, type NoiseField } from './noise.ts'
-import { sampleRamp, type Ramp } from './ramp.ts'
+import { sampleFlatRamp, flatRamp, type Ramp } from './ramp.ts'
 
 /** The SoA field block. Length = capacity; [0, count) is live.
  *  All arrays are allocated ONCE at creation — the store never grows,
@@ -450,7 +450,6 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
       const killR2 = hasAttract ? (at.killRadius ?? 0) ** 2 : 0
       // Task 122 — the new forces, hoisted (absent = a clean loop):
       const speedCurve = forces.speedCurve ?? null
-      const hasCurve = speedCurve !== null
       const collide = forces.collide ?? null
       const planeCount = collide !== null ? Math.min(collide.planes?.length ?? 0, MAX_PLANES) : 0
       const sphereCount = collide !== null ? Math.min(collide.spheres?.length ?? 0, MAX_SPHERES) : 0
@@ -518,6 +517,10 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
       const hasLimit = limitSpeed !== null
       const lsLimit = hasLimit ? limitSpeed!.limit : 0
       const lsDampen = hasLimit ? limitSpeed!.dampen : 0
+      // Task 142 — the speed curve's compiled form, hoisted ONCE per
+      // advance() (the two per-particle ramp samples skip the WeakMap
+      // lookup; sampleFlatRamp is the same expressions, bit-identical).
+      const curveFlat = speedCurve !== null ? flatRamp(speedCurve) : null
 
       // Reverse walk + swap-remove from the tail: particles beyond i are
       // already integrated (or dead), so the survivor lands in a slot that
@@ -532,11 +535,11 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
         // every frame from birth (the product telescopes). Two ramp samples
         // per particle into two STATIC scratches; the ε floor keeps a zero
         // curve point from NaN-ing the rescale.
-        if (hasCurve) {
+        if (curveFlat !== null) {
           const t = life > 0 ? age / life : 0
-          sampleRamp(speedCurve!, t, curveScratch)
+          sampleFlatRamp(curveFlat, t, curveScratch)
           const tPrev = life > 0 ? Math.max(0, (age - dt) / life) : 0
-          sampleRamp(speedCurve!, tPrev, curvePrev)
+          sampleFlatRamp(curveFlat, tPrev, curvePrev)
           const k = Math.max(1e-6, curveScratch[0]) / Math.max(1e-6, curvePrev[0])
           vx *= k; vy *= k; vz *= k
         }

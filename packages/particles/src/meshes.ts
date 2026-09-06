@@ -29,7 +29,7 @@
  */
 
 import type { ParticleSystem } from './system.ts'
-import { sampleRamp, CONSTANT_RAMP, type Ramp } from './ramp.ts'
+import { sampleFlatRamp, flatRamp, CONSTANT_RAMP, type Ramp } from './ramp.ts'
 
 /** Floats per vertex (position 3, normal 3, uv 2, color 4). */
 export const MESH_STRIDE = 12
@@ -90,10 +90,13 @@ export function fillMeshes(
     oax = (a[0] ?? 0) / al; oay = (a[1] ?? 0) / al; oaz = (a[2] ?? 0) / al
   }
 
+  // Task 142 — the compiled ramp hoisted once per bake (no per-particle
+  // WeakMap lookup — the same treatment as fillBillboards).
+  const rampFlat = flatRamp(ramp)
   let at = 0
   for (let i = 0; i < count; i++) {
     const t = f.life[i] > 0 ? f.age[i] / f.life[i] : 0
-    sampleRamp(ramp, t, s)
+    sampleFlatRamp(rampFlat, t, s)
     const scale = f.size[i] * s[0]
     if (scale <= 0) continue
     const cr = f.cr[i] * s[1], cg = f.cg[i] * s[2], cb = f.cb[i] * s[3], ca = f.ca[i] * s[4]

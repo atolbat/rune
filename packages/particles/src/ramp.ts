@@ -65,34 +65,12 @@ export function flatRamp(ramp: Ramp): Float64Array {
   return flat
 }
 
-/** Validates (finite, t ascending within [0, 1] after clamping, at least
- *  one point) and returns the compiled ramp. The input is NOT copied:
- *  treat the points as immutable from here on. */
-export function createRamp(points: readonly RampPoint[]): Ramp {
-  if (points.length === 0) throw new Error('rune/particles: a ramp needs at least one control point')
-  let prev = -Infinity
-  for (const p of points) {
-    const t = p.t
-    if (!Number.isFinite(t + p.size + p.r + p.g + p.b + p.a)) {
-      throw new Error('rune/particles: ramp control points must be finite')
-    }
-    if (p.frame !== undefined && !Number.isFinite(p.frame)) {
-      throw new Error('rune/particles: ramp frame must be finite (the atlas tile index)')
-    }
-    if (t < 0 || t > 1) throw new Error(`rune/particles: ramp t must be in [0, 1] (got ${t})`)
-    if (t <= prev) throw new Error('rune/particles: ramp control points must be sorted by ascending t')
-    prev = t
-  }
-  return { points }
-}
-
-/** Samples the ramp at t (clamped to [first.t, last.t]): linear
- *  interpolation between the neighbors, exact at the points. Writes
- *  out[0]=size, out[1..4]=rgba, out[5]=frame. `out` is the caller's
- *  6-float scratch (RAMP_STRIDE) — no allocation. Zero allocations;
- *  ~log(n) per sample (the flat cached form: no property loads). */
-export function sampleRamp(ramp: Ramp, t: number, out: Float32Array | number[]): void {
-  const flat = flatRamp(ramp)
+/** The sampler over the PRE-COMPILED flat form (Task 142, the performance
+ *  pass): the hot per-particle loops hoist `flatRamp(ramp)` ONCE before
+ *  the loop and call this — the per-sample WeakMap lookup and the
+ *  `length / 7` divide die. Same expressions as sampleRamp over the same
+ *  flat rows — bit-identical results. */
+export function sampleFlatRamp(flat: Float64Array, t: number, out: Float32Array | number[]): void {
   const n = flat.length / 7
   if (n === 1) {
     out[0] = flat[1]; out[1] = flat[2]; out[2] = flat[3]; out[3] = flat[4]; out[4] = flat[5]; out[5] = flat[6]
@@ -124,4 +102,36 @@ export function sampleRamp(ramp: Ramp, t: number, out: Float32Array | number[]):
   out[3] = flat[a + 4] + (flat[b + 4] - flat[a + 4]) * k
   out[4] = flat[a + 5] + (flat[b + 5] - flat[a + 5]) * k
   out[5] = flat[a + 6] + (flat[b + 6] - flat[a + 6]) * k
+}
+
+/** Validates (finite, t ascending within [0, 1] after clamping, at least
+ *  one point) and returns the compiled ramp. The input is NOT copied:
+ *  treat the points as immutable from here on. */
+export function createRamp(points: readonly RampPoint[]): Ramp {
+  if (points.length === 0) throw new Error('rune/particles: a ramp needs at least one control point')
+  let prev = -Infinity
+  for (const p of points) {
+    const t = p.t
+    if (!Number.isFinite(t + p.size + p.r + p.g + p.b + p.a)) {
+      throw new Error('rune/particles: ramp control points must be finite')
+    }
+    if (p.frame !== undefined && !Number.isFinite(p.frame)) {
+      throw new Error('rune/particles: ramp frame must be finite (the atlas tile index)')
+    }
+    if (t < 0 || t > 1) throw new Error(`rune/particles: ramp t must be in [0, 1] (got ${t})`)
+    if (t <= prev) throw new Error('rune/particles: ramp control points must be sorted by ascending t')
+    prev = t
+  }
+  return { points }
+}
+
+/** Samples the ramp at t (clamped to [first.t, last.t]): linear
+ * interpolation between the neighbors, exact at the points. Writes
+ * out[0]=size, out[1..4]=rgba, out[5]=frame. `out` is the caller's
+ * 6-float scratch (RAMP_STRIDE) — no allocation. Zero allocations;
+ * ~log(n) per sample. The per-particle hot loops hoist the compiled form
+ * and call sampleFlatRamp directly; this wrapper compiles and delegates
+ * (the one-off callers' convenience). */
+export function sampleRamp(ramp: Ramp, t: number, out: Float32Array | number[]): void {
+  sampleFlatRamp(flatRamp(ramp), t, out)
 }

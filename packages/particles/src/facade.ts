@@ -613,6 +613,29 @@ export function createParticles(desc: ParticlesDesc): Particles {
   const sortKeys = sortOn ? new Float32Array(capacity) : null
   const sortOrder: number[] | null = sortOn ? new Array<number>(capacity).fill(0) : null
 
+  // Task 142 (the performance pass) — the BAKE-OPTIONS SCRATCH: view()
+  // used to build a fresh options object (and a fresh `?? {}` for the
+  // per-call overrides) EVERY call — one-to-four small objects per system
+  // per frame, against the package's zero-allocation contract. The bakers
+  // read the options ONCE per call and never retain them, so a closure
+  // scratch mutated in place is behaviorally identical; every field is
+  // (re)assigned on every use, so nothing stale can leak between frames.
+  const EMPTY: Record<string, never> = Object.freeze({}) as Record<string, never>
+  // The scratch types: the bakers' option interfaces are readonly (the
+  // public contract); the scratch mutates in place, so it widens to a
+  // mutable view of the same shape.
+  type Mutable<T> = { -readonly [K in keyof T]: T[K] }
+  const meshBakeOpts: Mutable<MeshOptions> = { ramp, axis: undefined, spin: 0 }
+  const trailBakeOpts: Mutable<TrailBakeOptions> = { ramp, length: 0, width: 0 }
+  const packOptsScratch: Mutable<PackOptions> = {
+    ramp, tiles: undefined, frameJitter: 0, order: null, frustum: null, cullRadiusK,
+  }
+  const billboardBakeOpts: Mutable<BillboardOptions> = {
+    ramp, spin, mode: 'camera', tiles: undefined, speedFactor: 0, lengthFactor: 1,
+    axis: 'random', spin3d: 0, frameJitter: 0, order: null, frustum: null, cullRadiusK,
+  }
+  const forwardBasis = { right: [] as readonly number[], up: [] as readonly number[], forward: [0, 0, 0] }
+
   // ── the burst schedule state (Task 122) ────────────────────────────────
   let time = 0 // the facade's own clock (per-facade closure state; the prewarm shares it)
   const bursts = (desc.bursts ?? []).map(burst => validateBurst(burst))
@@ -725,19 +748,19 @@ export function createParticles(desc: ParticlesDesc): Particles {
     view(basis, options) {
       if (kind === 'mesh') {
         const renderOpts = render as MeshOptions
-        const o = options?.mesh ?? {}
-        view.vertexCount = fillMeshes(system, (render as { geometry: MeshGeometry }).geometry, vertices, {
-          ramp, axis: o.axis ?? renderOpts.axis, spin: o.spin ?? renderOpts.spin,
-        })
+        const o = options?.mesh ?? EMPTY
+        meshBakeOpts.axis = o.axis ?? renderOpts.axis
+        meshBakeOpts.spin = o.spin ?? renderOpts.spin
+        view.vertexCount = fillMeshes(system, (render as { geometry: MeshGeometry }).geometry, vertices, meshBakeOpts)
       } else if (kind === 'trail') {
         const renderOpts = render as TrailBakeOptions
-        const o = options?.trail ?? {}
-        view.vertexCount = fillTrails(system, history!, withForward(basis), vertices, {
-          ramp, length: o.length ?? renderOpts.length, width: o.width ?? renderOpts.width,
-        })
+        const o = options?.trail ?? EMPTY
+        trailBakeOpts.length = o.length ?? renderOpts.length
+        trailBakeOpts.width = o.width ?? renderOpts.width
+        view.vertexCount = fillTrails(system, history!, withForward(basis), vertices, trailBakeOpts)
       } else {
         const renderOpts = render as Omit<BillboardOptions, 'ramp'>
-        const o = options?.billboard ?? {}
+        const o = options?.billboard ?? EMPTY
         // Task 132 — THE PAINTER'S ORDER: the back-to-front index sequence
         // (far first — the alpha layers composite correctly, the near sprite
         // blending over everything behind it). The SAME sequence feeds BOTH
@@ -783,31 +806,23 @@ export function createParticles(desc: ParticlesDesc): Particles {
           // resolves the ramp/tint/tile; the BILLBOARD material's vertex
           // stage expands the quad on the GPU). The counts alias: the
           // records ARE the draw's instances.
-          const packOpts: PackOptions = {
-            ramp,
-            tiles: o.tiles ?? renderOpts.tiles,
-            frameJitter: o.frameJitter ?? renderOpts.frameJitter,
-            order,
-            frustum,
-            cullRadiusK,
-          }
-          view.vertexCount = packInstances(system, vertices, packOpts)
+          packOptsScratch.tiles = o.tiles ?? renderOpts.tiles
+          packOptsScratch.frameJitter = o.frameJitter ?? renderOpts.frameJitter
+          packOptsScratch.order = order
+          packOptsScratch.frustum = frustum
+          view.vertexCount = packInstances(system, vertices, packOptsScratch)
           view.instanceCount = view.vertexCount
         } else {
-          view.vertexCount = fillBillboards(system, basis, vertices, {
-            ramp,
-            spin,
-            mode: o.mode ?? renderOpts.mode ?? 'camera',
-            tiles: o.tiles ?? renderOpts.tiles,
-            speedFactor: o.speedFactor ?? renderOpts.speedFactor,
-            lengthFactor: o.lengthFactor ?? renderOpts.lengthFactor,
-            axis: o.axis ?? renderOpts.axis,
-            spin3d: o.spin3d ?? renderOpts.spin3d,
-            frameJitter: o.frameJitter ?? renderOpts.frameJitter,
-            order,
-            frustum,
-            cullRadiusK,
-          })
+          billboardBakeOpts.mode = o.mode ?? renderOpts.mode ?? 'camera'
+          billboardBakeOpts.tiles = o.tiles ?? renderOpts.tiles
+          billboardBakeOpts.speedFactor = o.speedFactor ?? renderOpts.speedFactor
+          billboardBakeOpts.lengthFactor = o.lengthFactor ?? renderOpts.lengthFactor
+          billboardBakeOpts.axis = o.axis ?? renderOpts.axis
+          billboardBakeOpts.spin3d = o.spin3d ?? renderOpts.spin3d
+          billboardBakeOpts.frameJitter = o.frameJitter ?? renderOpts.frameJitter
+          billboardBakeOpts.order = order
+          billboardBakeOpts.frustum = frustum
+          view.vertexCount = fillBillboards(system, basis, vertices, billboardBakeOpts)
           view.instanceCount = 0
         }
       }
@@ -1062,7 +1077,14 @@ export function createParticles(desc: ParticlesDesc): Particles {
     const cx = r[1] * u[2] - r[2] * u[1]
     const cy = r[2] * u[0] - r[0] * u[2]
     const cz = r[0] * u[1] - r[1] * u[0]
-    return { right: r, up: u, forward: [-cx, -cy, -cz] }
+    // Task 142 — the derived basis writes into the closure scratch (the
+    // fresh array + wrapper per call die; fillTrails reads it once).
+    const fb = forwardBasis as { right: readonly number[]; up: readonly number[]; forward: number[] }
+    fb.right = r
+    fb.up = u
+    const fw = fb.forward
+    fw[0] = -cx; fw[1] = -cy; fw[2] = -cz
+    return fb
   }
 
   return facade

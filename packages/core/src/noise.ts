@@ -36,6 +36,15 @@ export const GRAD3 = new Int8Array([
   0, 1, 1, 0, -1, 1, 0, 1, -1, 0, -1, -1,
 ])
 
+/** The gradient-entry offset per permuted index (Task 142, the
+ * performance pass): `GRAD_OFF[i] = (PERM[i] % 12) * 3` — the offset the
+ * classic form computed per corner with a modulo AND a multiply. Derived
+ * from PERM at module load (a fixed table — the same derivation every
+ * load), so the evaluation is bit-identical to the modulo form while
+ * dropping four `% 12` and four `* 3` per sample. */
+const GRAD_OFF = new Uint8Array(512)
+for (let i = 0; i < 512; i++) GRAD_OFF[i] = (PERM[i] % 12) * 3
+
 function buildPerm(): Uint8Array {
   // A deterministic Fisher-Yates over 0..255 driven by an integer hash
   // (random.ts's cousin, inlined — the table is pinned bit-exactly by
@@ -81,25 +90,25 @@ export function simplex3(x: number, y: number, z: number): number {
   let n = 0
   let t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0
   if (t0 > 0) {
-    const g = (PERM[ii + PERM[jj + PERM[kk]]] % 12) * 3
+    const g = GRAD_OFF[ii + PERM[jj + PERM[kk]]]
     t0 *= t0
     n += t0 * t0 * (GRAD3[g] * x0 + GRAD3[g + 1] * y0 + GRAD3[g + 2] * z0)
   }
   let t1 = 0.6 - x1 * x1 - y1 * y1 - z1 * z1
   if (t1 > 0) {
-    const g = (PERM[ii + i1 + PERM[jj + j1 + PERM[kk + k1]]] % 12) * 3
+    const g = GRAD_OFF[ii + i1 + PERM[jj + j1 + PERM[kk + k1]]]
     t1 *= t1
     n += t1 * t1 * (GRAD3[g] * x1 + GRAD3[g + 1] * y1 + GRAD3[g + 2] * z1)
   }
   let t2 = 0.6 - x2 * x2 - y2 * y2 - z2 * z2
   if (t2 > 0) {
-    const g = (PERM[ii + i2 + PERM[jj + j2 + PERM[kk + k2]]] % 12) * 3
+    const g = GRAD_OFF[ii + i2 + PERM[jj + j2 + PERM[kk + k2]]]
     t2 *= t2
     n += t2 * t2 * (GRAD3[g] * x2 + GRAD3[g + 1] * y2 + GRAD3[g + 2] * z2)
   }
   let t3 = 0.6 - x3 * x3 - y3 * y3 - z3 * z3
   if (t3 > 0) {
-    const g = (PERM[ii + 1 + PERM[jj + 1 + PERM[kk + 1]]] % 12) * 3
+    const g = GRAD_OFF[ii + 1 + PERM[jj + 1 + PERM[kk + 1]]]
     t3 *= t3
     n += t3 * t3 * (GRAD3[g] * x3 + GRAD3[g + 1] * y3 + GRAD3[g + 2] * z3)
   }

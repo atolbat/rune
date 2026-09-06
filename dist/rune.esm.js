@@ -3696,31 +3696,31 @@ function simplex3(x, y, z) {
   let n = 0;
   let t0 = 0.6 - x0 * x0 - y0 * y0 - z0 * z0;
   if (t0 > 0) {
-    const g = PERM[ii + PERM[jj + PERM[kk]]] % 12 * 3;
+    const g = GRAD_OFF[ii + PERM[jj + PERM[kk]]];
     t0 *= t0;
     n += t0 * t0 * (GRAD3[g] * x0 + GRAD3[g + 1] * y0 + GRAD3[g + 2] * z0);
   }
   let t1 = 0.6 - x1 * x1 - y1 * y1 - z1 * z1;
   if (t1 > 0) {
-    const g = PERM[ii + i1 + PERM[jj + j1 + PERM[kk + k1]]] % 12 * 3;
+    const g = GRAD_OFF[ii + i1 + PERM[jj + j1 + PERM[kk + k1]]];
     t1 *= t1;
     n += t1 * t1 * (GRAD3[g] * x1 + GRAD3[g + 1] * y1 + GRAD3[g + 2] * z1);
   }
   let t2 = 0.6 - x2 * x2 - y2 * y2 - z2 * z2;
   if (t2 > 0) {
-    const g = PERM[ii + i2 + PERM[jj + j2 + PERM[kk + k2]]] % 12 * 3;
+    const g = GRAD_OFF[ii + i2 + PERM[jj + j2 + PERM[kk + k2]]];
     t2 *= t2;
     n += t2 * t2 * (GRAD3[g] * x2 + GRAD3[g + 1] * y2 + GRAD3[g + 2] * z2);
   }
   let t3 = 0.6 - x3 * x3 - y3 * y3 - z3 * z3;
   if (t3 > 0) {
-    const g = PERM[ii + 1 + PERM[jj + 1 + PERM[kk + 1]]] % 12 * 3;
+    const g = GRAD_OFF[ii + 1 + PERM[jj + 1 + PERM[kk + 1]]];
     t3 *= t3;
     n += t3 * t3 * (GRAD3[g] * x3 + GRAD3[g + 1] * y3 + GRAD3[g + 2] * z3);
   }
   return 32 * n;
 }
-var F3, G3, PERM, GRAD3;
+var F3, G3, PERM, GRAD3, GRAD_OFF;
 var init_noise = __esm(() => {
   F3 = 1 / 3;
   G3 = 1 / 6;
@@ -3763,6 +3763,9 @@ var init_noise = __esm(() => {
     -1,
     -1
   ]);
+  GRAD_OFF = new Uint8Array(512);
+  for (let i = 0;i < 512; i++)
+    GRAD_OFF[i] = PERM[i] % 12 * 3;
 });
 
 // packages/core/src/random.ts

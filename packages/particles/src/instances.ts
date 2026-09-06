@@ -47,7 +47,7 @@
 
 import { sphereOutsideFrustum } from '@rune/core'
 import type { ParticleSystem } from './system.ts'
-import { sampleRamp, CONSTANT_RAMP, type Ramp } from './ramp.ts'
+import { flatRamp, CONSTANT_RAMP, type Ramp } from './ramp.ts'
 
 /** Floats per instance record (see the module header). */
 export const INSTANCE_STRIDE = 16
@@ -139,6 +139,12 @@ export function packInstances(
   // the particles in the given sequence; the default — the slot order.
   const order = options.order
   const ordered = order !== undefined && order !== null
+  // Task 142 — the ramp's compiled form hoisted once per pack, the sampler
+  // INLINED into the walk (JSC keeps the binary-search call out-of-line —
+  // the inline body is sampleFlatRamp's own, verbatim, bit-identical).
+  const rampFlat = flatRamp(ramp)
+  const rampN = rampFlat.length / 7
+  const rampLast = (rampN - 1) * 7
   const total = ordered ? order!.length : count
   for (let j = 0; j < total; j++) {
     const i = ordered ? order![j] : j
@@ -146,7 +152,29 @@ export function packInstances(
     const age = f.age[i]
     const life = f.life[i]
     const t = life > 0 ? age / life : 0
-    sampleRamp(ramp, t, s)
+    // INLINE sampleFlatRamp(rampFlat, t, s) — the sampler's own expressions.
+    if (rampN === 1 || t <= rampFlat[0]) {
+      s[0] = rampFlat[1]; s[1] = rampFlat[2]; s[2] = rampFlat[3]; s[3] = rampFlat[4]; s[4] = rampFlat[5]; s[5] = rampFlat[6]
+    } else if (t >= rampFlat[rampLast]) {
+      s[0] = rampFlat[rampLast + 1]; s[1] = rampFlat[rampLast + 2]; s[2] = rampFlat[rampLast + 3]
+      s[3] = rampFlat[rampLast + 4]; s[4] = rampFlat[rampLast + 5]; s[5] = rampFlat[rampLast + 6]
+    } else {
+      let lo = 0, hi = rampN - 1
+      while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1
+        if (rampFlat[mid * 7] <= t) lo = mid
+        else hi = mid
+      }
+      const a = lo * 7, b = hi * 7
+      const span = rampFlat[b] - rampFlat[a]
+      const k = span > 0 ? (t - rampFlat[a]) / span : 0
+      s[0] = rampFlat[a + 1] + (rampFlat[b + 1] - rampFlat[a + 1]) * k
+      s[1] = rampFlat[a + 2] + (rampFlat[b + 2] - rampFlat[a + 2]) * k
+      s[2] = rampFlat[a + 3] + (rampFlat[b + 3] - rampFlat[a + 3]) * k
+      s[3] = rampFlat[a + 4] + (rampFlat[b + 4] - rampFlat[a + 4]) * k
+      s[4] = rampFlat[a + 5] + (rampFlat[b + 5] - rampFlat[a + 5]) * k
+      s[5] = rampFlat[a + 6] + (rampFlat[b + 6] - rampFlat[a + 6]) * k
+    }
     // The half extent — the same zero-size skip as fillBillboards (a
     // size-0 particle emits no quad; the packed count excludes it).
     const half = f.size[i] * s[0] * 0.5

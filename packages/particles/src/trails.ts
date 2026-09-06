@@ -26,7 +26,7 @@
 
 import type { ParticleSystem } from './system.ts'
 import { SOUP_STRIDE } from './billboards.ts'
-import { sampleRamp, CONSTANT_RAMP, type Ramp } from './ramp.ts'
+import { sampleFlatRamp, flatRamp, CONSTANT_RAMP, type Ramp } from './ramp.ts'
 
 /** The trail history options. */
 export interface TrailOptions {
@@ -174,13 +174,16 @@ export function fillTrails(
   const fx = basis.forward[0], fy = basis.forward[1], fz = basis.forward[2]
   const s = SCRATCH
 
+  // Task 142 — the compiled ramp hoisted once per bake (no per-particle
+  // WeakMap lookup — the same treatment as fillBillboards).
+  const rampFlat = flatRamp(ramp)
   let at = 0
   for (let i = 0; i < count; i++) {
     const histCount = counts[i]
     if (histCount < 1) continue // 1 recorded point + the live head = the
     // minimum 2-point ribbon; 0 points = nothing to span
     const t = f.life[i] > 0 ? f.age[i] / f.life[i] : 0
-    sampleRamp(ramp, t, s)
+    sampleFlatRamp(rampFlat, t, s)
     const halfW = Math.max(0, f.size[i] * s[0] * widthK * 0.5)
     if (halfW <= 0) continue
     const headX = f.px[i], headY = f.py[i], headZ = f.pz[i]
