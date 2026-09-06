@@ -745,3 +745,100 @@ growth epoch, the delete-free store overwrite/LRU, the executor state
 call sequence ×3, the sparse/padding/idempotent collect walks),
 typecheck/lint at the baseline, build OK, demo:smoke 24/24, the
 task134/137/138 probes + the raw-device battery green, ?v=143.
+
+## Task 144 — THE THIRD GENERAL PASS: the remaining frame machinery (uniform sets, arenas, the transient pool)
+
+The survey: Tasks 142/143 covered the particles CPU tier and the
+transport/executor/tape/scene machinery; the profiler over the FULL
+18-bench battery named what was left. Three surfaces carried
+identifiable, bit-identical-fixable waste; one candidate (the texture
+preview downsample) was measured, found memory-bound (~2–4%, below
+the gate), and left alone; one (the WebGPU pipeline cache's
+join-per-lookup) is real but lives on a compile-time path the battery
+cannot resolve — deferred, not forced.
+
+**The targets (self-time in the profiles):**
+
+- `uniformSet.write` (theoryL: `entries` 19.4% + `write` 17.2%) —
+  `Object.entries(schema)` ran PER WRITE, allocating a fresh key array
+  + N array destructures just to re-discover what `attach` had already
+  resolved into `offsets`.
+- `arena.clearDirty` (theoryL: 16.2%) — the per-frame reset walked
+  ALL slots (`for..of` over the whole slot table) even when one value
+  changed; 5 000 slots × 60 frames paid 300 000 flag stores to clear
+  ~13 flags.
+- `transientPool.alloc` (theoryM: 14.8% + 6.9%) — every lease keyed
+  its bin by `` `${tag}:${length}` ``: a fresh STRING per scratch
+  array taken in a frame (9 leases per object in the renderer's
+  profile shape).
+
+**The changes (each pinned bit-identical by a checksum-gated sandbox
+micro + the interleaved A/B medians):**
+
+1. `core/uniforms/uniformSet.ts` — the write PLAN built once at
+   `attach` (a flat `{field, offset}[]` in the same `Object.entries`
+   order); `write()` walks the plan with the scalar/array split
+   inlined (the Task-142 ramp lesson). Write-before-attach stays
+   silent (plan `null` ≡ empty offsets), link-override wins, the
+   offsets snapshot is unchanged. Sandbox: the theoryL shape
+   4.01 → 0.65 ms (−84%) with byte-identical call logs.
+2. `core/uniforms/arena.ts` — the guarded dirty LIST: marks append
+   (already-dirty → no-op), `clearDirty` walks only the marked slots
+   and empties the list. Every reader (`isDirty`, `dirtySlots`,
+   `dirtyRanges`) still reads the live `slot.dirty` flag; born-dirty
+   survives (alloc marks); `importBytes` marks. The executor's
+   external `field.slot.dirty = false` (the per-field upload clear)
+   stays harmless — the list member re-clears as a no-op and a later
+   write re-marks. Sandbox: the theoryL shape −35%, the 5 000-slot /
+   13-dirty pathological shape −77%.
+3. `core/pool/transientPool.ts` — the bins are a TWO-LEVEL map
+   (tag → length → bin): the tag is an existing string constant, the
+   length a number — both lookups allocation-free, the per-lease key
+   string dies. The identity sequence (which buffer a lease returns,
+   and when) is bit-identical — pinned by an id-mapped 48 245-entry
+   log walk in the sandbox. Sandbox: the theoryM shape −33%.
+
+**The rejected candidate:** `webgl2/command.ts reflectCached` — a
+two-level (vertex → fragment) accelerator replacing the
+`` `${vertex}\u0000${fragment}` `` concat per compile. The micro
+showed −48% on an isolated lookup loop, but the strict interleaved
+A/B on the real theoryF bench measured hit ±0% / miss +4% (the hit
+path is dominated by spec conversion and state reads, not the key
+build; the miss path gains a small Map per unique shader). Per the
+discipline — apply only what the REAL bench proves — the change was
+reverted; the sandbox and the story stay in the scripts for the day
+the compile path becomes measurable.
+
+**The etalons (interleaved A/B, medians of 4, tree vs HEAD):**
+
+| path | HEAD | tree | delta |
+|---|---:|---:|---:|
+| theoryL unified zone | 3.970 ms | 1.320 ms | **−66.8%** |
+| theoryL split zone | 2.910 ms | 1.480 ms | **−49.1%** |
+| theoryL steady | 2.610 ms | 1.070 ms | **−59.0%** |
+| theoryM pooled frame | 0.154 ms | 0.094 ms | **−39.0%** |
+| theoryF hit batch | 0.290 ms | 0.300 ms | +3.4% (the alloc's third push — a setup-path cost) |
+| theoryF miss batch | 1.910 ms | 1.950 ms | +2.1% (same) |
+| webgl2 framePath record | 0.354 ms | 0.360 ms | +1.7% (within the IQR overlap 0.34–0.38) |
+| particles steady (~10k) | 0.928 ms | 0.917 ms | −1.2% (untouched) |
+| T3 feed round-trip (theoryN) | 65.1 ms | 65.1 ms | ±0% (untouched) |
+
+The compile-path +2–3% is the born-dirty slot's third array push per
+`alloc` (the dirty-list invariant), paid 800× per theoryF batch —
+12 ns per allocation on a SETUP-time path, traded against the
+−49…−67% frame-path wins. The block A/B (16 runs per side) pins it
+with tight IQRs; the framePath numbers sit inside each other's
+interquartile ranges.
+
+The verification: 1660 tests + 13 new (the uniform-set plan pins:
+pre-attach silence, the exact write sequence, attach idempotence,
+link merge; the arena dirty-list pins: born-dirty, the
+many-slots-one-write walk, the fround no-remark, importBytes ranges,
+the executor's external-clear pattern, writeVec4 lanes; the pool
+bins: the same-length different-tag isolation, the depth/reuse
+identity, the stats totals), typecheck 6 (the pre-existing
+task142.test.ts strictness, identical at HEAD), lint 0 errors /
+374 warnings (the baseline), build OK, demo:smoke 24/24 with GPU
+health clean, task134/137/138 vfx-probes PASS, the raw-device
+battery (glsl-emit, wgsl-emit, wgsl-sort, wgsl-sim) 4/4 PASS,
+demo-shots ALL ALIVE (gpuEmbers 11 595 particles, warm), ?v=144.

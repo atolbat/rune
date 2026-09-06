@@ -96,6 +96,21 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
   // Last slot hit by a lookup: writes of one command's fields are clustered,
   // so a single comparison usually resolves the owner (O(1) fast path).
   let lastHit = 0
+  // Task 144 — the dirty LIST: clearDirty() used to walk ALL slots
+  // (O(S) per frame even when one value changed). Marks now append the
+  // slot here (guard: already-dirty → no-op), clear walks the list
+  // (O(dirty)) and empties it. Semantics preserved exactly: every reader
+  // (isDirty/dirtySlots/dirtyRanges) still reads the live slot.dirty flag;
+  // born-dirty survives (alloc marks); importBytes marks. An external
+  // slot.dirty = false (the executor's per-field upload clear) stays
+  // harmless — the list member is re-cleared as a no-op, and a later mark
+  // pushes it again (duplicates inside one cycle are bounded and benign).
+  const dirtyList: UniformSlot[] = []
+  function markDirty(slot: UniformSlot): void {
+    if (slot.dirty) return
+    slot.dirty = true
+    dirtyList.push(slot)
+  }
 
   function alloc(sizeOrType: number | string): UniformSlot | UniformSlotBytes {
     if (typeof sizeOrType === 'string') {
@@ -112,6 +127,7 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
     cursor += size
     bases.push(slot.base)
     slots.push(slot)
+    dirtyList.push(slot) // born dirty — the direct push (the literal + the list entry, no call)
     return slot
   }
 
@@ -123,6 +139,7 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
     cursor += size
     bases.push(slot.base)
     slots.push(slot)
+    dirtyList.push(slot) // born dirty — the direct push (the literal + the list entry, no call)
     return { offset: slot.base * 4, size: byteSize }
   }
 
@@ -144,7 +161,7 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
         }
       }
     }
-    if (changed) slot.dirty = true
+    if (changed) markDirty(slot)
     return changed
   }
 
@@ -184,7 +201,7 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
     if (Math.fround(value) !== buffer[floatIndex]) {
       buffer[floatIndex] = value
       const owner = slotAt(floatIndex)
-      if (owner !== null) owner.dirty = true
+      if (owner !== null) markDirty(owner)
     }
   }
 
@@ -207,7 +224,7 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
     if (Math.fround(w) !== buffer[base + 3]) { buffer[base + 3] = w; changed = true }
     if (changed) {
       const owner = slotAt(base)
-      if (owner !== null) owner.dirty = true
+      if (owner !== null) markDirty(owner)
     }
   }
 
@@ -273,12 +290,13 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
     for (let at = low; at < slots.length; at++) {
       const slot = slots[at]
       if (slot.base >= toFloat) break
-      slot.dirty = true
+      markDirty(slot)
     }
   }
 
   function clearDirty(): void {
-    for (const slot of slots) slot.dirty = false
+    for (let i = 0; i < dirtyList.length; i++) dirtyList[i].dirty = false
+    dirtyList.length = 0
   }
 
   function used(): number {

@@ -38,22 +38,44 @@ export function createUniformSet<S extends UniformSetSchema>(
   const cache: Partial<Record<keyof S, UniformSetValue>> = {}
   void options.frequency // a hint for frequency-split arenas (implemented by the arena)
 
+  // Task 144 — the write plan built ONCE at attach: the old write() paid
+  // Object.entries(schema) PER CALL (a fresh key array + N array
+  // destructures) just to discover what attach had already resolved. The
+  // plan walks a flat {field, offset} array in the same order — the
+  // call sequence is bit-identical (write before attach → nothing is
+  // written, exactly like the empty-offsets walk).
+  let plan: { readonly field: keyof S; readonly offset: number }[] | null = null
+
   function attach(alloc: (type: UniformSetFieldType) => { offset: number; size: number }): void {
     if (attached) return
     attached = true
-    for (const [field, type] of Object.entries(schema)) {
-      offsets[field as keyof S] = alloc(type).offset
+    const entries = Object.entries(schema)
+    const resolved: { field: keyof S; offset: number }[] = []
+    for (let i = 0; i < entries.length; i++) {
+      const offset = alloc(entries[i][1] as UniformSetFieldType).offset
+      offsets[entries[i][0] as keyof S] = offset
+      resolved.push({ field: entries[i][0] as keyof S, offset })
     }
+    plan = resolved
   }
 
   function write(writeFloat: (offset: number, value: number) => void): void {
-    for (const [field] of Object.entries(schema)) {
-      const offset = offsets[field as keyof S]
-      if (offset === undefined) continue
-      const signal = linked[field as keyof S]
-      const value = signal !== undefined ? signal.peek() : cache[field as keyof S]
+    if (plan === null) return
+    const p = plan
+    for (let i = 0; i < p.length; i++) {
+      const field = p[i].field
+      const offset = p[i].offset
+      const signal = linked[field]
+      const value = signal !== undefined ? signal.peek() : cache[field]
       if (value === undefined) continue
-      writeField(offset, value, writeFloat)
+      // writeField inlined (the Task-142 ramp lesson: JSC keeps the small
+      // out-of-line call) — the same scalar/array split, the same order.
+      if (typeof value === 'number') {
+        writeFloat(offset, value)
+      } else {
+        const array = value as readonly number[]
+        for (let at = 0; at < array.length; at++) writeFloat(offset + at * 4, array[at])
+      }
     }
   }
 
@@ -70,11 +92,4 @@ export function createUniformSet<S extends UniformSetSchema>(
   }
 }
 
-function writeField(offset: number, value: UniformSetValue, writeFloat: (offset: number, value: number) => void): void {
-  if (typeof value === 'number') {
-    writeFloat(offset, value)
-    return
-  }
-  const array = value as readonly number[]
-  for (let i = 0; i < array.length; i++) writeFloat(offset + i * 4, array[i])
-}
+

@@ -307,7 +307,7 @@ var init_epoch = __esm(() => {
 
 // packages/core/src/pool/transientPool.ts
 function createTransientPool(depth2 = 2) {
-  const bins = new Map;
+  const binsByTag = new Map;
   let created = 0;
   let bytes = 0;
   let frames = 0;
@@ -315,18 +315,26 @@ function createTransientPool(depth2 = 2) {
     frames++;
   }
   function alloc(tag, length) {
-    const bin = binFor(`${tag}:${length}`);
+    const bin = binFor(tag, length);
     reclaim(bin);
     const buf = bin.free.pop() ?? create(tag, length);
     bin.leased.push({ buf, frame: frames });
     return buf;
   }
-  function binFor(key) {
-    const found = bins.get(key);
-    if (found !== undefined)
-      return found;
+  function binFor(tag, length) {
+    const byLen = binsByTag.get(tag);
+    if (byLen !== undefined) {
+      const found = byLen.get(length);
+      if (found !== undefined)
+        return found;
+      const fresh2 = { free: [], leased: [] };
+      byLen.set(length, fresh2);
+      return fresh2;
+    }
+    const freshByLen = new Map;
     const fresh = { free: [], leased: [] };
-    bins.set(key, fresh);
+    freshByLen.set(length, fresh);
+    binsByTag.set(tag, freshByLen);
     return fresh;
   }
   function reclaim(bin) {
@@ -342,9 +350,11 @@ function createTransientPool(depth2 = 2) {
   function stats() {
     let pooled = 0;
     let leased = 0;
-    for (const bin of bins.values()) {
-      pooled += bin.free.length;
-      leased += bin.leased.length;
+    for (const byLen of binsByTag.values()) {
+      for (const bin of byLen.values()) {
+        pooled += bin.free.length;
+        leased += bin.leased.length;
+      }
     }
     return { created, pooled, leased, bytes, frames };
   }
@@ -663,6 +673,13 @@ function createUniformArena(floats = 1 << 16) {
   const bases = [];
   let cursor = 0;
   let lastHit = 0;
+  const dirtyList = [];
+  function markDirty(slot) {
+    if (slot.dirty)
+      return;
+    slot.dirty = true;
+    dirtyList.push(slot);
+  }
   function alloc(sizeOrType) {
     if (typeof sizeOrType === "string") {
       const byteSize = TYPE_BYTES[sizeOrType];
@@ -679,6 +696,7 @@ function createUniformArena(floats = 1 << 16) {
     cursor += size;
     bases.push(slot.base);
     slots.push(slot);
+    dirtyList.push(slot);
     return slot;
   }
   function allocBytes(byteSize) {
@@ -689,6 +707,7 @@ function createUniformArena(floats = 1 << 16) {
     cursor += size;
     bases.push(slot.base);
     slots.push(slot);
+    dirtyList.push(slot);
     return { offset: slot.base * 4, size: byteSize };
   }
   function write(slot, values) {
@@ -708,7 +727,7 @@ function createUniformArena(floats = 1 << 16) {
       }
     }
     if (changed)
-      slot.dirty = true;
+      markDirty(slot);
     return changed;
   }
   function slotAt(floatIndex) {
@@ -750,7 +769,7 @@ function createUniformArena(floats = 1 << 16) {
       buffer[floatIndex] = value;
       const owner = slotAt(floatIndex);
       if (owner !== null)
-        owner.dirty = true;
+        markDirty(owner);
     }
   }
   function readFloat(slot, index = 0) {
@@ -782,7 +801,7 @@ function createUniformArena(floats = 1 << 16) {
     if (changed) {
       const owner = slotAt(base);
       if (owner !== null)
-        owner.dirty = true;
+        markDirty(owner);
     }
   }
   function isDirty(slot) {
@@ -841,12 +860,13 @@ function createUniformArena(floats = 1 << 16) {
       const slot = slots[at];
       if (slot.base >= toFloat)
         break;
-      slot.dirty = true;
+      markDirty(slot);
     }
   }
   function clearDirty() {
-    for (const slot of slots)
-      slot.dirty = false;
+    for (let i = 0;i < dirtyList.length; i++)
+      dirtyList[i].dirty = false;
+    dirtyList.length = 0;
   }
   function used() {
     return cursor;
@@ -904,24 +924,38 @@ function createUniformSet(name, schema, options = {}) {
   let linked = {};
   const cache = {};
   options.frequency;
+  let plan = null;
   function attach(alloc) {
     if (attached)
       return;
     attached = true;
-    for (const [field, type] of Object.entries(schema)) {
-      offsets[field] = alloc(type).offset;
+    const entries = Object.entries(schema);
+    const resolved = [];
+    for (let i = 0;i < entries.length; i++) {
+      const offset = alloc(entries[i][1]).offset;
+      offsets[entries[i][0]] = offset;
+      resolved.push({ field: entries[i][0], offset });
     }
+    plan = resolved;
   }
   function write(writeFloat) {
-    for (const [field] of Object.entries(schema)) {
-      const offset = offsets[field];
-      if (offset === undefined)
-        continue;
+    if (plan === null)
+      return;
+    const p = plan;
+    for (let i = 0;i < p.length; i++) {
+      const field = p[i].field;
+      const offset = p[i].offset;
       const signal2 = linked[field];
       const value = signal2 !== undefined ? signal2.peek() : cache[field];
       if (value === undefined)
         continue;
-      writeField(offset, value, writeFloat);
+      if (typeof value === "number") {
+        writeFloat(offset, value);
+      } else {
+        const array = value;
+        for (let at = 0;at < array.length; at++)
+          writeFloat(offset + at * 4, array[at]);
+      }
     }
   }
   function link(values) {
@@ -934,15 +968,6 @@ function createUniformSet(name, schema, options = {}) {
     link,
     offsets
   };
-}
-function writeField(offset, value, writeFloat) {
-  if (typeof value === "number") {
-    writeFloat(offset, value);
-    return;
-  }
-  const array = value;
-  for (let i = 0;i < array.length; i++)
-    writeFloat(offset + i * 4, array[i]);
 }
 
 // packages/core/src/uniforms/frequencyArena.ts

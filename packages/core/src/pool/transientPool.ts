@@ -49,7 +49,13 @@ const MAKE: Record<Tag, (length: number) => View> = {
 
 /** Creates the pool; depth is the minimum buffer lifetime in frames. */
 export function createTransientPool(depth = 2): TransientPool {
-  const bins = new Map<string, Bin>()
+  // Task 144 — the bins are a TWO-LEVEL map (tag → length → bin): the old
+  // flat map keyed by `${tag}:${length}` allocated a fresh key STRING on
+  // every lease (a lease is a per-frame hot path — 9 leases per object in
+  // the theoryM profile). The tag is an existing string constant and the
+  // length is a number, so both lookups are allocation-free; the identity
+  // sequence (which buffer a lease returns, and when) is bit-identical.
+  const binsByTag = new Map<Tag, Map<number, Bin>>()
   let created = 0
   let bytes = 0
   let frames = 0
@@ -59,18 +65,26 @@ export function createTransientPool(depth = 2): TransientPool {
   }
 
   function alloc(tag: Tag, length: number): View {
-    const bin = binFor(`${tag}:${length}`)
+    const bin = binFor(tag, length)
     reclaim(bin)
     const buf = bin.free.pop() ?? create(tag, length)
     bin.leased.push({ buf, frame: frames })
     return buf
   }
 
-  function binFor(key: string): Bin {
-    const found = bins.get(key)
-    if (found !== undefined) return found
+  function binFor(tag: Tag, length: number): Bin {
+    const byLen = binsByTag.get(tag)
+    if (byLen !== undefined) {
+      const found = byLen.get(length)
+      if (found !== undefined) return found
+      const fresh: Bin = { free: [], leased: [] }
+      byLen.set(length, fresh)
+      return fresh
+    }
+    const freshByLen = new Map<number, Bin>()
     const fresh: Bin = { free: [], leased: [] }
-    bins.set(key, fresh)
+    freshByLen.set(length, fresh)
+    binsByTag.set(tag, freshByLen)
     return fresh
   }
 
@@ -90,9 +104,11 @@ export function createTransientPool(depth = 2): TransientPool {
   function stats(): TransientPoolStats {
     let pooled = 0
     let leased = 0
-    for (const bin of bins.values()) {
-      pooled += bin.free.length
-      leased += bin.leased.length
+    for (const byLen of binsByTag.values()) {
+      for (const bin of byLen.values()) {
+        pooled += bin.free.length
+        leased += bin.leased.length
+      }
     }
     return { created, pooled, leased, bytes, frames }
   }
