@@ -133,6 +133,27 @@
 //     watchdog, the pixel-confirmed ladder and the ?emit=1&cull=1 escape
 //     hatch are unchanged.
 //
+// Task 155 — THE DEVICE VERDICT (the 23:50 field log's lesson, and the
+// user's verdict on the whole mechanism: "a circus" — every reload of
+// the reporting phone paid ~2 s of doomed GPU attempts + a self-reload
+// flash, and every FRESH TAB re-ran the whole ladder from zero because
+// the verdict lived in per-tab sessionStorage). The verdicts are
+// DEVICE-SCOPED now: every pixel-confirmed verdict (rung 1 at the
+// level-0 crossing, rung 2 at the conservative-tier escalation) lands
+// in localStorage with the browser's major version and a timestamp, and
+// a WARM conservative tier re-arms rung 1 (the standing verdict). main.js
+// reads it at module scope on EVERY page — reload or fresh tab — and
+// lands the surviving rung directly: rung 2 = the CPU floor with ZERO
+// GPU attempts (no black window, no self-reload, no verdict WARN pair),
+// rung 1 = the conservative TF tier with no level-0 leg. The re-probe
+// door: ~6 h of verdict age (or a browser update — the major-version
+// key) degrades rung 2 to a rung-1 re-probe and kills a stale rung 1
+// (the full ladder re-runs); a clean re-probe re-arms rung 1, a
+// dropping one re-arms the rung-2 floor. The landing does NOT hijack
+// the boot mode — a WebGPU-capable browser still boots the user's own
+// default (the verdict binds the WebGL2 leg only; the WG→GL toggle
+// takes the floor in-page, instantly).
+//
 //   · THE COMMON POINT (Task 132): createGpuParticles(facade, backend)
 //     dispatches by the facade's shape — WebGPU compute (the SSBO tier,
 //     160k) or WebGL2 transform feedback (the TF tier — 16k on the
@@ -334,8 +355,34 @@ const fallbackLevel = () => {
  * the fresh page boots straight into WebGL2 at the carried rung + demo);
  * the reload itself goes through a small indirection so the gates can
  * intercept it. Storage unavailable → the v150 in-page rung step takes
- * over. */
+ * over.
+ *
+ * Task 155 — THE DEVICE VERDICT (localStorage, device-scoped): the v155
+ * field evidence — five-plus consecutive pixel-confirmed rung-1 drops on
+ * fresh pages across an entire evening, EVERY reload and EVERY fresh tab
+ * of the reporting phone re-running the same doomed circus (level-0 →
+ * the crossing reload → level-1 → the floor) — settled that a verdict
+ * this expensive to earn must not die with its tab. Every pixel-confirmed
+ * verdict lands in localStorage TOO: any future page of this browser —
+ * reload or fresh tab — lands its rung DIRECTLY (main.js reads the
+ * verdict at module scope; the re-probe/recovery door lives there:
+ * ~6 h of age or a browser update re-opens the ladder). A warm
+ * conservative tier re-arms rung 1 (the standing verdict: level 0 dead,
+ * the rung alive). Storage-less browsers keep the in-tab ladder (the
+ * honest floor). */
 const HEAL_KEY = 'rune:vfx:glheal'
+const VERDICT_KEY = 'rune:vfx:glverdict'
+const UA_MAJOR = (() => {
+  try {
+    const m = /(?:Chrome|Chromium)\/(\d+)/.exec(String(navigator.userAgent))
+    return m !== null ? Number(m[1]) : 0
+  } catch { return 0 }
+})()
+const writeDeviceVerdict = (rung, env, why) => {
+  const marker = { v: 1, rung, demo: env.demoIndex ?? 0, at: Date.now(), major: UA_MAJOR, why: String(why ?? '').slice(0, 240) }
+  try { localStorage.setItem(VERDICT_KEY, JSON.stringify(marker)); return } catch { /* fall through */ }
+  try { sessionStorage.setItem(HEAL_KEY, JSON.stringify(marker)) } catch { /* storage-less — the in-tab ladder remains the floor */ }
+}
 const healReload = () => {
   if (typeof window !== 'undefined' && typeof window.__vfxHealReload === 'function') window.__vfxHealReload()
   else if (typeof location !== 'undefined' && typeof location.reload === 'function') location.reload()
@@ -343,7 +390,7 @@ const healReload = () => {
 
 export default {
   title: 'GPU Embers',
-  sub: 'the GPGPU tier · 160k compute-simmed, GPU-EMITTED embers · the full GPU pipeline on BOTH backends by default (WebGL2: the transform-feedback tier — 160k + GPU emission + the frustum cull on real GPUs; SwiftShader/llvmpipe keep the conservative CPU defaults) · zero per-frame particle uploads · the session NEVER disposes its WebGL2 context (backend toggles park and resurrect it) · a driver drop self-heals ACROSS A PAGE RELOAD into the conservative TF tier on the fresh page\'s first context — and once that tier itself has verdicted dead across reloads, the next reload lands the CPU tier directly (a periodic conservative re-probe keeps the recovery door open) · ?forensic=1 runs the pass-family isolation walk · the mid-run watchdog keeps watching',
+  sub: 'the GPGPU tier · 160k compute-simmed, GPU-EMITTED embers · the full GPU pipeline on BOTH backends by default (WebGL2: the transform-feedback tier — 160k + GPU emission + the frustum cull on real GPUs; SwiftShader/llvmpipe keep the conservative CPU defaults) · zero per-frame particle uploads · the session NEVER disposes its WebGL2 context (backend toggles park and resurrect it) · a driver drop self-heals ACROSS A PAGE RELOAD into the conservative TF tier on the fresh page\'s first context — and the verdict is DEVICE-SCOPED (localStorage): once a tier verdicts dead, every reload AND every fresh tab lands the surviving rung directly — no doomed retries, no self-reload — until the periodic re-probe (≈6 h, or a browser update) re-opens the ladder · ?forensic=1 runs the pass-family isolation walk · the mid-run watchdog keeps watching',
   camera: { yaw: 0.6, pitch: 0.34, dist: 13, orbit: 0.05, target: [0, 4.5, 0] },
 
   make(env) {
@@ -655,9 +702,13 @@ export default {
           crossed = true
         } catch { crossed = false }
         if (crossed) {
+          // Task 155 — the verdict ALSO becomes DEVICE knowledge: every
+          // future page of this browser (reload OR fresh tab) lands this
+          // rung directly instead of re-running the doomed ladder
+          writeDeviceVerdict(1, env, reason)
           if (typeof window !== 'undefined') window.__vfxHeal = { rung: 1, demo: env.demoIndex ?? 0 }
           perf.heal = 'reload'
-          console.warn(`[rune/vfx] GPU Embers: ${reason} — the session's WebGL2 context (never disposed — the shell's Task 152 keep-alive parks and resurrects it across backend toggles) still drops its transform feedback. Healing ACROSS A PAGE RELOAD: the FIRST WebGL2 context of a fresh page is the one cell this driver class has rendered the conservative TF tier at the full 160k in, live-verified — the reload re-enters THIS demo at that tier automatically (emit:'cpu', cull off, the simulation and the records pack still on the GPU at the full capacity). If the fresh page drops too, its own ladder lands the CPU tier — the one configuration every driver renders — and arms the direct-to-CPU crossing for this tab's subsequent reloads (no more doomed crossings per reload). The reload fires NOW (about a second of blank); the fresh page's log opens with the "GL heal" event line. Paste that log back if anything still looks wrong.`)
+          console.warn(`[rune/vfx] GPU Embers: ${reason} — the session's WebGL2 context (never disposed — the shell's Task 152 keep-alive parks and resurrects it across backend toggles) still drops its transform feedback. Healing ACROSS A PAGE RELOAD: the FIRST WebGL2 context of a fresh page is the one cell this driver class has rendered the conservative TF tier at the full 160k in, live-verified — the reload re-enters THIS demo at that tier automatically (emit:'cpu', cull off, the simulation and the records pack still on the GPU at the full capacity). The verdict is ALSO remembered device-wide (localStorage): if this driver keeps dropping, every future page of this browser — reload or fresh tab — lands the surviving rung directly, no repeated ladder. If the fresh page drops too, its own ladder lands the CPU tier — the one configuration every driver renders. The reload fires NOW (about a second of blank); the fresh page's log opens with the "GL heal" event line.`)
           healReload()
           return
         }
@@ -684,28 +735,22 @@ export default {
         // to escalate; it fires only where sessionStorage is unavailable.
         console.warn(`[rune/vfx] GPU Embers: ${reason} — the FULL pipeline's passes (the GPU emission + the frustum cull) are what this driver is dropping; the transform feedback itself may still be sound (the minimal tier — emit:'cpu', cull off — is the configuration this hardware class ran at the full 160k, live-verified). Stepping down ONCE to the conservative TF tier (emit:'cpu', cull off, the sim and the records pack still on the GPU at the full capacity) on a FRESH context, re-verdicted by the same pixel-confirmed ladder: if its own records read back degenerate AND its canvas reads cold, the page drops to the facade's CPU tier. Reload to retry the full pipeline, or force it with ?emit=1&cull=1.`)
       } else {
-        // Task 154 — THE RUNG-2 MARKER (the escalation): the conservative
-        // tier just verdicted dead on THIS page. The v154 field evidence:
-        // the poison on the reporting phone SURVIVES page reloads — rung 1
-        // dropped on five consecutive fresh pages (every reload of the
-        // session, pixel-confirmed each time), so a plain reload re-runs
-        // the whole doomed cycle (level-0 → the crossing reload →
-        // level-1 → the floor). Write the rung-2 marker: the NEXT reload
-        // lands the CPU floor directly — no GPU attempt, no verdict WARN
-        // pair, no self-reload. The marker re-arms on every CPU-direct
-        // landing (main.js) and ages into the rung-1 RE-PROBE after
-        // HEAL_PROBE_MS of verdict age (the recovery door: a clean
-        // re-probe leaves no marker and re-opens the full ladder); a
-        // fresh tab re-runs the ladder from rung 0 — sessionStorage is
-        // per-tab. Storage unavailable → the next reload re-runs the
-        // ladder (the honest floor; the try/catch keeps this branch
+        // Task 154/155 — THE RUNG-2 VERDICT (the escalation, DEVICE-SCOPED):
+        // the conservative tier just verdicted dead on THIS page. The
+        // v154/v155 field evidence: the poison on the reporting phone
+        // SURVIVES page reloads — rung 1 dropped on five-plus consecutive
+        // fresh pages (every reload of the session, pixel-confirmed each
+        // time), so a plain reload re-ran the whole doomed cycle (level-0
+        // → the crossing reload → level-1 → the floor) — and a FRESH TAB
+        // re-ran it too (sessionStorage is per-tab). The rung-2 verdict
+        // lands in localStorage: the NEXT reload AND every fresh tab of
+        // this browser land the CPU floor directly — no GPU attempt, no
+        // verdict WARN pair, no self-reload — until the verdict re-probes
+        // (≈6 h of age, or a browser update — main.js owns the gate).
+        // Storage unavailable → the next reload re-runs the ladder (the
+        // honest floor; writeDeviceVerdict keeps this branch
         // storage-optional, exactly like the level-0 crossing).
-        try {
-          sessionStorage.setItem(HEAL_KEY, JSON.stringify({
-            v: 1, rung: 2, demo: env.demoIndex ?? 0, at: Date.now(),
-            why: String(reason).slice(0, 240),
-          }))
-        } catch { /* storage-less — the ladder re-runs on the next reload */ }
+        writeDeviceVerdict(2, env, reason)
         // Task 151 — THE CONTAMINATED-VERDICT CORRECTION: rung 1 is the
         // PROVEN-CLEAN configuration (the live fresh-load experiment
         // rendered it at the full 160k) — if IT drops too, the session's
@@ -722,7 +767,7 @@ export default {
           fr.contaminated = true
           console.warn(`[rune/vfx] GPU Embers FORENSIC CORRECTION: the conservative TF tier — the minimal configuration a FRESH page load rendered clean at the full capacity — is dropping too. The walk's legs ran on contexts born into an already-poisoned session (this driver class degrades every subsequently created context after a run of rapid re-boots), so the "${fr.verdict}" verdict above is INCONCLUSIVE: the drop follows the session's CONTEXT HISTORY, not the pass family. A page reload is the clean retest — the first WebGL2 context of a fresh session has rendered the full pipeline clean, live-verified.`)
         }
-        console.warn(`[rune/vfx] GPU Embers: ${reason} — the conservative TF tier itself is dropping its writes on this driver. Falling back ONCE to the facade's own CPU tier (sim:'cpu' — the simulation, the emission and the records all on the CPU, per-frame uploads, no transform feedback: the one configuration every driver renders). The NEXT reload lands the CPU floor directly (this session verdicted the conservative tier dead across its reloads — the marker re-probes the tier periodically, and a fresh tab re-runs the full ladder), or force the GPU pipeline now with ?emit=1&cull=1.`)
+        console.warn(`[rune/vfx] GPU Embers: ${reason} — the conservative TF tier itself is dropping its writes on this driver. Falling back ONCE to the facade's own CPU tier (sim:'cpu' — the simulation, the emission and the records all on the CPU, per-frame uploads, no transform feedback: the one configuration every driver renders). The verdict is DEVICE-SCOPED now (localStorage): the next reload AND every fresh tab of this browser land the CPU floor directly — no GPU attempt, no self-reload, no verdict pair — until the periodic re-probe (≈6 h, or a browser update) re-tests the tier; or force the GPU pipeline now with ?emit=1&cull=1.`)
       }
     }
 
@@ -781,6 +826,13 @@ export default {
                 }
                 perf.pixelCheck = 'warm'
                 checkStage = 2
+                // Task 155 — a WARM conservative tier re-arms the DEVICE
+                // verdict at rung 1 (the standing knowledge: level 0 dead,
+                // rung 1 alive — every future page lands the conservative
+                // tier directly, no level-0 leg). A rung-2 re-probe that
+                // verdicts warm lands here too — the downgrade is the
+                // recovery door opening (the device healed to rung 1).
+                if (lvl === 1 && leg === null) writeDeviceVerdict(1, env, `the conservative TF tier re-verdicted WARM live (canvas ${pixelsWarm} bright, ledger ${live}) — level 0 stays dead, the rung stays`)
                 // Task 150 — the isolation leg's CLEAN completion (a leg
                 // that renders on a fresh context exonerates its family):
                 // leg A → leg B; leg B → the verdict + the heal.
@@ -810,6 +862,9 @@ export default {
                     if (leg !== null) {
                       completeLeg(leg, 'clean', `no suspicion ever latched and the canvas never held a swarm large enough to sample by frame ${frameCount} — this configuration passes`)
                     }
+                    // Task 155 — the too-small-but-sane pass is a clean
+                    // verdict too: re-arm the standing rung-1 device verdict
+                    if (lvl === 1 && leg === null) writeDeviceVerdict(1, env, `the conservative TF tier passed its live re-verdict (no suspicion latched, frame ${frameCount})`)
                   }
                   checkStage = 2
                 } else {

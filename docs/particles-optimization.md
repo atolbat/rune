@@ -1609,3 +1609,95 @@ field log on the reporting phone: the SECOND reload of a tab opens with
 `GL heal: the reload crossing landed (rung 2, ...) — ... takes the CPU
 floor DIRECTLY`, no verdict WARNs — and any reload 15+ minutes later
 re-probes the conservative tier once.
+
+## Task 155 — THE DEVICE VERDICT (the 23:50 field log + the user's verdict: "a circus" — the verdict must outlive the tab)
+
+The v155 escalation fixed the reload loop and quietly kept the promise
+(the 23:50 log: the heal landed rung 1, rung 1 dropped, the CPU floor
+landed in-page, the rung-2 marker armed — the next reload of that tab
+would have been silent). But the user's verdict on the whole mechanism
+arrived with the log: *"Если я нажимаю вебгл, я не хочу, чтобы был
+чёрный экран, потом какая-то вспышка потери контекста или перестройки
+канваса... И у тебя было более-менее так до оптимизаций вебгля. А
+сейчас какой-то цирк с конями."* The decode: the RESULT the user wants
+is fast 160k embers on WebGPU (which works — every field log's WG
+interlude is healthy) and a WebGL2 button that NEVER puts on a show.
+The remaining circus had two roots: (a) a fresh TAB always re-ran the
+full ladder from zero (sessionStorage is per-tab — every new tab paid
+~2 s of doomed GPU attempts plus the crossing self-reload flash), and
+(b) the 15-minute re-probe cadence re-ran a doomed 0.8 s attempt on
+every long-lived tab's reload — a user who reloads a lot meets the
+black window regularly.
+
+The fix moves the verdict to device scope (demo tier, the library
+untouched, dist byte-identical):
+
+1. **THE DEVICE VERDICT** (`gpuEmbers.js`) — every pixel-confirmed
+   verdict now ALSO lands in `localStorage['rune:vfx:glverdict']`:
+   `{ v, rung, demo, at, major, why }` — rung 1 at the level-0
+   crossing, rung 2 at the conservative-tier escalation, and a WARM
+   conservative tier re-arms rung 1 (the standing verdict: level 0
+   dead, the rung alive — `writeDeviceVerdict(1, env, ...)` on both
+   warm conclusions, the plain one and the too-small-but-sane one).
+   Storage-less browsers keep the in-tab ladder (localStorage →
+   sessionStorage fallback inside the writer).
+2. **THE LANDING** (`main.js`) — `deviceVerdict` is read at module
+   scope on EVERY page: a pending sessionStorage crossing still wins
+   (the reload handoff, v152 semantics verbatim), then the device
+   verdict. Fresh rung 2 → `window.__embersFallback = 2` and the CPU
+   floor DIRECTLY (zero GPU attempts, zero self-reloads, zero verdict
+   WARN pairs — on reloads AND fresh tabs); fresh rung 1 → the
+   conservative TF tier directly (no level-0 leg, no crossing); a
+   stale rung 2 degrades to the rung-1 RE-PROBE; a stale rung 1 dies
+   (the full ladder re-runs). A v155-era rung-2 session marker is
+   HARVESTED into the device verdict (the user's existing tab upgrades
+   on its next reload). The landing does NOT hijack the boot mode: a
+   WebGPU-capable browser boots the user's own default (the verdict
+   binds the WebGL2 leg only — a WG→GL backend toggle takes the
+   floor in-page, instantly, through the window flag).
+3. **THE PROBE CADENCE** (`VERDICT_TTL_MS = 6 h`, keyed to the
+   browser's major version) — the re-probe fires on hours-scale age
+   OR a Chrome major bump (the ANGLE/driver stack rides the Chrome
+   train — an update re-opens the full ladder), never per-reload. A
+   clean re-probe DOWNGRADES the verdict to rung 1 (a recovered
+   device keeps its 160k conservative tier directly on every load);
+   a dropping one re-arms a fresh rung-2. Worst case for the
+   reporting phone after the one bootstrap ladder: a single 0.8 s
+   conservative attempt per ~6 h, and the full circus only when
+   Chrome itself updates.
+
+The messages tell the truth again (the WARN pair and the demo `sub`
+line name the device scope, the cross-tab landing, and the ~6 h /
+browser-update re-probe). The heal event lines are landing-aware:
+"GL heal: the device verdict remembered (rung 2, demo 23) — ... the
+WebGL2 leg lands the CPU floor DIRECTLY ... on every reload AND every
+fresh tab of this browser"; the RE-PROBE line names the door.
+
+Gates: `task152-keepalive` — the reload cell asserts the rung-2
+DEVICE verdict ARMED in localStorage (and the session marker
+consumed); the escalate cell runs the no-WebGPU device class
+(`delete Navigator.prototype.gpu` — auto boots straight into
+WebGL2): C1 'direct' (a legacy v155 session marker seeded → the
+HARVEST promotes it to the device verdict verbatim → the CPU floor
+with NO GPU attempt, zero verdict WARNs, one GL context, the session
+marker consumed, warm), C2 'reprobe' (the verdict aged past the ~6 h
+TTL → rung 1 with the RE-PROBE heal line → the drop → the in-page CPU
+floor AND a fresh rung-2 verdict), C3 'recovery' (a clean driver →
+the re-probe verdicts WARM → the verdict DOWNGRADES to rung 1 with a
+fresh `at`); the NEW **crosstab** cell is the headline — page A runs
+the real full ladder (level-0 → the crossing → rung-1 drop → the CPU
+floor + the rung-2 device verdict) and DIES, then page B (a FRESH
+TAB: sessionStorage empty, localStorage carried) boots with the
+device-verdict heal event, the WG compute tier UNHIJACKED (the
+user's own Auto default), and ONE WebGL2 press lands the CPU floor
+INSTANTLY — zero verdict WARNs since the tab opened, zero reloads,
+one GL context, warm pixels. `task140p` (the verdict chain, exactly
+one reload) — green unchanged; `demo:smoke` 24/24 (GPU + mobile
+clean, labels 9/9); 1683 tests 0 fail; the typecheck/lint baselines
+hold (6 pre-existing / 0 errors, 374 warnings); the build is
+byte-identical. Deployed as `?v=156`. The expected next field
+experience on the reporting phone: the first post-deploy fresh tab
+pays the ladder ONE last time (the bootstrap), then every load —
+reload or fresh tab — opens on instant embers (CPU floor on
+WebGL2, the user's WG toggle for the fast 160k), no black windows,
+no context-loss flashes, no self-reloads.
