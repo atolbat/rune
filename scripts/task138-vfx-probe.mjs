@@ -113,7 +113,7 @@ async function freshPage() {
 
 async function warmPct(tag) {
   let best = 0
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 6; i++) {
     const clip = await page.evaluate(() => {
       const c = document.querySelector('canvas')
       if (!c) return null
@@ -134,7 +134,12 @@ async function warmPct(tag) {
       }
     }
     best = Math.max(best, 100 * warm / (W * H))
-    if (i < 2) await page.waitForTimeout(800)
+    // Task 152 (a gate-robustness fix, not a demo change): the storm's
+    // emission waves are ~5 s periods and the old 3-shot/800 ms window
+    // could land entirely inside a dim phase (the pre-existing leg-C flake
+    // — reproduced on the pre-152 code too); a 6-shot/1.5 s window catches
+    // a bright phase honestly.
+    if (i < 5) await page.waitForTimeout(1500)
   }
   return +best.toFixed(2)
 }

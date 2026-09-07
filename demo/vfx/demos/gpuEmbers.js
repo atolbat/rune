@@ -101,6 +101,38 @@
 //     poisoning suspect) + a per-boot context index line in the log
 //     (the next dropping log carries the correlate directly).
 //
+// Task 152 — THE KEEP-ALIVE + THE RELOAD CROSSING (the 13:27 live log's
+// verdict): the context-index lines nailed the correlate — the session's
+// FOURTH boot (WebGL2 #2, after GL #1 was disposed at the WG interlude)
+// was born dead, and the walk's legs on fresh contexts #5/#6 (2 s settles
+// between them) were born dead the same way, WHILE the first GL context
+// of each fresh page renders the full pipeline clean (11:48: 26 s, 12:36:
+// 10.6 s). The poison is PAGE-SCOPED and follows a prior GL context's
+// DISPOSAL — WEBGL_lose_context included (Task 137's own eviction fix is
+// the trigger on this driver class), and it does not cross a page reload.
+// Two demo-tier moves, the library untouched:
+//   · THE GL CONTEXT KEEP-ALIVE (main.js): the shell never disposes the
+//     session's WebGL2 renderer — leaving GL toward WebGPU PARKS it
+//     (stop() + the canvas and the boot's textures kept reachable) and
+//     coming back RESURRECTS the very same context (the canvas
+//     re-attached, the demo re-made, start()). The GL context count per
+//     page stays ONE — the user's WG→GL→WG→GL flow re-enters the proven
+//     clean cell instead of birthing a poisoned context #2. The
+//     diagnostic re-boots (the walk's legs, the storage-less rung-1)
+//     still take deliberately fresh contexts (boot('webgl2', {fresh})).
+//   · THE RELOAD CROSSING (this file): a level-0 pixel-confirmed verdict
+//     writes the sessionStorage heal marker (the rung + the demo index +
+//     the drop reason) and reloads the page — the fresh page's FIRST GL
+//     context is the one cell the conservative TF tier has rendered at
+//     the full 160k in, live-verified. The fresh page boots straight
+//     into WebGL2 at rung 1; if THAT drops too, its own ladder lands the
+//     CPU tier in-page (rung 2 never crosses a boundary — loop-free by
+//     construction). The auto isolation walk is retired from the default
+//     path (?forensic=1 opts in — its fresh in-page contexts can only
+//     echo the poisoned history on the reporting class); the mid-run
+//     watchdog, the pixel-confirmed ladder and the ?emit=1&cull=1 escape
+//     hatch are unchanged.
+//
 //   · THE COMMON POINT (Task 132): createGpuParticles(facade, backend)
 //     dispatches by the facade's shape — WebGPU compute (the SSBO tier,
 //     160k) or WebGL2 transform feedback (the TF tier — 16k on the
@@ -262,10 +294,15 @@ const FORCE_EMIT = flagOn('emit')
 const FORCE_EMIT_OFF = flagOff('emit')
 const FORCE_CULL = flagOn('cull')
 const FORCE_CULL_OFF = flagOff('cull')
-// Task 150 — the isolation walk's escape hatch: ?forensic=0 heals
-// immediately after the level-0 verdict (the v150 behavior, no
-// diagnostic re-boots) for anyone who prefers the fast heal.
-const WANT_FORENSIC = !flagOff('forensic')
+// Task 152 — THE WALK IS OPT-IN NOW (?forensic=1): the 13:27 session
+// settled the open question — the walk's fresh in-page contexts are born
+// dead after ANY prior GL context disposal (both legs "drop", the verdict
+// 'both', contaminated by the session's context history), so the default
+// auto-walk could only ever echo that history back. The DEFAULT level-0
+// heal crosses a page RELOAD instead (the one provably-clean cell — see
+// triggerFallback); the walk machinery stays for the manual mode and the
+// preset gates.
+const WANT_FORENSIC = flagOn('forensic')
 // Task 138 — THE REAL-GPU TF PIPELINE: a real GPU takes the full GPU
 // pipeline by DEFAULT now — emit:'gpu' + the frustum cull (the hardware
 // oracle: the user's live confirmation on a real GPU; the dedicated
@@ -292,9 +329,21 @@ const fallbackLevel = () => {
   return v === 1 ? 1 : v === 2 ? 2 : 0
 }
 
+/* Task 152 — THE RELOAD CROSSING: the level-0 heal's page boundary. The
+ * marker lands in sessionStorage (main.js consumes it at module scope:
+ * the fresh page boots straight into WebGL2 at the carried rung + demo);
+ * the reload itself goes through a small indirection so the gates can
+ * intercept it. Storage unavailable → the v150 in-page rung step takes
+ * over. */
+const HEAL_KEY = 'rune:vfx:glheal'
+const healReload = () => {
+  if (typeof window !== 'undefined' && typeof window.__vfxHealReload === 'function') window.__vfxHealReload()
+  else if (typeof location !== 'undefined' && typeof location.reload === 'function') location.reload()
+}
+
 export default {
   title: 'GPU Embers',
-  sub: 'the GPGPU tier · 160k compute-simmed, GPU-EMITTED embers · the full GPU pipeline on BOTH backends by default (WebGL2: the transform-feedback tier — 160k + GPU emission + the frustum cull on real GPUs; SwiftShader/llvmpipe keep the conservative CPU defaults) · zero per-frame particle uploads · self-heals down a two-rung ladder when a driver drops the pipeline (the conservative TF tier at 160k first, the CPU tier as the last resort), naming the dropping pass family along the way (the two-leg isolation walk, once per session — ?forensic=0 skips it)',
+  sub: 'the GPGPU tier · 160k compute-simmed, GPU-EMITTED embers · the full GPU pipeline on BOTH backends by default (WebGL2: the transform-feedback tier — 160k + GPU emission + the frustum cull on real GPUs; SwiftShader/llvmpipe keep the conservative CPU defaults) · zero per-frame particle uploads · the session NEVER disposes its WebGL2 context (backend toggles park and resurrect it) · a driver drop self-heals ACROSS A PAGE RELOAD into the conservative TF tier on the fresh page\'s first context, then the CPU tier as the floor · ?forensic=1 runs the pass-family isolation walk · the mid-run watchdog keeps watching',
   camera: { yaw: 0.6, pitch: 0.34, dist: 13, orbit: 0.05, target: [0, 4.5, 0] },
 
   make(env) {
@@ -571,8 +620,37 @@ export default {
         window[FORENSIC_FLAG] = 'a'
         window.__vfxRemakeRequested = true
         perf.forensic = 'a'
-        console.warn(`[rune/vfx] GPU Embers: ${reason} — the full pipeline's passes are what this driver drops. Before healing, running THE ISOLATION WALK (once per session, a few seconds of re-boots): leg A isolates the GPU-emission family, leg B the cull/sort family — each on a fresh context, re-verdicted live by this same check; the walk then heals into the conservative TF tier at the full capacity. Skip it with ?forensic=0.`)
+        console.warn(`[rune/vfx] GPU Embers: ${reason} — the full pipeline's passes are what this driver drops. Before healing, running THE ISOLATION WALK (once per session, a few seconds of re-boots): leg A isolates the GPU-emission family, leg B the cull/sort family — each on a fresh context, re-verdicted live by this same check; the walk then heals into the conservative TF tier at the full capacity.`)
         return
+      }
+      // Task 152 — THE RELOAD CROSSING (the DEFAULT level-0 heal now): the
+      // 13:27 session's verdict — an in-page FRESH context is born dead on
+      // this driver class (the walk's legs proved it: every configuration,
+      // both families, after one prior GL dispose), and the session's OWN
+      // context — kept alive by the shell's park/resurrect keep-alive —
+      // just verdicted. The one provably-clean cell left is the FIRST
+      // WebGL2 context of a FRESH PAGE (the Task 149 fresh-load proof:
+      // the conservative tier at the full 160k, records SANE, canvas WARM),
+      // so the heal CROSSES the page boundary: the marker carries the rung
+      // + this demo's index, the reload lands the fresh page straight on
+      // the conservative tier. Storage unavailable → the v150 in-page
+      // rung step below takes over (the old semantics, a fresh context).
+      if (from === 0) {
+        let crossed = false
+        try {
+          sessionStorage.setItem(HEAL_KEY, JSON.stringify({
+            v: 1, rung: 1, demo: env.demoIndex ?? 0, at: Date.now(),
+            why: String(reason).slice(0, 240),
+          }))
+          crossed = true
+        } catch { crossed = false }
+        if (crossed) {
+          if (typeof window !== 'undefined') window.__vfxHeal = { rung: 1, demo: env.demoIndex ?? 0 }
+          perf.heal = 'reload'
+          console.warn(`[rune/vfx] GPU Embers: ${reason} — the session's WebGL2 context (never disposed — the shell's Task 152 keep-alive parks and resurrects it across backend toggles) still drops its transform feedback. Healing ACROSS A PAGE RELOAD: the FIRST WebGL2 context of a fresh page is the one cell this driver class has rendered the conservative TF tier at the full 160k in, live-verified — the reload re-enters THIS demo at that tier automatically (emit:'cpu', cull off, the simulation and the records pack still on the GPU at the full capacity). If the fresh page drops too, its own ladder lands the CPU tier — the one configuration every driver renders. The reload fires NOW (about a second of blank); the fresh page's log opens with the "GL heal" event line. Paste that log back if anything still looks wrong.`)
+          healReload()
+          return
+        }
       }
       // Task 149 — ONE RUNG PER VERDICT: level 0 steps down to the
       // CONSERVATIVE TF tier (the minimal configuration this hardware
@@ -589,6 +667,11 @@ export default {
       window.__vfxRemakeRequested = true
       perf.fallback = to === 1 ? 'tf' : 'cpu'
       if (to === 1) {
+        // Task 152 — this branch is the STORAGE-LESS level-0 fallback now
+        // (the default path crossed the reload above): the same v150 step
+        // with one honest caveat — a fresh in-page context is born dead on
+        // the reporting driver class, so this rung's re-verdict is expected
+        // to escalate; it fires only where sessionStorage is unavailable.
         console.warn(`[rune/vfx] GPU Embers: ${reason} — the FULL pipeline's passes (the GPU emission + the frustum cull) are what this driver is dropping; the transform feedback itself may still be sound (the minimal tier — emit:'cpu', cull off — is the configuration this hardware class ran at the full 160k, live-verified). Stepping down ONCE to the conservative TF tier (emit:'cpu', cull off, the sim and the records pack still on the GPU at the full capacity) on a FRESH context, re-verdicted by the same pixel-confirmed ladder: if its own records read back degenerate AND its canvas reads cold, the page drops to the facade's CPU tier. Reload to retry the full pipeline, or force it with ?emit=1&cull=1.`)
       } else {
         // Task 151 — THE CONTAMINATED-VERDICT CORRECTION: rung 1 is the

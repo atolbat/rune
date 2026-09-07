@@ -56,7 +56,7 @@ import dust from './demos/dust.js'
 import grass from './demos/grass.js'
 import lightning from './demos/lightning.js'
 import laser from './demos/laser.js'
-import gpuEmbers from './demos/gpuEmbers.js?v=152'
+import gpuEmbers from './demos/gpuEmbers.js?v=153' // Task 152: the GL keep-alive + the reload crossing ride this cache-bust
 
 const DEMOS = [muzzle, explosion, shapes, trail, sequencer, mesh, subemitter,
   noise, alphatest, plugin, billboard, soft, blending, follow,
@@ -620,6 +620,40 @@ function mat4Multiply(out, a, b) {
 let activeRenderer = null
 let bootSeq = 0
 let bootedOnce = false // the first successful boot (a re-boot re-makes the demo)
+/* Task 152 — THE GL CONTEXT KEEP-ALIVE: the parked WebGL2 renderer (never
+ * disposed while this page lives) + the REAL-context counter for the log.
+ * The 13:27 live session closed the question: the FIRST WebGL2 context of
+ * a page renders the full TF pipeline clean (26 s at 11:48, 10.6 s at
+ * 12:36), and every WebGL2 context born after a prior one was DISPOSED
+ * (the toggle's renderer.dispose — Task 137's loseContext eviction fix) is
+ * born with a dead transform feedback: records zero, canvas black, the
+ * CPU ledger counting — the 2 s settle did NOT cure it (13:27: contexts
+ * #4/#5/#6 — the forensic legs included), and 12:36's rapid cycling
+ * produced the same corpses. WebGPU is immune in every observed session
+ * (a disposed GL context preceded the clean WG #3; device.destroy()
+ * poisons nothing). The page therefore parks its ONE WebGL2 renderer on
+ * the way out and resurrects the very same context on the way back. */
+let glKeep = null // { renderer, canvas, textures } — the parked GL session
+let glContexts = 0 // the real WebGL2 contexts this page has CREATED (resurrects do not increment)
+/* Task 152 — THE LOSS-EVENT TRACKER: a WebGL context can be lost
+ * TRANSIENTLY and then AUTO-RESTORED (the container's live proof: a
+ * SwiftShader WebGPU boot parked next to a live GL context flips
+ * isContextLost true→false within ~1.5 s) — but a RESTORED context's GL
+ * OBJECTS ARE ALL DEAD (the WebGL loss contract: the app must rebuild;
+ * this renderer has no restore wiring — the documented TODO). The park's
+ * health is therefore tracked by the LOSS EVENT (the listener rides the
+ * canvas, surviving the park), not by isContextLost()'s current value —
+ * a resurrect of a loss-then-restored context would render a black
+ * canvas with a live loop. */
+let glKeepLost = false // ANY webglcontextlost fired on the CURRENT GL canvas
+let onGlLoss = null // { canvas, fn } — the keep-alive's own loss listener (removable before a dispose)
+if (typeof window !== 'undefined') {
+  // the keep-alive's gate handle: { keep, contexts } — the probes assert the
+  // park/resurrect state machine directly
+  Object.defineProperty(window, '__vfxGLKeep', { get: () => glKeep !== null })
+  Object.defineProperty(window, '__vfxGLContexts', { get: () => glContexts })
+  Object.defineProperty(window, '__vfxGLKeepLost', { get: () => glKeepLost })
+}
 let demoIndex = 0
 let state = null          // the current demo's state object
 let rhythm = {}           // fresh per demo switch
@@ -651,6 +685,96 @@ let lastInteraction = 0
 /* ─── Shell, pill, sheet, arrows ───────────────────────────────────────── */
 
 const MODE_NAMES = { auto: 'Auto (WebGPU → WebGL2 fallback)', webgl2: 'WebGL2', webgpu: 'WebGPU' }
+
+/* ─── Task 152 — the GL-heal marker (the reload crossing) ─────────────────
+ * The demo's own level-0 verdict (GPU Embers) writes this marker and
+ * reloads the page: a fresh page's FIRST WebGL2 context is the one cell
+ * the reporting driver class has rendered the conservative TF tier at
+ * the full 160k in, live-verified (the Task 149 fresh-load proof) — an
+ * in-page fresh context is born dead there (13:27), so the heal CROSSES
+ * a page boundary. The marker carries the ladder rung, the demo index
+ * and the drop reason; it is consumed ONCE at module scope (a stale
+ * marker from a crashed session dies of old age — 120 s). */
+const HEAL_KEY = 'rune:vfx:glheal'
+const healMarker = (() => {
+  try {
+    const raw = sessionStorage.getItem(HEAL_KEY)
+    if (raw === null) return null
+    sessionStorage.removeItem(HEAL_KEY)
+    const m = JSON.parse(raw)
+    if (m?.v !== 1 || typeof m.rung !== 'number' || typeof m.demo !== 'number') return null
+    if (Date.now() - (m.at ?? 0) > 120_000) return null
+    return m
+  } catch { return null }
+})()
+const initialDemoIndex = healMarker !== null ? healMarker.demo : 0
+
+/** Parks the session's WebGL2 renderer: the loop stops, the canvas stays
+ *  EXACTLY where it was born (hidden in place) and the boot's textures stay
+ *  reachable — the context is NEVER disposed (the next WebGL2 boot
+ *  resurrects it; only the page's own death takes it). Task 152 — THE
+ *  CANVAS-MOVEMENT RULE: Chrome FORCE-LOSES a WebGL context whose canvas
+ *  LEAVES the document OR MOVES parents (the live container proof: both the
+ *  detach and a body re-parent fired CONTEXT_LOST_WEBGL within a second).
+ *  The park therefore performs ZERO DOM surgery on the canvas: display:none
+ *  in place, the slot rebuild keeps it as a child, the resurrect unhides
+ *  it — the element never moves for its whole parked life. */
+function parkGL(renderer) {
+  try { renderer.stop() } catch { /* best-effort */ }
+  const canvas = liveCanvas
+  try { canvas.style.display = 'none' } catch { /* best-effort */ }
+  glKeep = { renderer, canvas, textures: snapshotTextures() }
+  shell.log.info('Parking the WebGL2 context (the Task 152 keep-alive — never disposed, never moved; the next WebGL2 boot resurrects it)')
+}
+
+/** A parked context is usable unless the browser itself lost it (the
+ *  honest eviction — not ours). Task 152 — the LOSS-EVENT tracker: a
+ *  transient loss that auto-restored leaves isContextLost() false while
+ *  the objects are dead — the event flag is the authority, the current
+ *  state only adds. */
+function parkHealthy() {
+  if (glKeep === null) return false
+  if (glKeepLost) return false
+  try {
+    const ctx = glKeep.canvas.getContext('webgl2')
+    if (ctx === null || ctx.isContextLost()) return false
+  } catch { return false }
+  return true
+}
+
+/** Releases the park (the diagnostic fresh-boot paths and the unhealthy
+ *  discard): the keep-alive's own loss listener is removed BEFORE the
+ *  renderer dispose (the dispose's forced loss would otherwise fire the
+ *  event asynchronously and poison the NEXT context's tracker), the
+ *  tracker resets with the park. */
+function releasePark(why) {
+  if (glKeep === null) return
+  if (onGlLoss !== null && onGlLoss.canvas === glKeep.canvas) {
+    try { glKeep.canvas.removeEventListener('webglcontextlost', onGlLoss.fn) } catch { /* best-effort */ }
+    onGlLoss = null
+  }
+  try { glKeep.renderer.dispose() } catch { /* already dead — harmless */ }
+  glKeep = null
+  glKeepLost = false
+  shell.log.info(why)
+}
+
+/** The GL boot's texture set (the atlas + the procedural sprites): parked
+ *  with the renderer, restored on resurrect — the objects live on the
+ *  parked context and stay valid across the interlude. */
+function snapshotTextures() {
+  return { atlasTexture, atlasUpload, glowTexture, ribbonTexture, sparkTexture, flashTexture, smokeAtlas, hazeTexture, muzzleSheet }
+}
+function restoreTextures(t) {
+  atlasTexture = t.atlasTexture; atlasUpload = t.atlasUpload
+  glowTexture = t.glowTexture; ribbonTexture = t.ribbonTexture
+  sparkTexture = t.sparkTexture; flashTexture = t.flashTexture
+  smokeAtlas = t.smokeAtlas; hazeTexture = t.hazeTexture; muzzleSheet = t.muzzleSheet
+  env.atlasTexture = atlasTexture; env.glowTexture = glowTexture
+  env.ribbonTexture = ribbonTexture; env.sparkTexture = sparkTexture
+  env.flashTexture = flashTexture; env.smokeAtlas = smokeAtlas
+  env.hazeTexture = hazeTexture; env.muzzleSheet = muzzleSheet
+}
 
 const shell = window.RuneDemoShell.mount({
   layout: 'fullscreen',
@@ -833,6 +957,10 @@ const env = {
 
   width: 0,
   height: 0,
+
+  /** The current demo's carousel index (the reload crossing's marker
+   *  carries it — the healed page re-enters the demo the drop fired on). */
+  get demoIndex() { return demoIndex },
 
   /** The per-demo camera default. */
   camera(cam) {
@@ -1065,7 +1193,15 @@ function frameCallback(ctx, record) {
       // dispose can inherit the degraded state. Give the driver room
       // before the next context is born (2 s per walk step, paid only
       // when the ladder actually runs).
-      setTimeout(() => { void boot('webgl2') }, 2000)
+      // Task 152 — THE FRESH FLAG: these re-boots (the forensic walk's
+      // legs — the pass-family bisect NEEDS a fresh context to be a
+      // valid experiment; the storage-less 0→1 rung step) deliberately
+      // bypass the keep-alive: they dispose the session's GL context to
+      // birth a new one. The diagnostic paths accept the disposal poison
+      // (13:27: a fresh in-page context is born dead on the reporting
+      // class anyway — which is exactly why the DEFAULT level-0 heal
+      // crosses a page reload instead, gpuEmbers.js's marker).
+      setTimeout(() => { void boot('webgl2', { fresh: true }) }, 2000)
     } else {
       activateDemo('reboot')
     }
@@ -1272,6 +1408,23 @@ function activateDemo(why) {
   if (state !== null && state.dispose !== undefined) {
     try { state.dispose() } catch (error) { shell.log.warn(`dispose: ${error instanceof Error ? error.message : String(error)}`) }
   }
+  // Task 152 — THE KEEP-ALIVE'S DEBT: the old flow freed every layer's GL
+  // buffer implicitly — a backend toggle DISPOSED the renderer (and with
+  // it the context and every buffer on it). The parked-and-resurrected
+  // context outlives that disposal, so the soup/instance layers' dynamic
+  // buffers are deleted HERE, at teardown (the facade's deleteBuffer
+  // disarms the attrib bindings — the Task 137 ledger), before the fresh
+  // make re-creates them. The pre-existing demo-switch leak (a switch
+  // re-made the layers on the SAME renderer and the old buffer ids were
+  // simply forgotten — a 160k-particle records buffer per switch) dies
+  // with it. The WG-side dynamic bindings die with the WG renderer's
+  // device.destroy(); the demo-owned GPU tiers dispose through
+  // state.dispose() above.
+  for (const layer of layers) {
+    if (layer.glDyn !== undefined) {
+      try { layer.glDyn.gl.deleteBuffer(layer.glDyn.bufferId) } catch { /* best-effort */ }
+    }
+  }
   layers = []
   env.clearLabels()
   rhythm = {}
@@ -1320,85 +1473,207 @@ async function attachAtlas() {
   env.muzzleSheet = muzzleSheet
 }
 
-async function boot(mode) {
+async function boot(mode, opts) {
   const seq = ++bootSeq
+  const fresh = opts?.fresh === true
+  // Task 152 — THE PARK-OR-RESURRECT RESOLUTION: a WebGL2 target boot
+  // (explicit, or an auto with no navigator.gpu — the auto whose probe
+  // fails at runtime falls back through the explicit path below) reuses
+  // the parked context. A FRESH request (the forensic walk's legs, the
+  // storage-less rung-1 step) bypasses the keep-alive deliberately.
+  const glTarget = mode === 'webgl2' || (mode === 'auto' && typeof navigator !== 'undefined' && !('gpu' in navigator))
+  const keepCandidate = glTarget && !fresh
+  if (keepCandidate && glKeep !== null && !parkHealthy()) {
+    // the browser lost the parked context while idle (a transient
+    // loss-then-restore included — the restored objects are dead): discard
+    // it honestly and create a fresh one — the keep-alive continues on the
+    // new context (a browser-driven loss is NOT our disposal — the fresh
+    // context has every chance to be the clean cell).
+    releasePark('The parked WebGL2 context was lost while idle (a WebGPU-boot driver reset can do this transiently) — discarding it and creating a fresh one (the keep-alive continues on the new context)')
+  }
+  // A GL→GL re-boot with no parked renderer (two rapid WebGL2 toggles): the
+  // ACTIVE renderer IS the keep candidate — promote it to the park and
+  // resurrect it below, so even this path never burns a second context.
+  if (keepCandidate && glKeep === null && activeRenderer !== null && activeRenderer.backend === 'webgl2') {
+    parkGL(activeRenderer)
+  }
+  const wantResurrect = keepCandidate && glKeep !== null
   if (activeRenderer !== null) {
-    try { activeRenderer.dispose() } catch { /* the context may have died with the canvas */ }
+    const promoted = wantResurrect && glKeep !== null && glKeep.renderer === activeRenderer
+    if (promoted) {
+      // the promoted park IS the active renderer — parkGL already stopped
+      // its loop; it re-enters as the resurrect below, nothing to dispose
+    } else if (activeRenderer.backend === 'webgl2' && !fresh) {
+      // leaving WebGL2 toward WebGPU/Auto: PARK (never dispose — the born-dead
+      // second context was the 13:27 report's cause)
+      parkGL(activeRenderer)
+    } else {
+      try { activeRenderer.dispose() } catch { /* the context may have died with the canvas */ }
+    }
     activeRenderer = null
     for (const layer of layers) layer.commandBuilt = false
   }
-  shell.slot.replaceChildren()
+  if (fresh && glKeep !== null) {
+    // a deliberate fresh-context boot while a parked renderer exists: the
+    // park would leak a second live GL context — release it (this
+    // diagnostic path accepts the disposal poison)
+    releasePark('Releasing the parked WebGL2 context (a deliberate fresh-context boot — the diagnostic path accepts the disposal poison)')
+  }
+  // Task 152 — THE SLOT REBUILD THAT NEVER TOUCHES THE PARKED CANVAS: a
+  // canvas that leaves the document or moves parents loses its WebGL
+  // context in Chrome — the parked canvas stays exactly where it was born
+  // (display:none, untouched by this rebuild; it re-enters as the resurrect
+  // below). Everything else — the previous boot's canvas and the chrome —
+  // is removed and re-appended fresh.
+  const parkedCanvas = glKeep !== null ? glKeep.canvas : null
+  for (const child of [...shell.slot.children]) {
+    if (child !== parkedCanvas) child.remove()
+  }
   // adopt the label layer (the pre-boot activateDemo may have created it
   // detached — its labels ride into the slot here, alive)
   if (labelLayer === null) {
     labelLayer = document.createElement('div')
     labelLayer.style.cssText = 'position:absolute;inset:0;overflow:hidden;pointer-events:none;'
   }
-  const canvas = document.createElement('canvas')
-  canvas.id = 'canvas'
-  shell.slot.append(labelLayer, canvas, bar, sheet, dragHint)
-  liveCanvas = canvas
-  if (state === null) switchDemo(0)
-  bindInput(canvas)
-  canvas.addEventListener('pointerdown', () => dragHint.classList.add('pt-gone'), { once: true })
-  setTimeout(() => dragHint.classList.add('pt-gone'), 8000)
-
-  shell.log.event(`Booting: “${MODE_NAMES[mode] ?? mode}”`)
-  try {
-    const renderer = createRenderer({
-      canvas,
-      backend: mode === 'auto' ? undefined : mode,
-      clear: { color: [0.015, 0.02, 0.035, 1], depth: 1 },
-      onGlError: (message) => shell.log.warn(`GL: ${message}`),
-      onGpuError: (message) => shell.log.warn(`GPU: ${message}`),
-    })
-    await renderer.start()
-    if (seq !== bootSeq) { renderer.dispose(); return }
+  if (wantResurrect) {
+    // ── Task 152 — THE RESURRECT: the same renderer, the same canvas, the
+    //    same GL context (the one cell this driver class renders TF in);
+    //    the demo state and the UI chrome are re-made AROUND it. The
+    //    frame callback registered at this renderer's birth persists
+    //    (re-registering would double every frame); the canvas keeps its
+    //    input listeners for the same reason; the ResizeObserver never
+    //    left (its clientWidth-0 guard carried the parked interlude).
+    const renderer = glKeep.renderer
+    const canvas = glKeep.canvas
+    const keptTextures = glKeep.textures
+    glKeep = null
+    // the canvas is ALREADY in the slot (parked in place — it never moved);
+    // unhide it and re-append only the chrome around it
+    try { canvas.style.display = '' } catch { /* best-effort */ }
+    shell.slot.append(labelLayer, bar, sheet, dragHint)
+    liveCanvas = canvas
+    shell.log.event(`Booting: “${MODE_NAMES[mode] ?? mode}”`)
     activeRenderer = renderer
     env.renderer = renderer
     env.backend = renderer.backend
-    // Task 131 — the probe handle: the GPU facade (the state-buffer
-    // readback gates read the sim's own memory through it)
-    if (typeof window !== 'undefined' && renderer.backend === 'webgpu') window.__vfxGpuFacade = renderer.inner.gpu
-    await attachAtlas()
+    // the WG facade probe handle is backend-scoped — never a stale pointer
+    if (typeof window !== 'undefined') window.__vfxGpuFacade = undefined
+    restoreTextures(keptTextures)
     // A RE-boot (a backend toggle) with a live demo: the demo state owns
-    // renderer-bound objects (the soft demo's surface + prepass commands)
-    // — re-make it on THIS backend. The FIRST boot already made demo 0
-    // above (before the renderer existed — its commands build below).
+    // renderer-bound objects — re-make it on THIS backend (the parked
+    // one). The FIRST boot already made the demo above.
     if (state !== null && bootedOnce) activateDemo('reboot')
     attachLayers()
-    renderer.frame(frameCallback)
-    if (seq !== bootSeq) return
+    renderer.start()
     bar.hidden = false
-    const backendName = renderer.backend === 'webgpu' ? 'WebGPU' : 'WebGL2'
-    shell.setBadge(backendName, renderer.backend === 'webgpu' ? 'gpu' : 'gl')
-    shell.log.info(`Backend: ${backendName}${renderer.backend === 'webgl2' && mode === 'auto' ? ' (fallback)' : ''}`)
-    // Task 151 — THE SESSION CONTEXT INDEX: every boot increments it. The
-    // live drop correlate is the CONTEXT HISTORY (the first WebGL2
-    // context of a fresh session rendered the full pipeline clean twice;
-    // every context born after a rapid-cycling run dropped) — this line
-    // puts the correlate directly into the next pasted log.
-    shell.log.info(`context #${seq} this session (${backendName})`)
+    shell.setBadge('WebGL2', 'gl')
+    shell.log.info('Backend: WebGL2')
+    // Task 152 — the context line now counts REAL contexts: a resurrect
+    // does not create one (the correlate of every live drop was the GL
+    // context's creation history — the next pasted log carries the
+    // keep-alive verdict directly).
+    shell.log.info(`context #${seq} this session (WebGL2, GL #${glContexts}, RESURRECTED — parked, never disposed: the Task 152 keep-alive)`)
     bootedOnce = true
-    if (atlasUpload?.done !== undefined) void atlasUpload.done.catch(() => { /* logged by the facade */ })
-  } catch (error) {
-    if (seq !== bootSeq) return
-    const message = error instanceof Error ? error.message : String(error)
-    // Auto mode: the label PROMISES "WebGPU → WebGL2 fallback" — honor it.
-    // A WebGPU boot can die late (the adapter exists but the device or the
-    // first configure fails — driver-dependent); retry once on WebGL2
-    // instead of leaving a dead canvas behind.
-    if (mode === 'auto') {
-      shell.log.warn(`WebGPU boot failed (${message.slice(0, 120)}) — falling back to WebGL2`)
-      void boot('webgl2')
+  } else {
+    const canvas = document.createElement('canvas')
+    canvas.id = 'canvas'
+    shell.slot.append(labelLayer, canvas, bar, sheet, dragHint)
+    liveCanvas = canvas
+    bindInput(canvas)
+    canvas.addEventListener('pointerdown', () => dragHint.classList.add('pt-gone'), { once: true })
+    setTimeout(() => dragHint.classList.add('pt-gone'), 8000)
+
+    shell.log.event(`Booting: “${MODE_NAMES[mode] ?? mode}”`)
+    try {
+      const renderer = createRenderer({
+        canvas,
+        backend: mode === 'auto' ? undefined : mode,
+        clear: { color: [0.015, 0.02, 0.035, 1], depth: 1 },
+        onGlError: (message) => shell.log.warn(`GL: ${message}`),
+        onGpuError: (message) => shell.log.warn(`GPU: ${message}`),
+      })
+      await renderer.start()
+      if (seq !== bootSeq) { renderer.dispose(); return }
+      activeRenderer = renderer
+      env.renderer = renderer
+      env.backend = renderer.backend
+      // Task 131 — the probe handle: the GPU facade (the state-buffer
+      // readback gates read the sim's own memory through it). Task 152 —
+      // cleared on the GL boots too (a stale WG pointer outlives the
+      // device it belonged to otherwise).
+      if (typeof window !== 'undefined') {
+        window.__vfxGpuFacade = renderer.backend === 'webgpu' ? renderer.inner.gpu : undefined
+      }
+      await attachAtlas()
+      // A RE-boot (a backend toggle) with a live demo: the demo state owns
+      // renderer-bound objects (the soft demo's surface + prepass commands)
+      // — re-make it on THIS backend. The FIRST boot's demo make: the plain
+      // flow made demo 0 pre-boot (the Go section); the MARKER path (the
+      // reload crossing) defers its make to HERE — the renderer and the
+      // boot's textures exist (the GPU-tier demos' make() touches
+      // env.renderer.inner).
+      if (state === null) switchDemo(initialDemoIndex)
+      else if (bootedOnce) activateDemo('reboot')
+      attachLayers()
+      renderer.frame(frameCallback)
+      if (seq !== bootSeq) return
+      bar.hidden = false
+      const backendName = renderer.backend === 'webgpu' ? 'WebGPU' : 'WebGL2'
+      if (renderer.backend === 'webgl2') {
+        glContexts++
+        // the fresh GL boot arms the keep-alive's loss tracker (the
+        // listener rides THIS canvas — it survives the park; any
+        // webglcontextlost, transient or permanent, kills the next park's
+        // health verdict — a restored context's objects are dead)
+        if (onGlLoss !== null) {
+          try { onGlLoss.canvas.removeEventListener('webglcontextlost', onGlLoss.fn) } catch { /* best-effort */ }
+          onGlLoss = null
+        }
+        glKeepLost = false
+        const lossFn = () => { glKeepLost = true }
+        canvas.addEventListener('webglcontextlost', lossFn)
+        onGlLoss = { canvas, fn: lossFn }
+        if (glKeep !== null) {
+          // an auto-resolved GL boot bypassed the resurrect (navigator.gpu
+          // exists but the adapter failed at start): the parked context
+          // would leak a second live one — release it (this rare path
+          // accepts the disposal poison)
+          releasePark('A fresh WebGL2 boot bypassed the parked context (auto resolved to WebGL2) — releasing the park')
+        }
+      }
+      // the parked canvas (if one survived into this fresh GL boot) must
+      // not linger hidden in the slot — it lost its renderer above
+      if (glKeep === null && parkedCanvas !== null && parkedCanvas !== canvas) parkedCanvas.remove()
+      shell.setBadge(backendName, renderer.backend === 'webgpu' ? 'gpu' : 'gl')
+      shell.log.info(`Backend: ${backendName}${renderer.backend === 'webgl2' && mode === 'auto' ? ' (fallback)' : ''}`)
+      // Task 151/152 — THE SESSION CONTEXT INDEX: the boot ordinal, and —
+      // the part the drop correlate actually tracks — the REAL WebGL2
+      // context ordinal (a resurrect reuses GL #N; every live "born dead"
+      // report was a GL #≥2 created after a dispose).
+      shell.log.info(`context #${seq} this session (${backendName}${renderer.backend === 'webgl2' ? `, GL #${glContexts}` : ''})`)
+      bootedOnce = true
+      if (atlasUpload?.done !== undefined) void atlasUpload.done.catch(() => { /* logged by the facade */ })
+    } catch (error) {
+      if (seq !== bootSeq) return
+      const message = error instanceof Error ? error.message : String(error)
+      // Auto mode: the label PROMISES "WebGPU → WebGL2 fallback" — honor it.
+      // A WebGPU boot can die late (the adapter exists but the device or the
+      // first configure fails — driver-dependent); retry once on WebGL2
+      // instead of leaving a dead canvas behind. Task 152 — the fallback
+      // boots the GL leg explicitly (it resurrects a parked context if one
+      // is there — exactly the WG-failure-recover path the keep-alive adds).
+      if (mode === 'auto') {
+        shell.log.warn(`WebGPU boot failed (${message.slice(0, 120)}) — falling back to WebGL2`)
+        void boot('webgl2')
+        return
+      }
+      shell.setBadge(mode === 'webgpu' ? 'WebGPU unavailable' : 'startup failed', 'err')
+      shell.log.error(`Boot on “${mode}” failed: ${message}`)
+      if (mode === 'webgpu') {
+        shell.log.info('This is not a library error — the backend is missing in this browser. Switch the toggle to Auto or WebGL2.')
+      }
       return
     }
-    shell.setBadge(mode === 'webgpu' ? 'WebGPU unavailable' : 'startup failed', 'err')
-    shell.log.error(`Boot on “${mode}” failed: ${message}`)
-    if (mode === 'webgpu') {
-      shell.log.info('This is not a library error — the backend is missing in this browser. Switch the toggle to Auto or WebGL2.')
-    }
-    return
   }
   shell.log.event('Rendering started')
   const live = shell.slot.querySelector('canvas')
@@ -1410,5 +1685,19 @@ async function boot(mode) {
 
 shell.log.info(`WebGL2: ${typeof WebGL2RenderingContext !== 'undefined' ? 'present in the browser' : 'missing'}`)
 shell.log.info('24 demos on @rune/particles — the library surface end to end + the rune originals + the GPU compute tier (160k embers on WebGPU)')
-switchDemo(0)
-void boot(shell.mode ?? 'auto')
+if (healMarker !== null) {
+  // Task 152 — THE RELOAD CROSSING'S LANDING: the previous page's level-0
+  // verdict wrote the marker and reloaded; this fresh page boots straight
+  // into WebGL2 at the requested rung — its FIRST GL context is the
+  // provably-clean cell on the reporting driver class.
+  window.__embersFallback = healMarker.rung
+  const radio = document.querySelector('input[name="rd-mode"][value="webgl2"]')
+  if (radio !== null) radio.checked = true
+  shell.log.event(`GL heal: the reload crossing landed (rung ${healMarker.rung}, demo ${healMarker.demo})${healMarker.why != null ? ` — the drop that asked for it: ${healMarker.why}` : ''} — the fresh page's first WebGL2 context takes the conservative tier`)
+}
+if (healMarker === null) switchDemo(0) // the plain flow's pre-boot make (demo 0 — a CPU-tier make that tolerates the renderer-less pre-boot)
+// Task 152 — the MARKER path defers its demo make INTO the boot (after
+// the renderer exists): the GPU Embers make() reads env.renderer.inner —
+// a pre-boot make would crash on null (the live reload-heal gate's
+// catch). boot's fresh path takes the state === null branch there.
+void boot(healMarker !== null ? 'webgl2' : (shell.mode ?? 'auto'))

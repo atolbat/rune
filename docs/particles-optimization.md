@@ -1383,3 +1383,89 @@ before the rung-2 warning. The verification battery re-ran green
 across the board: 1683 tests, the typecheck/lint baselines, the 24/24
 smoke, task134/137/138, the toggle round trip, the raw-device bit-exact
 battery 4/4, task140n's preset rungs, and both forensic gates.
+
+## Task 152 — THE KEEP-ALIVE + THE RELOAD CROSSING (the 13:27 verdict: the poison follows the GL context's creation history)
+
+The v152 instrumentation settled the open question. The 13:27 session's
+context-index lines: the FOURTH boot (WebGL2 #2, born after GL #1 was
+disposed at the WebGPU interlude) was born dead at frame 30, and the
+walk's legs on fresh contexts #5/#6 — 2 s settles between them — were
+born dead the same way, while the FIRST WebGL2 context of every fresh
+page renders the full pipeline clean (26 s at 11:48, 10.6 s at 12:36).
+The correlate across every live log: **the first WebGL2 context of a
+page is healthy; every WebGL2 context created after a prior one was
+disposed — `WEBGL_lose_context` included — is born with a dead
+transform feedback.** WebGPU is immune in every observed session (a
+disposed GL context preceded the clean WG #3; `device.destroy()`
+poisons nothing). Task 149's fresh-load "minimal-config proof" was
+therefore confounded: the minimal tier rendered clean because the page
+was FRESH, not because the configuration was minimal — the entire
+pass-family theory (the rung-1 default, the auto-walk) was built on
+that confound, which is exactly why both legs always "dropped".
+
+Two demo-tier moves (the library untouched — dist byte-identical):
+
+1. **THE GL CONTEXT KEEP-ALIVE** (`main.js`) — the shell never disposes
+   the session's WebGL2 renderer. Leaving GL toward WebGPU/Auto PARKS it
+   (the loop stops, the canvas is hidden IN PLACE, the boot's textures
+   stay reachable) and coming back RESURRECTS the very same context
+   (the canvas unhidden, the demo re-made around it, `start()`). The GL
+   context count per page stays one — the user's WG→GL→WG→GL flow
+   re-enters the proven-clean cell instead of birthing a poisoned
+   context #2. Three hard browser rules the park obeys, all caught live
+   in the container: **a canvas that leaves the document or moves
+   parents force-loses its WebGL context** (the park performs zero DOM
+   surgery — the slot rebuild keeps the parked canvas as a child); **a
+   loss can be transient and auto-restore** (a SwiftShader WebGPU boot
+   parked next to a live GL context flips `isContextLost` true→false
+   within ~1.5 s — but a restored context's GL objects are dead), so
+   the park's health is tracked by the LOSS EVENT (a listener riding
+   the canvas, surviving the park), not the current state; and a
+   browser-driven loss is NOT our disposal — the honest discard creates
+   a fresh context with every chance to be the clean cell. The
+   diagnostic re-boots (the forensic walk's legs, the storage-less
+   rung-1 step) deliberately bypass the keep-alive
+   (`boot('webgl2', { fresh: true })`), and the resurrect never
+   re-registers the frame callback or the input listeners (the ones
+   from the renderer's birth persist).
+2. **THE RELOAD CROSSING** (`gpuEmbers.js`) — a level-0 pixel-confirmed
+   verdict writes the sessionStorage heal marker (the rung, the demo
+   index, the drop reason) and reloads the page: the fresh page's FIRST
+   WebGL2 context is the one cell the conservative TF tier has rendered
+   at the full 160k in, live-verified — and the only one an in-page
+   fresh context cannot be (13:27 proved those born dead). The fresh
+   page boots straight into WebGL2 at rung 1 (the marker is consumed at
+   module scope, BEFORE the first make — which the boot now defers
+   until the renderer exists, the GPU-tier makes read
+   `env.renderer.inner`); if rung 1 drops there too, its own ladder
+   lands the CPU tier IN-PAGE — rung 2 never crosses a boundary, so the
+   chain is loop-free by construction (at most one auto-reload per
+   natural session; a stale marker dies of old age after 120 s). The
+   auto isolation walk is retired from the default path (`?forensic=1`
+   opts in — its fresh in-page contexts can only echo the poisoned
+   history on the reporting class); the mid-run watchdog, the
+   pixel-confirmed ladder and the `?emit=1&cull=1` escape hatch are
+   unchanged.
+
+The keep-alive's side debt: a parked-and-resurrected context outlives
+the renderer dispose that used to free the layer buffers — the
+soup/instance layers' dynamic GL buffers are now deleted at demo
+teardown (the pre-existing demo-switch leak — a 160k-records buffer per
+switch — dies with it).
+
+Gates: the new `task152-keepalive.mjs` (three cells — `promotion`: the
+GL→GL re-boot with `navigator.gpu` removed keeps ONE context, the same
+canvas element, the TF tier re-made and verdicting warm; `interlude`:
+the WG park with the container's transient-loss reality lands the
+honest discard branch and still renders warm; `reload`: the full
+default chain — the level-0 verdict, the marker, the real reload, the
+GL-heal landing at rung 1, the in-page escalation to the CPU tier warm,
+exactly one reload); task140p rewritten for the new default chain; task137's
+leg C now honors the honest contract (warm directly or through the
+self-heal); task138's warm window widened (a pre-existing leg-C flake —
+reproduced on the pre-152 code — the storm's emission waves out-lasted
+the old 2.5 s sampling window). The verification battery re-ran green
+across the board: 1683 tests, the typecheck/lint baselines, the
+byte-identical build, the 24/24 smoke, task134/137/138, the toggle
+round trip, task140n's preset rungs, task140p's crossing chain, all
+four task150 verdict cells, and all three task152 cells.
