@@ -13678,7 +13678,7 @@ function createGpuParticlesTf(facade, gpu) {
     const rowsSeen = rows - zeroRows;
     diag.sane = !(nan > 0 || count >= rows * 16 && rowsSeen === 0);
     if (!diag.sane) {
-      console.warn(`[rune/particles] GPGPU TF diagnostics: the records buffer read back DEGENERATE at frame ${frame} (count ${count}, zeroRows ${zeroRows}/${rows}, nan ${nan}) — the transform-feedback write was dropped or poisoned on this driver; the consumer should fall back to the conservative path (emit:'cpu', render.cull off).`);
+      console.warn(`[rune/particles] GPGPU TF diagnostics: the records buffer read back DEGENERATE at frame ${frame} (count ${count}, zeroRows ${zeroRows}/${rows}, nan ${nan}) — the transform-feedback write was dropped or poisoned on this driver; the consumer should rebuild on the CPU tier (sim:'cpu' — the TF sim and the records pack ride the same dropped writes, a conservative reconfiguration of this tier is not enough), ideally after the canvas confirms the particles are really invisible (the readback itself can be the liar).`);
     }
   }
   let frameIndex = 0;

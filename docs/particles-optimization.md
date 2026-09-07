@@ -1082,3 +1082,90 @@ GPU-process death under the screenshot workload late in the cycle
 reproduced — the documented container class, environmental). ?v=147
 on the dist imports (the vfx/particles demos; Task 145 had already
 stamped v=146, this pass's rebuild bumps it).
+
+## Task 148 — THE FULL-CPU SELF-HEAL (the Android-Chrome invisible-embers report)
+
+The user's live log (Android 10 / Chrome 150, a phone, WebGL2): the GPU
+Embers page blank while the ledger counts — **and the Task-140
+auto-fallback visibly failing**: the first instance's records diagnostic
+verdicts DEGENERATE at frame 30 (68 766 on the ledger, zeroRows 4/4),
+the warning fires, the shell re-makes the demo conservative — and the
+RE-MADE instance's own diagnostic re-verdicts DEGENERATE at 69 105.
+The healed page was as blank as the sick one.
+
+**The root cause — the wrong conservative.** The Task-140 fallback
+switched the EMISSION (emit:'cpu', cull off) but left the simulation and
+the records pack on the transform feedback. A driver that drops the TF
+write drops the pack exactly as it drops the emit pass — the records the
+draw reads stay at their initial zeros no matter who births the rows.
+The live log's second DEGENERATE verdict was the proof: the
+conservative branch of a TF-broken driver is still invisible. (The
+nan=0 signature — exact zeros, never NaN — says the pack's writes never
+landed at all, not that they computed garbage.)
+
+**The fix — three moves, all in the demo tier (`gpuEmbers.js`):**
+
+1. **THE RE-MAKE GOES FULL-CPU.** `window.__embersFallback` now means:
+   no transform-feedback tier AT ALL — the facade's own `sim:'cpu'` tier
+   (simulation, emission AND records on the CPU, the harness's per-frame
+   records upload — the pre-Task-131 path every driver renders). The
+   verdict binds the TF LEG ONLY: the compute/SSBO leg ignores it (a
+   backend switch after a WebGL2 verdict keeps the full WebGPU
+   pipeline), and `?emit=1`/`?cull=1` override it (the forced retry
+   re-takes the TF tier at full capacity; the ladder is off while the
+   flag is set, so the escape hatch cannot loop).
+2. **THE HEALED CAPACITY IS HARDWARE-AWARE.** The CPU tier is
+   per-particle JS work (the Task-142 etalons: ~88 ns/particle
+   full-load, ~216 ns/spawn on a desktop core; a phone's core runs
+   2–4× slower) — the healed tier takes 32k on coarse-pointer devices
+   (dense and smooth on the phone class that actually hits
+   TF-broken drivers), 16k on the software-GL class, the full 160k
+   look on desktop.
+3. **THE VERDICT IS PIXEL-CONFIRMED.** A degenerate records readback
+   alone no longer fires the fallback — it LATCHES a suspicion and arms
+   the in-frame canvas sample immediately; the CANVAS settles it (the
+   ground truth of "the user sees particles"): cold pixels + a counting
+   ledger → the one-time full-CPU re-make; warm pixels → the READBACK
+   was the liar (the Task-140 compositor lesson, now applied to
+   getBufferSubData itself) and the GPU tier stays, with a console.info
+   carrying the forensics. Sane records still walk the original
+   frame-~45 draw-side check; a confirmation that never lands for 90
+   frames falls back on the records verdict alone. `perf.pixelCheck`
+   (undefined → 'armed' → 'warm'/'cold'/'off') exposes the ladder's
+   verdict for the gates.
+
+The library-side warning (`particlesGpuGl.ts`) now says the same thing:
+rebuild on the CPU tier — a conservative reconfiguration of THIS tier is
+not enough.
+
+**The gates, upgraded to the honest oracle:** task140n's Leg A moved
+its rendering proof from the compositor screenshot (the documented
+liar — it read 0.01–0.02% warm on a leg whose in-frame sample read
+WARM) to the in-frame `perf.pixelCheck === 'warm'` wait, with the
+screenshot kept as a reported metric behind a three-window retry; Leg B
+asserts the FULL-CPU branch (tier 'cpu', zero GPU backends, the healed
+capacity, emit 'cpu', cull off, warm pixels). task140p simulates the
+COMPLETE dropped-driver signature now — the zeroed readback AND the
+zeroed readPixels (zeroing only the readback leaves the pixels warm and
+the pixel-confirmed ladder correctly REFUSES to fall back — that
+refusal is the point) — and asserts the whole chain: verdict → cold
+confirmation → the re-make → tier 'cpu' with no GPU backend → warm
+pixels. **The bonus catch:** at HEAD the OLD task140n failed Leg A with
+a FALSE fallback (the cull-sentinel trap — 4 all-zero record rows read
+as "degenerate" while they were off-screen sentinels); the
+pixel-confirmed ladder kills that false-positive class by design.
+
+The verification: 1683 tests 0 fail, typecheck 6 (pre-existing,
+identical), lint 0 errors / 374 warnings (baseline), build OK,
+demo:smoke 24/24 GPU-health clean, task140n PASS (SANE diagnostics, no
+false fallback, in-frame pixels WARM, the full-CPU Leg B warm 0.77%),
+task140p PASS (the dropped-driver chain end-to-end, warm 0.98%),
+task134-vfx-probe PASS (sort+cull live, 13 266 particles),
+task137-vfx-probe PASS (drops 0), task138-vfx-probe PASS (all five
+policy legs), the raw-device battery 4/4 PASS (wgsl-sim parity,
+wgsl-emit bit-exact + the 90-frame sequence, wgsl-sort, glsl-emit
+bit-exact), demo-shots: every vfx row ALIVE with bright pixels
+(gpuEmbers 10 206 particles, bright 1.06% — the post-sweep toggle leg
+hit the documented container GPU-process class, covered separately by
+task147-toggle: labels 6→6→6, zero errors). ?v=149 on the dist imports
+(vfx main/index/gpuEmbers + the particles page).

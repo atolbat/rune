@@ -15,18 +15,19 @@
 //
 // EVERY sprite on this page is OURS — generated in this file (deterministic
 // pure functions → raw RGBA uploads; no image assets, no browser
-// premultiply semantics). The dist imports carry ?v=147 (the stale-cache
-// guard — bump on release; Task 130 changed @rune/particles: the line lattice).
-import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=147'
+// premultiply semantics). The dist imports carry ?v=149 (Task 148: the
+// self-heal re-make — the stale-cache guard — bump on release; Task 130
+// changed @rune/particles: the line lattice).
+import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=149'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER, BILLBOARD,
-} from '../../dist/rune-materials.esm.js?v=147'
-import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=147'
+} from '../../dist/rune-materials.esm.js?v=149'
+import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=149'
 
 /* ─── the demo registry (the carousel order) ────────────────────────────── */
 
-import muzzle from './demos/muzzle.js?v=148' // the Task 147 retune rides the same cache-bust
+import muzzle from './demos/muzzle.js?v=149' // the Task 147 retune rides the same cache-bust
 import explosion from './demos/explosion.js'
 import shapes from './demos/shapes.js'
 import trail from './demos/trail.js'

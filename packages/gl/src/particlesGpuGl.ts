@@ -76,10 +76,16 @@ export interface GpuParticlesTf {
    *  rows while the CPU ledger holds live particles — the transform
    *  feedback's write silently dropped or poisoned by a driver, while the
    *  emission itself keeps counting on the CPU). The consumer reads this
-   *  once per frame and can rebuild the tier in a conservative mode when
-   *  `sane === false` (the demo's auto-fallback). `checked === false` —
-   *  not yet sampled (too few frames); `readable === false` — the readback
-   *  itself was refused ("unknown", NOT a failure verdict). */
+   *  once per frame and should rebuild on the CPU TIER (`sim:'cpu'`) when
+   *  `sane === false` — the sim and the records pack ride the same dropped
+   *  TF writes, so a conservative reconfiguration of THIS tier (emit 'cpu',
+   *  cull off) is not enough: the TF-broken driver stays invisible (the
+   *  Task-148 lesson, live-reported from Android Chrome). The readback
+   *  itself can also lie — the sound consumer CONFIRMS with the canvas
+   *  before rebuilding (the demo's pixel-confirmed ladder).
+   *  `checked === false` — not yet sampled (too few frames);
+   *  `readable === false` — the readback itself was refused ("unknown",
+   *  NOT a failure verdict). */
   readonly diagnostics: { readonly checked: boolean; readonly readable: boolean; readonly sane: boolean; readonly atFrame: number; readonly count: number; readonly zeroRows: number; readonly nan: number; readonly halfMax: number; readonly caMax: number }
   /** Full teardown. */
   dispose(): void
@@ -342,7 +348,7 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
     diag.sane = !(nan > 0 || (count >= rows * 16 && rowsSeen === 0))
     if (!diag.sane) {
       console.warn(
-        `[rune/particles] GPGPU TF diagnostics: the records buffer read back DEGENERATE at frame ${frame} (count ${count}, zeroRows ${zeroRows}/${rows}, nan ${nan}) — the transform-feedback write was dropped or poisoned on this driver; the consumer should fall back to the conservative path (emit:'cpu', render.cull off).`,
+        `[rune/particles] GPGPU TF diagnostics: the records buffer read back DEGENERATE at frame ${frame} (count ${count}, zeroRows ${zeroRows}/${rows}, nan ${nan}) — the transform-feedback write was dropped or poisoned on this driver; the consumer should rebuild on the CPU tier (sim:'cpu' — the TF sim and the records pack ride the same dropped writes, a conservative reconfiguration of this tier is not enough), ideally after the canvas confirms the particles are really invisible (the readback itself can be the liar).`,
       )
     }
   }

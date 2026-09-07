@@ -1,13 +1,19 @@
-// task140p — THE AUTO-FALLBACK TRIGGER, end-to-end (Task 140).
+// task140p — THE AUTO-FALLBACK TRIGGER, end-to-end (Task 140, Task 148).
 //
 // task140n validated the pieces: the diagnostics fire and verdict SANE on
 // a healthy page (no false fallback), and the preset fallback flag takes
-// the conservative branch. THIS probe walks the REAL chain: a live page,
-// the diagnostics fired — then we MUTATE the verdict to `sane: false`
-// (simulating exactly what a dropping driver would produce — the real
-// records degenerate). The demo's frame ladder must: see it, set the
-// fallback flag, request the shell re-make — and the fresh make must run
-// the CONSERVATIVE branch with warm pixels. One console.warn expected.
+// the full-CPU branch. THIS probe walks the REAL chain: a live page, the
+// diagnostics fired — then we simulate the FULL dropped-driver signature
+// (Task 148: the pixel-confirmed ladder needs BOTH halves): zero every
+// getBufferSubData readback (the records read back ALL-ZERO at frame 30 —
+// the degenerate verdict) AND zero every readPixels return (the in-frame
+// canvas sample reads COLD — exactly the blank canvas a real TF write
+// drop shows; zeroing only the readback would leave the pixels WARM and
+// the ladder would correctly REFUSE to fall back — the lying-readback
+// guard). The demo's frame ladder must: latch the suspicion, confirm it
+// cold, set the fallback flag, request the shell re-make — and the fresh
+// make must run the FULL-CPU branch (sim:'cpu', tier:'cpu', no GPU
+// backend) with warm pixels. One console.warn expected.
 import { join } from 'node:path'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { chromium } from 'playwright'
@@ -32,6 +38,9 @@ const server = Bun.serve({
     let body = await file.text()
     if (pathname.endsWith('demos/gpuEmbers.js')) {
       body = body.replace(/const TF_CAPACITY = SOFTWARE_GL \? 16_000 : 160_000/, 'const TF_CAPACITY = 16000')
+      // Task 148 — the re-made CPU tier's capacity (the healed branch takes
+      // FALLBACK_CAPACITY — patch it to the same fast 16k budget)
+      body = body.replace(/const FALLBACK_CAPACITY = SOFTWARE_GL \? 16_000 : COARSE \? 32_000 : GPU_CAPACITY/, 'const FALLBACK_CAPACITY = 16000')
     }
     return new Response(body, { headers: { 'content-type': MIME[ext] ?? 'application/octet-stream' } })
   },
@@ -65,7 +74,7 @@ await context.addInitScript(() => {
 })
 const page = await context.newPage()
 const consoleMsgs = []
-page.on('console', (m) => consoleMsgs.push(`[${m.type()}] ${m.text().slice(0, 220)}`))
+page.on('console', (m) => consoleMsgs.push(`[${m.type()}] ${m.text().slice(0, 500)}`))
 page.on('pageerror', (e) => consoleMsgs.push('PAGEERROR: ' + String(e).slice(0, 220)))
 
 await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
@@ -80,12 +89,15 @@ await page.evaluate(() => {
 // wait for the tier to exist (the layer lands within the click)
 await page.waitForFunction(() => (window.__vfxLayers ?? []).some((l) => l?.gpuBackend), null, { timeout: 30_000 })
 
-// THE SIMULATED DROP, at the source: zero every getBufferSubData readback
-// (only the tier's one-shot diagnostic uses it in-page) — the records
-// read back ALL-ZERO at frame 30 exactly as a dropping driver would leave
-// them: count on the ledger, degenerate rows in the buffer. Installed
-// BEFORE the diagnostic frame so the verdict itself flips (mutating the
-// verdict object after the fact would race the demo's one-read ladder).
+// THE SIMULATED DROP, at the source — BOTH halves of the dropped-driver
+// signature (Task 148's pixel-confirmed ladder demands the confirmation):
+// (1) zero every getBufferSubData readback (only the tier's one-shot
+// diagnostic uses it in-page) — the records read back ALL-ZERO at frame 30
+// exactly as a dropping driver would leave them: count on the ledger,
+// degenerate rows in the buffer; (2) zero every readPixels return — the
+// in-frame canvas sample must read COLD (a dropped TF write = zero
+// records = nothing drawn). Installed BEFORE the diagnostic frame so the
+// verdict itself flips and the confirmation sees the blank canvas.
 await page.evaluate(() => {
   const c = document.querySelector('canvas')
   const ctx = c != null ? c.getContext('webgl2') : null
@@ -95,6 +107,12 @@ await page.evaluate(() => {
   ctx.getBufferSubData = (target, srcByteOffset, dst) => {
     const r = orig(target, srcByteOffset, dst)
     if (dst instanceof Float32Array) dst.fill(0)
+    return r
+  }
+  const origRp = ctx.readPixels.bind(ctx)
+  ctx.readPixels = (x, y, w, h, format, type, dst) => {
+    const r = origRp(x, y, w, h, format, type, dst)
+    if (dst instanceof Uint8Array) dst.fill(0)
     return r
   }
 })
@@ -108,6 +126,7 @@ const after = await page.evaluate(() => ({
   perf: window.__vfxPerf ? { ...window.__vfxPerf } : null,
   remakes: window.__fxRemakes,
   fallbackFlag: window.__embersFallback === true,
+  gpuBackends: (window.__vfxLayers ?? []).filter((l) => l?.gpuBackend !== undefined).length,
 })).catch((e) => ({ crash: String(e).slice(0, 150) }))
 console.log(`[task140p] after: ${JSON.stringify(after)}`)
 
@@ -135,10 +154,11 @@ const warn = consoleMsgs.find((m) => m.includes('rune/vfx') && /falling back/i.t
 console.log(`[task140p] fallback warning: ${warn ? 'FIRED ✓' : 'MISSING'}`)
 
 {
-  const ok = after.perf?.emit === 'cpu' && after.perf?.cull === false && after.perf?.fallback === 'selfcheck' && after.remakes === 2 && (shot.warm ?? -1) > 0.05 && warn != null
+  const ok = after.perf?.emit === 'cpu' && after.perf?.cull === false && after.perf?.fallback === 'selfcheck'
+    && after.perf?.tier === 'cpu' && after.gpuBackends === 0 && after.remakes === 2 && (shot.warm ?? -1) > 0.05 && warn != null
   const errs = consoleMsgs.filter((m) => m.startsWith('PAGEERROR'))
   if (errs.length > 0) { console.log('[task140p] PAGE ERRORS: ' + errs.slice(0, 2).join(' | ')); process.exit(1) }
-  console.log(ok ? '[task140p] PASS — the degenerate verdict → the auto-fallback → the conservative re-make → warm pixels' : '[task140p] FAIL — see above')
+  console.log(ok ? '[task140p] PASS — the degenerate verdict + the cold-canvas confirmation → the auto-fallback → the full-CPU re-make (no GPU backend) → warm pixels' : '[task140p] FAIL — see above')
   if (!ok) process.exit(1)
 }
 await browser.close()
