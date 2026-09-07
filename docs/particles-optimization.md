@@ -981,3 +981,104 @@ hashes), demo-shots: every measured vfx row ALIVE with motion (the
 browser's GPU process dies under the screenshot workload on this
 container — reproduced at HEAD with 16 rows vs the tree's 21–24 rows:
 environmental, not a regression). ?v=146.
+
+### Task 146 — the algorithmic sweep, second leg: the arena's dirtyRanges takes the O(dirty) walk
+
+The brief: "continue the WebGPU optimization, dig deep, and look at the
+ALGORITHMIC classes." The survey (fresh profiles of the whole battery at
+HEAD = the Task-145 commit, the artifact-filtered aggregation): the WebGPU
+frame path is at the floor after Task 145 (theoryE 13 ns/draw; the
+remaining theoryE/framePath profile mass is single-sample giant-delta
+startup artifacts — 17 ms "attributed" to uploadDirtySlices over ONE hit,
+the WeakMap 14 ms artifact — the honest reading of a 24-sample profile),
+idOf/structuralKey remain compile-time (the Task-145 verdict re-confirmed:
+the framePath bench compiles OUTSIDE its timed loop), and the remaining
+REAL battery mass sits in the T3 writer (theoryN, 16.6% of all sampled
+time — already Task-143-swept), materials (compile-once by design — the
+cache hit is a single numeric probe), and ONE untouched algorithmic
+surface: **`uniformArena.dirtyRanges()` still walked ALL slots per call**
+(the sibling of the Task-144 `clearDirty` fix — the dirty LIST exists,
+clearDirty uses it, dirtyRanges never got the leg). 29.5% of the
+uniformStrategy bench's self time, 2.3% of theoryL; the tape stub's
+dirty-mode delivery (theoryG) pays it per shipped frame.
+
+THE CHANGE (`packages/core/src/uniforms/arena.ts`, sandbox parity-gated
+first — 300 randomized seeds over allocs/marks/external-clears/
+importBytes/clearDirty cycles, ranges + the reused-array identity + flags
++ bytes identical): `dirtyRanges()` walks the dirty LIST now. Two
+load-only passes: pass 1 filters the live members (the list may hold
+stale externally-cleared entries and bounded duplicates) and detects
+ascending order; pass 2 merges in the exact V0 shape into the same reused
+output array. TWO GUARDED FALLBACKS onto the byte-for-byte pre-Task-146
+full-slot walk: a dense list (≥90% of all slots — the indirection cannot
+pay there) and ANY disorder (marks out of alloc order). The rejected
+intermediates, measured in the sandbox and NOT shipped: the sort variant
+(+341% on shuffled marks — the slice+sort allocation per call), the
+scratch-copy variant (+41% on all-dirty — the per-entry store overhead).
+
+The sandbox matrix (V0 walk vs V1):
+
+| Shape | delta |
+|---|---|
+| S=100 D=4 (uniformStrategy's sparse case) | **−82%** |
+| S=100 D=20 | **−38%** |
+| S=100 D=50 / D=100 (dense → guarded walk) | −0.4% / +0.9% |
+| S=5000 D=13 (the theoryL-class sparse frame) | **−98.7%** |
+| S=5000 D=5000 (all-dirty → guarded walk) | −0.6% |
+| S=2000 D=300 sorted (the theoryG-class shape) | **−48%** |
+| S=2000 D=300 SHUFFLED marks (the fallback) | +8.2% (the wasted pass 1, documented) |
+
+The A/B (interleaved stash-flip, median of 3 rounds): theoryG
+dirty-only delivery **0.0069 → 0.0033 ms (−52%)** — the direct
+consumer; theoryG full ±0%, theoryL inside the noise IQR (median −15%,
+overlapping bands — no claim), uniformStrategy d50/d100 ±0% (the dense
+guard holds the walk code identical), theoryD/theoryE/theoryN
+(untouched paths) ±0%.
+
+THE REJECTED CANDIDATES this pass (each sandboxed, each honest):
+
+1. **The T3 writer name-memo** (the biggest remaining block, 310 ms
+   self across the battery): the per-closure last-name memo kills the
+   `Map.get(name)` per write (the offsets map is immutable — the memo
+   cannot go stale; 400-seed parity PASS). The floor measurement: the
+   resolution-free bound is ~14 ns of the ~24 ns write — there IS room.
+   But the memo is UNSTABLE on the theoryN shape (−6% to −32% across
+   runs) and reproducibly REGRESSES the round-robin emit shapes
+   (K=8 fields through one closure: +18–26%, K=16: +23%) — the
+   name-addressed API contract pays the resolution per call by
+   design, and the trade is bad. Rejected.
+2. **idOf two-level/numeric** — the Task-145 verdict re-confirmed on
+   the fresh profiles: compile-time only.
+3. **materials package sweep** — compile-once by design (the bench's
+   own doc: "the cache hit is what a frame actually pays" — and the
+   hit is already one numeric probe).
+4. **formats.ts unorm/snorm/compressed** — module-eval table
+   construction (startup, one-time per process; the Task-145
+   effect.ts class).
+5. **webgl2 reflectCached concat key** — the Task-144 real-bench-null
+   verdict re-confirmed (theoryF's hit path is dominated by the other
+   compile work; the concat of two ~250 B sources is not the frame
+   path).
+6. **gl/shadow applyAction dispatch** — its heat is confined to the
+   stateProgram synthetic driver; the real frame path applies state
+   through the Task-143 precompiled-keys applyState.
+7. **sliceArena markDirty O(D) containment scan / dirtyRanges sort**
+   — the legacy writeVec4 surface has zero production callers
+   (tests only; the Task-145 "not frame-path" verdict re-confirmed).
+
+The verification: 1683 tests 0 fail (+4: the three-path agreement —
+sparse-list, dense-walk, disorder-walk must return the same ranges as
+the V0 reference; the stale-member/duplicate filter pin; the
+reused-array identity contract; the empty/born-dirty corners),
+typecheck 6 (pre-existing, identical), lint 0 errors / 374 warnings
+(baseline), build OK, demo:smoke 24/24 GPU-health clean,
+task134-vfx-probe PASS (sort+cull live gate, 11 866 → 15 032),
+task137 legs ok drops 0 on rerun (the documented settle-race flake
+class), task138 PASS, the raw-device battery 4/4 PASS (wgsl-sort,
+glsl-emit bit-exact, wgsl-emit bit-exact + the 90-frame sequence
+clean, wgsl-sim parity), demo-shots: every measured vfx row ALIVE
+with motion (dust 82% motion, gpuEmbers 10 076 particles; the browser
+GPU-process death under the screenshot workload late in the cycle
+reproduced — the documented container class, environmental). ?v=147
+on the dist imports (the vfx/particles demos; Task 145 had already
+stamped v=146, this pass's rebuild bumps it).

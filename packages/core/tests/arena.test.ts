@@ -96,3 +96,112 @@ describe('Task 114: importBytes marks the intersecting rank range', () => {
     expect(slot.dirty).toBe(true)
   })
 })
+
+// Task 146 — dirtyRanges took the O(dirty) list walk (the Task-144 clearDirty
+// sibling) with two guarded fallbacks (dense lists, disordered marks) onto the
+// exact pre-Task-146 full-slot walk. The pins below hold ALL THREE paths to
+// one answer: the same scenario replayed through each path must return the
+// same merged ranges, the stale members (external clears) must be excluded,
+// and the returned array must stay the reused object.
+describe('uniform arena dirtyRanges (Task 146: the O(dirty) list walk)', () => {
+  /** Reference: the V0 semantics (walk every slot, merge ascending). */
+  function referenceRanges(arena: ReturnType<typeof createUniformArena>, slots: Array<{ base: number; size: number; dirty: boolean }>): Array<{ from: number; to: number }> {
+    const merged: Array<{ from: number; to: number }> = []
+    for (const slot of slots) {
+      if (!slot.dirty) continue
+      const from = slot.base * 4
+      const to = (slot.base + slot.size) * 4
+      const last = merged[merged.length - 1]
+      if (last !== undefined && from <= last.to) {
+        if (to > last.to) last.to = to
+      } else merged.push({ from, to })
+    }
+    return merged.map(r => ({ ...r }))
+  }
+
+  it('the sparse-list path, the dense fallback, and the disorder fallback agree', () => {
+    // 10 slots; mark 3 (ascending) — the SPARSE path.
+    const arena = createUniformArena(256)
+    const slots: Array<{ base: number; size: number; dirty: boolean }> = []
+    for (let i = 0; i < 10; i++) slots.push(arena.alloc(4) as unknown as { base: number; size: number; dirty: boolean })
+    arena.clearDirty()
+    arena.write(slots[1] as never, [5, 0, 0, 0])
+    arena.write(slots[2] as never, [6, 0, 0, 0])
+    arena.write(slots[7] as never, [7, 0, 0, 0])
+    const sparse = arena.dirtyRanges().map(r => ({ ...r }))
+    expect(sparse).toEqual(referenceRanges(arena, slots))
+    // (1,2) merge into one range; 7 stands alone — 2 ranges total.
+    expect(sparse.length).toBe(2)
+    expect(sparse[0].from).toBe(slots[1].base * 4)
+    expect(sparse[0].to).toBe((slots[2].base + slots[2].size) * 4)
+
+    // The DISORDER path: clear, re-mark the same slots OUT of alloc order —
+    // the walk fallback must give the same ranges.
+    arena.clearDirty()
+    // NOTE: fresh values — the value-compare semantics do not re-mark a
+    // slot whose bytes already hold the written value.
+    arena.write(slots[7] as never, [80, 0, 0, 0])
+    arena.write(slots[1] as never, [50, 0, 0, 0])
+    arena.write(slots[2] as never, [60, 0, 0, 0])
+    const disordered = arena.dirtyRanges().map(r => ({ ...r }))
+    expect(disordered).toEqual(sparse)
+
+    // The DENSE path: mark every slot (list ≥ 90% of slots) — the full-slot
+    // walk must give the one merged range covering everything.
+    arena.clearDirty()
+    for (const slot of slots) arena.write(slot as never, [9, 0, 0, 0])
+    const dense = arena.dirtyRanges().map(r => ({ ...r }))
+    expect(dense).toEqual(referenceRanges(arena, slots))
+    expect(dense.length).toBe(1)
+    expect(dense[0].from).toBe(slots[0].base * 4)
+    expect(dense[0].to).toBe((slots[9].base + slots[9].size) * 4)
+  })
+
+  it('stale members (the executor external clear) are filtered, duplicates merge', () => {
+    const arena = createUniformArena(256)
+    const slots: Array<{ base: number; size: number; dirty: boolean }> = []
+    for (let i = 0; i < 20; i++) slots.push(arena.alloc(4) as unknown as { base: number; size: number; dirty: boolean })
+    arena.clearDirty()
+    arena.write(slots[3] as never, [1, 0, 0, 0])
+    arena.write(slots[4] as never, [2, 0, 0, 0])
+    arena.write(slots[12] as never, [3, 0, 0, 0])
+    // the executor's per-field upload clear — an EXTERNAL dirty=false while
+    // the entry stays on the internal list
+    slots[12].dirty = false
+    // a duplicate mark: clear-then-remark pushes the slot a second time
+    // (a NEW value — the old bytes already hold 1, value-compare would pass)
+    slots[3].dirty = false
+    arena.write(slots[3] as never, [11, 0, 0, 0])
+    const ranges = arena.dirtyRanges()
+    expect(ranges).toEqual(referenceRanges(arena, slots))
+    expect(ranges.length).toBe(1) // slots 3+4 merged; 12 externally clean
+    expect(ranges[0].from).toBe(slots[3].base * 4)
+    expect(ranges[0].to).toBe((slots[4].base + slots[4].size) * 4)
+  })
+
+  it('the returned array is the reused object (the documented contract)', () => {
+    const arena = createUniformArena(128)
+    const slot = arena.alloc(4)
+    arena.clearDirty()
+    arena.write(slot, [2, 0, 0, 0])
+    const first = arena.dirtyRanges()
+    const second = arena.dirtyRanges()
+    expect(second).toBe(first)
+    arena.clearDirty()
+    const third = arena.dirtyRanges()
+    expect(third).toBe(first)
+    expect(third.length).toBe(0)
+  })
+
+  it('empty-list and full-bounds corners', () => {
+    const arena = createUniformArena(64)
+    expect(arena.dirtyRanges()).toEqual([])
+    const slot = arena.alloc(16)
+    // born-dirty: the single live member IS the whole answer
+    const ranges = arena.dirtyRanges()
+    expect(ranges.length).toBe(1)
+    expect(ranges[0].from).toBe(0)
+    expect(ranges[0].to).toBe(64)
+    expect(slot.dirty).toBe(true)
+  })
+})

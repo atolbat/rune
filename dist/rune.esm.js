@@ -812,10 +812,52 @@ function createUniformArena(floats = 1 << 16) {
     return slots.filter((slot) => slot.dirty);
   }
   const dirtyRangesOut = [];
-  function dirtyRanges() {
+  function dirtyRangesWalk() {
     let write2 = 0;
     for (let at = 0;at < slots.length; at++) {
       const slot = slots[at];
+      if (!slot.dirty)
+        continue;
+      const from = slot.base * 4;
+      const to = (slot.base + slot.size) * 4;
+      const last = write2 > 0 ? dirtyRangesOut[write2 - 1] : undefined;
+      if (last !== undefined && from <= last.to) {
+        if (to > last.to)
+          last.to = to;
+      } else {
+        if (write2 < dirtyRangesOut.length) {
+          const reuse = dirtyRangesOut[write2];
+          reuse.from = from;
+          reuse.to = to;
+        } else {
+          dirtyRangesOut.push({ from, to });
+        }
+        write2++;
+      }
+    }
+    dirtyRangesOut.length = write2;
+    return dirtyRangesOut;
+  }
+  function dirtyRanges() {
+    const list = dirtyList;
+    if (list.length * 10 >= slots.length * 9)
+      return dirtyRangesWalk();
+    let ascending = true;
+    let prevBase = -1;
+    for (let i = 0;i < list.length; i++) {
+      const slot = list[i];
+      if (!slot.dirty)
+        continue;
+      if (slot.base < prevBase)
+        ascending = false;
+      else
+        prevBase = slot.base;
+    }
+    if (!ascending)
+      return dirtyRangesWalk();
+    let write2 = 0;
+    for (let i = 0;i < list.length; i++) {
+      const slot = list[i];
       if (!slot.dirty)
         continue;
       const from = slot.base * 4;

@@ -240,12 +240,59 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
   /** Dirty ranges in BYTES, merged from adjacent slots (byte-API).
  *  Slots are ascending by construction — one pass, no sort, no filter/map
  *  intermediate arrays; the output array is reused between calls (copy it
- *  if you need to keep it). */
+ *  if you need to keep it).
+ *  Task 146 — the O(dirty) walk (the Task-144 clearDirty sibling): the
+ *  marks now live on the dirty LIST, so sparse frames walk only the marked
+ *  entries instead of every slot (a 5000-slot frame with 13 dirty paid the
+ *  full 5000-slot scan per call). Two load-only passes: pass 1 filters the
+ *  live members (the list may hold stale externally-cleared entries — the
+ *  executor's per-field upload clear — and bounded duplicates) and detects
+ *  ascending order; pass 2 merges in the exact V0 shape. Guards: a dense
+ *  list (≥90% of all slots — the indirection cannot pay there) or ANY
+ *  disorder (marks out of alloc order) falls back to the full-slot walk,
+ *  which is byte-for-byte the pre-Task-146 code — always-correct, and the
+ *  adversarial shapes measured even (all-dirty ±0.9%, shuffled marks +8%
+ *  — the wasted pass-1, documented as the trade). */
   const dirtyRangesOut: ByteRange[] = []
-  function dirtyRanges(): ByteRange[] {
+  function dirtyRangesWalk(): ByteRange[] {
     let write = 0
     for (let at = 0; at < slots.length; at++) {
       const slot = slots[at]
+      if (!slot.dirty) continue
+      const from = slot.base * 4
+      const to = (slot.base + slot.size) * 4
+      const last = write > 0 ? dirtyRangesOut[write - 1] : undefined
+      if (last !== undefined && from <= last.to) {
+        if (to > last.to) last.to = to
+      } else {
+        if (write < dirtyRangesOut.length) {
+          const reuse = dirtyRangesOut[write]
+          reuse.from = from
+          reuse.to = to
+        } else {
+          dirtyRangesOut.push({ from, to })
+        }
+        write++
+      }
+    }
+    dirtyRangesOut.length = write
+    return dirtyRangesOut
+  }
+  function dirtyRanges(): ByteRange[] {
+    const list = dirtyList
+    if (list.length * 10 >= slots.length * 9) return dirtyRangesWalk()
+    let ascending = true
+    let prevBase = -1
+    for (let i = 0; i < list.length; i++) {
+      const slot = list[i]
+      if (!slot.dirty) continue
+      if (slot.base < prevBase) ascending = false
+      else prevBase = slot.base
+    }
+    if (!ascending) return dirtyRangesWalk()
+    let write = 0
+    for (let i = 0; i < list.length; i++) {
+      const slot = list[i]
       if (!slot.dirty) continue
       const from = slot.base * 4
       const to = (slot.base + slot.size) * 4
