@@ -27,7 +27,7 @@ import { createParticles, createRamp, createSpawner, createGrassField } from '..
 
 /* ─── the demo registry (the carousel order) ────────────────────────────── */
 
-import muzzle from './demos/muzzle.js?v=150' // the Task 147 retune rides the same cache-bust
+import muzzle from './demos/muzzle.js?v=151' // the Task 147 retune rides the same cache-bust
 import explosion from './demos/explosion.js'
 import shapes from './demos/shapes.js'
 import trail from './demos/trail.js'
@@ -56,7 +56,7 @@ import dust from './demos/dust.js'
 import grass from './demos/grass.js'
 import lightning from './demos/lightning.js'
 import laser from './demos/laser.js'
-import gpuEmbers from './demos/gpuEmbers.js?v=150'
+import gpuEmbers from './demos/gpuEmbers.js?v=151'
 
 const DEMOS = [muzzle, explosion, shapes, trail, sequencer, mesh, subemitter,
   noise, alphatest, plugin, billboard, soft, blending, follow,
@@ -1044,9 +1044,16 @@ function frameCallback(ctx, record) {
   // before the renderer it runs on is disposed. The 1→2 step (the CPU
   // tier) re-makes the demo alone — no transform feedback, the context
   // is irrelevant.
+  // Task 150 — THE ISOLATION WALK's legs ride the SAME full re-boot path
+  // (each leg must land on a FRESH GL context — leg A isolates the
+  // GPU-emission family, leg B the cull/sort family; a leg on a warm
+  // context would test the residue, not the family). The walk's exit
+  // clears the leg flag and sets the rung-1 position, so the heal takes
+  // the same boot branch below.
   if (window.__vfxRemakeRequested === true) {
     window.__vfxRemakeRequested = undefined
-    if (window.__embersFallback === 1 && activeRenderer !== null && activeRenderer.backend === 'webgl2') {
+    const forensicWalk = window.__embersForensic === 'a' || window.__embersForensic === 'b'
+    if ((window.__embersFallback === 1 || forensicWalk) && activeRenderer !== null && activeRenderer.backend === 'webgl2') {
       setTimeout(() => { void boot('webgl2') }, 0)
     } else {
       activateDemo('reboot')

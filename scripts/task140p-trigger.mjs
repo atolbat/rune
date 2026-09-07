@@ -1,10 +1,10 @@
 // task140p — THE AUTO-FALLBACK TRIGGER, end-to-end (Task 140, Task 148,
-// Task 149 — THE TWO-RUNG LADDER).
+// Task 149 — THE TWO-RUNG LADDER; Task 150 — THE ISOLATION WALK).
 //
 // task140n validated the pieces: the diagnostics fire and verdict SANE on
 // a healthy page (no false fallback), and the preset ladder positions
-// take their rungs. THIS probe walks the REAL chain TWICE: a live page,
-// the diagnostics fired — then we simulate the FULL dropped-driver
+// take their rungs. THIS probe walks the REAL chain: a live page, the
+// diagnostics fired — then we simulate the FULL dropped-driver
 // signature (Task 148: the pixel-confirmed ladder needs BOTH halves):
 // zero every getBufferSubData readback (the records read back ALL-ZERO at
 // frame 30 — the degenerate verdict) AND zero every readPixels return
@@ -12,18 +12,20 @@
 // real TF write drop shows; zeroing only the readback would leave the
 // pixels WARM and the ladder would correctly REFUSE to fall back — the
 // lying-readback guard). The Task-149 discipline: the zeroing rides the
-// getContext PROTOTYPE hook — it survives the ladder's 0→1 step, which
-// re-boots the RENDERER (a fresh canvas + a fresh GL context must ALSO
-// read back zeroed for the second verdict). The demo's frame ladder must:
-// latch the suspicion, confirm it cold, set the flag to 1, request the
-// re-make — the re-make channel re-boots the renderer on the same backend
-// and the fresh make must run the CONSERVATIVE TF rung (tier 'gpu',
-// emit:'cpu', cull off, the full patched capacity, a gpuBackend present,
-// fallback 'tf'); the rung's OWN diagnostic re-verdicts degenerate (the
-// records still read zeroed), its pixel sample confirms cold — the
-// escalation to 2 — and the final re-make must run the FULL-CPU branch
-// (sim:'cpu', tier:'cpu', no GPU backend, fallback 'cpu') with warm
-// pixels. Two console.warns expected (one per rung).
+// getContext PROTOTYPE hook — it survives every renderer re-boot the
+// walk performs (a fresh canvas + a fresh GL context must ALSO read
+// back zeroed for every later verdict). The demo's frame ladder must:
+// latch the suspicion, confirm it cold, and enter THE ISOLATION WALK
+// (Task 150): leg A (the GPU emission alone) re-booted and re-verdicted
+// DROPPED → leg B (the cull/sort family alone) re-booted and re-verdicted
+// DROPPED → the FORENSIC VERDICT names BOTH families and heals into the
+// CONSERVATIVE TF rung (tier 'gpu', emit:'cpu', cull off, the full
+// patched capacity, a gpuBackend present, fallback 'tf'); the rung's OWN
+// diagnostic re-verdicts degenerate (the records still read zeroed), its
+// pixel sample confirms cold — the escalation to 2 — and the final
+// re-make must run the FULL-CPU branch (sim:'cpu', tier:'cpu', no GPU
+// backend, fallback 'cpu') with warm pixels. FIVE makes total; the walk
+// entry, the FORENSIC VERDICT, and the rung-2 warnings all expected.
 import { join } from 'node:path'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { chromium } from 'playwright'
@@ -32,7 +34,7 @@ import { PNG } from 'pngjs'
 const root = '/home/z/my-project/rune'
 const out = join(root, '.shots', 'task140')
 mkdirSync(out, { recursive: true })
-const port = 8156
+const port = Number(process.env.TASK140P_PORT ?? 8156)
 
 const server = Bun.serve({
   port,
@@ -122,27 +124,63 @@ await page.waitForFunction(() => (window.__vfxLayers ?? []).some((l) => l?.gpuBa
 const before = await page.evaluate(() => ({ perf: { ...window.__vfxPerf }, remakes: window.__fxRemakes }))
 console.log(`[task140p] before: ${JSON.stringify(before)}`)
 
-// RUNG 1 — the level-0 verdict: the ladder sees the degenerate records +
-// the cold canvas on the next frame; the 0→1 step re-boots the renderer
-// (a fresh context — the zeroing rides the prototype hook, so the new
-// context reads zeroed too). The container's slow raster makes frame 30
-// take up to ~20s at the patched 16k.
-await page.waitForFunction(() => window.__fxRemakes >= 2, null, { timeout: 90_000 }).catch(() => { })
+// Task 150 — THE EXTENDED CHAIN: the level-0 verdict now enters THE
+// ISOLATION WALK before the heal — under this probe's GLOBAL zeroing
+// (every context, every configuration) BOTH legs drop, the FORENSIC
+// VERDICT names both families, and the walk's exit heals into rung 1;
+// rung 1 re-verdicts dropped (the zeroing never lifts) and escalates
+// to the CPU tier exactly as v150 did. FIVE makes total: L0 (1) → leg
+// A (2) → leg B (3) → rung 1 (4) → rung 2 CPU (5). The container's
+// slow raster makes each verdict 15-30s at the patched 16k.
+
+// LEG A (remakes 2): the GPU-emission family alone (emit 'gpu', cull
+// off) on a fresh re-booted context — still zeroed → degenerate + cold
+// → the leg verdicts DROPPED and the walk steps to leg B.
+await page.waitForFunction(() => window.__fxRemakes >= 2, null, { timeout: 150_000 }).catch(() => { })
+await page.waitForTimeout(2500)
+const legA = await page.evaluate(() => ({
+  perf: window.__vfxPerf ? { ...window.__vfxPerf } : null,
+  remakes: window.__fxRemakes,
+  legFlag: window.__embersForensic ?? null,
+  fallbackFlag: window.__embersFallback ?? 0,
+  booted: document.querySelector('canvas') != null,
+})).catch((e) => ({ crash: String(e).slice(0, 150) }))
+console.log(`[task140p] leg A (the GPU emission alone): ${JSON.stringify(legA)}`)
+
+// LEG B (remakes 3): the cull/sort family alone (emit 'cpu', cull on) —
+// still zeroed → DROPPED → the FORENSIC VERDICT (both families) fires
+// and the walk heals into rung 1 (the next make).
+await page.waitForFunction(() => window.__fxRemakes >= 3, null, { timeout: 150_000 }).catch(() => { })
+await page.waitForTimeout(2500)
+const legB = await page.evaluate(() => ({
+  perf: window.__vfxPerf ? { ...window.__vfxPerf } : null,
+  remakes: window.__fxRemakes,
+  legFlag: window.__embersForensic ?? null,
+  forensicResult: window.__embersForensicResult ? { ...window.__embersForensicResult } : null,
+  fallbackFlag: window.__embersFallback ?? 0,
+  booted: document.querySelector('canvas') != null,
+})).catch((e) => ({ crash: String(e).slice(0, 150) }))
+console.log(`[task140p] leg B (the cull/sort family alone): ${JSON.stringify(legB)}`)
+
+// RUNG 1 (remakes 4): the walk's heal — the conservative TF tier on a
+// fresh context; the zeroing never lifts → the rung's own re-verdict
+// goes degenerate + cold → the escalation to level 2.
+await page.waitForFunction(() => window.__fxRemakes >= 4, null, { timeout: 150_000 }).catch(() => { })
 await page.waitForTimeout(2500)
 const mid = await page.evaluate(() => ({
   perf: window.__vfxPerf ? { ...window.__vfxPerf } : null,
   remakes: window.__fxRemakes,
   fallbackFlag: window.__embersFallback ?? 0,
+  legFlag: window.__embersForensic ?? null,
+  forensicResult: window.__embersForensicResult ? { ...window.__embersForensicResult } : null,
   gpuBackends: (window.__vfxLayers ?? []).filter((l) => l?.gpuBackend !== undefined).length,
   booted: document.querySelector('canvas') != null,
 })).catch((e) => ({ crash: String(e).slice(0, 150) }))
-console.log(`[task140p] mid (the conservative TF rung): ${JSON.stringify(mid)}`)
+console.log(`[task140p] mid (the conservative TF rung — the walk's heal): ${JSON.stringify(mid)}`)
 
-// RUNG 2 — the level-1 re-verdict: the fresh context's diagnostic reads
-// the still-zeroed records → degenerate → the pixel sample confirms cold
-// (the readPixels zeroing) → the escalation to level 2 → the full-CPU
-// re-make. Settle for the warm pixels.
-await page.waitForFunction(() => window.__fxRemakes >= 3, null, { timeout: 120_000 }).catch(() => { })
+// RUNG 2 (remakes 5): the level-1 re-verdict → the full-CPU re-make.
+// Settle for the warm pixels.
+await page.waitForFunction(() => window.__fxRemakes >= 5, null, { timeout: 150_000 }).catch(() => { })
 await page.waitForTimeout(4000)
 
 const after = await page.evaluate(() => ({
@@ -173,23 +211,44 @@ try {
   shot = { warm: +(100 * w / (W * H)).toFixed(3) }
 } catch { }
 console.log(`[task140p] after pixels: ${JSON.stringify(shot)}`)
-const warnTf = consoleMsgs.find((m) => m.includes('rune/vfx') && /stepping down once/i.test(m))
+// Task 150 — the walk's console story: the entry warning, the FORENSIC
+// VERDICT naming BOTH families, and the rung-2 escalation warning. (The
+// v150 'Stepping down ONCE' text no longer fires on this chain — the
+// walk's exit does the 0→1 step and speaks through the FORENSIC VERDICT
+// line instead; the direct rung warning still fires on the skipped-walk
+// paths — the ?forensic=0 escape and the flags-narrowed configurations.)
+const warnWalk = consoleMsgs.find((m) => m.includes('rune/vfx') && /ISOLATION WALK/i.test(m))
+const warnForensic = consoleMsgs.find((m) => m.includes('FORENSIC VERDICT') && /both families drop independently/i.test(m))
 const warnCpu = consoleMsgs.find((m) => m.includes('rune/vfx') && /falling back once/i.test(m))
-console.log(`[task140p] rung-1 warning (stepping down): ${warnTf ? 'FIRED ✓' : 'MISSING'}`)
+console.log(`[task140p] walk entry warning: ${warnWalk ? 'FIRED ✓' : 'MISSING'}`)
+console.log(`[task140p] forensic verdict (both families): ${warnForensic ? 'FIRED ✓' : 'MISSING'}`)
 console.log(`[task140p] rung-2 warning (falling back): ${warnCpu ? 'FIRED ✓' : 'MISSING'}`)
 
 {
+  // LEG A live: the GPU-emission family alone, pinned by the walk
+  const legAOk = legA.perf?.tier === 'gpu' && legA.perf?.emit === 'gpu' && legA.perf?.cull === false
+    && legA.perf?.forensic === 'a' && legA.legFlag === 'a' && legA.fallbackFlag === 0
+    && legA.remakes === 2 && legA.booted === true
+  // LEG B live: the cull/sort family alone, pinned by the walk
+  const legBOk = legB.perf?.tier === 'gpu' && legB.perf?.emit === 'cpu' && legB.perf?.cull === true
+    && legB.perf?.forensic === 'b' && legB.legFlag === 'b' && legB.fallbackFlag === 0
+    && legB.remakes === 3 && legB.booted === true
+  // the walk's heal: the verdict matrix + rung 1 pinned
   const midOk = mid.perf?.tier === 'gpu' && mid.perf?.emit === 'cpu' && mid.perf?.cull === false
-    && mid.perf?.fallback === 'tf' && mid.perf?.capacity === 16000
-    && mid.fallbackFlag === 1 && mid.gpuBackends === 1 && mid.remakes === 2 && mid.booted === true
-  const ok = midOk
+    && mid.perf?.fallback === 'tf' && mid.perf?.capacity === 16000 && mid.perf?.forensic === undefined
+    && mid.legFlag === null && mid.forensicResult?.a === 'dropped' && mid.forensicResult?.b === 'dropped'
+    && mid.forensicResult?.verdict === 'both' && mid.fallbackFlag === 1
+    && mid.gpuBackends === 1 && mid.remakes === 4 && mid.booted === true
+  const ok = legAOk && legBOk && midOk
     && after.perf?.emit === 'cpu' && after.perf?.cull === false && after.perf?.fallback === 'cpu'
-    && after.perf?.tier === 'cpu' && after.gpuBackends === 0 && after.remakes === 3
-    && after.fallbackFlag === 2 && (shot.warm ?? -1) > 0.05 && warnTf != null && warnCpu != null
+    && after.perf?.tier === 'cpu' && after.gpuBackends === 0 && after.remakes === 5
+    && after.fallbackFlag === 2 && (shot.warm ?? -1) > 0.05 && warnWalk != null && warnForensic != null && warnCpu != null
   const errs = consoleMsgs.filter((m) => m.startsWith('PAGEERROR'))
   if (errs.length > 0) { console.log('[task140p] PAGE ERRORS: ' + errs.slice(0, 2).join(' | ')); process.exit(1) }
-  console.log(midOk ? '[task140p] rung 1 ✓ — the degenerate verdict + the cold canvas → the renderer re-boot → the CONSERVATIVE TF tier (160k budget, emit cpu, a live gpuBackend, fallback \'tf\')' : '[task140p] rung 1 FAIL — see the mid state above')
-  console.log(ok ? '[task140p] PASS — the full two-rung ladder: 0 → conservative TF (re-booted, re-verdicted degenerate + cold) → 1 → the facade CPU tier (no GPU backend) → warm pixels' : '[task140p] FAIL — see above')
+  console.log(legAOk ? '[task140p] leg A ✓ — the level-0 verdict → the walk entry → the renderer re-boot → the GPU-EMISSION-alone tier (emit gpu, cull off, forensic \'a\')' : '[task140p] leg A FAIL — see the leg A state above')
+  console.log(legBOk ? '[task140p] leg B ✓ — leg A verdicted dropped → the re-boot → the CULL/SORT-alone tier (emit cpu, cull on, forensic \'b\')' : '[task140p] leg B FAIL — see the leg B state above')
+  console.log(midOk ? '[task140p] heal ✓ — the FORENSIC VERDICT (both families) → the walk exits into rung 1 (tier gpu, emit cpu, cull off, a live gpuBackend, fallback \'tf\')' : '[task140p] heal FAIL — see the mid state above')
+  console.log(ok ? '[task140p] PASS — the full extended chain: L0 verdict → isolation walk (leg A dropped, leg B dropped, BOTH named) → rung 1 (re-verdicted degenerate + cold) → rung 2 CPU → warm pixels' : '[task140p] FAIL — see above')
   if (!ok) process.exit(1)
 }
 await browser.close()

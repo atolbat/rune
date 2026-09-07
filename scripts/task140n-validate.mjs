@@ -27,7 +27,7 @@ import { PNG } from 'pngjs'
 const root = '/home/z/my-project/rune'
 const out = join(root, '.shots', 'task140')
 mkdirSync(out, { recursive: true })
-const port = 8154
+const port = Number(process.env.TASK140N_PORT ?? 8154)
 
 let PATCH_VALUE = '40000'
 const server = Bun.serve({

@@ -57,6 +57,24 @@
 // flapping, no loop); ?emit=1&cull=1 re-take the full pipeline at level
 // 0; a reload clears the ladder.
 //
+// Task 150 — THE ISOLATION WALK: the ladder heals, but the phone's log
+// still cannot say WHICH pass family drops the transform feedback (the
+// candidates: the GPU-emission TF pass with its PBO slice round-trips,
+// or the cull/sort family — sortKeys' pairsOut round-trip + the sorted
+// pack). Before the 0→1 heal fires, the demo now runs the two-leg
+// bisect ON THE REPORTING DEVICE itself, automatically: leg A = the
+// full pipeline MINUS the cull family (the GPU emission alone), leg B =
+// the full pipeline MINUS the emission (the cull family alone) — each
+// re-booted on a FRESH GL context (the same full re-boot channel the
+// 0→1 step rides) and re-verdicted live by the same pixel-confirmed
+// self-check. Both legs complete → the FORENSIC VERDICT names the
+// family ('emit' / 'cull' / 'both' / 'interaction' — the console warn
+// carries the human story, window.__embersForensicResult the machine
+// one), then the walk heals into rung 1 exactly as v150 did. Once per
+// session; ?forensic=0 skips the walk (the heal fires immediately);
+// the force flags keep it off entirely (manual mode wins); the compute
+// leg never runs it.
+//
 //   · THE COMMON POINT (Task 132): createGpuParticles(facade, backend)
 //     dispatches by the facade's shape — WebGPU compute (the SSBO tier,
 //     160k) or WebGL2 transform feedback (the TF tier — 16k on the
@@ -113,6 +131,55 @@ import { createGpuParticles } from '../../../dist/rune.esm.js?v=150'
 // full pipeline at the FULL capacity, and the ladder is off while a flag
 // is set, so the escape hatch cannot loop).
 const FALLBACK_FLAG = '__embersFallback'
+// Task 150 — THE ISOLATION WALK's session state (all on window — the
+// walk spans re-boots, so it lives above any single make): __embersForensic
+// is 'a' | 'b' while a leg is live (the fresh make reads it and PINS that
+// leg's configuration: leg A = emit:'gpu' + cull off, leg B = emit:'cpu' +
+// cull on — each the full pipeline minus one suspect family);
+// __embersForensicDone — the walk already ran this session (once; a later
+// 1→2 escalation never re-enters it); __embersForensicResult = { a, b,
+// verdict } — 'clean' | 'dropped' per leg, the verdict ∈ 'emit' | 'cull' |
+// 'both' | 'interaction' (the gates assert it, the user's log carries it).
+const FORENSIC_FLAG = '__embersForensic'
+const forensicLeg = () => {
+  if (typeof window === 'undefined') return null
+  const v = window[FORENSIC_FLAG]
+  return v === 'a' || v === 'b' ? v : null
+}
+const forensicDone = () => typeof window !== 'undefined' && window.__embersForensicDone === true
+// Task 150 — completeLeg: a leg's self-check reached its verdict → record
+// it, then advance the walk. Leg A completes → leg B on the NEXT fresh
+// context; leg B completes → THE FORENSIC VERDICT (which family drops on
+// this driver) + the heal into rung 1 — the walk's exit IS the ladder's
+// original 0→1 step: whatever the verdict says, the user's page heals to
+// the proven minimal configuration at the full capacity.
+function completeLeg(leg, verdict, detail) {
+  if (typeof window === 'undefined') return
+  const res = window.__embersForensicResult ?? (window.__embersForensicResult = { a: 'pending', b: 'pending', verdict: 'incomplete' })
+  res[leg] = verdict
+  if (leg === 'a') {
+    window[FORENSIC_FLAG] = 'b'
+    window.__vfxRemakeRequested = true
+    console.warn(`[rune/vfx] GPU Embers FORENSIC leg A (the GPU emission alone, fresh context): ${verdict === 'dropped' ? `DROPPED — ${detail}` : `CLEAN — ${detail}`}. Stepping to leg B (the cull/sort family alone) on the next fresh context.`)
+    return
+  }
+  const a = res.a === 'dropped' ? 'dropped' : 'clean'
+  const b = verdict
+  res.verdict = a === 'dropped' && b === 'dropped' ? 'both' : a === 'dropped' ? 'emit' : b === 'dropped' ? 'cull' : 'interaction'
+  const bLine = `leg B (the cull/sort family alone, fresh context): ${b === 'dropped' ? `DROPPED — ${detail}` : `CLEAN — ${detail}`}`
+  const verdictText = res.verdict === 'both'
+    ? 'BOTH families drop independently on this driver — the GPU-emission pass AND the cull/sort family each break the transform feedback on their own'
+    : res.verdict === 'emit'
+      ? 'THE GPU-EMISSION FAMILY is the dropper — the emission TF pass (the emitOut append + its PBO slice round-trips into the state texture) breaks the transform feedback; the cull/sort family is clean'
+      : res.verdict === 'cull'
+        ? 'THE CULL/SORT FAMILY is the dropper — the sortKeys TF pass (the pairsOut buffer + its PBO round-trip into the pairs texture) with the sorted pack breaks the records; the GPU emission is clean'
+        : 'NEITHER family drops alone on a fresh context — the failure needs the full combination (the interaction of both families together, or a residue only the complete pipeline leaves on the context)'
+  window[FORENSIC_FLAG] = undefined
+  // THE HEAL: rung 1 — the conservative TF tier, the exact v150 step
+  window[FALLBACK_FLAG] = 1
+  window.__vfxRemakeRequested = true
+  console.warn(`[rune/vfx] GPU Embers FORENSIC VERDICT: ${verdictText}. (${bLine}.) Healing into the conservative TF tier now — the proven minimal configuration at the full capacity. Paste this log back for the follow-up fix.`)
+}
 
 // Task 137 — the WebGL2 TF budget is now HARDWARE-AWARE: the 16k cap was
 // the SwiftShader/software-GL budget (the container's gate-hostile class:
@@ -164,6 +231,10 @@ const FORCE_EMIT = flagOn('emit')
 const FORCE_EMIT_OFF = flagOff('emit')
 const FORCE_CULL = flagOn('cull')
 const FORCE_CULL_OFF = flagOff('cull')
+// Task 150 — the isolation walk's escape hatch: ?forensic=0 heals
+// immediately after the level-0 verdict (the v150 behavior, no
+// diagnostic re-boots) for anyone who prefers the fast heal.
+const WANT_FORENSIC = !flagOff('forensic')
 // Task 138 — THE REAL-GPU TF PIPELINE: a real GPU takes the full GPU
 // pipeline by DEFAULT now — emit:'gpu' + the frustum cull (the hardware
 // oracle: the user's live confirmation on a real GPU; the dedicated
@@ -171,6 +242,10 @@ const FORCE_CULL_OFF = flagOff('cull')
 // and the pairs/emit PBO round-trips are hardware paths off the software
 // GL). The software-GL class keeps the proven CPU defaults (Task 135's
 // queue-serialization constraint) — the flags above override both.
+// Task 150 — an isolation leg PINS its family: leg A runs the GPU
+// emission alone (emit on, cull off), leg B the cull/sort family alone
+// (emit cpu, cull on) — each isolating one of the two deltas between
+// the full pipeline and the proven minimal configuration.
 const TF_GPU_PIPELINE = !SOFTWARE_GL
 // Task 140 — the one-time conservative re-make: after a self-check verdict
 // the flag sticks until the page reloads (the fallback session stays
@@ -188,7 +263,7 @@ const fallbackLevel = () => {
 
 export default {
   title: 'GPU Embers',
-  sub: 'the GPGPU tier · 160k compute-simmed, GPU-EMITTED embers · the full GPU pipeline on BOTH backends by default (WebGL2: the transform-feedback tier — 160k + GPU emission + the frustum cull on real GPUs; SwiftShader/llvmpipe keep the conservative CPU defaults) · zero per-frame particle uploads · self-heals down a two-rung ladder when a driver drops the pipeline (the conservative TF tier at 160k first, the CPU tier as the last resort)',
+  sub: 'the GPGPU tier · 160k compute-simmed, GPU-EMITTED embers · the full GPU pipeline on BOTH backends by default (WebGL2: the transform-feedback tier — 160k + GPU emission + the frustum cull on real GPUs; SwiftShader/llvmpipe keep the conservative CPU defaults) · zero per-frame particle uploads · self-heals down a two-rung ladder when a driver drops the pipeline (the conservative TF tier at 160k first, the CPU tier as the last resort), naming the dropping pass family along the way (the two-leg isolation walk, once per session — ?forensic=0 skips it)',
   camera: { yaw: 0.6, pitch: 0.34, dist: 13, orbit: 0.05, target: [0, 4.5, 0] },
 
   make(env) {
@@ -212,6 +287,14 @@ export default {
     // pipeline, and the ladder is off while a flag is set — no loop).
     const forceGpu = FORCE_EMIT || FORCE_CULL
     const lvl = (compute || forceGpu) ? 0 : fallbackLevel()
+    // Task 150 — THE ISOLATION LEG: while the walk is live the make PINS
+    // the leg's configuration regardless of the ladder position (a leg IS
+    // a level-0-family config on a fresh context — the full pipeline minus
+    // one suspect family; the position stays 0 and the capacity stays the
+    // full TF budget). The compute leg and the force flags ignore the walk
+    // entirely (it cannot start under either — the verdict binds the TF
+    // leg, and manual mode wins).
+    const leg = (compute || forceGpu) ? null : forensicLeg()
     const gpuTier = compute || lvl < 2
     // Task 138 — the pipeline policy (explicit HERE, where the compute leg
     // is known): the compute leg always took the GPU pipeline; the TF leg
@@ -220,8 +303,8 @@ export default {
     // flags override both branches in both directions. Task 149 — only the
     // LEVEL-0 TF leg runs the full pipeline; the level-1 rung is the
     // conservative tier by construction.
-    const emitGpu = !FORCE_EMIT_OFF && (compute || (TF_GPU_PIPELINE && lvl === 0) || FORCE_EMIT)
-    const cullOn = !FORCE_CULL_OFF && (compute || (TF_GPU_PIPELINE && lvl === 0) || FORCE_CULL)
+    const emitGpu = leg === 'a' ? true : leg === 'b' ? false : (!FORCE_EMIT_OFF && (compute || (TF_GPU_PIPELINE && lvl === 0) || FORCE_EMIT))
+    const cullOn = leg === 'a' ? false : leg === 'b' ? true : (!FORCE_CULL_OFF && (compute || (TF_GPU_PIPELINE && lvl === 0) || FORCE_CULL))
     const capacity = compute ? GPU_CAPACITY : (lvl === 2 ? FALLBACK_CAPACITY : TF_CAPACITY)
     counters.tier = gpuTier ? 'gpu' : 'cpu'
     if (typeof window !== 'undefined') window.__vfxCounters = counters
@@ -326,7 +409,7 @@ export default {
     // conservative TF tier (level 1 — the re-booted, re-verdicted rung),
     // 'cpu' when it reached the facade's own CPU tier (level 2, Task
     // 148's full-CPU safe harbor).
-    const perf = { tier: gpuTier ? 'gpu' : 'cpu', capacity, count: 0, ms: 0, emit: gpuTier && emitGpu ? 'gpu' : 'cpu', cull: cullOn, sort: WANT_SORT, softwareGL: SOFTWARE_GL, pixelCheck: (compute || !gpuTier) ? 'off' : undefined, ...(lvl > 0 ? { fallback: lvl === 1 ? 'tf' : 'cpu' } : {}) }
+    const perf = { tier: gpuTier ? 'gpu' : 'cpu', capacity, count: 0, ms: 0, emit: gpuTier && emitGpu ? 'gpu' : 'cpu', cull: cullOn, sort: WANT_SORT, softwareGL: SOFTWARE_GL, pixelCheck: (compute || !gpuTier) ? 'off' : undefined, ...(leg !== null ? { forensic: leg } : {}), ...(lvl > 0 ? { fallback: lvl === 1 ? 'tf' : 'cpu' } : {}) }
     if (typeof window !== 'undefined') window.__vfxPerf = perf
     let msAvg = 16
     let last = 0
@@ -412,6 +495,35 @@ export default {
     }
     function triggerFallback(reason) {
       if (compute || forceGpu) return
+      // Task 150 — THE LEG'S OWN DROP: this instance IS an isolation leg and
+      // its configuration just verdicted broken on a fresh context — the
+      // verdict IS the diagnostic answer for that family; the walk advances
+      // (leg A → leg B; leg B → the FORENSIC VERDICT + the heal into rung
+      // 1). The ladder position itself is NOT touched here — the walk's
+      // exit does the 0→1 step.
+      if (leg !== null) {
+        completeLeg(leg, 'dropped', reason)
+        return
+      }
+      const from = fallbackLevel()
+      // Task 150 — THE ISOLATION WALK's entry: the level-0 verdict fired
+      // from the FULL pipeline (emit gpu + cull on — the flags-narrowed or
+      // software-GL level-0 configurations go straight to the rungs: there
+      // is nothing left to bisect). Before the heal, run the two-leg
+      // bisect — ON THIS DEVICE, automatically, once per session: leg A
+      // isolates the GPU-emission family, leg B the cull/sort family, each
+      // on a fresh context re-verdicted live by this same pixel-confirmed
+      // check. The walk's exit heals into rung 1 (the v150 step — the user
+      // keeps the 160k); the verdict tells the NEXT fix which family to
+      // restructure or default off on this driver class.
+      if (from === 0 && WANT_FORENSIC && !forensicDone() && emitGpu && cullOn) {
+        window.__embersForensicDone = true
+        window[FORENSIC_FLAG] = 'a'
+        window.__vfxRemakeRequested = true
+        perf.forensic = 'a'
+        console.warn(`[rune/vfx] GPU Embers: ${reason} — the full pipeline's passes are what this driver drops. Before healing, running THE ISOLATION WALK (once per session, a few seconds of re-boots): leg A isolates the GPU-emission family, leg B the cull/sort family — each on a fresh context, re-verdicted live by this same check; the walk then heals into the conservative TF tier at the full capacity. Skip it with ?forensic=0.`)
+        return
+      }
       // Task 149 — ONE RUNG PER VERDICT: level 0 steps down to the
       // CONSERVATIVE TF tier (the minimal configuration this hardware
       // class demonstrably renders — the live ?emit=0&cull=0 proof: 160k,
@@ -422,7 +534,6 @@ export default {
       // re-make channel gives the level-1 rung a FRESH GL context (the
       // renderer re-boot — a context the full pipeline never ran on, the
       // exact cell the live proof validated).
-      const from = fallbackLevel()
       const to = from >= 2 ? 2 : from + 1
       window[FALLBACK_FLAG] = to
       window.__vfxRemakeRequested = true
@@ -482,12 +593,21 @@ export default {
                 // readback (the draw is demonstrably alive: the READBACK
                 // is the liar on this driver, the rung stays) or the
                 // healthy draw-side check passing.
-                if (suspectReason !== null) {
+                const liar = suspectReason !== null
+                if (liar) {
                   console.info(`[rune/vfx] GPU Embers: the records readback verdicted DEGENERATE but the canvas reads WARM (${pixelsWarm} bright pixels, ledger ${live}) — the readback itself is unreliable on this driver; staying on the GPU tier.`)
                   suspectReason = null
                 }
                 perf.pixelCheck = 'warm'
                 checkStage = 2
+                // Task 150 — the isolation leg's CLEAN completion (a leg
+                // that renders on a fresh context exonerates its family):
+                // leg A → leg B; leg B → the verdict + the heal.
+                if (leg !== null) {
+                  completeLeg(leg, 'clean', liar
+                    ? `the records read back degenerate but the canvas reads WARM (${pixelsWarm} bright, ledger ${live}) — the readback lies, this configuration renders`
+                    : `the records verdicted SANE and the canvas pixel sample read WARM at frame ${frameCount} (${pixelsWarm} bright pixels, ledger ${live})`)
+                }
               } else {
                 // pixelsWarm === 0 with a swarm TOO SMALL to verdict
                 // (live ≤ 1000): INCONCLUSIVE — Task 149: a death-wave
@@ -504,6 +624,11 @@ export default {
                     perf.pixelCheck = 'cold'
                   } else {
                     perf.pixelCheck = 'warm'
+                    // Task 150 — the healthy-tier pass completes a clean leg
+                    // too (no suspicion ever latched, the tier simply runs)
+                    if (leg !== null) {
+                      completeLeg(leg, 'clean', `no suspicion ever latched and the canvas never held a swarm large enough to sample by frame ${frameCount} — this configuration passes`)
+                    }
                   }
                   checkStage = 2
                 } else {

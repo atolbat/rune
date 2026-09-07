@@ -1243,3 +1243,85 @@ pipeline (SANE, no false fallback, in-frame WARM), Leg B the preset
 rung 1 (the conservative TF tier — a live gpuBackend, its own SANE
 diagnostic, pixelCheck 'warm', no escalation), Leg C the preset rung 2
 (Task 148's full-CPU branch).
+
+## Task 150 — THE ISOLATION WALK (name the dropping pass family, on the reporting device, automatically)
+
+The v150 ladder heals the phone, but its log still cannot answer the
+question that decides the NEXT fix: **which family of the full
+pipeline's passes drops the transform feedback?** The live
+minimal-config proof narrowed the failure to the two families that
+separate the full pipeline from the proven minimal configuration —
+the GPU-EMISSION family (the emit TF pass writing `emitOut` + its PBO
+slice round-trips into the state texture) and the CULL/SORT family
+(the sortKeys TF pass writing `pairsOut` + its PBO round-trip into the
+pairs texture, feeding the sorted pack that writes the records) — and
+the only reproducer is the reporting phone itself.
+
+**The walk.** When the level-0 verdict fires from the FULL pipeline
+(emit gpu + cull on — the flags-narrowed and software-GL level-0
+configurations skip straight to the rungs: there is nothing left to
+bisect), the demo runs the two-leg bisect ON THE DEVICE, before the
+heal, automatically:
+
+1. **Leg A — the GPU emission alone** (emit:'gpu', cull off; the full
+   pipeline minus the cull family), re-booted through the SAME full
+   renderer re-boot the 0→1 step rides (a fresh canvas + a fresh GL
+   context — the exact cell the live proof validated; a leg on a warm
+   context would test the residue, not the family), re-verdicted live
+   by the same pixel-confirmed self-check.
+2. **Leg B — the cull/sort family alone** (emit:'cpu', cull on; the
+   full pipeline minus the emission), on the next fresh context, same
+   live verdict.
+3. **The FORENSIC VERDICT** names the family: `emit` (leg A dropped,
+   leg B clean), `cull` (A clean, B dropped), `both` (each family
+   breaks the tier independently), or `interaction` (neither drops
+   alone — the failure needs the full combination, or a residue only
+   the complete pipeline leaves on the context; the one warm-context
+   data point — the 06:16 pre-v149 re-mix verdicting degenerate on a
+   context the full pipeline had already run on — is consistent with
+   the residue reading). The console warn carries the human story
+   (`FORENSIC VERDICT: …`), `window.__embersForensicResult` the
+   machine one (`{ a, b, verdict }`).
+4. **The heal** — the walk's exit IS the ladder's original 0→1 step:
+   whatever the verdict says, the page heals into rung 1 (the
+   conservative TF tier at the full capacity — the user keeps the
+   160k). The verdict tells the NEXT fix which family to restructure
+   or default off on this driver class.
+
+**The discipline.** Once per session (`__embersForensicDone` — a later
+1→2 escalation never re-enters the walk); `?forensic=0` skips it (the
+v150 immediate heal, for anyone who prefers the fast path); the force
+flags keep it off entirely (manual mode wins); the compute leg never
+runs it. Each leg inherits the ladder's verdict machinery wholesale —
+the bounded too-small re-arms, the 90-frame confirmation guard — so a
+leg cannot hang the walk beyond the same bounds that bound the rungs.
+The legs pin their configurations in `make()` regardless of the ladder
+position (a leg IS a level-0-family config on a fresh context, at the
+full TF budget).
+
+**The gates.** task150-forensic (new) walks three verdict cells, each
+presetting the walk at leg A with a CONFIG-AWARE dropped-driver
+simulation — the zeroed readback + readPixels fire only when the LIVE
+configuration (the make's `__vfxPerf`, set before any verdict) matches
+the cell's culprit family: the `emit` cell (zero when emit==='gpu':
+leg A DROPS, leg B CLEAN), the `cull` cell (zero when cull: A CLEAN, B
+DROPS), and the `interaction` cell (zero only when both: both legs
+CLEAN). Every cell's minimal configuration never matches a predicate,
+so each walk lands on rung 1, SANE + in-frame WARM, with the right
+verdict in `__embersForensicResult` and the FORENSIC VERDICT warn —
+three makes per cell (leg A → leg B → the heal, each a full renderer
+re-boot). task140p's chain extends to five makes under its global
+zeroing: L0 verdict → the walk (both legs dropped) → the BOTH-families
+verdict → rung 1 (re-verdicted degenerate + cold) → rung 2 CPU → warm
+pixels — the walk entry, the FORENSIC VERDICT, and the rung-2 warnings
+all expected. The v150 "Stepping down ONCE" text now fires only on the
+walk-skipped paths (the `?forensic=0` escape and the flags-narrowed
+configurations); on the walked chain the 0→1 step speaks through the
+FORENSIC VERDICT line.
+
+**The library is untouched** (the walk is demo-tier orchestration over
+the v150 machinery; the dist bundles rebuild byte-identical) — the
+verification battery re-ran green across the board: 1683 tests, the
+typecheck/lint baselines, the 24/24 smoke, task134/137/138, the
+WebGPU↔WebGL2 toggle round trip, the raw-device bit-exact battery
+4/4, task140n's preset rungs, and the two forensic gates.
