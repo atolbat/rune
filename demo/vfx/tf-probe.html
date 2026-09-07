@@ -1,0 +1,1026 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TF-проба — голый WebGL2, без библиотеки</title>
+<!--
+  Task 156 — the RAW WebGL2 transform-feedback probe (the promised bare
+  ~50-liner grew a body, but it is still ZERO library: no dist imports, no
+  shell, no engine — one HTML file, the browser, and the driver).
+
+  WHY: Task 152's live verdict — the first WebGL2 context of a page
+  renders the full TF pipeline clean, every context born after a prior
+  GL dispose is born dead — was measured THROUGH the library. This page
+  answers "в каком смысле мёртв" (in what sense dead) with raw GL, by
+  DECOMPOSING the failure on the reporting phone:
+
+    T1   plain buffer roundtrip (no TF at all — the readback path itself)
+    T2   TF roundtrip, RASTERIZER_DISCARD on  (the library-exact pass;
+         a discard-off variant is INVALID_OPERATION in WebGL2 — ANGLE
+         rejects the draw outright, caught live by the gate — so the
+         library's always-discard contract is the ONLY legal shape)
+    T3a  TF -> PBO -> RGBA32F texture -> TF   (the library's state loop,
+         texelFetch consume — zero CPU traffic)
+    T3b  the same chain with a CPU-side upload (the differential)
+    T4   plain raster + readPixels            (the canvas ground truth)
+    T5   THE CROSS: TF writes point positions (sentinel-prefilled!), the
+         SAME buffer becomes the attribute source of a point render, the
+         canvas is read back — readback verdict x pixel verdict = the
+         exact sense of "dead":
+           readback OK      + pixels WARM -> HEALTHY
+           readback OK      + pixels COLD -> DRAW/READPIXELS dead
+           readback garbage + pixels WARM -> READBACK LIES (GPU data real)
+           readback garbage + pixels COLD -> TF WRITE DEAD (the true drop)
+
+  Every pattern is the LIBRARY-EXACT shape (particlesGpuGl.ts +
+  realGL.ts): context attrs cascade {antialias:true,
+  preserveDrawingBuffer:true, alpha:false} first; TF varyings
+  INTERLEAVED before link; trivial fragment '#version 300 es\nprecision
+  lowp float;\nvoid main() {}'; dedicated VAO; bindBufferBase(0); the
+  COPY_READ_BUFFER readback; the PIXEL_UNPACK_BUFFER texSubImage2D
+  offset form; DYNAMIC_DRAW out buffers. The one deliberate difference:
+  the TF out buffers are SENTINEL-PREFILLED (1337.0) instead of the
+  library's zeros — "write never landed" and "wrote zeros" separate.
+
+  LIFECYCLE BUTTONS (the poison history, without the library):
+    +1 (dispose -> новый)  — loseContext + detach, then a fresh context:
+                             the exact Task-137 eviction the shell did
+    +1 (старый живёт)      — coexistence: N simultaneous live contexts
+    WebGPU интерлюдия      — device + one submitted pass + destroy, then
+                             a dispose->new cycle (the user's WG->GL flow)
+    Авто ×6                — six dispose->new cycles, compact verdicts
+
+  The log format matches the demo shell's paste (so the follow-up parses
+  it the same way) and window.__tfProbe carries the machine-readable copy.
+-->
+<style>
+  :root{
+    --bg:#040509; --panel:#0a0d15; --line:#26304a; --line2:#2c3855;
+    --txt:#cfd6e4; --dim:#6b7691; --accent:#7aa2f7; --accent2:#9eccff;
+    --ok:#9ece6a; --bad:#f7768e; --warn:#e0af68;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--txt);
+    font:14px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;
+    -webkit-text-size-adjust:100%}
+  .wrap{max-width:860px;margin:0 auto;padding:14px 14px calc(env(safe-area-inset-bottom,0px) + 14px)}
+  h1{font-size:17px;margin:0 0 4px;letter-spacing:.01em}
+  h1 .v{color:var(--dim);font-weight:400;font-size:12px}
+  .desc{color:var(--dim);font-size:12.5px;margin:0 0 12px;max-width:70ch}
+  .desc b{color:var(--accent2);font-weight:600}
+  .desc code{font:11px/1.4 ui-monospace,'SF Mono',Menlo,Consolas,monospace;color:var(--accent2)}
+
+  /* status line + summary table */
+  #status{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 10px;
+    font-size:12px;color:var(--dim);min-height:24px}
+  #status b{color:var(--txt);font-weight:600}
+  #status .live{color:var(--ok)} #status .dead{color:var(--bad)}
+  #sumwrap{overflow-x:auto;margin:0 0 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+  #sum{border-collapse:collapse;font:11px/1.5 ui-monospace,'SF Mono',Menlo,Consolas,monospace;white-space:nowrap}
+  #sum th{color:var(--dim);font-weight:500;text-align:left;padding:6px 9px;border-bottom:1px solid var(--line)}
+  #sum td{padding:5px 9px;border-bottom:1px solid #141a29}
+  #sum tr:last-child td{border-bottom:none}
+  #sum .ok{color:var(--ok)} #sum .bad{color:var(--bad)} #sum .warn{color:var(--warn)} #sum .dim{color:var(--dim)}
+
+  /* context cards */
+  #cards{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 14px}
+  .card{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:8px;width:150px}
+  .card .cvwrap{position:relative;width:100%;aspect-ratio:1/1;border-radius:7px;overflow:hidden;background:#000}
+  .card canvas,.card .snap{display:block;width:100%;height:100%}
+  .card .meta{margin-top:7px;font-size:11px;color:var(--dim);display:flex;justify-content:space-between;align-items:center}
+  .card .meta b{color:var(--txt);font:600 12px/1.2 ui-monospace,monospace}
+  .card .st{font-size:10px;padding:2px 6px;border-radius:5px;border:1px solid var(--line);color:var(--dim)}
+  .card.alive .st{color:var(--ok);border-color:#2a4020}
+  .card.disposed .st{color:var(--warn);border-color:#4a3a20}
+  .card.lost .st{color:var(--bad);border-color:#4a2028}
+  .card.disposed{opacity:.75}
+  .card .chips{margin-top:7px;display:flex;flex-wrap:wrap;gap:3px}
+  .card .chips span{font:10px/1.4 ui-monospace,'SF Mono',Menlo,Consolas,monospace;padding:2px 5px;border-radius:4px;
+    border:1px solid var(--line);color:var(--dim)}
+  .card .chips .ok{color:var(--ok);border-color:#2a4020}
+  .card .chips .bad{color:var(--bad);border-color:#4a2028}
+  .card .verdict{margin-top:7px;font:600 10.5px/1.4 ui-monospace,monospace;color:var(--dim)}
+  .card .verdict.ok{color:var(--ok)} .card .verdict.bad{color:var(--bad)}
+
+  /* buttons */
+  #bar{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}
+  button{min-height:44px;padding:10px 14px;border-radius:9px;cursor:pointer;touch-action:manipulation;
+    border:1px solid var(--line2);background:#121826;color:var(--txt);
+    font:600 13px/1.2 system-ui,-apple-system,'Segoe UI',sans-serif}
+  button:hover{border-color:#3b4a70}
+  button:disabled{opacity:.45;cursor:default}
+  button.primary{border-color:#33507e;background:#16233c;color:var(--accent2)}
+  button.warnbtn{border-color:#6a4d1e;background:#241a0d;color:var(--warn)}
+  button.danger{border-color:#6a2c38;background:#241016;color:#f0a4b2}
+
+  /* log */
+  #logsec{border:1px solid var(--line);border-radius:10px;background:var(--panel);overflow:hidden}
+  #logbar{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--line)}
+  #logbar .t{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);flex:1}
+  #logbar button{min-height:34px;padding:7px 12px;font-size:12px}
+  #loglist{list-style:none;margin:0;padding:8px 10px;max-height:42vh;min-height:120px;overflow-y:auto;
+    font:11.5px/1.55 ui-monospace,'SF Mono',Menlo,Consolas,monospace}
+  #loglist li{display:flex;gap:7px;align-items:baseline;white-space:pre-wrap;word-break:break-word}
+  #loglist .t{color:var(--dim);flex:0 0 auto}
+  #loglist .lv{flex:0 0 auto;font-weight:700;font-size:10px;letter-spacing:.04em;padding:1px 5px;border-radius:3px}
+  #loglist .m{flex:1;min-width:0}
+  .lv-PASS{color:var(--ok);background:#14210f}
+  .lv-FAIL{color:var(--bad);background:#241016}
+  .lv-WARN{color:var(--warn);background:#231a0c}
+  .lv-ERROR{color:var(--bad);background:#2b0d12}
+  .lv-EVENT{color:var(--accent2);background:#101c30}
+  .lv-INFO{color:var(--dim)}
+  .hint{color:var(--dim);font-size:11.5px;margin:10px 0 0;max-width:75ch}
+  .hint code{color:var(--accent2)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>TF-проба <span class="v">голый WebGL2 · Task 156 · без библиотеки</span></h1>
+  <p class="desc">
+    Один HTML-файл, ноль импортов — только браузер и драйвер. Страница сама создаёт
+    контекст <b>#1</b> (загрузка страницы = доказанно чистая ячейка) и прогоняет батарею:
+    <code>T1</code> буфер без TF, <code>T2</code> TF roundtrip, <code>T3a/T3b</code>
+    TF→текстура→TF (PBO и CPU), <code>T4</code> растер + <code>readPixels</code>,
+    <code>T5</code> TF→растер кросс-вердикт («в каком смысле мёртв»).
+    Дальше жми кнопки: «+1 (dispose → новый)» убивает текущий контекст и создаёт
+    следующий — если дроп драйверный, он воспроизведётся здесь без библиотеки.
+    В конце — <b>Copy</b> и пришли лог.
+  </p>
+
+  <div id="status">boot…</div>
+  <div id="sumwrap"><table id="sum">
+    <thead><tr><th>#</th><th>состояние</th><th>T1 buf</th><th>T2 TF</th><th>T3a PBO</th><th>T3b CPU</th><th>T4 px</th><th>T5 кросс</th></tr></thead>
+    <tbody id="sumbody"></tbody>
+  </table></div>
+
+  <div id="cards"></div>
+
+  <div id="bar">
+    <button class="primary" id="btn-cycle">+1 контекст (dispose → новый)</button>
+    <button id="btn-keep">+1 контекст (старый живёт)</button>
+    <button id="btn-wg">WebGPU интерлюдия → новый GL</button>
+    <button class="warnbtn" id="btn-auto">Авто ×6 (dispose-циклы)</button>
+    <button id="btn-rerun">Повторить батарею на текущем</button>
+  </div>
+
+  <section id="logsec">
+    <div id="logbar">
+      <span class="t">лог <span id="logcount">0</span></span>
+      <button class="primary" id="btn-copy">Copy</button>
+      <button id="btn-clear">Clear</button>
+    </div>
+    <ol id="loglist"></ol>
+  </section>
+
+  <p class="hint">
+    Чек-лист: 1) дождись автопрогона <code>#1</code>; 2) жми «+1 (dispose → новый)»
+    несколько раз — смотри карточки и колонку <code>T5</code>; 3) если хочешь повторить
+    свой точный сценарий — «WebGPU интерлюдия»; 4) «Авто ×6» прогонит шесть циклов
+    сразу; 5) <code>Copy</code> → пришли лог целиком.
+  </p>
+</div>
+
+<script>
+'use strict'
+/* ================= Task 156 — the raw WebGL2 TF probe =================
+ * No library. Every GL pattern mirrors the library's exact calls (see
+ * the HTML comment) so a failure here = the driver, not the
+ * orchestration. The log format matches the demo shell paste. */
+
+var VERSION = 'tf-probe v1 (Task 156)'
+var N = 1024            // vertices per TF pass
+var GRID = 32           // 32 x 32 texel grid / point grid
+var SENT = 1337.0       // the sentinel prefill (library used zeros)
+var MAX_ENTRIES = 700
+
+/* ---------- the log ---------- */
+var entries = []
+var logList = document.getElementById('loglist')
+var logCount = document.getElementById('logcount')
+
+function stamp() {
+  var d = new Date()
+  var ms = String(d.getMilliseconds())
+  while (ms.length < 3) ms = '0' + ms
+  return d.toTimeString().slice(0, 8) + '.' + ms
+}
+function log(level, msg) {
+  entries.push({ time: stamp(), level: level, msg: msg })
+  if (entries.length > MAX_ENTRIES) entries.splice(0, entries.length - MAX_ENTRIES)
+  renderLog()
+}
+function renderLog() {
+  var frag = document.createDocumentFragment()
+  for (var i = 0; i < entries.length; i++) {
+    var e = entries[i]
+    var li = document.createElement('li')
+    li.innerHTML = '<span class="t"></span><span class="lv lv-' + e.level + '"></span><span class="m"></span>'
+    li.firstChild.textContent = e.time
+    li.children[1].textContent = e.level
+    li.children[2].textContent = e.msg
+    frag.appendChild(li)
+  }
+  logList.replaceChildren(frag)
+  logCount.textContent = String(entries.length)
+  logList.scrollTop = logList.scrollHeight
+}
+
+/* ---------- copy (the shell's exact strategy) ---------- */
+function buildReport() {
+  var head = [
+    VERSION + ' — raw WebGL2 transform-feedback probe (zero library)',
+    'url: ' + location.href,
+    'time: ' + new Date().toISOString(),
+    'viewport: ' + window.innerWidth + 'x' + window.innerHeight + ' (dpr ' + window.devicePixelRatio + ')',
+    'ua: ' + navigator.userAgent,
+    'gl contexts created: ' + totalCreated + ' · disposed: ' + totalDisposed + ' · alive now: ' + aliveCount(),
+    'entries: ' + entries.length,
+    '---',
+  ]
+  var lines = entries.map(function (e) { return '[' + e.time + '] ' + e.level + ': ' + e.msg })
+  return head.concat(lines).join('\n')
+}
+function legacyCopy(text) {
+  try {
+    var area = document.createElement('textarea')
+    area.value = text
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.append(area)
+    area.select()
+    var ok = document.execCommand('copy')
+    area.remove()
+    return ok
+  } catch (e) { return false }
+}
+function copyLog(button) {
+  var text = buildReport()
+  function done(via) {
+    log('EVENT', 'Log copied to clipboard (' + via + ', ' + entries.length + ' entries)')
+    if (button) {
+      var orig = button.textContent
+      button.textContent = 'Copied'
+      setTimeout(function () { button.textContent = orig }, 1500)
+    }
+  }
+  function fail(e) { log('ERROR', 'Failed to copy log: ' + (e && e.message ? e.message : String(e))) }
+  if (navigator.clipboard !== undefined && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(function () { done('clipboard API') }, function (e) {
+      legacyCopy(text) ? done('textarea fallback') : fail(e)
+    })
+  } else {
+    legacyCopy(text) ? done('textarea fallback') : fail(new Error('clipboard unavailable (https or localhost required)'))
+  }
+}
+document.getElementById('btn-copy').addEventListener('click', function () { copyLog(this) })
+document.getElementById('btn-clear').addEventListener('click', function () {
+  entries = []
+  renderLog()
+  log('EVENT', 'log cleared')
+})
+
+/* ---------- GL helpers ---------- */
+var GL_ERRORS = {
+  0x0500: 'INVALID_ENUM', 0x0501: 'INVALID_VALUE', 0x0502: 'INVALID_OPERATION',
+  0x0503: 'STACK_OVERFLOW', 0x0504: 'STACK_UNDERFLOW', 0x0505: 'OUT_OF_MEMORY',
+  0x0506: 'INVALID_FRAMEBUFFER_OPERATION', 0x9242: 'CONTEXT_LOST_WEBGL',
+}
+function glErrName(code) { return GL_ERRORS[code] || ('0x' + code.toString(16)) }
+function errSweep(ctx, tag) {
+  var gl = ctx.gl
+  var code = gl.getError()
+  if (code !== gl.NO_ERROR) log('WARN', '#' + ctx.index + ' gl.getError after ' + tag + ' -> ' + glErrName(code))
+  return code
+}
+function readCenterWarm(gl) {
+  var RW = 64, RH = 64
+  var px = new Uint8Array(RW * RH * 4)
+  gl.readPixels(Math.floor((gl.drawingBufferWidth - RW) / 2), Math.floor((gl.drawingBufferHeight - RH) / 2),
+    RW, RH, gl.RGBA, gl.UNSIGNED_BYTE, px)
+  var warm = 0
+  for (var i = 0; i < px.length; i += 4) if (px[i] + px[i + 1] + px[i + 2] > 90) warm++
+  return warm / (RW * RH)
+}
+/* row classifier: expected / sentinel / zero / garbage (eps compare).
+ * sentRow: the sentinel row shape (T5 uses an OFF-SCREEN POSITION
+ * (5,5,0,1) — a 1337 in w would divide NDC back to (1,1), the corner!). */
+var SENT_ROW = [SENT, SENT, SENT, SENT]
+function classifyRows(data, expectedFn, n, sentRow) {
+  var sr = sentRow || SENT_ROW
+  var res = { expected: 0, sentinel: 0, zero: 0, garbage: 0, firstBad: null }
+  for (var i = 0; i < n; i++) {
+    var e0 = expectedFn(i * 4), ok = true, allSent = true, allZero = true
+    for (var k = 0; k < 4; k++) {
+      var v = data[i * 4 + k]
+      if (Math.abs(v - e0[k]) > 1e-4 * Math.max(1, Math.abs(e0[k]))) ok = false
+      if (Math.abs(v - sr[k]) > 1e-6) allSent = false
+      if (v !== 0) allZero = false
+    }
+    if (ok) res.expected++
+    else if (allSent) res.sentinel++
+    else if (allZero) res.zero++
+    else { res.garbage++ }
+    if (!ok && res.firstBad === null) {
+      res.firstBad = 'row ' + i + ': got [' + data[i * 4] + ',' + data[i * 4 + 1] + ',' + data[i * 4 + 2] + ',' + data[i * 4 + 3] +
+        '] want [' + e0.join(',') + ']'
+    }
+  }
+  return res
+}
+function rowVerdict(r, n) {
+  if (r.expected === n) return 'ok'
+  if (r.sentinel === n) return 'SENTINEL-INTACT (the TF pass never wrote)'
+  if (r.zero === n) return 'ALL-ZEROS (wrote zeros / zero-init survived)'
+  if (r.expected + r.sentinel + r.zero < n) return 'GARBAGE ' + r.garbage + '/' + n + ' rows'
+  return 'MIXED ok:' + r.expected + ' sent:' + r.sentinel + ' zero:' + r.zero
+}
+
+/* ---------- the context registry ---------- */
+var contexts = []   // { index, gl, canvas, card, chips, results, created, disposed, lost, snapshot }
+var totalCreated = 0
+var totalDisposed = 0
+var busy = false
+var GL_ATTEMPTS = [
+  { antialias: true, preserveDrawingBuffer: true, alpha: false },
+  { antialias: false, preserveDrawingBuffer: true, alpha: false },
+  { alpha: false },
+]
+function aliveCount() {
+  var n = 0
+  for (var i = 0; i < contexts.length; i++) if (!contexts[i].disposed) n++
+  return n
+}
+function currentCtx() {
+  for (var i = contexts.length - 1; i >= 0; i--) if (!contexts[i].disposed) return contexts[i]
+  return null
+}
+function updateStatus() {
+  var el = document.getElementById('status')
+  var cur = currentCtx()
+  el.innerHTML = ''
+  var b1 = document.createElement('b'); b1.textContent = 'создано: ' + totalCreated
+  var b2 = document.createElement('b'); b2.textContent = ' · убито: ' + totalDisposed
+  var b3 = document.createElement('b'); b3.className = aliveCount() > 0 ? 'live' : 'dead'
+  b3.textContent = ' · живых: ' + aliveCount()
+  var b4 = document.createElement('span')
+  b4.textContent = cur ? (' · текущий: #' + cur.index) : ' · живых контекстов нет'
+  el.append(b1, b2, b3, b4)
+  var buttons = document.querySelectorAll('#bar button')
+  for (var i = 0; i < buttons.length; i++) buttons[i].disabled = busy || (glUnavailable && buttons[i].id !== 'btn-copy')
+}
+
+/* ---------- context creation + card ---------- */
+function makeCard(ctx) {
+  var card = document.createElement('div')
+  card.className = 'card alive'
+  var wrap = document.createElement('div'); wrap.className = 'cvwrap'
+  wrap.appendChild(ctx.canvas)
+  card.appendChild(wrap)
+  var meta = document.createElement('div'); meta.className = 'meta'
+  var b = document.createElement('b'); b.textContent = 'GL #' + ctx.index
+  var st = document.createElement('span'); st.className = 'st'; st.textContent = 'alive'
+  meta.append(b, st)
+  card.appendChild(meta)
+  var chips = document.createElement('div'); chips.className = 'chips'
+  var names = ['T1', 'T2', 'T3a', 'T3b', 'T4', 'T5']
+  for (var i = 0; i < names.length; i++) {
+    var s = document.createElement('span'); s.textContent = names[i] + '?'
+    chips.appendChild(s)
+  }
+  card.appendChild(chips)
+  var v = document.createElement('div'); v.className = 'verdict'; v.textContent = '—'
+  card.appendChild(v)
+  document.getElementById('cards').appendChild(card)
+  ctx.card = card
+  ctx.chips = chips.children
+  ctx.verdictEl = v
+}
+function setChip(ctx, i, text, cls) {
+  var el = ctx.chips[i]
+  el.textContent = text
+  el.className = cls === 'ok' ? 'ok' : (cls === 'bad' ? 'bad' : '')
+}
+function sumRow(ctx) {
+  var tbody = document.getElementById('sumbody')
+  var tr = document.createElement('tr')
+  var cells = []
+  for (var i = 0; i < 9; i++) { var td = document.createElement('td'); cells.push(td); tr.appendChild(td) }
+  cells[0].innerHTML = '<b>#' + ctx.index + '</b>'
+  tbody.appendChild(tr)
+  ctx.sumCells = cells
+  paintSumRow(ctx)
+}
+function paintSumRow(ctx) {
+  var cells = ctx.sumCells
+  var state = ctx.disposed ? (ctx.lost ? 'disposed+lost' : 'disposed') : (ctx.lost ? 'LOST' : 'alive')
+  var cls = ctx.disposed ? 'warn' : (ctx.lost ? 'bad' : 'ok')
+  cells[1].className = cls; cells[1].textContent = state
+  var r = ctx.results
+  var short = ['t1', 't2', 't3a', 't3b', 't4', 't5']
+  for (var i = 0; i < short.length; i++) {
+    var v = r ? r[short[i]] : null
+    var td = cells[2 + i]
+    if (v === null || v === undefined) { td.className = 'dim'; td.textContent = '—' }
+    else { td.className = v.ok ? 'ok' : 'bad'; td.textContent = v.short }
+  }
+}
+function createGL(reason) {
+  var canvas = document.createElement('canvas')
+  canvas.width = 128; canvas.height = 128
+  var gl = null, attempt = 0
+  var creationErr = null
+  canvas.addEventListener('webglcontextcreationerror', function (e) {
+    creationErr = e.statusMessage || '(no statusMessage)'
+    log('ERROR', 'webglcontextcreationerror: ' + creationErr)
+  })
+  for (var i = 0; i < GL_ATTEMPTS.length; i++) {
+    attempt = i + 1
+    gl = canvas.getContext('webgl2', GL_ATTEMPTS[i])
+    if (gl) break
+  }
+  if (!gl) {
+    log('ERROR', 'getContext("webgl2") -> null on all ' + GL_ATTEMPTS.length + ' attr attempts' +
+      (creationErr ? ' — ' + creationErr : '') + ' — probe cannot continue')
+    glUnavailable = true
+    updateStatus()
+    return null
+  }
+  var ctx = {
+    index: ++totalCreated, gl: gl, canvas: canvas, results: null,
+    created: stamp(), disposed: false, lost: false, reason: reason || '',
+    res: {}, // GL resources created lazily by the battery
+  }
+  canvas.addEventListener('webglcontextlost', function (e) {
+    ctx.lost = true
+    log('EVENT', '#' + ctx.index + ' webglcontextlost FIRED' + (ctx.disposed ? ' (expected — our dispose)' : ' (SPONTANEOUS!)') +
+      ' at ' + stamp())
+    if (ctx.card) { ctx.card.classList.remove('alive'); ctx.card.classList.add(ctx.disposed ? 'disposed' : 'lost') }
+    paintSumRow(ctx)
+    updateStatus()
+  })
+  canvas.addEventListener('webglcontextrestored', function () {
+    log('WARN', '#' + ctx.index + ' webglcontextrestored — the context was RESTORED; every prior GL object is DEAD (re-run the battery!)')
+  })
+  makeCard(ctx)
+  sumRow(ctx)
+  contexts.push(ctx)
+  log('EVENT', 'GL #' + ctx.index + ' created (' + (reason || 'auto-baseline') + ', attrs attempt ' + attempt + ': ' +
+    JSON.stringify(GL_ATTEMPTS[attempt - 1]) + ') — page total: ' + totalCreated + ' created, ' + aliveCount() + ' alive')
+  return ctx
+}
+var glUnavailable = false
+
+/* ---------- dispose (the Task-137 eviction, library-exact) ---------- */
+function waitFor(cond, ms) {
+  return new Promise(function (resolve) {
+    var t0 = performance.now()
+    ;(function tick() {
+      if (cond() || performance.now() - t0 > ms) return resolve()
+      setTimeout(tick, 25)
+    })()
+  })
+}
+async function disposeGL(ctx) {
+  if (!ctx || ctx.disposed) return
+  // snapshot the last visible frame first (preserveDrawingBuffer keeps it)
+  try {
+    var snap = document.createElement('canvas')
+    snap.width = 128; snap.height = 128
+    snap.getContext('2d').drawImage(ctx.canvas, 0, 0)
+    snap.className = 'snap'
+    var w = ctx.card.querySelector('.cvwrap')
+    w.replaceChildren(snap)
+  } catch (e) { /* snapshot is best-effort */ }
+  var ext = ctx.gl.getExtension('WEBGL_lose_context')
+  ctx.disposed = true
+  totalDisposed++
+  if (ext) ext.loseContext()
+  else log('WARN', '#' + ctx.index + ' WEBGL_lose_context missing — detaching only')
+  await waitFor(function () { return ctx.lost }, 350)
+  ctx.canvas.remove()
+  ctx.card.classList.remove('alive')
+  ctx.card.classList.add('disposed')
+  var st = ctx.card.querySelector('.st')
+  if (st) st.textContent = 'disposed ' + stamp()
+  log('EVENT', 'GL #' + ctx.index + ' disposed: loseContext() called, contextlost ' +
+    (ctx.lost ? 'fired' : 'DID NOT fire (timeout 350ms)') + ', canvas detached')
+  paintSumRow(ctx)
+  updateStatus()
+}
+
+/* ================= the battery (library-exact GL patterns) =================
+ * All expected values are EXACT in float32 (integers and powers of two),
+ * so a healthy driver compares clean; a poisoned one cannot fake it. */
+
+var FRAG_TF = '#version 300 es\nprecision lowp float;\nvoid main() {}'
+/* NOTE: every TF vertex shader writes a DEFINED gl_Position (a center
+ * point) — a pass drawing without RASTERIZER_DISCARD is INVALID_OPERATION
+ * in WebGL2 anyway (the gate caught ANGLE rejecting it live), but a
+ * defined position keeps even that path deterministic; TF capture is
+ * unaffected either way. */
+var VS_TF_A = '#version 300 es\nprecision highp float;\nlayout(location=0) in vec4 a_in;\nout vec4 v_out;\nvoid main(){ gl_Position = vec4(0.0, 0.0, 0.0, 1.0); v_out = a_in * 2.0 + vec4(1.0, 0.5, 0.25, 0.125); }'
+var VS_TF_GRID = '#version 300 es\nprecision highp float;\nout vec4 v_pos;\nvoid main(){\n  gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n  float id = float(gl_VertexID);\n  float gx = mod(id, 32.0);\n  float gy = floor(id / 32.0);\n  v_pos = vec4((gx / 31.0 - 0.5) * 1.8, (gy / 31.0 - 0.5) * 1.8, 0.0, 1.0);\n}'
+var VS_TF_STATE = '#version 300 es\nprecision highp float;\nout vec4 v_state;\nvoid main(){\n  gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n  float id = float(gl_VertexID);\n  v_state = vec4(id * 1.5, -id * 2.0, mod(id, 17.0), 1.0 + mod(id, 5.0));\n}'
+var VS_TF_CONSUME = '#version 300 es\nprecision highp float;\nprecision highp sampler2D;\nuniform sampler2D u_state;\nout vec4 v_out;\nvoid main(){\n  gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n  int id = gl_VertexID;\n  vec4 t = texelFetch(u_state, ivec2(id % 32, id / 32), 0);\n  v_out = t + vec4(10.0, 20.0, 30.0, 40.0);\n}'
+var VS_GRAD = '#version 300 es\nprecision highp float;\nout vec2 v_uv;\nvoid main(){\n  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n  v_uv = p;\n  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n}'
+var FRAG_GRAD = '#version 300 es\nprecision highp float;\nin vec2 v_uv;\nout vec4 o;\nvoid main(){ o = vec4(mix(vec3(0.02), vec3(0.95, 0.75, 0.35), (v_uv.x + v_uv.y) * 0.5), 1.0); }'
+var VS_POINTS = '#version 300 es\nprecision highp float;\nlayout(location=0) in vec4 a_pos;\nvoid main(){ gl_Position = a_pos; gl_PointSize = 4.0; }'
+var FRAG_POINTS = '#version 300 es\nprecision highp float;\nout vec4 o;\nvoid main(){ o = vec4(1.0, 0.6, 0.15, 1.0); }'
+
+function compile(gl, type, src) {
+  var s = gl.createShader(type)
+  gl.shaderSource(s, src)
+  gl.compileShader(s)
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    var m = gl.getShaderInfoLog(s)
+    throw new Error('shader compile: ' + m)
+  }
+  return s
+}
+/* a TF program: varyings INTERLEAVED before the link (the WebGL2 contract) */
+function linkTF(gl, vsSrc, outputs) {
+  var p = gl.createProgram()
+  gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, vsSrc))
+  gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, FRAG_TF))
+  gl.transformFeedbackVaryings(p, outputs, gl.INTERLEAVED_ATTRIBS)
+  gl.linkProgram(p)
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('TF link: ' + gl.getProgramInfoLog(p))
+  return p
+}
+function linkPlain(gl, vsSrc, fsSrc) {
+  var p = gl.createProgram()
+  gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, vsSrc))
+  gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, fsSrc))
+  gl.linkProgram(p)
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('link: ' + gl.getProgramInfoLog(p))
+  return p
+}
+/* the library-exact TF pass: discard, TF object + buffer bound, POINTS, restore */
+function runTFPass(gl, prog, vao, tf, outBuf, count, discard) {
+  gl.useProgram(prog)
+  gl.bindVertexArray(vao)
+  if (discard) gl.enable(gl.RASTERIZER_DISCARD)
+  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, tf)
+  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, outBuf)
+  gl.beginTransformFeedback(gl.POINTS)
+  gl.drawArrays(gl.POINTS, 0, count)
+  gl.endTransformFeedback()
+  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null)
+  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null)
+  if (discard) gl.disable(gl.RASTERIZER_DISCARD)
+  gl.bindVertexArray(null)
+}
+/* the library-exact readback: COPY_READ_BUFFER (a target nothing else binds) */
+function readBack(gl, buf, dst) {
+  gl.bindBuffer(gl.COPY_READ_BUFFER, buf)
+  try { gl.getBufferSubData(gl.COPY_READ_BUFFER, 0, dst) }
+  finally { gl.bindBuffer(gl.COPY_READ_BUFFER, null) }
+}
+function makeSentinelBuf(gl, nFloats) {
+  var b = gl.createBuffer()
+  var fill = new Float32Array(nFloats)
+  for (var i = 0; i < nFloats; i++) fill[i] = SENT
+  gl.bindBuffer(gl.ARRAY_BUFFER, b)
+  gl.bufferData(gl.ARRAY_BUFFER, fill, gl.DYNAMIC_DRAW)
+  gl.bindBuffer(gl.ARRAY_BUFFER, null)
+  return b
+}
+
+/* ---------- environment dump (once, on context #1) ---------- */
+var envDumped = false
+function dumpEnv(gl) {
+  if (envDumped) return
+  envDumped = true
+  var dbg = null
+  try { dbg = gl.getExtension('WEBGL_debug_renderer_info') } catch (e) {}
+  var renderer = '(masked)'
+  if (dbg) {
+    try { renderer = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) + ' / ' + gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) } catch (e) {}
+  }
+  log('INFO', 'env — ua: ' + navigator.userAgent)
+  log('INFO', 'env — screen ' + screen.width + 'x' + screen.height + ' @dpr ' + window.devicePixelRatio +
+    ' · cores ' + (navigator.hardwareConcurrency || '?') +
+    ' · deviceMemory ' + (navigator.deviceMemory || navigator.deviceMemory === 0 ? navigator.deviceMemory + 'GB' : '?') +
+    ' · touch points ' + (navigator.maxTouchPoints || 0))
+  log('INFO', 'env — renderer: ' + renderer + ' · ' + gl.getParameter(gl.VERSION) + ' · GLSL ' + gl.getParameter(gl.SHADING_LANGUAGE_VERSION))
+  log('INFO', 'env — TF limits: interleaved components ' + gl.getParameter(gl.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS) +
+    ' · separate attribs ' + gl.getParameter(gl.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS) +
+    ' · separate components ' + gl.getParameter(gl.MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS))
+  log('INFO', 'env — vertex attribs ' + gl.getParameter(gl.MAX_VERTEX_ATTRIBS) +
+    ' · vertex texture units ' + gl.getParameter(gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS) +
+    ' · max texture ' + gl.getParameter(gl.MAX_TEXTURE_SIZE))
+  var exts = (gl.getExtensions ? gl.getExtensions() : null)
+  var list = []
+  try { list = gl.getExtension('EXT_color_buffer_float') ? ['EXT_color_buffer_float'] : [] } catch (e) {}
+  try { if (gl.getExtension('OES_texture_float_linear')) list.push('OES_texture_float_linear') } catch (e) {}
+  try { if (gl.getExtension('WEBGL_lose_context')) list.push('WEBGL_lose_context') } catch (e) {}
+  try { if (dbg) list.push('WEBGL_debug_renderer_info') } catch (e) {}
+  log('INFO', 'env — extensions of interest: ' + (list.length ? list.join(', ') : 'none of them'))
+  log('INFO', 'env — WebGPU: ' + (navigator.gpu ? 'navigator.gpu present' : 'absent'))
+  errSweep({ gl: gl, index: 0 }, 'env dump')
+}
+
+/* ---------- the battery ---------- */
+function ensureResources(ctx) {
+  if (ctx.res.built) return
+  var gl = ctx.gl, r = ctx.res
+  r.built = true
+  // T1/T2 input buffer
+  r.aData = new Float32Array(N * 4)
+  for (var i = 0; i < N; i++) {
+    r.aData[i * 4] = i
+    r.aData[i * 4 + 1] = -i
+    r.aData[i * 4 + 2] = i % 7
+    r.aData[i * 4 + 3] = 100 + (i % 13)
+  }
+  r.inBuf = gl.createBuffer()
+  gl.bindBuffer(gl.ARRAY_BUFFER, r.inBuf)
+  gl.bufferData(gl.ARRAY_BUFFER, r.aData, gl.STATIC_DRAW)
+  gl.bindBuffer(gl.ARRAY_BUFFER, null)
+  // programs
+  r.pTFa = linkTF(gl, VS_TF_A, ['v_out'])
+  r.pTFgrid = linkTF(gl, VS_TF_GRID, ['v_pos'])
+  r.pTFstate = linkTF(gl, VS_TF_STATE, ['v_state'])
+  r.pTFconsume = linkTF(gl, VS_TF_CONSUME, ['v_out'])
+  r.pGrad = linkPlain(gl, VS_GRAD, FRAG_GRAD)
+  r.pPoints = linkPlain(gl, VS_POINTS, FRAG_POINTS)
+  // TF objects + dedicated VAOs (the library contract: pass VAOs never touch others)
+  r.tfA = gl.createTransformFeedback(); r.vaoA = gl.createVertexArray()
+  gl.bindVertexArray(r.vaoA)
+  gl.bindBuffer(gl.ARRAY_BUFFER, r.inBuf)
+  gl.enableVertexAttribArray(0)
+  gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 0, 0)
+  gl.bindVertexArray(null)
+  gl.bindBuffer(gl.ARRAY_BUFFER, null)
+  r.tfGrid = gl.createTransformFeedback(); r.vaoGrid = gl.createVertexArray() // no attribs
+  r.tfState = gl.createTransformFeedback(); r.vaoState = gl.createVertexArray()
+  r.tfConsume = gl.createTransformFeedback(); r.vaoConsume = gl.createVertexArray()
+  // out buffers — SENTINEL-prefilled, DYNAMIC_DRAW (the library's usage)
+  r.outA = makeSentinelBuf(gl, N * 4)          // T2
+  r.outGrid = makeSentinelBuf(gl, N * 4)       // T5
+  r.outState = makeSentinelBuf(gl, N * 4)      // T3 pass A
+  r.outConsume = makeSentinelBuf(gl, N * 4)    // T3 pass B
+  // T3 state texture: 32x32 RGBA32F, texelFetch-consumed
+  r.stateTex = gl.createTexture()
+  gl.bindTexture(gl.TEXTURE_2D, r.stateTex)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, GRID, GRID, 0, gl.RGBA, gl.FLOAT, null)
+  gl.bindTexture(gl.TEXTURE_2D, null)
+  r.uState = gl.getUniformLocation(r.pTFconsume, 'u_state')
+  // T5 point VAO — bound to outGrid at battery time (after the TF pass)
+  r.vaoPoints = gl.createVertexArray()
+  errSweep(ctx, 'resource setup')
+}
+
+function battery(ctx) {
+  return new Promise(function (resolve) {
+    var tag = '#' + ctx.index
+    var results = { t1: null, t2: null, t3a: null, t3b: null, t4: null, t5: null }
+    ctx.results = results
+    var gl = ctx.gl
+    log('EVENT', tag + ' — battery start (' + (ctx.lost ? 'CONTEXT IS LOST' : 'context alive') + ')')
+    if (ctx.lost) log('WARN', tag + ' — isContextLost() true BEFORE the battery: everything below is expected to be dead')
+    try {
+      dumpEnv(gl)
+      ensureResources(ctx)
+      var r = ctx.res
+
+      /* ---- T1: plain buffer roundtrip (no TF — the readback path) ---- */
+      {
+        var t0 = performance.now()
+        var probe = new Float32Array(64)
+        for (var i = 0; i < 64; i++) probe[i] = (i * 7) % 19 - 3.5
+        var b = gl.createBuffer()
+        gl.bindBuffer(gl.ARRAY_BUFFER, b)
+        gl.bufferData(gl.ARRAY_BUFFER, probe, gl.STATIC_DRAW)
+        var back = new Float32Array(64)
+        readBack(gl, b, back)
+        gl.deleteBuffer(b)
+        var bad = -1
+        for (var i = 0; i < 64; i++) if (back[i] !== probe[i]) { bad = i; break }
+        var ok = bad === -1
+        results.t1 = { ok: ok, short: ok ? 'ok' : 'MISMATCH@' + bad }
+        log(ok ? 'PASS' : 'FAIL', tag + ' T1 buffer-readback (no TF): ' + (ok ? 'bit-exact 64/64' : 'row ' + bad + ' got ' + back[bad] + ' want ' + probe[bad]) +
+          ' (' + (performance.now() - t0).toFixed(1) + 'ms)')
+        setChip(ctx, 0, 'T1 ' + results.t1.short, ok ? 'ok' : 'bad')
+        errSweep(ctx, 'T1')
+      }
+
+      /* ---- T2: the TF roundtrip (RASTERIZER_DISCARD, library-exact) ---- */
+      var expectedA = function (o) {
+        var i = o / 4
+        return [r.aData[o] * 2 + 1, r.aData[o + 1] * 2 + 0.5, r.aData[o + 2] * 2 + 0.25, r.aData[o + 3] * 2 + 0.125]
+      }
+      {
+        var t0 = performance.now()
+        var fill = new Float32Array(N * 4)
+        for (var i = 0; i < fill.length; i++) fill[i] = SENT
+        gl.bindBuffer(gl.ARRAY_BUFFER, r.outA)
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, fill)
+        gl.bindBuffer(gl.ARRAY_BUFFER, null)
+        runTFPass(gl, r.pTFa, r.vaoA, r.tfA, r.outA, N, true)
+        var back = new Float32Array(N * 4)
+        readBack(gl, r.outA, back)
+        var cls = classifyRows(back, expectedA, N)
+        var verdict = rowVerdict(cls, N)
+        var ok = cls.expected === N
+        results.t2 = { ok: ok, short: ok ? 'ok' : (verdict.indexOf('SENTINEL') === 0 ? 'DEAD-sentinel' : verdict.split(' ')[0]) }
+        log(ok ? 'PASS' : 'FAIL', tag + ' T2 TF-roundtrip (RASTERIZER_DISCARD): ' + verdict + (cls.firstBad ? ' · ' + cls.firstBad : '') +
+          ' (' + (performance.now() - t0).toFixed(1) + 'ms)')
+        setChip(ctx, 1, 'T2 ' + results.t2.short, ok ? 'ok' : 'bad')
+        errSweep(ctx, 'T2')
+      }
+
+      /* ---- T3a/T3b: TF -> texture -> TF (PBO / CPU upload) ---- */
+      var expectedState = function (o) {
+        var i = o / 4
+        return [i * 1.5, -i * 2, i % 17, 1 + (i % 5)]
+      }
+      ;[
+        { key: 't3a', chip: 2, name: 'T3a TF->tex->TF (PBO upload, zero CPU)', pbo: true },
+        { key: 't3b', chip: 3, name: 'T3b TF->tex->TF (CPU upload)', pbo: false },
+      ].forEach(function (t) {
+        var t0 = performance.now()
+        // pass A: regenerate the state (outState)
+        var fill = new Float32Array(N * 4)
+        for (var i = 0; i < fill.length; i++) fill[i] = SENT
+        gl.bindBuffer(gl.ARRAY_BUFFER, r.outState)
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, fill)
+        gl.bindBuffer(gl.ARRAY_BUFFER, null)
+        runTFPass(gl, r.pTFstate, r.vaoState, r.tfState, r.outState, N, true)
+        var backA = new Float32Array(N * 4)
+        readBack(gl, r.outState, backA)
+        var clsA = classifyRows(backA, expectedState, N)
+        // upload into the RGBA32F texture
+        gl.bindTexture(gl.TEXTURE_2D, r.stateTex)
+        if (t.pbo) {
+          gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, r.outState)
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, GRID, GRID, gl.RGBA, gl.FLOAT, 0)
+          gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null)
+        } else {
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, GRID, GRID, gl.RGBA, gl.FLOAT, backA)
+        }
+        gl.bindTexture(gl.TEXTURE_2D, null)
+        // pass B: texelFetch consume -> outConsume
+        var fill2 = new Float32Array(N * 4)
+        for (var i = 0; i < fill2.length; i++) fill2[i] = SENT
+        gl.bindBuffer(gl.ARRAY_BUFFER, r.outConsume)
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, fill2)
+        gl.bindBuffer(gl.ARRAY_BUFFER, null)
+        gl.useProgram(r.pTFconsume)
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, r.stateTex)
+        gl.uniform1i(r.uState, 0)
+        gl.bindVertexArray(r.vaoConsume)
+        gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, r.tfConsume)
+        gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, r.outConsume)
+        gl.enable(gl.RASTERIZER_DISCARD)
+        gl.beginTransformFeedback(gl.POINTS)
+        gl.drawArrays(gl.POINTS, 0, N)
+        gl.endTransformFeedback()
+        gl.disable(gl.RASTERIZER_DISCARD)
+        gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null)
+        gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null)
+        gl.bindVertexArray(null)
+        gl.bindTexture(gl.TEXTURE_2D, null)
+        var backB = new Float32Array(N * 4)
+        readBack(gl, r.outConsume, backB)
+        var expectedB = function (o) { var e = expectedState(o); return [e[0] + 10, e[1] + 20, e[2] + 30, e[3] + 40] }
+        var clsB = classifyRows(backB, expectedB, N)
+        var verdictB = rowVerdict(clsB, N)
+        var ok = clsB.expected === N && clsA.expected === N
+        var short = clsB.expected === N ? 'ok' : (clsA.expected !== N ? 'A-dead(' + rowVerdict(clsA, N).split(' ')[0] + ')' : verdictB.split(' ')[0])
+        results[t.key] = { ok: ok, short: short }
+        log(ok ? 'PASS' : 'FAIL', tag + ' ' + t.name + ': passA ' + rowVerdict(clsA, N) + ' · passB ' + verdictB +
+          (clsB.firstBad ? ' · ' + clsB.firstBad : '') + ' (' + (performance.now() - t0).toFixed(1) + 'ms)')
+        setChip(ctx, t.chip, t.key.replace('t', 'T') + ' ' + short, ok ? 'ok' : 'bad')
+        errSweep(ctx, t.name)
+      })
+
+      /* ---- T4: plain raster + readPixels (the canvas ground truth) ---- */
+      {
+        var t0 = performance.now()
+        gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight)
+        gl.clearColor(0, 0, 0, 1)
+        gl.clear(gl.COLOR_BUFFER_BIT)
+        gl.useProgram(r.pGrad)
+        gl.bindVertexArray(r.vaoGrid) // no attribs — gl_VertexID only
+        gl.drawArrays(gl.TRIANGLES, 0, 3)
+        gl.bindVertexArray(null)
+        var warm = readCenterWarm(gl)
+        var ok = warm > 0.9
+        results.t4 = { ok: ok, short: (warm * 100).toFixed(0) + '%' + (ok ? ' warm' : ' COLD') }
+        log(ok ? 'PASS' : 'FAIL', tag + ' T4 render+readPixels: center region warm ' + (warm * 100).toFixed(1) + '% (' +
+          (performance.now() - t0).toFixed(1) + 'ms)')
+        setChip(ctx, 4, 'T4 ' + results.t4.short, ok ? 'ok' : 'bad')
+        errSweep(ctx, 'T4')
+      }
+
+      /* ---- T5: THE CROSS — TF writes positions, the same buffer rasterizes ---- */
+      {
+        var t0 = performance.now()
+        var expectedPos = function (o) {
+          var i = o / 4, gx = i % GRID, gy = Math.floor(i / GRID)
+          return [(gx / 31 - 0.5) * 1.8, (gy / 31 - 0.5) * 1.8, 0, 1]
+        }
+        var SENT_POS = [5, 5, 0, 1] // off-screen NDC when consumed as a vec4 position
+        var fill = new Float32Array(N * 4)
+        for (var i = 0; i < N; i++) { fill[i * 4] = 5; fill[i * 4 + 1] = 5; fill[i * 4 + 2] = 0; fill[i * 4 + 3] = 1 }
+        gl.bindBuffer(gl.ARRAY_BUFFER, r.outGrid)
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, fill)
+        gl.bindBuffer(gl.ARRAY_BUFFER, null)
+        runTFPass(gl, r.pTFgrid, r.vaoGrid, r.tfGrid, r.outGrid, N, true)
+        var back = new Float32Array(N * 4)
+        readBack(gl, r.outGrid, back)
+        var cls = classifyRows(back, expectedPos, N, SENT_POS)
+        var readbackOk = cls.expected === N
+        var readbackWord = readbackOk ? 'OK' : rowVerdict(cls, N)
+        // raster the TF output as a point grid (positions off-screen if unwritten)
+        gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight)
+        gl.clearColor(0, 0, 0, 1)
+        gl.clear(gl.COLOR_BUFFER_BIT)
+        gl.bindVertexArray(r.vaoPoints)
+        gl.bindBuffer(gl.ARRAY_BUFFER, r.outGrid)
+        gl.enableVertexAttribArray(0)
+        gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 0, 0)
+        gl.bindBuffer(gl.ARRAY_BUFFER, null)
+        gl.useProgram(r.pPoints)
+        gl.drawArrays(gl.POINTS, 0, N)
+        gl.bindVertexArray(null)
+        var warm = readCenterWarm(gl)
+        var pixelsWarm = warm > 0.02
+        var sense
+        if (readbackOk && pixelsWarm) sense = 'HEALTHY'
+        else if (readbackOk && !pixelsWarm) sense = 'DRAW/READPIXELS DEAD (TF data fine, presentation dead)'
+        else if (!readbackOk && pixelsWarm) sense = 'READBACK LIES (GPU data real, the CPU readback is the liar)'
+        else sense = 'TF WRITE DEAD (the true drop — nothing landed anywhere)'
+        var ok = readbackOk && pixelsWarm
+        results.t5 = { ok: ok, short: sense === 'HEALTHY' ? 'ok' : sense.split(' ')[0] + '/' + (pixelsWarm ? 'warm' : 'cold') }
+        log(ok ? 'PASS' : 'FAIL', tag + ' T5 TF->raster cross: readback ' + readbackWord + ' · pixels ' +
+          (warm * 100).toFixed(1) + '% ' + (pixelsWarm ? 'WARM' : 'COLD') + ' -> ' + sense +
+          (cls.firstBad ? ' · ' + cls.firstBad : '') + ' (' + (performance.now() - t0).toFixed(1) + 'ms)')
+        setChip(ctx, 5, 'T5 ' + results.t5.short, ok ? 'ok' : 'bad')
+        ctx.verdictEl.textContent = sense
+        ctx.verdictEl.className = 'verdict ' + (ok ? 'ok' : 'bad')
+        errSweep(ctx, 'T5')
+      }
+
+      /* ---- the final sweep ---- */
+      var lostNow = gl.isContextLost()
+      if (lostNow) log('WARN', tag + ' — isContextLost() became TRUE during the battery')
+      var compact = ['T1 ' + results.t1.short, 'T2 ' + results.t2.short,
+        'T3a ' + results.t3a.short, 'T3b ' + results.t3b.short, 'T4 ' + results.t4.short, 'T5 ' + results.t5.short]
+      log('EVENT', tag + ' — battery done: ' + compact.join(' | ') + (lostNow ? ' · CONTEXT LOST' : ''))
+    } catch (e) {
+      log('ERROR', tag + ' — battery crashed: ' + (e && e.message ? e.message : String(e)) +
+        (e && e.stack ? '\n' + String(e.stack).split('\n').slice(0, 3).join('\n') : ''))
+      var keys = ['t1', 't2', 't3a', 't3b', 't4', 't5']
+      for (var i = 0; i < keys.length; i++) {
+        if (results[keys[i]] === null) {
+          results[keys[i]] = { ok: false, short: 'CRASH' }
+          setChip(ctx, i, keys[i].replace('t', 'T') + ' crash', 'bad')
+        }
+      }
+    }
+    paintSumRow(ctx)
+    updateStatus()
+    resolve(results)
+  })
+}
+
+/* ---------- the machine-readable export ---------- */
+try {
+  Object.defineProperty(window, '__tfProbe', { get: function () {
+    return {
+      version: VERSION,
+      env: { ua: navigator.userAgent, dpr: window.devicePixelRatio, webgpu: !!navigator.gpu },
+      created: totalCreated,
+      disposed: totalDisposed,
+      contexts: contexts.map(function (c) {
+        return { index: c.index, created: c.created, disposed: c.disposed, lost: c.lost, reason: c.reason, results: c.results }
+      }),
+    }
+  }})
+} catch (e) {}
+
+/* ================= the lifecycle buttons (the poison history, raw) ================= */
+
+function guard(fn) {
+  return async function () {
+    if (busy || glUnavailable) return
+    busy = true
+    updateStatus()
+    try { await fn() }
+    catch (e) { log('ERROR', 'scenario crashed: ' + (e && e.message ? e.message : String(e))) }
+    finally {
+      busy = false
+      updateStatus()
+    }
+  }
+}
+function settle(ms) { return new Promise(function (r) { setTimeout(r, ms) }) }
+
+/* +1 (dispose -> новый): the exact Task-137 eviction the demo shell did */
+document.getElementById('btn-cycle').addEventListener('click', guard(async function () {
+  var cur = currentCtx()
+  if (cur) { await disposeGL(cur); await settle(200) }
+  var ctx = createGL('dispose-cycle')
+  if (ctx) await battery(ctx)
+}))
+
+/* +1 (старый живёт): coexistence — N simultaneous live contexts */
+document.getElementById('btn-keep').addEventListener('click', guard(async function () {
+  var alive = aliveCount()
+  log('EVENT', 'coexistence press — ' + alive + ' context(s) alive, creating one more (no dispose)')
+  var ctx = createGL('coexist')
+  if (ctx) await battery(ctx)
+  if (aliveCount() >= 10) log('WARN', aliveCount() + ' live GL contexts — Chrome kills the oldest around ~16; watch for SPONTANEOUS webglcontextlost above')
+}))
+
+/* WebGPU интерлюдия: device + one submitted pass + destroy, then dispose->new
+ * (the user's exact WG -> GL flow, minus the library) */
+async function wgInterlude() {
+  if (!navigator.gpu) { log('WARN', 'WebGPU interlude skipped: navigator.gpu absent on this browser'); return false }
+  try {
+    var t0 = performance.now()
+    var adapter = await navigator.gpu.requestAdapter()
+    if (!adapter) { log('WARN', 'WebGPU interlude: requestAdapter() -> null'); return false }
+    var device = await adapter.requestDevice()
+    var info = ''
+    try {
+      var ai = adapter.info || {}
+      info = [ai.vendor, ai.architecture, ai.device].filter(Boolean).join(' / ')
+    } catch (e) {}
+    // one trivial render pass: 64x64 rgba8unorm, cleared red, submitted
+    var tex = device.createTexture({ size: [64, 64], format: 'rgba8unorm', usage: 0x10 | 0x1 })
+    var enc = device.createCommandEncoder()
+    var pass = enc.beginRenderPass({ colorAttachments: [{
+      view: tex.createView(), clearValue: { r: 1, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' }] })
+    pass.end()
+    device.queue.submit([enc.finish()])
+    await device.queue.onSubmittedWorkDone()
+    tex.destroy()
+    device.destroy()
+    log('EVENT', 'WebGPU interlude: device created' + (info ? ' (' + info + ')' : '') +
+      ' + one render pass submitted + device.destroy() — ' + (performance.now() - t0).toFixed(0) + 'ms')
+    return true
+  } catch (e) {
+    log('ERROR', 'WebGPU interlude failed: ' + (e && e.message ? e.message : String(e)))
+    return false
+  }
+}
+document.getElementById('btn-wg').addEventListener('click', guard(async function () {
+  var cur = currentCtx()
+  if (cur) { await disposeGL(cur); await settle(200) }
+  await wgInterlude()
+  await settle(150)
+  var ctx = createGL('after-webgpu-interlude')
+  if (ctx) await battery(ctx)
+}))
+
+/* Авто ×6: six dispose->new cycles — the churn that poisoned the session */
+document.getElementById('btn-auto').addEventListener('click', guard(async function () {
+  log('EVENT', 'AUTO x6 start — six dispose->new cycles, 300ms apart')
+  for (var i = 1; i <= 6; i++) {
+    var cur = currentCtx()
+    if (cur) { await disposeGL(cur); await settle(300) }
+    var ctx = createGL('auto-cycle ' + i + '/6')
+    if (!ctx) break
+    await battery(ctx)
+    await settle(300)
+  }
+  log('EVENT', 'AUTO x6 done — ' + totalCreated + ' contexts created, ' + totalDisposed + ' disposed in this page\'s lifetime')
+}))
+
+/* Повторить батарею: mid-life re-verdict on the current context */
+document.getElementById('btn-rerun').addEventListener('click', guard(async function () {
+  var cur = currentCtx()
+  if (!cur) { log('WARN', 'no live context to re-run — press a +1 button first'); return }
+  await battery(cur)
+}))
+
+/* ================= boot ================= */
+log('EVENT', VERSION + ' — page loaded, auto-running the baseline on the FIRST context (the clean cell: a fresh page, context #1)')
+updateStatus()
+var first = createGL('auto-baseline')
+if (first) {
+  busy = true
+  updateStatus()
+  battery(first).then(function (res) {
+    var allOk = res && res.t1.ok && res.t2.ok && res.t3a.ok && res.t3b.ok && res.t4.ok && res.t5.ok
+    log(allOk ? 'PASS' : 'FAIL', 'BASELINE VERDICT #' + first.index + ': ' +
+      (allOk ? 'the first context is fully healthy — press «+1 (dispose → новый)» now and watch what dies' :
+               'the FIRST context already fails — that would be a new class (not the dispose history)'))
+  }).then(function () {
+    busy = false
+    updateStatus()
+  })
+}
+</script>
+</body>
+</html>

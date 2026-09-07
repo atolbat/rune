@@ -1701,3 +1701,59 @@ pays the ladder ONE last time (the bootstrap), then every load —
 reload or fresh tab — opens on instant embers (CPU floor on
 WebGL2, the user's WG toggle for the fast 160k), no black windows,
 no context-loss flashes, no self-reloads.
+
+## Task 156 — THE RAW TF PROBE (the user's ask: "make a new page
+WITHOUT the library and check whatever you want in WebGL — don't
+forget the logs and a copy button")
+
+`demo/vfx/tf-probe.html` — one self-contained file, zero library
+imports, no shell: the browser, the driver, and the question "в каком
+смысле мёртв" (in what sense dead). Task 152's live verdict — the
+first WebGL2 context of a page renders the full TF pipeline clean,
+every context born after a GL dispose is born dead — was measured
+through the library; this page decomposes the failure with raw GL on
+the reporting phone itself.
+
+Per context, a six-test battery in the LIBRARY-EXACT call shapes (the
+same context-attrs cascade, TF varyings INTERLEAVED before the link,
+the trivial no-op fragment, dedicated VAOs, `bindBufferBase`, the
+`COPY_READ_BUFFER` readback, the `PIXEL_UNPACK_BUFFER` texSubImage2D
+offset form, `DYNAMIC_DRAW` out buffers): `T1` a plain buffer
+roundtrip (the readback path without TF), `T2` the TF roundtrip under
+`RASTERIZER_DISCARD`, `T3a`/`T3b` the TF→RGBA32F-texture→TF state loop
+via PBO and via a CPU upload, `T4` plain raster + `readPixels` (the
+canvas ground truth), and `T5` THE CROSS — TF writes point positions
+into a sentinel-prefilled buffer (the library pre-fills zeros; the
+1337 sentinel separates "the pass never wrote" from "wrote zeros"),
+the SAME buffer then rasterizes as a point grid, and the readback ×
+pixel matrix names the exact sense of death: readback OK + warm =
+HEALTHY; readback OK + cold = DRAW/READPIXELS dead; garbage + warm =
+READBACK LIES; garbage + cold = TF WRITE DEAD.
+
+The lifecycle buttons reproduce the poison history without the
+library: `+1 (dispose → новый)` is the exact Task-137 eviction
+(`loseContext` + detach, waiting for the lost event),
+`+1 (старый живёт)` tests coexistence, `WebGPU интерлюдия` replicates
+the user's WG→GL flow (device + one submitted pass + destroy), `Авто
+×6` churns six cycles, `Повторить батарею` re-verdicts mid-life. Every
+context gets a visible card (a snapshot survives the dispose), the
+summary table accumulates the verdicts, the log matches the demo
+shell's paste format, and Copy ships it back for the follow-up —
+`window.__tfProbe` carries the machine-readable copy.
+
+The gate lesson baked into the page: a TF draw WITHOUT
+`RASTERIZER_DISCARD` is INVALID_OPERATION in WebGL2 — ANGLE rejects
+the draw outright and the TF capture never happens (the planned T2b
+differential was dropped live by `task153-tf-probe.mjs` catching the
+error + sentinel-intact readback). The library's always-discard
+contract is the only legal shape, so the probe tests exactly that.
+
+Gates: `scripts/task153-tf-probe.mjs` — PAGE A: the auto-baseline
+(context #1, all six PASS, T5 HEALTHY), `Авто ×6` (7 contexts, the
+first six disposed with the lost event each, the newest healthy, 7
+cards / 6 disposed, no spontaneous losses), and the Copy round trip
+(clipboard permissions granted, the button, the full report read back
+from the clipboard). PAGE B: the WG interlude → GL #2, coexistence →
+GL #3 alongside the live #2, and the mid-life re-run. Zero page
+errors on both pages. The library, `dist/` and every other demo are
+untouched (no rebuild — the page imports nothing).
