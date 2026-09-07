@@ -22,10 +22,14 @@
 // CONSERVATIVE TF rung (tier 'gpu', emit:'cpu', cull off, the full
 // patched capacity, a gpuBackend present, fallback 'tf'); the rung's OWN
 // diagnostic re-verdicts degenerate (the records still read zeroed), its
-// pixel sample confirms cold — the escalation to 2 — and the final
-// re-make must run the FULL-CPU branch (sim:'cpu', tier:'cpu', no GPU
-// backend, fallback 'cpu') with warm pixels. FIVE makes total; the walk
-// entry, the FORENSIC VERDICT, and the rung-2 warnings all expected.
+// pixel sample confirms cold — the escalation to 2 fires the Task-151
+// FORENSIC CORRECTION first (the verdict is INCONCLUSIVE: rung 1 is the
+// proven-clean configuration, so the drop follows the session's context
+// history — the machine-readable forensicResult.contaminated flag) and
+// then the rung-2 warning; the final re-make must run the FULL-CPU branch
+// (sim:'cpu', tier:'cpu', no GPU backend, fallback 'cpu') with warm
+// pixels. FIVE makes total; the walk entry, the FORENSIC VERDICT, the
+// FORENSIC CORRECTION, and the rung-2 warnings all expected.
 import { join } from 'node:path'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { chromium } from 'playwright'
@@ -187,6 +191,7 @@ const after = await page.evaluate(() => ({
   perf: window.__vfxPerf ? { ...window.__vfxPerf } : null,
   remakes: window.__fxRemakes,
   fallbackFlag: window.__embersFallback ?? 0,
+  forensicResult: window.__embersForensicResult ? { ...window.__embersForensicResult } : null,
   gpuBackends: (window.__vfxLayers ?? []).filter((l) => l?.gpuBackend !== undefined).length,
 })).catch((e) => ({ crash: String(e).slice(0, 150) }))
 console.log(`[task140p] after (the CPU rung): ${JSON.stringify(after)}`)
@@ -219,9 +224,11 @@ console.log(`[task140p] after pixels: ${JSON.stringify(shot)}`)
 // paths — the ?forensic=0 escape and the flags-narrowed configurations.)
 const warnWalk = consoleMsgs.find((m) => m.includes('rune/vfx') && /ISOLATION WALK/i.test(m))
 const warnForensic = consoleMsgs.find((m) => m.includes('FORENSIC VERDICT') && /both families drop independently/i.test(m))
+const warnCorrection = consoleMsgs.find((m) => m.includes('FORENSIC CORRECTION') && /INCONCLUSIVE/i.test(m))
 const warnCpu = consoleMsgs.find((m) => m.includes('rune/vfx') && /falling back once/i.test(m))
 console.log(`[task140p] walk entry warning: ${warnWalk ? 'FIRED ✓' : 'MISSING'}`)
 console.log(`[task140p] forensic verdict (both families): ${warnForensic ? 'FIRED ✓' : 'MISSING'}`)
+console.log(`[task140p] forensic correction (contaminated verdict): ${warnCorrection ? 'FIRED ✓' : 'MISSING'}`)
 console.log(`[task140p] rung-2 warning (falling back): ${warnCpu ? 'FIRED ✓' : 'MISSING'}`)
 
 {
@@ -242,13 +249,14 @@ console.log(`[task140p] rung-2 warning (falling back): ${warnCpu ? 'FIRED ✓' :
   const ok = legAOk && legBOk && midOk
     && after.perf?.emit === 'cpu' && after.perf?.cull === false && after.perf?.fallback === 'cpu'
     && after.perf?.tier === 'cpu' && after.gpuBackends === 0 && after.remakes === 5
-    && after.fallbackFlag === 2 && (shot.warm ?? -1) > 0.05 && warnWalk != null && warnForensic != null && warnCpu != null
+    && after.fallbackFlag === 2 && after.forensicResult?.contaminated === true
+    && (shot.warm ?? -1) > 0.05 && warnWalk != null && warnForensic != null && warnCorrection != null && warnCpu != null
   const errs = consoleMsgs.filter((m) => m.startsWith('PAGEERROR'))
   if (errs.length > 0) { console.log('[task140p] PAGE ERRORS: ' + errs.slice(0, 2).join(' | ')); process.exit(1) }
   console.log(legAOk ? '[task140p] leg A ✓ — the level-0 verdict → the walk entry → the renderer re-boot → the GPU-EMISSION-alone tier (emit gpu, cull off, forensic \'a\')' : '[task140p] leg A FAIL — see the leg A state above')
   console.log(legBOk ? '[task140p] leg B ✓ — leg A verdicted dropped → the re-boot → the CULL/SORT-alone tier (emit cpu, cull on, forensic \'b\')' : '[task140p] leg B FAIL — see the leg B state above')
   console.log(midOk ? '[task140p] heal ✓ — the FORENSIC VERDICT (both families) → the walk exits into rung 1 (tier gpu, emit cpu, cull off, a live gpuBackend, fallback \'tf\')' : '[task140p] heal FAIL — see the mid state above')
-  console.log(ok ? '[task140p] PASS — the full extended chain: L0 verdict → isolation walk (leg A dropped, leg B dropped, BOTH named) → rung 1 (re-verdicted degenerate + cold) → rung 2 CPU → warm pixels' : '[task140p] FAIL — see above')
+  console.log(ok ? '[task140p] PASS — the full extended chain: L0 verdict → isolation walk (leg A dropped, leg B dropped, BOTH named) → rung 1 (re-verdicted degenerate + cold) → the FORENSIC CORRECTION (contaminated verdict flagged) → rung 2 CPU → warm pixels' : '[task140p] FAIL — see above')
   if (!ok) process.exit(1)
 }
 await browser.close()

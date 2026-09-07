@@ -1325,3 +1325,61 @@ verification battery re-ran green across the board: 1683 tests, the
 typecheck/lint baselines, the 24/24 smoke, task134/137/138, the
 WebGPU↔WebGL2 toggle round trip, the raw-device bit-exact battery
 4/4, task140n's preset rungs, and the two forensic gates.
+
+## Task 151 — THE HONEST WALK (the live verdict arrived — and refuted itself)
+
+The 12:36 live log was the first session to run the isolation walk end
+to end on the reporting phone, and it delivered a verdict — then
+invalidated it in the same breath:
+
+- leg A (the GPU emission alone, fresh context): **DROPPED**;
+- leg B (the cull/sort family alone, fresh context): **DROPPED**;
+- the FORENSIC VERDICT: "BOTH families drop independently";
+- and 1.3 s later the heal itself — rung 1, the minimal configuration
+  the user's own fresh-load experiment (`?emit=0&cull=0`) rendered at
+  the full 160k — **dropped exactly the same way**.
+
+When the KNOWN-GOOD configuration drops, the variable is not the pass
+family. The session's timeline carries the real correlate: the first
+wg→gl switch of that session ran the full pipeline clean and visible
+for 10+ seconds; the swarm then died **mid-run, silently** (the
+one-shot check window, frames 30–45, had already passed); the user
+paused/resumed and cycled backends (four renderer re-boots in 3.4 s);
+and every context born afterwards dropped its TF writes — the walk's
+legs, the heal, all of them. The pass-family verdict was an artifact of
+testing inside a session whose context-creation state was already
+poisoned: the walk's own rapid re-boots reproduce the poisoning
+condition. (No `webglcontextlost` events fired — the contexts were
+alive, the writes were gone; the drop is subtler than context loss.)
+
+Three demo-tier fixes shipped as v152 (the library untouched, the dist
+byte-identical):
+
+1. **THE CONTAMINATED-VERDICT CORRECTION** — when rung 1 drops after a
+   completed walk, the escalation now fires a follow-up warn declaring
+   the verdict INCONCLUSIVE (the drop follows the session's context
+   history, not the pass family) and sets the machine-readable
+   `__embersForensicResult.contaminated` flag.
+2. **THE MID-RUN WATCHDOG** — the one-shot check verdicts the tier's
+   birth, not its life. The pixel sample now re-arms every ~300 frames:
+   a cold canvas with a counting ledger TWICE in a row walks the same
+   pixel-confirmed ladder (a mid-run death on an isolation leg verdicts
+   that leg's family dropped); warm resets the streak silently. One
+   verdict per instance is enforced (the watchdog cannot double-fire
+   during the re-boot settle), and a leg completes at most once.
+3. **THE RE-BOOT SETTLE + THE CONTEXT INDEX** — the walk's re-boots (the
+   legs and the 0→1 heal) take a 2 s settle before the next context is
+   born (Chrome reaps torn-down GL contexts asynchronously; rapid
+   create/destroy cycles are the poisoning suspect), and every boot
+   logs its session context index (`context #N this session`) so the
+   next dropping log carries the correlate directly.
+
+Gates: task150-forensic gained the fourth cell (`contaminated` — every
+GPU-tier context zeroed: both legs drop, the verdict fires, the heal
+drops, the CORRECTION fires with the contaminated flag, the page lands
+on the CPU tier warm; four makes); task140p's five-make chain now
+expects the FORENSIC CORRECTION line and `forensicResult.contaminated`
+before the rung-2 warning. The verification battery re-ran green
+across the board: 1683 tests, the typecheck/lint baselines, the 24/24
+smoke, task134/137/138, the toggle round trip, the raw-device bit-exact
+battery 4/4, task140n's preset rungs, and both forensic gates.

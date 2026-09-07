@@ -56,7 +56,7 @@ import dust from './demos/dust.js'
 import grass from './demos/grass.js'
 import lightning from './demos/lightning.js'
 import laser from './demos/laser.js'
-import gpuEmbers from './demos/gpuEmbers.js?v=151'
+import gpuEmbers from './demos/gpuEmbers.js?v=152'
 
 const DEMOS = [muzzle, explosion, shapes, trail, sequencer, mesh, subemitter,
   noise, alphatest, plugin, billboard, soft, blending, follow,
@@ -1054,7 +1054,18 @@ function frameCallback(ctx, record) {
     window.__vfxRemakeRequested = undefined
     const forensicWalk = window.__embersForensic === 'a' || window.__embersForensic === 'b'
     if ((window.__embersFallback === 1 || forensicWalk) && activeRenderer !== null && activeRenderer.backend === 'webgl2') {
-      setTimeout(() => { void boot('webgl2') }, 0)
+      // Task 151 — THE RE-BOOT SETTLE: the setTimeout lets the current
+      // frame callback finish before the renderer it runs on is disposed
+      // — and the walk's legs and the 0→1 heal now take a 2 s SETTLE on
+      // top of that. The live 12:36 session entered its dropping state
+      // right after four renderer re-boots in 3.4 s: every subsequently
+      // born context dropped its TF writes, INCLUDING the configuration
+      // a fresh page load renders clean — and Chrome reaps torn-down GL
+      // contexts asynchronously, so a context born immediately after the
+      // dispose can inherit the degraded state. Give the driver room
+      // before the next context is born (2 s per walk step, paid only
+      // when the ladder actually runs).
+      setTimeout(() => { void boot('webgl2') }, 2000)
     } else {
       activateDemo('reboot')
     }
@@ -1362,6 +1373,12 @@ async function boot(mode) {
     const backendName = renderer.backend === 'webgpu' ? 'WebGPU' : 'WebGL2'
     shell.setBadge(backendName, renderer.backend === 'webgpu' ? 'gpu' : 'gl')
     shell.log.info(`Backend: ${backendName}${renderer.backend === 'webgl2' && mode === 'auto' ? ' (fallback)' : ''}`)
+    // Task 151 — THE SESSION CONTEXT INDEX: every boot increments it. The
+    // live drop correlate is the CONTEXT HISTORY (the first WebGL2
+    // context of a fresh session rendered the full pipeline clean twice;
+    // every context born after a rapid-cycling run dropped) — this line
+    // puts the correlate directly into the next pasted log.
+    shell.log.info(`context #${seq} this session (${backendName})`)
     bootedOnce = true
     if (atlasUpload?.done !== undefined) void atlasUpload.done.catch(() => { /* logged by the facade */ })
   } catch (error) {

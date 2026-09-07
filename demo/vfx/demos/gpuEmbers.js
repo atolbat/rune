@@ -75,6 +75,32 @@
 // the force flags keep it off entirely (manual mode wins); the compute
 // leg never runs it.
 //
+// Task 151 — THE HONEST WALK (the 12:36 live log's lesson): the user's
+// session caught the drop AND completed the walk — leg A DROPPED, leg B
+// DROPPED, the verdict said "BOTH families drop independently" — and
+// then the HEAL ITSELF (rung 1: the minimal configuration the user's
+// own fresh-load experiment rendered clean at the full 160k) dropped
+// exactly the same way. When the KNOWN-GOOD configuration drops, the
+// variable is not the pass family: the session's CONTEXT-CREATION
+// state is poisoned (that log entered the dropping state right after
+// four renderer re-boots in 3.4 s — and the first wg→gl switch of the
+// SAME session ran the full pipeline clean and visible for 10+ s).
+// Three demo-tier fixes, the library untouched:
+//   · THE CONTAMINATED-VERDICT CORRECTION — rung 1 dropping after a
+//     completed walk fires a follow-up warn that declares the verdict
+//     INCONCLUSIVE (the drop follows the context history, not the pass
+//     family) + the machine-readable forensicResult.contaminated flag;
+//   · THE MID-RUN WATCHDOG — the one-shot check (frames 30-45) verdicts
+//     the tier's BIRTH, not its LIFE: that session's swarm died ~10 s
+//     in with the machine silent. The pixel sample now re-arms
+//     periodically (every ~300 frames): cold canvas + a counting
+//     ledger TWICE in a row → the same pixel-confirmed ladder;
+//   · THE RE-BOOT SETTLE (main.js) — the walk's re-boots take a 2 s
+//     settle before the next context is born (Chrome reaps torn-down
+//     GL contexts asynchronously; rapid create/destroy cycles are the
+//     poisoning suspect) + a per-boot context index line in the log
+//     (the next dropping log carries the correlate directly).
+//
 //   · THE COMMON POINT (Task 132): createGpuParticles(facade, backend)
 //     dispatches by the facade's shape — WebGPU compute (the SSBO tier,
 //     160k) or WebGL2 transform feedback (the TF tier — 16k on the
@@ -156,6 +182,11 @@ const forensicDone = () => typeof window !== 'undefined' && window.__embersForen
 function completeLeg(leg, verdict, detail) {
   if (typeof window === 'undefined') return
   const res = window.__embersForensicResult ?? (window.__embersForensicResult = { a: 'pending', b: 'pending', verdict: 'incomplete' })
+  // Task 151 — a leg verdicts ONCE: the mid-run watchdog can re-fire on
+  // an instance that is still alive during the re-boot settle (its own
+  // birth verdict already completed the leg) — a second completion must
+  // not rewind the walk's state machine
+  if (res[leg] !== 'pending') return
   res[leg] = verdict
   if (leg === 'a') {
     window[FORENSIC_FLAG] = 'b'
@@ -457,6 +488,16 @@ export default {
     let pixelsWarm = -1
     let armFrame = -1
     let frameCount = 0
+    // Task 151 — ONE VERDICT PER INSTANCE (the mid-run watchdog can fire
+    // while the re-boot settle still runs this instance — a second
+    // trigger would double-escalate the ladder or rewind the walk), and
+    // the watchdog's own state: arms at frame ~60 (just past the one-shot
+    // window), re-arms every ~300 frames, cold canvas + counting ledger
+    // TWICE in a row → the pixel-confirmed ladder
+    let verdictFired = false
+    let watchdogArmed = false
+    let watchdogNext = 60
+    let watchdogColdRun = 0
     // Task 149 — the TOO-SMALL re-arm budget: a death-wave dip colliding
     // with the one-shot pixel sample (pixelsWarm === 0 at live ≤ 1000) is
     // INCONCLUSIVE, not a verdict — it must neither clear a latched
@@ -468,7 +509,10 @@ export default {
       if (pixelsArmed || compute) return
       pixelsArmed = true
       armFrame = frameCount
-      perf.pixelCheck = 'armed'
+      // Task 151 — a concluded one-shot verdict ('warm'/'cold') must not
+      // be clobbered when the mid-run watchdog re-arms the sample (the
+      // gates poll the field; the watchdog writes perf.watchdog instead)
+      if (perf.pixelCheck !== 'warm' && perf.pixelCheck !== 'cold') perf.pixelCheck = 'armed'
       const canvasEl = document.querySelector('canvas')
       const gl2 = canvasEl != null ? canvasEl.getContext('webgl2') : null
       if (gl2 == null) return
@@ -495,6 +539,12 @@ export default {
     }
     function triggerFallback(reason) {
       if (compute || forceGpu) return
+      // Task 151 — ONE VERDICT PER INSTANCE: the mid-run watchdog can
+      // fire while a re-boot settle (main.js gives the walk's re-boots a
+      // 2 s settle — the old instance keeps rendering through it) is
+      // still running an instance that already verdicted
+      if (verdictFired) return
+      verdictFired = true
       // Task 150 — THE LEG'S OWN DROP: this instance IS an isolation leg and
       // its configuration just verdicted broken on a fresh context — the
       // verdict IS the diagnostic answer for that family; the walk advances
@@ -541,6 +591,22 @@ export default {
       if (to === 1) {
         console.warn(`[rune/vfx] GPU Embers: ${reason} — the FULL pipeline's passes (the GPU emission + the frustum cull) are what this driver is dropping; the transform feedback itself may still be sound (the minimal tier — emit:'cpu', cull off — is the configuration this hardware class ran at the full 160k, live-verified). Stepping down ONCE to the conservative TF tier (emit:'cpu', cull off, the sim and the records pack still on the GPU at the full capacity) on a FRESH context, re-verdicted by the same pixel-confirmed ladder: if its own records read back degenerate AND its canvas reads cold, the page drops to the facade's CPU tier. Reload to retry the full pipeline, or force it with ?emit=1&cull=1.`)
       } else {
+        // Task 151 — THE CONTAMINATED-VERDICT CORRECTION: rung 1 is the
+        // PROVEN-CLEAN configuration (the live fresh-load experiment
+        // rendered it at the full 160k) — if IT drops too, the session's
+        // contexts are dropping regardless of configuration, and the
+        // walk's legs ran inside that poisoned state. The 12:36 live log:
+        // leg A dropped, leg B dropped, the verdict said "both families"
+        // — and then rung 1, which no family touches, dropped exactly
+        // the same way; the correlate is the session's context-creation
+        // history (four re-boots in 3.4 s preceded the first drop), not
+        // the pass family. Declare the verdict inconclusive — in the log
+        // AND machine-readably (forensicResult.contaminated).
+        const fr = typeof window !== 'undefined' ? window.__embersForensicResult : null
+        if (fr != null && fr.verdict !== 'incomplete') {
+          fr.contaminated = true
+          console.warn(`[rune/vfx] GPU Embers FORENSIC CORRECTION: the conservative TF tier — the minimal configuration a FRESH page load rendered clean at the full capacity — is dropping too. The walk's legs ran on contexts born into an already-poisoned session (this driver class degrades every subsequently created context after a run of rapid re-boots), so the "${fr.verdict}" verdict above is INCONCLUSIVE: the drop follows the session's CONTEXT HISTORY, not the pass family. A page reload is the clean retest — the first WebGL2 context of a fresh session has rendered the full pipeline clean, live-verified.`)
+        }
         console.warn(`[rune/vfx] GPU Embers: ${reason} — the conservative TF tier itself is dropping its writes on this driver. Falling back ONCE to the facade's own CPU tier (sim:'cpu' — the simulation, the emission and the records all on the CPU, per-frame uploads, no transform feedback: the one configuration every driver renders). Reload to retry the GPU pipeline, or force it with ?emit=1&cull=1.`)
       }
     }
@@ -642,6 +708,47 @@ export default {
               triggerFallback(`${suspectReason} — and the pixel confirmation never landed (frame ${frameCount})`)
               perf.pixelCheck = 'cold'
               checkStage = 2
+            }
+          }
+          // Task 151 — THE MID-RUN WATCHDOG: the one-shot window (frames
+          // 30-45) verdicts the tier's BIRTH; this re-arms the pixel
+          // sample periodically for the tier's LIFE. The live 12:36
+          // session: the full pipeline ran clean and visibly for 10+
+          // seconds past its check, then the swarm died MID-RUN with the
+          // machine silent (the user watched it go sparse; the log said
+          // nothing). A cold canvas with a counting ledger TWICE in a
+          // row → the same pixel-confirmed ladder (a mid-run death on an
+          // isolation leg verdicts that leg's family dropped); warm
+          // resets the streak silently — no console noise on a healthy
+          // page; a sample that never lands just re-arms.
+          if (checkStage === 2) {
+            if (!watchdogArmed && frameCount >= watchdogNext) {
+              watchdogArmed = true
+              pixelsArmed = false
+              pixelsWarm = -1
+              armPixelCheck()
+            } else if (watchdogArmed && pixelsWarm >= 0) {
+              watchdogArmed = false
+              watchdogNext = frameCount + 300
+              const live = embers.facade.count
+              if (pixelsWarm === 0 && live > 1000) {
+                watchdogColdRun++
+                if (watchdogColdRun >= 2) {
+                  perf.watchdog = 'cold'
+                  triggerFallback(`the swarm died MID-RUN at frame ${frameCount}: the periodic canvas sample read cold (ZERO bright pixels) while the ledger counted ${live} live particles — the tier ran clean past its one-shot check and died in flight`)
+                } else {
+                  // one cold reading is not a verdict — confirm it quickly
+                  watchdogNext = frameCount + 30
+                }
+              } else {
+                if (watchdogColdRun > 0) watchdogColdRun = 0
+                if (pixelsWarm > 0) perf.watchdog = 'warm'
+              }
+            } else if (watchdogArmed && armFrame >= 0 && frameCount - armFrame > 90) {
+              // the periodic sample never landed (no qualifying draw) —
+              // inconclusive, not cold: re-arm, no verdict
+              watchdogArmed = false
+              watchdogNext = frameCount + 300
             }
           }
         }
