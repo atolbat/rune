@@ -1,16 +1,24 @@
 // task140n — THE FINAL VALIDATION (Task 140: the self-healing embers;
-// Task 148: the healed branch is the FULL-CPU tier).
+// Task 148: the pixel-confirmed verdict; Task 149: the TWO-RUNG LADDER).
 //
-// Leg A (healthy, the user's exact branch): 40k + the renderer spoof +
+// Leg A (healthy, the user's exact branch): 16k + the renderer spoof +
 // the thaw flag. MUST: the tier's one-shot diagnostics run (checked,
 // readable, SANE), NO fallback fires (perf.fallback undefined — the
 // healthy page never re-makes; the pixel-confirmed ladder never suspects
 // a SANE tier), the pixels stay warm.
-// Leg B (the forced fallback): window.__embersFallback preset before the
-// demo make — MUST: the FULL-CPU branch (Task 148: sim:'cpu' — tier 'cpu',
-// no GPU backend on the layer, emit:'cpu', cull:false at the healed 16k
-// budget), perf.fallback === 'selfcheck', warm pixels (the pre-Task-131
-// path every driver renders).
+// Leg B (the preset rung 1 — the conservative TF tier): window.
+// __embersFallback = 1 before the demo make — MUST: the CONSERVATIVE TF
+// branch (Task 137's configuration, Task 149's rung: tier 'gpu', the
+// gpuBackend PRESENT (the sim and the records pack still on the GPU),
+// emit:'cpu', cull:false, the full TF capacity, perf.fallback === 'tf'),
+// the rung's OWN diagnostic verdicts SANE (the healthy container), the
+// in-frame pixel sample reads WARM — the rung that the reporting phone
+// lands on after one step-down, rendering its full 160k.
+// Leg C (the preset rung 2 — the CPU tier): window.__embersFallback = 2 —
+// MUST: Task 148's full-CPU branch (sim:'cpu' — tier 'cpu', no GPU
+// backend on the layer, emit:'cpu', cull:false at the healed budget),
+// perf.fallback === 'cpu', warm pixels (the pre-Task-131 path every
+// driver renders).
 import { join } from 'node:path'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { chromium } from 'playwright'
@@ -38,7 +46,7 @@ const server = Bun.serve({
       const before = body
       body = body.replace(/const TF_CAPACITY = SOFTWARE_GL \? 16_000 : 160_000/, `const TF_CAPACITY = ${PATCH_VALUE}`)
       // Task 148 — the healed branch's capacity (patched to the same fast
-      // 16k budget — the preset-fallback leg runs the CPU tier at it)
+      // 16k budget — the preset-fallback legs run the CPU tier at it)
       body = body.replace(/const FALLBACK_CAPACITY = SOFTWARE_GL \? 16_000 : COARSE \? 32_000 : GPU_CAPACITY/, 'const FALLBACK_CAPACITY = 16000')
       if (body === before) { console.error('[task140n] PATCH FAILED'); process.exit(1) }
     }
@@ -62,7 +70,7 @@ function warmOf(png) {
   return { warm: +(100 * w / (W * H)).toFixed(3), lit: +(100 * lit / (W * H)).toFixed(2) }
 }
 
-async function leg(tag, { presetFallback }) {
+async function leg(tag, { preset }) {
   // 16k under the spoof: the FULL GPU pipeline (SOFTWARE_GL=false →
   // emit:'gpu' + cull by default) at a capacity the container's raster can
   // carry — frames fast enough to reach the diagnostic frame (~30) inside
@@ -71,9 +79,14 @@ async function leg(tag, { presetFallback }) {
   // second — the container's slowness, not the code's).
   PATCH_VALUE = '16000'
   const context = await browser.newContext({ viewport: { width: 480, height: 320 } })
-  if (presetFallback) {
-    await context.addInitScript(() => { window.__embersFallback = true })
-  }  await context.addInitScript(() => {
+  if (preset > 0) {
+    // Task 149 — the preset LADDER POSITION: 1 = the conservative TF rung
+    // (Leg B), 2 = the CPU tier (Leg C). A live session reaches these the
+    // same way: the rung's own verdict writes the position before the
+    // re-make.
+    await context.addInitScript((p) => { window.__embersFallback = p }, preset)
+  }
+  await context.addInitScript(() => {
     window.__fxRemakes = 0
     let v = null
     Object.defineProperty(window, '__vfxPerf', {
@@ -96,7 +109,7 @@ async function leg(tag, { presetFallback }) {
   })
   const page = await context.newPage()
   const consoleMsgs = []
-  page.on('console', (m) => consoleMsgs.push(`[${m.type()}] ${m.text().slice(0, 200)}`))
+  page.on('console', (m) => consoleMsgs.push(`[${m.type()}] ${m.text().slice(0, 300)}`))
   page.on('pageerror', (e) => consoleMsgs.push('PAGEERROR: ' + String(e).slice(0, 200)))
   await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
   await page.waitForTimeout(1000)
@@ -109,10 +122,10 @@ async function leg(tag, { presetFallback }) {
   })
   // poll until the tier's one-shot diagnostics have fired (the container's
   // slow raster makes frames 300-600ms — frame 30 needs up to ~20s; on a
-  // real GPU it lands in half a second). SKIPPED on the preset-fallback
-  // leg: the healed session runs the CPU tier — there IS no gpuBackend and
-  // no diagnostics to wait for (waiting would burn the 45s timeout).
-  if (!presetFallback) {
+  // real GPU it lands in half a second). SKIPPED on the CPU-tier leg (C):
+  // the level-2 session runs the CPU tier — there IS no gpuBackend and no
+  // diagnostics to wait for (waiting would burn the 45s timeout).
+  if (preset !== 2) {
     await page.waitForFunction(() => {
       const layers = window.__vfxLayers ?? []
       const d = layers.map((l) => l?.gpuBackend?.diagnostics).find((x) => x !== undefined)
@@ -124,7 +137,7 @@ async function leg(tag, { presetFallback }) {
     // sample at frame ~45 and verdicts it — perf.pixelCheck flips to 'warm'
     // (bright pixels in the drawing buffer right after the ember draw) or
     // 'cold' (→ the auto-fallback, which the no-false-fallback assertion
-    // would catch). Waiting for the verdict makes Leg A's rendering proof
+    // would catch). Waiting for the verdict makes the rendering proof
     // deterministic — the screenshot stays a reported metric.
     await page.waitForFunction(() => window.__vfxPerf?.pixelCheck === 'warm' || window.__vfxPerf?.pixelCheck === 'cold', null, { timeout: 120_000 }).catch(() => { })
   }
@@ -132,7 +145,7 @@ async function leg(tag, { presetFallback }) {
   const state = await page.evaluate(() => ({
     perf: window.__vfxPerf ? { ...window.__vfxPerf } : null,
     remakes: window.__fxRemakes,
-    fallbackFlag: window.__embersFallback === true,
+    fallbackFlag: window.__embersFallback ?? 0,
     gpuBackends: (window.__vfxLayers ?? []).filter((l) => l?.gpuBackend !== undefined).length,
     diag: window.__vfxLayers?.find?.((l) => l?.gpuBackend?.diagnostics !== undefined)?.gpuBackend?.diagnostics ?? (window.__vfxLayers ?? []).map((l) => l?.gpuBackend?.diagnostics).find((d) => d !== undefined) ?? null,
   })).catch((e) => ({ crash: String(e).slice(0, 150) }))
@@ -168,23 +181,41 @@ async function leg(tag, { presetFallback }) {
   return { state, shot }
 }
 
-const A = await leg('healthy-40k', { presetFallback: false })
-const B = await leg('forced-fallback', { presetFallback: true })
+const A = await leg('healthy-16k', { preset: 0 })
+const B = await leg('preset-rung1-tf', { preset: 1 })
+const C = await leg('preset-rung2-cpu', { preset: 2 })
 
 console.log('── THE VERDICTS ──')
 {
   const d = A.state.diag
   const diagOk = d != null && d.checked === true && d.readable === true && d.sane === true
-  const noFallback = A.state.perf?.fallback === undefined && A.state.fallbackFlag === false && A.state.remakes === 1
+  const noFallback = A.state.perf?.fallback === undefined && A.state.fallbackFlag === 0 && A.state.remakes === 1
   // Task 148 — the in-frame oracle: the healthy leg's own pixel sample
   // verdicted WARM (bright pixels in the drawing buffer, post-draw)
   const inFrameWarm = A.state.perf?.pixelCheck === 'warm'
   const warmA = A.shot.warm ?? -1
   const warmB = B.shot.warm ?? -1
-  const bConservative = B.state.perf?.emit === 'cpu' && B.state.perf?.cull === false && B.state.perf?.fallback === 'selfcheck' && B.state.perf?.tier === 'cpu' && B.state.gpuBackends === 0 && B.state.perf?.capacity === 16000
+  const warmC = C.shot.warm ?? -1
+  // Task 149 — RUNG 1 (the conservative TF tier): the preset position 1
+  // takes Task 137's configuration — the gpuBackend PRESENT (the sim and
+  // the records still on the GPU), emit 'cpu', cull off, the full patched
+  // capacity, fallback 'tf' — and the rung's own diagnostic verdicts SANE
+  // with the in-frame pixel sample WARM (no escalation: remakes stays 1).
+  const db = B.state.diag
+  const bRung1 = B.state.perf?.tier === 'gpu' && B.state.perf?.emit === 'cpu' && B.state.perf?.cull === false
+    && B.state.perf?.fallback === 'tf' && B.state.perf?.capacity === 16000
+    && B.state.gpuBackends === 1 && B.state.fallbackFlag === 1 && B.state.remakes === 1
+    && db != null && db.checked === true && db.sane === true && B.state.perf?.pixelCheck === 'warm'
+  // Task 149 — RUNG 2 (the CPU tier): the preset position 2 takes Task
+  // 148's full-CPU branch — no gpuBackend, the healed capacity, the
+  // per-frame upload path every driver renders.
+  const cRung2 = C.state.perf?.tier === 'cpu' && C.state.perf?.emit === 'cpu' && C.state.perf?.cull === false
+    && C.state.perf?.fallback === 'cpu' && C.state.perf?.capacity === 16000
+    && C.state.gpuBackends === 0 && C.state.fallbackFlag === 2
   console.log(`A diagnostics: ${diagOk ? 'SANE ✓' : `FAIL ${JSON.stringify(d)}`} · no false fallback: ${noFallback ? '✓' : `FAIL (remakes ${A.state.remakes}, flag ${A.state.fallbackFlag})`} · in-frame pixels ${A.state.perf?.pixelCheck} ✓ · compositor shot warm ${warmA}%`)
-  console.log(`B full-cpu: ${bConservative ? '✓' : `FAIL ${JSON.stringify(B.state.perf)} (gpuBackends ${B.state.gpuBackends})`} · warm ${warmB}%`)
-  if (diagOk && noFallback && inFrameWarm && bConservative && warmB > 0.05) console.log('[task140n] PASS — the self-healing contract holds end-to-end')
+  console.log(`B rung-1 (conservative TF): ${bRung1 ? '✓' : `FAIL ${JSON.stringify(B.state.perf)} (gpuBackends ${B.state.gpuBackends}, diag ${JSON.stringify(db)})`} · warm ${warmB}%`)
+  console.log(`C rung-2 (full CPU): ${cRung2 ? '✓' : `FAIL ${JSON.stringify(C.state.perf)} (gpuBackends ${C.state.gpuBackends})`} · warm ${warmC}%`)
+  if (diagOk && noFallback && inFrameWarm && bRung1 && cRung2 && warmB > 0.05 && warmC > 0.05) console.log('[task140n] PASS — the two-rung self-healing contract holds end-to-end')
   else { console.log('[task140n] FAIL — see above'); process.exitCode = 1 }
 }
 await browser.close()

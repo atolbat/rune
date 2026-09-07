@@ -1169,3 +1169,77 @@ bit-exact), demo-shots: every vfx row ALIVE with bright pixels
 hit the documented container GPU-process class, covered separately by
 task147-toggle: labels 6→6→6, zero errors). ?v=149 on the dist imports
 (vfx main/index/gpuEmbers + the particles page).
+
+## Task 149 — THE TWO-RUNG LADDER (the live minimal-config proof)
+
+The follow-up report: the healed page renders (the v149 self-heal
+verified live — records degenerate at frame 30, the canvas confirmed
+cold at frame 32, the one-time re-make, the embers visible again) — but
+"there are far fewer particles now," and a pointed challenge: "before
+your optimizations the transform feedback ran the SAME 160k as WebGPU,
+just slower — now there are fallbacks and supposedly my driver is
+broken."
+
+**The decisive experiment.** The Task-147-era configuration (Task 137:
+160k TF, emit:'cpu', cull off) was still reachable on the deployed page
+with the value-aware flags — `?emit=0&cull=0` on a COLD page load. The
+user ran it on the reporting phone: **the full swarm at 160k, records
+SANE, canvas WARM.** The driver lands the minimal tier's
+transform-feedback writes perfectly. What drops is the FULL pipeline's
+own pass set (the Task-138 default: the GPU-emission TF pass + the
+sortKeys/packSorted cull family) — and the git timeline confirms the
+breakage predates the optimization passes by 7+ hours (the invisible
+report is Task 140, 09-05 20:41; the optimization sweep starts Task
+142, 09-06 03:53; the TF emission was bit-exact through every pass).
+The honest correction: Task 148's "rebuild on the CPU tier — a
+conservative reconfiguration is not enough" was calibrated on ONE
+ambiguous data point (the 06:16 re-make's degenerate re-verdict on a
+WARM context, no pixel confirmation — the readback-liar class Task 148
+itself later documented); the fresh-context proof splits that verdict.
+
+**The fix — the heal steps down ONE RUNG PER VERDICT** (all in
+`gpuEmbers.js` + the re-make channel in `main.js`):
+
+1. **THE LADDER.** `window.__embersFallback` is the rung position: 0 =
+   the full pipeline (Task 138's real-GPU default), 1 = the CONSERVATIVE
+   TF tier (Task 137's proven configuration — emit:'cpu', cull off, the
+   sim and the records pack STILL on the GPU at the FULL capacity: the
+   exact cell the live proof rendered at 160k), 2 = the facade's own CPU
+   tier (Task 148's terminal safe harbor, the healed budget). A level-0
+   verdict escalates to 1; a level-1 verdict escalates to 2; each rung
+   fires at most once per session (no flapping, no loop); `?emit=1`
+   / `?cull=1` treat the position as 0 (the escape hatch cannot loop);
+   a reload clears the ladder.
+2. **THE CONTEXT DISCIPLINE.** The 0→1 step re-boots the RENDERER on the
+   same backend (a fresh canvas + a fresh GL context — the re-make
+   channel's `boot()` path), because the one live data point against the
+   conservative tier was on a context the full pipeline had already
+   poisoned (and the fresh-context cell is the proven one); the 1→2
+   step re-makes the demo alone (the CPU tier touches no transform
+   feedback). `perf.fallback` reports the rung reached ('tf' / 'cpu').
+3. **THE LEVEL-1 RUNG IS ITSELF RE-VERDICTED.** The pixel-confirmed
+   self-check runs on EVERY GPU rung (the level-1 tier's own frame-~30
+   records diagnostic + the in-frame canvas sample): SANE/warm → the
+   160k stay (the phone's expected landing); degenerate + pixel-cold →
+   the escalation to the CPU tier; a lying readback against a warm
+   canvas → the rung stays (console.info carries the forensics).
+
+The library-side warning (`particlesGpuGl.ts`) matches the discipline:
+step down one rung at a time, pixel-confirming each — the terminal safe
+harbor stays the CPU tier, but the conservative tier is worth one live
+re-verdict (the reporting class drops only the full pipeline's passes).
+
+**The gates:** task140p walks the ladder END-TO-END with the
+dropped-driver signature applied to EVERY context (the zeroed
+getBufferSubData AND readPixels now ride the getContext prototype hook —
+the 0→1 step re-boots the renderer, and a hook on the old context object
+would die with it): verdict → cold → the renderer re-boot → the
+conservative TF rung pinned mid-walk (tier 'gpu', emit 'cpu', cull off,
+capacity 160k-patched, a gpuBackend present, fallback 'tf') → the rung's
+own degenerate re-verdict + cold confirmation → the CPU tier (no GPU
+backend, fallback 'cpu') → warm pixels; TWO warnings expected (one per
+rung). task140n validates the preset rungs: Leg A the healthy full
+pipeline (SANE, no false fallback, in-frame WARM), Leg B the preset
+rung 1 (the conservative TF tier — a live gpuBackend, its own SANE
+diagnostic, pixelCheck 'warm', no escalation), Leg C the preset rung 2
+(Task 148's full-CPU branch).

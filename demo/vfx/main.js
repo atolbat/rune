@@ -15,19 +15,19 @@
 //
 // EVERY sprite on this page is OURS — generated in this file (deterministic
 // pure functions → raw RGBA uploads; no image assets, no browser
-// premultiply semantics). The dist imports carry ?v=149 (Task 148: the
+// premultiply semantics). The dist imports carry ?v=150 (Task 149: the
 // self-heal re-make — the stale-cache guard — bump on release; Task 130
 // changed @rune/particles: the line lattice).
-import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=149'
+import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=150'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER, BILLBOARD,
-} from '../../dist/rune-materials.esm.js?v=149'
-import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=149'
+} from '../../dist/rune-materials.esm.js?v=150'
+import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=150'
 
 /* ─── the demo registry (the carousel order) ────────────────────────────── */
 
-import muzzle from './demos/muzzle.js?v=149' // the Task 147 retune rides the same cache-bust
+import muzzle from './demos/muzzle.js?v=150' // the Task 147 retune rides the same cache-bust
 import explosion from './demos/explosion.js'
 import shapes from './demos/shapes.js'
 import trail from './demos/trail.js'
@@ -56,7 +56,7 @@ import dust from './demos/dust.js'
 import grass from './demos/grass.js'
 import lightning from './demos/lightning.js'
 import laser from './demos/laser.js'
-import gpuEmbers from './demos/gpuEmbers.js'
+import gpuEmbers from './demos/gpuEmbers.js?v=150'
 
 const DEMOS = [muzzle, explosion, shapes, trail, sequencer, mesh, subemitter,
   noise, alphatest, plugin, billboard, soft, blending, follow,
@@ -1035,9 +1035,22 @@ function frameCallback(ctx, record) {
   // demo reads its fallback flag and takes the conservative branch). The
   // poll is a flag read per frame — free; the return skips THIS frame's
   // bake/draw (the fresh demo starts clean on the next).
+  // Task 149 — THE CONTEXT DISCIPLINE: the ladder's 0→1 step (down to the
+  // conservative TF tier) re-boots the RENDERER on the same backend
+  // instead — a fresh canvas + a fresh GL context, the exact cell the
+  // live minimal-config proof validated (a context the FULL pipeline
+  // never ran on, taking the conservative tier, lands its TF writes at
+  // the full 160k); deferred a tick so THIS frame's callback finishes
+  // before the renderer it runs on is disposed. The 1→2 step (the CPU
+  // tier) re-makes the demo alone — no transform feedback, the context
+  // is irrelevant.
   if (window.__vfxRemakeRequested === true) {
     window.__vfxRemakeRequested = undefined
-    activateDemo('reboot')
+    if (window.__embersFallback === 1 && activeRenderer !== null && activeRenderer.backend === 'webgl2') {
+      setTimeout(() => { void boot('webgl2') }, 0)
+    } else {
+      activateDemo('reboot')
+    }
     return
   }
   // auto-orbit: paused while dragging and for 1.5 s after

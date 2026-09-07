@@ -13678,7 +13678,7 @@ function createGpuParticlesTf(facade, gpu) {
     const rowsSeen = rows - zeroRows;
     diag.sane = !(nan > 0 || count >= rows * 16 && rowsSeen === 0);
     if (!diag.sane) {
-      console.warn(`[rune/particles] GPGPU TF diagnostics: the records buffer read back DEGENERATE at frame ${frame} (count ${count}, zeroRows ${zeroRows}/${rows}, nan ${nan}) — the transform-feedback write was dropped or poisoned on this driver; the consumer should rebuild on the CPU tier (sim:'cpu' — the TF sim and the records pack ride the same dropped writes, a conservative reconfiguration of this tier is not enough), ideally after the canvas confirms the particles are really invisible (the readback itself can be the liar).`);
+      console.warn(`[rune/particles] GPGPU TF diagnostics: the records buffer read back DEGENERATE at frame ${frame} (count ${count}, zeroRows ${zeroRows}/${rows}, nan ${nan}) — the transform-feedback write was dropped or poisoned on this driver; the consumer should step down one rung at a time, pixel-confirming each (the readback itself can be the liar): a conservative reconfiguration of this tier (emit:'cpu', cull off) is worth one live re-verdict before the CPU-tier drop — the reporting Android-Chrome class drops only the full pipeline's passes and renders the minimal tier SANE at the full capacity (Task 149's live minimal-config proof); the terminal safe harbor is the CPU tier (sim:'cpu' — per-frame uploads, no transform feedback, the one configuration every driver renders).`);
     }
   }
   let frameIndex = 0;

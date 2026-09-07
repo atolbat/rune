@@ -39,6 +39,24 @@
 // healed capacity is hardware-aware (the CPU tier is per-particle JS
 // work: 32k on coarse-pointer devices, the full 160k look on desktop).
 //
+// Task 149 — THE TWO-RUNG LADDER: the user's decisive live experiment
+// (?emit=0&cull=0 on a COLD page load — the exact Task-137 configuration:
+// 160k TF, emit:'cpu', cull off) rendered the FULL swarm, records SANE,
+// canvas WARM: the driver lands the MINIMAL tier's transform-feedback
+// writes perfectly, and only the FULL pipeline's passes (the GPU
+// emission + the cull family) drop. Task 148's straight-to-CPU jump
+// treated a ONE-RUNG problem with a TWO-RUNG drop and cost this phone
+// its 160k. The heal now steps down ONE RUNG PER VERDICT: level 0 (the
+// full pipeline) fails → level 1 — the CONSERVATIVE TF tier (emit:'cpu',
+// cull off, the sim and the records pack still on the GPU at the FULL
+// capacity), re-booted on a FRESH GL context (the re-make channel
+// re-boots the renderer — the exact cell the live proof validated: a
+// context the full pipeline never ran on) and re-verdicted live by the
+// same pixel-confirmed ladder; level 1 fails → level 2 — Task 148's
+// full-CPU safe harbor. Each rung fires at most once per session (no
+// flapping, no loop); ?emit=1&cull=1 re-take the full pipeline at level
+// 0; a reload clears the ladder.
+//
 //   · THE COMMON POINT (Task 132): createGpuParticles(facade, backend)
 //     dispatches by the facade's shape — WebGPU compute (the SSBO tier,
 //     160k) or WebGL2 transform feedback (the TF tier — 16k on the
@@ -57,7 +75,7 @@
 //     cull, softwareGL } — the probe gates pin the tier + the frame cost
 //     + the hardware-policy branch; window.__vfxCounters.embers — the
 //     emission counters.
-import { createGpuParticles } from '../../../dist/rune.esm.js?v=149'
+import { createGpuParticles } from '../../../dist/rune.esm.js?v=150'
 
 // Task 140 — THE AUTO-FALLBACK CHANNEL (the real-GPU invisible-particles
 // report: "no freeze anymore, but the particles are gone while the counter
@@ -84,6 +102,16 @@ import { createGpuParticles } from '../../../dist/rune.esm.js?v=149'
 // is only the SUSPICION — the in-frame canvas pixel sample CONFIRMS it
 // (cold canvas + counting ledger → re-make; warm canvas → the readback
 // lied, the GPU tier stays).
+//
+// Task 149 — THE FLAG IS THE LADDER POSITION NOW: 1 = the conservative TF
+// tier (Task 137's proven configuration — re-booted on a fresh context,
+// re-verdicted live), 2 = the facade's own CPU tier (Task 148's terminal
+// safe harbor). The verdict binds the TF leg ONLY (the compute/SSBO leg
+// is a different mechanism — a backend switch after a WebGL2 verdict
+// keeps the full compute pipeline), and the explicit force flags
+// (?emit=1 / ?cull=1) treat the position as 0 (the retry re-takes the
+// full pipeline at the FULL capacity, and the ladder is off while a flag
+// is set, so the escape hatch cannot loop).
 const FALLBACK_FLAG = '__embersFallback'
 
 // Task 137 — the WebGL2 TF budget is now HARDWARE-AWARE: the 16k cap was
@@ -149,43 +177,52 @@ const TF_GPU_PIPELINE = !SOFTWARE_GL
 // conservative — no flapping between modes mid-run). READ AT MAKE TIME —
 // the flag lands DURING a live session (the re-make must see it; a
 // module-scope constant would freeze the import-time value).
-const fellBack = () => typeof window !== 'undefined' && window[FALLBACK_FLAG] === true
+// Task 149 — the flag is the LADDER POSITION (0 = fresh, 1 = the
+// conservative TF tier, 2 = the CPU tier); the make reads it, the
+// self-check escalates it one rung at a time, a reload clears it.
+const fallbackLevel = () => {
+  if (typeof window === 'undefined') return 0
+  const v = window[FALLBACK_FLAG]
+  return v === 1 ? 1 : v === 2 ? 2 : 0
+}
 
 export default {
   title: 'GPU Embers',
-  sub: 'the GPGPU tier · 160k compute-simmed, GPU-EMITTED embers · the full GPU pipeline on BOTH backends by default (WebGL2: the transform-feedback tier — 160k + GPU emission + the frustum cull on real GPUs; SwiftShader/llvmpipe keep the conservative CPU defaults) · zero per-frame particle uploads · self-heals to the CPU tier when a driver drops the transform feedback',
+  sub: 'the GPGPU tier · 160k compute-simmed, GPU-EMITTED embers · the full GPU pipeline on BOTH backends by default (WebGL2: the transform-feedback tier — 160k + GPU emission + the frustum cull on real GPUs; SwiftShader/llvmpipe keep the conservative CPU defaults) · zero per-frame particle uploads · self-heals down a two-rung ladder when a driver drops the pipeline (the conservative TF tier at 160k first, the CPU tier as the last resort)',
   camera: { yaw: 0.6, pitch: 0.34, dist: 13, orbit: 0.05, target: [0, 4.5, 0] },
 
   make(env) {
     // THE TIER: WebGPU → the compute tier (160k); WebGL2 → the
     // TRANSFORM-FEEDBACK tier (Task 137: hardware-aware — 160k on a real
     // GPU, 16k on the software-GL class). Both GPU legs are sim:'gpu' —
-    // the facade contract is backend-neutral; the Task-148 HEALED session
-    // drops to the facade's own sim:'cpu' tier instead.
+    // the facade contract is backend-neutral; the Task-149 ladder steps
+    // the TF leg down one rung per verdict (level 1: the conservative
+    // tier; level 2: the facade's own sim:'cpu' tier).
     const compute = env.backend === 'webgpu'
     const counters = (typeof window !== 'undefined' && window.__vfxCounters) || {}
-    // Task 148 — THE VERDICT BINDS THE TF LEG ONLY: the compute/SSBO tier is
-    // a different mechanism (a backend switch after a WebGL2 verdict keeps
-    // the full compute pipeline — the flag no longer conservatizes the
-    // WebGPU leg), and the explicit force flags (?emit=1 / ?cull=1 — the
-    // console story's "force it back on") override the session flag too: a
-    // forced re-make re-takes the TF tier at the FULL capacity, and the
-    // ladder is off while the flag is set, so the escape hatch cannot loop.
-    const fell = fellBack()
+    // Task 149 — THE LADDER POSITION: 0 = the full pipeline (Task 138's
+    // real-GPU default — the GPU emission + the cull), 1 = the
+    // conservative TF tier (Task 137's proven configuration — emit:'cpu',
+    // cull off, the sim and the records pack STILL on the GPU at the FULL
+    // capacity: the live ?emit=0&cull=0 proof rendered exactly this at
+    // 160k), 2 = the facade's own CPU tier (Task 148's terminal safe
+    // harbor — sim:'cpu', per-frame uploads, the healed budget). The
+    // compute leg and the force flags ignore the position entirely (the
+    // verdict binds the TF leg only; a forced re-make re-takes the FULL
+    // pipeline, and the ladder is off while a flag is set — no loop).
     const forceGpu = FORCE_EMIT || FORCE_CULL
-    // THE HEALED SHAPE: no TF tier at all — the facade's own CPU tier
-    // (sim:'cpu': the simulation, the emission AND the records on the CPU,
-    // the harness's per-frame upload path — the one configuration every
-    // driver renders).
-    const gpuTier = compute || (!fell || forceGpu)
+    const lvl = (compute || forceGpu) ? 0 : fallbackLevel()
+    const gpuTier = compute || lvl < 2
     // Task 138 — the pipeline policy (explicit HERE, where the compute leg
     // is known): the compute leg always took the GPU pipeline; the TF leg
     // takes it by default on a real GPU (the hardware oracle) and keeps the
     // conservative CPU path on the software-GL class; the value-aware
-    // flags override both branches in both directions.
-    const emitGpu = !FORCE_EMIT_OFF && (compute || (TF_GPU_PIPELINE && !fell) || FORCE_EMIT)
-    const cullOn = !FORCE_CULL_OFF && (compute || (TF_GPU_PIPELINE && !fell) || FORCE_CULL)
-    const capacity = compute ? GPU_CAPACITY : (fell && !forceGpu ? FALLBACK_CAPACITY : TF_CAPACITY)
+    // flags override both branches in both directions. Task 149 — only the
+    // LEVEL-0 TF leg runs the full pipeline; the level-1 rung is the
+    // conservative tier by construction.
+    const emitGpu = !FORCE_EMIT_OFF && (compute || (TF_GPU_PIPELINE && lvl === 0) || FORCE_EMIT)
+    const cullOn = !FORCE_CULL_OFF && (compute || (TF_GPU_PIPELINE && lvl === 0) || FORCE_CULL)
+    const capacity = compute ? GPU_CAPACITY : (lvl === 2 ? FALLBACK_CAPACITY : TF_CAPACITY)
     counters.tier = gpuTier ? 'gpu' : 'cpu'
     if (typeof window !== 'undefined') window.__vfxCounters = counters
     const EMBER_S = {
@@ -237,9 +274,12 @@ export default {
 
     // ── the GPU tier's backend: the buffers + the passes ──
     // THE COMMON POINT: one call — the WebGPU compute tier or the WebGL2
-    // transform-feedback tier, dispatched by the facade's shape. Task 148 —
-    // the HEALED session skips it entirely: a CPU-tier facade needs no GPU
-    // backend (the harness's own per-frame upload path draws it).
+    // transform-feedback tier, dispatched by the facade's shape. The
+    // ladder's LEVEL-1 rung runs it too (the conservative tier is still
+    // the TF tier — fresh buffers, fresh passes, a fresh live verdict);
+    // the level-2 (CPU) session skips it entirely: a CPU-tier facade
+    // needs no GPU backend (the harness's own per-frame upload path
+    // draws it).
     let gpuBackend = null
     if (gpuTier) {
       const backendFacade = env.renderer.inner[compute ? 'gpu' : 'gl']
@@ -282,10 +322,11 @@ export default {
     // Task 138 — the policy fields: `emit`, `cull`, `softwareGL` pin the
     // hardware branch the page took (the probe asserts the software leg
     // stays conservative in the container and the flags flip it).
-    // Task 140 — `fallback: 'selfcheck'` when the one-time conservative
-    // re-make happened (the two-stage self-check verdicted the GPU
-    // pipeline broken on this driver).
-    const perf = { tier: gpuTier ? 'gpu' : 'cpu', capacity, count: 0, ms: 0, emit: gpuTier && emitGpu ? 'gpu' : 'cpu', cull: cullOn, sort: WANT_SORT, softwareGL: SOFTWARE_GL, pixelCheck: (compute || !gpuTier) ? 'off' : undefined, ...(fell ? { fallback: 'selfcheck' } : {}) }
+    // Task 149 — `fallback`: 'tf' when the ladder stepped down to the
+    // conservative TF tier (level 1 — the re-booted, re-verdicted rung),
+    // 'cpu' when it reached the facade's own CPU tier (level 2, Task
+    // 148's full-CPU safe harbor).
+    const perf = { tier: gpuTier ? 'gpu' : 'cpu', capacity, count: 0, ms: 0, emit: gpuTier && emitGpu ? 'gpu' : 'cpu', cull: cullOn, sort: WANT_SORT, softwareGL: SOFTWARE_GL, pixelCheck: (compute || !gpuTier) ? 'off' : undefined, ...(lvl > 0 ? { fallback: lvl === 1 ? 'tf' : 'cpu' } : {}) }
     if (typeof window !== 'undefined') window.__vfxPerf = perf
     let msAvg = 16
     let last = 0
@@ -333,6 +374,13 @@ export default {
     let pixelsWarm = -1
     let armFrame = -1
     let frameCount = 0
+    // Task 149 — the TOO-SMALL re-arm budget: a death-wave dip colliding
+    // with the one-shot pixel sample (pixelsWarm === 0 at live ≤ 1000) is
+    // INCONCLUSIVE, not a verdict — it must neither clear a latched
+    // suspicion nor report a false 'cold'. Three re-arms, then the
+    // degenerate-records verdict stands alone (a sane tier simply
+    // passes).
+    let smallRetries = 0
     function armPixelCheck() {
       if (pixelsArmed || compute) return
       pixelsArmed = true
@@ -363,11 +411,27 @@ export default {
       }
     }
     function triggerFallback(reason) {
-      if (fellBack() || compute) return
-      window[FALLBACK_FLAG] = true
+      if (compute || forceGpu) return
+      // Task 149 — ONE RUNG PER VERDICT: level 0 steps down to the
+      // CONSERVATIVE TF tier (the minimal configuration this hardware
+      // class demonstrably renders — the live ?emit=0&cull=0 proof: 160k,
+      // records SANE, canvas WARM), level 1 steps down to the facade's
+      // own CPU tier (Task 148's terminal safe harbor). Each rung fires
+      // at most once per session (the fresh make reads the position;
+      // checkStage pins the dying instance) — no flapping, no loop. The
+      // re-make channel gives the level-1 rung a FRESH GL context (the
+      // renderer re-boot — a context the full pipeline never ran on, the
+      // exact cell the live proof validated).
+      const from = fallbackLevel()
+      const to = from >= 2 ? 2 : from + 1
+      window[FALLBACK_FLAG] = to
       window.__vfxRemakeRequested = true
-      perf.fallback = 'selfcheck'
-      console.warn(`[rune/vfx] GPU Embers: ${reason} — this driver is dropping the WebGL2 transform-feedback pipeline. Falling back ONCE to the facade's own CPU tier (sim:'cpu' — the simulation, the emission and the records all on the CPU, per-frame uploads, no transform feedback: the one configuration every driver renders). Reload to retry the GPU pipeline, or force it with ?emit=1&cull=1.`)
+      perf.fallback = to === 1 ? 'tf' : 'cpu'
+      if (to === 1) {
+        console.warn(`[rune/vfx] GPU Embers: ${reason} — the FULL pipeline's passes (the GPU emission + the frustum cull) are what this driver is dropping; the transform feedback itself may still be sound (the minimal tier — emit:'cpu', cull off — is the configuration this hardware class ran at the full 160k, live-verified). Stepping down ONCE to the conservative TF tier (emit:'cpu', cull off, the sim and the records pack still on the GPU at the full capacity) on a FRESH context, re-verdicted by the same pixel-confirmed ladder: if its own records read back degenerate AND its canvas reads cold, the page drops to the facade's CPU tier. Reload to retry the full pipeline, or force it with ?emit=1&cull=1.`)
+      } else {
+        console.warn(`[rune/vfx] GPU Embers: ${reason} — the conservative TF tier itself is dropping its writes on this driver. Falling back ONCE to the facade's own CPU tier (sim:'cpu' — the simulation, the emission and the records all on the CPU, per-frame uploads, no transform feedback: the one configuration every driver renders). Reload to retry the GPU pipeline, or force it with ?emit=1&cull=1.`)
+      }
     }
 
     return {
@@ -376,19 +440,24 @@ export default {
         // CPU) → the GPU step (the compact replay, the force walk, the
         // record pack — Task 134: the sort/cull family with the CAMERA —
         // the frame context's basis forward + mvp) → the harness draws
-        // from the external buffer. Task 148 — the HEALED session has no
-        // GPU step at all (the facade's own advance IS the simulation;
+        // from the external buffer. The level-2 (CPU) session has no GPU
+        // step at all (the facade's own advance IS the simulation;
         // the harness's per-frame upload path draws the CPU records).
         embers.facade.advance(ctx.dt)
         gpuBackend?.step(ctx.dt, { forward: ctx.basis.forward, viewProj: ctx.mvp })
-        // Task 148 — the self-check ladder (pixel-confirmed): stage 1
-        // polls the tier's one-shot records verdict — degenerate LATCHES
-        // the suspicion (the readback can lie; the canvas settles it),
-        // sane walks the original frame-~45 draw-side check; stage 2 arms
-        // the in-frame pixel sample, then polls it — cold + counting →
-        // the one-time full-CPU re-make, warm → the suspicion clears.
+        // Task 149 — the self-check ladder (pixel-confirmed, TWO RUNGS):
+        // stage 1 polls the tier's one-shot records verdict — degenerate
+        // LATCHES the suspicion (the readback can lie; the canvas settles
+        // it), sane walks the original frame-~45 draw-side check; stage 2
+        // arms the in-frame pixel sample, then polls it — cold + counting
+        // → step down one rung (a level-0 verdict re-boots into the
+        // conservative TF tier on a fresh context; a level-1 verdict
+        // re-makes into the CPU tier), warm → the suspicion clears. The
+        // gate runs on EVERY GPU rung (the level-1 tier re-verdicts
+        // itself live); the force flags disable it (the escape hatch
+        // cannot loop); the CPU tier has no gpuBackend to check.
         frameCount++
-        if (gpuBackend !== null && !fellBack() && !compute) {
+        if (gpuBackend !== null && !compute && !forceGpu) {
           if (checkStage === 0 && gpuBackend.diagnostics !== undefined && gpuBackend.diagnostics.checked) {
             const d = gpuBackend.diagnostics
             if (d.sane) {
@@ -408,19 +477,39 @@ export default {
                   : 'the ember draw left ZERO bright pixels in the canvas while the ledger counted live particles')
                 perf.pixelCheck = 'cold'
                 checkStage = 2
-              } else if (suspectReason !== null) {
-                // WARM canvas (or a swarm too small to verdict) against a
-                // degenerate records readback: the draw is demonstrably
-                // alive — the READBACK is the liar on this driver.
-                if (pixelsWarm > 0) {
+              } else if (pixelsWarm > 0) {
+                // WARM canvas — either against a degenerate records
+                // readback (the draw is demonstrably alive: the READBACK
+                // is the liar on this driver, the rung stays) or the
+                // healthy draw-side check passing.
+                if (suspectReason !== null) {
                   console.info(`[rune/vfx] GPU Embers: the records readback verdicted DEGENERATE but the canvas reads WARM (${pixelsWarm} bright pixels, ledger ${live}) — the readback itself is unreliable on this driver; staying on the GPU tier.`)
+                  suspectReason = null
                 }
                 perf.pixelCheck = 'warm'
                 checkStage = 2
-                suspectReason = null
               } else {
-                perf.pixelCheck = pixelsWarm > 0 ? 'warm' : 'cold'
-                checkStage = 2
+                // pixelsWarm === 0 with a swarm TOO SMALL to verdict
+                // (live ≤ 1000): INCONCLUSIVE — Task 149: a death-wave
+                // dip colliding with the one-shot sample must not clear
+                // a latched suspicion (nor report a false 'cold' on the
+                // healthy leg). RE-ARM the sample — bounded: after three
+                // too-small samples the degenerate-records verdict stands
+                // alone (the conservative semantics of a confirmation
+                // that never landed); a sane tier simply passes.
+                smallRetries++
+                if (smallRetries > 3) {
+                  if (suspectReason !== null) {
+                    triggerFallback(`${suspectReason} — and the canvas never held a swarm large enough to verdict (frame ${frameCount})`)
+                    perf.pixelCheck = 'cold'
+                  } else {
+                    perf.pixelCheck = 'warm'
+                  }
+                  checkStage = 2
+                } else {
+                  pixelsArmed = false
+                  pixelsWarm = -1
+                }
               }
             } else if (suspectReason !== null && armFrame >= 0 && frameCount - armFrame > 90) {
               // the pixel confirmation never landed (readPixels refused,
