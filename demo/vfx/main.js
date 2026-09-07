@@ -26,7 +26,7 @@ import { createParticles, createRamp, createSpawner, createGrassField } from '..
 
 /* ─── the demo registry (the carousel order) ────────────────────────────── */
 
-import muzzle from './demos/muzzle.js'
+import muzzle from './demos/muzzle.js?v=148' // the Task 147 retune rides the same cache-bust
 import explosion from './demos/explosion.js'
 import shapes from './demos/shapes.js'
 import trail from './demos/trail.js'
@@ -796,6 +796,14 @@ const env = {
 
   /** A world-anchored DOM label (the emitter-shapes demo). */
   label(text, x, y, z) {
+    // lazy singleton: the FIRST activateDemo runs at module scope — before
+    // boot() builds the slot. The detached layer is adopted by boot() and
+    // its labels go live with the first frame (Task 147: the muzzle demo's
+    // T-labels exposed this — the pre-boot make() killed the whole page).
+    if (labelLayer === null) {
+      labelLayer = document.createElement('div')
+      labelLayer.style.cssText = 'position:absolute;inset:0;overflow:hidden;pointer-events:none;'
+    }
     const el = document.createElement('div')
     el.className = 'fx-label'
     el.textContent = text
@@ -1288,8 +1296,12 @@ async function boot(mode) {
     for (const layer of layers) layer.commandBuilt = false
   }
   shell.slot.replaceChildren()
-  labelLayer = document.createElement('div')
-  labelLayer.style.cssText = 'position:absolute;inset:0;overflow:hidden;pointer-events:none;'
+  // adopt the label layer (the pre-boot activateDemo may have created it
+  // detached — its labels ride into the slot here, alive)
+  if (labelLayer === null) {
+    labelLayer = document.createElement('div')
+    labelLayer.style.cssText = 'position:absolute;inset:0;overflow:hidden;pointer-events:none;'
+  }
   const canvas = document.createElement('canvas')
   canvas.id = 'canvas'
   shell.slot.append(labelLayer, canvas, bar, sheet, dragHint)

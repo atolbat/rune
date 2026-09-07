@@ -24,12 +24,16 @@
 //     (a manual model matrix composed per frame).
 //
 // The turret: a static base + a yawing head (cube) + a barrel, all
-// LAMBERT. The targets: six dim glow markers; the ACTIVE one carries a
-// lock ring. The camera orbits slowly, watching the sweeps.
+// LAMBERT. The targets: six BEACONS (Task 147's readability retune — the
+// old 0.34 dim dots read as "firing into empty space": each target now
+// carries a halo + a T-label, the camera frames them INSIDE the view, the
+// lock ring lives through the whole engage, and the rounds/balls got fat
+// and trackable); the ACTIVE one carries a lock ring. The camera orbits
+// slowly, watching the sweeps.
 export default {
   title: 'Sentry Turret',
   sub: 'rotating emitter · tracers + BEAM volleys · reflection sparks · bouncing shells',
-  camera: { yaw: 0.9, pitch: 0.3, dist: 16, orbit: 0.04, target: [0, 1.3, 0] },
+  camera: { yaw: 0.9, pitch: 0.34, dist: 13.5, orbit: 0.025, target: [0, 1.15, 0] },
 
   make(env) {
     // ── the scene: the floor + the turret meshes ──
@@ -86,15 +90,17 @@ export default {
     const headModel = new Float32Array(16)
     const barrelModel = new Float32Array(16)
 
-    // ── the targets: six markers around the sentry ──
+    // ── the targets: six beacons around the sentry (radius ~8 — all six
+    //    stay INSIDE the frame at dist 13; the aim math is position-driven,
+    //    nothing else reads these coords) ──
     const TARGETS = [
-      [8.5, 0.7, 3.4], [-7.2, 1.7, 6.0], [-9.2, 0.5, -3.8],
-      [3.2, 2.6, -8.6], [9.6, 1.1, -2.6], [0.6, 0.7, 10.6],
+      [6.6, 0.7, 2.6], [-5.6, 1.7, 4.7], [-7.2, 0.5, -3.0],
+      [2.5, 2.6, -6.7], [7.5, 1.1, -2.0], [0.5, 0.7, 8.3],
     ]
     const MARKER_S = {
       shape: { kind: 'point', origin: [0, 0, 0] },
       velocity: { mode: 'fixed', dir: [0, 1, 0] },
-      speed: [0, 0], life: [1e9, 1e9], size: [0.34, 0.34],
+      speed: [0, 0], life: [1e9, 1e9], size: [0.52, 0.52],
       color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 9,
     }
     const markers = env.addLayer({
@@ -102,8 +108,8 @@ export default {
       facade: env.createParticles({
         capacity: 8,
         ramp: env.createRamp([
-          { t: 0, size: 1, r: 0.45, g: 0.6, b: 0.9, a: 0.5, frame: 0 },
-          { t: 1, size: 1, r: 0.45, g: 0.6, b: 0.9, a: 0.5, frame: 0 },
+          { t: 0, size: 1, r: 0.62, g: 0.8, b: 1, a: 0.95, frame: 0 },
+          { t: 1, size: 1, r: 0.62, g: 0.8, b: 1, a: 0.95, frame: 0 },
         ]),
         spawner: MARKER_S,
         render: { kind: 'billboard', draw: 'instance', tiles: env.atlasTiles },
@@ -116,20 +122,51 @@ export default {
       markers.facade.at(tx, ty, tz)
       markers.facade.burst(1, { ...MARKER_S, seed: Math.round(tx * 31 + tz * 7) })
     }
-    // the ACTIVE target's lock ring: a camera-facing ring, re-burst on
-    // every switch (the acquire beat)
+    // the beacon HALO: a soft glow riding under each marker — the targets
+    // read as beacons you can SEE, not distant christmas lights
+    const HALO_S = {
+      shape: { kind: 'point', origin: [0, 0, 0] },
+      velocity: { mode: 'fixed', dir: [0, 1, 0] },
+      speed: [0, 0], life: [1e9, 1e9], size: [1.4, 1.4],
+      color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 9,
+    }
+    const halos = env.addLayer({
+      id: 'sn-halo',
+      facade: env.createParticles({
+        capacity: 8,
+        ramp: env.createRamp([
+          { t: 0, size: 1, r: 0.42, g: 0.66, b: 1, a: 0.32 },
+          { t: 1, size: 1, r: 0.42, g: 0.66, b: 1, a: 0.32 },
+        ]),
+        spawner: HALO_S,
+        render: { kind: 'billboard', draw: 'instance' },
+      }),
+      material: env.materials.bbSprite,
+      pipeline: env.pipelines.additive,
+      texture: () => env.glowTexture,
+    })
+    TARGETS.forEach(([tx, ty, tz], i) => {
+      halos.facade.at(tx, ty, tz)
+      halos.facade.burst(1, { ...HALO_S, seed: 9 + i })
+      // the T-label: the eye gets a NAME for every engage point
+      env.label(`T${i + 1}`, tx, ty - 0.55, tz)
+    })
+    // the ACTIVE target's lock ring: camera-facing, re-burst on every
+    // switch (the acquire beat) AND at the fire start — Task 147: the life
+    // now covers the whole engage (acquire → aim → burst) so the eye
+    // always sees WHERE the next burst goes
     const LOCK_S = {
       shape: { kind: 'point', origin: [0, 0, 0] },
       velocity: { mode: 'fixed', dir: [0, 1, 0] },
-      speed: [0, 0], life: [0.9, 0.9], size: [1, 1],
+      speed: [0, 0], life: [2.6, 2.6], size: [1.2, 1.2],
       color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 11,
     }
     const lock = env.addLayer({
       id: 'sn-lock',
       facade: env.createParticles({
-        capacity: 4,
+        capacity: 6,
         ramp: env.createRamp([
-          { t: 0, size: 0.55, r: 1, g: 0.6, b: 0.35, a: 0.9, frame: 5 },
+          { t: 0, size: 0.55, r: 1, g: 0.6, b: 0.35, a: 1, frame: 5 },
           { t: 1, size: 1, r: 1, g: 0.75, b: 0.45, a: 0, frame: 5 },
         ]),
         spawner: LOCK_S,
@@ -174,7 +211,7 @@ export default {
     const FLASH_S = {
       shape: { kind: 'point', origin: [1.9, 0, 0] },
       velocity: { mode: 'fixed', dir: [1, 0, 0] },
-      speed: [0, 0], life: [0.1, 0.16], size: [1.5, 2.3],
+      speed: [0, 0], life: [0.13, 0.2], size: [1.8, 2.7],
       color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 45,
     }
     const flash = env.addLayer({
@@ -200,7 +237,7 @@ export default {
     const BEAM_S = {
       shape: { kind: 'point', origin: [2.0, 0.02, 0] },
       velocity: { mode: 'fixed', dir: [1, 0.04, 0] },
-      speed: [2.2, 2.2], life: [0.1, 0.14], size: [0.9, 1.1],
+      speed: [2.2, 2.2], life: [0.1, 0.14], size: [1.15, 1.35],
       color: [[1, 0.72, 0.3, 1], [1, 0.72, 0.3, 1]], seed: 41,
     }
     const beam = env.addLayer({
@@ -280,7 +317,7 @@ export default {
     const TRACER_S = {
       shape: { kind: 'point', origin: [0, 0, 0] },
       velocity: { mode: 'fixed', dir: [1, 0, 0] },
-      speed: [55, 55], life: [0.2, 0.2], size: [0.16, 0.16],
+      speed: [55, 55], life: [0.2, 0.2], size: [0.26, 0.26],
       color: [[1, 0.9, 0.6, 1], [1, 0.9, 0.6, 1]], seed: 51,
     }
     const impacts = [] // the TRACER impacts queued: x, y, z, vx, vy, vz (the record is reused)
@@ -296,7 +333,7 @@ export default {
         ]),
         onRetire: (rec) => { impacts.push(rec.x, rec.y, rec.z, rec.vx, rec.vy, rec.vz) },
         spawner: TRACER_S,
-        render: { kind: 'billboard', draw: 'instance', mode: 'stretched', speedFactor: 0.028, lengthFactor: 0.4 },
+        render: { kind: 'billboard', draw: 'instance', mode: 'stretched', speedFactor: 0.06, lengthFactor: 0.4 },
       }),
       material: env.materials.bbSprite,
       pipeline: env.pipelines.additive,
@@ -307,11 +344,13 @@ export default {
     //    per volley shot. Same die-at-the-target trick as the tracer (the
     //    life is the exact distance/speed), but slower, thicker and
     //    aimed at an OFFSET point of the target's sphere — the arrival
-    //    angle varies, and the impact sparks REFLECT off that curvature ──
+    //    angle varies, and the impact sparks REFLECT off that curvature.
+    //    Task 147: speed 26 → 16 and size ~0.55 → ~1 — the balls are
+    //    FAT and trackable now (they read as cannonballs, not specks) ──
     const BOLT_S = {
       shape: { kind: 'point', origin: [0, 0, 0] },
       velocity: { mode: 'fixed', dir: [1, 0, 0] },
-      speed: [26, 26], life: [0.5, 0.5], size: [0.52, 0.62],
+      speed: [16, 16], life: [0.5, 0.5], size: [0.95, 1.1],
       color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 57,
     }
     const bolt = env.addLayer({
@@ -319,7 +358,7 @@ export default {
       facade: env.createParticles({
         capacity: 8,
         ramp: env.createRamp([
-          { t: 0, size: 0.5, r: 1, g: 1, b: 1, a: 1 },
+          { t: 0, size: 0.55, r: 1, g: 1, b: 1, a: 1 },
           { t: 0.8, size: 1, r: 0.72, g: 0.92, b: 1, a: 0.95 },
           { t: 1, size: 0.85, r: 0.45, g: 0.7, b: 1, a: 0 },
         ]),
@@ -387,7 +426,7 @@ export default {
     const IMPACT_FLASH_S = {
       shape: { kind: 'point', origin: [0, 0, 0] },
       velocity: { mode: 'fixed', dir: [0, 1, 0] },
-      speed: [0, 0], life: [0.14, 0.2], size: [1.2, 1.7],
+      speed: [0, 0], life: [0.14, 0.2], size: [1.35, 1.95],
       color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 61,
     }
     const impactFlash = env.addLayer({
@@ -450,12 +489,12 @@ export default {
     })
 
     // ── the behavior: acquire → aim → burst (every third = a BEAM volley) → dwell → next ──
-    const AIM_RATE = 2.4 // rad/s
-    const ROUNDS = 4
-    const ROUND_DT = 0.095
+    const AIM_RATE = 3.0 // rad/s
+    const ROUNDS = 5
+    const ROUND_DT = 0.115
     const BOLT_ROUNDS = 3
-    const BOLT_DT = 0.17
-    const DWELL = 0.85
+    const BOLT_DT = 0.24
+    const DWELL = 0.65
     let yaw = 0.6
     let targetIdx = 0
     let phase = 'aim' // 'aim' | 'fire' | 'cool'
@@ -512,12 +551,12 @@ export default {
       bolt.facade.burst(1, {
         ...BOLT_S,
         velocity: { mode: 'fixed', dir: [dx / dist, dy / dist, dz / dist] },
-        speed: [26, 26], life: [dist / 26, dist / 26], seed: s,
+        speed: [16, 16], life: [dist / 16, dist / 16], seed: s,
       })
       // the launch package: a fatter beam card + a hot flash (no shells —
       // the energy weapon does not eject brass)
-      beam.facade.burst(1, { ...BEAM_S, seed: s + 1, size: [1.5, 1.8] })
-      flash.facade.burst(2, { ...FLASH_S, seed: s + 2, size: [1.9, 2.6] })
+      beam.facade.burst(1, { ...BEAM_S, seed: s + 1, size: [1.8, 2.1] })
+      flash.facade.burst(2, { ...FLASH_S, seed: s + 2, size: [2.2, 3.0] })
       sparks.facade.burst(5, { ...SPARKS_S, seed: s + 3, speed: [10, 24] })
       recoil = 0.17
     }
@@ -543,6 +582,10 @@ export default {
             burstLeft = volley ? BOLT_ROUNDS : ROUNDS
             shotT = 0
             const t = TARGETS[targetIdx]
+            // the FIRE pulse on the lock ring: the engage point flares as
+            // the burst starts (the connective tissue — gun → target)
+            lock.facade.at(t[0], t[1], t[2])
+            lock.facade.burst(1, { ...LOCK_S, life: [0.7, 0.7], seed: 40 + burstN })
             env.log.event(`sentry ${volley ? 'BEAM volley' : 'burst'} #${burstN} → target ${targetIdx + 1} (${t[0].toFixed(1)}, ${t[1].toFixed(1)}, ${t[2].toFixed(1)})`)
           }
         } else if (phase === 'fire') {
@@ -644,9 +687,9 @@ export default {
             boltFlash.facade.burst(1, { ...BOLT_FLASH_S, seed: s + 1 })
           }
           impactFlash.facade.at(ix, iy, iz)
-          impactFlash.facade.burst(1, { ...IMPACT_FLASH_S, seed: s + 2, size: beamHit ? [1.6, 2.2] : [1.2, 1.7] })
+          impactFlash.facade.burst(1, { ...IMPACT_FLASH_S, seed: s + 2, size: beamHit ? [1.85, 2.55] : [1.35, 1.95] })
           impactRing.facade.at(ix, iy, iz)
-          impactRing.facade.burst(1, { ...IMPACT_RING_S, seed: s + 3, size: beamHit ? [1.1, 1.3] : [0.9, 1.1] })
+          impactRing.facade.burst(1, { ...IMPACT_RING_S, seed: s + 3, size: beamHit ? [1.25, 1.45] : [0.9, 1.1] })
           impactSmoke.facade.at(ix, iy, iz)
           impactSmoke.facade.burst(beamHit ? 4 : 3, { ...IMPACT_SMOKE_S, seed: s + 4 })
         }
@@ -659,7 +702,7 @@ export default {
             boltImpacts.shift(), boltImpacts.shift(), boltImpacts.shift(), true)
         }
 
-        for (const l of [markers, lock, smoke, flash, beam, sparks, shells, tracer, bolt, refSparks, boltFlash,
+        for (const l of [markers, halos, lock, smoke, flash, beam, sparks, shells, tracer, bolt, refSparks, boltFlash,
           impactFlash, impactRing, impactSmoke]) l.facade.advance(dt)
       },
     }
