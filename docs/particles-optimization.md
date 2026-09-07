@@ -1536,3 +1536,76 @@ through the readback; reload: the full crossing chain, loop-free);
 pixel-confirmed verdicts), `task147-toggle`, `demo:smoke` 24/24 — all
 green; 1683 tests 0 fail; the typecheck/lint baselines hold; the build
 is byte-identical. Deployed as `?v=154`.
+
+## Task 154 — THE RUNG-2 ESCALATION (the v154 field logs: the poison outlives the reload — stop re-running the doomed cycle)
+
+The field evidence landed as three pasted logs (22:28 v153, 23:09 default
+URL, 23:12 v153 — the same Android 10 / Chrome 150 phone). Every single
+load tells the same story: the GL heal lands the fresh page's first
+context on rung 1, rung 1 verdicts degenerate at frame 30 and
+pixel-confirms cold at frame 32 (the ledger counting ~78k), the
+once-fallback lands the CPU floor in-page — and the next reload does it
+all again. Five-plus consecutive rung-1 drops (two uncaptured reloads
+ride between the captured ones — the heal events cite drops the captured
+pages never made). The verdict: on this phone, this day, the
+transform-feedback poison is *stable across page reloads* — the Task-152
+"fresh page's first context is the best cell" bet loses every time, and
+the crossing's own marker (hardcoded `rung: 1`) re-runs the whole doomed
+cycle on every user reload: ~1.2 s of level-0, a self-reload, ~0.8 s of
+level-1, then the floor. Two doomed GPU attempts and three WARN lines
+per reload, forever.
+
+The fix is one escalation step in the demo tier (the library untouched,
+dist byte-identical):
+
+1. **THE RUNG-2 MARKER** (`gpuEmbers.js`) — the level-1 verdict (the
+   `to === 2` branch: the conservative tier itself dropping,
+   pixel-confirmed) now writes the heal marker with `rung: 2`. The
+   session has just proven the poison survives a page boundary, so the
+   NEXT reload boots straight into the CPU floor — no level-0 attempt,
+   no crossing reload, no verdict WARN pair. The in-page CPU fallback
+   stays immediate (the user is watching; a re-make beats a reload).
+   Storage unavailable → the next reload re-runs the ladder, the honest
+   floor, exactly like the level-0 crossing's own fallback.
+2. **THE LANDING + THE RE-ARM** (`main.js`) — a rung-2 marker is
+   session knowledge, not a pending reload: it skips the 120 s
+   crash-TTL (rung-1 markers keep it — they are written ~1 s before
+   their own reload), and the CPU-direct landing RE-ARMS it unchanged
+   (the same verdict `at`) — a CPU page never verdicts a GPU tier, so
+   nothing else would re-arm it; without the re-arm every reload would
+   re-run the level-0 cycle. The heal event line is rung-aware now:
+   rung 2 names the CPU floor DIRECTLY.
+3. **THE RE-PROBE** (`HEAL_PROBE_MS = 15 min`, `main.js`) — a rung-2
+   verdict older than 15 minutes degrades the landing to rung 1 (the
+   periodic re-PROBE — the recovery door). A clean re-probe leaves no
+   marker: the ladder re-opens (the next reload runs the full pipeline
+   again). A dropping re-probe re-arms a FRESH rung-2 marker. A new tab
+   always re-runs the full ladder — sessionStorage is per-tab, the
+   natural full re-probe. Worst case per tab: one doomed cycle + one
+   0.8 s probe per 15 minutes of active reloading.
+
+The messages tell the truth now: the level-1 WARN's "Reload to retry
+the GPU pipeline" (a lie under the escalation — a plain reload lands
+the CPU floor) became "The NEXT reload lands the CPU floor directly
+(... the marker re-probes the tier periodically, and a fresh tab
+re-runs the full ladder), or force the GPU pipeline now with
+`?emit=1&cull=1`".
+
+Gates: `task152-keepalive` — the reload cell now also asserts the
+rung-2 marker ARMED after the in-page escalation, and a new **escalate**
+cell walks the whole escalation: C1 'direct' (a fresh rung-2 marker →
+the CPU tier with NO GPU attempt — zero verdict WARNs, `pixelCheck
+'off'`, one GL context, loop-free, the marker re-armed with the SAME
+verdict `at`, warm), C2 'reprobe' (the re-armed marker aged past the
+window → the reload lands rung 1 with the heal event naming the
+RE-PROBE → the drop → the in-page CPU fallback AND a fresh rung-2
+verdict ~16 min newer than the patched one), C3 'recovery' (a clean
+driver + a stale marker → the re-probe verdicts WARM and NO marker
+survives — the ladder re-opens); `task140p` (the verdict chain,
+exactly one reload), `demo:smoke` 24/24 — all green; 1683 tests 0
+fail; the typecheck/lint baselines hold (6 pre-existing / 0 errors);
+the build is byte-identical. Deployed as `?v=155`. The expected next
+field log on the reporting phone: the SECOND reload of a tab opens with
+`GL heal: the reload crossing landed (rung 2, ...) — ... takes the CPU
+floor DIRECTLY`, no verdict WARNs — and any reload 15+ minutes later
+re-probes the conservative tier once.

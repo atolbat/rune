@@ -56,7 +56,26 @@
 //      still matches the GPU tier) → rung 2 IN-PAGE (the CPU tier, warm —
 //      the zeroing never matches tier 'cpu') → NO second reload (the
 //      sessionStorage reload counter pins at 2 — loop-free by
-//      construction).
+//      construction) → Task 154: the level-1 verdict must ALSO have
+//      ARMED the rung-2 marker (the next reload of this tab lands the
+//      CPU floor directly).
+//
+//   C. 'escalate' — Task 154, THE RUNG-2 ESCALATION (the v154 field
+//      verdict: on the reporting phone the poison SURVIVES page reloads —
+//      rung 1 dropped on five consecutive fresh pages, so every user
+//      reload re-ran the whole doomed cycle). Three legs:
+//      C1 'direct' — a fresh rung-2 marker: the page boots the CPU tier
+//      with NO GPU attempt (no verdict WARNs, pixelCheck 'off', ONE GL
+//      context, loop-free), the heal event names rung 2 + the CPU floor,
+//      the marker RE-ARMS with the SAME verdict `at` (the re-probe clock
+//      ticks from the verdict, not from the landings), warm.
+//      C2 'reprobe' — the re-armed marker aged past the 15-min window:
+//      the reload lands rung 1 (the heal event names the RE-PROBE), the
+//      predicate still drops the GPU tier → the in-page CPU fallback AND
+//      a FRESH rung-2 marker (a new verdict `at`).
+//      C3 'recovery' — a CLEAN driver (the predicate never drops): a
+//      stale rung-2 marker → the re-probe lands rung 1 → verdicts WARM →
+//      NO marker survives — the ladder re-opens (the recovery door).
 import { join } from 'node:path'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { chromium } from 'playwright'
@@ -500,6 +519,16 @@ async function reloadHealCell() {
   })
   await page.waitForTimeout(4000) // the loop guard: no further reloads
   const reloadsAfter = await page.evaluate(() => { try { return Number(sessionStorage.getItem('fxReloads') ?? '0') } catch { return -1 } })
+  // Task 154 — the level-1 verdict (the in-page CPU fallback above) must
+  // have ARMED the escalation marker: this tab's NEXT reload lands the CPU
+  // floor directly instead of re-running the doomed level-0 → level-1 cycle
+  const marker2 = await page.evaluate(() => { try { return sessionStorage.getItem('rune:vfx:glheal') } catch { return 'NO_STORAGE' } })
+  let marker2Ok = false
+  try {
+    const m2 = JSON.parse(String(marker2))
+    marker2Ok = m2.v === 1 && m2.rung === 2 && m2.demo === EMERS_INDEX && typeof m2.why === 'string' && m2.why.length > 0 && typeof m2.at === 'number' && m2.at > 0
+  } catch { marker2Ok = false }
+  console.log(`[task152] reload-heal: the Task-154 rung-2 marker ${marker2Ok ? 'ARMED ✓' : `MISSING/BAD — ${String(marker2).slice(0, 200)}`}`)
   const pixels = await shot(page, 'reload-heal')
 
   console.log(`[task152] reload-heal: landed ${JSON.stringify(landed)} · reloads after the settle ${reloadsAfter} · pixels ${JSON.stringify(pixels)}`)
@@ -519,7 +548,143 @@ async function reloadHealCell() {
   if (errs.length > 0) { console.log(`[task152] reload-heal PAGE ERRORS: ${JSON.stringify(errs.slice(0, 4))}`); process.exitCode = 1 }
   await page.close()
   await context.close()
-  return { markerOk, healWarn: healWarn != null, okLanding, okHealEvent, okOneContext, okLoopFree, okWarm, okNoAutoWalk, errs: errs.length === 0 }
+  return { markerOk, marker2Ok, healWarn: healWarn != null, okLanding, okHealEvent, okOneContext, okLoopFree, okWarm, okNoAutoWalk, errs: errs.length === 0 }
+}
+
+// ═══ Cell C — Task 154: the rung-2 escalation (the direct crossing) ═══
+async function escalationCell() {
+  const out = { directOk: false, rearmOk: false, reprobeOk: false, freshMarkerOk: false, recoveryOk: false, warmOk: false, errs: true }
+
+  // ── C1 + C2: the poisoned driver (the task140p signature) ──
+  {
+    const context = await browser.newContext({ viewport: { width: 480, height: 320 } })
+    await installHooks(context, `(p) => p.tier === 'gpu'`)
+    const page = await context.newPage()
+    const consoleMsgs = []
+    page.on('console', (m) => consoleMsgs.push(`[${m.type()}] ${m.text().slice(0, 700)}`))
+    page.on('pageerror', (e) => consoleMsgs.push('PAGEERROR: ' + String(e).slice(0, 220)))
+
+    await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+    await page.waitForTimeout(1500) // the plain flow settles (demo 0 — a CPU-tier make, no GPU verdict)
+    // seed a FRESH rung-2 marker (the simulated previous page's level-1 verdict)
+    const seededAt = await page.evaluate(() => {
+      const at = Date.now()
+      sessionStorage.setItem('rune:vfx:glheal', JSON.stringify({ v: 1, rung: 2, demo: 23, at, why: 'the gate seed — a simulated level-1 verdict (the conservative tier dropped across a reload)' }))
+      return at
+    })
+    const markC1 = consoleMsgs.length
+    await page.evaluate(() => { location.reload() })
+    await page.waitForLoadState('domcontentloaded', { timeout: 120_000 }).catch(() => { })
+
+    const direct = await poll(page, `() => {
+      const p = window.__vfxPerf
+      if (p == null || p.tier !== 'cpu' || p.fallback !== 'cpu') return null
+      return {
+        tier: p.tier, fallback: p.fallback, capacity: p.capacity, pixelCheck: p.pixelCheck,
+        healR2: /GL heal: the reload crossing landed \\(rung 2, demo 23\\)[\\s\\S]*CPU floor DIRECTLY/.test(document.querySelector('#log-list')?.textContent ?? ''),
+        glContexts: window.__fxGLContexts,
+        marker: (() => { try { return sessionStorage.getItem('rune:vfx:glheal') } catch { return 'NO_STORAGE' } })(),
+      }
+    }`, 300_000, 'the rung-2 marker lands the CPU floor directly').catch(async (e) => {
+      const dump = await page.evaluate(`(() => ({ perf: window.__vfxPerf ?? null, fxContexts: window.__fxGLContexts, fallbackFlag: window.__embersFallback ?? 0, log: (document.querySelector('#log-list')?.textContent ?? '').slice(-600) }))()`).catch((e2) => ({ crash: String(e2).slice(0, 200) }))
+      console.log(`[task152] escalate-direct FAILURE DUMP: ${JSON.stringify(dump, null, 1)}`)
+      throw e
+    })
+    await page.waitForTimeout(4000) // the loop guard: a CPU-direct page never verdicts, never reloads
+    const reloadsAfterDirect = await page.evaluate(() => { try { return Number(sessionStorage.getItem('fxReloads') ?? '0') } catch { return -1 } })
+    const pixelsDirect = await shot(page, 'escalate-direct')
+    const verdictWarnsC1 = consoleMsgs.slice(markC1).filter((m) => m.includes('Falling back ONCE') || m.includes('ACROSS A PAGE RELOAD') || m.includes('DEGENERATE'))
+
+    let rearm = null
+    try { rearm = JSON.parse(String(direct.marker)) } catch { rearm = null }
+    out.directOk = direct.tier === 'cpu' && direct.fallback === 'cpu' && direct.capacity === 16000
+      && direct.pixelCheck === 'off' && direct.healR2 === true && direct.glContexts === 1
+      && reloadsAfterDirect === 2 && verdictWarnsC1.length === 0
+    out.rearmOk = rearm !== null && rearm.rung === 2 && rearm.at === seededAt
+    out.warmOk = (pixelsDirect.warm ?? -1) > 0.05
+    console.log(`[task152] escalate-direct: ${JSON.stringify({ tier: direct.tier, fallback: direct.fallback, capacity: direct.capacity, pixelCheck: direct.pixelCheck, healR2: direct.healR2, gl: direct.glContexts, reloads: reloadsAfterDirect, verdictWarns: verdictWarnsC1.length })} · re-armed at ${rearm?.at} (seeded ${seededAt}) · pixels ${JSON.stringify(pixelsDirect)}`)
+
+    // C2 — age the RE-ARMED marker past the 15-min probe window, reload: the re-probe
+    const patchedAt = await page.evaluate(() => {
+      const m = JSON.parse(sessionStorage.getItem('rune:vfx:glheal'))
+      const at = Date.now() - 16 * 60_000
+      m.at = at
+      sessionStorage.setItem('rune:vfx:glheal', JSON.stringify(m))
+      return at
+    })
+    const markC2 = consoleMsgs.length
+    await page.evaluate(() => { location.reload() })
+    await page.waitForLoadState('domcontentloaded', { timeout: 120_000 }).catch(() => { })
+    const reprobe = await poll(page, `() => {
+      const p = window.__vfxPerf
+      if (p == null || p.tier !== 'cpu' || p.fallback !== 'cpu') return null
+      return {
+        tier: p.tier, fallback: p.fallback, capacity: p.capacity,
+        healProbe: /RE-PROBE/.test(document.querySelector('#log-list')?.textContent ?? ''),
+        marker: (() => { try { return sessionStorage.getItem('rune:vfx:glheal') } catch { return 'NO_STORAGE' } })(),
+      }
+    }`, 300_000, 'the stale rung-2 marker re-probes rung 1, which drops to the CPU floor in-page').catch(async (e) => {
+      const dump = await page.evaluate(`(() => ({ perf: window.__vfxPerf ?? null, fallbackFlag: window.__embersFallback ?? 0, log: (document.querySelector('#log-list')?.textContent ?? '').slice(-700) }))()`).catch((e2) => ({ crash: String(e2).slice(0, 200) }))
+      console.log(`[task152] escalate-reprobe FAILURE DUMP: ${JSON.stringify(dump, null, 1)}`)
+      throw e
+    })
+    await page.waitForTimeout(4000) // the loop guard
+    const reloadsAfterReprobe = await page.evaluate(() => { try { return Number(sessionStorage.getItem('fxReloads') ?? '0') } catch { return -1 } })
+    const fallbackWarnC2 = consoleMsgs.slice(markC2).filter((m) => m.includes('Falling back ONCE')).length
+    let fresh = null
+    try { fresh = JSON.parse(String(reprobe.marker)) } catch { fresh = null }
+    out.reprobeOk = reprobe.tier === 'cpu' && reprobe.fallback === 'cpu' && reprobe.healProbe === true
+      && fallbackWarnC2 >= 1 && reloadsAfterReprobe === 3
+    out.freshMarkerOk = fresh !== null && fresh.rung === 2 && typeof fresh.at === 'number' && fresh.at > patchedAt + 14 * 60_000
+    const errs1 = consoleMsgs.filter((m) => m.startsWith('PAGEERROR'))
+    if (errs1.length > 0) { console.log(`[task152] escalate C1/C2 PAGE ERRORS: ${JSON.stringify(errs1.slice(0, 4))}`); process.exitCode = 1; out.errs = false }
+    console.log(`[task152] escalate-reprobe: ${JSON.stringify({ tier: reprobe.tier, fallback: reprobe.fallback, healProbe: reprobe.healProbe, fallbackWarn: fallbackWarnC2, reloads: reloadsAfterReprobe })} · fresh marker at ${fresh?.at} vs patched ${patchedAt}`)
+    await page.close()
+    await context.close()
+  }
+
+  // ── C3: the recovery door — a CLEAN driver + a stale rung-2 marker ──
+  {
+    const context = await browser.newContext({ viewport: { width: 480, height: 320 } })
+    await installHooks(context, `(p) => false`) // the healed driver: nothing ever drops
+    const page = await context.newPage()
+    const consoleMsgs = []
+    page.on('console', (m) => consoleMsgs.push(`[${m.type()}] ${m.text().slice(0, 700)}`))
+    page.on('pageerror', (e) => consoleMsgs.push('PAGEERROR: ' + String(e).slice(0, 220)))
+    await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+    await page.waitForTimeout(1500)
+    // seed a STALE rung-2 marker (the verdict is 16 minutes old — the probe window is open)
+    await page.evaluate(() => {
+      sessionStorage.setItem('rune:vfx:glheal', JSON.stringify({ v: 1, rung: 2, demo: 23, at: Date.now() - 16 * 60_000, why: 'the gate seed — a stale level-1 verdict (the re-probe window is open)' }))
+    })
+    await page.evaluate(() => { location.reload() })
+    await page.waitForLoadState('domcontentloaded', { timeout: 120_000 }).catch(() => { })
+    const recovery = await poll(page, `() => {
+      const p = window.__vfxPerf
+      if (p == null || p.tier !== 'gpu' || p.fallback !== 'tf' || p.pixelCheck !== 'warm') return null
+      return {
+        tier: p.tier, fallback: p.fallback, pixelCheck: p.pixelCheck,
+        healProbe: /RE-PROBE/.test(document.querySelector('#log-list')?.textContent ?? ''),
+        marker: (() => { try { return sessionStorage.getItem('rune:vfx:glheal') } catch { return 'NO_STORAGE' } })(),
+      }
+    }`, 300_000, 'the clean re-probe verdicts the conservative tier WARM').catch(async (e) => {
+      const dump = await page.evaluate(`(() => ({ perf: window.__vfxPerf ?? null, fallbackFlag: window.__embersFallback ?? 0, log: (document.querySelector('#log-list')?.textContent ?? '').slice(-700) }))()`).catch((e2) => ({ crash: String(e2).slice(0, 200) }))
+      console.log(`[task152] escalate-recovery FAILURE DUMP: ${JSON.stringify(dump, null, 1)}`)
+      throw e
+    })
+    // THE RECOVERY DOOR: no marker survives (the re-probe consumed it; a
+    // clean tier verdicts nothing, re-arms nothing) — the NEXT reload
+    // re-runs the full ladder from rung 0
+    const markerGone = recovery.marker === null
+    out.recoveryOk = recovery.tier === 'gpu' && recovery.fallback === 'tf' && recovery.pixelCheck === 'warm' && recovery.healProbe === true && markerGone
+    const errs2 = consoleMsgs.filter((m) => m.startsWith('PAGEERROR'))
+    if (errs2.length > 0) { console.log(`[task152] escalate-recovery PAGE ERRORS: ${JSON.stringify(errs2.slice(0, 4))}`); process.exitCode = 1; out.errs = false }
+    console.log(`[task152] escalate-recovery: ${JSON.stringify({ tier: recovery.tier, fallback: recovery.fallback, pixelCheck: recovery.pixelCheck, healProbe: recovery.healProbe, markerGone })}`)
+    await page.close()
+    await context.close()
+  }
+
+  return out
 }
 
 const only = process.env.TASK152_CELL
@@ -527,6 +692,7 @@ const results = {}
 if (only === undefined || only === 'promotion') results.promotion = await promotionCell()
 if (only === undefined || only === 'interlude') results.interlude = await wgInterludeCell()
 if (only === undefined || only === 'reload') results.reload = await reloadHealCell()
+if (only === undefined || only === 'escalate') results.escalate = await escalationCell()
 
 console.log('── THE VERDICTS ──')
 let ok = true
@@ -542,13 +708,19 @@ const il = results.interlude ?? { branch: 'INVALID', okBranch: false, okWarm: fa
   if (!pass) ok = false
   console.log(`interlude (WG park → canvas line truthful + interlude alive → the honest ${il.branch} branch, warm): ${pass ? 'PASS ✓' : `FAIL ${JSON.stringify(il)}`}`)
 }
-const rh = results.reload ?? { markerOk: false, healWarn: false, okLanding: false, okHealEvent: false, okOneContext: false, okLoopFree: false, okWarm: false, okNoAutoWalk: false, errs: true }
+const rh = results.reload ?? { markerOk: false, marker2Ok: false, healWarn: false, okLanding: false, okHealEvent: false, okOneContext: false, okLoopFree: false, okWarm: false, okNoAutoWalk: false, errs: true }
 {
-  const pass = rh.markerOk && rh.healWarn && rh.okLanding && rh.okHealEvent && rh.okOneContext && rh.okLoopFree && rh.okWarm && rh.okNoAutoWalk && rh.errs
+  const pass = rh.markerOk && rh.marker2Ok && rh.healWarn && rh.okLanding && rh.okHealEvent && rh.okOneContext && rh.okLoopFree && rh.okWarm && rh.okNoAutoWalk && rh.errs
   if (!pass) ok = false
-  console.log(`reload-heal (L0 → the crossing → rung 1 → CPU warm, loop-free): ${pass ? 'PASS ✓' : `FAIL ${JSON.stringify(rh)}`}`)
+  console.log(`reload-heal (L0 → the crossing → rung 1 → CPU warm + the rung-2 marker ARMED, loop-free): ${pass ? 'PASS ✓' : `FAIL ${JSON.stringify(rh)}`}`)
 }
-console.log(ok ? '[task152] PASS — the session keeps ONE WebGL2 context across backend cycles, and the default heal crosses the page boundary into the fresh page\'s first context (the best cell this driver class has — NOT a guaranteed one: the v153 field log dropped rung 1 there too, the CPU floor caught it)' : '[task152] FAIL — see above')
+const es = results.escalate ?? { directOk: false, rearmOk: false, reprobeOk: false, freshMarkerOk: false, recoveryOk: false, warmOk: false, errs: true }
+{
+  const pass = es.directOk && es.rearmOk && es.reprobeOk && es.freshMarkerOk && es.recoveryOk && es.warmOk && es.errs
+  if (!pass) ok = false
+  console.log(`escalate (rung 2 → CPU DIRECT, re-armed → the stale marker RE-PROBES rung 1 → a fresh rung-2 verdict; the clean re-probe re-opens the ladder): ${pass ? 'PASS ✓' : `FAIL ${JSON.stringify(es)}`}`)
+}
+console.log(ok ? '[task152] PASS — the session keeps ONE WebGL2 context across backend cycles, the default heal crosses the page boundary into the fresh page\'s first context (the best cell this driver class has — NOT a guaranteed one: the v153/v154 field logs dropped rung 1 there too), and once the conservative tier itself verdicts dead across reloads the rung-2 escalation lands the CPU floor directly (re-probing the tier every 15 min — the recovery door), the CPU floor catching everything else' : '[task152] FAIL — see above')
 if (!ok) process.exitCode = 1
 
 await browser.close()

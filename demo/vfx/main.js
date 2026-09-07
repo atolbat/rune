@@ -56,7 +56,7 @@ import dust from './demos/dust.js'
 import grass from './demos/grass.js'
 import lightning from './demos/lightning.js'
 import laser from './demos/laser.js'
-import gpuEmbers from './demos/gpuEmbers.js?v=154' // Task 153: the canvas-truth fix (the boot's own canvas in the log + the pixel sampler) rides this cache-bust
+import gpuEmbers from './demos/gpuEmbers.js?v=155' // Task 154: the rung-2 escalation (the direct-to-CPU crossing + the re-probe) rides this cache-bust
 
 const DEMOS = [muzzle, explosion, shapes, trail, sequencer, mesh, subemitter,
   noise, alphatest, plugin, billboard, soft, blending, follow,
@@ -694,8 +694,20 @@ const MODE_NAMES = { auto: 'Auto (WebGPU → WebGL2 fallback)', webgl2: 'WebGL2'
  * in-page fresh context is born dead there (13:27), so the heal CROSSES
  * a page boundary. The marker carries the ladder rung, the demo index
  * and the drop reason; it is consumed ONCE at module scope (a stale
- * marker from a crashed session dies of old age — 120 s). */
+ * marker from a crashed session dies of old age — 120 s).
+ * Task 154 — THE RUNG-2 ESCALATION: a level-1 verdict (the conservative
+ * tier itself dropping — the v154 field logs: five consecutive
+ * reloads, pixel-confirmed each time) now writes the marker with
+ * rung 2 — the poison survived the reload, so the NEXT reload lands the
+ * CPU floor directly instead of re-running the doomed level-0 →
+ * level-1 cycle. A rung-2 marker is SESSION knowledge, not a pending
+ * reload: it skips the crash-TTL, re-arms on every CPU-direct landing
+ * (a CPU page never verdicts a GPU tier, so nothing else would re-arm
+ * it), and ages into the rung-1 RE-PROBE after HEAL_PROBE_MS (the
+ * recovery door: a clean re-probe leaves no marker and re-opens the
+ * full ladder). */
 const HEAL_KEY = 'rune:vfx:glheal'
+const HEAL_PROBE_MS = 15 * 60_000
 const healMarker = (() => {
   try {
     const raw = sessionStorage.getItem(HEAL_KEY)
@@ -703,7 +715,12 @@ const healMarker = (() => {
     sessionStorage.removeItem(HEAL_KEY)
     const m = JSON.parse(raw)
     if (m?.v !== 1 || typeof m.rung !== 'number' || typeof m.demo !== 'number') return null
-    if (Date.now() - (m.at ?? 0) > 120_000) return null
+    if (m.rung !== 1 && m.rung !== 2) return null
+    // the crash-TTL guards the CROSSING marker only (rung 1 is written
+    // ~1 s before its own reload — an old one is a reload that never
+    // fired, and it dies). The rung-2 escalation carries session
+    // knowledge: it never dies of age, it ages into the re-probe.
+    if (m.rung === 1 && Date.now() - (m.at ?? 0) > 120_000) return null
     return m
   } catch { return null }
 })()
@@ -1708,10 +1725,28 @@ if (healMarker !== null) {
   // verdict wrote the marker and reloaded; this fresh page boots straight
   // into WebGL2 at the requested rung — its FIRST GL context is the
   // provably-clean cell on the reporting driver class.
-  window.__embersFallback = healMarker.rung
+  // Task 154 — THE RUNG-2 LANDING: the marker's rung is the ladder
+  // position the previous page verdicted itself OFF of. Rung 2 (the
+  // conservative tier dropped ACROSS this session's reloads) lands the
+  // CPU floor directly — no doomed GPU attempt per reload; a verdict
+  // older than HEAL_PROBE_MS degrades into the rung-1 RE-PROBE (the
+  // recovery door: a clean re-probe leaves no marker, and the next
+  // reload re-runs the full ladder). The landing RE-ARMS the marker
+  // unchanged (the SAME verdict `at` — a CPU-direct page never verdicts
+  // a GPU tier, so nothing else would re-arm it; without the re-arm
+  // every reload would re-run the level-0 crossing cycle).
+  const staleRung2 = healMarker.rung === 2 && Date.now() - (healMarker.at ?? 0) > HEAL_PROBE_MS
+  const rung = staleRung2 ? 1 : healMarker.rung
+  window.__embersFallback = rung
   const radio = document.querySelector('input[name="rd-mode"][value="webgl2"]')
   if (radio !== null) radio.checked = true
-  shell.log.event(`GL heal: the reload crossing landed (rung ${healMarker.rung}, demo ${healMarker.demo})${healMarker.why != null ? ` — the drop that asked for it: ${healMarker.why}` : ''} — the fresh page's first WebGL2 context takes the conservative tier`)
+  const why = healMarker.why != null ? ` — the drop that asked for it: ${healMarker.why}` : ''
+  if (rung === 2) {
+    shell.log.event(`GL heal: the reload crossing landed (rung 2, demo ${healMarker.demo})${why} — the conservative tier verdicted dead ACROSS this session's reloads, so the fresh page's first WebGL2 context takes the CPU floor DIRECTLY (no GPU attempt; the marker re-arms until the re-probe window)`)
+    try { sessionStorage.setItem(HEAL_KEY, JSON.stringify(healMarker)) } catch { /* the next reload re-runs the ladder — the honest floor */ }
+  } else {
+    shell.log.event(`GL heal: the reload crossing landed (rung 1, demo ${healMarker.demo})${why}${staleRung2 ? ` — a ${Math.max(1, Math.round((Date.now() - (healMarker.at ?? 0)) / 60_000))}-minute-old verdict: the fresh page's first WebGL2 context takes the conservative tier as the periodic RE-PROBE (the recovery door)` : ' — the fresh page\'s first WebGL2 context takes the conservative tier'}`)
+  }
 }
 if (healMarker === null) switchDemo(0) // the plain flow's pre-boot make (demo 0 — a CPU-tier make that tolerates the renderer-less pre-boot)
 // Task 152 — the MARKER path defers its demo make INTO the boot (after
