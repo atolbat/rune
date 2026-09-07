@@ -1469,3 +1469,70 @@ across the board: 1683 tests, the typecheck/lint baselines, the
 byte-identical build, the 24/24 smoke, task134/137/138, the toggle
 round trip, task140n's preset rungs, task140p's crossing chain, all
 four task150 verdict cells, and all three task152 cells.
+
+## Task 153 — THE CANVAS TRUTH (the v153 field log: the crossing landed, the keep-alive held, and one lying log line)
+
+The first v153 field log (22:28, Android 10 / Chrome 150) carried three
+verdicts and one bug. The good news first: **the reload crossing landed**
+— the previous session's level-0 verdict wrote the marker, the fresh page
+consumed it at module scope, and its FIRST WebGL2 context booted straight
+into rung 1 (the `GL heal` event fired before any demo made). And **the
+keep-alive held across the WebGPU interlude** — the WG boot parked GL #1,
+the user toggled back 5.2 s later, and the same context RESURRECTED at
+360×663 (the 13:27 "second GL run is blank" report is fixed in the field:
+one GL context for the whole session, `GL #1` on every boot line). The
+instructive news: **rung 1 itself dropped on that fresh first context**
+(degenerate records at frame 30, pixel-confirmed cold at frame 32, the
+ledger counting 78838) — and the once-fallback landed the CPU tier
+in-page, which then held silently for 25 s of watch. The "fresh page's
+first GL context is the clean cell" claim is therefore falsified as a
+guarantee: on this device, this day, the transform-feedback poison
+outlived a page reload. No behavior change follows — the ladder is the
+right design precisely because no cell is guaranteed; the crossing is
+still the best bet (the 11:48/12:36 sessions rendered the full pipeline
+on it), and the CPU floor catches the days it loses. The
+`?emit=1&cull=1` retry stays the manual escape hatch.
+
+The bug: `Canvas: 0×0 css-px` logged right after the WebGPU boot. The
+line queried `shell.slot.querySelector('canvas')` — and during a WG
+interlude the slot's FIRST canvas is the PARKED one (`display:none`,
+first in tree order, kept in place by the Task-152 no-DOM-surgery rule):
+a hidden canvas reads 0×0 while the live WG canvas renders at the full
+viewport. A pure diagnostics lie — but exactly the kind that erodes
+trust in a pasted log. The fix is three small demo-tier moves (the
+library untouched, dist byte-identical):
+
+1. **THE BOOT'S OWN CANVAS** (`main.js`) — the log line now reads
+   `liveCanvas` (this boot's element in both the fresh and the resurrect
+   paths), never a slot/document query.
+2. **`env.canvas`** — the boot threads its own canvas through the demo
+   environment (both paths), and the GPU Embers pixel sampler
+   (`armPixelCheck`) now targets `env.canvas`, captured at arm time — a
+   document query could hit the parked hidden canvas and sample its
+   stale drawing buffer; the capture-at-arm-time semantics keep the
+   one-shot wrapper bound to the canvas its instance was drawing on,
+   even across the 2 s re-boot settle.
+3. **THE GATE'S OWN EYES** (`task152-keepalive.mjs`) — the interlude
+   cell now asserts the regression directly: the WG boot's `Canvas:`
+   line must read the real viewport (480×320 — it read 0×0 before the
+   fix). The interlude's LIVENESS is the honest measurable (the frame
+   counter advancing ~40 fps + the Sentry Turret's own burst events
+   firing through the interlude): this container's SwiftShader-WebGPU
+   canvas presents white garbage to the compositor and reads all-black
+   through `drawImage` — BOTH pixel paths lie (the `t153-interlude-probe`
+   ground truth), so "warm pixels" is deliberately not gated for the WG
+   leg. The post-toggle-back GL leg keeps its pixel gate and moves to an
+   in-page drawing-buffer readback polled at 150 ms (`canvasWarm`) —
+   the muzzle demo's sparse bursts need the poll, not 4 screenshot
+   attempts (the screenshots caught 0.043% against the 0.05 threshold;
+   the readback lands 0.24–0.37% inside a burst), and the shot clipper
+   now picks the last VISIBLE canvas so it works mid-interlude too.
+
+Gates: `task152-keepalive` all three cells green with the new assertions
+(promotion: ONE context, same canvas, TF warm; interlude: canvas line
+truthful + interlude alive + the honest discard branch + the GL leg warm
+through the readback; reload: the full crossing chain, loop-free);
+`task140p` (the ladder chain — the `env.canvas` sampler change rides its
+pixel-confirmed verdicts), `task147-toggle`, `demo:smoke` 24/24 — all
+green; 1683 tests 0 fail; the typecheck/lint baselines hold; the build
+is byte-identical. Deployed as `?v=154`.

@@ -4,10 +4,10 @@
 // pipeline clean, every context born after a prior GL dispose is born
 // dead).
 //
-// TWO cells on the live page (the renderer spoofed onto the real-GPU
+// THREE cells on the live page (the renderer spoofed onto the real-GPU
 // class, the capacities patched to the container's fast 16k):
 //
-//   A. 'keep-alive' — THE USER'S EXACT FLOW, poisoned-driver simulation:
+//   A1. 'promotion' — THE USER'S EXACT FLOW, poisoned-driver simulation:
 //      the zeroing predicate (getBufferSubData AND readPixels — both
 //      halves of the pixel-confirmed verdict) fires ONLY when the page's
 //      WebGL2 CONTEXT COUNT exceeds one (the born-dead second context —
@@ -21,6 +21,28 @@
 //      pixelCheck 'warm', and never touch the heal reload (the stub is a
 //      tripwire). With the OLD dispose-per-toggle flow this cell would
 //      reproduce the user's black screen — GL #2 would be born dead.
+//
+//   A2. 'interlude' — THE WG INTERLUDE: the honest degradation + Task 153's
+//      canvas-truth regression. While the GL park is hidden in the slot
+//      (display:none, first in tree order) the LIVE canvas is the WebGPU
+//      one: the boot's own "Canvas: WxH css-px" log line must report the
+//      REAL viewport (the user's v153 field log carried a false
+//      "Canvas: 0×0" — the pre-153 line queried the slot's first canvas,
+//      the parked one), and the interlude must stay ALIVE (the WG frame
+//      loop advancing + the demo's own burst events firing — the pixel
+//      claim is deliberately NOT gated: this container's SwiftShader-WG
+//      canvas presents white garbage to the compositor and reads
+//      all-black through drawImage, both paths lie, see
+//      t153-interlude-probe). Then the honest-degradation contract: the
+//      container's SwiftShader WG boot transiently kills the parked GL
+//      context (loss-then-restore ~1.5 s — a restored context's objects
+//      are dead): the loss-event tracker (not isContextLost) discards the
+//      park, a FRESH context is born, the demo re-makes and renders WARM
+//      (the post-toggle-back GL leg is pixel-gated via the in-page
+//      readback — the GL canvas's buffer reads back honestly). On the
+//      reporting phone the interlude may leave the park alive (the
+//      resurrect branch — machinery cell A1 proves); this cell proves the
+//      OTHER branch stays honest instead of resurrecting a zombie.
 //
 //   B. 'reload-heal' — THE DEFAULT LADDER, end-to-end: the predicate
 //      zeroes EVERY GPU-tier verdict (the task140p signature). The flow:
@@ -98,12 +120,63 @@ async function poll(page, fnSrc, timeoutMs, label) {
   throw new Error(`poll timeout (${label})${lastErr !== null ? ` last error: ${lastErr}` : ''}`)
 }
 
+/** Task 153 — THE IN-PAGE CANVAS READBACK: the compositor screenshot of a
+ * SwiftShader-WebGPU canvas in this container tears into white raster
+ * tiles (the page.screenshot path re-rasterizes the page; the muzzle
+ * demo's sparse bursts also miss a 4-attempt screenshot window — the
+ * Task-138 flake class). The drawing buffer is the ground truth:
+ * drawImage the VISIBLE canvas onto a small 2D canvas and count warm
+ * pixels, polling at 150 ms until warm or the deadline — fast enough to
+ * land inside a muzzle burst. */
+async function canvasWarm(page, timeoutMs = 12_000) {
+  const readOnce = () => page.evaluate(() => {
+    const all = [...document.querySelectorAll('canvas')]
+    const visible = all.filter((c) => { const r = c.getBoundingClientRect(); return r.width > 1 && r.height > 1 })
+    const c = visible.length > 0 ? visible[visible.length - 1] : (all.length > 0 ? all[all.length - 1] : null)
+    if (c === null) return null
+    try {
+      const r = document.createElement('canvas')
+      r.width = 240
+      r.height = 160
+      const g = r.getContext('2d', { willReadFrequently: true })
+      g.drawImage(c, 0, 0, 240, 160)
+      const d = g.getImageData(0, 0, 240, 160).data
+      let warm = 0
+      let bright = 0
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i] > 40 && d[i] > d[i + 1] * 1.15 && d[i + 1] > d[i + 2] * 1.05) warm++
+        if (d[i] + d[i + 1] + d[i + 2] > 120) bright++
+      }
+      return { warm: +(100 * warm / (240 * 160)).toFixed(3), bright: +(100 * bright / (240 * 160)).toFixed(3) }
+    } catch (e) { return { err: String(e).slice(0, 80) } }
+  })
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    const v = await readOnce()
+    if (v != null && !('err' in v)) {
+      last = v
+      if (v.warm > 0.05) return v
+    }
+    await new Promise((r) => setTimeout(r, 150))
+  }
+  return last ?? { cold: true }
+}
+
 async function shot(page, tag) {
   let best = { starved: true }
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
+      // Task 153 — the VISIBLE canvas, not the first one: while a GL park
+      // hides in the slot (display:none, first in tree order) the live
+      // render target is the LAST canvas with a non-zero rect — a plain
+      // querySelector('canvas') would clip a 0×0 parked element mid-
+      // interlude. With a single canvas (every non-interlude shot) this
+      // picks exactly what the old query picked.
       const clip = await page.evaluate(() => {
-        const c = document.querySelector('canvas')
+        const all = [...document.querySelectorAll('canvas')]
+        const visible = all.filter((c) => { const r = c.getBoundingClientRect(); return r.width > 1 && r.height > 1 })
+        const c = visible.length > 0 ? visible[visible.length - 1] : (all.length > 0 ? all[all.length - 1] : null)
         if (c === null) return null
         const r = c.getBoundingClientRect()
         return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }
@@ -305,6 +378,30 @@ async function wgInterludeCell() {
   const parked = await page.evaluate(() => ({ keep: window.__vfxGLKeep ?? null, lost: window.__vfxGLKeepLost ?? null }))
   await page.waitForTimeout(2500) // let the transient loss land (and restore — the tracker keeps the flag)
 
+  // Task 153 — THE CANVAS TRUTH OF THE INTERLUDE: the LAST "Canvas:" line
+  // is the WG boot's own report — it must read the REAL viewport (480×320),
+  // never the parked hidden canvas's 0×0 (the user's v153 field log). The
+  // WG leg's LIVENESS is the honest measurable here: this container's
+  // SwiftShader-WebGPU canvas presents WHITE garbage to the compositor
+  // (page.screenshot) and reads all-black through drawImage — BOTH pixel
+  // paths lie (the t153-interlude-probe ground truth: the loop runs at
+  // ~40 fps, the Sentry Turret keeps bursting through the interlude, zero
+  // page errors), so "warm pixels" is not a measurable claim for the WG
+  // leg in-container. The measurable truth: the WG frame loop keeps
+  // advancing AND the demo's own burst events keep firing (the turret
+  // logs them — the log caps at 400 entries, far above this cell's use).
+  const interludeCanvasLine = await page.evaluate(() => {
+    const log = document.querySelector('#log-list')?.textContent ?? ''
+    const lines = log.match(/Canvas: \d+×\d+ css-px/g) ?? []
+    return lines.length > 0 ? lines[lines.length - 1] : null
+  })
+  const aliveA = await page.evaluate(() => ({ frames: window.__vfxFrame ?? 0, bursts: ((document.querySelector('#log-list')?.textContent ?? '').match(/sentry (?:burst|BEAM)/g) ?? []).length }))
+  await page.waitForTimeout(3000)
+  const aliveB = await page.evaluate(() => ({ frames: window.__vfxFrame ?? 0, bursts: ((document.querySelector('#log-list')?.textContent ?? '').match(/sentry (?:burst|BEAM)/g) ?? []).length }))
+  const okCanvasLine = interludeCanvasLine === 'Canvas: 480×320 css-px'
+  const okInterludeAlive = aliveB.frames - aliveA.frames > 60 && aliveB.bursts > aliveA.bursts
+  console.log(`[task152] interlude: the WG boot's canvas line ${interludeCanvasLine ?? 'MISSING'} ${okCanvasLine ? '✓ (the real viewport, not the parked 0×0)' : 'WRONG'} · interlude liveness: frames ${aliveA.frames}→${aliveB.frames}, bursts ${aliveA.bursts}→${aliveB.bursts}`)
+
   await toggle(page, 'webgl2')
   await page.waitForFunction(() => (document.querySelector('#backend')?.textContent ?? '').includes('WebGL2'), null, { timeout: 60_000 })
   const after = await poll(page, `() => {
@@ -317,25 +414,29 @@ async function wgInterludeCell() {
     }
   }`, 60_000, 'the post-interlude GL leg boots')
   await page.waitForTimeout(3500) // the fresh muzzle instance renders
-  const pixels = await shot(page, 'interlude')
+  // Task 153 — the muzzle burst needs the 150 ms readback poll, not 4
+  // screenshot attempts (the Task-138 sampling flake class — the shot
+  // caught 0.043% vs the 0.05 threshold on the first runs of this cell)
+  const readback = await canvasWarm(page, 12_000)
   const logText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
   const discardLine = /parked WebGL2 context was lost while idle/.test(logText)
   const parkLine = /Parking the WebGL2 context/.test(logText)
 
-  console.log(`[task152] interlude: parked ${JSON.stringify(parked)} · after ${JSON.stringify(after)} · pixels ${JSON.stringify(pixels)}`)
+  console.log(`[task152] interlude: parked ${JSON.stringify(parked)} · after ${JSON.stringify(after)} · readback ${JSON.stringify(readback)}`)
   console.log(`[task152] interlude: park line ${parkLine ? 'FIRED ✓' : 'MISSING'} · discard line ${discardLine ? 'FIRED ✓' : 'MISSING (the park survived — the resurrect branch, also valid)'}`)
 
   // EITHER branch is honest: the resurrect (contexts stay 1 — the park
   // survived, e.g. on a real phone) or the discard (contexts 2 + the
-  // discard line — the container's SwiftShader reality). Both must render.
+  // discard line — the container's SwiftShader reality). Both must render
+  // (the in-page readback).
   const branch = after.fxContexts === 1 ? 'resurrect' : after.fxContexts === 2 && discardLine ? 'discard' : 'INVALID'
-  const okWarm = (pixels.warm ?? -1) > 0.05 && after.frames > 30
+  const okWarm = (readback?.warm ?? -1) > 0.05 && after.frames > 30
   const okBranch = branch !== 'INVALID'
   const errs = consoleMsgs.filter((m) => m.startsWith('PAGEERROR'))
   if (errs.length > 0) { console.log(`[task152] interlude PAGE ERRORS: ${JSON.stringify(errs.slice(0, 4))}`); process.exitCode = 1 }
   await page.close()
   await context.close()
-  return { branch, okBranch, okWarm, parkLine, errs: errs.length === 0 }
+  return { branch, okBranch, okWarm, parkLine, okCanvasLine, okInterludeAlive, errs: errs.length === 0 }
 }
 
 // ═══ Cell B — the default ladder crosses the page boundary ═══
@@ -435,11 +536,11 @@ const pr = results.promotion ?? { okContext: false, okSameCanvas: false, okWarm:
   if (!pass) ok = false
   console.log(`promotion (GL→GL re-boot, ONE context, TF warm): ${pass ? 'PASS ✓' : `FAIL ${JSON.stringify(pr)}`}`)
 }
-const il = results.interlude ?? { branch: 'INVALID', okBranch: false, okWarm: false, parkLine: false, errs: true }
+const il = results.interlude ?? { branch: 'INVALID', okBranch: false, okWarm: false, parkLine: false, okCanvasLine: false, okInterludeAlive: false, errs: true }
 {
-  const pass = il.okBranch && il.okWarm && il.parkLine && il.errs
+  const pass = il.okBranch && il.okWarm && il.parkLine && il.okCanvasLine && il.okInterludeAlive && il.errs
   if (!pass) ok = false
-  console.log(`interlude (WG park → the honest ${il.branch} branch, warm): ${pass ? 'PASS ✓' : `FAIL ${JSON.stringify(il)}`}`)
+  console.log(`interlude (WG park → canvas line truthful + interlude alive → the honest ${il.branch} branch, warm): ${pass ? 'PASS ✓' : `FAIL ${JSON.stringify(il)}`}`)
 }
 const rh = results.reload ?? { markerOk: false, healWarn: false, okLanding: false, okHealEvent: false, okOneContext: false, okLoopFree: false, okWarm: false, okNoAutoWalk: false, errs: true }
 {
@@ -447,7 +548,7 @@ const rh = results.reload ?? { markerOk: false, healWarn: false, okLanding: fals
   if (!pass) ok = false
   console.log(`reload-heal (L0 → the crossing → rung 1 → CPU warm, loop-free): ${pass ? 'PASS ✓' : `FAIL ${JSON.stringify(rh)}`}`)
 }
-console.log(ok ? '[task152] PASS — the session keeps ONE WebGL2 context across backend cycles, and the default heal crosses the page boundary into the proven-clean cell' : '[task152] FAIL — see above')
+console.log(ok ? '[task152] PASS — the session keeps ONE WebGL2 context across backend cycles, and the default heal crosses the page boundary into the fresh page\'s first context (the best cell this driver class has — NOT a guaranteed one: the v153 field log dropped rung 1 there too, the CPU floor caught it)' : '[task152] FAIL — see above')
 if (!ok) process.exitCode = 1
 
 await browser.close()

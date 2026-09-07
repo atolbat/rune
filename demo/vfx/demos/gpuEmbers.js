@@ -562,7 +562,17 @@ export default {
       // be clobbered when the mid-run watchdog re-arms the sample (the
       // gates poll the field; the watchdog writes perf.watchdog instead)
       if (perf.pixelCheck !== 'warm' && perf.pixelCheck !== 'cold') perf.pixelCheck = 'armed'
-      const canvasEl = document.querySelector('canvas')
+      // Task 153 — THIS instance's OWN canvas, never a document query: while
+      // a GL context is parked (a WebGPU interlude — the Task-152 keep-alive
+      // keeps the hidden canvas in the slot, first in tree order), a
+      // document.querySelector('canvas') grab can hit the parked element and
+      // sample its stale drawingBuffer instead of the live render target.
+      // env.canvas is threaded at boot (both the fresh and the resurrect
+      // paths) and is captured HERE, at arm time — even if a re-boot swaps
+      // canvases later, this instance's one-shot wrapper stays bound to the
+      // canvas it was drawing on (the re-boot settle keeps the old instance
+      // alive for ~2 s).
+      const canvasEl = env.canvas ?? null
       const gl2 = canvasEl != null ? canvasEl.getContext('webgl2') : null
       if (gl2 == null) return
       const RW = Math.min(256, gl2.drawingBufferWidth)

@@ -56,7 +56,7 @@ import dust from './demos/dust.js'
 import grass from './demos/grass.js'
 import lightning from './demos/lightning.js'
 import laser from './demos/laser.js'
-import gpuEmbers from './demos/gpuEmbers.js?v=153' // Task 152: the GL keep-alive + the reload crossing ride this cache-bust
+import gpuEmbers from './demos/gpuEmbers.js?v=154' // Task 153: the canvas-truth fix (the boot's own canvas in the log + the pixel sampler) rides this cache-bust
 
 const DEMOS = [muzzle, explosion, shapes, trail, sequencer, mesh, subemitter,
   noise, alphatest, plugin, billboard, soft, blending, follow,
@@ -869,6 +869,15 @@ function setSheetOpen(open) {
 const env = {
   renderer: null, // set at boot
   backend: 'auto',
+  // Task 153 — THIS boot's OWN canvas, threaded at boot (both paths):
+  // the demos' canvas-touching code (the GPU Embers pixel sampler) must
+  // target the renderer's canvas DIRECTLY. A document/slot query grabs the
+  // FIRST canvas in tree order — during a WebGPU interlude that is the
+  // PARKED, display:none GL canvas (the Task-152 keep-alive never moves
+  // it), and a hidden canvas reads 0×0 css-px with a dead-looking
+  // drawingBuffer. The live WG canvas sits AFTER it in the slot — the
+  // user's v153 log carried exactly this false "Canvas: 0×0" line.
+  canvas: null, // set at boot
   log: shell.log,
   atlasTexture: null, // set at boot
   atlasTiles: [4, 4],
@@ -1552,6 +1561,7 @@ async function boot(mode, opts) {
     try { canvas.style.display = '' } catch { /* best-effort */ }
     shell.slot.append(labelLayer, bar, sheet, dragHint)
     liveCanvas = canvas
+    env.canvas = canvas
     shell.log.event(`Booting: “${MODE_NAMES[mode] ?? mode}”`)
     activeRenderer = renderer
     env.renderer = renderer
@@ -1579,6 +1589,7 @@ async function boot(mode, opts) {
     canvas.id = 'canvas'
     shell.slot.append(labelLayer, canvas, bar, sheet, dragHint)
     liveCanvas = canvas
+    env.canvas = canvas
     bindInput(canvas)
     canvas.addEventListener('pointerdown', () => dragHint.classList.add('pt-gone'), { once: true })
     setTimeout(() => dragHint.classList.add('pt-gone'), 8000)
@@ -1676,7 +1687,14 @@ async function boot(mode, opts) {
     }
   }
   shell.log.event('Rendering started')
-  const live = shell.slot.querySelector('canvas')
+  // Task 153 — THE BOOT'S OWN CANVAS, never a slot/document query: while a
+  // GL context is parked (a WebGPU interlude) the slot's FIRST canvas is
+  // the hidden parked one — querySelector('canvas') returned it and logged
+  // a false "Canvas: 0×0 css-px" while the live WG canvas rendered at the
+  // full viewport (the user's v153 field log). liveCanvas is this boot's
+  // own element in BOTH paths (the resurrect's unhidden park, the fresh
+  // boot's new canvas) and is set before any early return reaches here.
+  const live = liveCanvas
   shell.log.info(`Canvas: ${live.clientWidth}×${live.clientHeight} css-px, DPR ${window.devicePixelRatio}`)
   shell.markReady()
 }
