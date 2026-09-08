@@ -1757,3 +1757,68 @@ from the clipboard). PAGE B: the WG interlude → GL #2, coexistence →
 GL #3 alongside the live #2, and the mid-life re-run. Zero page
 errors on both pages. The library, `dist/` and every other demo are
 untouched (no rebuild — the page imports nothing).
+
+## Task 162 — THE LADDER RETIRED (the root cause is dead; the armor moved into the library)
+
+The user's phone (Mali-G57 MC2 / Android 10 / Chrome 150, a device whose
+GPU disk cache is actually poisoned) rendered the full 160k GPU pipeline
+live on the Task-161 build — the field confirmation that closed the
+investigation. The root cause was never the demo's pass families, the
+context lifecycle, or the tier configuration: it was the ARM Mali
+driver's `glProgramBinary` blobs omitting the transform-feedback
+varyings, restored by ANGLE's program cache (backed by Chrome's GPU
+disk cache) on every repeat link of the same source — the exact twin
+of issuetracker.google.com/issues/530857248, fixed upstream by CL
+8040203 (upstream's answer: never cache TF programs on Mali). rune's
+answer is the library-side Task-161 nonce: every TF link compiles a
+uniquely-salted vertex source — an eternal cache miss — so the poison
+class cannot reach any rune app on any browser, fixed or not.
+
+With the cause dead, Tasks 140-155's two-rung pixel-confirmed ladder
+had nothing left to catch — and everything left to break: its every
+future trigger would be a false positive degrading a healthy page
+(the watchdog's cold-canvas verdict could drop a working 160k tier to
+the 32k CPU floor because a phone's compositor blanked for two
+seconds). RETIRED wholesale from `demo/vfx/demos/gpuEmbers.js` and
+`demo/vfx/main.js`:
+
+- the fallback flag (`window.__embersFallback`) and the rung logic;
+- the forensic isolation walk (`?forensic=1`, `__embersForensic*`);
+- the two-stage self-check (the records readback suspicion + the
+  in-frame pixel confirmation) and the mid-run watchdog;
+- the reload crossing (`rune:vfx:glheal` sessionStorage markers, the
+  `__vfxHealReload` indirection, the self-reload) and the device
+  verdict (`rune:vfx:glverdict` localStorage, the TTL/major-version
+  re-probe, the Go-section landings, the boot-mode hijack);
+- the `__vfxRemakeRequested` channel, the 2 s re-boot settle, and
+  `boot()`'s `fresh` option (the diagnostic re-boots were its only
+  callers);
+- the `FALLBACK_CAPACITY` budget (the CPU floor is gone with the
+  ladder — the TF tier IS the tier now).
+
+What stays: Task 138's `?emit` / `?cull` / `?sort` value-aware flags
+(the manual escape hatches), the software-GL conservative defaults and
+the hardware-aware budgets (Task 137), the `window.__vfxPerf` pill
+fields (tier/capacity/count/ms/emit/cull/softwareGL — the probe gates
+read them), and — in `main.js` — the Task-152 keep-alive (park /
+resurrect: ONE WebGL2 context per page across backend toggles, zero
+context churn, instant switch-back; its original "born dead after a
+dispose" rationale is closed by the root cause, but the discipline
+stands on its own) plus the Task-153 canvas-truth rules.
+
+The gates follow the machinery: `task140n-validate.mjs`,
+`task140p-trigger.mjs`, `task150-forensic.mjs` and the one-off
+`task149-debug.mjs` are deleted (their subjects no longer exist);
+`task152-keepalive.mjs` is trimmed to its two keep-alive cells
+(promotion + interlude — the reload-heal / escalate / crosstab cells
+tested the ladder). The tf-probe pages v1-v4 stay: they are the
+detector pages for the upstream fix's arrival on the phone (a Beta /
+151+ run of v4 should print the all-green matrix and self-heal the
+device's disk cache). Cache-busts: `?v=162` on the gpuEmbers import
+and the `main.js` tag (the library `dist/` is untouched — byte-
+identical, no rebuild).
+
+The demo's story is one sentence again: 160k embers simulated and
+emitted on the GPU, on both backends, by default — and the armor that
+makes that safe on a poisoned phone lives in the library where it
+belongs.

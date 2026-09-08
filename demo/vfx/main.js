@@ -57,7 +57,7 @@ import dust from './demos/dust.js'
 import grass from './demos/grass.js'
 import lightning from './demos/lightning.js'
 import laser from './demos/laser.js'
-import gpuEmbers from './demos/gpuEmbers.js?v=156' // Task 155: the device-scoped verdict (the localStorage landing + the cross-tab CPU floor) rides this cache-bust
+import gpuEmbers from './demos/gpuEmbers.js?v=162' // Task 162: THE LADDER RETIRED (the Task-161 nonce is the armor; the fallback machinery is gone) rides this cache-bust
 
 const DEMOS = [muzzle, explosion, shapes, trail, sequencer, mesh, subemitter,
   noise, alphatest, plugin, billboard, soft, blending, follow,
@@ -623,17 +623,15 @@ let bootSeq = 0
 let bootedOnce = false // the first successful boot (a re-boot re-makes the demo)
 /* Task 152 — THE GL CONTEXT KEEP-ALIVE: the parked WebGL2 renderer (never
  * disposed while this page lives) + the REAL-context counter for the log.
- * The 13:27 live session closed the question: the FIRST WebGL2 context of
- * a page renders the full TF pipeline clean (26 s at 11:48, 10.6 s at
- * 12:36), and every WebGL2 context born after a prior one was DISPOSED
- * (the toggle's renderer.dispose — Task 137's loseContext eviction fix) is
- * born with a dead transform feedback: records zero, canvas black, the
- * CPU ledger counting — the 2 s settle did NOT cure it (13:27: contexts
- * #4/#5/#6 — the forensic legs included), and 12:36's rapid cycling
- * produced the same corpses. WebGPU is immune in every observed session
- * (a disposed GL context preceded the clean WG #3; device.destroy()
- * poisons nothing). The page therefore parks its ONE WebGL2 renderer on
- * the way out and resurrects the very same context on the way back. */
+ * The 13:27 live session's "born dead after a dispose" theory is CLOSED
+ * (Task 160/161: the deaths were the program-binary cache poison, not the
+ * context history — the library's TF nonce defeats the class on any
+ * context), but the park/resurrect discipline STAYS on its own merits:
+ * ONE WebGL2 context per page for the whole session (zero context churn
+ * on backend toggles, an instant resurrect, and the page never rides
+ * Chrome's per-page context budget), with the Task-153 canvas-truth rules
+ * (a parked canvas is display:none in place — never moved, never
+ * re-parented). */
 let glKeep = null // { renderer, canvas, textures } — the parked GL session
 let glContexts = 0 // the real WebGL2 contexts this page has CREATED (resurrects do not increment)
 /* Task 152 — THE LOSS-EVENT TRACKER: a WebGL context can be lost
@@ -687,98 +685,6 @@ let lastInteraction = 0
 
 const MODE_NAMES = { auto: 'Auto (WebGPU → WebGL2 fallback)', webgl2: 'WebGL2', webgpu: 'WebGPU' }
 
-/* ─── Task 152/154/155 — the GL-heal markers ───────────────────────────────
- * Two storage layers, one contract: a pixel-confirmed TF verdict must
- * never cost this browser a second doomed attempt.
- *   · sessionStorage `rune:vfx:glheal` (Task 152) — THE RELOAD CROSSING:
- *     the level-0 verdict writes it ~1 s before its own reload; the
- *     fresh page's FIRST WebGL2 context (the best cell this driver
- *     class has ever rendered the conservative TF tier in) takes rung 1.
- *     One-shot, consumed at module scope, 120 s crash-TTL (a marker whose
- *     reload never fired dies of old age). A v155-era rung-2 session
- *     marker is not a pending crossing — the reader below harvests it
- *     into the device verdict instead.
- *   · localStorage `rune:vfx:glverdict` (Task 155 — THE DEVICE VERDICT):
- *     every pixel-confirmed verdict lands in device-scoped storage too.
- *     The v155 field evidence: five-plus consecutive rung-1 drops across
- *     an evening's reloads AND fresh tabs (sessionStorage is per-tab, so
- *     every new tab re-ran the whole doomed circus — level-0 → the
- *     crossing reload → level-1 → the floor, ~2 s + a self-reload flash
- *     per load, forever). Now ANY page of this browser — reload OR fresh
- *     tab — reads the verdict and lands its rung directly: rung 2 = the
- *     CPU floor with ZERO GPU attempts (no black window, no self-reload,
- *     no verdict WARN pair); rung 1 = the conservative TF tier directly
- *     (no level-0 leg, no crossing). The verdict is keyed to the
- *     browser's major version (an update re-opens the full ladder — the
- *     ANGLE/driver stack rides the Chrome train) and ages out after
- *     VERDICT_TTL_MS: a stale rung-2 degrades to the rung-1 RE-PROBE (the
- *     recovery door — a clean re-probe re-arms rung 1 on the device, a
- *     dropping one re-arms a fresh rung-2); a stale rung-1 dies and the
- *     full ladder re-runs (level-0 gets its chance back). */
-const HEAL_KEY = 'rune:vfx:glheal'
-const VERDICT_KEY = 'rune:vfx:glverdict'
-const VERDICT_TTL_MS = 6 * 60 * 60_000
-const UA_MAJOR = (() => {
-  try {
-    const m = /(?:Chrome|Chromium)\/(\d+)/.exec(String(navigator.userAgent))
-    return m !== null ? Number(m[1]) : 0
-  } catch { return 0 }
-})()
-const healMarker = (() => {
-  try {
-    const raw = sessionStorage.getItem(HEAL_KEY)
-    if (raw === null) return null
-    sessionStorage.removeItem(HEAL_KEY)
-    const m = JSON.parse(raw)
-    if (m?.v !== 1 || typeof m.rung !== 'number' || typeof m.demo !== 'number') return null
-    if (m.rung !== 1 && m.rung !== 2) return null
-    // the crash-TTL guards the CROSSING marker only (rung 1 is written
-    // ~1 s before its own reload — an old one is a reload that never
-    // fired, and it dies). A rung-2 session marker is legacy/fallback
-    // knowledge — the device-verdict reader harvests it below.
-    if (m.rung === 1 && Date.now() - (m.at ?? 0) > 120_000) return null
-    return m
-  } catch { return null }
-})()
-const pendingCrossing = healMarker !== null && healMarker.rung === 1 ? healMarker : null
-const deviceVerdictRead = (() => {
-  try {
-    let raw = null
-    let harvested = false
-    try { raw = localStorage.getItem(VERDICT_KEY) } catch { raw = null }
-    if (raw === null && healMarker !== null && healMarker.rung === 2) {
-      // THE v155 HARVEST: a rung-2 session marker (the in-tab escalation
-      // Task 154 wrote before this deploy) is knowledge the whole browser
-      // should keep — promote it into the device verdict, then the same
-      // rules apply to it.
-      raw = JSON.stringify(healMarker)
-      harvested = true
-    }
-    if (raw === null) return null
-    const m = JSON.parse(raw)
-    if (m?.v !== 1 || (m.rung !== 1 && m.rung !== 2) || typeof m.demo !== 'number') return null
-    // the browser updated since the verdict — the full ladder re-opens
-    if (typeof m.major === 'number' && m.major > 0 && m.major !== UA_MAJOR) return { harvested }
-    const age = Date.now() - (m.at ?? 0)
-    if (m.rung === 2) {
-      // fresh: the CPU floor DIRECTLY; stale: the rung-1 RE-PROBE (the
-      // recovery door — hours-scale, never per-reload)
-      return { m: age <= VERDICT_TTL_MS ? m : { ...m, rung: 1, reprobe: true }, harvested }
-    }
-    // rung 1: fresh = the conservative tier directly; stale = the verdict
-    // died, level-0 gets its chance back
-    return age <= VERDICT_TTL_MS ? { m, harvested } : { harvested }
-  } catch { return null }
-})()
-const deviceVerdict = deviceVerdictRead !== null && deviceVerdictRead.m !== undefined ? deviceVerdictRead.m : null
-if (deviceVerdictRead !== null && deviceVerdictRead.harvested && healMarker !== null && healMarker.rung === 2) {
-  // the harvest persists (localStorage blocked → keep the session marker
-  // in sessionStorage so this tab's next reload still lands the floor)
-  try { localStorage.setItem(VERDICT_KEY, JSON.stringify(healMarker)) } catch { try { sessionStorage.setItem(HEAL_KEY, JSON.stringify(healMarker)) } catch { /* storage-less */ } }
-}
-const initialMarker = pendingCrossing ?? deviceVerdict
-const initialDemoIndex = initialMarker !== null ? initialMarker.demo : 0
-
 /** Parks the session's WebGL2 renderer: the loop stops, the canvas stays
  *  EXACTLY where it was born (hidden in place) and the boot's textures stay
  *  reachable — the context is NEVER disposed (the next WebGL2 boot
@@ -812,11 +718,11 @@ function parkHealthy() {
   return true
 }
 
-/** Releases the park (the diagnostic fresh-boot paths and the unhealthy
- *  discard): the keep-alive's own loss listener is removed BEFORE the
- *  renderer dispose (the dispose's forced loss would otherwise fire the
- *  event asynchronously and poison the NEXT context's tracker), the
- *  tracker resets with the park. */
+/** Releases the park (the unhealthy discard — the browser lost the parked
+ *  context, or a fresh GL boot bypassed the resurrect): the keep-alive's
+ *  own loss listener is removed BEFORE the renderer dispose (the dispose's
+ *  forced loss would otherwise fire the event asynchronously and poison
+ *  the NEXT context's tracker), the tracker resets with the park. */
 function releasePark(why) {
   if (glKeep === null) return
   if (onGlLoss !== null && onGlLoss.canvas === glKeep.canvas) {
@@ -940,7 +846,7 @@ const env = {
   renderer: null, // set at boot
   backend: 'auto',
   // Task 153 — THIS boot's OWN canvas, threaded at boot (both paths):
-  // the demos' canvas-touching code (the GPU Embers pixel sampler) must
+  // the demos' canvas-touching code (the soft demo's surface aspect) must
   // target the renderer's canvas DIRECTLY. A document/slot query grabs the
   // FIRST canvas in tree order — during a WebGPU interlude that is the
   // PARKED, display:none GL canvas (the Task-152 keep-alive never moves
@@ -1037,8 +943,7 @@ const env = {
   width: 0,
   height: 0,
 
-  /** The current demo's carousel index (the reload crossing's marker
-   *  carries it — the healed page re-enters the demo the drop fired on). */
+  /** The current demo's carousel index. */
   get demoIndex() { return demoIndex },
 
   /** The per-demo camera default. */
@@ -1235,57 +1140,6 @@ function attachLayers() {
 /* ─── The frame ───────────────────────────────────────────────────────── */
 
 function frameCallback(ctx, record) {
-  // Task 140 — THE ONE-TIME SELF-REMAKE CHANNEL: a demo's self-check (the
-  // GPU Embers two-stage fallback) sets window.__vfxRemakeRequested after
-  // verdicting its GPU pipeline broken on this driver; the re-make runs
-  // through the standard activateDemo path (teardown + fresh make — the
-  // demo reads its fallback flag and takes the conservative branch). The
-  // poll is a flag read per frame — free; the return skips THIS frame's
-  // bake/draw (the fresh demo starts clean on the next).
-  // Task 149 — THE CONTEXT DISCIPLINE: the ladder's 0→1 step (down to the
-  // conservative TF tier) re-boots the RENDERER on the same backend
-  // instead — a fresh canvas + a fresh GL context, the exact cell the
-  // live minimal-config proof validated (a context the FULL pipeline
-  // never ran on, taking the conservative tier, lands its TF writes at
-  // the full 160k); deferred a tick so THIS frame's callback finishes
-  // before the renderer it runs on is disposed. The 1→2 step (the CPU
-  // tier) re-makes the demo alone — no transform feedback, the context
-  // is irrelevant.
-  // Task 150 — THE ISOLATION WALK's legs ride the SAME full re-boot path
-  // (each leg must land on a FRESH GL context — leg A isolates the
-  // GPU-emission family, leg B the cull/sort family; a leg on a warm
-  // context would test the residue, not the family). The walk's exit
-  // clears the leg flag and sets the rung-1 position, so the heal takes
-  // the same boot branch below.
-  if (window.__vfxRemakeRequested === true) {
-    window.__vfxRemakeRequested = undefined
-    const forensicWalk = window.__embersForensic === 'a' || window.__embersForensic === 'b'
-    if ((window.__embersFallback === 1 || forensicWalk) && activeRenderer !== null && activeRenderer.backend === 'webgl2') {
-      // Task 151 — THE RE-BOOT SETTLE: the setTimeout lets the current
-      // frame callback finish before the renderer it runs on is disposed
-      // — and the walk's legs and the 0→1 heal now take a 2 s SETTLE on
-      // top of that. The live 12:36 session entered its dropping state
-      // right after four renderer re-boots in 3.4 s: every subsequently
-      // born context dropped its TF writes, INCLUDING the configuration
-      // a fresh page load renders clean — and Chrome reaps torn-down GL
-      // contexts asynchronously, so a context born immediately after the
-      // dispose can inherit the degraded state. Give the driver room
-      // before the next context is born (2 s per walk step, paid only
-      // when the ladder actually runs).
-      // Task 152 — THE FRESH FLAG: these re-boots (the forensic walk's
-      // legs — the pass-family bisect NEEDS a fresh context to be a
-      // valid experiment; the storage-less 0→1 rung step) deliberately
-      // bypass the keep-alive: they dispose the session's GL context to
-      // birth a new one. The diagnostic paths accept the disposal poison
-      // (13:27: a fresh in-page context is born dead on the reporting
-      // class anyway — which is exactly why the DEFAULT level-0 heal
-      // crosses a page reload instead, gpuEmbers.js's marker).
-      setTimeout(() => { void boot('webgl2', { fresh: true }) }, 2000)
-    } else {
-      activateDemo('reboot')
-    }
-    return
-  }
   // auto-orbit: paused while dragging and for 1.5 s after
   if (!dragging && performance.now() - lastInteraction > 1500) camYaw += ctx.dt * presetOrbit
 
@@ -1552,16 +1406,15 @@ async function attachAtlas() {
   env.muzzleSheet = muzzleSheet
 }
 
-async function boot(mode, opts) {
+async function boot(mode) {
   const seq = ++bootSeq
-  const fresh = opts?.fresh === true
   // Task 152 — THE PARK-OR-RESURRECT RESOLUTION: a WebGL2 target boot
   // (explicit, or an auto with no navigator.gpu — the auto whose probe
   // fails at runtime falls back through the explicit path below) reuses
-  // the parked context. A FRESH request (the forensic walk's legs, the
-  // storage-less rung-1 step) bypasses the keep-alive deliberately.
+  // the parked context (Task 162: the fresh-bypass option died with the
+  // ladder — the diagnostic re-boots were its only callers).
   const glTarget = mode === 'webgl2' || (mode === 'auto' && typeof navigator !== 'undefined' && !('gpu' in navigator))
-  const keepCandidate = glTarget && !fresh
+  const keepCandidate = glTarget
   if (keepCandidate && glKeep !== null && !parkHealthy()) {
     // the browser lost the parked context while idle (a transient
     // loss-then-restore included — the restored objects are dead): discard
@@ -1582,21 +1435,15 @@ async function boot(mode, opts) {
     if (promoted) {
       // the promoted park IS the active renderer — parkGL already stopped
       // its loop; it re-enters as the resurrect below, nothing to dispose
-    } else if (activeRenderer.backend === 'webgl2' && !fresh) {
-      // leaving WebGL2 toward WebGPU/Auto: PARK (never dispose — the born-dead
-      // second context was the 13:27 report's cause)
+    } else if (activeRenderer.backend === 'webgl2') {
+      // leaving WebGL2 toward WebGPU/Auto: PARK (never dispose — the
+      // session keeps ONE GL context, ready to resurrect instantly)
       parkGL(activeRenderer)
     } else {
       try { activeRenderer.dispose() } catch { /* the context may have died with the canvas */ }
     }
     activeRenderer = null
     for (const layer of layers) layer.commandBuilt = false
-  }
-  if (fresh && glKeep !== null) {
-    // a deliberate fresh-context boot while a parked renderer exists: the
-    // park would leak a second live GL context — release it (this
-    // diagnostic path accepts the disposal poison)
-    releasePark('Releasing the parked WebGL2 context (a deliberate fresh-context boot — the diagnostic path accepts the disposal poison)')
   }
   // Task 152 — THE SLOT REBUILD THAT NEVER TOUCHES THE PARKED CANVAS: a
   // canvas that leaves the document or moves parents loses its WebGL
@@ -1616,9 +1463,9 @@ async function boot(mode, opts) {
   }
   if (wantResurrect) {
     // ── Task 152 — THE RESURRECT: the same renderer, the same canvas, the
-    //    same GL context (the one cell this driver class renders TF in);
-    //    the demo state and the UI chrome are re-made AROUND it. The
-    //    frame callback registered at this renderer's birth persists
+    //    same GL context (the session's ONE WebGL2 context — parked, never
+    //    disposed); the demo state and the UI chrome are re-made AROUND
+    //    it. The frame callback registered at this renderer's birth persists
     //    (re-registering would double every frame); the canvas keeps its
     //    input listeners for the same reason; the ResizeObserver never
     //    left (its clientWidth-0 guard carried the parked interlude).
@@ -1648,10 +1495,9 @@ async function boot(mode, opts) {
     bar.hidden = false
     shell.setBadge('WebGL2', 'gl')
     shell.log.info('Backend: WebGL2')
-    // Task 152 — the context line now counts REAL contexts: a resurrect
-    // does not create one (the correlate of every live drop was the GL
-    // context's creation history — the next pasted log carries the
-    // keep-alive verdict directly).
+    // Task 152 — the context line counts REAL contexts: a resurrect does
+    // not create one (the session keeps ONE GL context — the discipline
+    // the counter proves).
     shell.log.info(`context #${seq} this session (WebGL2, GL #${glContexts}, RESURRECTED — parked, never disposed: the Task 152 keep-alive)`)
     bootedOnce = true
   } else {
@@ -1688,12 +1534,10 @@ async function boot(mode, opts) {
       await attachAtlas()
       // A RE-boot (a backend toggle) with a live demo: the demo state owns
       // renderer-bound objects (the soft demo's surface + prepass commands)
-      // — re-make it on THIS backend. The FIRST boot's demo make: the plain
-      // flow made demo 0 pre-boot (the Go section); the MARKER path (the
-      // reload crossing) defers its make to HERE — the renderer and the
-      // boot's textures exist (the GPU-tier demos' make() touches
-      // env.renderer.inner).
-      if (state === null) switchDemo(initialDemoIndex)
+      // — re-make it on THIS backend. The plain flow already made demo 0
+      // pre-boot (the Go section); the state === null guard below stays
+      // defensive (a pre-boot make that threw leaves state null).
+      if (state === null) switchDemo(0)
       else if (bootedOnce) activateDemo('reboot')
       attachLayers()
       renderer.frame(frameCallback)
@@ -1773,41 +1617,5 @@ async function boot(mode, opts) {
 
 shell.log.info(`WebGL2: ${typeof WebGL2RenderingContext !== 'undefined' ? 'present in the browser' : 'missing'}`)
 shell.log.info('24 demos on @rune/particles — the library surface end to end + the rune originals + the GPU compute tier (160k embers on WebGPU)')
-if (pendingCrossing !== null) {
-  // Task 152 — THE RELOAD CROSSING'S LANDING: the previous page's level-0
-  // verdict wrote the marker and reloaded; this fresh page boots straight
-  // into WebGL2 at rung 1 — its FIRST GL context is the best cell on the
-  // reporting driver class (v155 semantics, verbatim: the user chose
-  // WebGL2, the healed reload returns them to WebGL2).
-  window.__embersFallback = 1
-  const radio = document.querySelector('input[name="rd-mode"][value="webgl2"]')
-  if (radio !== null) radio.checked = true
-  const why = pendingCrossing.why != null ? ` — the drop that asked for it: ${pendingCrossing.why}` : ''
-  shell.log.event(`GL heal: the reload crossing landed (rung 1, demo ${pendingCrossing.demo})${why} — the fresh page's first WebGL2 context takes the conservative tier`)
-} else if (deviceVerdict !== null) {
-  // Task 155 — THE DEVICE VERDICT'S LANDING: the knowledge is
-  // device-scoped — this page (a reload OR a fresh tab) skips the doomed
-  // attempts the verdict already paid for. The landing does NOT hijack
-  // the boot mode: a WebGPU-capable browser still boots the user's own
-  // default (the verdict binds the WebGL2 leg only — a backend toggle
-  // into WebGL2 takes the floor/rung in-page through the window flag,
-  // instantly, no reload, no black window).
-  window.__embersFallback = deviceVerdict.rung
-  const why = deviceVerdict.why != null ? ` — the drop that asked for it: ${deviceVerdict.why}` : ''
-  if (deviceVerdict.rung === 2) {
-    shell.log.event(`GL heal: the device verdict remembered (rung 2, demo ${deviceVerdict.demo})${why} — this device's conservative TF tier verdicted dead across reloads, so the WebGL2 leg lands the CPU floor DIRECTLY: no GPU attempt, no self-reload, no verdict pair — on every reload AND every fresh tab of this browser (the verdict re-probes in ~${Math.round(VERDICT_TTL_MS / 3_600_000)} h or after a browser update; ?emit=1&cull=1 forces the GPU pipeline)`)
-  } else if (deviceVerdict.reprobe === true) {
-    shell.log.event(`GL heal: the device verdict (rung 2, demo ${deviceVerdict.demo}) is ${Math.max(1, Math.round((Date.now() - (deviceVerdict.at ?? 0)) / 3_600_000))} h old — the periodic RE-PROBE: this page's WebGL2 leg takes the conservative TF tier (a clean re-probe restores the 160k tier and re-arms rung 1; a dropping one re-arms the CPU floor directly)${why}`)
-  } else {
-    shell.log.event(`GL heal: the device verdict remembered (rung 1, demo ${deviceVerdict.demo})${why} — the full pipeline verdicted dead on this device, so the WebGL2 leg boots the conservative TF tier directly (the full capacity, emit cpu, cull off; a clean tier keeps it, a dropping one steps to the CPU floor in-page)`)
-  }
-}
-if (pendingCrossing === null && deviceVerdict === null) switchDemo(0) // the plain flow's pre-boot make (demo 0 — a CPU-tier make that tolerates the renderer-less pre-boot)
-// Task 152/155 — the MARKER/VERDICT paths defer their demo make INTO the
-// boot (after the renderer exists): the GPU Embers make() reads
-// env.renderer.inner — a pre-boot make would crash on null (the live
-// reload-heal gate's catch). boot's fresh path takes the state === null
-// branch there. The CROSSING forces the WebGL2 boot (the user chose it);
-// the device verdict does NOT (the user's own mode wins — the verdict
-// binds the WebGL2 leg only).
-void boot(pendingCrossing !== null ? 'webgl2' : (shell.mode ?? 'auto'))
+switchDemo(0) // the plain flow's pre-boot make (demo 0 — a CPU-tier make that tolerates the renderer-less pre-boot)
+void boot(shell.mode ?? 'auto')
