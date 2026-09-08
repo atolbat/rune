@@ -15,10 +15,11 @@
 //
 // EVERY sprite on this page is OURS — generated in this file (deterministic
 // pure functions → raw RGBA uploads; no image assets, no browser
-// premultiply semantics). The dist imports carry ?v=150 (Task 149: the
-// self-heal re-make — the stale-cache guard — bump on release; Task 130
-// changed @rune/particles: the line lattice).
-import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=150'
+// premultiply semantics). The dist imports carry ?v= (the stale-cache
+// guard — bump on release): rune.esm.js is at ?v=161 (Task 161: the TF
+// program-binary cache-miss nonce — the Mali poison armor), the
+// untouched bundles keep their Task 149 marks.
+import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=161'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER, BILLBOARD,

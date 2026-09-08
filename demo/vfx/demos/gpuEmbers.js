@@ -172,7 +172,7 @@
 //     cull, softwareGL } — the probe gates pin the tier + the frame cost
 //     + the hardware-policy branch; window.__vfxCounters.embers — the
 //     emission counters.
-import { createGpuParticles } from '../../../dist/rune.esm.js?v=150'
+import { createGpuParticles } from '../../../dist/rune.esm.js?v=161' // Task 161: the TF cache-miss nonce — every gpuEmbers TF link is now a fresh compile (the Mali program-binary cache poison can no longer reach the demo)
 
 // Task 140 — THE AUTO-FALLBACK CHANNEL (the real-GPU invisible-particles
 // report: "no freeze anymore, but the particles are gone while the counter

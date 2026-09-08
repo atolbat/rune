@@ -4428,6 +4428,15 @@ function formatInfo(format) {
       return { internalFormat: ENUM.RGBA8, uploadFormat: ENUM.RGBA, uploadType: ENUM.UNSIGNED_BYTE };
   }
 }
+var TF_NONCE_SEED = `${Date.now().toString(36)}.${Math.random().toString(36).slice(2, 8)}`;
+var tfNonceCounter = 0;
+function tfNoncedVertexSource(vertex) {
+  const source = vertex.endsWith(`
+`) ? vertex : `${vertex}
+`;
+  return `${source}// rune tf-link ${TF_NONCE_SEED}#${++tfNonceCounter}
+`;
+}
 function createRealGL(gl, onViewportHeal) {
   const programs = new Map;
   const buffers = new Map;
@@ -4973,7 +4982,7 @@ function createRealGL(gl, onViewportHeal) {
   const transformProgramIds = new Set;
   function createTransformPass(desc) {
     const program = gl.createProgram();
-    gl.attachShader(program, compile(gl.VERTEX_SHADER, desc.vertex));
+    gl.attachShader(program, compile(gl.VERTEX_SHADER, tfNoncedVertexSource(desc.vertex)));
     gl.attachShader(program, compile(gl.FRAGMENT_SHADER, `#version 300 es
 precision lowp float;
 void main() {}

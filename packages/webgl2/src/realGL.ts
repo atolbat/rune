@@ -66,6 +66,46 @@ interface TargetRecord {
   readonly color: readonly number[]
 }
 
+/** Task 161 — THE PROGRAM-BINARY CACHE POISON: on ARM Mali drivers the
+ *  glProgramBinary blob omits the transform-feedback varyings, and
+ *  ANGLE's program cache (backed by Chrome's GPU disk cache — it survives
+ *  reloads and browser restarts) restores such a binary on any REPEAT
+ *  link of the same source set: the link reports ok, the varyings query
+ *  reports the full set, and the TF pass then silently captures NOTHING
+ *  (the SENTINEL-INTACT signature; the v1–v4 field probes on the Mali-G57:
+ *  15/15 links — every FIRST link of a source set alive, every repeat
+ *  link dead — reload, context recovery, second tab, all identical; and
+ *  the repeat links are FASTER: 6–9ms vs 14–16ms, the cache-hit
+ *  fingerprint). Chrome's gpu_driver_bug_list workaround for exactly
+ *  this (entry 306, crbug.com/961950) is dead code under the ANGLE
+ *  passthrough decoder — issuetracker.google.com/issues/530857248,
+ *  fixed ANGLE-side 2026-07-06 (CL 8040203: disable program caching on
+ *  Mali), but Chrome ≤150 and every other GL stack stay exposed.
+ *
+ *  THE ARMOR (the app-level mirror of the ANGLE fix): a trailing comment
+ *  unique to EVERY link changes the program-binary cache key, so a TF
+ *  link is a cache MISS forever — a fresh compile is the one link shape
+ *  the field matrix proved TF-alive. The nonce rides the VERTEX source
+ *  alone (the captured varyings are the vertex stage's outputs; the v4
+ *  probe salted the vertex only and defeated the poison) and is unique
+ *  across reloads (time+random seed) AND within a page (monotonic
+ *  counter) — a context recovery's re-link must miss the cache too, not
+ *  just the first boot. Render programs (createProgram) stay
+ *  cache-eligible: the poison only strikes binaries that carry TF
+ *  varyings. Cost: one fresh compile per TF pass creation (~10–16ms in
+ *  the field). */
+const TF_NONCE_SEED = `${Date.now().toString(36)}.${Math.random().toString(36).slice(2, 8)}`
+let tfNonceCounter = 0
+
+/** Appends the per-link nonce comment (Task 161) to a TF pass's vertex
+ *  source. A trailing `//` comment is position-safe GLSL (the #version
+ *  directive must stay the first statement, so the nonce never precedes
+ *  it); a missing final newline is supplied first. */
+function tfNoncedVertexSource(vertex: string): string {
+  const source = vertex.endsWith('\n') ? vertex : `${vertex}\n`
+  return `${source}// rune tf-link ${TF_NONCE_SEED}#${++tfNonceCounter}\n`
+}
+
 export function createRealGL(
   gl: WebGL2RenderingContext,
   /** Task 129: the viewport-heal sink — fires ONCE per divergence between
@@ -1018,9 +1058,11 @@ export function createRealGL(
     // WebGL2 contract: transformFeedbackVaryings must precede linkProgram).
     // The fragment stage is a trivial no-op — rasterization is discarded
     // during the pass, but a program still needs a fragment shader to link
-    // on strict drivers.
+    // on strict drivers. The vertex source carries the Task 161 nonce —
+    // every TF link must be a program-binary cache MISS (the poison the
+    // nonce defeats: TF_NONCE_SEED's comment above).
     const program = gl.createProgram()
-    gl.attachShader(program, compile(gl.VERTEX_SHADER, desc.vertex))
+    gl.attachShader(program, compile(gl.VERTEX_SHADER, tfNoncedVertexSource(desc.vertex)))
     gl.attachShader(program, compile(gl.FRAGMENT_SHADER, '#version 300 es\nprecision lowp float;\nvoid main() {}\n'))
     gl.transformFeedbackVaryings(program, desc.outputs as unknown as string[], gl.INTERLEAVED_ATTRIBS)
     gl.linkProgram(program)

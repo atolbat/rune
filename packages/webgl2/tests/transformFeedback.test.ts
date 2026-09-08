@@ -26,11 +26,15 @@ interface MockCallLog {
   readonly gl: WebGL2RenderingContext
   /** program link order: the varyings submitted before each link. */
   readonly varyings: string[][]
+  /** shaderSource call order (Task 161: vertex/fragment sources as
+   *  compiled — the nonce tests read the TF vertex sources from here). */
+  readonly sources: string[]
 }
 
 function mockGL(): MockCallLog {
   const calls: string[] = []
   const varyings: string[][] = []
+  const sources: string[] = []
   let program = 0
   let shader = 0
   let buffer = 0
@@ -67,7 +71,8 @@ function mockGL(): MockCallLog {
       calls.push(`transformFeedbackVaryings(${names.join('+')},${mode})`)
     },
     createShader: () => ({ id: ++shader }),
-    shaderSource: () => {},
+    // Task 161 — capture the compiled sources (the nonce armor tests).
+    shaderSource: (_shader: unknown, source: string) => { sources.push(source) },
     compileShader: () => {},
     getShaderParameter: () => true,
     getShaderInfoLog: () => '',
@@ -144,7 +149,7 @@ function mockGL(): MockCallLog {
     getExtension: () => null,
     getParameter: () => 4096,
   } as unknown as WebGL2RenderingContext
-  return { calls, gl, varyings }
+  return { calls, gl, varyings, sources }
 }
 
 const VERT = `#version 300 es
@@ -157,6 +162,32 @@ void main() { v_s0 = texelFetch(u_state, ivec2(int(a_map), 0), 0) + vec4(u_dt); 
 `
 
 describe('realGL: the transform-feedback family', () => {
+  test('Task 161 — every TF link carries a unique vertex-source nonce (the program-binary cache-miss armor)', () => {
+    const { gl, sources } = mockGL()
+    const facade = createRealGL(gl)
+    // Two passes over the IDENTICAL source set — the poison scenario: a
+    // reload, a context-recovery re-link, a second tab; any repeat link
+    // of the same sources must NOT hit the program-binary cache (on Mali
+    // the restored binary silently loses its TF capture).
+    facade.createTransformPass({ vertex: VERT, outputs: ['v_s0'] })
+    facade.createTransformPass({ vertex: VERT, outputs: ['v_s0'] })
+    // Compile order per pass: the (nonced) vertex first, then the shared
+    // trivial fragment.
+    const vertex0 = sources[0] as string
+    const vertex1 = sources[2] as string
+    // The original shader is intact — the armor is a TRAILING comment
+    // (never before #version), the source keeps a final newline.
+    expect(vertex0.startsWith(VERT)).toBe(true)
+    expect(vertex1.startsWith(VERT)).toBe(true)
+    expect(vertex0.endsWith('\n')).toBe(true)
+    // The cache keys differ per link, forever: no two links anywhere in
+    // the page's lifetime compile the same vertex source.
+    expect(vertex0).not.toBe(vertex1)
+    // The trivial fragment stays shared — only the vertex needs the
+    // armor (the captured varyings are the vertex stage's outputs).
+    expect(sources[1]).toBe(sources[3])
+  })
+
   test('createTransformPass: the varyings are submitted BEFORE the link, INTERLEAVED', () => {
     const { calls, gl, varyings } = mockGL()
     const facade = createRealGL(gl)
