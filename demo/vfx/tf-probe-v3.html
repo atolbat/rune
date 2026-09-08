@@ -1,0 +1,1083 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>tf-probe v3 — что лечит яд</title>
+<!--
+  Task 158 — the THIRD raw probe. v1 (Task 156): the first context of a
+  page is TF-healthy, contexts born after loseContext+dispose are born
+  TF-DEAD (silent, no GL errors). v2 (Task 157): the DISCRIMINATING
+  MATRIX came back — the base ctx1 of load #2 is ALREADY DEAD. Unique
+  shader sources, 5s settle, SEPARATE/INTERLEAVED, fence/+350ms/copy
+  read ladder — none of it revived TF. The poison OUTLIVES the page.
+
+  So the question changed. v3 is the RESET MATRIX: what CURES it?
+    reload the page        (v2 says: does NOT cure)
+    browser restart        (GPU process respawn — H1, in-memory poison)
+    cache clear            (ANGLE program cache / GPUCache — H2, disk)
+    phone reboot / Firefox (driver / OS — H3)
+
+  Evidence machinery:
+    - localStorage run history: every run's verdict is stamped and
+      printed at the top of the NEXT log (survives browser restart) —
+      the before/after-restart story assembles inside ONE log
+    - sessionStorage tab counter + navigation type (soft session signal)
+    - a manual 📌 marker button: "browser was just restarted" — the
+      only reliable restart evidence (localStorage cannot tell restart
+      from a new tab)
+    - if the base is ALIVE: the RESTORE experiment (loseContext +
+      preventDefault + restoreContext + battery on the SAME context —
+      the app-level workaround candidate, never yet run on the phone),
+      then the NEW-CONTEXT loss cycles (the v1 condition), so one auto
+      run answers "restore vs recreate" directly
+    - WGPU compute probe: is the GPU alive OUTSIDE the GL stack?
+      (alive + dead GL TF => suspicion narrows to ANGLE/GL path;
+       dead too => take H3 driver/OS seriously)
+    - battery is minimal: T1 (readback path), T2 (TF roundtrip, unique
+      salt per run), T4 (raster ground truth). The fence/+350/copy
+      ladder, sep/relink cache probes are already ruled out by v2.
+-->
+<style>
+  :root{
+    --bg:#040509; --panel:#0a0d15; --line:#26304a; --line2:#2c3855;
+    --txt:#cfd6e4; --dim:#6b7691; --accent:#7aa2f7; --accent2:#9eccff;
+    --ok:#9ece6a; --bad:#f7768e; --warn:#e0af68;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--txt);
+    font:14px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;
+    -webkit-text-size-adjust:100%}
+  .wrap{max-width:860px;margin:0 auto;padding:14px 14px calc(env(safe-area-inset-bottom,0px) + 14px)}
+  h1{font-size:17px;margin:0 0 4px;letter-spacing:.01em}
+  h1 .v{color:var(--dim);font-weight:400;font-size:12px}
+  .desc{color:var(--dim);font-size:12.5px;margin:0 0 10px;max-width:75ch}
+  .desc b{color:var(--accent2);font-weight:600}
+  .desc code{font:11px/1.4 ui-monospace,'SF Mono',Menlo,Consolas,monospace;color:var(--accent2)}
+
+  details.proto{border:1px solid var(--line);border-radius:10px;background:var(--panel);
+    padding:8px 12px;margin:0 0 12px;font-size:12.5px}
+  details.proto summary{cursor:pointer;font-weight:600;color:var(--accent2)}
+  details.proto ol{margin:6px 0 2px;padding-left:20px;color:var(--txt)}
+  details.proto li{margin:5px 0}
+  details.proto b{color:var(--warn)}
+
+  #status{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 10px;
+    font-size:12px;color:var(--dim);min-height:24px}
+  #status b{color:var(--txt);font-weight:600}
+  #status .live{color:var(--ok)} #status .dead{color:var(--bad)}
+
+  #sumwrap{overflow-x:auto;margin:0 0 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+  #sum{border-collapse:collapse;font:11px/1.5 ui-monospace,'SF Mono',Menlo,Consolas,monospace;white-space:nowrap}
+  #sum th{color:var(--dim);font-weight:500;text-align:left;padding:6px 9px;border-bottom:1px solid var(--line)}
+  #sum td{padding:5px 9px;border-bottom:1px solid #141a29}
+  #sum tr:last-child td{border-bottom:none}
+  #sum .ok{color:var(--ok)} #sum .bad{color:var(--bad)} #sum .warn{color:var(--warn)} #sum .dim{color:var(--dim)}
+
+  #cvrow{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}
+  .slot{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:6px;width:118px}
+  .slot .cvwrap{width:100%;aspect-ratio:1/1;border-radius:7px;overflow:hidden;background:#000}
+  .slot canvas,.slot img{display:block;width:100%;height:100%}
+  .slot .lbl{margin-top:5px;font:600 10.5px/1.3 ui-monospace,Menlo,Consolas,monospace;color:var(--txt);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .slot .st{font-size:10px;color:var(--dim)}
+  .slot.disposed{opacity:.7}
+
+  #bar{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}
+  button{min-height:44px;padding:10px 14px;border-radius:9px;cursor:pointer;touch-action:manipulation;
+    border:1px solid var(--line2);background:#121826;color:var(--txt);
+    font:600 13px/1.2 system-ui,-apple-system,'Segoe UI',sans-serif}
+  button:hover{border-color:#3b4a70}
+  button:disabled{opacity:.45;cursor:default}
+  button.primary{border-color:#33507e;background:#16233c;color:var(--accent2)}
+  button.warnbtn{border-color:#6a4d1e;background:#241a0d;color:var(--warn)}
+  button.danger{border-color:#6a2c38;background:#241016;color:#f0a4b2}
+
+  #logsec{border:1px solid var(--line);border-radius:10px;background:var(--panel);overflow:hidden}
+  #logbar{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--line)}
+  #logbar .t{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);flex:1}
+  #logbar button{min-height:34px;padding:7px 12px;font-size:12px}
+  #loglist{list-style:none;margin:0;padding:8px 10px;max-height:50vh;min-height:120px;overflow-y:auto;
+    font:11.5px/1.55 ui-monospace,'SF Mono',Menlo,Consolas,monospace}
+  #loglist li{display:flex;gap:7px;align-items:baseline;white-space:pre-wrap;word-break:break-word}
+  #loglist .t{color:var(--dim);flex:0 0 auto}
+  #loglist .lv{flex:0 0 auto;font-weight:700;font-size:10px;letter-spacing:.04em;padding:1px 5px;border-radius:3px}
+  #loglist .m{flex:1;min-width:0}
+  .lv-PASS{color:var(--ok);background:#14210f}
+  .lv-FAIL{color:var(--bad);background:#241016}
+  .lv-WARN{color:var(--warn);background:#231a0c}
+  .lv-ERROR{color:var(--bad);background:#2b0d12}
+  .lv-EVENT{color:var(--accent2);background:#101c30}
+  .lv-INFO{color:var(--dim)}
+  .lv-MARKER{color:#141414;background:var(--warn)}
+  .hint{color:var(--dim);font-size:11.5px;margin:10px 0 0;max-width:80ch}
+  .hint code{color:var(--accent2)}
+  .hint b{color:var(--warn)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>tf-probe v3 <span class="v">Task 158 · что ЛЕЧИТ яд · без библиотеки</span></h1>
+  <p class="desc">
+    v2 показал: яд живёт <b>дольше страницы</b> — база мертва уже на первой
+    загрузке (уник-исходники, 5с, кеш-пробы, лестница чтений — ничего не
+    помогло). v3 — <b>reset-матрица</b>: излечивает ли яд <code>reload</code> /
+    <b>рестарт браузера</b> / <b>чистка кеша</b> / <b>ребут</b>? Плюс два
+    новых различителя: <b>restore-путь</b> (<code>webglcontextrestored</code>
+    на том же контексте — кандидат-митигация для приложения, на телефоне
+    ещё не запускался) против <b>нового контекста</b>, и <b>WGPU-проба</b> —
+    жив ли GPU вообще вне GL-стека. Жми <b>Copy</b> и пришли лог.
+  </p>
+
+  <details class="proto" open>
+    <summary>ПРОТОКОЛ — 3 шага (~5 минут всего)</summary>
+    <ol>
+      <li>Дождись <b>AUTO MATRIX завершена</b> (~10–25с). Если база <b>ЖИВА</b> —
+        страница сама прогонит restore-эксперимент и лосс-циклы, потом скажет
+        «перезагрузи страницу» — сделай <b>⟳ reload</b> (браузер НЕ закрывать!)
+        и пришли лог.</li>
+      <li>Если база <b>МЕРТВА</b> — полностью закрой Chrome («Недавние» → свайп,
+        или Настройки → Приложения → Chrome → «Остановить»), открой эту страницу,
+        <b>сразу нажми 📌 маркер</b>, дождись вердикта, пришли лог.</li>
+      <li>Если мертва и после рестарта — следуй инструкциям в логе: чистка кеша
+        Chrome → инкогнито / Firefox (этот же URL) → ребут телефона. Каждый
+        шаг = один лог. По желанию: <code>chrome://gpu</code> → Graphics Feature
+        Status + счётчик аварий GPU-процесса (скажи словами).</li>
+    </ol>
+  </details>
+
+  <div id="status">boot…</div>
+  <div id="sumwrap"><table id="sum">
+    <thead><tr><th>#</th><th>метка</th><th>сост.</th><th>T1</th><th>TF</th><th>T4</th></tr></thead>
+    <tbody id="sumbody"></tbody>
+  </table></div>
+
+  <div id="cvrow"></div>
+
+  <div id="bar">
+    <button class="warnbtn" id="btn-mark">📌 Маркер: браузер только что перезапущен</button>
+    <button id="btn-plus">+1 контекст (старый живёт)</button>
+    <button id="btn-rerun">Ещё раз (новая база в этой же странице)</button>
+    <button class="danger" id="btn-reload">⟳ Перезагрузить (персистентность)</button>
+  </div>
+
+  <section id="logsec">
+    <div id="logbar">
+      <span class="t">лог <span id="logcount">0</span></span>
+      <button class="primary" id="btn-copy">Copy</button>
+      <button id="btn-clear">Clear</button>
+    </div>
+    <ol id="loglist"></ol>
+  </section>
+
+  <p class="hint">
+    Чек-лист: 1) дождись <code>AUTO MATRIX завершена</code>; 2) база жива →
+    после автопрогона <b>⟳ reload</b> и пришли лог (лечит ли reload); 3) база
+    мертва → <b>force-stop Chrome</b> → эта страница → <b>📌 маркер</b> → лог;
+    4) дальше по инструкциям в логе; 5) <code>Copy</code> → пришли лог целиком.
+    История прогонов печатается в начале каждого лога (localStorage) — «до
+    рестарта / после рестарта» соберётся в одном логе.
+  </p>
+</div>
+
+<script>
+'use strict'
+/* ============ Task 158 — tf-probe v3: the RESET matrix ============ */
+
+var VERSION = 'tf-probe v3 (Task 158)'
+var N = 1024            // vertices per TF pass
+var SENT = 1337.0       // sentinel prefill
+var MAX_ENTRIES = 900
+
+/* ---------- the log (v1/v2-exact format) ---------- */
+var entries = []
+var logList = document.getElementById('loglist')
+var logCount = document.getElementById('logcount')
+function stamp() {
+  var d = new Date()
+  var ms = String(d.getMilliseconds())
+  while (ms.length < 3) ms = '0' + ms
+  return d.toTimeString().slice(0, 8) + '.' + ms
+}
+function log(level, msg) {
+  entries.push({ time: stamp(), level: level, msg: msg })
+  if (entries.length > MAX_ENTRIES) entries.splice(0, entries.length - MAX_ENTRIES)
+  renderLog()
+}
+function renderLog() {
+  var frag = document.createDocumentFragment()
+  for (var i = 0; i < entries.length; i++) {
+    var e = entries[i]
+    var li = document.createElement('li')
+    li.innerHTML = '<span class="t"></span><span class="lv lv-' + e.level + '"></span><span class="m"></span>'
+    li.firstChild.textContent = e.time
+    li.children[1].textContent = e.level
+    li.children[2].textContent = e.msg
+    frag.appendChild(li)
+  }
+  logList.replaceChildren(frag)
+  logCount.textContent = String(entries.length)
+  logList.scrollTop = logList.scrollHeight
+}
+
+/* ---------- session stamps (v3: the reset dimension) ----------
+ * localStorage  — survives browser restarts (cumulative run counter)
+ * sessionStorage — dies with the tab (soft "same tab session" signal)
+ * navigation type — reload vs navigate (soft)
+ * tfp3.hist      — the verdict of each run, printed at the next load:
+ *                  the before/after-restart story inside ONE log      */
+var loads = 1, tabLoads = 1, navType = 'unknown'
+try {
+  loads = (parseInt(localStorage.getItem('tfp3.loads') || '0', 10) || 0) + 1
+  localStorage.setItem('tfp3.loads', String(loads))
+} catch (e) { log('WARN', 'localStorage недоступен — счётчики неточны') }
+try {
+  tabLoads = (parseInt(sessionStorage.getItem('tfp3.tab') || '0', 10) || 0) + 1
+  sessionStorage.setItem('tfp3.tab', String(tabLoads))
+} catch (e) { tabLoads = 1 }
+try {
+  var nav = performance.getEntriesByType('navigation')[0]
+  if (nav && nav.type) navType = nav.type
+} catch (e) {}
+
+function getHist() {
+  try { return JSON.parse(localStorage.getItem('tfp3.hist') || '[]') } catch (e) { return [] }
+}
+function setHist(h) {
+  try { localStorage.setItem('tfp3.hist', JSON.stringify(h.slice(-8))) } catch (e) {}
+}
+function ago(t) {
+  var m = Math.round((Date.now() - t) / 60000)
+  if (m < 1) return 'только что'
+  if (m < 60) return m + ' мин назад'
+  var h = Math.floor(m / 60), mm = m % 60
+  if (h < 24) return h + ' ч ' + (mm ? mm + ' мин ' : '') + 'назад'
+  return Math.floor(h / 24) + ' д назад'
+}
+function printHist() {
+  var h = getHist()
+  if (!h.length) { log('INFO', 'hist — предыдущих прогонов v3 нет (это первый, история появится в следующем логе)'); return }
+  for (var i = 0; i < h.length; i++) {
+    var e = h[i]
+    log('INFO', 'hist — прогон №' + (i + 1) + ' · ' + ago(e.t) + ': база ' + e.base +
+      (e.rest ? ' · restore ' + e.rest : '') +
+      (e.newctx ? ' · новый-контекст ' + e.newctx + (e.losses ? ' (лосс ×' + e.losses + ')' : '') : '') +
+      (e.marker ? ' · [📌 юзер сообщил рестарт браузера]' : ''))
+  }
+  var last = h[h.length - 1]
+  if (last.base === 'ok') log('INFO', 'hist — в последнем прогоне база была ЖИВА: если сейчас DEAD — яд пережил reload страницы (reload НЕ лечит)')
+  else log('INFO', 'hist — в последнем прогоне база была МЕРТВА: если сейчас ЖИВА — что-то между прогонами яд ИЗЛЕЧИЛО (рестарт? чистка? время?) — отметь 📌 маркер, если рестартил')
+}
+
+/* ---------- copy (v1/v2-exact strategy) ---------- */
+function buildReport() {
+  var head = [
+    VERSION + ' — raw WebGL2 TF probe, the RESET matrix (zero library)',
+    'url: ' + location.href,
+    'time: ' + new Date().toISOString(),
+    'viewport: ' + window.innerWidth + 'x' + window.innerHeight + ' (dpr ' + window.devicePixelRatio + ')',
+    'ua: ' + navigator.userAgent,
+    'gl contexts created: ' + totalCreated + ' · disposed: ' + totalDisposed + ' · alive now: ' + aliveCount(),
+    'page loads of this url (localStorage): ' + loads + ' · tab session loads (sessionStorage): ' + tabLoads + ' · navigation: ' + navType,
+    'restart marker pressed this run: ' + (markerPressed ? 'YES' : 'no'),
+    'entries: ' + entries.length,
+    '---',
+  ]
+  var lines = entries.map(function (e) { return '[' + e.time + '] ' + e.level + ': ' + e.msg })
+  return head.concat(lines).join('\n')
+}
+function legacyCopy(text) {
+  try {
+    var area = document.createElement('textarea')
+    area.value = text
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.append(area)
+    area.select()
+    var ok = document.execCommand('copy')
+    area.remove()
+    return ok
+  } catch (e) { return false }
+}
+function copyLog(button) {
+  var text = buildReport()
+  function done(via) {
+    log('EVENT', 'Log copied to clipboard (' + via + ', ' + entries.length + ' entries)')
+    if (button) {
+      var orig = button.textContent
+      button.textContent = 'Copied'
+      setTimeout(function () { button.textContent = orig }, 1500)
+    }
+  }
+  function fail(e) { log('ERROR', 'Failed to copy log: ' + (e && e.message ? e.message : String(e))) }
+  if (navigator.clipboard !== undefined && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(function () { done('clipboard API') }, function (e) {
+      legacyCopy(text) ? done('textarea fallback') : fail(e)
+    })
+  } else {
+    legacyCopy(text) ? done('textarea fallback') : fail(new Error('clipboard unavailable (https or localhost required)'))
+  }
+}
+document.getElementById('btn-copy').addEventListener('click', function () { copyLog(this) })
+document.getElementById('btn-clear').addEventListener('click', function () {
+  entries = []
+  renderLog()
+  log('EVENT', 'log cleared')
+})
+
+/* ---------- GL helpers (v2-exact) ---------- */
+var GL_ERRORS = {
+  0x0500: 'INVALID_ENUM', 0x0501: 'INVALID_VALUE', 0x0502: 'INVALID_OPERATION',
+  0x0503: 'STACK_OVERFLOW', 0x0504: 'STACK_UNDERFLOW', 0x0505: 'OUT_OF_MEMORY',
+  0x0506: 'INVALID_FRAMEBUFFER_OPERATION', 0x9242: 'CONTEXT_LOST_WEBGL',
+}
+function glErrName(code) { return GL_ERRORS[code] || ('0x' + code.toString(16)) }
+function errSweep(ctx, tag) {
+  var gl = ctx.gl
+  var code = gl.getError()
+  if (code !== gl.NO_ERROR) log('WARN', '#' + ctx.index + ' gl.getError after ' + tag + ' -> ' + glErrName(code))
+  return code
+}
+function readCenterWarm(gl) {
+  var RW = 64, RH = 64
+  var px = new Uint8Array(RW * RH * 4)
+  gl.readPixels(Math.floor((gl.drawingBufferWidth - RW) / 2), Math.floor((gl.drawingBufferHeight - RH) / 2),
+    RW, RH, gl.RGBA, gl.UNSIGNED_BYTE, px)
+  var warm = 0
+  for (var i = 0; i < px.length; i += 4) if (px[i] + px[i + 1] + px[i + 2] > 90) warm++
+  return warm / (RW * RH)
+}
+var SENT_ROW = [SENT, SENT, SENT, SENT]
+function classifyRows(data, expectedFn, n, sentRow) {
+  var sr = sentRow || SENT_ROW
+  var res = { expected: 0, sentinel: 0, zero: 0, garbage: 0, firstBad: null }
+  for (var i = 0; i < n; i++) {
+    var e0 = expectedFn(i * 4), ok = true, allSent = true, allZero = true
+    for (var k = 0; k < 4; k++) {
+      var v = data[i * 4 + k]
+      if (Math.abs(v - e0[k]) > 1e-4 * Math.max(1, Math.abs(e0[k]))) ok = false
+      if (Math.abs(v - sr[k]) > 1e-6) allSent = false
+      if (v !== 0) allZero = false
+    }
+    if (ok) res.expected++
+    else if (allSent) res.sentinel++
+    else if (allZero) res.zero++
+    else { res.garbage++ }
+    if (!ok && res.firstBad === null) {
+      res.firstBad = 'row ' + i + ': got [' + data[i * 4] + ',' + data[i * 4 + 1] + ',' + data[i * 4 + 2] + ',' + data[i * 4 + 3] +
+        '] want [' + e0.join(',') + ']'
+    }
+  }
+  return res
+}
+function rowVerdict(r, n) {
+  if (r.expected === n) return 'ok'
+  if (r.sentinel === n) return 'SENTINEL-INTACT (the TF pass never wrote)'
+  if (r.zero === n) return 'ALL-ZEROS (wrote zeros / zero-init survived)'
+  if (r.expected + r.sentinel + r.zero < n) return 'GARBAGE ' + r.garbage + '/' + n + ' rows'
+  return 'MIXED ok:' + r.expected + ' sent:' + r.sentinel + ' zero:' + r.zero
+}
+
+/* ---------- the context registry (v2-exact + restoreArmed) ---------- */
+var contexts = []
+var totalCreated = 0
+var totalDisposed = 0
+var busy = false
+var glUnavailable = false
+var restoreArmed = false      // during the restore experiment: preventDefault on contextlost
+var markerPressed = false
+var firstRenderer = null
+var GL_ATTEMPTS = [
+  { antialias: true, preserveDrawingBuffer: true, alpha: false },
+  { antialias: false, preserveDrawingBuffer: true, alpha: false },
+  { alpha: false },
+]
+function aliveCount() {
+  var n = 0
+  for (var i = 0; i < contexts.length; i++) if (!contexts[i].disposed && !contexts[i].lost) n++
+  return n
+}
+function currentCtx() {
+  for (var i = contexts.length - 1; i >= 0; i--) if (!contexts[i].disposed && !contexts[i].lost) return contexts[i]
+  return null
+}
+function updateStatus() {
+  var el = document.getElementById('status')
+  var cur = currentCtx()
+  el.innerHTML = ''
+  var b1 = document.createElement('b'); b1.textContent = 'создано: ' + totalCreated
+  var b2 = document.createElement('b'); b2.textContent = ' · убито: ' + totalDisposed
+  var b3 = document.createElement('b'); b3.className = aliveCount() > 0 ? 'live' : 'dead'
+  b3.textContent = ' · живых: ' + aliveCount()
+  var b4 = document.createElement('span')
+  b4.textContent = cur ? (' · текущий: #' + cur.index + ' ' + cur.label) : ' · живых контекстов нет'
+  var b5 = document.createElement('span')
+  b5.textContent = ' · загрузок: ' + loads + ' (вкладка: ' + tabLoads + ')'
+  el.append(b1, b2, b3, b4, b5)
+  var buttons = document.querySelectorAll('#bar button, #logbar button')
+  for (var i = 0; i < buttons.length; i++) {
+    if (buttons[i].id === 'btn-copy' || buttons[i].id === 'btn-clear' || buttons[i].id === 'btn-reload' || buttons[i].id === 'btn-mark') continue
+    buttons[i].disabled = busy || glUnavailable
+  }
+}
+
+/* ---------- context creation (v2-exact identity dump) ---------- */
+function makeSlot(ctx) {
+  var slot = document.createElement('div')
+  slot.className = 'slot'
+  var wrap = document.createElement('div'); wrap.className = 'cvwrap'
+  wrap.appendChild(ctx.canvas)
+  slot.appendChild(wrap)
+  var lbl = document.createElement('div'); lbl.className = 'lbl'
+  lbl.textContent = '#' + ctx.index + ' ' + ctx.label
+  var st = document.createElement('div'); st.className = 'st'; st.textContent = 'alive'
+  slot.append(lbl, st)
+  document.getElementById('cvrow').appendChild(slot)
+  ctx.slot = slot
+  ctx.slotState = st
+}
+function createGL(label) {
+  var canvas = document.createElement('canvas')
+  canvas.width = 128; canvas.height = 128
+  var t0 = performance.now()
+  var gl = null, attempt = 0
+  var creationErr = null
+  canvas.addEventListener('webglcontextcreationerror', function (e) {
+    creationErr = e.statusMessage || '(no statusMessage)'
+    log('ERROR', 'webglcontextcreationerror: ' + creationErr)
+  })
+  for (var i = 0; i < GL_ATTEMPTS.length; i++) {
+    attempt = i + 1
+    gl = canvas.getContext('webgl2', GL_ATTEMPTS[i])
+    if (gl) break
+  }
+  if (!gl) {
+    log('ERROR', 'getContext("webgl2") -> null on all attr attempts' +
+      (creationErr ? ' — ' + creationErr : '') + ' — probe cannot continue')
+    glUnavailable = true
+    updateStatus()
+    return null
+  }
+  var ctx = {
+    index: ++totalCreated, label: label, gl: gl, canvas: canvas, results: null,
+    created: stamp(), disposed: false, lost: false, restored: false, reason: '',
+    createdMs: 0, renderer: '',
+  }
+  ctx.createdMs = performance.now() - t0
+  canvas.addEventListener('webglcontextlost', function (e) {
+    ctx.lost = true
+    if (restoreArmed && !ctx.disposed) {
+      try { e.preventDefault() } catch (err) {}
+      log('EVENT', '#' + ctx.index + ' webglcontextlost FIRED (restore-тест: preventDefault, ждём восстановления)')
+    } else {
+      log('EVENT', '#' + ctx.index + ' webglcontextlost FIRED' + (ctx.disposed ? ' (expected — our dispose)' : ' (SPONTANEOUS!)') +
+        ' at ' + stamp())
+    }
+    if (ctx.slot) { ctx.slot.classList.add('disposed'); ctx.slotState.textContent = ctx.disposed ? 'disposed' : 'LOST' }
+    updateStatus()
+  })
+  canvas.addEventListener('webglcontextrestored', function () {
+    ctx.lost = false
+    ctx.restored = true
+    log('EVENT', '#' + ctx.index + ' webglcontextrestored — все старые GL-объекты мертвы, батарея создаст всё заново')
+    if (ctx.slot) { ctx.slot.classList.remove('disposed'); ctx.slotState.textContent = 'restored' }
+    updateStatus()
+  })
+  makeSlot(ctx)
+  sumRow(ctx)
+  contexts.push(ctx)
+  var dbg = null
+  try { dbg = gl.getExtension('WEBGL_debug_renderer_info') } catch (e) {}
+  var renderer = '(masked)'
+  if (dbg) { try { renderer = String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) } catch (e) {} }
+  ctx.renderer = renderer
+  if (firstRenderer === null) firstRenderer = renderer
+  var attrs = null
+  try { attrs = gl.getContextAttributes() } catch (e) {}
+  var swapped = renderer !== firstRenderer
+  log('EVENT', 'GL #' + ctx.index + ' [' + label + '] created (' + (ctx.createdMs < 0.5 ? '<1' : ctx.createdMs.toFixed(0)) + 'ms, attrs attempt ' + attempt + ')' +
+    (swapped ? ' — ⚠️ RENDERER ОТЛИЧАЕТСЯ от #1: ' : ' — ') + renderer + ' · attrs ' + JSON.stringify(attrs) +
+    ' — page total: ' + totalCreated + ' created, ' + aliveCount() + ' alive')
+  if (swapped) log('FAIL', '#' + ctx.index + ' [' + label + '] ТИХАЯ СМЕНА БЭКЕНДА: renderer != #1 — это отдельная находка, запиши её')
+  errSweep(ctx, 'context creation')
+  updateStatus()
+  return ctx
+}
+
+/* ---------- dispose (v1-exact Task-137 eviction) ---------- */
+function waitFor(cond, ms) {
+  return new Promise(function (resolve) {
+    var t0 = performance.now()
+    ;(function tick() {
+      if (cond() || performance.now() - t0 > ms) return resolve()
+      setTimeout(tick, 25)
+    })()
+  })
+}
+async function disposeGL(ctx) {
+  if (!ctx || ctx.disposed) return
+  try {
+    var snap = document.createElement('canvas')
+    snap.width = 128; snap.height = 128
+    snap.getContext('2d').drawImage(ctx.canvas, 0, 0)
+    var w = ctx.slot.querySelector('.cvwrap')
+    w.replaceChildren(snap)
+  } catch (e) { /* best-effort snapshot */ }
+  var ext = ctx.gl.getExtension('WEBGL_lose_context')
+  ctx.disposed = true
+  totalDisposed++
+  if (ext) ext.loseContext()
+  else log('WARN', '#' + ctx.index + ' WEBGL_lose_context missing — detaching only')
+  await waitFor(function () { return ctx.lost }, 350)
+  ctx.canvas.remove()
+  ctx.slot.classList.add('disposed')
+  ctx.slotState.textContent = 'disposed ' + stamp()
+  log('EVENT', 'GL #' + ctx.index + ' [' + ctx.label + '] disposed: loseContext() called, contextlost ' +
+    (ctx.lost ? 'fired' : 'DID NOT fire (timeout 350ms)') + ', canvas detached')
+  updateStatus()
+}
+function settle(ms) { return new Promise(function (r) { setTimeout(r, ms) }) }
+function guard(fn) {
+  return async function () {
+    if (busy || glUnavailable) return
+    busy = true
+    updateStatus()
+    try { await fn() }
+    catch (e) { log('ERROR', 'scenario crashed: ' + (e && e.message ? e.message : String(e))) }
+    finally {
+      busy = false
+      updateStatus()
+    }
+  }
+}
+
+/* ================= shaders (v2-exact shapes + salt) ================= */
+var FRAG_TF = '#version 300 es\nprecision lowp float;\nvoid main() {}'
+function vsTFA(salt) {
+  return '#version 300 es\nprecision highp float;\nlayout(location=0) in vec4 a_in;\nout vec4 v_out;\nvoid main(){ gl_Position = vec4(0.0, 0.0, 0.0, 1.0); v_out = a_in * 2.0 + vec4(1.0, 0.5, 0.25, 0.125); if (a_in.x < -900000.0) { v_out = vec4(' + salt + '); } }'
+}
+var VS_GRAD = '#version 300 es\nprecision highp float;\nout vec2 v_uv;\nvoid main(){\n  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n  v_uv = p;\n  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n}'
+var FRAG_GRAD = '#version 300 es\nprecision highp float;\nin vec2 v_uv;\nout vec4 o;\nvoid main(){ o = vec4(mix(vec3(0.02), vec3(0.95, 0.75, 0.35), (v_uv.x + v_uv.y) * 0.5), 1.0); }'
+
+function compile(gl, type, src) {
+  var s = gl.createShader(type)
+  gl.shaderSource(s, src)
+  gl.compileShader(s)
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error('shader compile: ' + gl.getShaderInfoLog(s))
+  return s
+}
+function linkTF(gl, vsSrc, outputs, mode, label) {
+  var p = gl.createProgram()
+  gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, vsSrc))
+  gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, FRAG_TF))
+  gl.transformFeedbackVaryings(p, outputs, mode)
+  gl.linkProgram(p)
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(label + ' link: ' + gl.getProgramInfoLog(p))
+  var vary = null, qmode = null
+  try { vary = gl.getProgramParameter(p, gl.TRANSFORM_FEEDBACK_VARYINGS) } catch (e) {}
+  try { qmode = gl.getProgramParameter(p, gl.TRANSFORM_FEEDBACK_BUFFER_MODE) } catch (e) {}
+  var wantName = mode === gl.INTERLEAVED_ATTRIBS ? 'INTERLEAVED' : 'SEPARATE'
+  var gotName = qmode === gl.INTERLEAVED_ATTRIBS ? 'INTERLEAVED' : (qmode === gl.SEPARATE_ATTRIBS ? 'SEPARATE' : String(qmode))
+  var anomaly = (vary !== outputs.length) || (qmode !== mode)
+  log(anomaly ? 'WARN' : 'INFO', label + ': link ok · TF varyings=' + vary + '/' + outputs.length +
+    ' · mode=' + gotName + ' (запрошен ' + wantName + ')' +
+    (anomaly ? ' — ⚠️ АНОМАЛИЯ TF-МЕТАДАННЫХ' : ''))
+  return { prog: p, vary: vary, mode: qmode, anomaly: anomaly }
+}
+function linkPlain(gl, vsSrc, fsSrc) {
+  var p = gl.createProgram()
+  gl.attachShader(p, compile(gl, gl.VERTEX_SHADER, vsSrc))
+  gl.attachShader(p, compile(gl, gl.FRAGMENT_SHADER, fsSrc))
+  gl.linkProgram(p)
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('link: ' + gl.getProgramInfoLog(p))
+  return p
+}
+/* the TF pass: v2-exact call shapes + per-step error gates + binding checks */
+function runTFPass(ctx, prog, vao, tf, outBuf, count, label) {
+  var gl = ctx.gl
+  gl.useProgram(prog)
+  gl.bindVertexArray(vao)
+  gl.enable(gl.RASTERIZER_DISCARD)
+  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, tf)
+  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, outBuf)
+  var tfBound = false, bufBound = false
+  try { tfBound = gl.getParameter(gl.TRANSFORM_FEEDBACK_BINDING) === tf } catch (e) {}
+  try { bufBound = gl.getIndexedParameter(gl.TRANSFORM_FEEDBACK_BUFFER_BINDING, 0) === outBuf } catch (e) {}
+  if (!tfBound || !bufBound) log('WARN', label + ': TF-биндинги не применились (tf-obj=' + tfBound + ', buffer=' + bufBound + ')')
+  gl.beginTransformFeedback(gl.POINTS)
+  errSweep(ctx, label + ' beginTransformFeedback')
+  gl.drawArrays(gl.POINTS, 0, count)
+  errSweep(ctx, label + ' drawArrays(TF)')
+  gl.endTransformFeedback()
+  errSweep(ctx, label + ' endTransformFeedback')
+  gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null)
+  gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null)
+  gl.disable(gl.RASTERIZER_DISCARD)
+  gl.bindVertexArray(null)
+}
+function readBack(gl, buf, dst) {
+  gl.bindBuffer(gl.COPY_READ_BUFFER, buf)
+  try { gl.getBufferSubData(gl.COPY_READ_BUFFER, 0, dst) }
+  finally { gl.bindBuffer(gl.COPY_READ_BUFFER, null) }
+}
+function makeSentinelBuf(gl, nFloats) {
+  var b = gl.createBuffer()
+  var fill = new Float32Array(nFloats)
+  for (var i = 0; i < nFloats; i++) fill[i] = SENT
+  gl.bindBuffer(gl.ARRAY_BUFFER, b)
+  gl.bufferData(gl.ARRAY_BUFFER, fill, gl.DYNAMIC_DRAW)
+  gl.bindBuffer(gl.ARRAY_BUFFER, null)
+  return b
+}
+function refillSentinel(gl, buf, row) {
+  var fill = new Float32Array(N * 4)
+  for (var i = 0; i < N; i++) {
+    fill[i * 4] = row[0]; fill[i * 4 + 1] = row[1]; fill[i * 4 + 2] = row[2]; fill[i * 4 + 3] = row[3]
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf)
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, fill)
+  gl.bindBuffer(gl.ARRAY_BUFFER, null)
+}
+
+/* ---------- environment dump (once, v2-exact) ---------- */
+var envDumped = false
+function dumpEnv(gl) {
+  if (envDumped) return
+  envDumped = true
+  log('INFO', 'env — ua: ' + navigator.userAgent)
+  log('INFO', 'env — screen ' + screen.width + 'x' + screen.height + ' @dpr ' + window.devicePixelRatio +
+    ' · cores ' + (navigator.hardwareConcurrency || '?') +
+    ' · deviceMemory ' + (navigator.deviceMemory || navigator.deviceMemory === 0 ? navigator.deviceMemory + 'GB' : '?') +
+    ' · touch points ' + (navigator.maxTouchPoints || 0))
+  log('INFO', 'env — ' + gl.getParameter(gl.VERSION) + ' · GLSL ' + gl.getParameter(gl.SHADING_LANGUAGE_VERSION))
+  log('INFO', 'env — TF limits: interleaved components ' + gl.getParameter(gl.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS) +
+    ' · separate attribs ' + gl.getParameter(gl.MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS) +
+    ' · separate components ' + gl.getParameter(gl.MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS))
+  var list = []
+  try { if (gl.getExtension('EXT_color_buffer_float')) list.push('EXT_color_buffer_float') } catch (e) {}
+  try { if (gl.getExtension('OES_texture_float_linear')) list.push('OES_texture_float_linear') } catch (e) {}
+  try { if (gl.getExtension('WEBGL_lose_context')) list.push('WEBGL_lose_context') } catch (e) {}
+  log('INFO', 'env — extensions of interest: ' + (list.length ? list.join(', ') : 'none'))
+  log('INFO', 'env — WebGPU: ' + (navigator.gpu ? 'navigator.gpu present' : 'absent'))
+  errSweep({ gl: gl, index: 0 }, 'env dump')
+}
+
+/* ---------- the summary table (v3: compact) ---------- */
+function sumRow(ctx) {
+  var tbody = document.getElementById('sumbody')
+  var tr = document.createElement('tr')
+  var cells = []
+  for (var i = 0; i < 6; i++) { var td = document.createElement('td'); cells.push(td); tr.appendChild(td) }
+  cells[0].innerHTML = '<b>#' + ctx.index + '</b>'
+  cells[1].textContent = ctx.label
+  tbody.appendChild(tr)
+  ctx.sumCells = cells
+  paintSumRow(ctx)
+}
+function paintSumRow(ctx) {
+  var cells = ctx.sumCells
+  var state = ctx.disposed ? (ctx.lost ? 'disposed+lost' : 'disposed') : (ctx.lost ? 'LOST' : (ctx.restored ? 'restored' : 'alive'))
+  cells[2].className = ctx.disposed ? 'warn' : (ctx.lost ? 'bad' : 'ok')
+  cells[2].textContent = state
+  var r = ctx.results
+  var defs = [
+    { v: r ? r.t1 : null, dead: 'FAIL' },
+    { v: r ? r.tf : null, dead: 'DEAD' },
+    { v: r ? r.t4 : null, dead: 'COLD' },
+  ]
+  for (var i = 0; i < 3; i++) {
+    var d = defs[i]
+    if (!d.v) { cells[3 + i].textContent = '—'; cells[3 + i].className = 'dim'; continue }
+    if (d.v.ok) { cells[3 + i].textContent = 'ok'; cells[3 + i].className = 'ok' }
+    else { cells[3 + i].textContent = d.v.short === 'CRASH' ? 'CRASH' : (d.v.short || d.dead).slice(0, 14); cells[3 + i].className = 'bad' }
+  }
+}
+
+/* ================= THE BATTERY (v3: minimal) =================
+ * v2 already ruled out: sync-ladder (fence/+350ms/copy), SEPARATE mode,
+ * identical relink, program-cache-by-source. What remains decisive:
+ * T1 (the readback path itself), T2 (the TF roundtrip — the poison
+ * detector), T4 (raster ground truth).                                  */
+async function battery(ctx, salt) {
+  var tag = '#' + ctx.index + ' [' + ctx.label + ']'
+  var R = { salt: salt, t1: null, tf: null, t4: null, renderer: ctx.renderer }
+  ctx.results = R
+  var gl = ctx.gl
+  log('EVENT', tag + ' — battery start (salt ' + salt + ', visible=' + document.visibilityState + ', ' +
+    (ctx.lost ? 'CONTEXT IS LOST' : 'context alive') + ')')
+  errSweep(ctx, 'battery start sweep')
+  try {
+    dumpEnv(gl)
+
+    /* --- resources (all fresh per battery — zero shared state) --- */
+    var aData = new Float32Array(N * 4)
+    for (var i = 0; i < N; i++) {
+      aData[i * 4] = i; aData[i * 4 + 1] = -i; aData[i * 4 + 2] = i % 7; aData[i * 4 + 3] = 100 + (i % 13)
+    }
+    var expectedA = function (o) {
+      return [aData[o] * 2 + 1, aData[o + 1] * 2 + 0.5, aData[o + 2] * 2 + 0.25, aData[o + 3] * 2 + 0.125]
+    }
+    var inBuf = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, inBuf)
+    gl.bufferData(gl.ARRAY_BUFFER, aData, gl.STATIC_DRAW)
+    gl.bindBuffer(gl.ARRAY_BUFFER, null)
+    var vaoA = gl.createVertexArray()
+    gl.bindVertexArray(vaoA)
+    gl.bindBuffer(gl.ARRAY_BUFFER, inBuf)
+    gl.enableVertexAttribArray(0)
+    gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 0, 0)
+    gl.bindVertexArray(null)
+    gl.bindBuffer(gl.ARRAY_BUFFER, null)
+    var vaoGrid = gl.createVertexArray() // no attribs — gl_VertexID only
+    var srcA = vsTFA(salt)
+
+    /* ---- T1: buffer roundtrip without TF (the readback path itself) ---- */
+    {
+      var t0 = performance.now()
+      var probe = new Float32Array(64)
+      for (var i = 0; i < 64; i++) probe[i] = (i * 7) % 19 - 3.5
+      var b = gl.createBuffer()
+      gl.bindBuffer(gl.ARRAY_BUFFER, b)
+      gl.bufferData(gl.ARRAY_BUFFER, probe, gl.STATIC_DRAW)
+      var back = new Float32Array(64)
+      readBack(gl, b, back)
+      gl.deleteBuffer(b)
+      var bad = -1
+      for (var i = 0; i < 64; i++) if (back[i] !== probe[i]) { bad = i; break }
+      var ok = bad === -1
+      R.t1 = { ok: ok, short: ok ? 'ok' : 'MISMATCH@' + bad }
+      log(ok ? 'PASS' : 'FAIL', tag + ' T1 buffer-readback (no TF): ' + (ok ? 'bit-exact 64/64' : 'row ' + bad + ' got ' + back[bad] + ' want ' + probe[bad]) +
+        ' (' + (performance.now() - t0).toFixed(1) + 'ms)')
+      errSweep(ctx, 'T1')
+    }
+
+    /* ---- T2: the TF roundtrip (RASTERIZER_DISCARD — the only legal WebGL2 form) ---- */
+    var outA = makeSentinelBuf(gl, N * 4)
+    var tfA = gl.createTransformFeedback()
+    var pInt = linkTF(gl, srcA, ['v_out'], gl.INTERLEAVED_ATTRIBS, tag + ' P-int(salt ' + salt + ')')
+    R.linkInt = { vary: pInt.vary, mode: pInt.mode, anomaly: pInt.anomaly }
+    {
+      var t0 = performance.now()
+      refillSentinel(gl, outA, [SENT, SENT, SENT, SENT])
+      runTFPass(ctx, pInt.prog, vaoA, tfA, outA, N, tag + ' T2')
+      var back1 = new Float32Array(N * 4)
+      readBack(gl, outA, back1)
+      var cls1 = classifyRows(back1, expectedA, N)
+      R.tf = { ok: cls1.expected === N, short: rowVerdict(cls1, N), firstBad: cls1.firstBad }
+      log(cls1.expected === N ? 'PASS' : 'FAIL', tag + ' T2 TF-roundtrip imm (RASTERIZER_DISCARD): ' + rowVerdict(cls1, N) +
+        (cls1.firstBad ? ' · ' + cls1.firstBad : '') + ' (' + (performance.now() - t0).toFixed(1) + 'ms)')
+      errSweep(ctx, 'T2')
+    }
+
+    /* ---- T4: plain raster + readPixels (the canvas ground truth) ---- */
+    {
+      var t0 = performance.now()
+      gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight)
+      gl.clearColor(0, 0, 0, 1)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+      var pGrad = linkPlain(gl, VS_GRAD, FRAG_GRAD)
+      gl.useProgram(pGrad)
+      gl.bindVertexArray(vaoGrid)
+      gl.drawArrays(gl.TRIANGLES, 0, 3)
+      gl.bindVertexArray(null)
+      var warm = readCenterWarm(gl)
+      var ok = warm > 0.9
+      R.t4 = { ok: ok, short: (warm * 100).toFixed(0) + '%' + (ok ? ' warm' : ' COLD') }
+      log(ok ? 'PASS' : 'FAIL', tag + ' T4 render+readPixels: center region warm ' + (warm * 100).toFixed(1) + '% (' +
+        (performance.now() - t0).toFixed(1) + 'ms)')
+      errSweep(ctx, 'T4')
+    }
+
+    var lostNow = gl.isContextLost()
+    if (lostNow) log('WARN', tag + ' — isContextLost() became TRUE during the battery')
+    log('EVENT', tag + ' — battery done: T1 ' + (R.t1.ok ? 'ok' : 'FAIL') + ' | TF ' + (R.tf.ok ? 'ALIVE' : 'DEAD (' + R.tf.short + ')') +
+      ' | T4 ' + R.t4.short + (lostNow ? ' · CONTEXT LOST' : ''))
+  } catch (e) {
+    log('ERROR', tag + ' — battery crashed: ' + (e && e.message ? e.message : String(e)) +
+      (e && e.stack ? '\n' + String(e.stack).split('\n').slice(0, 3).join('\n') : ''))
+    var keys = ['t1', 'tf', 't4']
+    for (var i = 0; i < keys.length; i++) {
+      if (R[keys[i]] === null) R[keys[i]] = { ok: false, short: 'CRASH' }
+    }
+  }
+  paintSumRow(ctx)
+  updateStatus()
+  return R
+}
+/* ================= the machine-readable export ================= */
+try {
+  Object.defineProperty(window, '__tfProbe3', { get: function () {
+    return {
+      version: VERSION,
+      loads: loads,
+      tabLoads: tabLoads,
+      navType: navType,
+      markerPressed: markerPressed,
+      hist: getHist(),
+      created: totalCreated,
+      disposed: totalDisposed,
+      contexts: contexts.map(function (c) {
+        return {
+          index: c.index, label: c.label, created: c.created, disposed: c.disposed, lost: c.lost,
+          restored: c.restored, renderer: c.renderer, results: c.results,
+        }
+      }),
+    }
+  }})
+} catch (e) {}
+
+/* ================= THE AUTO MATRIX: what CURES the poison? ================= */
+function tfState(R) {
+  if (!R || !R.tf) return 'DEAD'
+  return R.tf.ok ? 'ok' : 'DEAD'
+}
+function recordRun(fields) {
+  var h = getHist()
+  h.push(fields)
+  setHist(h)
+}
+function updateRun(fields) {
+  var h = getHist()
+  if (h.length) {
+    for (var k in fields) h[h.length - 1][k] = fields[k]
+    setHist(h)
+  }
+}
+
+/* ---- the RESTORE experiment (v2 had it as a button — never pressed;
+ *      the app-level workaround candidate, never yet run on the phone) ---- */
+async function restoreExperiment(c1) {
+  var ext = c1.gl.getExtension('WEBGL_lose_context')
+  if (!ext) { log('WARN', 'restore: WEBGL_lose_context недоступен — проба пропущена'); return 'SKIP' }
+  if (c1.disposed || c1.lost) { log('WARN', 'restore: #1 уже не жив — проба пропущена'); return 'SKIP' }
+  restoreArmed = true
+  log('EVENT', 'RESTORE-ЭКСПЕРИМЕНТ (митигация-кандидат): #1 loseContext() + preventDefault → restoreContext() → батарея на ТОМ ЖЕ контексте')
+  try {
+    ext.loseContext()
+    await waitFor(function () { return c1.lost }, 3000)
+    if (!c1.lost) { log('WARN', 'restore: contextlost не пришёл за 3с'); return 'SKIP' }
+    ext.restoreContext()
+    await waitFor(function () { return c1.restored }, 20000)
+    if (!c1.restored) {
+      log('FAIL', 'RESTORE-ПУТЬ: webglcontextrestored НЕ пришёл за 20с — восстановление того же канваса не срабатывает')
+      return 'NO-RESTORE'
+    }
+    c1.label = 'база-restored'
+    if (c1.slot) c1.slot.querySelector('.lbl').textContent = '#' + c1.index + ' база-restored'
+    var R = await battery(c1, 97.5 + loads * 0.1)
+    var st = tfState(R)
+    log(st === 'ok' ? 'PASS' : 'FAIL', 'RESTORE VERDICT: TF на восстановленном #1 — ' + st +
+      (st === 'ok' ? ' → митигация работает: восстанавливай тот же контекст, НЕ создавай новый' : ' → restore тоже отравлен'))
+    return st
+  } finally {
+    restoreArmed = false
+  }
+}
+
+/* ---- the WGPU compute probe: is the GPU alive OUTSIDE the GL stack? ---- */
+function withTimeout(promise, ms) {
+  return new Promise(function (resolve) {
+    var settled = false
+    var timer = setTimeout(function () { if (!settled) { settled = true; resolve({ __timeout: true }) } }, ms)
+    promise.then(function (v) { if (!settled) { settled = true; clearTimeout(timer); resolve({ __value: v }) } },
+      function (e) { if (!settled) { settled = true; clearTimeout(timer); resolve({ __error: e }) } })
+  })
+}
+async function wgpuProbe() {
+  var t0 = performance.now()
+  try {
+    if (!navigator.gpu) return { ok: null, why: 'navigator.gpu отсутствует — проба пропущена', ms: 0 }
+    var a = await withTimeout(navigator.gpu.requestAdapter(), 3000)
+    if (a.__timeout) return { ok: false, why: 'requestAdapter: таймаут 3с', ms: performance.now() - t0 }
+    if (a.__error) return { ok: false, why: 'requestAdapter: ' + String(a.__error).slice(0, 120), ms: performance.now() - t0 }
+    if (!a.__value) return { ok: null, why: 'adapter === null — WebGPU в этом браузере недоступен (НЕ сигнал о GPU)', ms: performance.now() - t0 }
+    var d = await withTimeout(a.__value.requestDevice(), 3000)
+    if (d.__timeout) return { ok: false, why: 'requestDevice: таймаут 3с', ms: performance.now() - t0 }
+    if (d.__error) return { ok: false, why: 'requestDevice: ' + String(d.__error).slice(0, 120), ms: performance.now() - t0 }
+    var device = d.__value
+    var code = '@group(0) @binding(0) var<storage, read_write> data: array<f32>;\n' +
+      '@compute @workgroup_size(64)\n' +
+      'fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n' +
+      '  let i = gid.x;\n' +
+      '  if (i < 64u) { data[i] = f32(i) * 0.5 + 1.0; }\n' +
+      '}'
+    var module = device.createShaderModule({ code: code })
+    var pipeline = device.createComputePipeline({ layout: 'auto', compute: { module: module, entryPoint: 'main' } })
+    var buf = device.createBuffer({ size: 256, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC })
+    var rd = device.createBuffer({ size: 256, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST })
+    var bind = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buf } }] })
+    var enc = device.createCommandEncoder()
+    var pass = enc.beginComputePass()
+    pass.setPipeline(pipeline)
+    pass.setBindGroup(0, bind)
+    pass.dispatchWorkgroups(1)
+    pass.end()
+    enc.copyBufferToBuffer(buf, 0, rd, 0, 256)
+    device.queue.submit([enc.finish()])
+    var mp = await withTimeout(rd.mapAsync(GPUMapMode.READ), 4000)
+    if (mp.__timeout) { try { device.destroy() } catch (e) {} return { ok: false, why: 'mapAsync: таймаут 4с', ms: performance.now() - t0 } }
+    if (mp.__error) { try { device.destroy() } catch (e) {} return { ok: false, why: 'mapAsync: ' + String(mp.__error).slice(0, 120), ms: performance.now() - t0 } }
+    var copy = new Float32Array(rd.getMappedRange().slice(0))
+    rd.unmap()
+    var ok = true, bad = -1
+    for (var i = 0; i < 64; i++) {
+      var want = i * 0.5 + 1.0
+      if (copy[i] !== want) { ok = false; if (bad < 0) bad = i }
+    }
+    try { if (device.destroy) device.destroy() } catch (e) {}
+    return {
+      ok: ok,
+      why: ok ? 'compute roundtrip точен 64/64' : 'несовпадение с i=' + bad + ': got [' + copy[0] + ',' + copy[1] + ',' + copy[2] + ',' + copy[3] + '] want [1,1.5,2,2.5]',
+      ms: performance.now() - t0,
+    }
+  } catch (e) {
+    return { ok: false, why: 'threw: ' + String(e && e.message ? e.message : e).slice(0, 140), ms: performance.now() - t0 }
+  }
+}
+
+/* ---- verdicts ---- */
+function autoVerdictAlive(base, rest, newCtx, lossCount) {
+  log('EVENT', 'AUTO VERDICT — база: ' + base + ' · restore того же контекста: ' + rest + ' · новый контекст после лосса ×' + lossCount + ': ' + newCtx)
+  if (newCtx === 'DEAD') {
+    log('PASS', 'ВЫВОД (условие v1 на месте): живая база → лосс → новые контексты TF-мёртвы. Теперь измерим РАДИУС яда: ' +
+      'перезагрузи страницу (⟳, браузер НЕ закрывать!) и пришли лог — если база снова DEAD, reload НЕ лечит (как в v2); ' +
+      'затем force-stop браузера → эта страница → 📌 маркер → лог — лечит ли РЕСТАРТ.')
+    if (rest === 'ok') log('PASS', 'МИТИГАЦИЯ НАЙДЕНА: restore-путь (preventDefault + webglcontextrestored) ЖИВ, путь «новый контекст» МЁРТВ → ' +
+      'для приложения: НИКОГДА не пересоздавай контекст — только восстановление того же.')
+    else if (rest === 'DEAD') log('FAIL', 'ОБА ПУТИ МЕРТВЫ: и restore, и новый контекст → после потери контекста TF мёртв минимум до конца жизни GPU-процесса.')
+    else log('WARN', 'restore-эксперимент не удался (' + rest + ') — это отдельная потеря данных, отметь в ответе.')
+  } else if (newCtx === 'ok') {
+    log('INFO', 'ВЫВОД: на этой загрузке лосс НЕ убил TF (в v1/v2 убивал!). Триггер — не сам лосс. Пришли лог и опиши, ' +
+      'что предшествовало запуску (браузер свежезапущен? что открывал раньше?).')
+  } else {
+    log('WARN', 'ВЫВОД: эксперимент нового контекста прерван (' + newCtx + ') — пришли лог как есть.')
+  }
+  for (var i = 1; i < contexts.length; i++) {
+    if (contexts[i].renderer && firstRenderer && contexts[i].renderer !== firstRenderer) {
+      log('FAIL', 'нашёл ТИХУЮ СМЕНУ БЭКЕНДА: #' + contexts[i].index + ' renderer=' + contexts[i].renderer + ' != #1 ' + firstRenderer)
+    }
+  }
+}
+function autoVerdictDead() {
+  log('FAIL', 'ВЫВОД A: БАЗА МЁРТВА — первый контекст этой загрузки TF-мёртв. Яд ПЕРСИСТЕНТЕН и живёт дольше страницы: ' +
+    'GPU-процесс Chrome (память), диск-кеш (ANGLE/GPUCache) или драйвер/ОС. v2 уже показал reload НЕ лечит.')
+  var h = getHist()
+  var lastAliveIdx = -1
+  for (var i = h.length - 2; i >= 0; i--) if (h[i].base === 'ok') { lastAliveIdx = i; break }
+  if (lastAliveIdx >= 0) log('EVENT', 'история: живая база была ' + ago(h[lastAliveIdx].t) + ' (прогон №' + (lastAliveIdx + 1) + ') → яд пережил перезагрузку страницы; ' +
+    'радиус ≥ страницы, теперь измеряем — лечит ли РЕСТАРТ БРАУЗЕРА.')
+  log('EVENT', 'ШАГ 1 — H1 (GPU-процесс, яд в памяти): полностью закрой Chrome — «Недавние» → свайп вверх, ' +
+    'ИЛИ Настройки → Приложения → Chrome → «Остановить». Открой эту страницу, СРАЗУ нажми «📌 Маркер: браузер только что перезапущен», ' +
+    'дождись вердикта, Copy, пришли лог. Предсказание H1: база станет ЖИВОЙ.')
+  log('EVENT', 'ШАГ 2 — H2 (диск-кеш), если база мертва и после рестарта: очисти ТОЛЬКО кеш — Chrome ⋮ → Настройки → ' +
+    'Конфиденциальность → «Удаление данных» → галка ТОЛЬКО «Изображения и другие файлы, сохранённые в кеше» → Удалить ' +
+    '(или Настройки → Приложения → Chrome → Хранилище → «Очистить кеш»). → снова эта страница → лог. Предсказание H2: база оживёт.')
+  log('EVENT', 'ШАГ 3 — H3 (драйвер/ОС), если мертва и после чистки: (а) этот URL в Firefox — другой GL-стек, не ANGLE; ' +
+    '(б) этот URL в инкогнито Chrome (мягкий сигнал); (в) ребут телефона → эта страница → лог. ' +
+    'По желанию: chrome://gpu → Graphics Feature Status + счётчик аварий GPU-процесса — скажи словами.')
+}
+
+/* ---- the auto run itself ---- */
+var runCount = 0
+async function autoMatrix() {
+  busy = true
+  updateStatus()
+  runCount++
+  var saltBase = 11.5 + loads * 7.3 + runCount * 1.9
+  var baseLabel = runCount === 1 ? 'база' : 'база-rerun' + runCount
+  log('EVENT', 'AUTO MATRIX v3 (прогон ' + runCount + ') — план: #1 [' + baseLabel + '] батарея (salt ' + saltBase.toFixed(1) + ') → ' +
+    (runCount === 1 ? 'если TF жив: RESTORE-эксперимент + лосс-циклы' : '(повторный прогон — те же шаги)') + ' → WGPU-проба')
+  var c1 = createGL(baseLabel)
+  if (!c1) {
+    log('EVENT', 'AUTO MATRIX прервана: webgl2 недоступен')
+    busy = false
+    updateStatus()
+    return
+  }
+  var r1 = await battery(c1, saltBase.toFixed(1))
+  var baseState = tfState(r1)
+  recordRun({ t: Date.now(), base: baseState, marker: markerPressed })
+
+  if (baseState === 'ok') {
+    /* RESTORE on the same context — the mitigation candidate */
+    var restState = await restoreExperiment(c1)
+    /* then the v1 condition: dispose → new contexts */
+    var newState = 'SKIP', lossCount = 0
+    var cur = c1
+    for (var k = 1; k <= 4; k++) {
+      log('EVENT', 'ЛОСС-ЦИКЛ №' + k + ': dispose #' + cur.index + ' (v1-условие: loseContext + detach) → 1с → новый контекст')
+      await disposeGL(cur)
+      await settle(1000)
+      var c = createGL('после-лосса' + k)
+      if (!c) { newState = 'NO-CTX'; break }
+      var rc = await battery(c, (saltBase + k * 2.7).toFixed(1))
+      newState = tfState(rc)
+      lossCount = k
+      cur = c
+      if (newState === 'DEAD') break
+    }
+    updateRun({ rest: restState, newctx: newState, losses: lossCount })
+    autoVerdictAlive(baseState, restState, newState, lossCount)
+  } else {
+    updateRun({ newctx: 'SKIP' })
+    autoVerdictDead()
+  }
+
+  /* the WGPU probe — GPU outside the GL stack */
+  log('EVENT', 'WGPU-проба (косвенный сигнальный тест: жив ли GPU-путь ВНЕ GL-стека — Vulkan/Dawn):')
+  var w = await wgpuProbe()
+  log(w.ok === null ? 'INFO' : (w.ok ? 'PASS' : 'FAIL'), 'WGPU compute roundtrip: ' + w.why + ' (' + (w.ms || 0).toFixed(0) + 'ms)')
+  if (w.ok === true) log('EVENT', 'WGPU-интерпретация: GPU жив ВНЕ GL → при мёртвом GL TF подозрение сужается на ANGLE/GL-путь (H1/H2), не на GPU целиком')
+  else if (w.ok === false) log('EVENT', 'WGPU-интерпретация: ВНЕ GL тоже сломано (не «недоступно», а сломано) → отнесись к H3 (драйвер/ОС, ребут телефона) всерьёз')
+  else log('EVENT', 'WGPU-интерпретация: проба пропущена — сигнала нет, решай по шагам H1/H2/H3')
+  log('EVENT', 'AUTO MATRIX завершена — жми Copy и пришли лог')
+
+  busy = false
+  updateStatus()
+}
+
+/* ================= the buttons ================= */
+document.getElementById('btn-mark').addEventListener('click', function () {
+  markerPressed = true
+  var h = getHist()
+  if (h.length) {
+    h[h.length - 1].marker = true
+    setHist(h)
+  }
+  log('MARKER', 'юзер пометил: браузер был ПОЛНОСТЬЮ перезапущен перед этим запуском (нажато в ' + stamp() + ')')
+})
+
+var plusSeq = 51.5
+document.getElementById('btn-plus').addEventListener('click', guard(async function () {
+  var salt = (plusSeq + loads * 0.7).toFixed(1); plusSeq += 2
+  log('EVENT', '+1 контекст БЕЗ dispose (параллельно живым) — salt ' + salt)
+  var ctx = createGL('+1-параллельно')
+  if (ctx) await battery(ctx, salt)
+}))
+
+document.getElementById('btn-rerun').addEventListener('click', guard(async function () {
+  log('EVENT', 'ручной повтор: новый прогон матрицы в ЭТОЙ ЖЕ странице (без reload, без рестарта браузера)')
+  await autoMatrix()
+}))
+
+document.getElementById('btn-reload').addEventListener('click', function () {
+  log('EVENT', 'RELOAD: перезагрузка №' + (loads + 1) + ' — ТЕСТ ПЕРСИСТЕНТНОСТИ (reload лечит яд?). ' +
+    'Лог сбросится — это нормально; пришли лог каждой загрузки.')
+  setTimeout(function () { location.reload() }, 400)
+})
+
+/* ================= boot ================= */
+log('EVENT', VERSION + ' — page loaded (загрузка №' + loads + ' страницы · №' + tabLoads + ' в этой вкладке (sessionStorage) · navigation: ' + navType + ')')
+log('INFO', 'сессии: localStorage №' + loads + ' живёт вечно · sessionStorage №' + tabLoads + ' умирает с вкладкой: ' +
+  '№1 + navigation=navigate — возможно свежая сессия после рестарта (но и просто новая вкладка тоже даёт №1 — ' +
+  'поэтому после рестарта жми 📌 маркер)')
+printHist()
+updateStatus()
+autoMatrix().catch(function (e) {
+  log('ERROR', 'autoMatrix crashed: ' + (e && e.message ? e.message : String(e)))
+  busy = false
+  updateStatus()
+})
+</script>
+</body>
+</html>
