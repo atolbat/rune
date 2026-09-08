@@ -19,6 +19,7 @@
  *   float16-render     ↔ EXT_color_buffer_half_float
  *   float32-blend      ↔ EXT_float_blend (depends on EXT_color_buffer_float)
  *   timestamp-query    ↔ EXT_disjoint_timer_query_webgl2
+ *   parallel-shader-compile ↔ KHR_parallel_shader_compile (Task 163)
  *
  * 'instancing' is native in WebGL2 (gl.drawArraysInstanced), not an extension.
  *
@@ -131,6 +132,10 @@ export function probeGLCaps(probe: GLProbe): CapsQuery {
     ['float32-render', 'EXT_color_buffer_float'],
     ['float16-render', 'EXT_color_buffer_half_float'],
     ['timestamp-query', 'EXT_disjoint_timer_query_webgl2'],
+    // Task 163 — the non-blocking compile/link extension: realGL's deferred
+    // link pipeline (submit-all + resolve-at-first-use) activates on it;
+    // caps.has('parallel-shader-compile') is the app-visible probe.
+    ['parallel-shader-compile', 'KHR_parallel_shader_compile'],
   ]
   for (const [feature, extName] of extList) {
     const ext = probe.getExtension(extName)
@@ -148,6 +153,14 @@ export function probeGLCaps(probe: GLProbe): CapsQuery {
     features.add('float16-blend')
     extensions.set('EXT_float_blend', floatBlend)
   }
+
+  // Task 163 — WEBGL_debug_renderer_info: not a capability, a diagnostics
+  // fingerprint — caps.ext('WEBGL_debug_renderer_info') exposes the object
+  // with UNMASKED_VENDOR_WEBGL / UNMASKED_RENDERER_WEBGL for renderer
+  // reporting (the field probes read it manually; the caps surface now
+  // carries it). No feature: the strings are info, not an ability.
+  const rendererInfo = probe.getExtension('WEBGL_debug_renderer_info')
+  if (rendererInfo) extensions.set('WEBGL_debug_renderer_info', rendererInfo)
 
   // Task 67: functional probe of RGBA32F. Takes priority over the
   // OES_texture_float extension: if actually creating RGBA32F storage fails

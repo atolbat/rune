@@ -6,6 +6,17 @@ import type { GLFacade, GLImageSource, GLTextureFormat } from './facade.ts'
 interface ProgramRecord {
   readonly program: WebGLProgram
   readonly uniforms: Map<string, WebGLUniformLocation | null>
+  /** Task 163 — the label for the link-failure message ('program' /
+   *  'transform pass' — the two historical error texts stay distinct). */
+  readonly label: string
+  /** Task 163 — KHR_parallel_shader_compile: the link is IN FLIGHT on a
+   *  driver thread (submitted, not yet resolved). false = resolved (or the
+   *  sync path — the extension is absent, the link was checked at submit). */
+  linkPending: boolean
+  /** Task 163 — the CACHED link failure: a failed deferred link throws on
+   *  EVERY use (the record remembers; the driver's info log is queried
+   *  once). null = ok / not yet resolved. */
+  linkError: string | null
 }
 
 /** The (format, type) pair for uploading pixels into a texture of a given
@@ -177,6 +188,22 @@ export function createRealGL(
       anisoMax = 1
     }
   }
+  // Task 163 — KHR_parallel_shader_compile: non-blocking compile+link.
+  // With the extension the driver defers shader compilation to background
+  // threads and the LINK may be queued before the compiles finish; every
+  // status query (COMPLETION_STATUS_KHR) is then non-blocking. WITHOUT the
+  // extension each getProgramParameter(LINK_STATUS) blocks until the driver
+  // finishes — the historical behavior, kept byte-for-byte (the sync path
+  // checks the link right at submit; only the ext path defers).
+  // In mock-GL environments getExtension may be undefined — try/catch guard.
+  let parallelCompileExt: { readonly COMPLETION_STATUS_KHR: number } | null = null
+  try {
+    parallelCompileExt = (gl as unknown as {
+      getExtension?: (name: string) => unknown
+    }).getExtension?.('KHR_parallel_shader_compile') as { readonly COMPLETION_STATUS_KHR: number } | null ?? null
+  } catch {
+    parallelCompileExt = null
+  }
   let nextProgram = 1
   // Task 137 — the DEFAULT VAO's attrib LEDGER: location → the facade
   // bufferId bindVertexBuffer last pointed there (the DEFAULT VAO only —
@@ -198,6 +225,26 @@ export function createRealGL(
   let canvasWidth = 1
   let canvasHeight = 1
   const unitTextures = new Map<number, number>() // unit → textureId (feedback-loop prevention)
+  // Task 163 — THE UNIT-BIND CACHE: the render executor re-asserts every
+  // command's samplers per draw (the same Task-75b discipline as the
+  // pipeline state), and the TF pass family rebinds its state/pair textures
+  // on every pass of every frame — within a pass those rebinds are 100%
+  // redundant: the same texture, the same LOD range, the same unit. A
+  // skipped bind saves 4 GL calls (activeTexture + bindTexture + the
+  // 2× texParameteri of the LOD re-assert). The cache lives EXACTLY one
+  // pass: bindTarget drops it at every pass start / target switch (the
+  // re-assert discipline survives — external state changes between our
+  // frames still die at the pass boundary), and every facade path that
+  // binds a texture OUTSIDE bindTexture (the upload family, createTexture)
+  // or resets a unit (deleteTexture, the feedback-loop unbind) clears it —
+  // the cache must never outlive the GL state it mirrors. NOTE: gl.bindTexture
+  // inside texSubImage2D & co binds to the CURRENT active unit — those paths
+  // change unit state bindTexture does not know about, hence the clears.
+  const unitBindCache = new Map<number, { readonly textureId: number; readonly baseLevel: number; readonly maxLevel: number }>()
+  /** Drop every mirrored unit binding (see unitBindCache). */
+  function invalidateUnitBinds(): void {
+    unitBindCache.clear()
+  }
 
   // Task 67: OES_texture_float_linear — linear filtering of RGBA32F.
   // RGBA32F storage/NEAREST sampling is core WebGL2; LINEAR is an extension
@@ -233,17 +280,40 @@ export function createRealGL(
     }
   }
 
+  /** Task 163 — THE PENDING-LINK SET (KHR_parallel_shader_compile): every
+   *  record whose link is in flight on a driver thread. resolveProgramLink
+   *  round-robins over it (one COMPLETION_STATUS query can finalize several
+   *  programs at once), deleteProgram/deleteTransformPass unhook their
+   *  records. */
+  const pendingLinks = new Set<ProgramRecord>()
+
   function createProgram(vertex: string, fragment: string): number {
     const program = gl.createProgram()
     gl.attachShader(program, compile(gl.VERTEX_SHADER, vertex))
     gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragment))
     gl.linkProgram(program)
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      throw new Error(`rune: program linking: ${gl.getProgramInfoLog(program)}`)
+    const record: ProgramRecord = {
+      program, uniforms: new Map(), label: 'program',
+      linkPending: false, linkError: null,
     }
+    finishLinkSubmission(program, record)
     const id = nextProgram++
-    programs.set(id, { program, uniforms: new Map() })
+    programs.set(id, record)
     return id
+  }
+
+  /** Task 163 — the link submission's tail: WITH the extension the link is
+   *  deferred (the record joins pendingLinks; the first use resolves);
+   * WITHOUT it — today's exact blocking check, right at submit. */
+  function finishLinkSubmission(program: WebGLProgram, record: ProgramRecord): void {
+    if (parallelCompileExt !== null) {
+      record.linkPending = true
+      pendingLinks.add(record)
+      return
+    }
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error(`rune: ${record.label} linking: ${gl.getProgramInfoLog(program)}`)
+    }
   }
 
   function compile(type: number, source: string): WebGLShader {
@@ -251,12 +321,84 @@ export function createRealGL(
     if (shader === null) throw new Error('rune: createShader returned null')
     gl.shaderSource(shader, source)
     gl.compileShader(shader)
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      const log = gl.getShaderInfoLog(shader)
-      gl.deleteShader(shader)
-      throw new Error(`rune: shader compilation: ${log}`)
+    if (parallelCompileExt === null) {
+      // The sync path: getShaderParameter(COMPILE_STATUS) blocks until the
+      // driver finishes — today's behavior exactly.
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        const log = gl.getShaderInfoLog(shader)
+        gl.deleteShader(shader)
+        throw new Error(`rune: shader compilation: ${log}`)
+      }
+      return shader
     }
+    // The deferred path: the compile runs on a driver background thread;
+    // attach+linkProgram on a still-compiling shader is LEGAL (the extension
+    // queues the link behind the compiles). A FAILED compile surfaces at
+    // the link: COMPLETION_STATUS flips true, LINK_STATUS reads false, and
+    // the program's info log carries the shader's compile errors (ANGLE
+    // concatenates them) — the error path stays diagnosable, one hop later.
     return shader
+  }
+
+  /** Task 163 — resolve a program's deferred link at FIRST USE (the use
+   *  uniform-family, a TF run — anything that must not observe a
+   *  half-linked program: getUniformLocation/getAttribLocation on an
+   *  unlinked program return null/-1, and the facade's location CACHES
+   * would freeze that null forever — the trap this resolve kills).
+   *
+   *  The spin: COMPLETION_STATUS_KHR is non-blocking, so we poll — the only
+   *  primitive a synchronous facade has. The poll is ROUND-ROBIN over the
+   *  whole pending set: one IPC round-trip can finalize several programs
+   *  (they are all compiling in parallel — that is the point), so resolving
+   *  program A usually finds B..N done too, and their resolves return
+   *  instantly. Guards: isContextLost (a lost context makes every query
+   *  return garbage forever — the spin must not hang the page) and a hard
+   *  30s deadline (a wedged driver must not hang the page either). */
+  function resolveProgramLink(programId: number): void {
+    const record = programs.get(programId)
+    if (record === undefined) return
+    if (!record.linkPending) {
+      if (record.linkError !== null) throw new Error(record.linkError)
+      return
+    }
+    const completionStatus = parallelCompileExt !== null ? parallelCompileExt.COMPLETION_STATUS_KHR : 0x91b1
+    const deadline = Date.now() + 30_000
+    for (;;) {
+      for (const pending of pendingLinks) {
+        let complete: unknown
+        try {
+          complete = gl.getProgramParameter(pending.program, completionStatus)
+        } catch {
+          complete = true // the query itself failed — fall through to the LINK check
+        }
+        if (complete === true || complete === 1) {
+          pendingLinks.delete(pending)
+          pending.linkPending = false
+          if (!gl.getProgramParameter(pending.program, gl.LINK_STATUS)) {
+            pending.linkError = `rune: ${pending.label} linking: ${gl.getProgramInfoLog(pending.program)}`
+          }
+        }
+      }
+      if (!record.linkPending) break
+      if (Date.now() > deadline) {
+        for (const pending of pendingLinks) {
+          pending.linkPending = false
+          pending.linkError = 'rune: program link did not complete within 30s (KHR_parallel_shader_compile) — the driver appears wedged'
+        }
+        pendingLinks.clear()
+        break
+      }
+      const lost = (gl as unknown as { isContextLost?: () => boolean }).isContextLost?.() ?? false
+      if (lost) {
+        for (const pending of pendingLinks) {
+          pending.linkPending = false
+          pending.linkError = 'rune: WebGL context lost while a program link was in flight'
+        }
+        pendingLinks.clear()
+        break
+      }
+    }
+    if (record.linkError !== null) throw new Error(record.linkError)
   }
 
   function useProgram(programId: number): void {
@@ -265,6 +407,9 @@ export function createRealGL(
     if (programId === currentProgramId) return
     const record = programs.get(programId)
     if (record === undefined || record.program === currentProgram) return
+    // Task 163: a deferred link resolves HERE — the program must be fully
+    // linked before the GL sees it as current.
+    resolveProgramLink(programId)
     currentProgram = record.program
     currentProgramId = programId
     gl.useProgram(record.program)
@@ -273,6 +418,11 @@ export function createRealGL(
   function location(programId: number, name: string): WebGLUniformLocation | null {
     const record = programs.get(programId)
     if (record === undefined) return null
+    // Task 163 — the link resolves BEFORE any location query:
+    // getUniformLocation on an unlinked program legally returns null, and
+    // the cache below would freeze that null FOREVER (every uniform call
+    // silently skipped — the deferred-link trap).
+    resolveProgramLink(programId)
     // Single Map probe: undefined — not queried yet, null — a cached
     // "optimized out" (both are valid cacheable states).
     const cached = record.uniforms.get(name)
@@ -406,6 +556,7 @@ export function createRealGL(
     options?: { mipLevels?: number; maxAnisotropy?: number; format?: GLTextureFormat },
   ): number {
     const texture = gl.createTexture()
+    invalidateUnitBinds()
     gl.bindTexture(gl.TEXTURE_2D, texture)
     const mipLevels = options?.mipLevels ?? 1
     // Task 67 HDR: the storage format — the allocation internalFormat and
@@ -470,6 +621,7 @@ export function createRealGL(
   }
 
   function texSubImage2D(textureId: number, x: number, y: number, width: number, height: number, bytes: Uint8Array | Float32Array): void {
+    invalidateUnitBinds()
     gl.bindTexture(gl.TEXTURE_2D, textures.get(textureId) ?? null)
     // Task 75b (driver-proofing): the raw-byte upload contract is EXACT bytes
     // — no browser conversion. UNPACK_* are per-context global state: if
@@ -494,6 +646,7 @@ export function createRealGL(
   }
 
   function texImage2DFromSource(textureId: number, source: GLImageSource, options?: { flipY?: boolean }): void {
+    invalidateUnitBinds()
     gl.bindTexture(gl.TEXTURE_2D, textures.get(textureId) ?? null)
     // Permalink overload: texImage2D(target, level, internalformat, format, type, source)
     // — source overwrites the texture contents (mip 0). The size is taken from the source.
@@ -542,6 +695,7 @@ export function createRealGL(
   }
 
   function texSubImage2DFromSource(textureId: number, x: number, y: number, source: GLImageSource, options?: { flipY?: boolean }): void {
+    invalidateUnitBinds()
     gl.bindTexture(gl.TEXTURE_2D, textures.get(textureId) ?? null)
     // The texSubImage2D overload with TexImageSource: updates only the region
     // [x, y, x+source.width, y+source.height]. Does not touch the rest of the texture.
@@ -572,6 +726,7 @@ export function createRealGL(
       type?: number
     },
   ): void {
+    invalidateUnitBinds()
     gl.bindTexture(gl.TEXTURE_2D, textures.get(textureId) ?? null)
     // Permalink overload: texImage2D(target, level, internalFormat, format, type, source).
     // Uploads a specific mip level (level=0 — base, 1 — 1/2 size, etc.).
@@ -638,7 +793,10 @@ export function createRealGL(
     // streaming). BASE_LEVEL/MAX_LEVEL state does not leak between
     // bindTexture calls: every call rewrites both parameters anew
     // on the texture it binds.
-    gl.activeTexture(gl.TEXTURE0 + unit)
+    // Task 163 — THE UNIT-BIND CACHE: if this unit already holds EXACTLY this
+    // texture with this LOD range, the full bind would write the state the GL
+    // already has — skip all 4 calls (see unitBindCache's declaration for the
+    // invalidation contract that keeps this honest).
     const subView = textureViews.get(textureOrViewId)
     let underlyingTextureId: number
     let baseLevel: number
@@ -656,6 +814,19 @@ export function createRealGL(
       // is ignored by MIN_FILTER=LINEAR without mipmap, but we set 0 for cleanliness).
       maxLevel = meta !== undefined ? meta.maxLoadedLevel : 0
     }
+    const cachedBind = unitBindCache.get(unit)
+    if (
+      cachedBind !== undefined &&
+      cachedBind.textureId === underlyingTextureId &&
+      cachedBind.baseLevel === baseLevel &&
+      cachedBind.maxLevel === maxLevel
+    ) {
+      // The feedback-loop ledger still mirrors the unit (a texture can be
+      // re-asserted exactly BECAUSE it is bound — the entry must exist).
+      unitTextures.set(unit, underlyingTextureId)
+      return
+    }
+    gl.activeTexture(gl.TEXTURE0 + unit)
     gl.bindTexture(gl.TEXTURE_2D, textures.get(underlyingTextureId) ?? null)
     // The sampler's base/maximum mip level. WebGL2 spec: TEXTURE_BASE_LEVEL
     // and TEXTURE_MAX_LEVEL are per-texture-object state, NOT per-bind. That is why
@@ -666,6 +837,7 @@ export function createRealGL(
     // would inherit the view's range, which it must not.
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, baseLevel)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, maxLevel)
+    unitBindCache.set(unit, { textureId: underlyingTextureId, baseLevel, maxLevel })
     // unitTextures stores the underlying textureId (NOT the viewId) — needed for
     // feedback-loop prevention in bindTarget: target and sampler on the same
     // texture = GL undefined behavior, ANGLE/SwiftShader kill the draw.
@@ -781,7 +953,13 @@ export function createRealGL(
       // free. The drawing buffer is re-read too: if it moved without our
       // resize() seeing it (canvas.width written behind our back), we
       // adopt the real size and report the heal once.
+      //
+      // Task 163: the pass boundary is also where the unit-bind cache dies
+      // (the 75b discipline — external texture-state changes between our
+      // frames are re-asserted by the first bind of the pass; redundant
+      // rebinds WITHIN the pass stay skipped).
       currentTarget = 0
+      invalidateUnitBinds()
       const bufferW = gl.drawingBufferWidth
       const bufferH = gl.drawingBufferHeight
       if (bufferW > 0 && bufferH > 0 && (bufferW !== canvasWidth || bufferH !== canvasHeight)) {
@@ -799,6 +977,9 @@ export function createRealGL(
     currentTarget = targetId
     const target = targets.get(targetId)
     if (target === undefined) return
+    // Task 163: a target switch runs through the feedback-loop unbind below
+    // (unit bindings change) — the unit-bind cache dies with the switch.
+    invalidateUnitBinds()
     // Feedback-loop prevention: the TARGET texture must not stay bound to
     // sampler units while it is the FBO's color attachment (GL: undefined;
     // ANGLE/SwiftShader kill such draws). Exactly this was killing frame 2+.
@@ -933,6 +1114,9 @@ export function createRealGL(
   function deleteTexture(textureId: number): void {
     const texture = textures.get(textureId)
     if (texture === undefined) return
+    // Task 163 — the unbind loop below resets unit state behind the cache's
+    // back; the whole mirror dies here.
+    invalidateUnitBinds()
     // Unbind from sampler units (otherwise deleteTexture is silently ignored on some drivers)
     for (const [unit, boundId] of unitTextures) {
       if (boundId === textureId) {
@@ -971,6 +1155,10 @@ export function createRealGL(
   function deleteProgram(programId: number): void {
     const record = programs.get(programId)
     if (record === undefined) return
+    // Task 163 — a deleted program's pending link is dead: unhook the record
+    // (GL deleteProgram on an in-flight link is legal — the driver defers the
+    // object's destruction until the link completes).
+    pendingLinks.delete(record)
     if (currentProgram === record.program) {
       gl.useProgram(null)
       currentProgram = null
@@ -1030,8 +1218,12 @@ export function createRealGL(
      *  renderer re-binds its own per draw as always. */
     readonly vao: WebGLVertexArrayObject
     readonly uniforms: Map<string, WebGLUniformLocation | null>
-    /** Attribute locations by declaration index (getAttribLocation). */
-    readonly attribLocations: readonly number[]
+    /** Attribute locations by declaration index (getAttribLocation) —
+     *  Task 163: resolved LAZILY on the first run. getAttribLocation must
+     *  come AFTER the link resolves (on an unlinked program it legally
+     *  returns -1), and under KHR_parallel_shader_compile the link may
+     *  still be in flight at creation time. */
+    attribLocations: number[] | null
     /** The declared uniform layout (name + size), walked over the packed array. */
     readonly uniformDecl: readonly { readonly name: string; readonly size: 1 | 2 | 3 | 4 }[]
     /** The declared attribute layout (for runTransformPass's binds). */
@@ -1060,36 +1252,46 @@ export function createRealGL(
     // during the pass, but a program still needs a fragment shader to link
     // on strict drivers. The vertex source carries the Task 161 nonce —
     // every TF link must be a program-binary cache MISS (the poison the
-    // nonce defeats: TF_NONCE_SEED's comment above).
+    // nonce defeats: TF_NONCE_SEED's comment above). Task 163: the link is
+    // SUBMITTED here and resolved at the first run (or the first uniform)
+    // — with KHR_parallel_shader_compile the whole tier's passes (the
+    // gpuSim boot creates six back-to-back) link in PARALLEL on the
+    // driver's background threads; the first run pays max(link), not the
+    // sum. The attribute locations move to the first run with it.
     const program = gl.createProgram()
     gl.attachShader(program, compile(gl.VERTEX_SHADER, tfNoncedVertexSource(desc.vertex)))
     gl.attachShader(program, compile(gl.FRAGMENT_SHADER, '#version 300 es\nprecision lowp float;\nvoid main() {}\n'))
     gl.transformFeedbackVaryings(program, desc.outputs as unknown as string[], gl.INTERLEAVED_ATTRIBS)
     gl.linkProgram(program)
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      throw new Error(`rune: transform pass linking: ${gl.getProgramInfoLog(program)}`)
+    // Task 163 — register in the shared program registry (uniform-location
+    // cache + useProgram coherence) and submit the link: WITHOUT the
+    // extension this throws exactly at today's point (the TF object and VAO
+    // below stay uncreated, the historical error path); WITH it the record
+    // joins pendingLinks and the first run/uniform resolves.
+    const programId = nextProgram++
+    const programRecord: ProgramRecord = {
+      program, uniforms: new Map(), label: 'transform pass',
+      linkPending: false, linkError: null,
     }
+    finishLinkSubmission(program, programRecord)
     const tf = gl.createTransformFeedback()
     const vao = gl.createVertexArray()
     const attribDecl = desc.attributes ?? []
-    const attribLocations = attribDecl.map(a => gl.getAttribLocation(program, a.name))
-    const id = nextTransformPass++
-    transformPasses.set(id, {
+    const record: TransformPassRecord = {
       program,
       tf,
       vao,
-      uniforms: new Map(),
-      attribLocations,
+      uniforms: programRecord.uniforms,
+      attribLocations: null,
       attribDecl,
       uniformDecl: desc.uniforms ?? [],
       textureDecl: desc.textures ?? [],
-    })
-    // Register in the shared program registry (useProgram's cache); the
-    // numeric id is the facade's next program id (kept in lockstep).
-    const programId = nextProgram++
-    programs.set(programId, { program, uniforms: transformPasses.get(id)!.uniforms })
+    }
+    programs.set(programId, programRecord)
     transformProgramIds.add(programId)
+    const id = nextTransformPass++
     transformPassIds.set(id, programId)
+    transformPasses.set(id, record)
     return id
   }
   /** passId → the shared program registry id (useProgram cache coherence). */
@@ -1121,9 +1323,12 @@ export function createRealGL(
     }
     // The program switch goes through the shared cache (the numeric
     // early-out + the current-program coherence with the render executor).
+    // Task 163: useProgram resolves the deferred link FIRST — the pass's
+    // attribute locations (below) and uniform locations may only be queried
+    // on a fully linked program.
     const programId = transformPassIds.get(passId)
     if (programId !== undefined) useProgram(programId)
-    else gl.useProgram(record.program)
+    else gl.useProgram(record.program) // defensive dead branch (programId is always set today)
     // THE DEDICATED VAO: the pass's draws see an EMPTY vertex array (plus
     // this pass's own attribute inputs, bound below) — the default VAO's
     // captured bindings (the renderer's instance attributes — possibly
@@ -1135,18 +1340,27 @@ export function createRealGL(
     // bookkeeping stays OUT of the default VAO's ledger (the pass's
     // locations die with the pass; see deleteBuffer's disarm comment).
     passVaoActive = true
+    // Task 163 — the attribute locations resolve LAZILY here (the link is
+    // settled above; getAttribLocation before it would return -1 and
+    // silently break the pass's inputs). Cached on the record after the
+    // first run.
+    let attribLocations = record.attribLocations
+    if (attribLocations === null) {
+      attribLocations = record.attribDecl.map(a => gl.getAttribLocation(record.program, a.name))
+      record.attribLocations = attribLocations
+    }
     // The attribute inputs: per-declaration-entry bufferId → the location
-    // resolved at creation. bindVertexBuffer re-establishes enable + the
+    // resolved at first run. bindVertexBuffer re-establishes enable + the
     // pointer + the divisor (the same path the render executor uses per
     // draw — the state after this pass is exactly what the executor fixes
     // up anyway, so no restore dance is needed for the ARRAY attributes).
     const ab = output.attribBuffers
     if (ab !== undefined) {
-      for (let i = 0; i < record.attribLocations.length && i < ab.length; i++) {
+      for (let i = 0; i < attribLocations.length && i < ab.length; i++) {
         const bufferId = ab[i]
         if (bufferId === undefined) continue
         const a = record.attribDecl[i]
-        bindVertexBuffer(bufferId, record.attribLocations[i], a.size, a.stride, a.offset, a.divisor)
+        bindVertexBuffer(bufferId, attribLocations[i]!, a.size, a.stride, a.offset, a.divisor)
       }
     }
     // The texture inputs: units 0..N-1 (bindTexture resets the LOD clamps
@@ -1218,6 +1432,9 @@ export function createRealGL(
     if (record === undefined) return
     const programId = transformPassIds.get(passId)
     if (programId !== undefined) {
+      // Task 163 — unhook the pending link before the registry drop.
+      const programRecord = programs.get(programId)
+      if (programRecord !== undefined) pendingLinks.delete(programRecord)
       if (currentProgramId === programId) {
         gl.useProgram(null)
         currentProgram = null
@@ -1243,6 +1460,9 @@ export function createRealGL(
       throw new Error(`rune: texSubImage2DBuffer — no such buffer ${bufferId}`)
     }
     const pair = uploadPair(textureId)
+    // Task 163 — the PBO path binds TEXTURE_2D to the CURRENT active unit:
+    // the unit-bind mirror dies (the next bindTexture re-asserts honestly).
+    invalidateUnitBinds()
     gl.bindTexture(gl.TEXTURE_2D, texture)
     // The PBO contract: PIXEL_UNPACK_BUFFER bound, the offset into it as
     // the data pointer, UNPACK_ALIGNMENT pinned to 4 (rgba32f rows are

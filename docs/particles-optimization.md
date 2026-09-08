@@ -1822,3 +1822,90 @@ The demo's story is one sentence again: 160k embers simulated and
 emitted on the GPU, on both backends, by default — and the armor that
 makes that safe on a poisoned phone lives in the library where it
 belongs.
+
+---
+
+## Task 163 — the kernel speed pass: KHR_parallel_shader_compile + the audit findings
+
+The library-side follow-up to the armor: the Task-161 nonce made every
+TF link a fresh ~10–16 ms compile on the phone (the gpuSim boot
+creates SIX passes back-to-back — 60–96 ms of serial boot jank, the
+documented cost of the armor), and the whole GL kernel went through
+the audit the user asked for ("go through the kernel, see what's
+missing, maybe some speed extensions"). Four findings landed:
+
+1. **KHR_parallel_shader_compile — the deferred-link pipeline**
+   (`realGL.ts`). With the extension (Chrome, Firefox; Safari falls
+   back silently) the compile+link submission is fire-and-forget:
+   `createProgram` / `createTransformPass` return WITHOUT a LINK_STATUS
+   query, the driver compiles on its background threads, and the link
+   resolves at the program's FIRST USE — `useProgram`, a
+   uniform-location query, the first TF run — by polling
+   COMPLETION_STATUS_KHR round-robin over the pending set (one IPC
+   round-trip can finalize several programs; resolving pass #1 finds
+   #2–#6 already done). The executor cooperates: `run()` submits EVERY
+   compiled command's program at frame start (the whole frame's shader
+   set goes to the driver at once; vertex buffers stay lazy — an
+   undrawn command uploads nothing). Net: the six-pass boot pays
+   max(link) instead of the sum; a cold scene with N pipelines pays
+   one ~max resolve instead of N × 6–16 ms of first-frame jank.
+   WITHOUT the extension every code path is byte-for-byte the
+   historical synchronous one (the link checked at submit, the error
+   texts and their throw points unchanged) — the mock-based suite
+   needed zero edits, which is the parity proof. The trap the resolve
+   guards: `getUniformLocation` / `getAttribLocation` on a half-linked
+   program legally return null/-1, and the facade's location caches
+   would freeze that null FOREVER — every location query resolves the
+   link first, and the TF pass's attribute locations moved to the
+   first run. A failed deferred link throws at first use and keeps
+   throwing (the record caches the driver's info log); a deleted
+   program unhooks its pending link; a lost context or a wedged driver
+   (30 s deadline) breaks the spin instead of hanging the page.
+
+2. **The unit-bind cache** (`realGL.ts`, `bindTexture`). The executor
+   re-asserts every command's samplers per draw and every TF pass
+   rebinds its state/pair textures per pass — within a pass those
+   rebinds were 100 % redundant (the same texture, the same LOD range,
+   the same unit: 4 GL calls each — activeTexture + bindTexture + the
+   BASE/MAX_LEVEL re-assert). The cache mirrors the unit state and
+   skips the redundant bind; it dies at EVERY pass boundary
+   (bindTarget — the Task-75b re-assert discipline survives: external
+   state changes between our frames still die at the pass start) and
+   at every facade path that binds a texture outside `bindTexture`
+   (the upload family, createTexture — they bind to the CURRENT unit
+   behind the mirror's back) or resets a unit (deleteTexture, the
+   feedback-loop unbind). The hottest loop (6 sim passes × 2–3
+   textures × 60 fps) drops ~600–1,200 GL calls per frame.
+
+3. **powerPreference: 'high-performance'** (`webgl2Renderer.ts`,
+   `acquireWebGL2`). A hint, ignored on single-GPU systems and phones;
+   on dual-GPU laptops it asks for the discrete adapter instead of the
+   battery-saving integrated one. Overridable via the new
+   `options.glAttributes` (a battery-conscious embedding can force
+   `'default'`).
+
+4. **The caps surface** (`capsProbe.ts`): the
+   `'parallel-shader-compile'` feature (KHR_parallel_shader_compile —
+   the app-visible probe of what the kernel just activated) and
+   `WEBGL_debug_renderer_info` in the extensions map (the diagnostics
+   fingerprint the field probes read manually — now
+   `caps.ext('WEBGL_debug_renderer_info')`).
+
+The audit's honest non-adoptions: `desynchronized` (latency-only, and
+it fights preserveDrawingBuffer semantics + the screenshot class);
+`WEBGL_multi_draw` (the tape's draws are state-heterogeneous — a
+same-program batching tier would be the prerequisite); the TF-sentinel
+verify option and the auto-restore wiring stay on the roadmap (Task
+162's list) — robustness items, not speed.
+
+Verified: 1,703 tests (19 new Task-163 pins: the deferred submit, the
+round-robin resolve, the failure contract, the lazy attrib locations,
+the sync-path parity, the bind cache + every invalidation, the
+executor submission, the caps probe), typecheck/lint at baseline, the
+dist rebuilt, `demo:smoke` 24/24 live with GPU Embers on SwiftShader
+(the deferred path exercised live — Chrome exposes the extension
+there), `task152-keepalive` PASS, `task138-vfx-probe` legs A/B green
+(leg C's screenshot dies in this container's saturated-rasterizer
+class — reproduced on clean HEAD via stash, an environment flake, not
+a regression). Cache-busts: `?v=163` on the library import in
+`demo/vfx/main.js` and the script tag in `demo/vfx/index.html`.

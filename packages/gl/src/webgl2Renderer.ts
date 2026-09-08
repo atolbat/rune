@@ -314,6 +314,11 @@ export interface WebGL2RendererOptions {
    *  mode diagnostics; dossier §7.2). Optional: without it renderer.feed()
    *  creates a channel via detectTransport(). */
   readonly transport?: TransportClient
+  /** Task 163 — context-attribute overrides for the underlying
+   *  canvas.getContext('webgl2') — merged over the cascade defaults
+   *  (which set powerPreference:'high-performance'). Example:
+   *  { powerPreference: 'default' } for a battery-conscious embedding. */
+  readonly glAttributes?: Partial<WebGLContextAttributes>
 }
 
 const DEFAULT_CLEAR = { color: [0.07, 0.08, 0.11, 1] as const, depth: 1 }
@@ -323,7 +328,7 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
   const canvas = resolveCanvasAny(options.canvas)
   // acquireWebGL2 yields a raw WebGL2RenderingContext — kept for caps-probing.
   // If createGL is injected (headless tests) — probing is skipped (no raw gl).
-  const rawContext = options.createGL === undefined ? acquireWebGL2(canvas) : null
+  const rawContext = options.createGL === undefined ? acquireWebGL2(canvas, options.glAttributes) : null
   // Task 129: the viewport-heal sink is wired into the raw facade — a
   // drawing-buffer divergence (the live "everything in the bottom-left
   // corner, as if the canvas shrank 4x" report) lands in the GL error log
@@ -942,7 +947,7 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
   } as WebGL2Renderer
 }
 
-function acquireWebGL2(canvas: AnyCanvas): WebGL2RenderingContext {
+function acquireWebGL2(canvas: AnyCanvas, overrides?: Partial<WebGLContextAttributes>): WebGL2RenderingContext {
   // Cascade: some drivers reject antialias+preserveDrawingBuffer together.
   // alpha:false — Task 69: COMPOSITING PARITY with WebGPU (alphaMode:'opaque').
   // With alpha:true (the previous default) transparent frame pixels (e.g. empty
@@ -951,13 +956,19 @@ function acquireWebGL2(canvas: AnyCanvas): WebGL2RenderingContext {
   // With alpha:false alpha is ignored at compositing: the same pixels are
   // black, EXACTLY as on WebGPU. The same scene — the same picture on both
   // backends.
+  //
+  // powerPreference:'high-performance' — Task 163: a HINT, ignored on
+  // single-GPU systems and phones; on dual-GPU laptops it asks the browser
+  // for the DISCRETE adapter instead of the battery-saving integrated one —
+  // a full GPU tier library wants the big GPU by default. Overridable via
+  // options.glAttributes (a battery-conscious app can force 'default').
   const attempts: WebGLContextAttributes[] = [
-    { antialias: true, preserveDrawingBuffer: true, alpha: false },
-    { antialias: false, preserveDrawingBuffer: true, alpha: false },
-    { alpha: false },
+    { antialias: true, preserveDrawingBuffer: true, alpha: false, powerPreference: 'high-performance' },
+    { antialias: false, preserveDrawingBuffer: true, alpha: false, powerPreference: 'high-performance' },
+    { alpha: false, powerPreference: 'high-performance' },
   ]
-  for (const attributes of attempts) {
-    const gl = canvas.getContext('webgl2', attributes)
+  for (const base of attempts) {
+    const gl = canvas.getContext('webgl2', { ...base, ...overrides })
     if (gl !== null) return gl as WebGL2RenderingContext
   }
   const inIframe = typeof window !== 'undefined' && window.self !== window.top

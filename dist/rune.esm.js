@@ -4314,6 +4314,8 @@ function createExecutor(options) {
   let lastCull = "";
   let lastBlend = "";
   function run(view) {
+    for (const command of commands)
+      submitProgram(command);
     for (let at = 0;at < view.count; at++) {
       const op = view.op[at];
       if (op === 1)
@@ -4362,7 +4364,17 @@ function createExecutor(options) {
     const rich = command;
     if (rich.programId === undefined) {
       rich.programId = gl.createProgram(rich.glsl.vertex, rich.glsl.fragment);
+    }
+    if (rich.bufferIds === undefined) {
       rich.bufferIds = rich.attributes.map((attribute) => attribute.bufferId !== undefined ? -1 : gl.createBuffer(attribute.data));
+    }
+  }
+  function submitProgram(command) {
+    if (command === undefined)
+      return;
+    const rich = command;
+    if (rich.programId === undefined && rich.glsl !== undefined) {
+      rich.programId = gl.createProgram(rich.glsl.vertex, rich.glsl.fragment);
     }
   }
   function applyState(command) {
@@ -4459,6 +4471,12 @@ function createRealGL(gl, onViewportHeal) {
       anisoMax = 1;
     }
   }
+  let parallelCompileExt = null;
+  try {
+    parallelCompileExt = gl.getExtension?.("KHR_parallel_shader_compile") ?? null;
+  } catch {
+    parallelCompileExt = null;
+  }
   let nextProgram = 1;
   const defaultAttribBindings = new Map;
   let passVaoActive = false;
@@ -4471,6 +4489,10 @@ function createRealGL(gl, onViewportHeal) {
   let canvasWidth = 1;
   let canvasHeight = 1;
   const unitTextures = new Map;
+  const unitBindCache = new Map;
+  function invalidateUnitBinds() {
+    unitBindCache.clear();
+  }
   let floatLinearExt = false;
   try {
     floatLinearExt = gl.getExtension?.("OES_texture_float_linear") != null;
@@ -4494,17 +4516,33 @@ function createRealGL(gl, onViewportHeal) {
       type: explicit?.type ?? fi.uploadType
     };
   }
+  const pendingLinks = new Set;
   function createProgram(vertex, fragment) {
     const program = gl.createProgram();
     gl.attachShader(program, compile(gl.VERTEX_SHADER, vertex));
     gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragment));
     gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      throw new Error(`rune: program linking: ${gl.getProgramInfoLog(program)}`);
-    }
+    const record = {
+      program,
+      uniforms: new Map,
+      label: "program",
+      linkPending: false,
+      linkError: null
+    };
+    finishLinkSubmission(program, record);
     const id = nextProgram++;
-    programs.set(id, { program, uniforms: new Map });
+    programs.set(id, record);
     return id;
+  }
+  function finishLinkSubmission(program, record) {
+    if (parallelCompileExt !== null) {
+      record.linkPending = true;
+      pendingLinks.add(record);
+      return;
+    }
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      throw new Error(`rune: ${record.label} linking: ${gl.getProgramInfoLog(program)}`);
+    }
   }
   function compile(type, source) {
     const shader = gl.createShader(type);
@@ -4512,12 +4550,65 @@ function createRealGL(gl, onViewportHeal) {
       throw new Error("rune: createShader returned null");
     gl.shaderSource(shader, source);
     gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      const log = gl.getShaderInfoLog(shader);
-      gl.deleteShader(shader);
-      throw new Error(`rune: shader compilation: ${log}`);
+    if (parallelCompileExt === null) {
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        const log = gl.getShaderInfoLog(shader);
+        gl.deleteShader(shader);
+        throw new Error(`rune: shader compilation: ${log}`);
+      }
+      return shader;
     }
     return shader;
+  }
+  function resolveProgramLink(programId) {
+    const record = programs.get(programId);
+    if (record === undefined)
+      return;
+    if (!record.linkPending) {
+      if (record.linkError !== null)
+        throw new Error(record.linkError);
+      return;
+    }
+    const completionStatus = parallelCompileExt !== null ? parallelCompileExt.COMPLETION_STATUS_KHR : 37297;
+    const deadline = Date.now() + 30000;
+    for (;; ) {
+      for (const pending2 of pendingLinks) {
+        let complete;
+        try {
+          complete = gl.getProgramParameter(pending2.program, completionStatus);
+        } catch {
+          complete = true;
+        }
+        if (complete === true || complete === 1) {
+          pendingLinks.delete(pending2);
+          pending2.linkPending = false;
+          if (!gl.getProgramParameter(pending2.program, gl.LINK_STATUS)) {
+            pending2.linkError = `rune: ${pending2.label} linking: ${gl.getProgramInfoLog(pending2.program)}`;
+          }
+        }
+      }
+      if (!record.linkPending)
+        break;
+      if (Date.now() > deadline) {
+        for (const pending2 of pendingLinks) {
+          pending2.linkPending = false;
+          pending2.linkError = "rune: program link did not complete within 30s (KHR_parallel_shader_compile) — the driver appears wedged";
+        }
+        pendingLinks.clear();
+        break;
+      }
+      const lost = gl.isContextLost?.() ?? false;
+      if (lost) {
+        for (const pending2 of pendingLinks) {
+          pending2.linkPending = false;
+          pending2.linkError = "rune: WebGL context lost while a program link was in flight";
+        }
+        pendingLinks.clear();
+        break;
+      }
+    }
+    if (record.linkError !== null)
+      throw new Error(record.linkError);
   }
   function useProgram(programId) {
     if (programId === currentProgramId)
@@ -4525,6 +4616,7 @@ function createRealGL(gl, onViewportHeal) {
     const record = programs.get(programId);
     if (record === undefined || record.program === currentProgram)
       return;
+    resolveProgramLink(programId);
     currentProgram = record.program;
     currentProgramId = programId;
     gl.useProgram(record.program);
@@ -4533,6 +4625,7 @@ function createRealGL(gl, onViewportHeal) {
     const record = programs.get(programId);
     if (record === undefined)
       return null;
+    resolveProgramLink(programId);
     const cached = record.uniforms.get(name);
     if (cached !== undefined)
       return cached;
@@ -4617,6 +4710,7 @@ function createRealGL(gl, onViewportHeal) {
   }
   function createTexture(width, height, options) {
     const texture = gl.createTexture();
+    invalidateUnitBinds();
     gl.bindTexture(gl.TEXTURE_2D, texture);
     const mipLevels = options?.mipLevels ?? 1;
     const format = options?.format ?? "rgba8";
@@ -4646,6 +4740,7 @@ function createRealGL(gl, onViewportHeal) {
     return id;
   }
   function texSubImage2D(textureId, x, y, width, height, bytes) {
+    invalidateUnitBinds();
     gl.bindTexture(gl.TEXTURE_2D, textures.get(textureId) ?? null);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
@@ -4655,6 +4750,7 @@ function createRealGL(gl, onViewportHeal) {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, width, height, pair.format, pair.type, bytes);
   }
   function texImage2DFromSource(textureId, source, options) {
+    invalidateUnitBinds();
     gl.bindTexture(gl.TEXTURE_2D, textures.get(textureId) ?? null);
     const flipY = options?.flipY ?? false;
     if (flipY)
@@ -4671,6 +4767,7 @@ function createRealGL(gl, onViewportHeal) {
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   }
   function texSubImage2DFromSource(textureId, x, y, source, options) {
+    invalidateUnitBinds();
     gl.bindTexture(gl.TEXTURE_2D, textures.get(textureId) ?? null);
     const flipY = options?.flipY ?? false;
     if (flipY)
@@ -4681,6 +4778,7 @@ function createRealGL(gl, onViewportHeal) {
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   }
   function texImage2DLevel(textureId, level, source, options) {
+    invalidateUnitBinds();
     gl.bindTexture(gl.TEXTURE_2D, textures.get(textureId) ?? null);
     const flipY = options?.flipY ?? false;
     const meta = textureMeta.get(textureId);
@@ -4704,7 +4802,6 @@ function createRealGL(gl, onViewportHeal) {
     }
   }
   function bindTexture(textureOrViewId, unit) {
-    gl.activeTexture(gl.TEXTURE0 + unit);
     const subView = textureViews.get(textureOrViewId);
     let underlyingTextureId;
     let baseLevel;
@@ -4719,9 +4816,16 @@ function createRealGL(gl, onViewportHeal) {
       baseLevel = 0;
       maxLevel = meta !== undefined ? meta.maxLoadedLevel : 0;
     }
+    const cachedBind = unitBindCache.get(unit);
+    if (cachedBind !== undefined && cachedBind.textureId === underlyingTextureId && cachedBind.baseLevel === baseLevel && cachedBind.maxLevel === maxLevel) {
+      unitTextures.set(unit, underlyingTextureId);
+      return;
+    }
+    gl.activeTexture(gl.TEXTURE0 + unit);
     gl.bindTexture(gl.TEXTURE_2D, textures.get(underlyingTextureId) ?? null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, baseLevel);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, maxLevel);
+    unitBindCache.set(unit, { textureId: underlyingTextureId, baseLevel, maxLevel });
     unitTextures.set(unit, underlyingTextureId);
   }
   function createTextureView(textureId, options) {
@@ -4795,6 +4899,7 @@ function createRealGL(gl, onViewportHeal) {
   function bindTarget(targetId, clear2) {
     if (targetId === 0) {
       currentTarget = 0;
+      invalidateUnitBinds();
       const bufferW = gl.drawingBufferWidth;
       const bufferH = gl.drawingBufferHeight;
       if (bufferW > 0 && bufferH > 0 && (bufferW !== canvasWidth || bufferH !== canvasHeight)) {
@@ -4812,6 +4917,7 @@ function createRealGL(gl, onViewportHeal) {
     const target = targets.get(targetId);
     if (target === undefined)
       return;
+    invalidateUnitBinds();
     for (const [unit, boundId] of unitTextures) {
       if (boundId === target.textureId) {
         gl.activeTexture(gl.TEXTURE0 + unit);
@@ -4922,6 +5028,7 @@ function createRealGL(gl, onViewportHeal) {
     const texture = textures.get(textureId);
     if (texture === undefined)
       return;
+    invalidateUnitBinds();
     for (const [unit, boundId] of unitTextures) {
       if (boundId === textureId) {
         gl.activeTexture(gl.TEXTURE0 + unit);
@@ -4955,6 +5062,7 @@ function createRealGL(gl, onViewportHeal) {
     const record = programs.get(programId);
     if (record === undefined)
       return;
+    pendingLinks.delete(record);
     if (currentProgram === record.program) {
       gl.useProgram(null);
       currentProgram = null;
@@ -4989,28 +5097,33 @@ void main() {}
 `));
     gl.transformFeedbackVaryings(program, desc.outputs, gl.INTERLEAVED_ATTRIBS);
     gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      throw new Error(`rune: transform pass linking: ${gl.getProgramInfoLog(program)}`);
-    }
+    const programId = nextProgram++;
+    const programRecord = {
+      program,
+      uniforms: new Map,
+      label: "transform pass",
+      linkPending: false,
+      linkError: null
+    };
+    finishLinkSubmission(program, programRecord);
     const tf = gl.createTransformFeedback();
     const vao = gl.createVertexArray();
     const attribDecl = desc.attributes ?? [];
-    const attribLocations = attribDecl.map((a) => gl.getAttribLocation(program, a.name));
-    const id = nextTransformPass++;
-    transformPasses.set(id, {
+    const record = {
       program,
       tf,
       vao,
-      uniforms: new Map,
-      attribLocations,
+      uniforms: programRecord.uniforms,
+      attribLocations: null,
       attribDecl,
       uniformDecl: desc.uniforms ?? [],
       textureDecl: desc.textures ?? []
-    });
-    const programId = nextProgram++;
-    programs.set(programId, { program, uniforms: transformPasses.get(id).uniforms });
+    };
+    programs.set(programId, programRecord);
     transformProgramIds.add(programId);
+    const id = nextTransformPass++;
     transformPassIds.set(id, programId);
+    transformPasses.set(id, record);
     return id;
   }
   const transformPassIds = new Map;
@@ -5040,14 +5153,19 @@ void main() {}
       gl.useProgram(record.program);
     gl.bindVertexArray(record.vao);
     passVaoActive = true;
+    let attribLocations = record.attribLocations;
+    if (attribLocations === null) {
+      attribLocations = record.attribDecl.map((a) => gl.getAttribLocation(record.program, a.name));
+      record.attribLocations = attribLocations;
+    }
     const ab = output.attribBuffers;
     if (ab !== undefined) {
-      for (let i = 0;i < record.attribLocations.length && i < ab.length; i++) {
+      for (let i = 0;i < attribLocations.length && i < ab.length; i++) {
         const bufferId = ab[i];
         if (bufferId === undefined)
           continue;
         const a = record.attribDecl[i];
-        bindVertexBuffer(bufferId, record.attribLocations[i], a.size, a.stride, a.offset, a.divisor);
+        bindVertexBuffer(bufferId, attribLocations[i], a.size, a.stride, a.offset, a.divisor);
       }
     }
     const tex = output.textures;
@@ -5098,6 +5216,9 @@ void main() {}
       return;
     const programId = transformPassIds.get(passId);
     if (programId !== undefined) {
+      const programRecord = programs.get(programId);
+      if (programRecord !== undefined)
+        pendingLinks.delete(programRecord);
       if (currentProgramId === programId) {
         gl.useProgram(null);
         currentProgram = null;
@@ -5122,6 +5243,7 @@ void main() {}
       throw new Error(`rune: texSubImage2DBuffer — no such buffer ${bufferId}`);
     }
     const pair = uploadPair(textureId);
+    invalidateUnitBinds();
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, buffer);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
@@ -5192,7 +5314,8 @@ function probeGLCaps(probe) {
     ["linear-filter-half-float", "OES_texture_half_float_linear"],
     ["float32-render", "EXT_color_buffer_float"],
     ["float16-render", "EXT_color_buffer_half_float"],
-    ["timestamp-query", "EXT_disjoint_timer_query_webgl2"]
+    ["timestamp-query", "EXT_disjoint_timer_query_webgl2"],
+    ["parallel-shader-compile", "KHR_parallel_shader_compile"]
   ];
   for (const [feature, extName] of extList) {
     const ext = probe.getExtension(extName);
@@ -5208,6 +5331,9 @@ function probeGLCaps(probe) {
     features.add("float16-blend");
     extensions.set("EXT_float_blend", floatBlend);
   }
+  const rendererInfo = probe.getExtension("WEBGL_debug_renderer_info");
+  if (rendererInfo)
+    extensions.set("WEBGL_debug_renderer_info", rendererInfo);
   let float32StorageOk = true;
   if (probe.supportsFloat32Storage !== undefined && !probe.supportsFloat32Storage()) {
     float32StorageOk = false;
@@ -8020,7 +8146,7 @@ function computeMipLevels(w, h) {
 var DEFAULT_CLEAR2 = { color: [0.07, 0.08, 0.11, 1], depth: 1 };
 function createWebGL2Renderer(options) {
   const canvas = resolveCanvasAny(options.canvas);
-  const rawContext = options.createGL === undefined ? acquireWebGL2(canvas) : null;
+  const rawContext = options.createGL === undefined ? acquireWebGL2(canvas, options.glAttributes) : null;
   const rawGl = options.createGL !== undefined ? options.createGL(canvas) : createRealGL(rawContext, (message) => options.onGlError?.(message));
   const session = options.resources !== undefined ? createResourceSessionGL(rawGl, options.resources) : null;
   const gl = session !== null ? session.facade : options.journal !== undefined ? withJournal(rawGl, options.journal) : rawGl;
@@ -8457,14 +8583,14 @@ function createWebGL2Renderer(options) {
     dispose
   };
 }
-function acquireWebGL2(canvas) {
+function acquireWebGL2(canvas, overrides) {
   const attempts = [
-    { antialias: true, preserveDrawingBuffer: true, alpha: false },
-    { antialias: false, preserveDrawingBuffer: true, alpha: false },
-    { alpha: false }
+    { antialias: true, preserveDrawingBuffer: true, alpha: false, powerPreference: "high-performance" },
+    { antialias: false, preserveDrawingBuffer: true, alpha: false, powerPreference: "high-performance" },
+    { alpha: false, powerPreference: "high-performance" }
   ];
-  for (const attributes of attempts) {
-    const gl = canvas.getContext("webgl2", attributes);
+  for (const base of attempts) {
+    const gl = canvas.getContext("webgl2", { ...base, ...overrides });
     if (gl !== null)
       return gl;
   }

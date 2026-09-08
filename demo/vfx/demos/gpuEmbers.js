@@ -73,7 +73,7 @@
 //     cull, softwareGL } — the probe gates pin the tier + the frame cost
 //     + the hardware-policy branch; window.__vfxCounters.embers — the
 //     emission counters.
-import { createGpuParticles } from '../../../dist/rune.esm.js?v=161' // Task 161: the TF cache-miss nonce — every gpuEmbers TF link is a fresh compile (the Mali program-binary cache poison can no longer reach the demo)
+import { createGpuParticles } from '../../../dist/rune.esm.js?v=163' // Task 161: the TF cache-miss nonce — every gpuEmbers TF link is a fresh compile (the Mali poison armor). Task 163: the deferred-link pipeline — the six TF passes compile in PARALLEL now (KHR_parallel_shader_compile), the nonce's boot cost collapses from the sum to the max
 
 // Task 137 — the WebGL2 TF budget is now HARDWARE-AWARE: the 16k cap was
 // the SwiftShader/software-GL budget (the container's gate-hostile class:

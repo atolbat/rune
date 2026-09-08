@@ -37,6 +37,17 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
   let lastBlend = ''
 
   function run(view: TapeView): void {
+    // Task 163 — SUBMIT-ALL: every compiled-but-not-yet-created program is
+    // submitted NOW, before the first draw. createProgram fires the
+    // compile+link — and under KHR_parallel_shader_compile it RETURNS
+    // without blocking, so the driver's background compile threads take
+    // the WHOLE command set at once; the per-draw useProgram resolves then
+    // pay max(link time) instead of the sum (a cold demo scene with N
+    // distinct pipelines: N × 6–16ms of first-frame jank → one ~max
+    // resolve). Buffers stay LAZY (ensureProgram at draw): a command the
+    // frame never draws must not upload vertex data it may never use.
+    // Steady state: one property check per command, zero GL calls.
+    for (const command of commands) submitProgram(command)
     for (let at = 0; at < view.count; at++) {
       const op = view.op[at]
       if (op === 1) beginPass()
@@ -113,9 +124,31 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
       bufferIds?: number[]
     }
     if (rich.programId === undefined) {
+      // A command the run()-start sweep never saw (created after this
+      // frame's run began — the next run() submits it; here it submits
+      // inline, exactly the pre-Task-163 lazy path).
       rich.programId = gl.createProgram(rich.glsl.vertex, rich.glsl.fragment)
-      // M5: a feed attribute lives in the feed renderer's external buffer — we do not create our own.
+    }
+    // M5: a feed attribute lives in the feed renderer's external buffer — we do not create our own.
+    // Task 163: the buffers keep their own guard — the submit-all sweep may
+    // have created the PROGRAM of a command this frame never draws (the
+    // compile+link parallelism win); the vertex-data upload must stay lazy.
+    if (rich.bufferIds === undefined) {
       rich.bufferIds = rich.attributes.map(attribute => attribute.bufferId !== undefined ? -1 : gl.createBuffer(attribute.data))
+    }
+  }
+
+  /** Task 163 — the run()-start program submission (see run): createProgram
+   *  only, no buffers, no resolve — the link resolves at the program's first
+   *  useProgram (the facade's deferred-link contract). */
+  function submitProgram(command: CompiledCommand | undefined): void {
+    if (command === undefined) return
+    const rich = command as CompiledCommand & {
+      glsl?: { vertex: string; fragment: string }
+      programId?: number
+    }
+    if (rich.programId === undefined && rich.glsl !== undefined) {
+      rich.programId = gl.createProgram(rich.glsl.vertex, rich.glsl.fragment)
     }
   }
 
