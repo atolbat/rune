@@ -7,19 +7,25 @@
 //
 // The rendering surface this demo exercises end to end:
 //   • one auto renderer (WebGPU / WebGL2 toggle via the shell) on a
-//     fullscreen canvas;
-//   • 6 dual-source commands (GLSL + WGSL twins): two instanced star
-//     passes (a parallax background field + the galaxy), the lane pass (a
-//     line soup with a screen-constant width — the vertex shader expands
-//     the baked centerline+perpendicular to ~2.2px), the orbit-ring soup,
-//     the instanced ship pass and the instanced planet/sun pass — plus
-//     the ring/effect pass (selection, claim flashes, move markers);
+//     fullscreen canvas — now a REAL 3D PERSPECTIVE SCENE: a tilted orbit
+//     camera over the galaxy plane, camera-facing sprite quads, a textured
+//     spiral haze in the plane, 3D star fields, nebula puffs and a
+//     sphere-shaded planet atlas (see render.js);
+//   • 12 dual-source commands (GLSL + WGSL twins) over textures (procedural
+//     at boot, three real NASA/ESO bitmaps swapped in asynchronously);
 //   • the rendererFeed dynamic-buffer pattern on both backends (GL:
 //     createBuffer('dynamic') + updateBuffer per frame; WebGPU: the
 //     data-keyed vertex cache + syncVertexBuffer) — with the Task-165
 //     vertex-bind memo, the steady-state frame re-asserts nothing;
-//   • uniforms through the shared arena (mat4 cameras, per-pass fades),
-//     instance-step attributes with interleaved 64-byte records.
+//   • uniforms through the shared arena (mat4 cameras, per-pass fades,
+//     vec3 billboard axes), instance-step attributes with interleaved
+//     64-byte records.
+//
+// MOBILE INPUT: the canvas carries touch-action: none — the browser's
+// page-pinch never races the game's pinch (the field report: "zooming
+// zooms the whole page even on the canvas"). One finger pans, two fingers
+// pinch (zoom at the midpoint), twist (yaw the camera — the 3D plane
+// rotates under you) and pan at once; taps stay taps (a 9px/400ms slop).
 //
 // The dist import carries the stale-cache guard: rune.esm.js is at ?v=169.
 
@@ -28,9 +34,12 @@ import {
   generateWorld, stepWorld, orderShip, queueBuilding, queueShip, shipName,
   OWNER, SHIPS, lanePath,
 } from './galaxy.js?v=1'
-import { createGameRender } from './render.js?v=2'
-import { createUI } from './ui.js?v=1'
-import { setCamera, MVP, MVP_PARALLAX, PX, PX_PARALLAX, CLOCK, FADE, GALAXY_FADE } from './shaders.js?v=2'
+import { createGameRender } from './render.js?v=3'
+import { createUI } from './ui.js?v=2'
+import {
+  setCamera3D, screenToWorld, worldToScreen, panBy,
+  MVP, PXK, CLOCK, FADE, GALAXY_FADE, NEB_FADE, SHIP_CAP,
+} from './shaders.js?v=3'
 
 /* ─── the seed (the same seed replays the same galaxy) ───────────────────── */
 
@@ -55,7 +64,12 @@ const view = {
   blend: 0, // 0 = the galaxy layer, 1 = the system layer
 }
 
-const cam = { x: world.systems[0].x, y: world.systems[0].y, z: 0.42, tx: 0, ty: 0, tz: 0.42 }
+// the camera: x/y target on the plane, z = CSS px per world unit, yaw =
+// the twist around the view axis, tilt = the pitch from face-on
+const cam = {
+  x: world.systems[0].x, y: world.systems[0].y, z: 0.42, tx: 0, ty: 0, tz: 0.42,
+  yaw: 0, tyaw: 0, tilt: 0.5, ttilt: 0.5,
+}
 
 // land the camera between the homeworld and the galactic core (the home can
 // sit on the galaxy's outer edge — a camera centered on it would leave half
@@ -141,6 +155,7 @@ const actions = {
     const home = world.systems.find(s => s.owner === OWNER.PLAYER)
     if (home !== undefined) { cam.x = cam.tx = home.x * 0.6; cam.y = cam.ty = home.y * 0.6 }
     cam.z = cam.tz = 0.42
+    cam.yaw = cam.tyaw = 0
     shell.log.event(`Galaxy seed ${nextSeed}`)
     void boot(shell.mode)
   },
@@ -158,29 +173,48 @@ if (typeof window !== 'undefined') {
     get view() { return view },
     get cam() { return cam },
     get clock() { return CLOCK[0] },
+    /** world plane point → screen CSS px (the gates' projection handle). */
+    project(wx, wy) {
+      const [w, h] = activeRenderer !== null ? activeRenderer.size.peek() : [1, 1]
+      const out = { x: 0, y: 0 }
+      return worldToScreen(wx, wy, w, h, out) ?? { x: -9999, y: -9999 }
+    },
     frame: 0, // the liveness counter (the gates poll it)
   }
 }
 
-/* ─── the input: tap / pan / pinch / wheel ─────────────────────────────────── */
+/* ─── the input: tap / pan / pinch / twist / wheel ────────────────────────── */
+// THE TOUCH FIX: touch-action:none on the canvas (set at creation + CSS) —
+// the browser stops treating the game's pinch as a page pinch. The
+// gesturestart guard covers old iOS Safari, dblclick covers double-tap zoom.
 
 function bindInput(canvas) {
   const pointers = new Map()
   let pinchDist = 0
+  let pinchAngle = 0
   let pinchZ = 0
+  let pinchYaw = 0
+  let midX = 0
+  let midY = 0
   let moved = 0
   let downAt = 0
+
+  const snapTwoFinger = () => {
+    const [a, b] = [...pointers.values()]
+    pinchDist = Math.hypot(a.x - b.x, a.y - b.y)
+    pinchAngle = Math.atan2(b.y - a.y, b.x - a.x)
+    pinchZ = cam.z
+    pinchYaw = cam.yaw
+    midX = (a.x + b.x) / 2
+    midY = (a.y + b.y) / 2
+  }
 
   canvas.addEventListener('pointerdown', (e) => {
     canvas.setPointerCapture?.(e.pointerId)
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
     moved = 0
     downAt = performance.now()
-    if (pointers.size === 2) {
-      const [a, b] = [...pointers.values()]
-      pinchDist = Math.hypot(a.x - b.x, a.y - b.y)
-      pinchZ = cam.z
-    }
+    if (pointers.size === 2) snapTwoFinger()
   })
 
   canvas.addEventListener('pointermove', (e) => {
@@ -192,16 +226,26 @@ function bindInput(canvas) {
     p.y = e.clientY
     moved += Math.abs(dx) + Math.abs(dy)
     if (pointers.size === 2) {
+      // pinch + twist + two-finger pan, all at once
       const [a, b] = [...pointers.values()]
       const d = Math.hypot(a.x - b.x, a.y - b.y)
-      if (pinchDist > 0 && d > 0) {
-        zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, pinchZ * (d / pinchDist))
+      const ang = Math.atan2(b.y - a.y, b.x - a.x)
+      const nMidX = (a.x + b.x) / 2
+      const nMidY = (a.y + b.y) / 2
+      if (pinchDist > 8 && d > 8) {
+        zoomAt(nMidX, nMidY, pinchZ * (d / pinchDist))
+        cam.yaw = pinchYaw + (ang - pinchAngle)
+        cam.tyaw = cam.yaw
       }
+      // the midpoint drag pans (the world under the fingers)
+      panBy(cam, nMidX - midX, nMidY - midY)
+      midX = nMidX
+      midY = nMidY
+      clampCam()
       return
     }
     // pan (both views)
-    cam.x -= dx / cam.z
-    cam.y += dy / cam.z
+    panBy(cam, dx, dy)
     cam.tx = cam.x
     cam.ty = cam.y
     clampCam()
@@ -210,7 +254,10 @@ function bindInput(canvas) {
   const up = (e) => {
     const had = pointers.delete(e.pointerId)
     if (!had) return
-    if (pointers.size === 0 && moved < 9 && performance.now() - downAt < 400) {
+    // a tap is "down→up without movement" — the slop is the discriminator,
+    // not the duration (a slow main thread can deliver the pair a second
+    // apart; a held-still-then-released finger still means "select this")
+    if (pointers.size === 0 && moved < 9) {
       tap(e.clientX, e.clientY)
     }
     if (pointers.size < 2) pinchDist = 0
@@ -222,20 +269,35 @@ function bindInput(canvas) {
     e.preventDefault()
     zoomAt(e.clientX, e.clientY, cam.z * Math.exp(-e.deltaY * 0.0012))
   }, { passive: false })
+
+  // iOS Safari's page-level gesture events never fire with touch-action:none
+  // on modern builds — this guard is for the old ones
+  const stopGesture = (e) => { e.preventDefault() }
+  document.addEventListener('gesturestart', stopGesture)
+  document.addEventListener('gesturechange', stopGesture)
+  canvas.addEventListener('dblclick', (e) => e.preventDefault())
 }
 
-/** Zoom keeping the world point under (sx, sy) fixed. */
+/**
+ * Zoom keeping the world point under (sx, sy) fixed — Newton by world-space
+ * correction: read the world point under the cursor, change z, then move the
+ * camera target by wherever that point now lands. Two iterations converge
+ * past pixel precision under any yaw/tilt.
+ */
 function zoomAt(sx, sy, z) {
   const [w, h] = activeRenderer !== null ? activeRenderer.size.peek() : [1, 1]
-  const zClamped = clampZoom(z)
-  const wx = cam.x + (sx - w / 2) / cam.z
-  const wy = cam.y - (sy - h / 2) / cam.z
-  cam.z = zClamped
-  cam.x = wx - (sx - w / 2) / zClamped
-  cam.y = wy + (sy - h / 2) / zClamped
+  const before = screenToWorld(sx, sy, w, h)
+  cam.z = clampZoom(z)
+  if (before === null) return
+  for (let i = 0; i < 2; i++) {
+    const now = screenToWorld(sx, sy, w, h)
+    if (now === null) break
+    cam.x += before[0] - now[0]
+    cam.y += before[1] - now[1]
+  }
   cam.tx = cam.x
   cam.ty = cam.y
-  cam.tz = zClamped
+  cam.tz = cam.z
   clampCam()
 }
 
@@ -257,8 +319,10 @@ function clampCam() {
 /** A tap: planets (system view) > ships vs systems (proportional) > deselect. */
 function tap(sx, sy) {
   const [w, h] = activeRenderer !== null ? activeRenderer.size.peek() : [1, 1]
-  const wx = cam.x + (sx - w / 2) / cam.z
-  const wy = cam.y - (sy - h / 2) / cam.z
+  const hit = screenToWorld(sx, sy, w, h)
+  if (hit === null) return
+  const wx = hit[0]
+  const wy = hit[1]
 
   // 1. a planet (system view) — the view's subject wins over everything
   if (view.mode === 'system' && view.system !== null) {
@@ -268,7 +332,7 @@ function tap(sx, sy) {
       const ang = planet.phase + CLOCK[0] * planet.speed
       const px = sys.x + Math.cos(ang) * planet.orbit
       const py = sys.y + Math.sin(ang) * planet.orbit
-      const r = Math.max(planet.size * 0.5, 14 / cam.z) + 6 / cam.z
+      const r = Math.max(planet.size * 0.5 * 1.55, 14 / cam.z) + 6 / cam.z
       if (Math.hypot(px - wx, py - wy) < r) {
         view.selectedPlanet = view.selectedPlanet === pi ? -1 : pi
         if (view.selectedPlanet >= 0) shell.log.event(`${sys.name} · ${planet.type.name} selected`)
@@ -368,6 +432,8 @@ async function boot(mode) {
   shell.slot.replaceChildren()
   const canvas = document.createElement('canvas')
   canvas.id = 'canvas'
+  // THE TOUCH FIX: the browser must not own pinch/pan on the game surface
+  canvas.style.touchAction = 'none'
   shell.slot.append(canvas)
   bindInput(canvas)
 
@@ -377,7 +443,7 @@ async function boot(mode) {
     const renderer = createRenderer({
       canvas,
       backend: mode === 'auto' ? undefined : mode,
-      clear: { color: [0.016, 0.02, 0.033, 1], depth: 1 },
+      clear: { color: [0.008, 0.011, 0.02, 1], depth: 1 },
       onGlError: (message) => shell.log.warn(`GL: ${message}`),
       onGpuError: (message) => shell.log.warn(`GPU: ${message}`),
     })
@@ -385,7 +451,7 @@ async function boot(mode) {
     if (seq !== bootSeq) { renderer.dispose(); return }
     activeRenderer = renderer
     if (ui === null) ui = createUI(world, view, actions)
-    gameRender = createGameRender(renderer, world)
+    gameRender = createGameRender(renderer, world, shell)
     renderer.frame(frameCallback)
     const backendName = renderer.backend === 'webgpu' ? 'WebGPU' : 'WebGL2'
     shell.setBadge(backendName, renderer.backend === 'webgpu' ? 'gpu' : 'gl')
@@ -426,18 +492,28 @@ function frameCallback(ctx, record) {
   cam.x += (cam.tx - cam.x) * k
   cam.y += (cam.ty - cam.y) * k
   cam.z += (cam.tz - cam.z) * k
+  // the yaw eases the short way around the circle
+  let dyaw = (cam.tyaw - cam.yaw) % (Math.PI * 2)
+  if (dyaw > Math.PI) dyaw -= Math.PI * 2
+  if (dyaw < -Math.PI) dyaw += Math.PI * 2
+  cam.yaw += dyaw * k
+  // the tilt target: cinematic when zoomed out, strategic when close in
   const blendTarget = view.mode === 'system' ? 1 : 0
   view.blend += (blendTarget - view.blend) * k
+  const tiltTarget = view.mode === 'system'
+    ? 0.21 // ~12° — the orbits read as ellipses, the rings show
+    : 0.32 + 0.26 * Math.min(1, Math.max(0, (1.5 - cam.z) / 1.2)) // 33°..48°
+  cam.tilt += (tiltTarget - cam.tilt) * (1 - Math.exp(-3.5 * dtRaw))
 
   // the matrices + the shared uniforms
   const [w, h] = activeRenderer.size.peek()
-  setCamera(MVP, cam.x, cam.y, cam.z, ctx.aspect, h)
-  const bgPx = Math.max(cam.z * 0.09, 0.05)
-  setCamera(MVP_PARALLAX, cam.x * 0.15, cam.y * 0.15, bgPx, ctx.aspect, h)
-  PX[0] = cam.z
-  PX_PARALLAX[0] = bgPx
+  setCamera3D(cam, ctx.aspect, w, h)
   FADE[0] = view.blend
   GALAXY_FADE[0] = 1 - view.blend
+  NEB_FADE[0] = 0.9 * GALAXY_FADE[0]
+  // in the system view ships are markers, not giants (a galaxy-scale hull
+  // would dwarf the textured planets)
+  SHIP_CAP[0] = 240 - 230 * view.blend
 
   gameRender.draw(record, view)
   ui?.tick(dtRaw, cam, w, h)

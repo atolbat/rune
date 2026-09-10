@@ -5,6 +5,7 @@
 // projected" standard).
 
 import { BUILDINGS, SHIPS, TECHS, OWNER, production } from './galaxy.js?v=1'
+import { worldToScreen } from './shaders.js?v=3'
 
 const ICON = { minerals: '◆', energy: '⚡', science: '✦' }
 
@@ -111,7 +112,7 @@ export function createUI(world, view, actions) {
   // ── the hint ──
   const hint = document.createElement('div')
   hint.className = 'as-hint'
-  hint.textContent = 'tap a system · tap again to enter'
+  hint.textContent = 'drag to pan · pinch to zoom · twist to rotate · tap a system, tap again to enter'
   root.append(hint)
   let hintKilled = false
   const killHint = () => { if (!hintKilled) { hintKilled = true; hint.classList.add('as-gone') } }
@@ -119,12 +120,15 @@ export function createUI(world, view, actions) {
 
   document.body.append(root)
 
-  // ── the label projection (called every frame) ──
+  // ── the label projection (called every frame — through the live MVP) ──
+  const screenPt = { x: 0, y: 0 }
   function projectLabels(cam, w, h) {
     for (const label of systemLabels) {
       const sys = label.sys
-      const sx = (sys.x - cam.x) * cam.z + w / 2
-      const sy = h / 2 - (sys.y - cam.y) * cam.z
+      const pt = worldToScreen(sys.x, sys.y, w, h, screenPt)
+      if (pt === null) { label.el.style.display = 'none'; continue }
+      const sx = pt.x
+      const sy = pt.y
       const margin = 70
       const visible = sx > -margin && sx < w + margin && sy > 30 && sy < h - 60
       const owned = sys.owner !== OWNER.NONE

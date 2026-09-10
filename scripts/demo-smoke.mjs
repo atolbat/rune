@@ -590,9 +590,9 @@ try {
   console.log(`[smoke] astral animation: ${astralAlive ? 'alive' : 'STATIC'}`)
   // a tap on the homeworld opens the system panel (its live screen position)
   const astralTap = await page.evaluate(() => {
-    const { world, cam } = window.__astral
-    const home = world.systems.find(s => s.owner === 1)
-    return { x: Math.round((home.x - cam.x) * cam.z + window.innerWidth / 2), y: Math.round(window.innerHeight / 2 - (home.y - cam.y) * cam.z) }
+    const home = window.__astral.world.systems.find(s => s.owner === 1)
+    const pt = window.__astral.project(home.x, home.y)
+    return { x: Math.round(pt.x), y: Math.round(pt.y) }
   })
   await page.mouse.click(astralTap.x, astralTap.y)
   await page.waitForTimeout(600)

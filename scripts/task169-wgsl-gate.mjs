@@ -143,15 +143,14 @@ try {
       if (device === null) return out
       out.device = true
 
-      const mod = await import(`http://localhost:${port}/demo/astral/shaders.js?gate=169`)
-      const named = [
-        ['star', mod.starShader.wgsl],
-        ['lane', mod.laneShader.wgsl],
-        ['soup', mod.soupShader.wgsl],
-        ['ship', mod.shipShader.wgsl],
-        ['planet', mod.planetShader.wgsl],
-        ['ring', mod.ringShader.wgsl],
-      ]
+      const mod = await import(`http://localhost:${port}/demo/astral/shaders.js?gate=170`)
+      // Task 170: the demo's shader set grew (sky/nebula/haze/bgstar/pring
+      // twins) — discover EVERY *Shader export instead of a fixed list, so
+      // a new pass can never ship uncompiled again (the class stays closed)
+      const named = Object.keys(mod)
+        .filter(k => k.endsWith('Shader') && mod[k] && typeof mod[k].wgsl === 'string')
+        .sort()
+        .map(k => [k.replace(/Shader$/, ''), mod[k].wgsl])
       for (const [name, code] of named) {
         const verdict = await compileVerdict(device, code)
         out.shaders.push({

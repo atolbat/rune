@@ -67,12 +67,14 @@ const check = (ok, label, detail = '') => {
   if (!ok) failed = true
 }
 
-/** world→screen through the LIVE camera (read at evaluate time). */
+/** world→screen through the LIVE camera (read at evaluate time).
+ * Task 170: the camera is a tilted perspective now — the gates project
+ * through the demo's own __astral.project (ray-cast through the MVP),
+ * never a re-derived ortho formula. */
 function screenOf(page, wx, wy) {
   return page.evaluate(([x, y]) => {
-    const { cam } = window.__astral
-    const w = window.innerWidth, h = window.innerHeight
-    return { x: (x - cam.x) * cam.z + w / 2, y: h / 2 - (y - cam.y) * cam.z }
+    const pt = window.__astral.project(x, y)
+    return { x: pt.x, y: pt.y }
   }, [wx, wy])
 }
 
@@ -122,13 +124,14 @@ async function laneCheck(page, label) {
   // (a minimum SCREEN length — a 2px hop between neighbors is entirely
   // inside the stars' glow and proves nothing)
   const lane = await page.evaluate(() => {
-    const { world, cam } = window.__astral
+    const { world } = window.__astral
     const w = window.innerWidth, h = window.innerHeight
+    const P = window.__astral.project
     let best = null
     for (const L of world.lanes) {
       const A = world.systems[L.a], B = world.systems[L.b]
-      const ax = (A.x - cam.x) * cam.z + w / 2, ay = h / 2 - (A.y - cam.y) * cam.z
-      const bx = (B.x - cam.x) * cam.z + w / 2, by = h / 2 - (B.y - cam.y) * cam.z
+      const pa = P(A.x, A.y), pb = P(B.x, B.y)
+      const ax = pa.x, ay = pa.y, bx = pb.x, by = pb.y
       const len = Math.hypot(bx - ax, by - ay)
       const mid = { x: (ax + bx) / 2, y: (ay + by) / 2 }
       if (len < 90) continue
@@ -174,10 +177,8 @@ try {
 
   // ── D. tap the homeworld (its live screen position) → the system panel ──
   const homeTap = await page.evaluate(() => {
-    const { world, cam } = window.__astral
-    const home = world.systems.find(s => s.owner === 1)
-    const w = window.innerWidth, h = window.innerHeight
-    return { x: (home.x - cam.x) * cam.z + w / 2, y: h / 2 - (home.y - cam.y) * cam.z }
+    const home = window.__astral.world.systems.find(s => s.owner === 1)
+    return window.__astral.project(home.x, home.y)
   })
   await page.mouse.click(Math.round(homeTap.x), Math.round(homeTap.y))
   await page.waitForTimeout(500)
@@ -204,14 +205,13 @@ try {
 
   // ── F. tap the first planet → the build panel ──
   const planetTap = await page.evaluate(() => {
-    const { view, cam, clock } = window.__astral
+    const { view, clock } = window.__astral
     const sys = view.system
     const p = sys.planets[0]
     const ang = p.phase + clock * p.speed
     const wx = sys.x + Math.cos(ang) * p.orbit
     const wy = sys.y + Math.sin(ang) * p.orbit
-    const w = window.innerWidth, h = window.innerHeight
-    return { x: (wx - cam.x) * cam.z + w / 2, y: h / 2 - (wy - cam.y) * cam.z }
+    return window.__astral.project(wx, wy)
   })
   await page.mouse.click(Math.round(planetTap.x), Math.round(planetTap.y))
   await page.waitForTimeout(500)
@@ -263,8 +263,8 @@ try {
       const d = Math.hypot(s.x - home.x, s.y - home.y)
       if (d < bestD) { bestD = d; best = s }
     }
-    const w = window.innerWidth, h = window.innerHeight
-    return { id: best.id, name: best.name, x: (best.x - cam.x) * cam.z + w / 2, y: h / 2 - (best.y - cam.y) * cam.z }
+    const pt = window.__astral.project(best.x, best.y)
+    return { id: best.id, name: best.name, x: pt.x, y: pt.y }
   })
   await page.mouse.click(Math.round(target.x), Math.round(target.y))
   await page.waitForTimeout(500)
@@ -289,9 +289,7 @@ try {
   const shipPos = await page.evaluate(() => {
     const s = window.__astral.world.ships.find(sh => sh.state === 'move')
     if (s === undefined) return null
-    const { cam } = window.__astral
-    const w = window.innerWidth, h = window.innerHeight
-    return { x: (s.x - cam.x) * cam.z + w / 2, y: h / 2 - (s.y - cam.y) * cam.z }
+    return window.__astral.project(s.x, s.y)
   })
   if (shipPos !== null) {
     const clip = {
@@ -318,10 +316,8 @@ try {
   check(badge2 === 'WebGL2', 'K: toggle → WebGL2', badge2)
   await laneCheck(page, 'K')
   const homeTap2 = await page.evaluate(() => {
-    const { world, cam } = window.__astral
-    const home = world.systems.find(s => s.owner === 1)
-    const w = window.innerWidth, h = window.innerHeight
-    return { x: (home.x - cam.x) * cam.z + w / 2, y: h / 2 - (home.y - cam.y) * cam.z }
+    const home = window.__astral.world.systems.find(s => s.owner === 1)
+    return window.__astral.project(home.x, home.y)
   })
   await page.mouse.click(Math.round(homeTap2.x), Math.round(homeTap2.y))
   await page.waitForTimeout(500)

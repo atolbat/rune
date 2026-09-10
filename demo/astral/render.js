@@ -1,94 +1,219 @@
-// "astral" demo — the rendering layer: instance records, soup builders and
+// "astral" demo — the rendering layer: instance records, soups, textures and
 // the commands over the dual-source shaders.
 //
-// Every dynamic quantity lives in stable pre-allocated Float32Arrays (the
-// instance records) uploaded as a live PREFIX per frame — the rendererFeed
-// pattern (GL: createBuffer('dynamic') + updateBuffer; WebGPU: the
-// data-keyed vertex cache + syncVertexBuffer). The Task-165 vertex-bind
-// memo keeps the per-frame rebinds dead on both backends.
+// THE 3D LAYOUT (all gameplay stays on the world plane z = 0):
+//   • the sky quad (the ESO Milky Way panorama) follows the camera at a
+//     frustum-covering distance — it never runs out of frame at any zoom;
+//   • ~1500 background stars scattered in a deep 3D shell below the plane —
+//     the perspective parallax replaces the old parallax-camera trick;
+//   • 4 nebulas drift below the galaxy, slowly turning;
+//   • the arm-aligned spiral haze lies IN the plane (z = −8) under the
+//     systems — it tilts with the camera like a real disc;
+//   • lanes/orbits are centerline soups expanded to constant screen px in
+//     eye space; ringed gas giants get in-plane annuli split near/far.
 //
-// Static geometry (the lane network) is a triangle soup baked once at
-// galaxy generation; the orbit rings are re-baked per system entry into a
-// MAX-SIZED soup buffer (bufferSubData cannot grow a storage).
+// THE TEXTURE STACK: everything procedural (textures.js — deterministic by
+// the world seed, zero network on the critical path); the planet surfaces
+// live in one 1024×512 ATLAS of 256×128 equirect tiles (rock/gas/ice/lava/
+// garden/sun), sampled through sphere normals by the planet shader. The
+// three REAL bitmaps (assets/: the ESO panorama, NASA moon + earth via the
+// three.js examples, ~127 KB total) load asynchronously and swap into the
+// SAME handles — moon → the rock tile, earth → the garden tile, panorama →
+// the sky — a failed fetch changes nothing.
+//
+// Every dynamic quantity lives in stable pre-allocated Float32Arrays (the
+// instance records) uploaded as live prefixes per frame — the rendererFeed
+// pattern (GL: createBuffer('dynamic') + updateBuffer; WebGPU: the
+// data-keyed vertex cache + syncVertexBuffer). Static records (the star
+// field, the nebulas) upload once.
 
-import { starShader, soupShader, laneShader, shipShader, planetShader, ringShader, MVP, MVP_PARALLAX, PX, PX_PARALLAX, CLOCK, FADE, GALAXY_FADE } from './shaders.js?v=2'
-import { BUILDINGS, buildTime } from './galaxy.js?v=1'
+import {
+  starShader, bgStarShader, skyShader, nebulaShader, hazeShader, laneShader,
+  shipShader, planetShader, pringShader, ringShader,
+  MVP, VIEW, PROJ, RIGHT, UP, PXK, LINEK, YAW, CLOCK, FADE, GALAXY_FADE, NEB_FADE, SHIP_CAP,
+  SPLIT, SKY_CENTER, SKY_HALF, SKY_U0, SKY_WIN, SKY_GAIN,
+} from './shaders.js?v=3'
+import { BUILDINGS, buildTime, GALAXY_RADIUS } from './galaxy.js?v=1'
+import { makeTextures } from './textures.js?v=1'
 
-export const RECORD_FLOATS = 16 // 64-byte stride, WG-aligned (vec2@0, vec2@8, vec4@16, vec4@32)
-export const SOUP_FLOATS = 8    // 32-byte stride: pos vec2@0, color vec4@16
+export const RECORD_FLOATS = 16 // 64-byte stride (pos vec3@0, meta@16, color@32, state@48)
+export const SOUP_FLOATS = 8    // 32-byte stride: pos vec2@0, dir vec2@8, color vec4@16
 
 const MAX_SHIPS = 128
 const MAX_RINGS = 32
 const MAX_PLANETS = 16 // the sun + planets of one system
-const MAX_BG_STARS = 620
+const MAX_PRINGS = 8   // ringed gas giants of one system
+const BG_STARS_BRIGHT = 600
+const BG_STARS_MICRO = 900
+const BG_STARS = BG_STARS_BRIGHT + BG_STARS_MICRO
 const ORBIT_SEGMENTS = 56
 const MAX_ORBIT_RINGS = 7
+const HAZE_GAIN = [0.62]
 
-/** One record field accessor (offsets in floats). */
+/** One record field accessor (offsets in floats — see the header). */
 const F = {
-  pos: 0, meta: 2, color: 4, state: 6,
+  pos: 0, meta: 4, color: 8, state: 12,
 }
 
-export function createGameRender(renderer, world) {
+// the atlas: 4×2 grid of 256×128 tiles in 1024×512
+const ATLAS_W = 1024, ATLAS_H = 512, TILE_W = 256, TILE_H = 128
+const TILE = { rock: 0, gas: 1, ice: 2, lava: 3, garden: 4, sun: 5 }
+
+// the fetched-bitmap cache (survives backend re-boots — the fetches run once)
+const bitmapCache = new Map()
+
+export function createGameRender(renderer, world, shell) {
   const isGL = renderer.backend === 'webgl2'
   const gl = isGL ? renderer.inner.gl : null
   const gpu = isGL ? null : renderer.inner.gpu
 
   // ── the instance record arrays (stable identities — the WG data-keyed cache) ──
-  const starRecords = new Float32Array((world.systems.length + MAX_BG_STARS) * RECORD_FLOATS)
+  const sysRecords = new Float32Array(world.systems.length * RECORD_FLOATS)
+  const bgRecords = new Float32Array(BG_STARS * RECORD_FLOATS)
   const shipRecords = new Float32Array(MAX_SHIPS * RECORD_FLOATS)
   const planetRecords = new Float32Array(MAX_PLANETS * RECORD_FLOATS)
+  const pringRecords = new Float32Array(MAX_PRINGS * RECORD_FLOATS)
   const ringRecords = new Float32Array(MAX_RINGS * RECORD_FLOATS)
+
+  // ── the nebulas (baked placement, three texture variants) ──
+  const NEBS = [
+    { ang: 0.55, dist: 1080, z: -430, size: 1500, rot: 1.2, spin: 0.010, alpha: 0.60, tex: 0 },
+    { ang: 2.45, dist: 720, z: -270, size: 1150, rot: 2.8, spin: -0.008, alpha: 0.52, tex: 1 },
+    { ang: 4.35, dist: 950, z: -560, size: 1680, rot: 0.4, spin: 0.007, alpha: 0.46, tex: 2 },
+    { ang: 5.55, dist: 1550, z: -720, size: 1950, rot: 4.0, spin: -0.005, alpha: 0.40, tex: 0 },
+  ]
+  const nebRecords = [0, 1, 2].map(() => new Float32Array(2 * RECORD_FLOATS))
+  const nebCounts = [0, 0, 0]
 
   // ── the soups ──
   const laneSoup = new Float32Array(world.lanes.length * 6 * SOUP_FLOATS)
   const orbitSoup = new Float32Array(MAX_ORBIT_RINGS * ORBIT_SEGMENTS * 6 * SOUP_FLOATS)
+  const hazeSoup = new Float32Array(6 * 4)   // pos vec2 + uv vec2
+  const skySoup = new Float32Array(6 * 2)    // the unit quad
   let orbitVerts = 0
   let laneVerts = 0
+
+  // ── the textures (procedural, seeded by the world) ──
+  const tex = makeTextures(world.seed)
+  const atlasData = new Uint8Array(ATLAS_W * ATLAS_H * 4)
+
+  /** Stretch-blit a procedural tile into the atlas grid. */
+  function blitTile(tileIndex, src) {
+    const tx = (tileIndex % 4) * TILE_W
+    const ty = Math.floor(tileIndex / 4) * TILE_H
+    for (let y = 0; y < TILE_H; y++) {
+      const sy = Math.min(src.height - 1, Math.floor((y / TILE_H) * src.height))
+      for (let x = 0; x < TILE_W; x++) {
+        const sx = Math.min(src.width - 1, Math.floor((x / TILE_W) * src.width))
+        const at = (ty + y) * ATLAS_W + tx + x
+        const sat = (sy * src.width + sx) * 4
+        atlasData[at * 4] = src.data[sat]
+        atlasData[at * 4 + 1] = src.data[sat + 1]
+        atlasData[at * 4 + 2] = src.data[sat + 2]
+        atlasData[at * 4 + 3] = src.data[sat + 3]
+      }
+    }
+  }
+  blitTile(TILE.rock, tex.rock)
+  blitTile(TILE.gas, tex.gas)
+  blitTile(TILE.ice, tex.ice)
+  blitTile(TILE.lava, tex.lava)
+  blitTile(TILE.garden, tex.garden)
+  blitTile(TILE.sun, tex.sun)
+
+  // the sky placeholder: a dark field with a sprinkle of micro stars (the
+  // real panorama swaps in when fetched)
+  const skyData = new Uint8Array(1024 * 512 * 4)
+  {
+    const rngSky = mulberry(world.seed ^ 0x5d2b)
+    for (let i = 0; i < 900; i++) {
+      const at = ((rngSky() * 512) | 0) * 1024 + ((rngSky() * 1024) | 0)
+      const v = 30 + (rngSky() * 90) | 0
+      skyData[at * 4] = v
+      skyData[at * 4 + 1] = v
+      skyData[at * 4 + 2] = Math.min(255, v + 20)
+      skyData[at * 4 + 3] = 255
+    }
+  }
+
+  const atlasTex = renderer.texture(ATLAS_W, ATLAS_H)
+  atlasTex.upload(atlasData)
+  const starTex = renderer.texture(tex.star.width, tex.star.height)
+  starTex.upload(tex.star.data)
+  const hazeTex = renderer.texture(tex.haze.width, tex.haze.height)
+  hazeTex.upload(tex.haze.data)
+  const skyTex = renderer.texture(1024, 512)
+  skyTex.upload(skyData)
+  const nebTexs = [tex.nebula0, tex.nebula1, tex.nebula2].map(t => {
+    const h = renderer.texture(t.width, t.height)
+    h.upload(t.data)
+    return h
+  })
+  const ringTexHandle = renderer.texture(tex.ring.width, tex.ring.height)
+  ringTexHandle.upload(tex.ring.data)
 
   // ── the per-backend dynamic buffer plumbing ──
   const glDyn = isGL
     ? {
-      stars: gl.createBuffer(starRecords, 'dynamic'),
+      sys: gl.createBuffer(sysRecords, 'dynamic'),
+      bg: gl.createBuffer(bgRecords),
       ships: gl.createBuffer(shipRecords, 'dynamic'),
       planets: gl.createBuffer(planetRecords, 'dynamic'),
+      prings: gl.createBuffer(pringRecords, 'dynamic'),
       rings: gl.createBuffer(ringRecords, 'dynamic'),
+      nebs: nebRecords.map(r => gl.createBuffer(r)),
       lanes: null, // static — created after the bake
       orbits: gl.createBuffer(orbitSoup, 'dynamic'),
+      haze: gl.createBuffer(hazeSoup),
+      sky: gl.createBuffer(skySoup),
     }
     : null
 
-  // ── the background star field (baked once) ──
+  // ── the baked content ──
+
+  // the background star field: two depth layers in one buffer
   {
     const rngB = mulberry(0x5eed ^ world.seed)
-    const base = world.systems.length * RECORD_FLOATS
-    for (let i = 0; i < MAX_BG_STARS; i++) {
-      const at = (base + i) * RECORD_FLOATS
+    for (let i = 0; i < BG_STARS; i++) {
+      const at = i * RECORD_FLOATS
       const a = rngB() * Math.PI * 2
-      const r = 240 + rngB() * 2400
-      starRecords[at + F.pos] = Math.cos(a) * r
-      starRecords[at + F.pos + 1] = Math.sin(a) * r
-      const size = 1.2 + rngB() * 3.2
-      starRecords[at + F.meta] = size
-      starRecords[at + F.meta + 1] = rngB()
+      const bright = i < BG_STARS_BRIGHT
+      const r = bright ? 2600 + rngB() * 2600 : 1900 + rngB() * 3700
+      const z = bright ? -250 - rngB() * 700 : -150 - rngB() * 1100
+      bgRecords[at + F.pos] = Math.cos(a) * r
+      bgRecords[at + F.pos + 1] = Math.sin(a) * r
+      bgRecords[at + F.pos + 2] = z
+      bgRecords[at + F.meta] = bright ? 26 + rngB() * 38 : 7 + rngB() * 11
+      bgRecords[at + F.meta + 1] = rngB()
       const warm = rngB()
-      const bright = 0.16 + rngB() * 0.34
-      starRecords[at + F.color] = bright * (0.8 + warm * 0.3)
-      starRecords[at + F.color + 1] = bright * (0.85 + warm * 0.1)
-      starRecords[at + F.color + 2] = bright * (1.15 - warm * 0.25)
-      starRecords[at + F.color + 3] = 0.5 + rngB() * 0.5
-      // state: owner −1 (no ring), fade by depth
-      starRecords[at + F.state] = -1
-      starRecords[at + F.state + 3] = 0.55 + rngB() * 0.45
+      const lum = bright ? 0.35 + rngB() * 0.55 : 0.14 + rngB() * 0.3
+      bgRecords[at + F.color] = lum * (0.8 + warm * 0.3)
+      bgRecords[at + F.color + 1] = lum * (0.85 + warm * 0.1)
+      bgRecords[at + F.color + 2] = lum * (1.15 - warm * 0.25)
+      bgRecords[at + F.color + 3] = bright ? 0.5 + rngB() * 0.5 : 0.3 + rngB() * 0.35
     }
   }
 
-  // ── the lane soup (baked once) ──
-  // The record: pos = the CENTERLINE endpoint (exact, no baked width),
-  // dir = the unit perpendicular * the edge side (±1) — the vertex shader
-  // expands this to a constant ~2.2 screen pixels (see the lane shader's
-  // comment: a baked world-space width is sub-pixel at galaxy zoom and
-  // the rasterizer drops it — the thin-line dropout).
+  // the nebulas
+  for (const neb of NEBS) {
+    const arr = nebRecords[neb.tex]
+    const n = nebCounts[neb.tex]
+    if (n >= 2) continue
+    const at = n * RECORD_FLOATS
+    arr[at + F.pos] = Math.cos(neb.ang) * neb.dist
+    arr[at + F.pos + 1] = Math.sin(neb.ang) * neb.dist
+    arr[at + F.pos + 2] = neb.z
+    arr[at + F.meta] = neb.size
+    arr[at + F.meta + 1] = neb.rot
+    arr[at + F.color] = 1
+    arr[at + F.color + 1] = 1
+    arr[at + F.color + 2] = 1
+    arr[at + F.color + 3] = neb.alpha
+    arr[at + F.state] = neb.spin
+    nebCounts[neb.tex] = n + 1
+  }
+
+  // the lane soup (centerline + unit perpendicular — the shader expands)
   {
     for (const lane of world.lanes) {
       const A = world.systems[lane.a]
@@ -102,9 +227,6 @@ export function createGameRender(renderer, world) {
       const cr = 0.36 * alpha
       const cg = 0.46 * alpha
       const cb = 0.66 * alpha
-      // CCW winding (the pipeline culls back faces — the pipeline default
-      // is cull:'back', a CW quad would vanish whole; the working star quads
-      // are CCW for the same reason)
       const quad = [
         A.x, A.y, -nx, -ny, cr, cg, cb, alpha,
         B.x, B.y, -nx, -ny, cr, cg, cb, alpha,
@@ -119,42 +241,113 @@ export function createGameRender(renderer, world) {
     if (isGL) glDyn.lanes = gl.createBuffer(laneSoup)
   }
 
-  // ── the commands (the attributes differ per backend — the vfx pattern) ──
-  // — star command (galaxy stars + the background field) —
-  const starAttr = {
-    a_pos: { data: starRecords, size: 2, stride: 64, offset: 0, step: 'instance', ...(isGL ? { bufferId: glDyn.stars } : {}) },
-    a_meta: { data: starRecords, size: 2, stride: 64, offset: 8, step: 'instance', ...(isGL ? { bufferId: glDyn.stars } : {}) },
-    a_color: { data: starRecords, size: 4, stride: 64, offset: 16, step: 'instance', ...(isGL ? { bufferId: glDyn.stars } : {}) },
-    a_state: { data: starRecords, size: 4, stride: 64, offset: 32, step: 'instance', ...(isGL ? { bufferId: glDyn.stars } : {}) },
+  // the galaxy haze quad: spans the spiral, v flipped so world +y is up
+  {
+    const S = GALAXY_RADIUS * 2.15
+    const half = S / 2
+    let hv = 0
+    const put = (x, y) => {
+      const v = hv * 4
+      hazeSoup[v] = x
+      hazeSoup[v + 1] = y
+      hazeSoup[v + 2] = (x + half) / S
+      hazeSoup[v + 3] = (half - y) / S
+      hv++
+    }
+    put(-half, -half); put(half, -half); put(half, half)
+    put(-half, -half); put(half, half); put(-half, half)
   }
-  const cmdStars = renderer.command({
-    shader: { glsl: starShader.glsl, wgsl: starShader.wgsl },
+
+  // the sky unit quad
+  {
+    let sv = 0
+    const put = (x, y) => {
+      const v = sv * 2
+      skySoup[v] = x
+      skySoup[v + 1] = y
+      sv++
+    }
+    put(-1, -1); put(1, -1); put(1, 1)
+    put(-1, -1); put(1, 1); put(-1, 1)
+  }
+
+  // ── the commands ──
+  const instanceAttrs = (records, dyn) => ({
+    a_pos: { data: records, size: 3, stride: 64, offset: 0, step: 'instance', ...(isGL ? { bufferId: dyn } : {}) },
+    a_meta: { data: records, size: 2, stride: 64, offset: 16, step: 'instance', ...(isGL ? { bufferId: dyn } : {}) },
+    a_color: { data: records, size: 4, stride: 64, offset: 32, step: 'instance', ...(isGL ? { bufferId: dyn } : {}) },
+    a_state: { data: records, size: 4, stride: 64, offset: 48, step: 'instance', ...(isGL ? { bufferId: dyn } : {}) },
+  })
+
+  const cmdSky = renderer.command({
+    shader: { glsl: skyShader.glsl, wgsl: skyShader.wgsl },
     pipeline: { depth: false, blend: { src: 'one', dst: 'one' } },
-    attributes: starAttr,
+    attributes: {
+      a_pos: { data: skySoup, size: 2, stride: 8, offset: 0, ...(isGL ? { bufferId: glDyn.sky } : {}) },
+    },
     uniforms: {
       u_mvp: () => MVP,
-      u_px: () => PX,
-      u_time: () => CLOCK,
-      u_fade: () => GALAXY_FADE,
+      u_center: () => SKY_CENTER,
+      u_right: () => RIGHT,
+      u_up: () => UP,
+      u_half: () => SKY_HALF,
+      u_u0: () => SKY_U0,
+      u_win: () => SKY_WIN,
+      u_gain: () => SKY_GAIN,
     },
+    textures: { u_tex: skyTex, texTexture: skyTex },
     count: 6,
-    instances: (p) => p.count,
   })
+
   const cmdBgStars = renderer.command({
-    shader: { glsl: starShader.glsl, wgsl: starShader.wgsl },
+    shader: { glsl: bgStarShader.glsl, wgsl: bgStarShader.wgsl },
     pipeline: { depth: false, blend: { src: 'one', dst: 'one' } },
-    attributes: starAttr,
+    attributes: instanceAttrs(bgRecords, glDyn?.bg),
     uniforms: {
-      u_mvp: () => MVP_PARALLAX,
-      u_px: () => PX_PARALLAX,
+      u_mvp: () => MVP,
+      u_view: () => VIEW,
+      u_right: () => RIGHT,
+      u_up: () => UP,
+      u_pxk: () => PXK,
       u_time: () => CLOCK,
-      u_fade: () => [1],
     },
+    textures: { u_tex: starTex, texTexture: starTex },
     count: 6,
     instances: (p) => p.count,
   })
 
-  // — the lane pass (its own shader: the screen-constant width) —
+  const cmdNebs = [0, 1, 2].map(i => renderer.command({
+    shader: { glsl: nebulaShader.glsl, wgsl: nebulaShader.wgsl },
+    pipeline: { depth: false, blend: { src: 'one', dst: 'one' } },
+    attributes: instanceAttrs(nebRecords[i], glDyn?.nebs[i]),
+    uniforms: {
+      u_mvp: () => MVP,
+      u_right: () => RIGHT,
+      u_up: () => UP,
+      u_time: () => CLOCK,
+      u_fade: () => NEB_FADE,
+    },
+    textures: { u_tex: nebTexs[i], texTexture: nebTexs[i] },
+    count: 6,
+    instances: (p) => p.count,
+  }))
+
+  const cmdHaze = renderer.command({
+    shader: { glsl: hazeShader.glsl, wgsl: hazeShader.wgsl },
+    pipeline: { depth: false, blend: { src: 'one', dst: 'one' } },
+    attributes: {
+      a_pos: { data: hazeSoup, size: 2, stride: 16, offset: 0, ...(isGL ? { bufferId: glDyn.haze } : {}) },
+      a_uv: { data: hazeSoup, size: 2, stride: 16, offset: 8, ...(isGL ? { bufferId: glDyn.haze } : {}) },
+    },
+    uniforms: {
+      u_mvp: () => MVP,
+      u_fade: () => GALAXY_FADE,
+      u_gain: () => HAZE_GAIN,
+    },
+    textures: { u_tex: hazeTex, texTexture: hazeTex },
+    count: 6,
+  })
+
   const cmdLanes = renderer.command({
     shader: { glsl: laneShader.glsl, wgsl: laneShader.wgsl },
     pipeline: { depth: false, cull: 'none', blend: { src: 'one', dst: 'one-minus-src-alpha' } },
@@ -163,64 +356,132 @@ export function createGameRender(renderer, world) {
       a_dir: { data: laneSoup, size: 2, stride: 32, offset: 8, ...(isGL ? { bufferId: glDyn.lanes } : {}) },
       a_color: { data: laneSoup, size: 4, stride: 32, offset: 16, ...(isGL ? { bufferId: glDyn.lanes } : {}) },
     },
-    uniforms: { u_mvp: () => MVP, u_px: () => PX, u_fade: () => GALAXY_FADE },
+    uniforms: {
+      u_view: () => VIEW,
+      u_proj: () => PROJ,
+      u_linek: () => LINEK,
+      u_width: [1.1],
+      u_fade: () => GALAXY_FADE,
+    },
     count: (p) => p.count,
   })
+
   const cmdOrbits = renderer.command({
-    shader: { glsl: soupShader.glsl, wgsl: soupShader.wgsl },
+    shader: { glsl: laneShader.glsl, wgsl: laneShader.wgsl },
     pipeline: { depth: false, cull: 'none', blend: { src: 'one', dst: 'one-minus-src-alpha' } },
     attributes: {
       a_pos: { data: orbitSoup, size: 2, stride: 32, offset: 0, ...(isGL ? { bufferId: glDyn.orbits } : {}) },
+      a_dir: { data: orbitSoup, size: 2, stride: 32, offset: 8, ...(isGL ? { bufferId: glDyn.orbits } : {}) },
       a_color: { data: orbitSoup, size: 4, stride: 32, offset: 16, ...(isGL ? { bufferId: glDyn.orbits } : {}) },
     },
-    uniforms: { u_mvp: () => MVP, u_fade: () => FADE },
+    uniforms: {
+      u_view: () => VIEW,
+      u_proj: () => PROJ,
+      u_linek: () => LINEK,
+      u_width: [2.2],
+      u_fade: () => FADE,
+    },
     count: (p) => p.count,
   })
 
-  // — the ship command —
-  const shipAttr = {
-    a_pos: { data: shipRecords, size: 2, stride: 64, offset: 0, step: 'instance', ...(isGL ? { bufferId: glDyn.ships } : {}) },
-    a_meta: { data: shipRecords, size: 2, stride: 64, offset: 8, step: 'instance', ...(isGL ? { bufferId: glDyn.ships } : {}) },
-    a_color: { data: shipRecords, size: 4, stride: 64, offset: 16, step: 'instance', ...(isGL ? { bufferId: glDyn.ships } : {}) },
-    a_state: { data: shipRecords, size: 4, stride: 64, offset: 32, step: 'instance', ...(isGL ? { bufferId: glDyn.ships } : {}) },
-  }
-  const cmdShips = renderer.command({
-    shader: { glsl: shipShader.glsl, wgsl: shipShader.wgsl },
-    pipeline: { depth: false, blend: { src: 'one', dst: 'one-minus-src-alpha' } },
-    attributes: shipAttr,
-    uniforms: { u_mvp: () => MVP, u_px: () => PX, u_time: () => CLOCK },
+  const pringAttrs = instanceAttrs(pringRecords, glDyn?.prings)
+  const cmdPRingsFar = renderer.command({
+    shader: { glsl: pringShader.glsl, wgsl: pringShader.wgsl },
+    pipeline: { depth: false, cull: 'none', blend: { src: 'one', dst: 'one-minus-src-alpha' } },
+    attributes: pringAttrs,
+    uniforms: {
+      u_mvp: () => MVP,
+      u_time: () => CLOCK,
+      u_split: () => SPLIT,
+      u_half: [1],
+      u_fade: () => FADE,
+    },
+    textures: { u_tex: ringTexHandle, texTexture: ringTexHandle },
+    count: 6,
+    instances: (p) => p.count,
+  })
+  const cmdPRingsNear = renderer.command({
+    shader: { glsl: pringShader.glsl, wgsl: pringShader.wgsl },
+    pipeline: { depth: false, cull: 'none', blend: { src: 'one', dst: 'one-minus-src-alpha' } },
+    attributes: pringAttrs,
+    uniforms: {
+      u_mvp: () => MVP,
+      u_time: () => CLOCK,
+      u_split: () => SPLIT,
+      u_half: [0],
+      u_fade: () => FADE,
+    },
+    textures: { u_tex: ringTexHandle, texTexture: ringTexHandle },
     count: 6,
     instances: (p) => p.count,
   })
 
-  // — the planet command (system view) —
-  const planetAttr = {
-    a_pos: { data: planetRecords, size: 2, stride: 64, offset: 0, step: 'instance', ...(isGL ? { bufferId: glDyn.planets } : {}) },
-    a_meta: { data: planetRecords, size: 2, stride: 64, offset: 8, step: 'instance', ...(isGL ? { bufferId: glDyn.planets } : {}) },
-    a_color: { data: planetRecords, size: 4, stride: 64, offset: 16, step: 'instance', ...(isGL ? { bufferId: glDyn.planets } : {}) },
-    a_state: { data: planetRecords, size: 4, stride: 64, offset: 32, step: 'instance', ...(isGL ? { bufferId: glDyn.planets } : {}) },
-  }
   const cmdPlanets = renderer.command({
     shader: { glsl: planetShader.glsl, wgsl: planetShader.wgsl },
     pipeline: { depth: false, blend: { src: 'one', dst: 'one-minus-src-alpha' } },
-    attributes: planetAttr,
-    uniforms: { u_mvp: () => MVP, u_time: () => CLOCK, u_fade: () => FADE },
+    attributes: instanceAttrs(planetRecords, glDyn?.planets),
+    uniforms: {
+      u_mvp: () => MVP,
+      u_view: () => VIEW,
+      u_right: () => RIGHT,
+      u_up: () => UP,
+      u_pxk: () => PXK,
+      u_time: () => CLOCK,
+      u_fade: () => FADE,
+    },
+    textures: { u_tex: atlasTex, texTexture: atlasTex },
     count: 6,
     instances: (p) => p.count,
   })
 
-  // — the ring/effect command —
-  const ringAttr = {
-    a_pos: { data: ringRecords, size: 2, stride: 64, offset: 0, step: 'instance', ...(isGL ? { bufferId: glDyn.rings } : {}) },
-    a_meta: { data: ringRecords, size: 2, stride: 64, offset: 8, step: 'instance', ...(isGL ? { bufferId: glDyn.rings } : {}) },
-    a_color: { data: ringRecords, size: 4, stride: 64, offset: 16, step: 'instance', ...(isGL ? { bufferId: glDyn.rings } : {}) },
-    a_state: { data: ringRecords, size: 4, stride: 64, offset: 32, step: 'instance', ...(isGL ? { bufferId: glDyn.rings } : {}) },
-  }
+  const cmdStars = renderer.command({
+    shader: { glsl: starShader.glsl, wgsl: starShader.wgsl },
+    pipeline: { depth: false, blend: { src: 'one', dst: 'one' } },
+    attributes: instanceAttrs(sysRecords, glDyn?.sys),
+    uniforms: {
+      u_mvp: () => MVP,
+      u_view: () => VIEW,
+      u_right: () => RIGHT,
+      u_up: () => UP,
+      u_pxk: () => PXK,
+      u_time: () => CLOCK,
+      u_fade: () => GALAXY_FADE,
+    },
+    textures: { u_tex: starTex, texTexture: starTex },
+    count: 6,
+    instances: (p) => p.count,
+  })
+
+  const cmdShips = renderer.command({
+    shader: { glsl: shipShader.glsl, wgsl: shipShader.wgsl },
+    pipeline: { depth: false, blend: { src: 'one', dst: 'one-minus-src-alpha' } },
+    attributes: instanceAttrs(shipRecords, glDyn?.ships),
+    uniforms: {
+      u_mvp: () => MVP,
+      u_view: () => VIEW,
+      u_right: () => RIGHT,
+      u_up: () => UP,
+      u_pxk: () => PXK,
+      u_time: () => CLOCK,
+      u_yaw: () => YAW,
+      u_cap: () => SHIP_CAP,
+    },
+    count: 6,
+    instances: (p) => p.count,
+  })
+
   const cmdRings = renderer.command({
     shader: { glsl: ringShader.glsl, wgsl: ringShader.wgsl },
     pipeline: { depth: false, blend: { src: 'one', dst: 'one' } },
-    attributes: ringAttr,
-    uniforms: { u_mvp: () => MVP, u_px: () => PX, u_time: () => CLOCK },
+    attributes: instanceAttrs(ringRecords, glDyn?.rings),
+    uniforms: {
+      u_mvp: () => MVP,
+      u_view: () => VIEW,
+      u_right: () => RIGHT,
+      u_up: () => UP,
+      u_pxk: () => PXK,
+      u_time: () => CLOCK,
+    },
     count: 6,
     instances: (p) => p.count,
   })
@@ -234,108 +495,149 @@ export function createGameRender(renderer, world) {
   function updateStarRecords() {
     for (const sys of world.systems) {
       const at = sys.id * RECORD_FLOATS
-      starRecords[at + F.pos] = sys.x
-      starRecords[at + F.pos + 1] = sys.y
-      starRecords[at + F.meta] = sys.cls.size * 0.34
-      starRecords[at + F.meta + 1] = (sys.id * 0.618) % 1
+      sysRecords[at + F.pos] = sys.x
+      sysRecords[at + F.pos + 1] = sys.y
+      sysRecords[at + F.pos + 2] = 0
+      sysRecords[at + F.meta] = sys.cls.size * 0.34
+      sysRecords[at + F.meta + 1] = (sys.id * 0.618) % 1
       const c = sys.cls.color
-      starRecords[at + F.color] = c[0]
-      starRecords[at + F.color + 1] = c[1]
-      starRecords[at + F.color + 2] = c[2]
-      starRecords[at + F.color + 3] = sys.planets.length > 0 ? 1.0 : 0.55
-      starRecords[at + F.state] = sys.owner
-      starRecords[at + F.state + 1] = sys.id === selectedSystem ? 1 : 0
-      starRecords[at + F.state + 2] = sys.colonizing !== null ? sys.colonizing.progress : 0
-      starRecords[at + F.state + 3] = 1
+      sysRecords[at + F.color] = c[0]
+      sysRecords[at + F.color + 1] = c[1]
+      sysRecords[at + F.color + 2] = c[2]
+      sysRecords[at + F.color + 3] = sys.planets.length > 0 ? 1.0 : 0.55
+      sysRecords[at + F.state] = sys.owner
+      sysRecords[at + F.state + 1] = sys.id === selectedSystem ? 1 : 0
+      sysRecords[at + F.state + 2] = sys.colonizing !== null ? sys.colonizing.progress : 0
+      sysRecords[at + F.state + 3] = 1
     }
     starsDirty = true
   }
 
+  // the last-seen positions (a PATROLLING ship also deserves its plume —
+  // the record's "moving" flag is velocity, not the state machine)
+  const lastPos = new Map()
   function writeShipRecord(at, ship) {
     const c = ship.kind === 'colony' ? [0.55, 0.95, 0.75] : [0.85, 0.75, 0.45]
     shipRecords[at + F.pos] = ship.x
     shipRecords[at + F.pos + 1] = ship.y
+    shipRecords[at + F.pos + 2] = 0
     shipRecords[at + F.meta] = ship.angle
     shipRecords[at + F.meta + 1] = ship.kind === 'colony' ? 1.1 : 1.5
     shipRecords[at + F.color] = c[0]
     shipRecords[at + F.color + 1] = c[1]
     shipRecords[at + F.color + 2] = c[2]
     shipRecords[at + F.color + 3] = 1
-    const moving = ship.state === 'move' ? 1 : (ship.state === 'colonize' ? 2 : 0)
+    const prev = lastPos.get(ship.id)
+    const drifting = prev !== undefined && Math.hypot(ship.x - prev[0], ship.y - prev[1]) > 1e-4
+    lastPos.set(ship.id, [ship.x, ship.y])
+    const moving = ship.state === 'move' ? 1 : (ship.state === 'colonize' ? 2 : (drifting ? 1 : 0))
     shipRecords[at + F.state] = ship.kind === 'war' ? 1 : 0
     shipRecords[at + F.state + 1] = moving
     shipRecords[at + F.state + 2] = ship.id === selectedShip ? 1 : 0
     shipRecords[at + F.state + 3] = (ship.id * 0.37) % 1
   }
 
-  function updateShipRecords() {
+  function updateShipRecords(view) {
     let n = 0
+    const near = view.mode === 'system' && view.system !== null ? view.system : null
     for (const ship of world.ships) {
       if (n >= MAX_SHIPS) break
+      if (near !== null && Math.hypot(ship.x - near.x, ship.y - near.y) > 60) continue
       writeShipRecord(n * RECORD_FLOATS, ship)
       n++
     }
     return n
   }
 
-  /** The system-view content: the sun + planets (static records — the shader orbits). */
+  /** The system-view content: the sun + planets (+ ring records). */
   function setSystemView(sys) {
     planetRecords.fill(0)
-    if (sys === null) return 0
-    // the sun (type 4)
+    pringRecords.fill(0)
+    let prings = 0
+    if (sys === null) return { planets: 0, prings: 0 }
+    // the sun (tile 5)
     const sunAt = 0
     const c = sys.cls.color
     planetRecords[sunAt + F.pos] = sys.x
     planetRecords[sunAt + F.pos + 1] = sys.y
-    planetRecords[sunAt + F.meta] = 1.9 + sys.cls.size * 0.05
+    planetRecords[sunAt + F.meta] = (1.9 + sys.cls.size * 0.05) * 1.35
     planetRecords[sunAt + F.meta + 1] = 0
     planetRecords[sunAt + F.color] = c[0]
     planetRecords[sunAt + F.color + 1] = c[1]
     planetRecords[sunAt + F.color + 2] = c[2]
-    planetRecords[sunAt + F.color + 3] = 1
-    planetRecords[sunAt + F.state + 3] = 4 // the sun type
+    planetRecords[sunAt + F.color + 3] = 0
+    planetRecords[sunAt + F.state + 3] = TILE.sun
     let n = 1
     for (const planet of sys.planets) {
       if (n >= MAX_PLANETS) break
       const at = n * RECORD_FLOATS
       const pc = planet.type.color
+      const settlement = planet.buildings.includes('colony')
+      // the settlement planet is a garden world (the earth bitmap swaps in)
+      const tile = settlement ? TILE.garden
+        : planet.type.key === 'rock' ? TILE.rock
+        : planet.type.key === 'gas' ? TILE.gas
+        : planet.type.key === 'ice' ? TILE.ice
+        : TILE.lava
+      // half-strength tint: the texture carries the hue, the tint varies it per planet
+      const jitter = 0.86 + ((planet.orbit * 7.3 + planet.phase) % 1) * 0.24
+      const tint = settlement ? [0.98, 0.99, 1.0] : [pc[0] * 0.5 + 0.5, pc[1] * 0.5 + 0.5, pc[2] * 0.5 + 0.5]
       planetRecords[at + F.pos] = sys.x
       planetRecords[at + F.pos + 1] = sys.y
-      planetRecords[at + F.meta] = planet.size * 0.5
+      planetRecords[at + F.meta] = planet.size * 0.5 * 1.55 // the visual scale (bigger, textured discs)
       planetRecords[at + F.meta + 1] = planet.orbit
-      planetRecords[at + F.color] = pc[0]
-      planetRecords[at + F.color + 1] = pc[1]
-      planetRecords[at + F.color + 2] = pc[2]
-      planetRecords[at + F.color + 3] = 1
+      planetRecords[at + F.color] = tint[0] * jitter
+      planetRecords[at + F.color + 1] = tint[1] * jitter
+      planetRecords[at + F.color + 2] = tint[2] * jitter
+      planetRecords[at + F.color + 3] = (planet.phase * 0.9) % 1 // the spin phase
       planetRecords[at + F.state] = planet.phase
       planetRecords[at + F.state + 1] = planet.speed
       planetRecords[at + F.state + 2] = planet.queue !== null ? Math.min(1, planet.queue.progress / buildTime(BUILDINGS[planet.queue.building])) : 0
-      planetRecords[at + F.state + 3] = planet.type.key === 'rock' ? 0 : planet.type.key === 'gas' ? 1 : planet.type.key === 'ice' ? 2 : 3
+      planetRecords[at + F.state + 3] = tile
+      // a ringed gas giant
+      if (planet.type.key === 'gas' && planet.size >= 1.35 && prings < MAX_PRINGS) {
+        const prAt = prings * RECORD_FLOATS
+        const r = planet.size * 0.5 * 1.55
+        pringRecords[prAt + F.pos] = sys.x
+        pringRecords[prAt + F.pos + 1] = sys.y
+        pringRecords[prAt + F.meta] = r * 1.45
+        pringRecords[prAt + F.meta + 1] = r * 2.55
+        pringRecords[prAt + F.color] = 0.9
+        pringRecords[prAt + F.color + 1] = 0.85
+        pringRecords[prAt + F.color + 2] = 0.75
+        pringRecords[prAt + F.color + 3] = 0.8
+        pringRecords[prAt + F.state] = planet.phase
+        pringRecords[prAt + F.state + 1] = planet.speed
+        pringRecords[prAt + F.state + 2] = planet.orbit
+        prings++
+      }
       n++
     }
-    // the orbit ring soup
+    // the orbit ring soup (centerline + perpendicular — the lane format)
     orbitVerts = 0
     bakeOrbits(sys)
-    return n
+    return { planets: n, prings }
   }
 
   function bakeOrbits(sys) {
-    const alpha = 0.1
-    const rgb = 0.4 * alpha
-    const put = (x, y) => {
-      orbitSoup[orbitVerts * SOUP_FLOATS] = x
-      orbitSoup[orbitVerts * SOUP_FLOATS + 1] = y
-      orbitSoup[orbitVerts * SOUP_FLOATS + 4] = rgb
-      orbitSoup[orbitVerts * SOUP_FLOATS + 5] = rgb
-      orbitSoup[orbitVerts * SOUP_FLOATS + 6] = rgb * 1.2
-      orbitSoup[orbitVerts * SOUP_FLOATS + 7] = alpha
+    const alpha = 0.16
+    const rgb = 0.42 * alpha
+    const put = (x, y, dx, dy) => {
+      const v = orbitVerts * SOUP_FLOATS
+      orbitSoup[v] = x
+      orbitSoup[v + 1] = y
+      orbitSoup[v + 2] = dx
+      orbitSoup[v + 3] = dy
+      orbitSoup[v + 4] = rgb
+      orbitSoup[v + 5] = rgb
+      orbitSoup[v + 6] = rgb * 1.2
+      orbitSoup[v + 7] = alpha
       orbitVerts++
     }
     let rings = 0
     for (const planet of sys.planets) {
       if (rings >= MAX_ORBIT_RINGS) break
       const r = planet.orbit
-      const t = 0.14 // ≥ 1px at the entry zoom (8) — thinner drops out
       for (let s = 0; s < ORBIT_SEGMENTS; s++) {
         const a0 = (s / ORBIT_SEGMENTS) * Math.PI * 2
         const a1 = ((s + 1) / ORBIT_SEGMENTS) * Math.PI * 2
@@ -343,16 +645,16 @@ export function createGameRender(renderer, world) {
         const y0 = sys.y + Math.sin(a0) * r
         const x1 = sys.x + Math.cos(a1) * r
         const y1 = sys.y + Math.sin(a1) * r
-        const nx0 = Math.sin(a0) * t
-        const ny0 = -Math.cos(a0) * t
-        const nx1 = Math.sin(a1) * t
-        const ny1 = -Math.cos(a1) * t
-        put(x0 - nx0, y0 - ny0)
-        put(x0 + nx0, y0 + ny0)
-        put(x1 - nx1, y1 - ny1)
-        put(x1 - nx1, y1 - ny1)
-        put(x0 + nx0, y0 + ny0)
-        put(x1 + nx1, y1 + ny1)
+        // the segment's unit perpendicular (tangent rotated 90°)
+        const tx = x1 - x0, ty = y1 - y0
+        const tl = Math.hypot(tx, ty) || 1
+        const nx = -ty / tl, ny = tx / tl
+        put(x0, y0, -nx, -ny)
+        put(x1, y1, -nx, -ny)
+        put(x1, y1, nx, ny)
+        put(x0, y0, -nx, -ny)
+        put(x1, y1, nx, ny)
+        put(x0, y0, nx, ny)
       }
       rings++
     }
@@ -368,7 +670,7 @@ export function createGameRender(renderer, world) {
         const ang = planet.phase + CLOCK[0] * planet.speed
         const px = view.system.x + Math.cos(ang) * planet.orbit
         const py = view.system.y + Math.sin(ang) * planet.orbit
-        n = writeRing(n, px, py, planet.size * 0.5 * 1.9, [1.0, 0.85, 0.4, 1], 0, 0, 1, CLOCK[0])
+        n = writeRing(n, px, py, planet.size * 0.5 * 1.55 * 1.9, [1.0, 0.85, 0.4, 1], 0, 0, 1, CLOCK[0])
       }
     }
     // the world effects
@@ -410,10 +712,17 @@ export function createGameRender(renderer, world) {
     if (isGL) gl.updateBuffer(glDyn[name], records.subarray(0, liveFloats))
     else gpu.syncVertexBuffer(records, liveFloats * 4)
   }
+  function uploadFull(records, name) {
+    if (isGL) gl.updateBuffer(glDyn[name], records)
+    else gpu.syncVertexBuffer(records, records.length * 4)
+  }
 
   // ── the frame draw (called from the renderer's frame callback) ──
   let planetCount = 0
+  let pringCount = 0
   let sysViewId = -2
+  let lanesUploaded = false
+  let staticUploaded = false
 
   function draw(record, view) {
     // the star records refresh (ownership/selection/colonize progress)
@@ -421,13 +730,16 @@ export function createGameRender(renderer, world) {
     const sysChanged = view.mode === 'system' && view.system !== null && sysViewId !== view.system.id
     if (sysChanged || view.mode !== 'system') {
       if (view.mode === 'system' && view.system !== null) {
-        planetCount = setSystemView(view.system)
+        const r = setSystemView(view.system)
+        planetCount = r.planets
+        pringCount = r.prings
         sysViewId = view.system.id
       } else {
         sysViewId = -2
         planetCount = 0
+        pringCount = 0
         // the orbit rings die with the crossfade (they are invisible past
-        // blend < 0.4 anyway — this frees the draw entirely)
+        // blend < 0.4 anyway — this frees the draws entirely)
         if (view.blend < 0.4) orbitVerts = 0
       }
     }
@@ -439,27 +751,36 @@ export function createGameRender(renderer, world) {
         const q = planet.queue
         planetRecords[at + F.state + 2] = q !== null ? Math.min(1, q.progress / buildTime(BUILDINGS[q.building])) : 0
       }
-      if (isGL) gl.updateBuffer(glDyn.planets, planetRecords)
-      else gpu.syncVertexBuffer(planetRecords, planetRecords.length * 4)
+      if (isGL) {
+        gl.updateBuffer(glDyn.planets, planetRecords.subarray(0, planetCount * RECORD_FLOATS))
+        gl.updateBuffer(glDyn.prings, pringRecords.subarray(0, pringCount * RECORD_FLOATS))
+      } else {
+        gpu.syncVertexBuffer(planetRecords, planetCount * RECORD_FLOATS * 4)
+        gpu.syncVertexBuffer(pringRecords, pringCount * RECORD_FLOATS * 4)
+      }
     }
 
-    // the galaxy-star prefix every frame; the baked background ONCE
-    upload(starRecords, world.systems.length * RECORD_FLOATS, 'stars')
-    if (!bgUploaded) {
-      const bgFloats = starRecords.length - world.systems.length * RECORD_FLOATS
-      if (isGL) {
-        gl.updateBuffer(glDyn.stars, starRecords.subarray(world.systems.length * RECORD_FLOATS), world.systems.length * RECORD_FLOATS * 4)
-      } else {
-        gpu.syncVertexBuffer(starRecords, starRecords.length * 4)
-      }
-      bgUploaded = true
-    }
-    const shipCount = updateShipRecords()
+    // the live prefixes + the once-only static uploads
+    upload(sysRecords, world.systems.length * RECORD_FLOATS, 'sys')
+    const shipCount = updateShipRecords(view)
     upload(shipRecords, shipCount * RECORD_FLOATS, 'ships')
     const ringCount = updateRingRecords(view)
     upload(ringRecords, ringCount * RECORD_FLOATS, 'rings')
 
-    // the soups: static lanes (once) + orbits (on entry)
+    if (!staticUploaded) {
+      if (isGL) {
+        gl.updateBuffer(glDyn.bg, bgRecords)
+        for (let i = 0; i < 3; i++) gl.updateBuffer(glDyn.nebs[i], nebRecords[i].subarray(0, nebCounts[i] * RECORD_FLOATS))
+        gl.updateBuffer(glDyn.haze, hazeSoup)
+        gl.updateBuffer(glDyn.sky, skySoup)
+      } else {
+        gpu.syncVertexBuffer(bgRecords, bgRecords.length * 4)
+        for (let i = 0; i < 3; i++) gpu.syncVertexBuffer(nebRecords[i], nebCounts[i] * RECORD_FLOATS * 4)
+        gpu.syncVertexBuffer(hazeSoup, hazeSoup.length * 4)
+        gpu.syncVertexBuffer(skySoup, skySoup.length * 4)
+      }
+      staticUploaded = true
+    }
     if (isGL) {
       if (!lanesUploaded) { gl.updateBuffer(glDyn.lanes, laneSoup); lanesUploaded = true }
       if (sysChanged && view.mode === 'system') gl.updateBuffer(glDyn.orbits, orbitSoup.subarray(0, orbitVerts * SOUP_FLOATS))
@@ -469,22 +790,62 @@ export function createGameRender(renderer, world) {
     }
 
     // the draw list (the tape order = the painter's order; the fades cross the view blend)
-    record(cmdBgStars, { count: MAX_BG_STARS })
+    record(cmdSky, {})
+    record(cmdBgStars, { count: BG_STARS })
+    for (let i = 0; i < 3; i++) {
+      if (nebCounts[i] > 0) record(cmdNebs[i], { count: nebCounts[i] })
+    }
+    record(cmdHaze, {})
     record(cmdLanes, { count: laneVerts })
     if (orbitVerts > 0) record(cmdOrbits, { count: orbitVerts })
-    record(cmdStars, { count: world.systems.length })
+    if (pringCount > 0 && view.blend > 0.05) record(cmdPRingsFar, { count: pringCount })
     if (planetCount > 0) record(cmdPlanets, { count: planetCount })
-    if (ringCount > 0) record(cmdRings, { count: ringCount })
+    if (pringCount > 0 && view.blend > 0.05) record(cmdPRingsNear, { count: pringCount })
+    record(cmdStars, { count: world.systems.length })
     if (shipCount > 0) record(cmdShips, { count: shipCount })
+    if (ringCount > 0) record(cmdRings, { count: ringCount })
   }
 
-  let lanesUploaded = false
-  let bgUploaded = false
+  // ── the REAL space assets: fetch + swap into the live handles ──
+  swapRealTextures(shell).catch(() => { /* a failed fetch keeps the procedural set */ })
+
+  async function swapRealTextures(sh) {
+    const load = async (url, opts) => {
+      if (bitmapCache.has(url)) return bitmapCache.get(url)
+      try {
+        const resp = await fetch(url)
+        if (!resp.ok) return null
+        const blob = await resp.blob()
+        const bitmap = await createImageBitmap(blob, opts)
+        bitmapCache.set(url, bitmap)
+        return bitmap
+      } catch {
+        return null
+      }
+    }
+    const [sky, moon, earth] = await Promise.all([
+      load('./assets/milkyway_1024.jpg', { premultiplyAlpha: 'none' }),
+      load('./assets/moon_512.jpg', { resizeWidth: TILE_W, resizeHeight: TILE_H, resizeQuality: 'high', premultiplyAlpha: 'none' }),
+      load('./assets/earth_512.jpg', { resizeWidth: TILE_W, resizeHeight: TILE_H, resizeQuality: 'high', premultiplyAlpha: 'none' }),
+    ])
+    if (sky !== null) {
+      skyTex.uploadImage(sky)
+      sh?.log.event('sky: the ESO Milky Way panorama swapped in')
+    }
+    if (moon !== null) {
+      atlasTex.uploadSubImage((TILE.rock % 4) * TILE_W, Math.floor(TILE.rock / 4) * TILE_H, moon)
+      sh?.log.event('planets: the NASA moon surface swapped into the rocky tile')
+    }
+    if (earth !== null) {
+      atlasTex.uploadSubImage((TILE.garden % 4) * TILE_W, Math.floor(TILE.garden / 4) * TILE_H, earth)
+      sh?.log.event('planets: the NASA earth swapped into the settlement tile')
+    }
+  }
 
   // ── the view-facing API ──
   return {
     draw,
-    get starRecords() { return starRecords },
+    get sysRecords() { return sysRecords },
     setSelected(systemId, shipId) {
       selectedSystem = systemId
       selectedShip = shipId

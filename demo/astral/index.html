@@ -2,12 +2,17 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no, maximum-scale=1" />
   <title>rune — astral</title>
   <link rel="stylesheet" href="../shared/demo-shell.css" />
   <style>
-    /* The game UI floats over the shell's fullscreen stage. Mobile-first:
-       compact chips, >= 40px touch targets, safe-area insets everywhere. */
+    /* The game owns every gesture on its surface: the canvas carries
+       touch-action:none (the field report — the page pinch ate the game
+       pinch) and the page refuses overscroll. The game UI floats over the
+       shell's fullscreen stage. Mobile-first: compact chips, >= 40px touch
+       targets, safe-area insets everywhere. */
+    html, body { overscroll-behavior: none; }
+    #canvas { touch-action: none; -webkit-user-select: none; user-select: none; }
     .as-root {
       position: absolute;
       inset: 0;
@@ -231,6 +236,6 @@
 <body>
   <div id="app"></div>
   <script src="../shared/demo-shell.js"></script>
-  <script type="module" src="./main.js?v=2"></script>
+  <script type="module" src="./main.js?v=3"></script>
 </body>
 </html>
