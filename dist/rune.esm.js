@@ -4419,7 +4419,18 @@ function createExecutor(options) {
     else
       gl.setUniform1f(programId, name, values[0]);
   }
-  return { run };
+  function invalidate() {
+    for (const command of commands) {
+      if (command === undefined)
+        continue;
+      const rich = command;
+      rich.programId = undefined;
+      rich.bufferIds = undefined;
+      for (let f = 0;f < rich.fields.length; f++)
+        rich.fields[f].slot.dirty = true;
+    }
+  }
+  return { run, invalidate };
 }
 // packages/webgl2/src/realGL.ts
 var ENUM = {
@@ -5132,6 +5143,34 @@ function createRealGL(gl, onViewportHeal) {
   const transformPasses = new Map;
   let nextTransformPass = 1;
   const transformProgramIds = new Set;
+  function resetAfterContextRestore() {
+    programs.clear();
+    pendingLinks.clear();
+    buffers.clear();
+    textures.clear();
+    targets.clear();
+    textureMeta.clear();
+    textureViews.clear();
+    nextTextureViewId = 1e6;
+    nextProgram = 1;
+    nextBuffer = 1;
+    nextTexture = 1;
+    nextTarget = 1;
+    defaultAttribBindings.clear();
+    passVaoActive = false;
+    currentProgram = null;
+    currentProgramId = -1;
+    currentTarget = 0;
+    unitTextures.clear();
+    unitBindCache.clear();
+    invalidateVertexBinds();
+    samplerUnits.clear();
+    unpackAlignmentMirror = 0;
+    transformPasses.clear();
+    nextTransformPass = 1;
+    transformProgramIds.clear();
+    transformPassIds.clear();
+  }
   function createTransformPass(desc) {
     const program = gl.createProgram();
     gl.attachShader(program, compile(gl.VERTEX_SHADER, tfNoncedVertexSource(desc.vertex)));
@@ -5360,7 +5399,8 @@ void main() {}
     createTransformPass,
     runTransformPass,
     deleteTransformPass,
-    texSubImage2DBuffer
+    texSubImage2DBuffer,
+    resetAfterContextRestore
   };
 }
 // packages/webgl2/src/capsProbe.ts
@@ -8261,14 +8301,40 @@ function createWebGL2Renderer(options) {
   let dprPollFrame = 0;
   let disposed = false;
   let contextLost = false;
+  let resumeOnRestore = false;
   const onContextLost = (event) => {
     event.preventDefault?.();
+    resumeOnRestore = running;
     contextLost = true;
     running = false;
-    options.onGlError?.("WebGL context lost — rendering stopped (the browser/driver dropped this canvas's context; re-boot the backend toggle to recover)");
+    options.onGlError?.(session !== null ? "WebGL context lost — rendering stopped (the browser/driver dropped this canvas's context; the journal will replay automatically on webglcontextrestored)" : "WebGL context lost — rendering stopped (the browser/driver dropped this canvas's context; re-boot the backend toggle to recover)");
+  };
+  const onContextRestored = () => {
+    if (!contextLost || disposed)
+      return;
+    if (session === null) {
+      options.onGlError?.("WebGL context restored — but this renderer runs WITHOUT the resource journal (the plain path): the textures died with the old context and cannot be replayed. Re-boot the renderer to recover (a renderer built with resources: createResourceJournal() recovers automatically here)");
+      return;
+    }
+    try {
+      rawGl.resetAfterContextRestore?.();
+      const report = session.restore();
+      executor.invalidate?.();
+      contextLost = false;
+      frameErrorCount = 0;
+      lastGlErrorKey = "";
+      lastCssWidth = -1;
+      lastCssHeight = -1;
+      options.onGlError?.(`WebGL context restored — ${report.opsReplayed} journal ops replayed (${report.textureIds.length} textures, ${report.viewIds.length} views, ${report.targetIds.length} targets); the loop resumes`);
+      if (resumeOnRestore)
+        start();
+    } catch (error) {
+      options.onGlError?.(`WebGL context restore failed: ${error instanceof Error ? error.message : String(error)} — re-boot the renderer to recover`);
+    }
   };
   if (rawContext !== null && typeof canvas.addEventListener === "function") {
     canvas.addEventListener("webglcontextlost", onContextLost);
+    canvas.addEventListener("webglcontextrestored", onContextRestored);
   }
   const [startW, startH] = getCanvasCssSize(canvas);
   resize(startW, startH);
@@ -8607,6 +8673,9 @@ function createWebGL2Renderer(options) {
     if (rawContext !== null) {
       try {
         canvas.removeEventListener?.("webglcontextlost", onContextLost);
+      } catch {}
+      try {
+        canvas.removeEventListener?.("webglcontextrestored", onContextRestored);
       } catch {}
       try {
         const code = rawContext.getError();
@@ -14933,6 +15002,10 @@ function describeWebgpuScope(a) {
   }
   return `WebGPU scope determined partially: main=${a.main ? "yes" : "no"}, worker unknown — call probeWebgpuScope().`;
 }
+
+// packages/gl/src/index.ts
+init_src();
+
 // packages/gl/src/adapters.ts
 init_src();
 function webgl2Adapter() {
@@ -15082,6 +15155,7 @@ export {
   createWebGL2Renderer,
   createResourceSessionGPU,
   createResourceSessionGL,
+  createResourceJournal,
   createRendererFeedGPU,
   createRendererFeedGL,
   createRenderer,

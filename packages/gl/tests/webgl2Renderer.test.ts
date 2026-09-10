@@ -263,11 +263,15 @@ describe('createWebGL2Renderer: the context-life contract (Task 137)', () => {
       requestFrame: () => () => {},
       onGlError: (message) => { errors.push(message) },
     })
-    expect(lostEvents.length).toBe(1)
+    // Task 168: TWO listeners now — the loss wire AND the restore wire
+    // (rawContextCanvas pushes every addEventListener into lostEvents)
+    expect(lostEvents.length).toBe(2)
     expect(lostEvents[0][0]).toBe('webglcontextlost')
+    expect(lostEvents[1][0]).toBe('webglcontextrestored')
     renderer.dispose()
-    // the listener removed BEFORE the loss — the dead renderer stays silent
+    // the listeners removed BEFORE the loss — the dead renderer stays silent
     expect(removed).toContain('webglcontextlost')
+    expect(removed).toContain('webglcontextrestored')
     expect(loseCalls).toEqual(['lose'])
     // the intentional loss must not have fired the "context lost" report
     expect(errors.filter(e => e.includes('context lost')).length).toBe(0)

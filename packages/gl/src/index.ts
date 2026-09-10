@@ -67,6 +67,14 @@ export type { WebgpuScope, WebgpuAvailability, WebgpuWorkerProbeState } from './
 // for both backends: journalGl.ts (WebGL2) and journalGpu.ts (WebGPU, Task 57).
 export { withJournal, replayJournalOn } from './journalGl.ts'
 export { withJournalGpu, replayJournalOnGpu } from './journalGpu.ts'
+// Task 168 — THE RESTORE WIRE: the v2 resource journal factory, re-exported
+// from the umbrella so the DIST surface can actually build the session path
+// (`resources: createResourceJournal()` — the option that arms the
+// automatic webglcontextrestored recovery). Without this re-export the
+// option was bundle-unusable (the factory lived only in @rune/core's
+// export surface, which the browser bundle does not re-export).
+export { createResourceJournal } from '@rune/core'
+export type { ResourceJournal, RestoreReport, WorkingSet } from '@rune/core'
 
 // Task 62: ResourceJournal v2 — stable ids + content in the journal.
 // resourceSession — a session over the facade (stable ids, content

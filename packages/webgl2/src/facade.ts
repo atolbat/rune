@@ -317,6 +317,17 @@ export interface GLFacade {
    *  PIXEL_UNPACK_BUFFER binding is saved and restored (no leak). */
   texSubImage2DBuffer(textureId: number, x: number, y: number, width: number, height: number, bufferId: number, byteOffset?: number): void
 
+  // ─── Task 168 — THE RESTORE WIRE (context-loss recovery) ─────────────────
+  // Optional: only realGL implements it (the recording/counting mocks and
+  // the session facade forward it when present). After a
+  // webglcontextlost → webglcontextrestored cycle the raw context is the
+  // same JS object but every GL object it handed out is dead; this returns
+  // the facade to its post-constructor state (Maps cleared, counters at
+  // zero, every memo/mirror disarmed) so resources can be re-created.
+  // See webgl2Renderer's onContextRestored for the full recovery flow.
+  /** Fresh facade state over a restored context (optional — realGL). */
+  resetAfterContextRestore?(): void
+
   // ─── Disposal (M1 §9.9 disposal discipline) ─────────────────────────────
   // Every delete* frees the GPU resource and removes the entry from the facade's
   // internal cache. A repeat call with the same id — a no-op (idempotence).

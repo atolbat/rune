@@ -2149,3 +2149,68 @@ arithmetic is pinned exactly on the mock, the live gate pins survival).
 Gates: 1751/1751 tests (was 1740, +11), typecheck at the 6-error baseline,
 lint 0 errors, dist rebuilt, demo:smoke 24/24, task167-syncpoint PASS.
 Cache-busts: `?v=167` (gpuEmbers.js, main.js, index.html, astral/main.js).
+
+## Task 168 — THE RESTORE WIRE
+
+The Task-137 comment carried a documented TODO: context loss stopped the
+loop honestly, `preventDefault` kept the context RESTORABLE — and then
+nothing ever picked the restore up. The journal machinery (Tasks 62-66)
+was built for exactly this recovery, but only as a MANUAL flow
+(new renderer + same journal + `restoreResources()`). This pass wires the
+browser's own `webglcontextrestored` event into an IN-PLACE recovery:
+
+- **`realGL.resetAfterContextRestore()`** (new, optional on `GLFacade`):
+  after the loss+restore cycle the raw context is the same JS object but
+  every GL object it handed out is dead — the facade's Maps would keep
+  pointing at corpses while the ids stay "known" (the exact silent-zombie
+  shape). The reset returns the facade to its post-constructor state:
+  Maps cleared, counters at zero, every Task-163/164/165 memo and mirror
+  disarmed (a surviving memo would SKIP re-asserts against the fresh
+  context — the Task-75b regression class, on the loss path). The cap
+  probes and the drawing-buffer notion stay (properties of the context,
+  not of the lost objects).
+- **The renderer's `onContextRestored`** (the session path —
+  `resources: createResourceJournal()`): (1) the raw facade resets; (2)
+  `session.restore()` clears the stable→raw mappings and replays the
+  journal (stable ids hold by construction — textures, views, targets
+  re-created with content); (3) `executor.invalidate()` drops every
+  command's `programId`/`bufferIds` (derived state — they re-create
+  lazily from the command specs) and RE-DIRTIES every uniform field (the
+  fresh programs start empty; the arena's value-compare would otherwise
+  suppress the first upload forever — a subtle trap pinned by test); (4)
+  the loop resumes if the loss stopped a running one; the report names
+  the replay stats.
+- **The honest boundaries, named in the reports**: the plain path (no
+  journal) gets the boundary report — nothing can replay dead textures,
+  re-boot; the v1 journal decorator likewise. The TF tier's passes and
+  the feeds' external buffers belong to their tiers — their stale ids
+  degrade to the honest unknown-id no-ops, never silent zombies.
+- **The API-surface gap this exposed**: the dist bundle did not export
+  `createResourceJournal` — the `resources:` option was BUNDLE-UNUSABLE
+  (the factory lived only in `@rune/core`). The umbrella package now
+  re-exports it (and the `ResourceJournal`/`RestoreReport`/`WorkingSet`
+  types).
+
+**The container finding (documented in the gate)**: this Chrome+SwiftShader
+combo NEVER delivers `webglcontextrestored` after `restoreContext()` — a
+raw browser probe (no library) shows the context stuck at
+`isContextLost()===true` forever. On real hardware the event is
+spec-pinned and well-supported. The live gate therefore drives both
+honest halves: synthetic event pair on a LIVE context (the full wire —
+replay, program re-creation, resume, real draws), plus the REAL
+`webglcontextlost` delivery (the zombie guard, live).
+
+Pinned by `packages/gl/tests/task168.test.ts` (4 pins: the full in-place
+cycle — the journal replays, the program re-creates, the uniform
+re-uploads, the loop resumes, the stable texture id survives; the
+plain-path boundary — the report lands, no auto-resume, `start()` still
+refuses; the dispose guard — both listeners removed; the
+never-running-restore — resources recovered, no auto-start, manual start
+works) and `scripts/task168-restore.mjs` (the live gate, both legs).
+
+Gates: 1755/1755 tests (was 1751, +4), typecheck at the 6-error baseline,
+lint 0 errors, dist rebuilt (with the journal export), demo:smoke OK,
+task167-syncpoint PASS (thresholds re-based honestly: the container
+variance spans 3-27 frames/6s on healthy builds — the live cells pin
+liveness, the cadence arithmetic is mock-pinned), task152-keepalive PASS.
+Cache-busts: `?v=168`.

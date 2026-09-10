@@ -388,17 +388,72 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
   // (facade ledgers, pills) keeps "running": the exact "particles gone,
   // the counter counts" zombie. The listener stops the loop HONESTLY and
   // reports through the error sink; preventDefault keeps the context
-  // RESTORABLE for a future restoreResources() re-attach (the journal is
-  // the restore source; the auto-restore wiring stays the documented TODO).
+  // RESTORABLE.
+  // Task 168 — THE RESTORE WIRE: with a resource session (options.resources)
+  // the RESTORED context is recovered IN PLACE — webglcontextrestored
+  // replays the journal and resumes the loop below. Without one (the plain
+  // path) the honest boundary stands: textures/buffers died with the old
+  // context and nothing can replay them — re-boot the renderer.
   let contextLost = false
+  // Whether the loop was RUNNING when the loss hit (the restore resumes
+  // only what the loss stopped).
+  let resumeOnRestore = false
   const onContextLost = (event: Event): void => {
     event.preventDefault?.()
+    resumeOnRestore = running
     contextLost = true
     running = false
-    options.onGlError?.('WebGL context lost — rendering stopped (the browser/driver dropped this canvas\'s context; re-boot the backend toggle to recover)')
+    options.onGlError?.(
+      session !== null
+        ? 'WebGL context lost — rendering stopped (the browser/driver dropped this canvas\'s context; the journal will replay automatically on webglcontextrestored)'
+        : 'WebGL context lost — rendering stopped (the browser/driver dropped this canvas\'s context; re-boot the backend toggle to recover)',
+    )
+  }
+  /** Task 168 — THE RESTORE WIRE: in-place recovery on the RESTORED context
+   *  (the session path only — see onContextLost's doc). The raw context is
+   *  the same JS object but every GL object died; the flow:
+   *    (1) the RAW FACADE resets (fresh Maps, counters at zero, every
+   *        Task-163/164/165 memo disarmed — the facade object stays the same
+   *        so every closure holding it keeps working);
+   *    (2) session.restore() clears the session's own stable→raw mappings
+   *        and REPLAYS the journal — every texture/view/target re-created,
+   *        stable ids hold by construction;
+   *    (3) executor.invalidate() drops every command's programId/bufferIds
+   *        (programs+vertex buffers are DERIVED state — the session's own
+   *        doc: they re-create lazily from the command specs) and re-dirties
+   *        every uniform field (the fresh programs start empty; the arena's
+   *        value-compare would otherwise suppress the first upload forever);
+   *    (4) the loop resumes: contextLost=false un-gates start()/step(),
+   *        the canvas state re-syncs on the next frame.
+   *  Boundaries (named in the report when they apply): the TF tier's passes
+   *  and the feeds' external buffers are OWNED by their tiers — a loss under
+   *  them needs the tier's rebuild (their ids degrade to the honest
+   *  unknown-id no-ops, never silent zombies). The v1 journal decorator and
+   *  the plain path do not auto-restore (no replay source). */
+  const onContextRestored = (): void => {
+    if (!contextLost || disposed) return
+    if (session === null) {
+      options.onGlError?.('WebGL context restored — but this renderer runs WITHOUT the resource journal (the plain path): the textures died with the old context and cannot be replayed. Re-boot the renderer to recover (a renderer built with resources: createResourceJournal() recovers automatically here)')
+      return
+    }
+    try {
+      ;(rawGl as { resetAfterContextRestore?: () => void }).resetAfterContextRestore?.()
+      const report = session.restore()
+      executor.invalidate?.()
+      contextLost = false
+      frameErrorCount = 0
+      lastGlErrorKey = ''
+      lastCssWidth = -1
+      lastCssHeight = -1
+      options.onGlError?.(`WebGL context restored — ${report.opsReplayed} journal ops replayed (${report.textureIds.length} textures, ${report.viewIds.length} views, ${report.targetIds.length} targets); the loop resumes`)
+      if (resumeOnRestore) start()
+    } catch (error) {
+      options.onGlError?.(`WebGL context restore failed: ${error instanceof Error ? error.message : String(error)} — re-boot the renderer to recover`)
+    }
   }
   if (rawContext !== null && typeof (canvas as { addEventListener?: unknown }).addEventListener === 'function') {
     (canvas as HTMLCanvasElement).addEventListener('webglcontextlost', onContextLost)
+    ;(canvas as HTMLCanvasElement).addEventListener('webglcontextrestored', onContextRestored)
   }
 
   const [startW, startH] = getCanvasCssSize(canvas)
@@ -909,9 +964,12 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     // renderer.dispose() (the vfx shell's activateDemo → state.dispose)
     // remain no-ops — harmless by design.
     if (rawContext !== null) {
-      // OUR listener first: the intentional loss below must not fire the
-      // "context lost" report from THIS (already disposed) renderer.
+      // OUR listeners first: the intentional loss below must not fire the
+      // "context lost" report from THIS (already disposed) renderer. Task 168:
+      // both listeners (the restore wire must not resurrect a disposed
+      // renderer — the guard inside checks `disposed` too, belt and braces).
       try { (canvas as HTMLCanvasElement).removeEventListener?.('webglcontextlost', onContextLost) } catch { /* best-effort */ }
+      try { (canvas as HTMLCanvasElement).removeEventListener?.('webglcontextrestored', onContextRestored) } catch { /* best-effort */ }
       // Task 167 — the final drain: the last frames before dispose may carry
       // an undrained error (the probe cadence). ONE getError right here — the
       // flush cost is irrelevant at teardown, the diagnostic hole is not.

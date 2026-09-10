@@ -23,6 +23,16 @@ const DEFAULT_CLEAR = { color: [0.07, 0.08, 0.11, 1] as const, depth: 1 }
 
 export interface GLExecutor {
   run(view: TapeView): void
+  /** Task 168 — THE RESTORE WIRE: after webglcontextlost+restored the
+   *  facade was reset (fresh Maps — the old program/buffer ids are unknown
+   *  again), so every command's derived GPU state is stale. This walks the
+   *  command set and drops programId/bufferIds (the next draw re-creates
+   *  them lazily from the command specs — the exact boot path), and re-dirt
+   *  ies every uniform field: the arena's value-compare suppressed uploads
+   *  because the DEAD program already had the values — the fresh program
+   *  has nothing until each field uploads once. Optional (the historical
+   *  executors without it keep their pre-168 behavior). */
+  invalidate?(): void
 }
 
 export function createExecutor(options: GLExecutorOptions): GLExecutor {
@@ -214,5 +224,23 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
     else gl.setUniform1f(programId, name, values[0])
   }
 
-  return { run }
+  /** Task 168 — see the interface doc. Steady-state cost: never called
+   *  (the restore path only); when called — O(commands × fields). */
+  function invalidate(): void {
+    for (const command of commands) {
+      if (command === undefined) continue
+      const rich = command as CompiledCommand & {
+        programId?: number
+        bufferIds?: number[]
+        fields: Array<{ slot: { dirty: boolean } }>
+      }
+      rich.programId = undefined
+      rich.bufferIds = undefined
+      for (let f = 0; f < rich.fields.length; f++) rich.fields[f].slot.dirty = true
+    }
+    // The per-frame state mirrors (lastProgram & co.) reset at beginPass of
+    // every frame — nothing to do here.
+  }
+
+  return { run, invalidate }
 }

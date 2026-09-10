@@ -1385,6 +1385,58 @@ export function createRealGL(
    *  object too). */
   const transformProgramIds = new Set<number>()
 
+  /** Task 168 — THE RESTORE WIRE: fresh facade state over a RESTORED context.
+   *  After webglcontextlost + webglcontextrestored the raw context object is
+   *  the SAME JS object, but every GL object it ever handed out (programs,
+   *  buffers, textures, FBOs, TF objects) is DEAD — the Maps below would
+   *  keep pointing at corpses while the ids stay "known", which is the exact
+   *  silent-zombie shape (bindTexture finds the dead WebGLTexture, the GL
+   *  ignores it, the canvas stays black while the loop counts frames). The
+   *  reset returns the facade to its post-constructor state: Maps cleared,
+   *  counters at zero, every memo/mirror disarmed. The CAP PROBES
+   *  (anisoExt / parallelCompileExt / floatLinearExt) stay — they are
+   *  properties of the CONTEXT (same renderer, same driver), not of the
+   *  lost object population; the drawing-buffer notion (canvasWidth/Height)
+   *  stays too — the bindTarget self-heal re-reads the real size on the
+   *  next pass. Callers re-create resources afterwards (the session's
+   *  journal replay; the executor's lazy program/buffer re-creation). */
+  function resetAfterContextRestore(): void {
+    programs.clear()
+    pendingLinks.clear()
+    buffers.clear()
+    textures.clear()
+    targets.clear()
+    textureMeta.clear()
+    textureViews.clear()
+    nextTextureViewId = 1_000_000
+    nextProgram = 1
+    nextBuffer = 1
+    nextTexture = 1
+    nextTarget = 1
+    defaultAttribBindings.clear()
+    passVaoActive = false
+    currentProgram = null
+    currentProgramId = -1
+    currentTarget = 0
+    // Task 163/164/165 caches — every one of them mirrors state that died
+    // with the context; leaving any armed would SKIP re-asserts against a
+    // fresh context (the Task-75b regression class, now on the loss path).
+    unitTextures.clear()
+    unitBindCache.clear()
+    invalidateVertexBinds()
+    samplerUnits.clear()
+    unpackAlignmentMirror = 0
+    // Task 132 — the TF family: the passes' programs died with everything
+    // else. The Map clear makes the stale pass ids UNKNOWN (the historical
+    // unknown-id no-op), so a TF tier that survives a loss degrades
+    // honestly (its rebuild is the tier owner's job — the renderer's
+    // restore report names the boundary).
+    transformPasses.clear()
+    nextTransformPass = 1
+    transformProgramIds.clear()
+    transformPassIds.clear()
+  }
+
   function createTransformPass(desc: {
     readonly vertex: string
     readonly outputs: readonly string[]
@@ -1701,5 +1753,7 @@ export function createRealGL(
     runTransformPass,
     deleteTransformPass,
     texSubImage2DBuffer,
+    // Task 168 — THE RESTORE WIRE
+    resetAfterContextRestore,
   }
 }
