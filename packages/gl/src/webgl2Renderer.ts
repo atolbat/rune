@@ -63,6 +63,12 @@ export interface WebGL2Renderer {
   readonly gl: GLFacade
   /** Caps — backend capabilities. null in headless mode (createGL injected). */
   readonly caps: Caps | null
+  /** Task 169 — the multi-draw tier's live verdict: true when the option
+   *  left it on (default) AND the facade actually exposes
+   *  multiDrawArraysInstanced (the context has WEBGL_multi_draw). A
+   *  diagnostic surface for pills/log lines — the tier engages by itself
+   *  whenever a frame repeats a command. */
+  readonly multiDraw: boolean
   readonly size: ReadableSignal<readonly [number, number]>
   readonly aspect: ReadableSignal<number>
   readonly time: ReadableSignal<number>
@@ -319,6 +325,13 @@ export interface WebGL2RendererOptions {
    *  (which set powerPreference:'high-performance'). Example:
    *  { powerPreference: 'default' } for a battery-conscious embedding. */
   readonly glAttributes?: Partial<WebGLContextAttributes>
+  /** Task 169 — THE MULTI-DRAW TIER: collapse runs of consecutive draws of
+   *  the same command into one WEBGL_multi_draw call (only when the
+   *  context actually has the ANGLE extension — see renderer.multiDraw
+   *  for the live verdict). Default true. false = the per-draw drawArrays
+   *  path, byte-identical call sequences (the driver-bug insurance
+   *  kill-switch: no code change needed to disable the tier in the field). */
+  readonly multiDraw?: boolean
 }
 
 const DEFAULT_CLEAR = { color: [0.07, 0.08, 0.11, 1] as const, depth: 1 }
@@ -354,6 +367,7 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
   const executor = createExecutor({
     gl, arena, commands: ctx.commands, clears,
     segments, uniformStrategy: options.uniformStrategy ?? 'auto',
+    multiDraw: options.multiDraw ?? true,
   })
 
   const epoch = createEpoch()
@@ -991,6 +1005,12 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     }
   }
 
+  // Task 169 — the multi-draw tier's live verdict: the option left it on
+  // (default) AND the (possibly decorated) facade exposes the method. The
+  // session/journal wrappers forward it conditionally, so presence through
+  // the wrapping mirrors the raw context exactly.
+  const multiDrawActive = (options.multiDraw ?? true) && typeof gl.multiDrawArraysInstanced === 'function'
+
   // Caps probing: on the real gl context (if present). Headless mode (createGL
   // injected) — caps = null; tests must inject their own caps.
   // GpuTimer — if the EXT_disjoint_timer_query_webgl2 extension exists. Hooked
@@ -1018,6 +1038,14 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
   return {
     gl,
     caps: probedCaps,
+    // Task 169 — the live multi-draw verdict: the option AND the facade
+    // method (realGL exposes it only when the context has WEBGL_multi_draw;
+    // the recording mock always does — the tier is pinned by tests). The
+    // session/journal decorators forward the base facade's method through,
+    // so the probe sees through the wrapping.
+    get multiDraw() {
+      return multiDrawActive
+    },
     size,
     aspect,
     time,

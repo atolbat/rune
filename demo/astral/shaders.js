@@ -153,15 +153,15 @@ fn vsMain(@builtin(vertex_index) vi : u32,
 @fragment
 fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
   let d = length(frag.uv);
-  if (d > 1.0) { discard }
+  if (d > 1.0) { discard; }
   let core = exp(-d * d * 14.0) * 1.25;
   let glow = exp(-d * d * 3.6) * 0.4;
   var a = (core + glow) * frag.color.a;
   var rgb = frag.color.rgb * a;
 
   let ring = exp(-pow((d - 0.62) * 14.0, 2.0)) * 0.85;
-  if (frag.state.x > 0.5 && frag.state.x < 1.5) { rgb += vec3<f32>(0.28, 0.5, 1.0) * ring * 0.55 * frag.color.a }
-  else if (frag.state.x > 1.5) { rgb += vec3<f32>(1.0, 0.28, 0.24) * ring * 0.6 * frag.color.a }
+  if (frag.state.x > 0.5 && frag.state.x < 1.5) { rgb += vec3<f32>(0.28, 0.5, 1.0) * ring * 0.55 * frag.color.a; }
+  else if (frag.state.x > 1.5) { rgb += vec3<f32>(1.0, 0.28, 0.24) * ring * 0.6 * frag.color.a; }
 
   if (frag.state.y > 0.5) {
     let ang = atan2(frag.uv.y, frag.uv.x);
@@ -421,7 +421,7 @@ fn vsMain(@builtin(vertex_index) vi : u32,
 @fragment
 fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
   let d = length(frag.uv * vec2<f32>(1.0, 0.6));
-  if (d > 1.25) { discard }
+  if (d > 1.25) { discard; }
   let hull = smoothstep(1.0, 0.72, d);
   let shade = 0.55 + 0.45 * clamp(frag.uv.y * 0.5 + 0.5, 0.0, 1.0);
   var rgb = frag.color.rgb * hull * shade;
@@ -444,6 +444,13 @@ fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
     let ring = exp(-pow((d - 1.05) * 9.0, 2.0)) * dashes;
     rgb += vec3<f32>(1.0, 0.85, 0.4) * ring;
     a += ring * 0.7;
+  }
+
+  // colonizing: a soft green aura (the GLSL twin's block — the WGSL twin
+  // had silently dropped it, ships colonizing showed the aura only on GL)
+  if (frag.state.w > 0.0 && frag.state.y > 1.5) {
+    let aura = exp(-d * d * 2.2) * (0.5 + 0.5 * sin(params.u_time * 3.0));
+    rgb += vec3<f32>(0.35, 1.0, 0.6) * aura * 0.35;
   }
 
   return vec4<f32>(rgb, a);
@@ -570,7 +577,7 @@ fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
   let ty = frag.state.w;
 
   if (ty < 3.5) {
-    if (d > 1.0) { discard }
+    if (d > 1.0) { discard; }
     let N = normalize(frag.uv + vec2<f32>(1e-5, 1e-5));
     let L = normalize(vec2<f32>(-0.55, 0.65));
     let lightK = 0.35 + 0.65 * max(0.0, dot(N, L));
@@ -709,7 +716,7 @@ fn vsMain(@builtin(vertex_index) vi : u32,
 @fragment
 fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
   let d = length(frag.uv);
-  if (d > 1.0) { discard }
+  if (d > 1.0) { discard; }
   let kind = frag.state.y;
   var a = 0.0;
   var rgb = vec3<f32>(0.0);

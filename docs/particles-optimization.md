@@ -2214,3 +2214,114 @@ task167-syncpoint PASS (thresholds re-based honestly: the container
 variance spans 3-27 frames/6s on healthy builds — the live cells pin
 liveness, the cadence arithmetic is mock-pinned), task152-keepalive PASS.
 Cache-busts: `?v=168`.
+
+## Task 169 — THE WGSL TWIN GATE + THE MULTI-DRAW TIER
+
+The session opened with a field report, not a request: a phone (Chrome 150,
+WebGPU) loaded the astral demo and the log showed
+
+```
+GPU: Error while parsing WGSL: :41:26 error: expected ';' for discard statement
+  if (d > 1.0) { discard }
+GPU: detected 3 GPU errors — rendering stopped (storm pause)
+```
+
+**The root cause class**: the astral demo's six passes are dual-source
+(GLSL ES 3.00 + WGSL twins). The WGSL twins shipped with syntax GLSL
+forgives and WGSL does not — a bare `{ discard }` (WGSL wants `discard;`),
+a ring-block statement missing its `;` — because **nothing in the pipeline
+ever compiled them**: the container has no WebGPU adapter under the plain
+demo-smoke flags, so every smoke run booted the WebGL2 twin, and the WGSL
+half was field-tested only by users. The demo WAS the test. (The same
+audit found a fourth gap: the ship WGSL twin had silently dropped the
+GLSL colonizing-aura block — parity restored.)
+
+**The fix**: all six WGSL sources corrected (`demo/astral/shaders.js`);
+the colonizing aura restored to the ship twin.
+
+**The gate that closes the class** (`scripts/task169-wgsl-gate.mjs`):
+- **Cell A — source compile**: a real WebGPU device (SwiftShader + the
+  Vulkan feature flags — the task164-steady discovery, now a documented
+  gate technique) compiles every WGSL source of the demo through
+  `createShaderModule` with an error-scope capture + `getCompilationInfo`,
+  on a BARE page (the astral page's own auto-boot races for the GPU
+  process — the contention that makes SwiftShader devices flaky).
+- **THE CANARY**: the channel is calibrated against a known-bad module
+  before any verdict. The first draft of this gate had the exact hole the
+  canary exists to prevent: on the flaky GPU process both `popErrorScope`
+  and `getCompilationInfo` REJECT, and `.catch(() => null)` read the dead
+  channel as "no problems" — three deliberately broken shaders sailed
+  through "compiles clean". A failing channel now fails the gate
+  honestly ("cannot verify"), never passes silently.
+- **Cell B — live boot**: the whole demo forced onto WebGPU: the badge,
+  the frame counter advancing (the storm pause freezes it — the field
+  report's exact state, now a first-class failure mode), the world booted,
+  zero `GPU:` lines. Pixel liveness is NOT asserted (the task152 lesson:
+  the SwiftShader-WG canvas lies to screenshots); the frame counter and
+  the error log are the honest instruments.
+- **Calibrated both directions**: with a deliberately re-broken shader the
+  gate fails with the exact field-report text (line numbers included);
+  with the fix it passes.
+
+**THE MULTI-DRAW TIER** (the roadmap's `WEBGL_multi_draw batch-tier`,
+the user's "Multi draw тоже давай"): runs of consecutive draws of the
+SAME command collapse into ONE `multiDrawArraysInstancedWEBGL` driver
+call instead of N `drawArraysInstanced` round-trips.
+
+- The batching condition is conservative and provable: same command
+  object (⇒ same program, precompiled state keys, samplers, vertex
+  bindings), `count > 0 && instances > 0`, run ≤ 512. The
+  record-then-execute discipline of `step()` means uniform dirty flags
+  are final before the run — the run's first draw uploads, and nothing
+  can re-dirty mid-run; the classic path's own value-compare already
+  uploaded nothing for draws 2..N. Degenerate members (count 0 /
+  instances 0) END the run instead of joining it (their classic-path
+  behavior is a pinned quirk; the multi-draw expansion of
+  instanceCount 0 is a no-op — not the same call). Runs flush on: any
+  non-Draw op, a different command, a degenerate draw, the cap, the
+  tape's end. **A run of length 1 rides the classic path verbatim** —
+  scenes that never repeat a command see byte-identical call sequences
+  with the tier on or off.
+- **Presence == capability** at the facade: `realGL` exposes
+  `multiDrawArraysInstanced` IFF the context has the extension. The
+  first draft exposed it unconditionally (a no-op stub without the
+  extension) — the executor armed the tier on the stub and **every
+  batched draw silently vanished** (the task165 test caught it: 4 draws
+  expected, 0 landed). The session/journal decorators forward the method
+  CONDITIONALLY so presence mirrors the raw context through the
+  wrapping.
+- The kill-switch: `createRenderer({ multiDraw: false })` (and
+  `renderer.multiDraw` — the live verdict, surfaced through the
+  unified and auto renderers; false on the WebGPU path: core WebGPU
+  has no multi-draw, `drawIndirectCount` is not in shipping Chrome —
+  the WG executor's equivalent savings are the Task-165 bind memos).
+- `caps.has('multi-draw')` — the app-visible probe.
+
+**The verification stack**:
+- `packages/webgl2/tests/task169.test.ts` (10 pins): the batch
+  arithmetic, **THE EXPANSION PARITY** (the batched call stream with
+  every multiDraw expanded is the classic stream — same draws, same
+  order; the batched non-draw calls are a SUBSEQUENCE of the classic's —
+  the tier may only REMOVE calls, never add one), cross-command runs
+  stay classic, BeginPass breaks runs, the kill-switch, the 512 cap
+  (600 draws → 512 + 88), degenerates keep the classic behavior, the
+  facade presence contract (both directions), the caps probe.
+- `packages/gl/tests/task169.test.ts` (5 pins): the renderer wiring
+  (verdicts through the journal and resource-session decorators), an
+  end-to-end frame (a command recorded three times lands as ONE
+  multiDraw through the whole renderer→tape→executor→facade stack),
+  the kill-switch end-to-end.
+- `scripts/task169-multidraw.mjs` — the live gate on the real
+  SwiftShader WebGL2 stack: the extension probe (present in this
+  container's ANGLE), the armed/kill-switch verdicts, zero GL errors,
+  and **THE PIXEL PARITY** — the same seeded scene on two renderers
+  (tier on / kill-switch), identical canvas screenshots (SHA-256).
+  The scene records one command four times per frame — the exact
+  multi-draw shape.
+
+Gates: full suite green (was 1755, +15), typecheck at the 6-error
+baseline, lint 0 errors, dist rebuilt, demo:smoke OK, astral-probe 23/23,
+task169-wgsl-gate PASS (calibrated), task169-multidraw PASS
+(pixel-identical), task167-syncpoint PASS, task168-restore PASS.
+Cache-busts: `?v=169` (dist imports of astral + vfx), `?v=2`
+(astral shaders/render).

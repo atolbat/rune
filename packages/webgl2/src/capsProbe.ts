@@ -136,6 +136,12 @@ export function probeGLCaps(probe: GLProbe): CapsQuery {
     // link pipeline (submit-all + resolve-at-first-use) activates on it;
     // caps.has('parallel-shader-compile') is the app-visible probe.
     ['parallel-shader-compile', 'KHR_parallel_shader_compile'],
+    // Task 169 — the ANGLE batch-draw extension: realGL's facade exposes
+    // multiDrawArraysInstanced only when the context has it, and the
+    // executor's batch tier collapses same-command draw runs onto that
+    // call. caps.has('multi-draw') is the app-visible probe (the WebGPU
+    // twin is the spec's 'multi-draw-indirect' — a different tier).
+    ['multi-draw', 'WEBGL_multi_draw'],
   ]
   for (const [feature, extName] of extList) {
     const ext = probe.getExtension(extName)

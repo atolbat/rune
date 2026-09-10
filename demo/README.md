@@ -61,6 +61,10 @@ Any static server from the repository root works too, after `bun run build`
    `https://atolbat.github.io/rune/demo/<name>/` format).
 8. **Smoke test**: if the demo is graphical — add checks to
    `scripts/demo-smoke.mjs` (badge, live animation, toggle, log).
+   If the demo carries hand-written WGSL twins — its sources must pass
+   `scripts/task169-wgsl-gate.mjs` (a real WebGPU device compiles every
+   WGSL source; the gate caught the shipped `{ discard }` class that
+   only surfaced on field hardware).
 
 For an immersive fullscreen demo pass `layout: 'fullscreen'` to the shell —
 the stage fills the whole viewport and the controls hide behind a compact

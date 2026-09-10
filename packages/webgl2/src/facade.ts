@@ -216,6 +216,22 @@ export interface GLFacade {
   setBlend(src: string | null, dst: string | null, equation?: string): void
   clear(color: readonly [number, number, number, number] | readonly number[], depth: number | null): void
   drawArrays(mode: string, first: number, count: number, instances: number): void
+  /** Task 169 — THE MULTI-DRAW TIER (WEBGL_multi_draw, the ANGLE batch-draw
+   *  extension): submits `drawcount` instanced draws of the SAME GL state in
+   *  ONE driver call — firsts/counts/instanceCounts are parallel Int32Array
+   *  lists, only [0, drawcount) of each is read. Semantically the exact
+   *  expansion of `drawcount` separate drawArrays(mode, firsts[i],
+   *  counts[i], instanceCounts[i]) calls with the state left untouched
+   *  between them — which is precisely what the executor's batch tier
+   *  guarantees before collapsing a run (same command → same program,
+   *  pipeline state, samplers and vertex bindings; the arena's
+   *  record-then-execute discipline means no uniform changes mid-run).
+   *
+   *  OPTIONAL, like resetAfterContextRestore: realGL exposes it only when
+   *  the context actually has WEBGL_multi_draw (the executor detects it by
+   *  presence); the recording mocks implement it so tests can pin the batch
+   *  arithmetic; absent — the executor stays on the per-draw drawArrays path. */
+  multiDrawArraysInstanced?(mode: string, firsts: Int32Array, counts: Int32Array, instanceCounts: Int32Array, drawcount: number): void
   /** Render target: an FBO with a color texture (and optional depth).
    *  targetId 0 — the canvas (a built-in target, not created). */
   createTarget(

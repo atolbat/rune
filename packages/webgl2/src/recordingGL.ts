@@ -142,6 +142,15 @@ export function createRecordingGL(): RecordingGL {
     frontFace: order => calls.push(`frontFace(${order})`),
     clear: (color, depth) => calls.push(`clear(${color.join(',')};${depth})`),
     drawArrays: (mode, first, count, instances) => calls.push(`drawArrays(${mode},${first},${count},${instances})`),
+    // Task 169 — the multi-draw tier: the batched form is logged in the
+    // EXPANDED form (`multiDraw×N[c1×i1,c2×i2,...]`) so tape-level tests can
+    // compare a batched and an unbatched run with one shared assertion —
+    // the expansion is the documented semantics of the extension.
+    multiDrawArraysInstanced: (mode, firsts, counts, instanceCounts, drawcount) => {
+      const parts: string[] = []
+      for (let i = 0; i < drawcount; i++) parts.push(`${counts[i]}×${instanceCounts[i]}@${firsts[i]}`)
+      calls.push(`multiDraw×${drawcount}[${parts.join(',')}]`)
+    },
     createTarget: (textureId, width, height, depth) => {
       calls.push(`createTarget(${textureId},${width},${height}${depth ? ',depth' : ''})`)
       return nextTarget++

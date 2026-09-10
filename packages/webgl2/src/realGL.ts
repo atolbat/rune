@@ -204,6 +204,40 @@ export function createRealGL(
   } catch {
     parallelCompileExt = null
   }
+  // Task 169 — WEBGL_multi_draw (the ANGLE batch-draw extension): the
+  // executor's batch tier rides it — a run of consecutive draws of the
+  // SAME command collapses into ONE driver call instead of N
+  // drawArraysInstanced round-trips (the per-call driver/ANGLE overhead —
+  // the desktop-GL twin of why WebGPU draw() is cheap: fewer crossings).
+  // ANGLE implements it on all its backends; plain GL exposes it from the
+  // extension string; a context without it keeps the per-draw path (the
+  // facade method simply stays absent — the executor detects by presence).
+  // In mock-GL environments getExtension may be undefined — try/catch guard
+  // (the same contract as anisoExt/parallelCompileExt above).
+  let multiDrawExt: {
+    multiDrawArraysInstancedWEBGL(
+      mode: number,
+      firstsList: Int32Array, firstsOffset: number,
+      countsList: Int32Array, countsOffset: number,
+      instanceCountsList: Int32Array, instanceCountsOffset: number,
+      drawcount: number,
+    ): void
+  } | null = null
+  try {
+    multiDrawExt = (gl as unknown as {
+      getExtension?: (name: string) => unknown
+    }).getExtension?.('WEBGL_multi_draw') as {
+      multiDrawArraysInstancedWEBGL(
+        mode: number,
+        firstsList: Int32Array, firstsOffset: number,
+        countsList: Int32Array, countsOffset: number,
+        instanceCountsList: Int32Array, instanceCountsOffset: number,
+        drawcount: number,
+      ): void
+    } | null ?? null
+  } catch {
+    multiDrawExt = null
+  }
   let nextProgram = 1
   // Task 137 — the DEFAULT VAO's attrib LEDGER: location → the facade
   // bufferId bindVertexBuffer last pointed there (the DEFAULT VAO only —
@@ -1220,15 +1254,33 @@ export function createRealGL(
     // branches were gl.TRIANGLES — a copy-paste fossil). The executor today
     // only emits 'triangles', so nobody's pixels change; the facade becomes
     // honest for the day a line/point soup is recorded.
-    const target = mode === 'lines'
+    // Task 169: the mapping moved to primitiveTarget() — the multi-draw
+    // tier shares it (the batch call is honest for the same four modes).
+    const target = primitiveTarget(mode)
+    if (instances > 1) gl.drawArraysInstanced(target, first, count, instances)
+    else gl.drawArrays(target, first, count)
+  }
+
+  /** Task 169 — the mode string → GL enum (shared by drawArrays and the
+   *  multi-draw tier; the Task-167 mapping, extracted verbatim). */
+  function primitiveTarget(mode: string): number {
+    return mode === 'lines'
       ? gl.LINES
       : mode === 'points'
         ? gl.POINTS
         : mode === 'triangle-strip'
           ? gl.TRIANGLE_STRIP
           : gl.TRIANGLES
-    if (instances > 1) gl.drawArraysInstanced(target, first, count, instances)
-    else gl.drawArrays(target, first, count)
+  }
+
+  // Task 169 — THE MULTI-DRAW TIER: drawcount instanced draws, one driver
+  // call. The offsets are the (list, offset) pairs of the extension
+  // signature — this facade always hands over the full lists with offset 0
+  // and a drawcount the caller kept within bounds (the executor's
+  // preallocated lists, [0, MAX_BATCH) — see executor.ts).
+  function multiDrawArraysInstanced(mode: string, firsts: Int32Array, counts: Int32Array, instanceCounts: Int32Array, drawcount: number): void {
+    if (multiDrawExt === null || drawcount <= 0) return
+    multiDrawExt.multiDrawArraysInstancedWEBGL(primitiveTarget(mode), firsts, 0, counts, 0, instanceCounts, 0, drawcount)
   }
 
   // ─── Disposal: explicit release of the GPU resource ───
@@ -1741,6 +1793,12 @@ export function createRealGL(
     setBlend,
     clear,
     drawArrays,
+    // Task 169 — the multi-draw tier: present IFF the context actually has
+    // WEBGL_multi_draw (the executor arms the tier by this method's
+    // PRESENCE — an always-present no-op would silently swallow every
+    // batched draw on a context without the extension; this is exactly the
+    // bug the first task165 run caught: 4 draws expected, 0 landed).
+    ...(multiDrawExt !== null ? { multiDrawArraysInstanced } : {}),
     createTarget,
     bindTarget,
     readTargetPixels,

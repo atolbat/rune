@@ -112,6 +112,15 @@ export function withJournal(gl: GLFacade, journal: Journal): GLFacade {
     setBlend: (src, dst, equation) => gl.setBlend(src, dst, equation),
     clear: (color, depth) => gl.clear(color, depth),
     drawArrays: (mode, first, count, instances) => gl.drawArrays(mode, first, count, instances),
+    // Task 169 — the multi-draw tier: a frame op, passthrough. Forwarded
+    // CONDITIONALLY so the wrapper's surface mirrors the inner facade
+    // exactly (the executor arms the tier by the method's PRESENCE — an
+    // unconditional forward on a context without WEBGL_multi_draw would
+    // arm it on a no-op).
+    ...(gl.multiDrawArraysInstanced !== undefined ? {
+      multiDrawArraysInstanced: (mode: string, firsts: Int32Array, counts: Int32Array, instanceCounts: Int32Array, drawcount: number) =>
+        gl.multiDrawArraysInstanced?.(mode, firsts, counts, instanceCounts, drawcount),
+    } : {}),
     createTarget: (textureId, width, height, depth, color) => {
       const id = gl.createTarget(textureId, width, height, depth, color)
       journal.record({ kind: 'createTarget', id, textureId, width, height, depth, color })

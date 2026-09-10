@@ -17,6 +17,16 @@ export interface GLExecutorOptions {
   readonly clears: ReadonlyArray<{ readonly color: readonly [number, number, number, number]; readonly depth: number | null }>
   readonly segments?: SegmentStore
   readonly uniformStrategy?: UniformStrategy
+  /** Task 169 — THE MULTI-DRAW TIER: collapse runs of consecutive draws of
+   *  the SAME command into one WEBGL_multi_drawArraysInstanced call. Only
+   *  active when the facade actually exposes multiDrawArraysInstanced (the
+   *  extension is present); default true. A kill-switch for driver-bug
+   *  insurance: false restores the per-draw drawArrays path exactly — the
+   *  batched and unbatched tapes are pixel-identical by construction (the
+   *  batch semantics are the verbatim expansion of the per-draw calls).
+   *  Batched draws are ALSO unchanged for scenes that never repeat a
+   *  command: a run of length 1 takes the classic path verbatim. */
+  readonly multiDraw?: boolean
 }
 
 const DEFAULT_CLEAR = { color: [0.07, 0.08, 0.11, 1] as const, depth: 1 }
@@ -46,6 +56,55 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
   let lastCull = ''
   let lastBlend = ''
 
+  // ── Task 169 — THE MULTI-DRAW TIER ──
+  // A RUN is a maximal sequence of consecutive Draw ops referencing the
+  // SAME command with count > 0 and instances > 0. Within a run every GL
+  // assertion the classic per-draw path makes is a no-op by construction:
+  //   • program/state/samplers/attributes — identical (the same command
+  //     object → the same programId, the same precompiled state keys, the
+  //     same textureIds and buffer bindings); the Task-163/165 facade
+  //     memos would skip every re-assert anyway;
+  //   • uniforms — the step() discipline is record-then-execute: ALL
+  //     arena writes happen before run() starts, so the dirty flags are
+  //     final; the run's first draw uploads (drains) them, and nothing can
+  //     re-dirty a field mid-run (the recorder is done; the executor writes
+  //     nothing). The classic path's own value-compare made draws 2..N of
+  //     such a run upload NOTHING already — the batch tier only removes
+  //     the redundant drawArrays round-trips.
+  // Degenerate members (count 0 / instances 0) END the run instead of
+  // joining it: their classic-path behavior is preserved byte-for-byte
+  // (a 0-instance draw historically falls into the non-instanced
+  // drawArrays branch — a quirk, but a pinned one; the multi-draw
+  // expansion of instanceCount 0 is a no-op, which is NOT the same call).
+  // The run is flushed (emitted) on: any non-Draw op (BeginPass resets
+  // state mirrors, BindTarget switches the framebuffer — pending draws
+  // belong to the OLD target), a different command, a degenerate draw,
+  // the MAX_BATCH cap, or the tape's end. A run of length 1 emits through
+  // the classic drawArrays path — scenes that never repeat a command see
+  // byte-identical call sequences with the tier on or off.
+  const multiDrawFn = typeof gl.multiDrawArraysInstanced === 'function'
+    ? gl.multiDrawArraysInstanced.bind(gl)
+    : undefined
+  const multiDraw = (options.multiDraw ?? true) && multiDrawFn !== undefined
+  const MAX_BATCH = 512
+  const batchFirsts = new Int32Array(MAX_BATCH) // all zeros — first is always 0
+  const batchCounts = new Int32Array(MAX_BATCH)
+  const batchInstances = new Int32Array(MAX_BATCH)
+  let batchCommand: CompiledCommand | undefined
+  let batchLen = 0
+
+  function flushBatch(): void {
+    if (batchLen === 0) { batchCommand = undefined; return }
+    if (batchLen === 1) {
+      // the lone draw rides the classic path — the pre-169 call, verbatim
+      gl.drawArrays('triangles', batchFirsts[0], batchCounts[0], batchInstances[0])
+    } else {
+      multiDrawFn?.('triangles', batchFirsts, batchCounts, batchInstances, batchLen)
+    }
+    batchLen = 0
+    batchCommand = undefined
+  }
+
   function run(view: TapeView): void {
     // Task 163 — SUBMIT-ALL: every compiled-but-not-yet-created program is
     // submitted NOW, before the first draw. createProgram fires the
@@ -60,11 +119,17 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
     for (const command of commands) submitProgram(command)
     for (let at = 0; at < view.count; at++) {
       const op = view.op[at]
-      if (op === 1) beginPass()
-      else if (op === 2) drawCommand(commands[view.a[at]], view.c[at], view.d[at])
-      else if (op === 4) gl.bindTarget(view.a[at], view.b[at] === 1)
-      // EndPass (3): a frame bracket, requires no GL cleanup
+      if (op === 2) drawCommand(commands[view.a[at]], view.c[at], view.d[at])
+      else {
+        // Task 169: a non-Draw op ends the run FIRST — its pending draws
+        // were recorded for the state/target as they stood
+        flushBatch()
+        if (op === 1) beginPass()
+        else if (op === 4) gl.bindTarget(view.a[at], view.b[at] === 1)
+        // EndPass (3): a frame bracket, requires no GL cleanup
+      }
     }
+    flushBatch() // the tape's end — no draw may leak past the frame
   }
 
   function beginPass(): void {
@@ -91,6 +156,32 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
 
   function drawCommand(command: CompiledCommand | undefined, count: number, instances: number): void {
     if (command === undefined) return
+    // Task 169 — the multi-draw fast path: an APPEND (the run's command,
+    // a real draw, room in the batch) skips the prologue entirely — every
+    // assertion below is a no-op for a same-command repeat, proven at the
+    // tier's design (see the batch block above). Runs of one stay classic.
+    let batched = false
+    if (multiDraw && count > 0 && instances > 0) {
+      if (command === batchCommand && batchLen < MAX_BATCH) {
+        batchCounts[batchLen] = count
+        batchInstances[batchLen] = instances
+        batchLen++
+        return
+      }
+      flushBatch()
+      batchCommand = command
+      batchCounts[0] = count
+      batchInstances[0] = instances
+      batchLen = 1
+      batched = true
+      // fall through to the prologue ONCE — for the whole run; the draw
+      // itself stays PENDING in the batch (flushBatch emits it)
+    }
+    else {
+      // degenerate (count 0 / instances 0) or the tier is off — the run
+      // must not absorb a draw whose classic behavior differs
+      flushBatch()
+    }
     const rich = command as CompiledCommand & {
       state: { depthTest: string; depthWrite: boolean; depthKey: string; cull: string; blend: { src: string; dst: string; equation: string } | null; blendKey: string }
       fields: Array<{ name: string; type: string; slot: { base: number; size: number; dirty: boolean } }>
@@ -129,7 +220,7 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
         gl.bindVertexBuffer(rich.bufferIds![attribute.location], attribute.location, attribute.size, undefined, undefined, divisor)
       }
     }
-    gl.drawArrays('triangles', 0, count, instances)
+    if (!batched) gl.drawArrays('triangles', 0, count, instances)
   }
 
   function ensureProgram(command: CompiledCommand & { programId?: number; bufferIds?: number[] }): void {
@@ -240,6 +331,12 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
     }
     // The per-frame state mirrors (lastProgram & co.) reset at beginPass of
     // every frame — nothing to do here.
+    // Task 169: the batch tier's run state dies with the same stroke — a
+    // pending batch's prologue ran against the DEAD program ids (between
+    // frames the batch is always empty by the tape-end flush; this is the
+    // hygiene arm of that invariant, not a reachable path).
+    batchLen = 0
+    batchCommand = undefined
   }
 
   return { run, invalidate }

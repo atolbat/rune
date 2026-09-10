@@ -45,6 +45,9 @@ export interface AutoRendererOptions {
   /** Task 116: the canvas clear — forwarded to the chosen backend (both
    *  branches honor it; previously the WebGPU branch silently dropped it). */
   readonly clear?: RendererOptions['clear']
+  /** Task 169 — the multi-draw batch tier's kill-switch (GL path only;
+   *  default true; see AutoRenderer.multiDraw for the live verdict). */
+  readonly multiDraw?: boolean
   /** WebGPU probe injection — for tests. */
   readonly probeGpu?: () => Promise<boolean>
   /** WebGL2 probe injection — for tests. Default: typeof WebGL2RenderingContext. */
@@ -58,6 +61,13 @@ export interface AutoRenderer {
   readonly decision: BackendDecision
   /** Inner renderer — for direct access (gpu/gl facade). */
   readonly inner: Renderer | WebGpuRenderer
+  /** Task 169 — the multi-draw tier's live verdict: true only on the GL
+   *  path with WEBGL_multi_draw present and the option on (default); the
+   *  WebGPU path reports false — core WebGPU exposes no multi-draw (the
+   *  drawIndirectCount spec method is not in shipping Chrome), its
+   *  equivalent is the Task-165 bind-group memos that already ride the
+   *  WG executor. */
+  readonly multiDraw: boolean
   // Unified API
   readonly size: ReadableSignal<readonly [number, number]>
   readonly aspect: ReadableSignal<number>
@@ -117,6 +127,8 @@ export async function createAutoRenderer(options: AutoRendererOptions): Promise<
     requestFrame: options.requestFrame,
     observeResize: options.observeResize,
     now: options.now,
+    // Task 169 — the batch tier's kill-switch, forwarded to the GL renderer
+    multiDraw: options.multiDraw,
   })
   return wrapGl(inner, decision)
 }
@@ -138,6 +150,7 @@ function wrapGl(inner: Renderer, decision: BackendDecision): AutoRenderer {
     backend: 'webgl2',
     decision,
     inner,
+    get multiDraw() { return inner.multiDraw },
     get size() { return inner.size },
     get aspect() { return inner.aspect },
     get time() { return inner.time },
@@ -160,6 +173,10 @@ function wrapGpu(inner: WebGpuRenderer, decision: BackendDecision): AutoRenderer
     backend: 'webgpu',
     decision,
     inner,
+    // Task 169 — the honest WG verdict: no multi-draw tier on this path
+    // (core WebGPU has no drawIndirectCount in shipping Chrome; the WG
+    // executor's equivalent savings are the Task-165 bind memos)
+    multiDraw: false,
     get size() { return inner.size },
     get aspect() { return inner.aspect },
     get time() { return inner.time },

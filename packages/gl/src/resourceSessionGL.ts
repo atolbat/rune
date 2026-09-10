@@ -286,6 +286,16 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
     setBlend: (src, dst, equation) => raw.setBlend(src, dst, equation),
     clear: (color, depth) => raw.clear(color, depth),
     drawArrays: (mode, first, count, instances) => raw.drawArrays(mode, first, count, instances),
+    // Task 169 — the multi-draw tier: a FRAME op (batched draws), not a
+    // journaled one. Forwarded CONDITIONALLY so the wrapper's surface
+    // mirrors the raw facade exactly: the executor detects the tier by the
+    // method's PRESENCE, and a context without WEBGL_multi_draw must stay
+    // absent through the wrapping (an unconditional forward would arm the
+    // tier on a no-op).
+    ...(raw.multiDrawArraysInstanced !== undefined ? {
+      multiDrawArraysInstanced: (mode: string, firsts: Int32Array, counts: Int32Array, instanceCounts: Int32Array, drawcount: number) =>
+        raw.multiDrawArraysInstanced?.(mode, firsts, counts, instanceCounts, drawcount),
+    } : {}),
     deleteProgram: programId => raw.deleteProgram(programId),
     deleteBuffer: bufferId => raw.deleteBuffer(bufferId),
 

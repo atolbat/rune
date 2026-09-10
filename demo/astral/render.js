@@ -11,7 +11,7 @@
 // galaxy generation; the orbit rings are re-baked per system entry into a
 // MAX-SIZED soup buffer (bufferSubData cannot grow a storage).
 
-import { starShader, soupShader, laneShader, shipShader, planetShader, ringShader, MVP, MVP_PARALLAX, PX, PX_PARALLAX, CLOCK, FADE, GALAXY_FADE } from './shaders.js?v=1'
+import { starShader, soupShader, laneShader, shipShader, planetShader, ringShader, MVP, MVP_PARALLAX, PX, PX_PARALLAX, CLOCK, FADE, GALAXY_FADE } from './shaders.js?v=2'
 import { BUILDINGS, buildTime } from './galaxy.js?v=1'
 
 export const RECORD_FLOATS = 16 // 64-byte stride, WG-aligned (vec2@0, vec2@8, vec4@16, vec4@32)

@@ -4313,18 +4313,43 @@ function createExecutor(options) {
   let lastDepthTest = "";
   let lastCull = "";
   let lastBlend = "";
+  const multiDrawFn = typeof gl.multiDrawArraysInstanced === "function" ? gl.multiDrawArraysInstanced.bind(gl) : undefined;
+  const multiDraw = (options.multiDraw ?? true) && multiDrawFn !== undefined;
+  const MAX_BATCH = 512;
+  const batchFirsts = new Int32Array(MAX_BATCH);
+  const batchCounts = new Int32Array(MAX_BATCH);
+  const batchInstances = new Int32Array(MAX_BATCH);
+  let batchCommand;
+  let batchLen = 0;
+  function flushBatch() {
+    if (batchLen === 0) {
+      batchCommand = undefined;
+      return;
+    }
+    if (batchLen === 1) {
+      gl.drawArrays("triangles", batchFirsts[0], batchCounts[0], batchInstances[0]);
+    } else {
+      multiDrawFn?.("triangles", batchFirsts, batchCounts, batchInstances, batchLen);
+    }
+    batchLen = 0;
+    batchCommand = undefined;
+  }
   function run(view) {
     for (const command of commands)
       submitProgram(command);
     for (let at = 0;at < view.count; at++) {
       const op = view.op[at];
-      if (op === 1)
-        beginPass();
-      else if (op === 2)
+      if (op === 2)
         drawCommand(commands[view.a[at]], view.c[at], view.d[at]);
-      else if (op === 4)
-        gl.bindTarget(view.a[at], view.b[at] === 1);
+      else {
+        flushBatch();
+        if (op === 1)
+          beginPass();
+        else if (op === 4)
+          gl.bindTarget(view.a[at], view.b[at] === 1);
+      }
     }
+    flushBatch();
   }
   function beginPass() {
     gl.bindTarget(0, false);
@@ -4338,6 +4363,23 @@ function createExecutor(options) {
   function drawCommand(command, count, instances) {
     if (command === undefined)
       return;
+    let batched = false;
+    if (multiDraw && count > 0 && instances > 0) {
+      if (command === batchCommand && batchLen < MAX_BATCH) {
+        batchCounts[batchLen] = count;
+        batchInstances[batchLen] = instances;
+        batchLen++;
+        return;
+      }
+      flushBatch();
+      batchCommand = command;
+      batchCounts[0] = count;
+      batchInstances[0] = instances;
+      batchLen = 1;
+      batched = true;
+    } else {
+      flushBatch();
+    }
     const rich = command;
     ensureProgram(rich);
     if (rich.programId !== lastProgram) {
@@ -4360,7 +4402,8 @@ function createExecutor(options) {
         gl.bindVertexBuffer(rich.bufferIds[attribute.location], attribute.location, attribute.size, undefined, undefined, divisor);
       }
     }
-    gl.drawArrays("triangles", 0, count, instances);
+    if (!batched)
+      gl.drawArrays("triangles", 0, count, instances);
   }
   function ensureProgram(command) {
     const rich = command;
@@ -4429,6 +4472,8 @@ function createExecutor(options) {
       for (let f = 0;f < rich.fields.length; f++)
         rich.fields[f].slot.dirty = true;
     }
+    batchLen = 0;
+    batchCommand = undefined;
   }
   return { run, invalidate };
 }
@@ -4492,6 +4537,12 @@ function createRealGL(gl, onViewportHeal) {
     parallelCompileExt = gl.getExtension?.("KHR_parallel_shader_compile") ?? null;
   } catch {
     parallelCompileExt = null;
+  }
+  let multiDrawExt = null;
+  try {
+    multiDrawExt = gl.getExtension?.("WEBGL_multi_draw") ?? null;
+  } catch {
+    multiDrawExt = null;
   }
   let nextProgram = 1;
   const defaultAttribBindings = new Map;
@@ -5071,11 +5122,19 @@ function createRealGL(gl, onViewportHeal) {
     }
   }
   function drawArrays(mode, first, count, instances) {
-    const target = mode === "lines" ? gl.LINES : mode === "points" ? gl.POINTS : mode === "triangle-strip" ? gl.TRIANGLE_STRIP : gl.TRIANGLES;
+    const target = primitiveTarget(mode);
     if (instances > 1)
       gl.drawArraysInstanced(target, first, count, instances);
     else
       gl.drawArrays(target, first, count);
+  }
+  function primitiveTarget(mode) {
+    return mode === "lines" ? gl.LINES : mode === "points" ? gl.POINTS : mode === "triangle-strip" ? gl.TRIANGLE_STRIP : gl.TRIANGLES;
+  }
+  function multiDrawArraysInstanced(mode, firsts, counts, instanceCounts, drawcount) {
+    if (multiDrawExt === null || drawcount <= 0)
+      return;
+    multiDrawExt.multiDrawArraysInstancedWEBGL(primitiveTarget(mode), firsts, 0, counts, 0, instanceCounts, 0, drawcount);
   }
   function deleteTexture(textureId) {
     const texture = textures.get(textureId);
@@ -5389,6 +5448,7 @@ void main() {}
     setBlend,
     clear,
     drawArrays,
+    ...multiDrawExt !== null ? { multiDrawArraysInstanced } : {},
     createTarget,
     bindTarget,
     readTargetPixels,
@@ -5428,7 +5488,8 @@ function probeGLCaps(probe) {
     ["float32-render", "EXT_color_buffer_float"],
     ["float16-render", "EXT_color_buffer_half_float"],
     ["timestamp-query", "EXT_disjoint_timer_query_webgl2"],
-    ["parallel-shader-compile", "KHR_parallel_shader_compile"]
+    ["parallel-shader-compile", "KHR_parallel_shader_compile"],
+    ["multi-draw", "WEBGL_multi_draw"]
   ];
   for (const [feature, extName] of extList) {
     const ext = probe.getExtension(extName);
@@ -7522,6 +7583,9 @@ function withJournal(gl, journal) {
     setBlend: (src, dst, equation) => gl.setBlend(src, dst, equation),
     clear: (color, depth2) => gl.clear(color, depth2),
     drawArrays: (mode, first, count, instances) => gl.drawArrays(mode, first, count, instances),
+    ...gl.multiDrawArraysInstanced !== undefined ? {
+      multiDrawArraysInstanced: (mode, firsts, counts, instanceCounts, drawcount) => gl.multiDrawArraysInstanced?.(mode, firsts, counts, instanceCounts, drawcount)
+    } : {},
     createTarget: (textureId, width, height, depth2, color) => {
       const id = gl.createTarget(textureId, width, height, depth2, color);
       journal.record({ kind: "createTarget", id, textureId, width, height, depth: depth2, color });
@@ -7787,6 +7851,9 @@ function createResourceSessionGL(raw, journal) {
     setBlend: (src, dst, equation) => raw.setBlend(src, dst, equation),
     clear: (color, depth2) => raw.clear(color, depth2),
     drawArrays: (mode, first, count, instances) => raw.drawArrays(mode, first, count, instances),
+    ...raw.multiDrawArraysInstanced !== undefined ? {
+      multiDrawArraysInstanced: (mode, firsts, counts, instanceCounts, drawcount) => raw.multiDrawArraysInstanced?.(mode, firsts, counts, instanceCounts, drawcount)
+    } : {},
     deleteProgram: (programId) => raw.deleteProgram(programId),
     deleteBuffer: (bufferId) => raw.deleteBuffer(bufferId),
     createTransformPass: (desc) => raw.createTransformPass(desc),
@@ -8273,7 +8340,8 @@ function createWebGL2Renderer(options) {
     commands: ctx.commands,
     clears,
     segments,
-    uniformStrategy: options.uniformStrategy ?? "auto"
+    uniformStrategy: options.uniformStrategy ?? "auto",
+    multiDraw: options.multiDraw ?? true
   });
   const epoch = createEpoch();
   const layoutGuard = createLayoutGuard();
@@ -8690,6 +8758,7 @@ function createWebGL2Renderer(options) {
       } catch {}
     }
   }
+  const multiDrawActive = (options.multiDraw ?? true) && typeof gl.multiDrawArraysInstanced === "function";
   const probedCaps = (() => {
     if (options.caps !== undefined)
       return options.caps;
@@ -8711,6 +8780,9 @@ function createWebGL2Renderer(options) {
   return {
     gl,
     caps: probedCaps,
+    get multiDraw() {
+      return multiDrawActive;
+    },
     size,
     aspect,
     time,
@@ -11696,6 +11768,9 @@ function createRenderer(options) {
     get transport() {
       return options.transport ?? null;
     },
+    get multiDraw() {
+      return inner !== null && "multiDraw" in inner && inner.multiDraw === true;
+    },
     feed(feedOptions) {
       return requireInner("feed").feed(feedOptions);
     },
@@ -11807,7 +11882,8 @@ function createRenderer(options) {
         journal: options.journal,
         resources: options.resources,
         stats: statsCollector,
-        transport: options.transport
+        transport: options.transport,
+        multiDraw: options.multiDraw
       });
       if ("caps" in inner) {
         caps = inner.caps;

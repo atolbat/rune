@@ -57,6 +57,9 @@ export interface RendererOptions {
   readonly dpr?: number
   readonly clear?: WebGL2RendererOptions['clear']
   readonly uploads?: UploadSchedulerOptions
+  /** Task 169 — the multi-draw batch tier's kill-switch (GL path only,
+   *  default true; renderer.multiDraw is the live verdict). */
+  readonly multiDraw?: WebGL2RendererOptions['multiDraw']
   /** GL facade injection for headless tests. */
   readonly createGL?: WebGL2RendererOptions['createGL']
   /** GPU facade injection for headless tests. */
@@ -102,6 +105,10 @@ export interface Renderer {
   readonly transients: TransientPool
   /** Escape-hatch to the concrete backend (for WebGL2-only methods like .gl/.live). */
   readonly inner: WebGL2Renderer | WebGpuRenderer | null
+  /** Task 169 — the multi-draw batch tier's live verdict: true on the GL
+   *  path when the option left it on AND the context has WEBGL_multi_draw;
+   *  false on WebGPU (no multi-draw in core) and before .start(). */
+  readonly multiDraw: boolean
   /** The chosen backend (null before .start()). */
   readonly backend: BackendId | null
   /** The structured decision (null before .start()). */
@@ -226,6 +233,11 @@ export function createRenderer(options: RendererOptions): Renderer {
     get decision() { return decision },
     get caps() { return caps },
     get transport() { return options.transport ?? null },
+    // Task 169 — the multi-draw tier's live verdict (GL path: option AND
+    // WEBGL_multi_draw; WG path: false — no multi-draw in core WebGPU).
+    get multiDraw() {
+      return inner !== null && 'multiDraw' in inner && (inner as WebGL2Renderer).multiDraw === true
+    },
 
     feed(feedOptions) {
       // M5: the feed needs the chosen backend's facade (the GPU mirror) —
@@ -375,6 +387,7 @@ export function createRenderer(options: RendererOptions): Renderer {
             resources: options.resources,
             stats: statsCollector,
             transport: options.transport,
+            multiDraw: options.multiDraw,
           })
       // Probe caps on the chosen backend.
       // The WebGL2 renderer probed caps itself (inside createWebGL2Renderer via

@@ -86,6 +86,7 @@ export type FeatureId =
   // Geometry / draw
   | 'instancing'
   | 'draw-indirect'
+  | 'multi-draw'
   | 'multi-draw-indirect'
   | 'base-instance'
   // Compute
