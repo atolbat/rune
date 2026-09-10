@@ -4493,6 +4493,14 @@ function createRealGL(gl, onViewportHeal) {
   function invalidateUnitBinds() {
     unitBindCache.clear();
   }
+  let uploadUnit = 7;
+  try {
+    const probed = gl.getParameter?.(gl.MAX_TEXTURE_IMAGE_UNITS ?? 34930);
+    if (typeof probed === "number" && Number.isFinite(probed) && probed >= 1) {
+      uploadUnit = Math.min(31, Math.max(0, Math.floor(probed) - 1));
+    }
+  } catch {}
+  let unpackAlignmentMirror = 0;
   let floatLinearExt = false;
   try {
     floatLinearExt = gl.getExtension?.("OES_texture_float_linear") != null;
@@ -4746,6 +4754,7 @@ function createRealGL(gl, onViewportHeal) {
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    unpackAlignmentMirror = 1;
     const pair = uploadPair(textureId);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, width, height, pair.format, pair.type, bytes);
   }
@@ -5117,7 +5126,9 @@ void main() {}
       attribLocations: null,
       attribDecl,
       uniformDecl: desc.uniforms ?? [],
-      textureDecl: desc.textures ?? []
+      textureDecl: desc.textures ?? [],
+      lastUniformData: null,
+      texUnits: []
     };
     programs.set(programId, programRecord);
     transformProgramIds.add(programId);
@@ -5175,16 +5186,36 @@ void main() {}
         if (textureId === undefined)
           continue;
         bindTexture(textureId, i);
-        const loc = tfLocation(record, record.textureDecl[i]);
-        if (loc !== null)
-          gl.uniform1i(loc, i);
+        if (record.texUnits[i] !== i) {
+          const loc = tfLocation(record, record.textureDecl[i]);
+          if (loc !== null)
+            gl.uniform1i(loc, i);
+          record.texUnits[i] = i;
+        }
       }
     }
     const data = output.uniformData;
     if (data !== undefined) {
       let at = 0;
+      const last = record.lastUniformData;
+      const comparable = last !== null && last.length === data.length;
+      let changed = false;
       for (const u of record.uniformDecl) {
         const loc = tfLocation(record, u.name);
+        if (comparable) {
+          let same = true;
+          for (let k = 0;k < u.size; k++) {
+            if (last[at + k] !== data[at + k]) {
+              same = false;
+              break;
+            }
+          }
+          if (same) {
+            at += u.size;
+            continue;
+          }
+        }
+        changed = true;
         if (loc !== null) {
           if (u.size === 1)
             gl.uniform1f(loc, data[at] ?? 0);
@@ -5197,6 +5228,8 @@ void main() {}
         }
         at += u.size;
       }
+      if (changed)
+        record.lastUniformData = data.slice();
     }
     gl.enable(gl.RASTERIZER_DISCARD);
     gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, record.tf);
@@ -5243,10 +5276,15 @@ void main() {}
       throw new Error(`rune: texSubImage2DBuffer — no such buffer ${bufferId}`);
     }
     const pair = uploadPair(textureId);
-    invalidateUnitBinds();
+    gl.activeTexture(gl.TEXTURE0 + uploadUnit);
+    unitBindCache.delete(uploadUnit);
     gl.bindTexture(gl.TEXTURE_2D, texture);
+    unitTextures.set(uploadUnit, textureId);
     gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, buffer);
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    if (unpackAlignmentMirror !== 4) {
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+      unpackAlignmentMirror = 4;
+    }
     gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, width, height, pair.format, pair.type, byteOffset);
     gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null);
   }
@@ -9454,6 +9492,10 @@ async function createRealGPU(canvas, onGpuError) {
   let currentPipeline = null;
   let currentPipelineId = -1;
   let currentTarget = 0;
+  let computePass = null;
+  let computeGroup = null;
+  const vertexBindMemo = [];
+  const sabStaging = new Map;
   const pendingTextureIds = [];
   const dynamicOffsetScratch = new Uint32Array(1);
   let timerHandle = null;
@@ -9734,7 +9776,12 @@ async function createRealGPU(canvas, onGpuError) {
       guardedWriteVertex(buffer, data, data.byteLength);
       vertexBuffers.set(data, buffer);
     }
-    pass?.setVertexBuffer(slot, buffer);
+    if (pass === null)
+      return;
+    if (vertexBindMemo[slot] === buffer)
+      return;
+    pass.setVertexBuffer(slot, buffer);
+    vertexBindMemo[slot] = buffer;
   }
   function syncVertexBuffer(data, byteLength) {
     let buffer = vertexBuffers.get(data);
@@ -9756,9 +9803,13 @@ async function createRealGPU(canvas, onGpuError) {
     try {
       const isSabView = typeof SharedArrayBuffer !== "undefined" && data.buffer instanceof SharedArrayBuffer;
       if (isSabView) {
-        const copy = new Uint8Array(new ArrayBuffer(capped));
-        copy.set(new Uint8Array(data.buffer, data.byteOffset, capped));
-        device.queue.writeBuffer(buffer, 0, copy);
+        let staging = sabStaging.get(data);
+        if (staging === undefined || staging.byteLength < capped) {
+          staging = new Uint8Array(new ArrayBuffer(capped));
+          sabStaging.set(data, staging);
+        }
+        staging.set(new Uint8Array(data.buffer, data.byteOffset, capped));
+        device.queue.writeBuffer(buffer, 0, staging, 0, capped);
         return;
       }
       if (data.byteOffset === 0 && capped === data.byteLength) {
@@ -9904,6 +9955,8 @@ async function createRealGPU(canvas, onGpuError) {
   function bindTarget(targetId, clear) {
     if (targetId === currentTarget && pass !== null && !clear)
       return;
+    closeComputePass();
+    vertexBindMemo.length = 0;
     if (pass !== null) {
       if (timerHandle !== null)
         timerHandle.onEndPass(pass);
@@ -9956,10 +10009,12 @@ async function createRealGPU(canvas, onGpuError) {
       timerHandle.onEndPass(pass);
     pass?.end();
     pass = null;
+    vertexBindMemo.length = 0;
   }
   function submit() {
     if (encoder === null)
       return;
+    closeComputePass();
     if (timerHandle !== null)
       timerHandle.onSubmit(encoder);
     device.queue.submit([encoder.finish()]);
@@ -9989,7 +10044,9 @@ async function createRealGPU(canvas, onGpuError) {
             timerHandle.onEndPass(pass);
           pass.end();
           pass = null;
+          vertexBindMemo.length = 0;
         }
+        closeComputePass();
         encoder ??= device.createCommandEncoder();
         const rowBytes = w * 4;
         const bytesPerRow = Math.ceil(rowBytes / 256) * 256;
@@ -10139,6 +10196,10 @@ async function createRealGPU(canvas, onGpuError) {
     pass = null;
     currentPipeline = null;
     currentTarget = 0;
+    computePass = null;
+    computeGroup = null;
+    vertexBindMemo.length = 0;
+    sabStaging.clear();
     device.destroy();
   }
   const externalBuffers = new Map;
@@ -10210,7 +10271,12 @@ async function createRealGPU(canvas, onGpuError) {
       onGpuError?.(`bindExternalVertexBuffer(${slot}, ${bufferId}): no such external buffer`);
       return;
     }
-    pass?.setVertexBuffer(slot, buffer);
+    if (pass === null)
+      return;
+    if (vertexBindMemo[slot] === buffer)
+      return;
+    pass.setVertexBuffer(slot, buffer);
+    vertexBindMemo[slot] = buffer;
   }
   const computeFamilies = new Map;
   let nextComputeId = 1;
@@ -10244,8 +10310,22 @@ async function createRealGPU(canvas, onGpuError) {
     }
     const group = device.createBindGroup({ layout, entries });
     const id = nextComputeId++;
-    computeFamilies.set(id, { module, layout, group, uniform, uniformBytes: uniformSize, pipelines: new Map });
+    computeFamilies.set(id, { module, layout, group, uniform, uniformBytes: uniformSize, pipelines: new Map, lastUniform: null });
     return id;
+  }
+  function ensureComputePass() {
+    if (computePass === null) {
+      encoder ??= device.createCommandEncoder();
+      computePass = encoder.beginComputePass();
+      computeGroup = null;
+    }
+    return computePass;
+  }
+  function closeComputePass() {
+    if (computePass !== null) {
+      computePass.end();
+      computePass = null;
+    }
   }
   function deleteCompute(computeId) {
     const family = computeFamilies.get(computeId);
@@ -10277,18 +10357,35 @@ async function createRealGPU(canvas, onGpuError) {
       family.pipelines.set(entry, pipeline);
     }
     const bytes = Math.min(uniformData.byteLength, family.uniformBytes);
-    device.queue.writeBuffer(family.uniform, 0, uniformData.buffer, uniformData.byteOffset, bytes);
     if (uniformData.byteLength > family.uniformBytes) {
       onGpuError?.(`runCompute(${entry}) uniform clamp: ${uniformData.byteLength} → ${family.uniformBytes} bytes (the staging was sized at createCompute)`);
     }
+    const floats = bytes >> 2;
+    const last = family.lastUniform;
+    let skipWrite = false;
+    if (last !== null && last.length === floats) {
+      const base = uniformData.byteOffset >> 2;
+      skipWrite = true;
+      for (let i = 0;i < floats; i++) {
+        if (last[i] !== uniformData[base + i]) {
+          skipWrite = false;
+          break;
+        }
+      }
+    }
+    if (!skipWrite) {
+      device.queue.writeBuffer(family.uniform, 0, uniformData.buffer, uniformData.byteOffset, bytes);
+      family.lastUniform = uniformData.slice(0, floats);
+    }
     if (workgroups <= 0)
       return;
-    encoder ??= device.createCommandEncoder();
-    const cp = encoder.beginComputePass();
+    const cp = ensureComputePass();
     cp.setPipeline(pipeline);
-    cp.setBindGroup(0, family.group);
+    if (computeGroup !== family.group) {
+      cp.setBindGroup(0, family.group);
+      computeGroup = family.group;
+    }
     cp.dispatchWorkgroups(workgroups);
-    cp.end();
   }
   return {
     configure,

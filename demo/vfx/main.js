@@ -16,11 +16,11 @@
 // EVERY sprite on this page is OURS — generated in this file (deterministic
 // pure functions → raw RGBA uploads; no image assets, no browser
 // premultiply semantics). The dist imports carry ?v= (the stale-cache
-// guard — bump on release): rune.esm.js is at ?v=163 (Task 163: the KHR
+// guard — bump on release): rune.esm.js is at ?v=164 (Task 164: the steady-state
 // parallel-shader-compile deferred-link pipeline + the unit-bind cache —
 // the dist changed, the mark moves), the untouched bundles keep their
 // Task 149 marks.
-import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=163'
+import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=164'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER, BILLBOARD,

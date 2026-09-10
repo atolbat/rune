@@ -246,6 +246,34 @@ export function createRealGL(
     unitBindCache.clear()
   }
 
+  // Task 164 — THE SCRATCH UPLOAD UNIT: the PBO upload path
+  // (texSubImage2DBuffer — the TF tier's per-pass GPU→GPU state round-trip,
+  // ~178 calls per frame in the sort loop) used to bind TEXTURE_2D on the
+  // CURRENT active unit and kill the WHOLE unit-bind cache — every TF
+  // pass's follow-up bindTexture re-bound for real (4 GL calls each), so
+  // Task 163's cache never survived a frame of sorting. The upload now
+  // binds on the LAST texture unit instead: no sampler ever lives there
+  // (bindTexture is called with units 0..texCount-1, and the mirror entry
+  // for the scratch unit is dropped on every upload), so units 0..N-2
+  // stay mirror-valid across the PBO round-trips. The feedback-loop ledger
+  // (unitTextures) DOES see the scratch binding — more honest than before
+  // (the old path changed the current unit's real binding invisibly).
+  let uploadUnit = 7 // the GLES3 guarantee floor is MAX_TEXTURE_IMAGE_UNITS ≥ 8
+  try {
+    const probed = (gl as unknown as { getParameter?: (pname: number) => unknown }).getParameter?.(
+      (gl as unknown as { MAX_TEXTURE_IMAGE_UNITS?: number }).MAX_TEXTURE_IMAGE_UNITS ?? 0x8872,
+    )
+    if (typeof probed === 'number' && Number.isFinite(probed) && probed >= 1) {
+      uploadUnit = Math.min(31, Math.max(0, Math.floor(probed) - 1))
+    }
+  } catch { /* a mock without getParameter — the floor stands */ }
+  // Task 164 — THE UNPACK_ALIGNMENT MIRROR: the two pixel-upload paths
+  // disagree on row alignment (the raw-byte path pins 1, the PBO path pins
+  // 4) and re-assert it unconditionally per call — the sort loop paid ~178
+  // redundant pixelStorei per frame. The mirror skips re-asserts; both
+  // writers keep it current, so a flip in one path re-arms the other.
+  let unpackAlignmentMirror = 0
+
   // Task 67: OES_texture_float_linear — linear filtering of RGBA32F.
   // RGBA32F storage/NEAREST sampling is core WebGL2; LINEAR is an extension
   // (desktops usually yes, mobile often no). Without it a LINEAR filter makes the
@@ -637,6 +665,7 @@ export function createRealGL(
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)
     gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE)
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+    unpackAlignmentMirror = 1 // Task 164 — the alignment mirror (see its declaration)
     // The raw-byte path — the UploadScheduler's domain: Uint8Array implies
     // 8-bit pixels. For HDR textures (rgba16f/rgba32f) the bytes will be
     // interpreted per the texture format's (format, type) — the caller must
@@ -1230,6 +1259,21 @@ export function createRealGL(
     readonly attribDecl: readonly { readonly name: string; readonly size: number; readonly stride?: number; readonly offset?: number; readonly divisor?: number }[]
     /** The declared texture sampler names (units 0..N-1). */
     readonly textureDecl: readonly string[]
+    /** Task 164 — THE PER-FIELD UNIFORM MEMO: the last uniform block's
+     *  values (a COPY — the caller's scratch is reused and mutated between
+     *  runs). The bitonic loop re-asserts the same frame-static block every
+     *  pass with only (k, j) moving: the per-field compare emits exactly the
+     *  changed uniforms (2 of ~6-8 per pass), the unchanged ones are skipped
+     *  — program state persists, a re-assert writes the same bytes. The
+     *  program is exclusively owned by this pass (no other path writes its
+     *  uniforms), so the memo cannot go stale. */
+    lastUniformData: Float32Array | null
+    /** Task 164 — THE SAMPLER-UNIT MEMO: declaration slot i ALWAYS samples
+     *  unit i (the run contract) — the uniform1i writes the UNIT INDEX, not
+     *  the texture, so after the first run the value never changes and the
+     *  call is pure redundancy (~178 per sort frame with textures bound).
+     *  Reset only by a relink — which TF programs never do (they link once). */
+    texUnits: (number | undefined)[]
   }
   const transformPasses = new Map<number, TransformPassRecord>()
   let nextTransformPass = 1
@@ -1286,6 +1330,8 @@ export function createRealGL(
       attribDecl,
       uniformDecl: desc.uniforms ?? [],
       textureDecl: desc.textures ?? [],
+      lastUniformData: null,
+      texUnits: [],
     }
     programs.set(programId, programRecord)
     transformProgramIds.add(programId)
@@ -1374,15 +1420,21 @@ export function createRealGL(
     // additive black screen). The DRAW path has always set its units
     // (the executor's setUniform1i); the TF family never did — single-
     // texture passes (u_state/u_pairs) worked only by the luck of the
-    // default. Every declared sampler now gets its unit explicitly.
+    // default. Every declared sampler now gets its unit explicitly —
+    // ON THE FIRST RUN (Task 164: the unit index for declaration slot i is
+    // always i, the value never changes across runs, and program state
+    // persists — the sampler-unit memo skips the redundant re-asserts).
     const tex = output.textures
     if (tex !== undefined) {
       for (let i = 0; i < record.textureDecl.length && i < tex.length; i++) {
         const textureId = tex[i]
         if (textureId === undefined) continue
         bindTexture(textureId, i)
-        const loc = tfLocation(record, record.textureDecl[i])
-        if (loc !== null) gl.uniform1i(loc, i)
+        if (record.texUnits[i] !== i) {
+          const loc = tfLocation(record, record.textureDecl[i])
+          if (loc !== null) gl.uniform1i(loc, i)
+          record.texUnits[i] = i
+        }
       }
     }
     // The packed uniforms: uniform1f/2f/3f/4fv per the declared sequence.
@@ -1397,11 +1449,32 @@ export function createRealGL(
     // the life row's range for size — giant garbage quads, the real-GPU
     // default-path freeze). A null location is a legal no-op target: the
     // uniform CALL is skipped, the slot WALK never is.
+    // Task 164 — THE PER-FIELD MEMO: a field whose values are IDENTICAL to
+    // the last run's is skipped (program state persists — the re-assert
+    // would write the same bytes); the bitonic loop moves only (k, j), so
+    // ~171 passes per frame emit exactly the two changed uniforms instead
+    // of the whole block. A length change (a different packed layout)
+    // falls back to the full emit; NaN fields compare unequal and emit
+    // (conservative, never wrong).
     const data = output.uniformData
     if (data !== undefined) {
       let at = 0
+      const last = record.lastUniformData
+      const comparable = last !== null && last.length === data.length
+      let changed = false
       for (const u of record.uniformDecl) {
         const loc = tfLocation(record, u.name)
+        if (comparable) {
+          let same = true
+          for (let k = 0; k < u.size; k++) {
+            if (last![at + k] !== data[at + k]) { same = false; break }
+          }
+          if (same) {
+            at += u.size
+            continue
+          }
+        }
+        changed = true
         if (loc !== null) {
           if (u.size === 1) gl.uniform1f(loc, data[at] ?? 0)
           else if (u.size === 2) gl.uniform2f(loc, data[at] ?? 0, data[at + 1] ?? 0)
@@ -1410,6 +1483,7 @@ export function createRealGL(
         }
         at += u.size
       }
+      if (changed) record.lastUniformData = data.slice()
     }
     // THE PASS: rasterizer off, the TF object + the output buffer bound,
     // POINTS drawn, everything restored — the render executor's own state
@@ -1462,14 +1536,26 @@ export function createRealGL(
     const pair = uploadPair(textureId)
     // Task 163 — the PBO path binds TEXTURE_2D to the CURRENT active unit:
     // the unit-bind mirror dies (the next bindTexture re-asserts honestly).
-    invalidateUnitBinds()
+    // Task 164 — THE SCRATCH UPLOAD UNIT replaces that suicide: the bind
+    // lands on the LAST unit (see uploadUnit's declaration), the mirror
+    // entry for THAT unit alone is dropped, and units 0..N-2 stay valid —
+    // the sort loop's per-pass bindTexture(pairsTex) becomes a cache HIT
+    // instead of 4 real GL calls after every round-trip. The feedback-loop
+    // ledger sees the real scratch binding (bindTarget/deleteTexture sweep
+    // it like any other unit — more honest than the old invisible bind).
+    gl.activeTexture(gl.TEXTURE0 + uploadUnit)
+    unitBindCache.delete(uploadUnit)
     gl.bindTexture(gl.TEXTURE_2D, texture)
+    unitTextures.set(uploadUnit, textureId)
     // The PBO contract: PIXEL_UNPACK_BUFFER bound, the offset into it as
     // the data pointer, UNPACK_ALIGNMENT pinned to 4 (rgba32f rows are
     // 16-byte aligned by construction — the row-alignment trap the WebGPU
     // tier already fixed once stays closed), the binding restored after.
     gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, buffer)
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4)
+    if (unpackAlignmentMirror !== 4) {
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4)
+      unpackAlignmentMirror = 4
+    }
     gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, width, height, pair.format, pair.type, byteOffset)
     gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null)
   }

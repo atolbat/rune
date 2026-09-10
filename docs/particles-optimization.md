@@ -1909,3 +1909,112 @@ there), `task152-keepalive` PASS, `task138-vfx-probe` legs A/B green
 class — reproduced on clean HEAD via stash, an environment flake, not
 a regression). Cache-busts: `?v=163` on the library import in
 `demo/vfx/main.js` and the script tag in `demo/vfx/index.html`.
+
+## Task 164 — the steady-state pass: the sort loop stops re-asserting its frame-static state (both backends)
+
+The Task-163 audit asked "what does the frame RE-ASSERT that it already
+holds?" — the unit-bind cache answered it for GL texture binds. This pass
+asks the same question about the two heaviest loops in the engine and
+finds the same shape on both backends: **the bitonic sort's per-pass /
+per-dispatch machinery re-asserts frame-static state hundreds of times
+per frame.** At 160k particles the WGSL path dispatches ~342 times per
+sorted frame (171 (bitonic, sortStep) pairs), the GLSL twin runs ~348 TF
+passes — each one re-paying begin/end pairs, bind groups, uniform blocks
+and texture binds that did not change since the previous iteration.
+
+**WebGPU (`@rune/webgpu` realGPU) — four mirrors:**
+
+1. **THE MERGED COMPUTE PASS** — `runCompute` opened AND closed a
+   `GPUComputePassEncoder` per call. Consecutive dispatches now share ONE
+   pass: it opens on the first `runCompute` of a burst and closes at the
+   frame's structural boundaries — a render pass opening (`bindTarget`),
+   `submit()`, the `readTargetPixels` copy (encoder-level ops are invalid
+   under an open pass; the copy now lands after the dispatches in the
+   command stream, so the readback observes post-compute state). Ordering
+   between dispatches is a WebGPU guarantee (each dispatch is its own sync
+   scope; the implementation barriers read-after-write on storage — the
+   property the barrier-free API is built on), so merging cannot reorder
+   effects. The sort frame: **342 begin/end pairs → 1.**
+2. **THE UNIFORM WRITE-SKIP MEMO** — every dispatch re-asserted the
+   frame-static uniform block via `queue.writeBuffer` (~342 identical
+   queue ops per frame, each copying the same bytes into staging). The
+   per-family memo (a COPY of the last uploaded floats — the caller's
+   scratch is reused and mutated) compares the clamped write range and
+   skips identical writes; NaN fields compare unequal and fall back to a
+   real write (conservative, never wrong). Last-write-wins semantics are
+   preserved exactly: a skipped write means the GPU already holds those
+   bytes. **~344 writes → ~2 per sorted frame.**
+3. **THE COMPUTE BIND-GROUP MEMO** — `setBindGroup(0, family.group)` per
+   dispatch; one family's dispatches share one group. Memoed per pass.
+   **342 → 1.**
+4. **THE VERTEX-BIND MEMO + THE SAB STAGING CACHE** — the executor
+   re-binds every command's attribute buffers per draw (the Task-75b
+   state discipline): `pass.setVertexBuffer(slot, buffer)` with the
+   slot's already-bound buffer is now skipped inside a render pass (the
+   GL twin of Task 163's unit-bind cache; the memo dies at every pass
+   boundary — a fresh pass encoder binds nothing until told). And
+   `guardedWriteVertex` copied SAB-backed vertex feeds into a FRESH
+   `Uint8Array` every frame (WebGPU forbids shared memory in
+   `writeBuffer`) — a ~MB-scale allocation per frame per feed, sustained
+   GC churn for T1/T2-style shared feeds. The staging buffer is cached
+   per source view and grown on demand; only the copy itself remains.
+
+**WebGL2 (`@rune/webgl2` realGL) — three mirrors, one honest non-change:**
+
+1. **THE PER-FIELD UNIFORM MEMO** — the GL bitonic loop moves only (k, j)
+   per pass but re-asserted the whole packed block (~6-8 uniform calls ×
+   171 passes). The per-record memo (a copy of the last block) emits
+   exactly the CHANGED fields — **~2 of ~6-8 calls per pass** — and an
+   identical block emits nothing. A length change falls back to the full
+   emit (field alignment cannot be assumed); the program is exclusively
+   owned by its pass, so the memo cannot go stale.
+2. **THE SAMPLER-UNIT MEMO** — declaration slot i always samples unit i;
+   `uniform1i` writes the UNIT INDEX, not the texture, so after the first
+   run the value never changes (~178 redundant calls per sorted frame →
+   0). The Task-136 first-run contract is pinned by tests.
+3. **THE SCRATCH UPLOAD UNIT** — `texSubImage2DBuffer` (the TF tier's
+   per-pass GPU→GPU state round-trip) bound `TEXTURE_2D` on the CURRENT
+   unit and killed the WHOLE Task-163 unit-bind cache — every follow-up
+   `bindTexture` re-bound for real, so the cache never survived a frame
+   of sorting. The upload now binds on the LAST texture unit (probed via
+   `MAX_TEXTURE_IMAGE_UNITS`; nobody's sampler lives there — the mirror
+   entry for that unit alone is dropped), the feedback-loop ledger sees
+   the real binding (more honest than the old invisible bind), and
+   units 0..N-2 stay mirror-valid across the round-trips: **the per-pass
+   bindTexture becomes a cache hit — ~712 GL calls per sorted frame →
+   ~0.** Plus the UNPACK_ALIGNMENT mirror (the PBO path's per-call
+   `pixelStorei(4)` → once; the plain byte path's pin of 1 re-arms it).
+4. **The honest non-change:** the eager restore discipline (VAO/TF/
+   discard/buffer-base unbound after every pass) stays byte-identical —
+   the pinned "the render executor never observes the TF family"
+   contract is load-bearing (a lazy-restore scheme would save ~4 more
+   calls per pass but puts a disarm check on every render-family entry;
+   the state-machine risk is not worth ~10% of the pass cost).
+
+**The measured field (container A/B, 16k embers, GPU Embers forced per
+backend):** WebGPU 60 fps on both builds (the container's Dawn-SwiftShader
+is GPU-emulation-bound; the structural win — 342→1 pass pairs, ~344→2
+uniform writes, 342→1 bind groups — lands as CPU time on real hardware,
+where the sorted 160k frame pays the difference in frame budget).
+WebGL2 (llvmpipe TF emulation): clean HEAD Δ3 frames / 6 s → this build
+Δ8 / 6 s (~2.6× the frame rate, the population actually progressing
+instead of stalling) — the container's absolute slowness is llvmpipe's
+transform-feedback emulation, not the library's; on real GPUs (the field
+phone's Mali) the TF tier runs at full rate.
+
+Verified: 1,723 tests (20 new Task-164 pins: the merged pass — one
+begin/end for N dispatches, the close-before-render/submit ordering, the
+burst-per-pass shape, the render-open guard, the zero-workgroups
+contract; the uniform memo — content-based skip, the mutated-scratch
+re-upload, per-family independence, the clamp reporting; the bind-group
+memo; the vertex-bind memo with pass-boundary reset; the SAB staging
+identity + fresh bytes; the GL per-field memo — identical block, the
+bitonic shape, the length fallback, the A-B-A alternation; the sampler
+memo; the scratch upload unit — the cache survives the PBO round-trip,
+the whole-iteration steady-state profile; the alignment mirror),
+typecheck/lint at baseline, dist rebuilt, `demo:smoke` 24/24 live (the
+vfx carousel runs GPU Embers on the container's default WebGPU — the
+merged pass carried the full 160k tier at ~60 fps), the new
+`task164-steady` gate PASS on both backends (W: Δ360/6 s, zero errors;
+G: alive + progressing + zero errors, thresholds honest per backend).
+Cache-busts: `?v=164` on the library imports and the script tags.

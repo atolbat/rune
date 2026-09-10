@@ -140,6 +140,37 @@ export async function createRealGPU(
   let currentPipeline: GPURenderPipeline | null = null
   let currentPipelineId = -1
   let currentTarget = 0
+  // Task 164 — THE MERGED COMPUTE PASS: runCompute used to open AND close a
+  // GPUComputePassEncoder per call — the bitonic sort loop dispatches ~342
+  // times per frame (171 (bitonic, sortStep) pairs at 160k particles), so
+  // the frame paid ~342 begin/end pairs that all carried the SAME pass
+  // state. Consecutive dispatches now share ONE pass: it opens on the first
+  // runCompute and closes where the frame's structure demands it — before a
+  // render pass opens (bindTarget), before submit, before an encoder-level
+  // copy (readTargetPixels). Ordering between dispatches is a WebGPU
+  // guarantee (each dispatch is its own sync scope; the implementation
+  // barriers read-after-write on storage buffers — the property the whole
+  // barrier-free API is built on), so merging cannot reorder effects.
+  let computePass: GPUComputePassEncoder | null = null
+  // Task 164 — the compute bind-group memo: setBindGroup(0, family.group)
+  // was re-asserted per dispatch; one family's dispatches share one group,
+  // so the sort loop re-set the SAME group ~342 times per frame.
+  let computeGroup: GPUBindGroup | null = null
+  // Task 164 — THE VERTEX-BIND MEMO: the executor re-binds every command's
+  // attribute buffers per draw (the Task-75b state discipline — the same
+  // re-assert that GL's Task 163 unit-bind cache already dedupes). Within a
+  // render pass, pass.setVertexBuffer(slot, buffer) with the slot's already-
+  // bound buffer is a pure no-op: skipped here. The memo dies at every pass
+  // boundary (a fresh pass encoder binds nothing until told) — the GL twin
+  // of Task 163's cache, with the same pass-scoped honesty.
+  const vertexBindMemo: (GPUBuffer | undefined)[] = []
+  // Task 164 — THE SAB STAGING CACHE: guardedWriteVertex copied SAB-backed
+  // vertex feeds into a FRESH Uint8Array every frame (WebGPU forbids shared
+  // memory in writeBuffer) — a ~MB-scale allocation per frame per feed, i.e.
+  // sustained GC churn for T1/T2-style shared feeds. The staging buffer is
+  // now cached per source view and grown on demand; only the copy itself
+  // (unavoidable) remains per frame.
+  const sabStaging = new Map<Float32Array, Uint8Array<ArrayBuffer>>()
   /** Multi-textures (Nefertiti model base+normal): command textures
    *  accumulate via bindTexture, the bind group is fixed in draw(). */
   const pendingTextureIds: number[] = []
@@ -610,7 +641,13 @@ export async function createRealGPU(
       guardedWriteVertex(buffer, data, data.byteLength)
       vertexBuffers.set(data, buffer)
     }
-    pass?.setVertexBuffer(slot, buffer)
+    // Task 164 — the vertex-bind memo (see its declaration): an identical
+    // re-bind inside the same render pass is skipped; a fresh pass resets
+    // the memo (bindTarget), so the first bind of every pass is real.
+    if (pass === null) return
+    if (vertexBindMemo[slot] === buffer) return
+    pass.setVertexBuffer(slot, buffer)
+    vertexBindMemo[slot] = buffer
   }
 
   /** M5 (Task 73): the feed's dynamic vertex buffer — writeBuffer in a
@@ -648,10 +685,18 @@ export async function createRealGPU(
     try {
       const isSabView = typeof SharedArrayBuffer !== 'undefined' && data.buffer instanceof SharedArrayBuffer
       if (isSabView) {
-        // capped — part of the write range (multiple of 4); copy into a plain buffer.
-        const copy = new Uint8Array(new ArrayBuffer(capped))
-        copy.set(new Uint8Array(data.buffer, data.byteOffset, capped))
-        device.queue.writeBuffer(buffer, 0, copy)
+        // capped — part of the write range (multiple of 4); copied into the
+        // REUSED staging buffer (Task 164 — see sabStaging's declaration:
+        // the per-frame allocation was pure GC churn; the copy is the only
+        // unavoidable part). Grown on demand; writeBuffer takes the element
+        // offset/size form so a larger staging writes exactly `capped` bytes.
+        let staging = sabStaging.get(data)
+        if (staging === undefined || staging.byteLength < capped) {
+          staging = new Uint8Array(new ArrayBuffer(capped))
+          sabStaging.set(data, staging)
+        }
+        staging.set(new Uint8Array(data.buffer, data.byteOffset, capped))
+        device.queue.writeBuffer(buffer, 0, staging, 0, capped)
         return
       }
       if (data.byteOffset === 0 && capped === data.byteLength) {
@@ -852,6 +897,12 @@ export async function createRealGPU(
 
   function bindTarget(targetId: number, clear: boolean): void {
     if (targetId === currentTarget && pass !== null && !clear) return
+    // Task 164 — a render pass opening is a structural boundary: the merged
+    // compute pass must END before beginRenderPass (one pass per encoder at
+    // a time), and the vertex-bind memo dies with the pass boundary (a
+    // fresh pass encoder binds nothing until told).
+    closeComputePass()
+    vertexBindMemo.length = 0
     if (pass !== null) {
       // END stamp BEFORE pass.end(): writeTimestamp(querySet, END_INDEX)
       if (timerHandle !== null) timerHandle.onEndPass(pass)
@@ -908,10 +959,17 @@ export async function createRealGPU(
     if (pass !== null && timerHandle !== null) timerHandle.onEndPass(pass)
     pass?.end()
     pass = null
+    // Task 164 — the vertex-bind memo is pass-scoped (see bindVertexBuffer).
+    vertexBindMemo.length = 0
   }
 
   function submit(): void {
     if (encoder === null) return
+    // Task 164 — the merged compute pass closes BEFORE the timer hook and
+    // encoder.finish() (encoder-level ops — resolveQuerySet, copies — are
+    // invalid while a pass is open, and the submit itself is the frame's
+    // structural end).
+    closeComputePass()
     // onSubmit BEFORE encoder.finish(): resolveQuerySet(BEGIN..END →
     // resolveBuffer) + copyBuffer(resolveBuffer → readBuffer for mapAsync).
     if (timerHandle !== null) timerHandle.onSubmit(encoder)
@@ -950,7 +1008,13 @@ export async function createRealGPU(
           if (timerHandle !== null) timerHandle.onEndPass(pass)
           pass.end()
           pass = null
+          vertexBindMemo.length = 0 // Task 164 — the memo is pass-scoped
         }
+        // Task 164 — encoder-level copies are invalid while a pass is open:
+        // the merged compute pass (if one is mid-frame) ends here, landing
+        // BEFORE the copy in the command stream — the readback observes
+        // post-compute state, in submit order.
+        closeComputePass()
         encoder ??= device.createCommandEncoder()
         const rowBytes = w * 4
         const bytesPerRow = Math.ceil(rowBytes / 256) * 256 // WebGPU alignment
@@ -1135,6 +1199,11 @@ export async function createRealGPU(
     pass = null
     currentPipeline = null
     currentTarget = 0
+    // Task 164 — the merged-compute/staging/memo state dies with the facade.
+    computePass = null
+    computeGroup = null
+    vertexBindMemo.length = 0
+    sabStaging.clear()
     // 7. Final: device.destroy() — deterministically frees ALL GPU memory
     //    of the device (textures/buffers/pipelines/samplers/texture-views),
     //    even what was not destroyed explicitly. After this the browser
@@ -1230,7 +1299,11 @@ export async function createRealGPU(
       onGpuError?.(`bindExternalVertexBuffer(${slot}, ${bufferId}): no such external buffer`)
       return
     }
-    pass?.setVertexBuffer(slot, buffer)
+    // Task 164 — the vertex-bind memo (same slot/same buffer re-bind skip).
+    if (pass === null) return
+    if (vertexBindMemo[slot] === buffer) return
+    pass.setVertexBuffer(slot, buffer)
+    vertexBindMemo[slot] = buffer
   }
 
   /** The compute family record: the module, the shared five-binding layout,
@@ -1242,6 +1315,11 @@ export async function createRealGPU(
     readonly uniform: GPUBuffer
     readonly uniformBytes: number
     readonly pipelines: Map<string, GPUComputePipeline>
+    /** Task 164 — the uniform write-skip memo: the last uploaded float
+     *  values (a COPY — the caller's scratch is reused and mutated). The
+     *  sort loop re-asserts the frame-static block per dispatch (~342
+     *  identical writeBuffer queue ops per frame — now one). */
+    lastUniform: Float32Array | null
   }
   const computeFamilies = new Map<number, ComputeFamily>()
   let nextComputeId = 1
@@ -1279,8 +1357,29 @@ export async function createRealGPU(
     }
     const group = device.createBindGroup({ layout, entries })
     const id = nextComputeId++
-    computeFamilies.set(id, { module, layout, group, uniform, uniformBytes: uniformSize, pipelines: new Map() })
+    computeFamilies.set(id, { module, layout, group, uniform, uniformBytes: uniformSize, pipelines: new Map(), lastUniform: null })
     return id
+  }
+
+  // Task 164 — THE MERGED COMPUTE PASS (see the computePass declaration
+  // comment): one pass per run of consecutive dispatches.
+  function ensureComputePass(): GPUComputePassEncoder {
+    if (computePass === null) {
+      encoder ??= device.createCommandEncoder()
+      computePass = encoder.beginComputePass()
+      computeGroup = null // a fresh pass binds nothing until told
+    }
+    return computePass
+  }
+
+  /** Ends the merged compute pass (a no-op when none is open). Called
+   *  before a render pass opens, before submit, and before encoder-level
+   *  copies — the frame's structural boundaries. */
+  function closeComputePass(): void {
+    if (computePass !== null) {
+      computePass.end()
+      computePass = null
+    }
   }
 
   // Task 133 — the compute family teardown: the staging uniform buffer is
@@ -1321,17 +1420,41 @@ export async function createRealGPU(
     // the uniform write (clamped to the staging size — a struct change
     // between calls is a caller bug, reported once, never fatal)
     const bytes = Math.min(uniformData.byteLength, family.uniformBytes)
-    device.queue.writeBuffer(family.uniform, 0, uniformData.buffer as ArrayBuffer, uniformData.byteOffset, bytes)
     if (uniformData.byteLength > family.uniformBytes) {
       onGpuError?.(`runCompute(${entry}) uniform clamp: ${uniformData.byteLength} → ${family.uniformBytes} bytes (the staging was sized at createCompute)`)
     }
+    // Task 164 — THE UNIFORM WRITE-SKIP MEMO: the frame-static block
+    // (the sort loop's count/padN/forward/planes — every dispatch of the
+    // family re-asserts it) uploads ONCE; a changed field uploads again.
+    // The compare is over the clamped write range; NaN fields compare
+    // unequal and fall back to a real write (conservative, never wrong).
+    // Last-write-wins semantics are preserved exactly: a skipped write
+    // means the GPU already holds those bytes.
+    const floats = bytes >> 2
+    const last = family.lastUniform
+    let skipWrite = false
+    if (last !== null && last.length === floats) {
+      const base = uniformData.byteOffset >> 2
+      skipWrite = true
+      for (let i = 0; i < floats; i++) {
+        if (last[i] !== uniformData[base + i]) { skipWrite = false; break }
+      }
+    }
+    if (!skipWrite) {
+      device.queue.writeBuffer(family.uniform, 0, uniformData.buffer as ArrayBuffer, uniformData.byteOffset, bytes)
+      family.lastUniform = uniformData.slice(0, floats)
+    }
     if (workgroups <= 0) return
-    encoder ??= device.createCommandEncoder()
-    const cp = encoder.beginComputePass()
+    // Task 164 — dispatches accumulate in the MERGED pass (see
+    // ensureComputePass); the bind group is memoed (same family — same
+    // group, the sort loop re-set it per dispatch).
+    const cp = ensureComputePass()
     cp.setPipeline(pipeline)
-    cp.setBindGroup(0, family.group)
+    if (computeGroup !== family.group) {
+      cp.setBindGroup(0, family.group)
+      computeGroup = family.group
+    }
     cp.dispatchWorkgroups(workgroups)
-    cp.end()
   }
 
   return {
