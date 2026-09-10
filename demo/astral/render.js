@@ -29,12 +29,12 @@
 
 import {
   starShader, bgStarShader, skyShader, nebulaShader, hazeShader, laneShader,
-  shipShader, planetShader, pringShader, ringShader,
+  shipShader, planetShader, pringShader, ringShader, territoryShader, blackholeShader,
   MVP, VIEW, PROJ, RIGHT, UP, PXK, LINEK, YAW, CLOCK, FADE, GALAXY_FADE, NEB_FADE, SHIP_CAP,
   SPLIT, SKY_CENTER, SKY_HALF, SKY_U0, SKY_WIN, SKY_GAIN,
-} from './shaders.js?v=3'
-import { BUILDINGS, buildTime, GALAXY_RADIUS } from './galaxy.js?v=1'
-import { makeTextures } from './textures.js?v=1'
+} from './shaders.js?v=4'
+import { BUILDINGS, buildTime, GALAXY_RADIUS, OWNER } from './galaxy.js?v=2'
+import { makeTextures } from './textures.js?v=2'
 
 export const RECORD_FLOATS = 16 // 64-byte stride (pos vec3@0, meta@16, color@32, state@48)
 export const SOUP_FLOATS = 8    // 32-byte stride: pos vec2@0, dir vec2@8, color vec4@16
@@ -43,12 +43,21 @@ const MAX_SHIPS = 128
 const MAX_RINGS = 32
 const MAX_PLANETS = 16 // the sun + planets of one system
 const MAX_PRINGS = 8   // ringed gas giants of one system
+const MAX_BHS = 4      // the black-hole landmarks
 const BG_STARS_BRIGHT = 600
 const BG_STARS_MICRO = 900
 const BG_STARS = BG_STARS_BRIGHT + BG_STARS_MICRO
 const ORBIT_SEGMENTS = 56
 const MAX_ORBIT_RINGS = 7
-const HAZE_GAIN = [0.62]
+// darker than the old glow: in the Stellaris read the galaxy disc is a
+// whisper — the star population itself carries the arms
+const HAZE_GAIN = [0.42]
+
+// ── the empire territory field (the Stellaris border bake) ──
+// 256² RGBA over the galaxy plane; R = the player's metaball sum, G = the
+// Hegemony's. Rebaked ONLY when ownership changes (see bakeTerritory).
+const TERR_SIZE = 256
+const TERR_SPAN = GALAXY_RADIUS * 2.3
 
 /** One record field accessor (offsets in floats — see the header). */
 const F = {
@@ -74,21 +83,28 @@ export function createGameRender(renderer, world, shell) {
   const planetRecords = new Float32Array(MAX_PLANETS * RECORD_FLOATS)
   const pringRecords = new Float32Array(MAX_PRINGS * RECORD_FLOATS)
   const ringRecords = new Float32Array(MAX_RINGS * RECORD_FLOATS)
+  const bhRecords = new Float32Array(MAX_BHS * RECORD_FLOATS)
 
   // ── the nebulas (baked placement, three texture variants) ──
+  // the Stellaris pass: seven painterly washes — teal, dusty violet and ember
+  // drift below the plane, giving the dark sky its color story
   const NEBS = [
     { ang: 0.55, dist: 1080, z: -430, size: 1500, rot: 1.2, spin: 0.010, alpha: 0.60, tex: 0 },
     { ang: 2.45, dist: 720, z: -270, size: 1150, rot: 2.8, spin: -0.008, alpha: 0.52, tex: 1 },
     { ang: 4.35, dist: 950, z: -560, size: 1680, rot: 0.4, spin: 0.007, alpha: 0.46, tex: 2 },
     { ang: 5.55, dist: 1550, z: -720, size: 1950, rot: 4.0, spin: -0.005, alpha: 0.40, tex: 0 },
+    { ang: 1.45, dist: 1350, z: -980, size: 2300, rot: 2.1, spin: 0.004, alpha: 0.30, tex: 1 },
+    { ang: 3.55, dist: 1180, z: -820, size: 1750, rot: 5.2, spin: -0.006, alpha: 0.34, tex: 2 },
+    { ang: 0.15, dist: 800, z: -600, size: 1350, rot: 0.9, spin: 0.006, alpha: 0.30, tex: 0 },
   ]
-  const nebRecords = [0, 1, 2].map(() => new Float32Array(2 * RECORD_FLOATS))
+  const nebRecords = [0, 1, 2].map(() => new Float32Array(3 * RECORD_FLOATS))
   const nebCounts = [0, 0, 0]
 
   // ── the soups ──
   const laneSoup = new Float32Array(world.lanes.length * 6 * SOUP_FLOATS)
   const orbitSoup = new Float32Array(MAX_ORBIT_RINGS * ORBIT_SEGMENTS * 6 * SOUP_FLOATS)
   const hazeSoup = new Float32Array(6 * 4)   // pos vec2 + uv vec2
+  const terrSoup = new Float32Array(6 * 4)   // the territory quad (the haze layout)
   const skySoup = new Float32Array(6 * 2)    // the unit quad
   let orbitVerts = 0
   let laneVerts = 0
@@ -152,6 +168,10 @@ export function createGameRender(renderer, world, shell) {
   const ringTexHandle = renderer.texture(tex.ring.width, tex.ring.height)
   ringTexHandle.upload(tex.ring.data)
 
+  // the territory field texture (starts empty — the first bake fills it)
+  const territoryTex = renderer.texture(TERR_SIZE, TERR_SIZE)
+  territoryTex.upload(new Uint8Array(TERR_SIZE * TERR_SIZE * 4))
+
   // ── the per-backend dynamic buffer plumbing ──
   const glDyn = isGL
     ? {
@@ -161,10 +181,12 @@ export function createGameRender(renderer, world, shell) {
       planets: gl.createBuffer(planetRecords, 'dynamic'),
       prings: gl.createBuffer(pringRecords, 'dynamic'),
       rings: gl.createBuffer(ringRecords, 'dynamic'),
+      bhs: gl.createBuffer(bhRecords, 'dynamic'),
       nebs: nebRecords.map(r => gl.createBuffer(r)),
       lanes: null, // static — created after the bake
       orbits: gl.createBuffer(orbitSoup, 'dynamic'),
       haze: gl.createBuffer(hazeSoup),
+      terr: gl.createBuffer(terrSoup),
       sky: gl.createBuffer(skySoup),
     }
     : null
@@ -198,7 +220,7 @@ export function createGameRender(renderer, world, shell) {
   for (const neb of NEBS) {
     const arr = nebRecords[neb.tex]
     const n = nebCounts[neb.tex]
-    if (n >= 2) continue
+    if (n >= 3) continue
     const at = n * RECORD_FLOATS
     arr[at + F.pos] = Math.cos(neb.ang) * neb.dist
     arr[at + F.pos + 1] = Math.sin(neb.ang) * neb.dist
@@ -214,6 +236,8 @@ export function createGameRender(renderer, world, shell) {
   }
 
   // the lane soup (centerline + unit perpendicular — the shader expands)
+  // the Stellaris read: hyperlanes are thin TEAL threads (RGB 80,200,190 at
+  // ~50% opacity) — a desaturated cyan that reads as technology, not decoration
   {
     for (const lane of world.lanes) {
       const A = world.systems[lane.a]
@@ -223,10 +247,10 @@ export function createGameRender(renderer, world, shell) {
       const len = Math.hypot(dx, dy) || 1
       const nx = -dy / len
       const ny = dx / len
-      const alpha = 0.3
-      const cr = 0.36 * alpha
-      const cg = 0.46 * alpha
-      const cb = 0.66 * alpha
+      const alpha = 0.42
+      const cr = 0.30 * alpha
+      const cg = 0.76 * alpha
+      const cb = 0.71 * alpha
       const quad = [
         A.x, A.y, -nx, -ny, cr, cg, cb, alpha,
         B.x, B.y, -nx, -ny, cr, cg, cb, alpha,
@@ -253,6 +277,22 @@ export function createGameRender(renderer, world, shell) {
       hazeSoup[v + 2] = (x + half) / S
       hazeSoup[v + 3] = (half - y) / S
       hv++
+    }
+    put(-half, -half); put(half, -half); put(half, half)
+    put(-half, -half); put(half, half); put(-half, half)
+  }
+
+  // the territory quad: the same layout, spanning TERR_SPAN
+  {
+    const half = TERR_SPAN / 2
+    let tv = 0
+    const put = (x, y) => {
+      const v = tv * 4
+      terrSoup[v] = x
+      terrSoup[v + 1] = y
+      terrSoup[v + 2] = (x + half) / TERR_SPAN
+      terrSoup[v + 3] = (half - y) / TERR_SPAN
+      tv++
     }
     put(-half, -half); put(half, -half); put(half, half)
     put(-half, -half); put(half, half); put(-half, half)
@@ -345,6 +385,24 @@ export function createGameRender(renderer, world, shell) {
       u_gain: () => HAZE_GAIN,
     },
     textures: { u_tex: hazeTex, texTexture: hazeTex },
+    count: 6,
+  })
+
+  // THE STELLARIS BORDER: the empire territory field — drawn above the haze,
+  // under the lanes (the fill tints the ground, the contour sheen and the
+  // contested frontier glow ride the same quad)
+  const cmdTerritory = renderer.command({
+    shader: { glsl: territoryShader.glsl, wgsl: territoryShader.wgsl },
+    pipeline: { depth: false, blend: { src: 'one', dst: 'one-minus-src-alpha' } },
+    attributes: {
+      a_pos: { data: terrSoup, size: 2, stride: 16, offset: 0, ...(isGL ? { bufferId: glDyn.terr } : {}) },
+      a_uv: { data: terrSoup, size: 2, stride: 16, offset: 8, ...(isGL ? { bufferId: glDyn.terr } : {}) },
+    },
+    uniforms: {
+      u_mvp: () => MVP,
+      u_fade: () => GALAXY_FADE,
+    },
+    textures: { u_tex: territoryTex, texTexture: territoryTex },
     count: 6,
   })
 
@@ -470,6 +528,24 @@ export function createGameRender(renderer, world, shell) {
     instances: (p) => p.count,
   })
 
+  // the black holes: an ALPHA-blend pass (the horizon must occlude, not add)
+  const cmdBlackholes = renderer.command({
+    shader: { glsl: blackholeShader.glsl, wgsl: blackholeShader.wgsl },
+    pipeline: { depth: false, blend: { src: 'one', dst: 'one-minus-src-alpha' } },
+    attributes: instanceAttrs(bhRecords, glDyn?.bhs),
+    uniforms: {
+      u_mvp: () => MVP,
+      u_view: () => VIEW,
+      u_right: () => RIGHT,
+      u_up: () => UP,
+      u_pxk: () => PXK,
+      u_time: () => CLOCK,
+      u_fade: () => GALAXY_FADE,
+    },
+    count: 6,
+    instances: (p) => p.count,
+  })
+
   const cmdRings = renderer.command({
     shader: { glsl: ringShader.glsl, wgsl: ringShader.wgsl },
     pipeline: { depth: false, blend: { src: 'one', dst: 'one' } },
@@ -499,7 +575,10 @@ export function createGameRender(renderer, world, shell) {
       sysRecords[at + F.pos + 1] = sys.y
       sysRecords[at + F.pos + 2] = 0
       sysRecords[at + F.meta] = sys.cls.size * 0.34
-      sysRecords[at + F.meta + 1] = (sys.id * 0.618) % 1
+      // the class rides the phase float: phase + type*4 (0 star, 1 black
+      // hole, 2 neutron) — the shader splits it back apart
+      const type = sys.cls.key === 'BH' ? 1 : sys.cls.key === 'N' ? 2 : 0
+      sysRecords[at + F.meta + 1] = (sys.id * 0.618) % 1 + type * 4
       const c = sys.cls.color
       sysRecords[at + F.color] = c[0]
       sysRecords[at + F.color + 1] = c[1]
@@ -508,9 +587,31 @@ export function createGameRender(renderer, world, shell) {
       sysRecords[at + F.state] = sys.owner
       sysRecords[at + F.state + 1] = sys.id === selectedSystem ? 1 : 0
       sysRecords[at + F.state + 2] = sys.colonizing !== null ? sys.colonizing.progress : 0
-      sysRecords[at + F.state + 3] = 1
+      // a black hole draws through its OWN pass (an opaque horizon needs the
+      // alpha blend) — the additive star sprite hides
+      sysRecords[at + F.state + 3] = type === 1 ? 0 : 1
     }
     starsDirty = true
+  }
+
+  /** The black-hole landmark records (the same fields as stars, minus color). */
+  function updateBlackholeRecords() {
+    let n = 0
+    for (const sys of world.systems) {
+      if (sys.cls.key !== 'BH' || n >= MAX_BHS) continue
+      const at = n * RECORD_FLOATS
+      bhRecords[at + F.pos] = sys.x
+      bhRecords[at + F.pos + 1] = sys.y
+      bhRecords[at + F.pos + 2] = 0
+      bhRecords[at + F.meta] = sys.cls.size * 0.34
+      bhRecords[at + F.meta + 1] = (sys.id * 0.618) % 1
+      bhRecords[at + F.state] = sys.owner
+      bhRecords[at + F.state + 1] = sys.id === selectedSystem ? 1 : 0
+      bhRecords[at + F.state + 2] = sys.colonizing !== null ? sys.colonizing.progress : 0
+      bhRecords[at + F.state + 3] = 1
+      n++
+    }
+    return n
   }
 
   // the last-seen positions (a PATROLLING ship also deserves its plume —
@@ -620,8 +721,12 @@ export function createGameRender(renderer, world, shell) {
   }
 
   function bakeOrbits(sys) {
-    const alpha = 0.16
-    const rgb = 0.42 * alpha
+    // the Stellaris read: orbit rings are quiet TEAL threads (the lane
+    // family), a hair brighter than the old grey
+    const alpha = 0.2
+    const rgb = 0.45 * alpha
+    const rgbG = 0.6 * alpha
+    const rgbB = 0.58 * alpha
     const put = (x, y, dx, dy) => {
       const v = orbitVerts * SOUP_FLOATS
       orbitSoup[v] = x
@@ -629,8 +734,8 @@ export function createGameRender(renderer, world, shell) {
       orbitSoup[v + 2] = dx
       orbitSoup[v + 3] = dy
       orbitSoup[v + 4] = rgb
-      orbitSoup[v + 5] = rgb
-      orbitSoup[v + 6] = rgb * 1.2
+      orbitSoup[v + 5] = rgbG
+      orbitSoup[v + 6] = rgbB
       orbitSoup[v + 7] = alpha
       orbitVerts++
     }
@@ -663,14 +768,14 @@ export function createGameRender(renderer, world, shell) {
   // the selection ring / effect records
   function updateRingRecords(view) {
     let n = 0
-    // the selected planet ring (system view)
+    // the selected planet ring (system view) — the Stellaris teal
     if (view.mode === 'system' && view.selectedPlanet >= 0 && view.system !== null) {
       const planet = view.system.planets[view.selectedPlanet]
       if (planet !== undefined) {
         const ang = planet.phase + CLOCK[0] * planet.speed
         const px = view.system.x + Math.cos(ang) * planet.orbit
         const py = view.system.y + Math.sin(ang) * planet.orbit
-        n = writeRing(n, px, py, planet.size * 0.5 * 1.55 * 1.9, [1.0, 0.85, 0.4, 1], 0, 0, 1, CLOCK[0])
+        n = writeRing(n, px, py, planet.size * 0.5 * 1.55 * 1.9, [0.45, 1.0, 0.88, 1], 0, 0, 1, CLOCK[0])
       }
     }
     // the world effects
@@ -683,7 +788,7 @@ export function createGameRender(renderer, world, shell) {
     if (view.selectedShipObj !== null && view.selectedShipObj.state === 'move' && view.selectedShipObj.path !== null) {
       const dest = world.systems[view.selectedShipObj.path[view.selectedShipObj.path.length - 1]]
       if (dest !== undefined && n < MAX_RINGS) {
-        n = writeRing(n, dest.x, dest.y, 5, [1.0, 0.8, 0.45, 1], 0, 3, 1, CLOCK[0] * 0.8)
+        n = writeRing(n, dest.x, dest.y, 5, [0.45, 1.0, 0.88, 1], 0, 3, 1, CLOCK[0] * 0.8)
       }
     }
     return n
@@ -715,6 +820,70 @@ export function createGameRender(renderer, world, shell) {
   function uploadFull(records, name) {
     if (isGL) gl.updateBuffer(glDyn[name], records)
     else gpu.syncVertexBuffer(records, records.length * 4)
+  }
+
+  // ── the empire territory bake (the Stellaris border field) ──
+  // 256² texels × the owned systems (a few dozen at endgame) — a couple of
+  // ms of Math.exp on a phone, and ONLY when a claim flips an owner. The
+  // fingerprint is the owned-count pair; positions are static, so the field
+  // changes iff a count changes.
+  const territoryData = new Uint8Array(TERR_SIZE * TERR_SIZE * 4)
+  let territoryFp = -1
+  function ownershipFingerprint() {
+    let p = 0
+    let r = 0
+    for (const sys of world.systems) {
+      if (sys.owner === OWNER.PLAYER) p++
+      else if (sys.owner === OWNER.RIVAL) r++
+    }
+    return p * 1000 + r
+  }
+  function bakeTerritory() {
+    territoryFp = ownershipFingerprint()
+    territoryData.fill(0)
+    const cells = []
+    for (const sys of world.systems) {
+      if (sys.owner === OWNER.NONE) continue
+      // the bubble radius: ~55% of the shortest lane (borders meet halfway
+      // to the neighbor — the Stellaris convention)
+      let minLane = Infinity
+      for (const other of sys.lanes) {
+        const o = world.systems[other]
+        minLane = Math.min(minLane, Math.hypot(o.x - sys.x, o.y - sys.y))
+      }
+      const base = Math.min(150, Math.max(72, minLane * 0.55))
+      cells.push({ x: sys.x, y: sys.y, base, owner: sys.owner, phi: sys.id * 1.7 })
+    }
+    if (cells.length > 0) {
+      const half = TERR_SPAN / 2
+      const k = TERR_SPAN / TERR_SIZE
+      for (let py = 0; py < TERR_SIZE; py++) {
+        const wy = half - (py + 0.5) * k
+        for (let px = 0; px < TERR_SIZE; px++) {
+          const wx = -half + (px + 0.5) * k
+          let wp = 0
+          let wr = 0
+          for (const c of cells) {
+            const dx = wx - c.x
+            const dy = wy - c.y
+            const d2 = dx * dx + dy * dy
+            const cut = c.base * 3
+            if (d2 > cut * cut) continue
+            // the organic wobble: 3-lobed + 5-lobed angular noise per
+            // system — Voronoi-ish blobs, never circles
+            const th = Math.atan2(dy, dx)
+            const rEff = c.base * (1 + 0.12 * Math.sin(3 * th + c.phi) + 0.07 * Math.sin(5 * th + c.phi * 2.3))
+            const w = Math.exp(-d2 / (rEff * rEff))
+            if (c.owner === OWNER.PLAYER) wp += w
+            else wr += w
+          }
+          const at = (py * TERR_SIZE + px) * 4
+          territoryData[at] = Math.min(255, wp * 255)
+          territoryData[at + 1] = Math.min(255, wr * 255)
+        }
+      }
+    }
+    territoryTex.upload(territoryData)
   }
 
   // ── the frame draw (called from the renderer's frame callback) ──
@@ -760,10 +929,15 @@ export function createGameRender(renderer, world, shell) {
       }
     }
 
+    // the territory rebake: only when a claim flipped an owner
+    if (ownershipFingerprint() !== territoryFp) bakeTerritory()
+
     // the live prefixes + the once-only static uploads
     upload(sysRecords, world.systems.length * RECORD_FLOATS, 'sys')
     const shipCount = updateShipRecords(view)
     upload(shipRecords, shipCount * RECORD_FLOATS, 'ships')
+    const bhCount = updateBlackholeRecords()
+    upload(bhRecords, bhCount * RECORD_FLOATS, 'bhs')
     const ringCount = updateRingRecords(view)
     upload(ringRecords, ringCount * RECORD_FLOATS, 'rings')
 
@@ -772,11 +946,13 @@ export function createGameRender(renderer, world, shell) {
         gl.updateBuffer(glDyn.bg, bgRecords)
         for (let i = 0; i < 3; i++) gl.updateBuffer(glDyn.nebs[i], nebRecords[i].subarray(0, nebCounts[i] * RECORD_FLOATS))
         gl.updateBuffer(glDyn.haze, hazeSoup)
+        gl.updateBuffer(glDyn.terr, terrSoup)
         gl.updateBuffer(glDyn.sky, skySoup)
       } else {
         gpu.syncVertexBuffer(bgRecords, bgRecords.length * 4)
         for (let i = 0; i < 3; i++) gpu.syncVertexBuffer(nebRecords[i], nebCounts[i] * RECORD_FLOATS * 4)
         gpu.syncVertexBuffer(hazeSoup, hazeSoup.length * 4)
+        gpu.syncVertexBuffer(terrSoup, terrSoup.length * 4)
         gpu.syncVertexBuffer(skySoup, skySoup.length * 4)
       }
       staticUploaded = true
@@ -796,12 +972,14 @@ export function createGameRender(renderer, world, shell) {
       if (nebCounts[i] > 0) record(cmdNebs[i], { count: nebCounts[i] })
     }
     record(cmdHaze, {})
+    record(cmdTerritory, {})
     record(cmdLanes, { count: laneVerts })
     if (orbitVerts > 0) record(cmdOrbits, { count: orbitVerts })
     if (pringCount > 0 && view.blend > 0.05) record(cmdPRingsFar, { count: pringCount })
     if (planetCount > 0) record(cmdPlanets, { count: planetCount })
     if (pringCount > 0 && view.blend > 0.05) record(cmdPRingsNear, { count: pringCount })
     record(cmdStars, { count: world.systems.length })
+    if (bhCount > 0) record(cmdBlackholes, { count: bhCount })
     if (shipCount > 0) record(cmdShips, { count: shipCount })
     if (ringCount > 0) record(cmdRings, { count: ringCount })
   }

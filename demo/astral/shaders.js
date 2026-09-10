@@ -66,7 +66,10 @@ export const SKY_CENTER = new Float32Array(3)
 export const SKY_HALF = new Float32Array(2)
 export const SKY_U0 = [0]
 export const SKY_WIN = [0.3]
-export const SKY_GAIN = [0.85]
+// darker than the photo-real ESO gain: the Stellaris galaxy background is
+// deep near-black with a whisper of dust — the nebulae and territory carry
+// the color story instead
+export const SKY_GAIN = [0.5]
 
 /** cam: { x, y, z (CSS px / world unit), yaw, tilt } — fills every matrix + basis. */
 export function setCamera3D(cam, aspect, w, h) {
@@ -526,6 +529,7 @@ uniform float u_fade;
 out vec2 v_uv;
 out vec4 v_color;
 out vec4 v_state;
+out vec2 v_extra;   // (type, phase) — 0 star, 1 black hole, 2 neutron
 
 const vec2 CORNERS[6] = vec2[6](vec2(-1,-1), vec2(1,-1), vec2(-1,1), vec2(-1,1), vec2(1,-1), vec2(1,1));
 
@@ -535,14 +539,17 @@ void main() {
   // apparent size in true screen CSS px (a star is a glow — readable at any zoom)
   float eyeZ = -(u_view * vec4(a_pos, 1.0)).z;
   eyeZ = max(eyeZ, 1.0);
-  float px = clamp(a_meta.x * u_pxk / eyeZ, 7.0, 30.0);
+  float px = clamp(a_meta.x * u_pxk / eyeZ, 6.0, 26.0);
   float size = px * eyeZ / u_pxk;
-  // the halo quad is 3.2x the core so the glow has room
-  vec3 world = a_pos + u_right * (corner.x * size * 3.2) + u_up * (corner.y * size * 3.2);
+  // the halo quad is 3x the core: Stellaris stars are tight bright points
+  // with a short glow, not big fuzzy blobs
+  vec3 world = a_pos + u_right * (corner.x * size * 3.0) + u_up * (corner.y * size * 3.0);
   gl_Position = u_mvp * vec4(world, 1.0);
   v_uv = corner;
   v_color = vec4(a_color.rgb * tw, a_color.a * u_fade * a_state.w);
   v_state = a_state;
+  // the class rides in the phase float: phase + type*4 (fract = phase)
+  v_extra = vec2(floor(a_meta.y / 4.0), fract(a_meta.y));
 }`
 
 const STAR_GLSL_FRAG = `#version 300 es
@@ -550,8 +557,10 @@ precision highp float;
 in vec2 v_uv;
 in vec4 v_color;
 in vec4 v_state;
+in vec2 v_extra;
 uniform sampler2D u_tex;
 uniform float u_fade;
+uniform float u_time;   // the neutron beams rotate with the clock
 out vec4 o_color;
 
 void main() {
@@ -567,12 +576,13 @@ void main() {
   else if (v_state.x > 1.5) rgb += vec3(1.0, 0.28, 0.24) * ring * 0.6 * a;
 
   // selection: a dashed rotating ring just outside the halo (fade-aware:
-  // the marker must not bleed through the system-view crossfade)
+  // the marker must not bleed through the system-view crossfade) — the
+  // Stellaris teal selection glow
   if (v_state.y > 0.5) {
     float ang = atan(v_uv.y, v_uv.x);
     float dashes = step(0.45, fract(ang * 2.5465 + v_state.x * 7.0));
     float sel = exp(-pow((d - 0.86) * 18.0, 2.0)) * dashes * u_fade;
-    rgb += vec3(1.0, 0.85, 0.4) * sel * 0.9;
+    rgb += vec3(0.45, 1.0, 0.88) * sel * 0.95;
     a += sel * 0.6;
   }
 
@@ -582,6 +592,18 @@ void main() {
     float arc = exp(-pow((d - 0.86) * 16.0, 2.0)) * step(ang, 6.2831853 * v_state.z) * u_fade;
     rgb += vec3(0.45, 1.0, 0.7) * arc * 0.8;
     a += arc * 0.5;
+  }
+
+  // the neutron star: a lighthouse — a hard tiny core + two rotating beams
+  if (v_extra.x > 1.5) {
+    float core = exp(-d * d * 26.0);
+    rgb = spr * v_color.rgb * a * (3.0 * core + 0.55);
+    float bAng = u_time * 0.9 + v_extra.y * 6.2831853;
+    vec2 uDir = vec2(cos(bAng), sin(bAng));
+    float across = abs(v_uv.x * uDir.y - v_uv.y * uDir.x);
+    float beam = exp(-across * across * 130.0) * smoothstep(1.0, 0.30, d);
+    rgb += vec3(0.60, 0.84, 1.0) * beam * a * 1.4;
+    a += beam * a * 0.5;
   }
 
   o_color = vec4(rgb, a);
@@ -606,6 +628,7 @@ struct VSOut {
   @location(0) uv : vec2<f32>,
   @location(1) color : vec4<f32>,
   @location(2) state : vec4<f32>,
+  @location(3) extra : vec2<f32>,
 }
 
 @vertex
@@ -620,14 +643,15 @@ fn vsMain(@builtin(vertex_index) vi : u32,
   let tw = 0.82 + 0.18 * sin(params.u_time * (0.9 + a_meta.y * 1.7) + a_meta.y * 43.0);
   var eyeZ = -(params.u_view * vec4<f32>(a_pos, 1.0)).z;
   eyeZ = max(eyeZ, 1.0);
-  let px = clamp(a_meta.x * params.u_pxk / eyeZ, 7.0, 30.0);
+  let px = clamp(a_meta.x * params.u_pxk / eyeZ, 6.0, 26.0);
   let size = px * eyeZ / params.u_pxk;
-  let world = a_pos + params.u_right * (corner.x * size * 3.2) + params.u_up * (corner.y * size * 3.2);
+  let world = a_pos + params.u_right * (corner.x * size * 3.0) + params.u_up * (corner.y * size * 3.0);
   var out : VSOut;
   out.pos = params.u_mvp * vec4<f32>(world, 1.0);
   out.uv = corner;
   out.color = vec4<f32>(a_color.rgb * tw, a_color.a * params.u_fade * a_state.w);
   out.state = a_state;
+  out.extra = vec2<f32>(floor(a_meta.y / 4.0), fract(a_meta.y));
   return out;
 }
 
@@ -647,7 +671,7 @@ fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
     let ang = atan2(frag.uv.y, frag.uv.x);
     let dashes = step(0.45, fract(ang * 2.5465 + frag.state.x * 7.0));
     let sel = exp(-pow((d - 0.86) * 18.0, 2.0)) * dashes * params.u_fade;
-    rgb += vec3<f32>(1.0, 0.85, 0.4) * sel * 0.9;
+    rgb += vec3<f32>(0.45, 1.0, 0.88) * sel * 0.95;
     a += sel * 0.6;
   }
 
@@ -656,6 +680,17 @@ fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
     let arc = exp(-pow((d - 0.86) * 16.0, 2.0)) * step(ang2, 6.2831853 * frag.state.z) * params.u_fade;
     rgb += vec3<f32>(0.45, 1.0, 0.7) * arc * 0.8;
     a += arc * 0.5;
+  }
+
+  if (frag.extra.x > 1.5) {
+    let ncore = exp(-d * d * 26.0);
+    rgb = spr * frag.color.rgb * a * (3.0 * ncore + 0.55);
+    let bAng = params.u_time * 0.9 + frag.extra.y * 6.2831853;
+    let uDir = vec2<f32>(cos(bAng), sin(bAng));
+    let across = abs(frag.uv.x * uDir.y - frag.uv.y * uDir.x);
+    let beam = exp(-across * across * 130.0) * smoothstep(1.0, 0.30, d);
+    rgb += vec3<f32>(0.60, 0.84, 1.0) * beam * a * 1.4;
+    a += beam * a * 0.5;
   }
 
   return vec4<f32>(rgb, a);
@@ -1433,4 +1468,287 @@ fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
 export const ringShader = {
   glsl: { vertex: RING_GLSL_VERT, fragment: RING_GLSL_FRAG },
   wgsl: RING_WGSL,
+}
+
+// ─── 11. the territory pass (the empire border field) ────────────────────────
+// THE STELLARIS SIGNATURE: translucent organic territory bubbles with a soft
+// contour where the empires meet. The FIELD is baked on the CPU (a 256×256
+// texture over the galaxy plane — R = the player's metaball sum, G = the
+// Hegemony's, each bubble's radius wobbled by a per-system angular noise so
+// the outlines stay organic) and rebaked ONLY when ownership changes (a claim
+// event), never per frame. The shader turns the two fields into a fill, an
+// edge sheen at the contour, and a warm contested-frontier glow where both
+// fields are nearly equal — the empires' borders grow and push each other
+// exactly the way they do on a Stellaris galaxy map.
+
+const TERR_GLSL_VERT = `#version 300 es
+precision highp float;
+layout(location = 0) in vec2 a_pos;   // world xy
+layout(location = 1) in vec2 a_uv;
+uniform mat4 u_mvp;
+out vec2 v_uv;
+void main() {
+  gl_Position = u_mvp * vec4(a_pos, -6.0, 1.0); // above the haze, under the lanes
+  v_uv = a_uv;
+}`
+
+const TERR_GLSL_FRAG = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_tex;
+uniform float u_fade;
+out vec4 o_color;
+void main() {
+  vec2 f = texture(u_tex, v_uv).rg;   // the player / rival metaball fields
+  float wp = f.r;
+  float wr = f.g;
+  float dom = max(wp, wr);
+  if (dom < 0.02) discard;             // the cheap empty-space out
+  // the winner's color paints the ground (Stellaris: the strongest claim)
+  vec3 col = mix(vec3(1.0, 0.32, 0.28), vec3(0.32, 0.55, 1.0), step(wr, wp));
+  float fill = smoothstep(0.20, 0.46, dom);
+  // the soft contour sheen where the field crosses the boundary value
+  float edge = exp(-pow((dom - 0.46) * 7.5, 2.0)) * smoothstep(0.16, 0.30, dom);
+  // the contested frontier: both fields strong and nearly equal
+  float front = exp(-pow((wp - wr) * 8.0, 2.0)) * smoothstep(0.24, 0.42, dom);
+  vec3 rgb = col * (fill * 0.60 + edge * 1.05) + vec3(1.0, 0.72, 0.45) * front * 0.6;
+  float a = fill * 0.34 + edge * 0.38 + front * 0.40;
+  o_color = vec4(rgb * u_fade, a * u_fade);
+}`
+
+const TERR_WGSL = `
+struct Params {
+  u_mvp : mat4x4<f32>,
+  u_fade : f32,
+}
+@group(0) @binding(0) var<uniform> params : Params;
+@group(1) @binding(0) var texSampler : sampler;
+@group(1) @binding(1) var texTexture : texture_2d<f32>;
+
+struct VSOut {
+  @builtin(position) pos : vec4<f32>,
+  @location(0) uv : vec2<f32>,
+}
+
+@vertex
+fn vsMain(@location(0) a_pos : vec2<f32>,
+          @location(1) a_uv : vec2<f32>) -> VSOut {
+  var out : VSOut;
+  out.pos = params.u_mvp * vec4<f32>(a_pos, -6.0, 1.0);
+  out.uv = a_uv;
+  return out;
+}
+
+@fragment
+fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
+  // the fetch lives FIRST — textureSample in uniform control flow (Task 169)
+  let f = textureSample(texTexture, texSampler, frag.uv).rg;
+  let wp = f.r;
+  let wr = f.g;
+  let dom = max(wp, wr);
+  if (dom < 0.02) { discard; }
+  let col = mix(vec3<f32>(1.0, 0.32, 0.28), vec3<f32>(0.32, 0.55, 1.0), step(wr, wp));
+  let fill = smoothstep(0.20, 0.46, dom);
+  let edge = exp(-pow((dom - 0.46) * 7.5, 2.0)) * smoothstep(0.16, 0.30, dom);
+  let front = exp(-pow((wp - wr) * 8.0, 2.0)) * smoothstep(0.24, 0.42, dom);
+  let rgb = col * (fill * 0.60 + edge * 1.05) + vec3<f32>(1.0, 0.72, 0.45) * front * 0.6;
+  let a = fill * 0.34 + edge * 0.38 + front * 0.40;
+  return vec4<f32>(rgb * params.u_fade, a * params.u_fade);
+}`
+
+export const territoryShader = {
+  glsl: { vertex: TERR_GLSL_VERT, fragment: TERR_GLSL_FRAG },
+  wgsl: TERR_WGSL,
+}
+
+// ─── 12. the black hole pass (event horizon + tilted accretion disc) ─────────
+// The anti-sprite: an opaque BLACK disc that truly occludes (this is the
+// alpha-blend pass the additive star glow cannot be), a lensed photon ring,
+// and a tilted accretion disc whose far half passes BEHIND the horizon while
+// the near half crosses in front — the Interstellar silhouette in one
+// billboard quad. The ownership ring / selection dashes live here too: the
+// star pass skips black-hole systems entirely (their records carry fade=0).
+
+const BH_GLSL_VERT = `#version 300 es
+precision highp float;
+layout(location = 0) in vec3 a_pos;
+layout(location = 1) in vec2 a_meta;   // (worldSize, phase)
+layout(location = 2) in vec4 a_color;
+layout(location = 3) in vec4 a_state;  // (owner, selected, colonize, fade)
+uniform mat4 u_mvp;
+uniform mat4 u_view;
+uniform vec3 u_right;
+uniform vec3 u_up;
+uniform float u_pxk;
+uniform float u_time;
+uniform float u_fade;
+out vec2 v_uv;
+out vec4 v_state;
+
+const vec2 CORNERS[6] = vec2[6](vec2(-1,-1), vec2(1,-1), vec2(-1,1), vec2(-1,1), vec2(1,-1), vec2(1,1));
+
+void main() {
+  vec2 corner = CORNERS[gl_VertexID];
+  float eyeZ = -(u_view * vec4(a_pos, 1.0)).z;
+  eyeZ = max(eyeZ, 1.0);
+  // black holes are BIG (Stellaris renders them as the map's landmarks)
+  float px = clamp(a_meta.x * u_pxk / eyeZ, 16.0, 64.0);
+  float size = px * eyeZ / u_pxk;
+  vec3 world = a_pos + u_right * (corner.x * size * 2.2) + u_up * (corner.y * size * 2.2);
+  gl_Position = u_mvp * vec4(world, 1.0);
+  v_uv = corner;
+  v_state = vec4(a_state.xyz, a_state.w * u_fade);
+}`
+
+const BH_GLSL_FRAG = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+in vec4 v_state;
+uniform float u_time;
+out vec4 o_color;
+
+void main() {
+  float d = length(v_uv);
+  if (d > 1.0) discard;
+  float fade = v_state.w;
+  if (fade < 0.01) discard;
+
+  // the event horizon: an opaque black disc (THIS is why the pass alpha-blends)
+  float core = smoothstep(0.30, 0.27, d);
+  // the photon ring — the lensed rim just outside the horizon
+  float photon = exp(-pow((d - 0.34) * 24.0, 2.0));
+  // the accretion disc: a slightly tilted ellipse; its far (upper) half hides
+  // behind the horizon, the near half crosses in front of it
+  vec2 ruv = vec2(v_uv.x * 0.988 - v_uv.y * 0.155, v_uv.x * 0.155 + v_uv.y * 0.988);
+  vec2 euv = vec2(ruv.x, ruv.y * 3.1);
+  float de = length(euv);
+  float disc = smoothstep(0.50, 0.58, de) * smoothstep(1.06, 0.88, de);
+  float dop = 0.60 + 0.55 * clamp(-ruv.x * 1.5, 0.0, 1.0);   // doppler beaming
+  float heat = clamp(1.0 - (de - 0.50) * 1.9, 0.0, 1.0);      // white-hot inside
+  vec3 discCol = mix(vec3(0.95, 0.55, 0.22), vec3(1.0, 0.92, 0.80), heat);
+  float occl = 1.0 - step(0.0, ruv.y) * core;                 // upper half behind
+  disc *= occl * dop * (0.85 + 0.15 * sin(u_time * 2.2 + v_uv.x * 10.0));
+
+  float glow = exp(-d * d * 2.4);
+  vec3 rgb = vec3(0.006, 0.008, 0.014) * core
+           + discCol * disc * 1.7
+           + vec3(0.70, 0.85, 1.0) * photon * 1.0
+           + vec3(0.28, 0.52, 0.95) * glow * 0.30;
+  float a = core * 1.0 + disc * 0.95 + photon * 0.55 + glow * 0.3;
+
+  // ownership: the thin tinted ring (the star-pass markers, mirrored here)
+  float ring = exp(-pow((d - 0.74) * 15.0, 2.0)) * 0.85;
+  if (v_state.x > 0.5 && v_state.x < 1.5) rgb += vec3(0.28, 0.5, 1.0) * ring * 0.6;
+  else if (v_state.x > 1.5) rgb += vec3(1.0, 0.28, 0.24) * ring * 0.65;
+
+  // selection: the teal dashed ring
+  if (v_state.y > 0.5) {
+    float ang = atan(v_uv.y, v_uv.x);
+    float dashes = step(0.45, fract(ang * 2.5465));
+    float sel = exp(-pow((d - 0.88) * 18.0, 2.0)) * dashes;
+    rgb += vec3(0.45, 1.0, 0.88) * sel * 0.95;
+    a += sel * 0.6;
+  }
+
+  // colonization: the filling arc
+  if (v_state.z > 0.001) {
+    float ang2 = atan(v_uv.y, v_uv.x) + 3.14159265;
+    float arc = exp(-pow((d - 0.88) * 16.0, 2.0)) * step(ang2, 6.2831853 * v_state.z);
+    rgb += vec3(0.45, 1.0, 0.7) * arc * 0.8;
+    a += arc * 0.5;
+  }
+
+  o_color = vec4(rgb * fade, a * fade);
+}`
+
+const BH_WGSL = `
+struct Params {
+  u_mvp : mat4x4<f32>,
+  u_view : mat4x4<f32>,
+  u_right : vec3<f32>,
+  u_up : vec3<f32>,
+  u_pxk : f32,
+  u_time : f32,
+  u_fade : f32,
+}
+@group(0) @binding(0) var<uniform> params : Params;
+
+struct VSOut {
+  @builtin(position) pos : vec4<f32>,
+  @location(0) uv : vec2<f32>,
+  @location(1) state : vec4<f32>,
+}
+
+@vertex
+fn vsMain(@builtin(vertex_index) vi : u32,
+          @location(0) a_pos : vec3<f32>,
+          @location(1) a_meta : vec2<f32>,
+          @location(2) a_color : vec4<f32>,
+          @location(3) a_state : vec4<f32>) -> VSOut {
+  var corners = array<vec2<f32>, 6>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0),
+                                     vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0));
+  let corner = corners[vi];
+  var eyeZ = -(params.u_view * vec4<f32>(a_pos, 1.0)).z;
+  eyeZ = max(eyeZ, 1.0);
+  let px = clamp(a_meta.x * params.u_pxk / eyeZ, 16.0, 64.0);
+  let size = px * eyeZ / params.u_pxk;
+  let world = a_pos + params.u_right * (corner.x * size * 2.2) + params.u_up * (corner.y * size * 2.2);
+  var out : VSOut;
+  out.pos = params.u_mvp * vec4<f32>(world, 1.0);
+  out.uv = corner;
+  out.state = vec4<f32>(a_state.xyz, a_state.w * params.u_fade);
+  return out;
+}
+
+@fragment
+fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
+  let d = length(frag.uv);
+  if (d > 1.0) { discard; }
+  let fade = frag.state.w;
+  if (fade < 0.01) { discard; }
+
+  let core = smoothstep(0.30, 0.27, d);
+  let photon = exp(-pow((d - 0.34) * 24.0, 2.0));
+  let ruv = vec2<f32>(frag.uv.x * 0.988 - frag.uv.y * 0.155, frag.uv.x * 0.155 + frag.uv.y * 0.988);
+  let euv = vec2<f32>(ruv.x, ruv.y * 3.1);
+  let de = length(euv);
+  var disc = smoothstep(0.50, 0.58, de) * smoothstep(1.06, 0.88, de);
+  let dop = 0.60 + 0.55 * clamp(-ruv.x * 1.5, 0.0, 1.0);
+  let heat = clamp(1.0 - (de - 0.50) * 1.9, 0.0, 1.0);
+  let discCol = mix(vec3<f32>(0.95, 0.55, 0.22), vec3<f32>(1.0, 0.92, 0.80), heat);
+  let occl = 1.0 - step(0.0, ruv.y) * core;
+  disc = disc * occl * dop * (0.85 + 0.15 * sin(params.u_time * 2.2 + frag.uv.x * 10.0));
+
+  let glow = exp(-d * d * 2.4);
+  var rgb = vec3<f32>(0.006, 0.008, 0.014) * core
+          + discCol * disc * 1.7
+          + vec3<f32>(0.70, 0.85, 1.0) * photon * 1.0
+          + vec3<f32>(0.28, 0.52, 0.95) * glow * 0.30;
+  var a = core * 1.0 + disc * 0.95 + photon * 0.55 + glow * 0.3;
+
+  let ring = exp(-pow((d - 0.74) * 15.0, 2.0)) * 0.85;
+  if (frag.state.x > 0.5 && frag.state.x < 1.5) { rgb += vec3<f32>(0.28, 0.5, 1.0) * ring * 0.6; }
+  else if (frag.state.x > 1.5) { rgb += vec3<f32>(1.0, 0.28, 0.24) * ring * 0.65; }
+
+  if (frag.state.y > 0.5) {
+    let ang = atan2(frag.uv.y, frag.uv.x);
+    let dashes = step(0.45, fract(ang * 2.5465));
+    let sel = exp(-pow((d - 0.88) * 18.0, 2.0)) * dashes;
+    rgb += vec3<f32>(0.45, 1.0, 0.88) * sel * 0.95;
+    a += sel * 0.6;
+  }
+
+  if (frag.state.z > 0.001) {
+    let ang2 = atan2(frag.uv.y, frag.uv.x) + 3.14159265;
+    let arc = exp(-pow((d - 0.88) * 16.0, 2.0)) * step(ang2, 6.2831853 * frag.state.z);
+    rgb += vec3<f32>(0.45, 1.0, 0.7) * arc * 0.8;
+    a += arc * 0.5;
+  }
+
+  return vec4<f32>(rgb * fade, a * fade);
+}`
+
+export const blackholeShader = {
+  glsl: { vertex: BH_GLSL_VERT, fragment: BH_GLSL_FRAG },
+  wgsl: BH_WGSL,
 }

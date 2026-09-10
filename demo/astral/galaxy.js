@@ -38,6 +38,16 @@ const PLANET_TYPES = [
   { key: 'lava', name: 'Volcanic',  color: [1.0, 0.55, 0.35],  slots: 3, mine: 1.5, farm: 0.2, lab: 0.8 },
 ]
 
+// the exotic stellar remnants (Stellaris' visually distinct systems): a
+// handful per galaxy, injected after generation and BEFORE the homeworld
+// pick so their classes never win "a good G/K star" — the homes stay garden
+// stars. The renderer gives them their own passes (the accretion disc, the
+// lighthouse beams); the rules treat them as ordinary systems.
+const EXOTIC_CLASSES = {
+  BH: { key: 'BH', name: 'black hole', color: [0.55, 0.72, 1.0], size: 16, weight: 0, planets: [1, 4], planetBias: 0.9 },
+  N:  { key: 'N',  name: 'neutron star', color: [0.82, 0.93, 1.0], size: 6, weight: 0, planets: [0, 2], planetBias: 0.5 },
+}
+
 const SYL_A = ['Ke', 'Al', 'Ve', 'Tha', 'Or', 'Ny', 'Ze', 'Cal', 'Mir', 'Sar', 'Eri', 'Pol', 'Tan', 'Vor', 'Lum', 'Rig']
 const SYL_B = ['pha', 'nir', 'dra', 'thes', 'mir', 'kon', 'var', 'lia', 'tus', 'ren', 'dor', 'gan', 'sha', 'bel', 'qor', 'wyn']
 const SYL_C = ['', 'a', 'is', 'on', 'ar', 'ux', 'eth', 'or', 'an', 'ys']
@@ -132,6 +142,23 @@ export function generateWorld(seed) {
       shipQueue: null,  // { kind, progress }
       lanes: [],
     })
+  }
+
+  // ── the exotic remnants: 2 black holes + 2 neutron stars, deterministic by
+  // seed, placed mid-arm/outer (r > 260) so the core stays a normal bulge.
+  // Their planets stay as generated — the rules don't care what lights a
+  // system; the renderer does (the accretion disc pass, the pulsar beams).
+  {
+    const spots = systems.filter(s => Math.hypot(s.x, s.y) > 260)
+    const take = (cls, n) => {
+      for (let k = 0; k < n && spots.length > 0; k++) {
+        const idx = Math.floor(rng() * spots.length)
+        spots[idx].cls = cls
+        spots.splice(idx, 1)
+      }
+    }
+    take(EXOTIC_CLASSES.BH, 2)
+    take(EXOTIC_CLASSES.N, 2)
   }
 
   // ── the travel lanes: k-nearest candidates + a union-find connectivity pass ──

@@ -54,6 +54,7 @@ const MIME = {
   '.fbx': 'application/octet-stream',
   '.wasm': 'application/wasm',
   '.jpg': 'image/jpeg',
+  '.woff2': 'font/woff2',
   '.jpeg': 'image/jpeg',
 }
 

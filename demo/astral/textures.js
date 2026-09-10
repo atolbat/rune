@@ -21,7 +21,7 @@
 // Output shape: { width, height, data: Uint8Array(RGBA) } — straight
 // (non-premultiplied) alpha, ready for renderer.texture(w, h).upload(data).
 
-import { mulberry32, GALAXY_RADIUS } from './galaxy.js?v=1'
+import { mulberry32, GALAXY_RADIUS } from './galaxy.js?v=2'
 
 const TAU = Math.PI * 2
 
@@ -140,7 +140,10 @@ export function makeGalaxyHaze(seed) {
 
 // ─── 2. the star glow sprite (core + halo + diffraction spikes) ──────────────
 
-/** The sprite every star field quad samples: three.js' galaxy-sprite look. */
+/** The sprite every star field quad samples: the Stellaris star — a hard
+ *  bright point, a SHORT glow, and faint horizontal diffraction streaks on
+ *  the brightest ones (the VLM read of the reference: "base point ~3-4px,
+ *  glow to ~8-10px, subtle cross flares"). */
 export function makeStarSprite() {
   const S = 128
   const data = new Uint8Array(S * S * 4)
@@ -151,12 +154,13 @@ export function makeStarSprite() {
       const dy = (py - c) / c
       const d = Math.hypot(dx, dy)
       const at = (py * S + px) * 4
-      const core = Math.exp(-d * d * 16) * 1.35
-      const halo = Math.exp(-d * d * 3.2) * 0.42
-      // the 4-point diffraction spikes (horizontal + vertical streaks)
-      const spikeH = Math.exp(-(dy * dy) * 340) * Math.exp(-(dx * dx) * 2.6) * 0.55
-      const spikeV = Math.exp(-(dx * dx) * 340) * Math.exp(-(dy * dy) * 2.6) * 0.55
-      const spikeD = Math.exp(-Math.pow(Math.abs(dx * dy), 1.1) * 60) * Math.exp(-d * d * 3.5) * 0.16
+      const core = Math.exp(-d * d * 30) * 1.55
+      const halo = Math.exp(-d * d * 4.6) * 0.34
+      // the 4-point diffraction spikes: a long horizontal streak + a short
+      // vertical one (the anamorphic "cinema" flare reads as sci-fi star)
+      const spikeH = Math.exp(-(dy * dy) * 420) * Math.exp(-(dx * dx) * 2.1) * 0.62
+      const spikeV = Math.exp(-(dx * dx) * 520) * Math.exp(-(dy * dy) * 3.6) * 0.34
+      const spikeD = Math.exp(-Math.pow(Math.abs(dx * dy), 1.1) * 60) * Math.exp(-d * d * 3.5) * 0.12
       const v = clamp01(core + halo + spikeH + spikeV + spikeD)
       data[at] = data[at + 1] = data[at + 2] = Math.round(v * 255)
       data[at + 3] = 255
@@ -454,11 +458,13 @@ export function makeRingBands(seed) {
 
 // ─── the kitchen: everything the render layer needs, in one call ────────────
 
-/** The three nebula palettes (deep → mid → hot). */
+/** The nebula palettes (deep → mid → hot) — tuned against Stellaris
+ *  references: muted teals, dusty violets and ember browns over a near-black
+ *  sky, never neon. */
 export const NEBULA_PALETTES = [
-  [[0.03, 0.08, 0.24], [0.18, 0.42, 0.85], [0.72, 0.88, 1.0]], // cold blue
-  [[0.10, 0.04, 0.16], [0.55, 0.22, 0.68], [1.0, 0.7, 0.95]], // violet
-  [[0.14, 0.05, 0.02], [0.75, 0.30, 0.14], [1.0, 0.8, 0.5]], // ember
+  [[0.015, 0.09, 0.10], [0.09, 0.40, 0.38], [0.55, 0.95, 0.86]], // muted teal
+  [[0.04, 0.03, 0.11], [0.30, 0.17, 0.52], [0.82, 0.62, 1.0]],  // dusty violet
+  [[0.11, 0.055, 0.03], [0.52, 0.27, 0.13], [0.95, 0.74, 0.48]], // ember dust
 ]
 
 /**

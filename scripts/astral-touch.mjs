@@ -25,7 +25,7 @@ const server = Bun.serve({
     const file = Bun.file(`${root}${pathname}`)
     if (!(await file.exists())) return new Response('not found', { status: 404 })
     const ext = pathname.slice(pathname.lastIndexOf('.'))
-    const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.jpg': 'image/jpeg' }
+    const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.jpg': 'image/jpeg', '.woff2': 'font/woff2' }
     return new Response(await file.arrayBuffer(), { headers: { 'content-type': MIME[ext] ?? 'application/octet-stream' } })
   },
 })

@@ -4,8 +4,8 @@
 // the UI floats). Labels are world-projected each frame (the vfx "labels
 // projected" standard).
 
-import { BUILDINGS, SHIPS, TECHS, OWNER, production } from './galaxy.js?v=1'
-import { worldToScreen } from './shaders.js?v=3'
+import { BUILDINGS, SHIPS, TECHS, OWNER, production } from './galaxy.js?v=2'
+import { worldToScreen } from './shaders.js?v=4'
 
 const ICON = { minerals: '◆', energy: '⚡', science: '✦' }
 
@@ -20,6 +20,10 @@ export function createUI(world, view, actions) {
   // ── the top bar ──
   const top = document.createElement('div')
   top.className = 'as-top'
+  // the empire brand (the Stellaris empire-name chip — who is playing)
+  const brand = document.createElement('span')
+  brand.className = 'as-brand'
+  brand.textContent = '✦ Astral'
   const res = document.createElement('div')
   res.className = 'as-res'
   const resMin = chip('as-min')
@@ -53,7 +57,7 @@ export function createUI(world, view, actions) {
     speed.append(b)
   }
 
-  top.append(res, territory, speed)
+  top.append(brand, res, territory, speed)
   root.append(top)
 
   // ── the labels layer ──
@@ -129,11 +133,17 @@ export function createUI(world, view, actions) {
       if (pt === null) { label.el.style.display = 'none'; continue }
       const sx = pt.x
       const sy = pt.y
+      // the top bar and the bottom panel own their screen bands — labels
+      // never overlap them (the VLM review caught "Tahosdon" garbled into
+      // the territory chip)
       const margin = 70
-      const visible = sx > -margin && sx < w + margin && sy > 30 && sy < h - 60
+      const visible = sx > -margin && sx < w + margin && sy > 78 && sy < h - 60
       const owned = sys.owner !== OWNER.NONE
       const zoomed = cam.z > 0.85
-      if (!visible || (!owned && !zoomed && sys.id !== view.selectedSystem)) {
+      // the Stellaris declutter: at far zoom only the SELECTION carries a
+      // name — owned names join once you lean in (z > 0.34)
+      const show = zoomed || (owned && cam.z > 0.34) || sys.id === view.selectedSystem
+      if (!visible || !show) {
         label.el.style.display = 'none'
         continue
       }

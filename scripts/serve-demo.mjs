@@ -21,6 +21,8 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.map': 'application/json',
   '.wasm': 'application/wasm',
+  '.jpg': 'image/jpeg',
+  '.woff2': 'font/woff2',
 }
 
 Bun.serve({

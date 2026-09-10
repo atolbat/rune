@@ -33,13 +33,13 @@ import { createRenderer } from '../../dist/rune.esm.js?v=169'
 import {
   generateWorld, stepWorld, orderShip, queueBuilding, queueShip, shipName,
   OWNER, SHIPS, lanePath,
-} from './galaxy.js?v=1'
-import { createGameRender } from './render.js?v=3'
-import { createUI } from './ui.js?v=2'
+} from './galaxy.js?v=2'
+import { createGameRender } from './render.js?v=4'
+import { createUI } from './ui.js?v=3'
 import {
   setCamera3D, screenToWorld, worldToScreen, panBy,
   MVP, PXK, CLOCK, FADE, GALAXY_FADE, NEB_FADE, SHIP_CAP,
-} from './shaders.js?v=3'
+} from './shaders.js?v=4'
 
 /* ─── the seed (the same seed replays the same galaxy) ───────────────────── */
 

@@ -17,7 +17,7 @@ import type { FrameContext, FrameHandle, Renderer, RendererOptions, Texture } fr
 import { createWebGpuRenderer } from './webgpuRenderer.ts'
 import type { GpuFrameContext, WebGpuRenderer, WebGpuRendererOptions } from './webgpuRenderer.ts'
 import type { CompiledCommand } from '@rune/webgl2'
-import type { WgpuCommand } from '@rune/webgpu'
+import { type WgpuCommand, type GPUImageSource, externalImageSize } from '@rune/webgpu'
 import type { UploadScheduler, TransientPool, ReadableSignal } from '@rune/core'
 import type { Surface, SurfaceOptions, PassOptions } from './surface.ts'
 
@@ -196,6 +196,21 @@ function wrapGpu(inner: WebGpuRenderer, decision: BackendDecision): AutoRenderer
         upload: (source: Uint8Array) => {
           inner.gpu.texSubImage2D(textureId, 0, 0, w, h, source)
           return { progress: 1, cancel: (): void => {}, done: Promise.resolve() }
+        },
+        // Task 170 (the Stellaris pass): the astral demo swaps the REAL
+        // bitmaps (ESO panorama, NASA moon/earth) through uploadImage /
+        // uploadSubImage — the GL handle has had them all along, this
+        // wrapper silently lacked them, so every WebGPU boot (the phone!)
+        // kept the procedural placeholders forever. copyExternalImageToTexture
+        // is the facade's ImageBitmap path; copy size = the SOURCE's own
+        // dims (externalImageSize, the renderer.ts convention).
+        uploadImage: (source: GPUImageSource, options?: { flipY?: boolean }) => {
+          const [sw, sh] = externalImageSize(source)
+          inner.gpu.copyExternalImageToTexture(textureId, source, 0, 0, sw, sh, options?.flipY)
+        },
+        uploadSubImage: (x: number, y: number, source: GPUImageSource, options?: { flipY?: boolean }) => {
+          const [sw, sh] = externalImageSize(source)
+          inner.gpu.copyExternalImageToTexture(textureId, source, x, y, sw, sh, options?.flipY)
         },
       } as never
     },

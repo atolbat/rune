@@ -53,6 +53,8 @@ const server = Bun.serve({
       '.js': 'text/javascript; charset=utf-8',
       '.mjs': 'text/javascript; charset=utf-8',
       '.css': 'text/css; charset=utf-8',
+      '.jpg': 'image/jpeg',
+      '.woff2': 'font/woff2',
     }
     return new Response(await file.text(), { headers: { 'content-type': MIME[ext] ?? 'application/octet-stream' } })
   },
