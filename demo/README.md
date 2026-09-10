@@ -15,6 +15,8 @@ toggle, a log panel.
 
 | vfx | https://atolbat.github.io/rune/demo/vfx/ | The game-VFX study on `@rune/particles`: **24 demos in one carousel page** — every emitter shape, trails with floor collision, the texture sequencer (1500 particles seeking a text mask), PBR mesh particles, sub-emitters, the simplex noise field, alpha-tested falling petals, a custom SinWave behavior on the composable core, the billboard modes, soft particles with a color-encoded depth prepass, the blend equations, a follow-object emitter, a composed explosion, the sentry turret (tracers + beam volleys + reflection sparks), plus the rune originals (rocket, rainstorm, sword slash, vortex, fireflies, dust & haze, grass field, lightning storm, a cutting laser — a continuous lattice beam biting a visible sphere target, reflection sparks off the curvature — and the GPU compute tier: 160k embers advanced by WebGPU compute shaders over a storage-buffer state, the instance records packed GPU-side (WebGL2 runs the same demo on the CPU tier). Every sprite procedural (no image assets); exercises the whole library surface: the shape family, image seek targets, the burst schedule, prewarm, the live emitter origin `at()`/`orient()`, the atlas + FrameOverLife, trails, mesh particles with normals, collision planes, noise, the seek spring, SpeedOverLife, `onRetire` sub-emitters, custom blend equations, the `SOFT_PARTICLES` and `OUTPUT_DITHER` material features, and the GPU-static grass field |
 
+| astral | https://atolbat.github.io/rune/demo/astral/ | A mini 4X strategy sandbox built directly on the renderer (no particle library — plain dual-source commands): a seeded spiral galaxy of 72 star systems joined by a connected hyperlane graph, planets orbiting their stars (four types, per-type build slots), colony ships and corvettes that fly BFS routes over the lanes, an economy of Deep Mines / Solar Farms / Orbital Labs with a four-step tech tree, and a rival power (the Hegemony) expanding across the map — settle 60% of the colonizable systems before they do (a parked corvette denies their claims). Two view layers (galaxy ↔ system) crossfaded on one orthographic camera, 7 GLSL+WGSL twin commands (two instanced star passes, a screen-constant-width lane pass, the orbit-ring soup, ships, planets/suns, rings/effects), the feed-path dynamic vertex buffers on both backends, world-projected DOM labels, a mobile-first game UI (tap/pan/pinch/wheel), and a `?seed=` URL for replayable galaxies |
+
 Overview of all demos: **https://atolbat.github.io/rune/demo/**
 
 Deployment is automatic: Pages is configured to **deploy from the `dev`
@@ -76,9 +78,16 @@ demo/
 ├── hello-cube/         — the "cube in one line" demo
 │   ├── index.html
 │   └── main.js
-└── model-viewer/       — the "scene with a loader" demo (three three.js models + the matcap cube)
-    ├── index.html
-    ├── main.js
-    └── assets/         — forest_house.glb, Nefertiti.glb, samba.fbx
-                          + draco_wasm_wrapper.js / draco_decoder.wasm
+├── model-viewer/       — the "scene with a loader" demo (three three.js models + the matcap cube)
+│   ├── index.html
+│   ├── main.js
+│   └── assets/         — forest_house.glb, Nefertiti.glb, samba.fbx
+│                         + draco_wasm_wrapper.js / draco_decoder.wasm
+└── astral/             — the mini-4X demo (the seeded galaxy strategy sandbox)
+    ├── index.html      — the page + the game UI stylesheet
+    ├── main.js         — the shell wiring, the camera, the input, the boot
+    ├── galaxy.js       — the world: generation, economy, ships, the rival AI
+    ├── render.js       — the commands: records, soups, the per-frame uploads
+    ├── shaders.js      — the GLSL + WGSL twin shaders (5 passes)
+    └── ui.js           — the DOM UI: top bar, panel, labels, outcome
 ```

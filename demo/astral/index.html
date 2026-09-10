@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>rune — astral</title>
+  <link rel="stylesheet" href="../shared/demo-shell.css" />
+  <style>
+    /* The game UI floats over the shell's fullscreen stage. Mobile-first:
+       compact chips, >= 40px touch targets, safe-area insets everywhere. */
+    .as-root {
+      position: absolute;
+      inset: 0;
+      z-index: 12;
+      pointer-events: none;
+      font: 13px/1.35 system-ui, -apple-system, 'Segoe UI', sans-serif;
+      color: #dfe5f1;
+    }
+    .as-root button { touch-action: manipulation; }
+
+    /* ── the top bar ── */
+    .as-top {
+      position: absolute;
+      top: calc(env(safe-area-inset-top, 0px) + 8px);
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      max-width: calc(100% - 20px);
+      padding: 5px 10px;
+      border-radius: 12px;
+      background: rgb(11 13 19 / 0.82);
+      border: 1px solid #26304a;
+      backdrop-filter: blur(8px);
+      pointer-events: auto;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .as-res { display: flex; gap: 6px; }
+    .as-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 8px;
+      border-radius: 8px;
+      background: #121826;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .as-min { color: #9ecbff; }
+    .as-energy { color: #ffd479; }
+    .as-sci { color: #b48ce8; }
+
+    .as-territory { display: flex; flex-direction: column; gap: 3px; min-width: 130px; }
+    .as-terr-bar {
+      position: relative;
+      height: 6px;
+      border-radius: 3px;
+      background: #1a2336;
+      overflow: hidden;
+    }
+    .as-terr-you, .as-terr-rival { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
+    .as-terr-you { left: 0; background: linear-gradient(90deg, #3d6fd8, #7aa2f7); }
+    .as-terr-rival { right: 0; background: linear-gradient(270deg, #a13b35, #e0685f); }
+    .as-terr-label { font-size: 10px; color: #6b7691; text-align: center; white-space: nowrap; }
+
+    .as-speed { display: flex; gap: 3px; }
+    .as-speed button {
+      min-width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      border: 1px solid #2c3855;
+      background: #121826;
+      color: #6b7691;
+      font: 12px/1 system-ui, sans-serif;
+      cursor: pointer;
+    }
+    .as-speed button.as-active { border-color: #7aa2f7; color: #9ecbff; background: #1a2336; }
+
+    /* ── the labels ── */
+    .as-labels { position: absolute; inset: 0; overflow: hidden; }
+    .as-label {
+      position: absolute;
+      left: 0;
+      top: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0;
+      transform-origin: center top;
+      white-space: nowrap;
+      text-shadow: 0 1px 3px rgb(0 0 0 / 0.9);
+    }
+    .as-label-name { font-size: 11px; color: #8d99b6; letter-spacing: 0.02em; }
+    .as-label-sub { font-size: 9px; color: #5a647d; font-variant-numeric: tabular-nums; }
+    .as-label.as-owned .as-label-name { color: #9ecbff; }
+    .as-label.as-owned .as-label-sub { color: #6f87b4; }
+    .as-label.as-rival .as-label-name { color: #ff9a93; }
+    .as-label.as-rival .as-label-sub { color: #b0665f; }
+
+    /* ── the bottom panel ── */
+    .as-panel {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%) translateY(8px);
+      bottom: calc(env(safe-area-inset-bottom, 0px) + 10px);
+      width: min(430px, calc(100% - 16px));
+      max-height: 42vh;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgb(11 13 19 / 0.92);
+      border: 1px solid #26304a;
+      backdrop-filter: blur(10px);
+      pointer-events: auto;
+      opacity: 0;
+      transition: opacity 0.18s, transform 0.18s;
+      overflow: hidden auto;
+    }
+    .as-panel.as-open { opacity: 1; transform: translateX(-50%) translateY(0); }
+    .as-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .as-panel-title { font-size: 13px; font-weight: 600; color: #dfe5f1; }
+    .as-back {
+      min-height: 40px;
+      padding: 0 12px;
+      border-radius: 10px;
+      border: 1px solid #2c3855;
+      background: #121826;
+      color: #9ecbff;
+      font: 12px/1 system-ui, sans-serif;
+      cursor: pointer;
+    }
+    .as-panel-body { display: flex; flex-direction: column; gap: 6px; }
+    .as-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .as-row.as-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .as-dim { color: #6b7691; font-size: 12px; }
+    .as-you { color: #7aa2f7; font-size: 12px; }
+    .as-riv { color: #e0685f; font-size: 12px; }
+    .as-neutral { color: #9aa4bd; font-size: 12px; }
+    .as-progress { color: #73daca; font-size: 12px; font-variant-numeric: tabular-nums; }
+    .as-planet-row {
+      padding: 6px 8px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      justify-content: space-between;
+    }
+    .as-planet-row:hover { border-color: #2c3855; background: rgb(18 24 38 / 0.6); }
+    .as-planet-name { font-size: 12px; font-weight: 600; }
+    .as-built {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 6px;
+      background: #1a2336;
+      color: #8fb7ff;
+      font-size: 11px;
+    }
+    .as-btn {
+      min-height: 40px;
+      padding: 0 12px;
+      border-radius: 10px;
+      border: 1px solid #7aa2f7;
+      background: #1a2336;
+      color: #9ecbff;
+      font: 12px/1.2 system-ui, sans-serif;
+      cursor: pointer;
+      flex: 1 1 auto;
+    }
+    .as-btn:disabled { opacity: 0.45; cursor: default; }
+    .as-btn:not(:disabled):hover { background: #223049; }
+
+    /* ── the outcome overlay ── */
+    .as-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgb(4 6 10 / 0.72);
+      backdrop-filter: blur(4px);
+      pointer-events: auto;
+    }
+    .as-overlay[hidden] { display: none; }
+    .as-overlay-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      padding: 28px 34px;
+      border-radius: 16px;
+      background: #0e1320;
+      border: 1px solid #2c3855;
+      text-align: center;
+      max-width: calc(100% - 32px);
+    }
+    .as-overlay-card h2 { margin: 0; font-size: 20px; }
+    .as-overlay-card h2.as-win { color: #73daca; }
+    .as-overlay-card h2.as-lose { color: #e0685f; }
+    .as-overlay-card p { margin: 0; color: #6b7691; font-size: 12px; }
+    .as-overlay-card button {
+      min-height: 44px;
+      padding: 0 20px;
+      border-radius: 10px;
+      border: 1px solid #7aa2f7;
+      background: #1a2336;
+      color: #9ecbff;
+      font: 14px/1 system-ui, sans-serif;
+      cursor: pointer;
+    }
+
+    /* ── the hint ── */
+    .as-hint {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      top: calc(env(safe-area-inset-top, 0px) + 64px);
+      padding: 5px 10px;
+      border-radius: 8px;
+      background: rgb(11 13 19 / 0.7);
+      color: #6b7691;
+      font-size: 11px;
+      transition: opacity 0.6s;
+    }
+    .as-hint.as-gone { opacity: 0; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script src="../shared/demo-shell.js"></script>
+  <script type="module" src="./main.js?v=1"></script>
+</body>
+</html>
