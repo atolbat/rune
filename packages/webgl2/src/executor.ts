@@ -97,15 +97,21 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
     }
     applyState(rich)
     uploadUniforms(rich)
-    for (const sampler of rich.samplers) {
+    for (let s = 0; s < rich.samplers.length; s++) {
+      const sampler = rich.samplers[s]
       gl.bindTexture(sampler.textureId, sampler.unit)
       gl.setUniform1i(rich.programId!, sampler.name, sampler.unit)
     }
-    for (const attribute of rich.attributes) {
+    for (let a = 0; a < rich.attributes.length; a++) {
+      const attribute = rich.attributes[a]
       // M5 (Task 73): feed dual-bind — the feed renderer's external buffer with
       // interleaving (stride/offset); our own buffer — a tight layout.
       // Task 75: an instance attribute — divisor 1 (one feed record per instance,
       // the quad corners are unfolded from gl_VertexID).
+      // Task 165: indexed walk (the Task-145 WG discipline — no iterator
+      // protocol per draw), and the bind itself is memo-able: the facade's
+      // vertex-bind mirror skips the 100%-redundant re-asserts (4 GL calls
+      // per attribute per draw → 0 in the steady state).
       const divisor = attribute.instance === true ? 1 : 0
       if (attribute.bufferId !== undefined) {
         gl.bindVertexBuffer(attribute.bufferId, attribute.location, attribute.size, attribute.stride, attribute.offset, divisor)
@@ -181,12 +187,21 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
   function uploadUniforms(command: CompiledCommand & { programId?: number }): void {
     const rich = command as CompiledCommand & {
       programId?: number
-      fields: Array<{ name: string; type: string; slot: { base: number; size: number; dirty: boolean } }>
+      fields: Array<{ name: string; type: string; slot: { base: number; size: number; dirty: boolean }; view?: Float32Array }>
     }
-    for (const field of rich.fields) {
+    for (let f = 0; f < rich.fields.length; f++) {
+      const field = rich.fields[f]
       if (!field.slot.dirty) continue
-      const view16 = arena.buffer.subarray(field.slot.base, field.slot.base + field.slot.size)
-      setByType(rich.programId!, field.name, field.type, view16)
+      // Task 165 — the slice-view twin of the WG executor's Task-145 cache:
+      // the arena window is a compile-time constant of the field, but the
+      // subarray allocated a fresh TypedArray view object per field per draw
+      // (a 20-command × 5-field scene = 6000 view objects/second of pure GC
+      // churn). The view is cached on the field — the arena's backing buffer
+      // is created once and never reallocated.
+      if (field.view === undefined) {
+        field.view = arena.buffer.subarray(field.slot.base, field.slot.base + field.slot.size)
+      }
+      setByType(rich.programId!, field.name, field.type, field.view)
       field.slot.dirty = false
     }
   }

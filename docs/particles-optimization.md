@@ -2018,3 +2018,59 @@ merged pass carried the full 160k tier at ~60 fps), the new
 `task164-steady` gate PASS on both backends (W: Δ360/6 s, zero errors;
 G: alive + progressing + zero errors, thresholds honest per backend).
 Cache-busts: `?v=164` on the library imports and the script tags.
+
+## Task 165 — THE RENDER-PASS TWIN
+
+Task 164 made the COMPUTE/TF hot loops steady-state-lean (merged pass, uniform
+write-skip, bind-group memo, vertex-bind memo, SAB staging). The RENDER pass —
+the path every scene, demo and game actually draws through — still re-asserted
+its frame-static machinery per draw. The audit found the same shape, now on
+both backends:
+
+- **GL vertex-bind memo** (`@rune/webgl2/realGL.ts`): the tape executor
+  re-asserted every command's attributes on every draw — bindBuffer +
+  enableVertexAttribArray + vertexAttribPointer + vertexAttribDivisor, 4 GL
+  calls per attribute — while the pointer tuple is a compile-time constant of
+  the command. The mirror (location → tuple) skips the identical re-assert
+  within a pass; bindTarget re-arms it at every pass boundary (the 75b
+  discipline, same as the unit-bind cache); deleteBuffer disarms the mirrored
+  locations; updateBuffer does NOT invalidate it (the feed path's per-frame
+  record upload keeps the pointer valid — the rebinds die too). The pass VAO
+  of the TF family never touches the mirror.
+- **GL sampler-unit memo** (`setUniform1i`): the draw path's per-draw sampler
+  unit asserts wrote the same byte to the same program uniform every frame —
+  program state persists. The memo skips the whole chain (useProgram resolve +
+  location probe + uniform1i); any different value re-arms it. The draw-path
+  twin of the TF family's `record.texUnits`.
+- **GL TF-capture discipline, strengthened**: every real `bindVertexBuffer`
+  now ends with the generic ARRAY_BUFFER binding EMPTY. This closes a latent
+  hazard the memo would otherwise open: a skipped bind would leave a stale
+  buffer on ARRAY_BUFFER — if that buffer later became a TF pass's OUTPUT
+  (the pack pass writing the very records buffer the draw binds as instance
+  attributes), the bindBufferBase capture would overlap it and silently drop
+  the write (the Task-139 class). Dead by construction now.
+- **GL uniform slice-view cache** (`executor.ts`): the per-field subarray was
+  a fresh TypedArray view object per field per draw — 6 000 view objects/second
+  of GC churn in a 20-command scene. Cached on the field (the arena's backing
+  buffer is allocated once), the GL twin of Task 145's WG sliceView.
+- **WebGPU group-0 offset memo** (`realGPU.ts bindUniforms`): setBindGroup(0)
+  with an unchanged dynamic offset inside a pass is skipped; a fresh pass, or
+  ensureUBO rebuilding the group OBJECT, re-arms it. Legal because the shared
+  group-0 layout is byte-identical across pipelines.
+- **WebGPU group-1 assert memo** (`flushTextureBindGroup`): the texture-group
+  flush with the exact same group object already on the pass skips the
+  setBindGroup(1) re-assert; any different texture set re-binds — a stale
+  group can never survive a texture change.
+
+Pinned by `packages/webgl2/tests/task165.test.ts` (12 pins: the tuple skip,
+the pass boundary, the feed win, deleteBuffer disarm, the TF-capture
+discipline, the sampler memos, and the executor steady-state profile — a
+2-command scene drawn twice per frame emits half the binds, a 1-command
+instanced scene pays exactly one honest bind per pass and zero sampler
+asserts) and `packages/webgpu/tests/task165webgpu.test.ts` (5 pins: the
+offset memo, its pass scoping, the ensureUBO re-arm, the group-1 skip and its
+A-B-A re-bind).
+
+Gates: 1740/1740 tests (was 1723, +17), typecheck at the 6-error baseline,
+lint 0 errors, dist rebuilt, demo:smoke 24/24, task164-steady both cells PASS.
+Cache-busts: `?v=165` (gpuEmbers.js, main.js, index.html).

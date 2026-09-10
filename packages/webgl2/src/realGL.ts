@@ -273,6 +273,40 @@ export function createRealGL(
   // redundant pixelStorei per frame. The mirror skips re-asserts; both
   // writers keep it current, so a flip in one path re-arms the other.
   let unpackAlignmentMirror = 0
+  // Task 165 — THE VERTEX-BIND MEMO (the render-path twin of Task 164's
+  // WebGPU vertex-bind memo): the tape executor re-asserts EVERY command's
+  // attributes on EVERY draw — bindBuffer + enableVertexAttribArray +
+  // vertexAttribPointer + vertexAttribDivisor, 4 GL calls per attribute —
+  // while the pointer tuple (buffer, size, stride, offset, divisor) is a
+  // COMPILE-TIME CONSTANT of the command: within a pass the re-asserts are
+  // 100% redundant (a 20-mesh scene × 5 attributes × 60fps = 24 000 skipped
+  // calls/second). The mirror holds the DEFAULT VAO's last-known pointer
+  // tuple per location; a skipped bind saves all 4 calls. The memo lives
+  // EXACTLY one pass — bindTarget drops it at every pass start / target
+  // switch (the 75b re-assert discipline survives: external default-VAO
+  // changes between our frames die at the pass boundary, exactly like the
+  // unit-bind cache) — and deleteBuffer disarms the mirrored locations of
+  // the deleted buffer (the Task-137 ledger walk already disables them).
+  // NOT invalidated by updateBuffer: a contents-only upload (the feed path —
+  // the per-frame record buffer) leaves the pointer tuple valid, so the
+  // feed rebinds die too — the deepest steady-state win of the family.
+  // A pass-VAO bind (passVaoActive) never touches this mirror: the TF
+  // family's VAO state is its own, and the default VAO is restored after.
+  const vertexBindMemo = new Map<number, { readonly bufferId: number; readonly size: number; readonly stride: number; readonly offset: number; readonly divisor: number }>()
+  /** Drop the whole vertex-bind mirror (see vertexBindMemo — the pass-boundary + structural invalidations). */
+  function invalidateVertexBinds(): void {
+    vertexBindMemo.clear()
+  }
+  // Task 165 — THE SAMPLER-UNIT MEMO (the draw-path twin of the TF family's
+  // record.texUnits): the executor asserts every command's sampler UNIFORMS
+  // per draw (setUniform1i — the Task-136 unit contract), but the value is a
+  // compile-time constant of the command and program uniform state PERSISTS —
+  // the re-assert writes the same byte to the same location every frame. The
+  // memo mirrors the last written value per (programId, name) and skips the
+  // whole call chain (useProgram resolve + location probe + uniform1i) when
+  // the value matches. programIds are monotonic — a deleted program's entry
+  // can never alias a new one; deleteProgram drops it for hygiene.
+  const samplerUnits = new Map<number, Map<string, number>>()
 
   // Task 67: OES_texture_float_linear — linear filtering of RGBA32F.
   // RGBA32F storage/NEAREST sampling is core WebGL2; LINEAR is an extension
@@ -494,7 +528,24 @@ export function createRealGL(
   }
 
   function bindVertexBuffer(bufferId: number, location: number, size: number, stride?: number, byteOffset?: number, divisor?: number): void {
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffers.get(bufferId) ?? null)
+    const strideVal = stride ?? 0
+    const offsetVal = byteOffset ?? 0
+    const divisorVal = divisor ?? 0
+    const buffer = buffers.get(bufferId)
+    // Task 165 — the vertex-bind memo (see its declaration): an identical
+    // pointer tuple re-asserted within the same pass is skipped entirely
+    // (4 GL calls → 0); the pass boundary / deleteBuffer re-arms it. Only
+    // REAL buffers are mirrored — an unknown id keeps the historical
+    // bind-null-and-enable path (a caller bug, but not a memo-able one).
+    if (!passVaoActive && buffer !== undefined) {
+      const memo = vertexBindMemo.get(location)
+      if (memo !== undefined && memo.bufferId === bufferId && memo.size === size
+        && memo.stride === strideVal && memo.offset === offsetVal && memo.divisor === divisorVal) {
+        return
+      }
+      vertexBindMemo.set(location, { bufferId, size, stride: strideVal, offset: offsetVal, divisor: divisorVal })
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer ?? null)
     gl.enableVertexAttribArray(location)
     // Task 137 — the enabled-location LEDGER of the DEFAULT VAO (the
     // deleteBuffer disarm's bookkeeping; see the ledger's declaration
@@ -502,11 +553,23 @@ export function createRealGL(
     // its locations live and die with the pass, never with the default VAO.
     if (!passVaoActive) defaultAttribBindings.set(location, bufferId)
     // M5: feed interleaving — the record's stride/offset (default: tight 0/0).
-    gl.vertexAttribPointer(location, size, gl.FLOAT, false, stride ?? 0, byteOffset ?? 0)
+    gl.vertexAttribPointer(location, size, gl.FLOAT, false, strideVal, offsetVal)
     // Task 75: the instance step (star quads: one feed record = one instance).
     // Called UNCONDITIONALLY (and with 0) — resets the divisor after instanced
     // commands, otherwise the attribute would "stick" with divisor=1 for regular geometry.
-    gl.vertexAttribDivisor(location, divisor ?? 0)
+    gl.vertexAttribDivisor(location, divisorVal)
+    // Task 165 — THE TF-CAPTURE DISCIPLINE, STRENGTHENED: the generic
+    // ARRAY_BUFFER binding ends EMPTY after every real bind (the pointer
+    // was captured by vertexAttribPointer at call time — the binding has no
+    // further readers). This closes a latent hazard the memo would otherwise
+    // OPEN: a skipped bind leaves the PREVIOUS buffer on ARRAY_BUFFER — if
+    // that buffer later became a TF pass's OUTPUT (the pack pass writing the
+    // very records buffer the draw path binds as instance attributes), the
+    // bindBufferBase(TRANSFORM_FEEDBACK_BUFFER) capture would overlap it and
+    // silently drop the write (the exact Task-139 class). With the trailing
+    // unbind, ARRAY_BUFFER is null outside of the bind itself — by
+    // construction, on every path (createBuffer/updateBuffer already unbind).
+    gl.bindBuffer(gl.ARRAY_BUFFER, null)
   }
 
   /** M5 (Task 73): dynamic update (feed dual-bind) — bufferSubData.
@@ -573,9 +636,22 @@ export function createRealGL(
   }
 
   function setUniform1i(programId: number, name: string, value: number): void {
+    // Task 165 — the sampler-unit memo (see its declaration): an identical
+    // re-write is skipped BEFORE the program switch, the location probe and
+    // the uniform call — program uniform state persists, the value would
+    // write the same byte to the same location. Any caller that writes a
+    // DIFFERENT value misses the memo and re-arms it (last-write-wins kept
+    // exact, whoever the writer was).
+    let perProgram = samplerUnits.get(programId)
+    if (perProgram !== undefined && perProgram.get(name) === value) return
     useProgram(programId)
     const loc = location(programId, name)
     if (loc !== null) gl.uniform1i(loc, value)
+    if (perProgram === undefined) {
+      perProgram = new Map<string, number>()
+      samplerUnits.set(programId, perProgram)
+    }
+    perProgram.set(name, value)
   }
 
   function createTexture(
@@ -987,8 +1063,11 @@ export function createRealGL(
       // (the 75b discipline — external texture-state changes between our
       // frames are re-asserted by the first bind of the pass; redundant
       // rebinds WITHIN the pass stay skipped).
+      // Task 165: the vertex-bind memo dies with the same boundary — the
+      // default VAO is re-asserted by each pass's first draws.
       currentTarget = 0
       invalidateUnitBinds()
+      invalidateVertexBinds()
       const bufferW = gl.drawingBufferWidth
       const bufferH = gl.drawingBufferHeight
       if (bufferW > 0 && bufferH > 0 && (bufferW !== canvasWidth || bufferH !== canvasHeight)) {
@@ -1008,7 +1087,10 @@ export function createRealGL(
     if (target === undefined) return
     // Task 163: a target switch runs through the feedback-loop unbind below
     // (unit bindings change) — the unit-bind cache dies with the switch.
+    // Task 165: the vertex-bind memo dies with the same switch (the next
+    // pass on the new target re-asserts its first binds).
     invalidateUnitBinds()
+    invalidateVertexBinds()
     // Feedback-loop prevention: the TARGET texture must not stay bound to
     // sampler units while it is the FBO's color attachment (GL: undefined;
     // ANGLE/SwiftShader kill such draws). Exactly this was killing frame 2+.
@@ -1195,6 +1277,9 @@ export function createRealGL(
     }
     gl.deleteProgram(record.program)
     programs.delete(programId)
+    // Task 165 — the sampler-unit memo entry dies with the program (hygiene:
+    // ids are monotonic and never alias, but the entry is pure garbage now).
+    samplerUnits.delete(programId)
   }
 
   function deleteBuffer(bufferId: number): void {
@@ -1224,6 +1309,10 @@ export function createRealGL(
       if (boundId === bufferId) {
         gl.disableVertexAttribArray(location)
         defaultAttribBindings.delete(location)
+        // Task 165 — the memo entry for a disarmed location is stale by
+        // definition (its buffer is gone): drop it or the next bind with
+        // the same tuple would skip arming a DISABLED location.
+        vertexBindMemo.delete(location)
       }
     }
   }

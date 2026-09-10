@@ -177,6 +177,18 @@ export async function createRealGPU(
   /** Scratch for setBindGroup dynamic offsets (a typed array is a valid
    *  sequence for the WebGPU API; avoids an array allocation per draw). */
   const dynamicOffsetScratch = new Uint32Array(1)
+  // Task 165 — THE GROUP-0 OFFSET MEMO (see bindUniforms): the dynamic offset
+  // of the LAST setBindGroup(0) on the CURRENT render pass (-1 = none). The
+  // skip is legal because the shared group-0 layout is byte-identical across
+  // every pipeline (structurally equal layouts are pipeline-compatible), so
+  // the binding survives pipeline switches; a fresh pass / a rebuilt group
+  // object re-arms it.
+  let boundGroup0Offset = -1
+  // Task 165 — THE GROUP-1 ASSERT MEMO (see flushTextureBindGroup): the group
+  // object last bound on set 1 of the CURRENT pass (null = none). Only an
+  // EXACT group-object repeat is skipped — a different command's flush
+  // re-binds, so a stale group can never survive a texture-set change.
+  let boundGroup1: GPUBindGroup | null = null
   let timerHandle: GpuTimerHandle | null = null
   // Create the timer IF the device has the 'timestamp-query' feature.
   // createGpuGpuTimer returns {timer, handle} or null (if no feature).
@@ -432,6 +444,9 @@ export async function createRealGPU(
       layout,
       entries: [{ binding: 0, resource: { buffer: ubo!, size: uboBindingWindow } }],
     })
+    // Task 165 — a NEW group-0 OBJECT: the offset memo must not skip the
+    // next bind onto the OLD group still sitting on the pass.
+    boundGroup0Offset = -1
   }
 
   function ensurePipeline(pipelineId: number, wgsl: string, attrs: readonly GpuAttrSlot[], hasTextures: boolean, desc?: GpuPipelineDesc): void {
@@ -628,10 +643,22 @@ export async function createRealGPU(
   }
 
   function bindUniforms(dynamicOffset: number): void {
+    // Task 165 — THE GROUP-0 OFFSET MEMO (pass-scoped, the render-path twin
+    // of Task 164's compute memos): every draw re-issued setBindGroup(0, …)
+    // even when the dynamic offset was UNCHANGED — consecutive draws of the
+    // same command (multi-record draws, layer passes) re-asserted the exact
+    // same binding. The memo skips the identical re-assert within one pass;
+    // it dies at every pass boundary (bindTarget/endPass/readTargetPixels)
+    // and when ensureUBO rebuilds the group OBJECT (the old group on the
+    // pass would otherwise be skipped onto forever). The shared group-0
+    // layout is byte-identical across pipelines — the bind survives
+    // pipeline switches, so the memo does not key on the pipeline.
+    if (pass !== null && dynamicOffset === boundGroup0Offset) return
     // Scratch buffer instead of a fresh [offset] array per draw — the array
     // crosses an external API boundary, so the allocator cannot elide it.
     dynamicOffsetScratch[0] = dynamicOffset
     pass?.setBindGroup(0, uboGroup!, dynamicOffsetScratch)
+    if (pass !== null) boundGroup0Offset = dynamicOffset
   }
 
   function bindVertexBuffer(slot: number, data: Float32Array, _size: number): void {
@@ -804,7 +831,14 @@ export async function createRealGPU(
         if (memo.ids[at] !== pendingTextureIds[at]) { same = false; break }
       }
       if (same) {
-        pass.setBindGroup(1, memo.group)
+        // Task 165 — the group-1 assert memo: an EXACT group-object repeat
+        // within the pass is skipped (the pass already holds it). A different
+        // command between the two flushes re-bound → boundGroup1 differs →
+        // this re-asserts; the stale-group class cannot exist.
+        if (boundGroup1 !== memo.group) {
+          pass.setBindGroup(1, memo.group)
+          boundGroup1 = memo.group
+        }
         pendingTextureIds.length = 0
         return
       }
@@ -842,6 +876,7 @@ export async function createRealGPU(
       textureBindGroups.set(key, group)
     }
     pass.setBindGroup(1, group)
+    boundGroup1 = group
     flushMemoBox = { pipelineId: currentPipelineId, count, ids: pendingTextureIds.slice(), group }
     pendingTextureIds.length = 0
   }
@@ -903,6 +938,8 @@ export async function createRealGPU(
     // fresh pass encoder binds nothing until told).
     closeComputePass()
     vertexBindMemo.length = 0
+    boundGroup0Offset = -1 // Task 165 — the bind-group memos die with the pass
+    boundGroup1 = null
     if (pass !== null) {
       // END stamp BEFORE pass.end(): writeTimestamp(querySet, END_INDEX)
       if (timerHandle !== null) timerHandle.onEndPass(pass)
@@ -961,6 +998,10 @@ export async function createRealGPU(
     pass = null
     // Task 164 — the vertex-bind memo is pass-scoped (see bindVertexBuffer).
     vertexBindMemo.length = 0
+    // Task 165 — the bind-group memos die with the pass (see their
+    // declarations): a fresh pass binds nothing until told.
+    boundGroup0Offset = -1
+    boundGroup1 = null
   }
 
   function submit(): void {
@@ -1009,6 +1050,8 @@ export async function createRealGPU(
           pass.end()
           pass = null
           vertexBindMemo.length = 0 // Task 164 — the memo is pass-scoped
+          boundGroup0Offset = -1 // Task 165 — the bind-group memos too
+          boundGroup1 = null
         }
         // Task 164 — encoder-level copies are invalid while a pass is open:
         // the merged compute pass (if one is mid-frame) ends here, landing
@@ -1203,6 +1246,8 @@ export async function createRealGPU(
     computePass = null
     computeGroup = null
     vertexBindMemo.length = 0
+    boundGroup0Offset = -1 // Task 165 — the bind-group memos too
+    boundGroup1 = null
     sabStaging.clear()
     // 7. Final: device.destroy() — deterministically frees ALL GPU memory
     //    of the device (textures/buffers/pipelines/samplers/texture-views),

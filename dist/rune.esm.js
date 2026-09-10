@@ -4346,11 +4346,13 @@ function createExecutor(options) {
     }
     applyState(rich);
     uploadUniforms(rich);
-    for (const sampler of rich.samplers) {
+    for (let s = 0;s < rich.samplers.length; s++) {
+      const sampler = rich.samplers[s];
       gl.bindTexture(sampler.textureId, sampler.unit);
       gl.setUniform1i(rich.programId, sampler.name, sampler.unit);
     }
-    for (const attribute of rich.attributes) {
+    for (let a = 0;a < rich.attributes.length; a++) {
+      const attribute = rich.attributes[a];
       const divisor = attribute.instance === true ? 1 : 0;
       if (attribute.bufferId !== undefined) {
         gl.bindVertexBuffer(attribute.bufferId, attribute.location, attribute.size, attribute.stride, attribute.offset, divisor);
@@ -4394,11 +4396,14 @@ function createExecutor(options) {
   }
   function uploadUniforms(command) {
     const rich = command;
-    for (const field of rich.fields) {
+    for (let f = 0;f < rich.fields.length; f++) {
+      const field = rich.fields[f];
       if (!field.slot.dirty)
         continue;
-      const view16 = arena.buffer.subarray(field.slot.base, field.slot.base + field.slot.size);
-      setByType(rich.programId, field.name, field.type, view16);
+      if (field.view === undefined) {
+        field.view = arena.buffer.subarray(field.slot.base, field.slot.base + field.slot.size);
+      }
+      setByType(rich.programId, field.name, field.type, field.view);
       field.slot.dirty = false;
     }
   }
@@ -4501,6 +4506,11 @@ function createRealGL(gl, onViewportHeal) {
     }
   } catch {}
   let unpackAlignmentMirror = 0;
+  const vertexBindMemo = new Map;
+  function invalidateVertexBinds() {
+    vertexBindMemo.clear();
+  }
+  const samplerUnits = new Map;
   let floatLinearExt = false;
   try {
     floatLinearExt = gl.getExtension?.("OES_texture_float_linear") != null;
@@ -4654,12 +4664,24 @@ function createRealGL(gl, onViewportHeal) {
     return id;
   }
   function bindVertexBuffer(bufferId, location2, size, stride, byteOffset, divisor) {
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffers.get(bufferId) ?? null);
+    const strideVal = stride ?? 0;
+    const offsetVal = byteOffset ?? 0;
+    const divisorVal = divisor ?? 0;
+    const buffer = buffers.get(bufferId);
+    if (!passVaoActive && buffer !== undefined) {
+      const memo = vertexBindMemo.get(location2);
+      if (memo !== undefined && memo.bufferId === bufferId && memo.size === size && memo.stride === strideVal && memo.offset === offsetVal && memo.divisor === divisorVal) {
+        return;
+      }
+      vertexBindMemo.set(location2, { bufferId, size, stride: strideVal, offset: offsetVal, divisor: divisorVal });
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer ?? null);
     gl.enableVertexAttribArray(location2);
     if (!passVaoActive)
       defaultAttribBindings.set(location2, bufferId);
-    gl.vertexAttribPointer(location2, size, gl.FLOAT, false, stride ?? 0, byteOffset ?? 0);
-    gl.vertexAttribDivisor(location2, divisor ?? 0);
+    gl.vertexAttribPointer(location2, size, gl.FLOAT, false, strideVal, offsetVal);
+    gl.vertexAttribDivisor(location2, divisorVal);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
   }
   function updateBuffer(bufferId, data, byteOffset = 0) {
     gl.bindBuffer(gl.ARRAY_BUFFER, buffers.get(bufferId) ?? null);
@@ -4711,10 +4733,18 @@ function createRealGL(gl, onViewportHeal) {
       gl.uniform1f(loc, value);
   }
   function setUniform1i(programId, name, value) {
+    let perProgram = samplerUnits.get(programId);
+    if (perProgram !== undefined && perProgram.get(name) === value)
+      return;
     useProgram(programId);
     const loc = location(programId, name);
     if (loc !== null)
       gl.uniform1i(loc, value);
+    if (perProgram === undefined) {
+      perProgram = new Map;
+      samplerUnits.set(programId, perProgram);
+    }
+    perProgram.set(name, value);
   }
   function createTexture(width, height, options) {
     const texture = gl.createTexture();
@@ -4909,6 +4939,7 @@ function createRealGL(gl, onViewportHeal) {
     if (targetId === 0) {
       currentTarget = 0;
       invalidateUnitBinds();
+      invalidateVertexBinds();
       const bufferW = gl.drawingBufferWidth;
       const bufferH = gl.drawingBufferHeight;
       if (bufferW > 0 && bufferH > 0 && (bufferW !== canvasWidth || bufferH !== canvasHeight)) {
@@ -4927,6 +4958,7 @@ function createRealGL(gl, onViewportHeal) {
     if (target === undefined)
       return;
     invalidateUnitBinds();
+    invalidateVertexBinds();
     for (const [unit, boundId] of unitTextures) {
       if (boundId === target.textureId) {
         gl.activeTexture(gl.TEXTURE0 + unit);
@@ -5079,6 +5111,7 @@ function createRealGL(gl, onViewportHeal) {
     }
     gl.deleteProgram(record.program);
     programs.delete(programId);
+    samplerUnits.delete(programId);
   }
   function deleteBuffer(bufferId) {
     const buffer = buffers.get(bufferId);
@@ -5091,6 +5124,7 @@ function createRealGL(gl, onViewportHeal) {
       if (boundId === bufferId) {
         gl.disableVertexAttribArray(location2);
         defaultAttribBindings.delete(location2);
+        vertexBindMemo.delete(location2);
       }
     }
   }
@@ -9498,6 +9532,8 @@ async function createRealGPU(canvas, onGpuError) {
   const sabStaging = new Map;
   const pendingTextureIds = [];
   const dynamicOffsetScratch = new Uint32Array(1);
+  let boundGroup0Offset = -1;
+  let boundGroup1 = null;
   let timerHandle = null;
   const timerBundle = createGpuGpuTimer(device);
   const gpuTimer = timerBundle === null ? null : timerBundle.timer;
@@ -9625,6 +9661,7 @@ async function createRealGPU(canvas, onGpuError) {
       layout,
       entries: [{ binding: 0, resource: { buffer: ubo, size: uboBindingWindow } }]
     });
+    boundGroup0Offset = -1;
   }
   function ensurePipeline(pipelineId, wgsl, attrs, hasTextures, desc) {
     if (pipelineRecords[pipelineId] !== undefined)
@@ -9766,8 +9803,12 @@ async function createRealGPU(canvas, onGpuError) {
     pass?.setPipeline(pipeline);
   }
   function bindUniforms(dynamicOffset) {
+    if (pass !== null && dynamicOffset === boundGroup0Offset)
+      return;
     dynamicOffsetScratch[0] = dynamicOffset;
     pass?.setBindGroup(0, uboGroup, dynamicOffsetScratch);
+    if (pass !== null)
+      boundGroup0Offset = dynamicOffset;
   }
   function bindVertexBuffer(slot, data, _size) {
     let buffer = vertexBuffers.get(data);
@@ -9876,7 +9917,10 @@ async function createRealGPU(canvas, onGpuError) {
         }
       }
       if (same) {
-        pass.setBindGroup(1, memo.group);
+        if (boundGroup1 !== memo.group) {
+          pass.setBindGroup(1, memo.group);
+          boundGroup1 = memo.group;
+        }
         pendingTextureIds.length = 0;
         return;
       }
@@ -9914,6 +9958,7 @@ async function createRealGPU(canvas, onGpuError) {
       textureBindGroups.set(key, group);
     }
     pass.setBindGroup(1, group);
+    boundGroup1 = group;
     flushMemoBox = { pipelineId: currentPipelineId, count, ids: pendingTextureIds.slice(), group };
     pendingTextureIds.length = 0;
   }
@@ -9957,6 +10002,8 @@ async function createRealGPU(canvas, onGpuError) {
       return;
     closeComputePass();
     vertexBindMemo.length = 0;
+    boundGroup0Offset = -1;
+    boundGroup1 = null;
     if (pass !== null) {
       if (timerHandle !== null)
         timerHandle.onEndPass(pass);
@@ -10010,6 +10057,8 @@ async function createRealGPU(canvas, onGpuError) {
     pass?.end();
     pass = null;
     vertexBindMemo.length = 0;
+    boundGroup0Offset = -1;
+    boundGroup1 = null;
   }
   function submit() {
     if (encoder === null)
@@ -10045,6 +10094,8 @@ async function createRealGPU(canvas, onGpuError) {
           pass.end();
           pass = null;
           vertexBindMemo.length = 0;
+          boundGroup0Offset = -1;
+          boundGroup1 = null;
         }
         closeComputePass();
         encoder ??= device.createCommandEncoder();
@@ -10199,6 +10250,8 @@ async function createRealGPU(canvas, onGpuError) {
     computePass = null;
     computeGroup = null;
     vertexBindMemo.length = 0;
+    boundGroup0Offset = -1;
+    boundGroup1 = null;
     sabStaging.clear();
     device.destroy();
   }
