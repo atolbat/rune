@@ -753,10 +753,34 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
    *  (with a limit to guard against an infinite loop). Errors accumulated by any
    *  ops of the frame (uploads, draws, state switches) are caught here.
    *  CONTEXT_LOST_WEBGL will pass too — duplicating the listener, but earlier
-   *  (listener_async — the event is asynchronous). */
+   *  (listener_async — the event is asynchronous).
+   *  Task 167 — THE SYNC-POINT PASS: the cadence is now a health PROBE, not a
+   *  per-frame read. getError is not a passive flag peek — the driver (and
+   *  ANGLE ahead of it) must complete every already-submitted command before
+   *  it can answer, so a once-per-frame drain is a forced FULL PIPELINE FLUSH
+   *  in the middle of the frame loop: a documented Chrome/ANGLE performance
+   *  anti-pattern (the WebGL best-practices guidance says to keep getError
+   *  out of hot paths). A live CDP profile of the GPU-Embers TF tier showed
+   *  84.6% of ALL sampled CPU time sitting blocked inside this one call (the
+   *  whole frame's ~170 TF passes + draws execute during the wait). The
+   *  trade of the probe cadence is honest because the GL error flag is
+   *  STICKY: an error sits set until getError retrieves it, and while one is
+   *  pending NEW errors are DISCARDED (GLES semantics) — a probe every 8th
+   *  frame still surfaces the FIRST error of its window; only the exact code
+   *  of a second, DIFFERENT error within the same window can coalesce away.
+   *  When a probe (or the dispose drain) finds anything, the cadence snaps to
+   *  EVERY FRAME (hunting mode) until a clean drain — the full diagnostic
+   *  precision of the old behavior exactly when it matters, and 1/8th of its
+   *  flush cost when it does not. (The container cannot measure the speed
+   *  delta honestly — llvmpipe executes the TF tier so slowly that
+   *  run-to-run variance swamps the signal; the mechanism, the profile, and
+   *  the sticky-flag semantics are what carry the change.) */
   let lastGlErrorKey = ''
+  let drainTick = 0
+  let drainHunting = false
   function drainGlErrors(): void {
     if (rawContext === null) return // headless facade injection — no raw context
+    if (!drainHunting && (++drainTick & 7) !== 0) return // probe cadence: every 8th frame
     const codes: number[] = []
     for (let i = 0; i < 16; i++) {
       const code = rawContext.getError()
@@ -765,9 +789,13 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     }
     if (codes.length === 0) {
       lastGlErrorKey = ''
+      drainHunting = false
       return
     }
     const key = codes.join(',')
+    // An error is live — hunting mode: every frame drains until clean (the
+    // spam guard below keeps the report single-shot per distinct code set).
+    drainHunting = true
     if (key === lastGlErrorKey) return // do not spam the same error every frame
     lastGlErrorKey = key
     const described = codes.map(c => `${glErrorName(c)} (0x${c.toString(16)})`).join(', ')
@@ -884,6 +912,18 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
       // OUR listener first: the intentional loss below must not fire the
       // "context lost" report from THIS (already disposed) renderer.
       try { (canvas as HTMLCanvasElement).removeEventListener?.('webglcontextlost', onContextLost) } catch { /* best-effort */ }
+      // Task 167 — the final drain: the last frames before dispose may carry
+      // an undrained error (the probe cadence). ONE getError right here — the
+      // flush cost is irrelevant at teardown, the diagnostic hole is not.
+      // try/catch: a partial/lost raw context must not break the teardown.
+      try {
+        const code = rawContext.getError()
+        if (code !== 0 && String(code) !== lastGlErrorKey) {
+          // (the key check: an error already reported in hunting mode does
+          // not repeat — the dispose drain only surfaces NEW flags)
+          options.onGlError?.(`GL error: ${glErrorName(code)} (0x${code.toString(16)}) — drained at dispose (an error accumulated in the renderer's final frames)`)
+        }
+      } catch { /* best-effort */ }
       try {
         const lose = (rawContext as unknown as { getExtension?: (name: string) => { loseContext?: () => void } | null })
           .getExtension?.('WEBGL_lose_context')

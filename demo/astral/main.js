@@ -21,9 +21,9 @@
 //   • uniforms through the shared arena (mat4 cameras, per-pass fades),
 //     instance-step attributes with interleaved 64-byte records.
 //
-// The dist import carries the stale-cache guard: rune.esm.js is at ?v=165.
+// The dist import carries the stale-cache guard: rune.esm.js is at ?v=167.
 
-import { createRenderer } from '../../dist/rune.esm.js?v=165'
+import { createRenderer } from '../../dist/rune.esm.js?v=167'
 import {
   generateWorld, stepWorld, orderShip, queueBuilding, queueShip, shipName,
   OWNER, SHIPS, lanePath,

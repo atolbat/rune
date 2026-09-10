@@ -1214,8 +1214,21 @@ export function createRealGL(
   }
 
   function drawArrays(mode: string, first: number, count: number, instances: number): void {
-    if (instances > 1) gl.drawArraysInstanced(mode === 'triangles' ? gl.TRIANGLES : gl.TRIANGLES, first, count, instances)
-    else gl.drawArrays(gl.TRIANGLES, first, count)
+    // Task 167 — the mode mapping: 'lines' / 'points' / 'triangle-strip'
+    // were silently drawn as TRIANGLES — the PrimitiveKind type promised
+    // them, the switch delivered triangles for all four (the ternary's both
+    // branches were gl.TRIANGLES — a copy-paste fossil). The executor today
+    // only emits 'triangles', so nobody's pixels change; the facade becomes
+    // honest for the day a line/point soup is recorded.
+    const target = mode === 'lines'
+      ? gl.LINES
+      : mode === 'points'
+        ? gl.POINTS
+        : mode === 'triangle-strip'
+          ? gl.TRIANGLE_STRIP
+          : gl.TRIANGLES
+    if (instances > 1) gl.drawArraysInstanced(target, first, count, instances)
+    else gl.drawArrays(target, first, count)
   }
 
   // ─── Disposal: explicit release of the GPU resource ───

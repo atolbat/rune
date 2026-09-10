@@ -5060,10 +5060,11 @@ function createRealGL(gl, onViewportHeal) {
     }
   }
   function drawArrays(mode, first, count, instances) {
+    const target = mode === "lines" ? gl.LINES : mode === "points" ? gl.POINTS : mode === "triangle-strip" ? gl.TRIANGLE_STRIP : gl.TRIANGLES;
     if (instances > 1)
-      gl.drawArraysInstanced(mode === "triangles" ? gl.TRIANGLES : gl.TRIANGLES, first, count, instances);
+      gl.drawArraysInstanced(target, first, count, instances);
     else
-      gl.drawArrays(gl.TRIANGLES, first, count);
+      gl.drawArrays(target, first, count);
   }
   function deleteTexture(textureId) {
     const texture = textures.get(textureId);
@@ -8502,8 +8503,12 @@ function createWebGL2Renderer(options) {
     });
   }
   let lastGlErrorKey = "";
+  let drainTick = 0;
+  let drainHunting = false;
   function drainGlErrors() {
     if (rawContext === null)
+      return;
+    if (!drainHunting && (++drainTick & 7) !== 0)
       return;
     const codes = [];
     for (let i = 0;i < 16; i++) {
@@ -8514,9 +8519,11 @@ function createWebGL2Renderer(options) {
     }
     if (codes.length === 0) {
       lastGlErrorKey = "";
+      drainHunting = false;
       return;
     }
     const key = codes.join(",");
+    drainHunting = true;
     if (key === lastGlErrorKey)
       return;
     lastGlErrorKey = key;
@@ -8600,6 +8607,12 @@ function createWebGL2Renderer(options) {
     if (rawContext !== null) {
       try {
         canvas.removeEventListener?.("webglcontextlost", onContextLost);
+      } catch {}
+      try {
+        const code = rawContext.getError();
+        if (code !== 0 && String(code) !== lastGlErrorKey) {
+          options.onGlError?.(`GL error: ${glErrorName(code)} (0x${code.toString(16)}) — drained at dispose (an error accumulated in the renderer's final frames)`);
+        }
       } catch {}
       try {
         const lose = rawContext.getExtension?.("WEBGL_lose_context");
@@ -9740,7 +9753,7 @@ async function createRealGPU(canvas, onGpuError) {
         }]
       },
       primitive: {
-        topology: desc.primitive === "triangle-strip" ? "triangle-strip" : "triangle-list",
+        topology: desc.primitive === "triangle-strip" ? "triangle-strip" : desc.primitive === "lines" ? "line-list" : desc.primitive === "points" ? "point-list" : "triangle-list",
         cullMode: desc.raster?.cull === "back" || desc.raster?.cull === "front" ? desc.raster.cull : "none",
         frontFace: desc.raster?.frontFace === "cw" ? "cw" : "ccw"
       },

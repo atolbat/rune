@@ -581,7 +581,18 @@ export async function createRealGPU(
       // compare:'always' (we keep the format to avoid spawning a second
       // branch of depth-less passes).
       primitive: {
-        topology: desc.primitive === 'triangle-strip' ? 'triangle-strip' : 'triangle-list',
+        // Task 167 — the topology mapping twin: 'lines'/'points' were
+        // silently drawn as triangle-list (the GL-side fossil's twin — the
+        // PrimitiveKind type promised them; only 'triangle-strip' was
+        // honored). Nothing in the repo records a line/point pipeline
+        // today, so nobody's pixels change.
+        topology: desc.primitive === 'triangle-strip'
+          ? 'triangle-strip'
+          : desc.primitive === 'lines'
+            ? 'line-list'
+            : desc.primitive === 'points'
+              ? 'point-list'
+              : 'triangle-list',
         cullMode: desc.raster?.cull === 'back' || desc.raster?.cull === 'front' ? desc.raster.cull : 'none',
         frontFace: desc.raster?.frontFace === 'cw' ? 'cw' : 'ccw',
       },

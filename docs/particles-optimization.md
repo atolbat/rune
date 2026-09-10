@@ -2074,3 +2074,78 @@ A-B-A re-bind).
 Gates: 1740/1740 tests (was 1723, +17), typecheck at the 6-error baseline,
 lint 0 errors, dist rebuilt, demo:smoke 24/24, task164-steady both cells PASS.
 Cache-busts: `?v=165` (gpuEmbers.js, main.js, index.html).
+
+## Task 167 — THE SYNC-POINT PASS
+
+The audit that opened this pass profiled a live frame with Chrome's CDP
+sampling profiler (the GPU-Embers TF tier, WebGL2, 16k container patch) and
+found a single leaf dominating everything: **84.6% of all sampled CPU time
+sitting blocked inside `getError`** — the Task-69 error drain at the end of
+`step()`. Everything else the Tasks-143..165 passes had been shaving
+(memos, skips, caches) was noise next to it.
+
+**Why it blocks.** `getError` is not a passive flag peek: the driver (and
+ANGLE ahead of it) must complete every already-submitted command before it
+can answer, so the call is a forced full-pipeline flush. A once-per-frame
+drain means the CPU serializes against the GPU's entire backlog once per
+frame — precisely the WebGL hot-path anti-pattern the Chrome best-practices
+guidance warns about. The TF tier's ~170 transform-feedback passes per frame
+all execute inside that one wait.
+
+**The fix — the probe cadence.** `drainGlErrors` now runs as a health PROBE
+every 8th frame instead of every frame:
+
+- **The error flag is sticky** (GLES semantics: an error sits set until
+  `getError` retrieves it; new errors are DISCARDED while one pends) — a
+  probe every 8th frame still surfaces the FIRST error of its window. Only
+  the exact code of a second, DIFFERENT error inside the same window can
+  coalesce away.
+- **Hunting mode**: when a probe finds an error, the cadence snaps back to
+  every frame until a clean drain — the old diagnostic precision exactly
+  when it matters. The existing key-set spam guard keeps reports single-shot.
+- **The dispose drain**: `dispose()` performs one final `getError` before
+  `WEBGL_lose_context` — a tail error raised after the last probe still
+  surfaces at teardown (the flush cost is irrelevant there; the diagnostic
+  hole is not). An error already reported by a probe does not repeat.
+- **Headless parity**: an injected facade (`rawContext === null`) never
+  touches `getError` — the historical contract, unchanged.
+
+**The honest measurement caveat.** The container CANNOT demonstrate the
+speed delta cleanly: llvmpipe executes the TF tier so slowly that
+run-to-run variance (6-20× on byte-identical builds) swamps any A/B signal —
+single-window frame counts here are lottery tickets. What carries the change
+is the mechanism (one forced flush per frame for a diagnostic read, gone to
+1/8th the frequency), the profile (the 84.6% blocked share), and the
+sticky-flag semantics (detection value preserved). On real hardware — where
+the CPU is not 800ms-per-frame behind — the win is the standard one for
+removing redundant sync points: the submission path stops serializing
+against the GPU once per frame, and the necessary sync remains where it
+belongs (the compositor's present).
+
+**The same pass, two smaller fixes:**
+
+- **`drawArrays` mode mapping** (`webgl2/realGL.ts`): `'lines'` /
+  `'points'` / `'triangle-strip'` were silently drawn as TRIANGLES — the
+  mode ternary's both branches read `gl.TRIANGLES` (a copy-paste fossil);
+  the `PrimitiveKind` type promised all four. The executor only emits
+  `'triangles'` today, so nobody's pixels change — the facade becomes
+  honest for the day a line/point soup is recorded. The WebGPU twin maps
+  `desc.primitive` to `line-list` / `point-list` the same way.
+
+Pinned by `packages/gl/tests/task167.test.ts` (6 pins: the probe cadence —
+getError called exactly once per 8 frames on a healthy page; the sticky flag
+— an error raised in frame 1 surfaces at the frame-8 probe; hunting mode —
+an error snaps the drain to per-frame, the clean drain disarms it, the tick
+gate resumes; the spam guard — a persistent storm reports once, a different
+code later reports anew; the dispose drain — a tail error surfaces at
+dispose, an already-reported one does not; headless parity — an injected
+facade never calls getError), `packages/webgl2/tests/task167.test.ts` (5
+pins: all four primitive modes reach their GL enums, instanced included),
+and `scripts/task167-syncpoint.mjs` (the LIVE contract gate: GPU Embers on
+WebGL2 with the new dist — the loop advances, 25+ probe drains ran during
+the walk, zero page errors, the population in a sane band; the cadence
+arithmetic is pinned exactly on the mock, the live gate pins survival).
+
+Gates: 1751/1751 tests (was 1740, +11), typecheck at the 6-error baseline,
+lint 0 errors, dist rebuilt, demo:smoke 24/24, task167-syncpoint PASS.
+Cache-busts: `?v=167` (gpuEmbers.js, main.js, index.html, astral/main.js).
