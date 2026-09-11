@@ -32,26 +32,32 @@ import {
   shipShader, planetShader, pringShader, ringShader, territoryShader, blackholeShader,
   MVP, VIEW, PROJ, RIGHT, UP, PXK, LINEK, YAW, CLOCK, FADE, GALAXY_FADE, NEB_FADE, SHIP_CAP,
   SPLIT, SKY_CENTER, SKY_HALF, SKY_U0, SKY_WIN, SKY_GAIN,
-} from './shaders.js?v=4'
-import { BUILDINGS, buildTime, GALAXY_RADIUS, OWNER } from './galaxy.js?v=2'
-import { makeTextures } from './textures.js?v=2'
+} from './shaders.js?v=5'
+import { BUILDINGS, buildTime, GALAXY_RADIUS, OWNER } from './galaxy.js?v=3'
+import { makeTextures } from './textures.js?v=3'
+import { createPostChain } from './post.js?v=1'
 
 export const RECORD_FLOATS = 16 // 64-byte stride (pos vec3@0, meta@16, color@32, state@48)
-export const SOUP_FLOATS = 8    // 32-byte stride: pos vec2@0, dir vec2@8, color vec4@16
+export const SOUP_FLOATS = 9    // 36-byte stride: pos vec2@0, dir vec2@8, color vec4@16, t@32
 
 const MAX_SHIPS = 128
 const MAX_RINGS = 32
 const MAX_PLANETS = 16 // the sun + planets of one system
 const MAX_PRINGS = 8   // ringed gas giants of one system
 const MAX_BHS = 4      // the black-hole landmarks
-const BG_STARS_BRIGHT = 600
-const BG_STARS_MICRO = 900
+const BG_STARS_BRIGHT = 900
+const BG_STARS_MICRO = 1100
 const BG_STARS = BG_STARS_BRIGHT + BG_STARS_MICRO
 const ORBIT_SEGMENTS = 56
 const MAX_ORBIT_RINGS = 7
-// darker than the old glow: in the Stellaris read the galaxy disc is a
-// whisper — the star population itself carries the arms
-const HAZE_GAIN = [0.42]
+// the bezier bake: each hyperlane becomes a quadratic curve with a
+// perpendicular sag (6–12% of the lane length, seeded) — organic Stellaris
+// hyperlane arcs, never ruler-straight graph edges
+const LANE_SEGS = 8
+// the beauty pass: the spiral disc GLOWS again — with the arm color story
+// baked into the texture (teal→violet→ember zones + HII knots) and the
+// bloom chain lifting the arms, the galaxy reads as a luminous colored disc
+const HAZE_GAIN = [0.34]
 
 // ── the empire territory field (the Stellaris border bake) ──
 // 256² RGBA over the galaxy plane; R = the player's metaball sum, G = the
@@ -71,10 +77,19 @@ const TILE = { rock: 0, gas: 1, ice: 2, lava: 3, garden: 4, sun: 5 }
 // the fetched-bitmap cache (survives backend re-boots — the fetches run once)
 const bitmapCache = new Map()
 
-export function createGameRender(renderer, world, shell) {
+export function createGameRender(renderer, world, shell, canvas) {
   const isGL = renderer.backend === 'webgl2'
   const gl = isGL ? renderer.inner.gl : null
   const gpu = isGL ? null : renderer.inner.gpu
+
+  // THE POST CHAIN — the whole scene renders into a surface, then bloom +
+  // grade + vignette composite to the canvas (see post.js). The chain reads
+  // the DRAWING BUFFER size off the canvas (the authoritative source — the
+  // renderer's resize self-heals to it too)
+  const post = createPostChain(renderer)
+  const bufferSize = () => (canvas !== undefined && canvas.width > 0
+    ? [canvas.width, canvas.height]
+    : [Math.round(800 * (globalThis.devicePixelRatio ?? 1)), Math.round(600 * (globalThis.devicePixelRatio ?? 1))])
 
   // ── the instance record arrays (stable identities — the WG data-keyed cache) ──
   const sysRecords = new Float32Array(world.systems.length * RECORD_FLOATS)
@@ -85,23 +100,30 @@ export function createGameRender(renderer, world, shell) {
   const ringRecords = new Float32Array(MAX_RINGS * RECORD_FLOATS)
   const bhRecords = new Float32Array(MAX_BHS * RECORD_FLOATS)
 
-  // ── the nebulas (baked placement, three texture variants) ──
-  // the Stellaris pass: seven painterly washes — teal, dusty violet and ember
-  // drift below the plane, giving the dark sky its color story
+  // ── the nebulas (baked placement, four texture variants) ──
+  // THE BEAUTY PASS: ten painterly washes — teal, dusty violet, ember and
+  // crimson drift below the plane, brighter and bolder (the bloom chain
+  // carries their hot tips into glow)
   const NEBS = [
-    { ang: 0.55, dist: 1080, z: -430, size: 1500, rot: 1.2, spin: 0.010, alpha: 0.60, tex: 0 },
-    { ang: 2.45, dist: 720, z: -270, size: 1150, rot: 2.8, spin: -0.008, alpha: 0.52, tex: 1 },
-    { ang: 4.35, dist: 950, z: -560, size: 1680, rot: 0.4, spin: 0.007, alpha: 0.46, tex: 2 },
-    { ang: 5.55, dist: 1550, z: -720, size: 1950, rot: 4.0, spin: -0.005, alpha: 0.40, tex: 0 },
-    { ang: 1.45, dist: 1350, z: -980, size: 2300, rot: 2.1, spin: 0.004, alpha: 0.30, tex: 1 },
-    { ang: 3.55, dist: 1180, z: -820, size: 1750, rot: 5.2, spin: -0.006, alpha: 0.34, tex: 2 },
-    { ang: 0.15, dist: 800, z: -600, size: 1350, rot: 0.9, spin: 0.006, alpha: 0.30, tex: 0 },
+    { ang: 0.55, dist: 1080, z: -430, size: 1500, rot: 1.2, spin: 0.010, alpha: 0.42, tex: 0 },
+    { ang: 2.45, dist: 720, z: -270, size: 1150, rot: 2.8, spin: -0.008, alpha: 0.38, tex: 1 },
+    { ang: 4.35, dist: 950, z: -560, size: 1680, rot: 0.4, spin: 0.007, alpha: 0.34, tex: 2 },
+    { ang: 5.55, dist: 1550, z: -720, size: 1950, rot: 4.0, spin: -0.005, alpha: 0.32, tex: 3 },
+    { ang: 1.45, dist: 1350, z: -980, size: 2300, rot: 2.1, spin: 0.004, alpha: 0.26, tex: 1 },
+    { ang: 3.55, dist: 1180, z: -820, size: 1750, rot: 5.2, spin: -0.006, alpha: 0.28, tex: 0 },
+    { ang: 0.15, dist: 800, z: -600, size: 1350, rot: 0.9, spin: 0.006, alpha: 0.24, tex: 3 },
+    { ang: 2.05, dist: 1420, z: -880, size: 2100, rot: 3.3, spin: -0.007, alpha: 0.23, tex: 2 },
+    { ang: 5.05, dist: 640, z: -320, size: 1050, rot: 1.7, spin: 0.009, alpha: 0.22, tex: 0 },
+    { ang: 3.85, dist: 1690, z: -1040, size: 2400, rot: 0.8, spin: 0.005, alpha: 0.20, tex: 1 },
   ]
-  const nebRecords = [0, 1, 2].map(() => new Float32Array(3 * RECORD_FLOATS))
-  const nebCounts = [0, 0, 0]
+  const nebRecords = [0, 1, 2, 3].map(() => new Float32Array(3 * RECORD_FLOATS))
+  const nebCounts = [0, 0, 0, 0]
 
   // ── the soups ──
-  const laneSoup = new Float32Array(world.lanes.length * 6 * SOUP_FLOATS)
+  // THE LANE SOUP GROWS: the new 36-byte layout adds the along-lane
+  // parameter t (the flow-pulse coordinate); the lanes are BAKED AS
+  // QUADRATIC BÉZIERS (LANE_SEGS subdivisions, a seeded perpendicular sag)
+  const laneSoup = new Float32Array(world.lanes.length * LANE_SEGS * 6 * SOUP_FLOATS)
   const orbitSoup = new Float32Array(MAX_ORBIT_RINGS * ORBIT_SEGMENTS * 6 * SOUP_FLOATS)
   const hazeSoup = new Float32Array(6 * 4)   // pos vec2 + uv vec2
   const terrSoup = new Float32Array(6 * 4)   // the territory quad (the haze layout)
@@ -160,7 +182,7 @@ export function createGameRender(renderer, world, shell) {
   hazeTex.upload(tex.haze.data)
   const skyTex = renderer.texture(1024, 512)
   skyTex.upload(skyData)
-  const nebTexs = [tex.nebula0, tex.nebula1, tex.nebula2].map(t => {
+  const nebTexs = [tex.nebula0, tex.nebula1, tex.nebula2, tex.nebula3].map(t => {
     const h = renderer.texture(t.width, t.height)
     h.upload(t.data)
     return h
@@ -182,7 +204,7 @@ export function createGameRender(renderer, world, shell) {
       prings: gl.createBuffer(pringRecords, 'dynamic'),
       rings: gl.createBuffer(ringRecords, 'dynamic'),
       bhs: gl.createBuffer(bhRecords, 'dynamic'),
-      nebs: nebRecords.map(r => gl.createBuffer(r)),
+      nebs: [0, 1, 2, 3].map(i => gl.createBuffer(nebRecords[i])),
       lanes: null, // static — created after the bake
       orbits: gl.createBuffer(orbitSoup, 'dynamic'),
       haze: gl.createBuffer(hazeSoup),
@@ -235,10 +257,13 @@ export function createGameRender(renderer, world, shell) {
     nebCounts[neb.tex] = n + 1
   }
 
-  // the lane soup (centerline + unit perpendicular — the shader expands)
-  // the Stellaris read: hyperlanes are thin TEAL threads (RGB 80,200,190 at
-  // ~50% opacity) — a desaturated cyan that reads as technology, not decoration
+  // the lane soup (centerline + unit perpendicular + the along-lane t —
+  // the shader expands and pulses). THE BEAUTY PASS: every hyperlane is a
+  // QUADRATIC BÉZIER with a seeded perpendicular sag — the arc reads organic
+  // (the Stellaris hyperlane sweep), never a ruler-straight graph edge.
+  // the Stellaris read: hyperlanes are TEAL threads with a traveling pulse
   {
+    const rngL = mulberry(0x1ace ^ world.seed)
     for (const lane of world.lanes) {
       const A = world.systems[lane.a]
       const B = world.systems[lane.b]
@@ -247,20 +272,56 @@ export function createGameRender(renderer, world, shell) {
       const len = Math.hypot(dx, dy) || 1
       const nx = -dy / len
       const ny = dx / len
-      const alpha = 0.42
-      const cr = 0.30 * alpha
-      const cg = 0.76 * alpha
-      const cb = 0.71 * alpha
-      const quad = [
-        A.x, A.y, -nx, -ny, cr, cg, cb, alpha,
-        B.x, B.y, -nx, -ny, cr, cg, cb, alpha,
-        B.x, B.y, nx, ny, cr, cg, cb, alpha,
-        A.x, A.y, -nx, -ny, cr, cg, cb, alpha,
-        B.x, B.y, nx, ny, cr, cg, cb, alpha,
-        A.x, A.y, nx, ny, cr, cg, cb, alpha,
-      ]
-      laneSoup.set(quad, laneVerts * SOUP_FLOATS)
-      laneVerts += 6
+      // the control point: the midpoint pushed perpendicular by 6–12% of
+      // the length (the sign seeded per lane — the arcs never all bow one way)
+      const sag = (0.06 + rngL() * 0.06) * len * (rngL() < 0.5 ? -1 : 1)
+      const cx = (A.x + B.x) / 2 + nx * sag
+      const cy = (A.y + B.y) / 2 + ny * sag
+      const alpha = 0.36
+      const cr = 0.42 * alpha
+      const cg = 0.88 * alpha
+      const cb = 0.80 * alpha
+      for (let s = 0; s < LANE_SEGS; s++) {
+        const q0 = s / LANE_SEGS
+        const q1 = (s + 1) / LANE_SEGS
+        // the bezier point + tangent at each end of the segment
+        const bez = (q, out) => {
+          const u = 1 - q
+          out[0] = u * u * A.x + 2 * u * q * cx + q * q * B.x
+          out[1] = u * u * A.y + 2 * u * q * cy + q * q * B.y
+          // the tangent (derivative), normalized → the segment perpendicular
+          let tx = 2 * u * (cx - A.x) + 2 * q * (B.x - cx)
+          let ty = 2 * u * (cy - A.y) + 2 * q * (B.y - cy)
+          const tl = Math.hypot(tx, ty) || 1
+          out[2] = -ty / tl
+          out[3] = tx / tl
+        }
+        const e0 = [0, 0, 0, 0]
+        const e1 = [0, 0, 0, 0]
+        bez(q0, e0)
+        bez(q1, e1)
+        // two triangles: (e0-, e1-, e1+) and (e0-, e1+, e0+), the dir
+        // carrying the edge side; t = the CURVE parameter (the pulse)
+        const put = (e, side, t) => {
+          const v = laneVerts * SOUP_FLOATS
+          laneSoup[v] = e[0]
+          laneSoup[v + 1] = e[1]
+          laneSoup[v + 2] = e[2] * side
+          laneSoup[v + 3] = e[3] * side
+          laneSoup[v + 4] = cr
+          laneSoup[v + 5] = cg
+          laneSoup[v + 6] = cb
+          laneSoup[v + 7] = alpha
+          laneSoup[v + 8] = t
+          laneVerts++
+        }
+        put(e0, -1, q0)
+        put(e1, -1, q1)
+        put(e1, 1, q1)
+        put(e0, -1, q0)
+        put(e1, 1, q1)
+        put(e0, 1, q0)
+      }
     }
     if (isGL) glDyn.lanes = gl.createBuffer(laneSoup)
   }
@@ -356,7 +417,7 @@ export function createGameRender(renderer, world, shell) {
     instances: (p) => p.count,
   })
 
-  const cmdNebs = [0, 1, 2].map(i => renderer.command({
+  const cmdNebs = [0, 1, 2, 3].map(i => renderer.command({
     shader: { glsl: nebulaShader.glsl, wgsl: nebulaShader.wgsl },
     pipeline: { depth: false, blend: { src: 'one', dst: 'one' } },
     attributes: instanceAttrs(nebRecords[i], glDyn?.nebs[i]),
@@ -410,16 +471,19 @@ export function createGameRender(renderer, world, shell) {
     shader: { glsl: laneShader.glsl, wgsl: laneShader.wgsl },
     pipeline: { depth: false, cull: 'none', blend: { src: 'one', dst: 'one-minus-src-alpha' } },
     attributes: {
-      a_pos: { data: laneSoup, size: 2, stride: 32, offset: 0, ...(isGL ? { bufferId: glDyn.lanes } : {}) },
-      a_dir: { data: laneSoup, size: 2, stride: 32, offset: 8, ...(isGL ? { bufferId: glDyn.lanes } : {}) },
-      a_color: { data: laneSoup, size: 4, stride: 32, offset: 16, ...(isGL ? { bufferId: glDyn.lanes } : {}) },
+      a_pos: { data: laneSoup, size: 2, stride: 36, offset: 0, ...(isGL ? { bufferId: glDyn.lanes } : {}) },
+      a_dir: { data: laneSoup, size: 2, stride: 36, offset: 8, ...(isGL ? { bufferId: glDyn.lanes } : {}) },
+      a_color: { data: laneSoup, size: 4, stride: 36, offset: 16, ...(isGL ? { bufferId: glDyn.lanes } : {}) },
+      a_t: { data: laneSoup, size: 1, stride: 36, offset: 32, ...(isGL ? { bufferId: glDyn.lanes } : {}) },
     },
     uniforms: {
       u_view: () => VIEW,
       u_proj: () => PROJ,
       u_linek: () => LINEK,
-      u_width: [1.1],
+      u_width: [1.15],
       u_fade: () => GALAXY_FADE,
+      u_time: () => CLOCK,
+      u_pulse: [0.28],
     },
     count: (p) => p.count,
   })
@@ -428,9 +492,10 @@ export function createGameRender(renderer, world, shell) {
     shader: { glsl: laneShader.glsl, wgsl: laneShader.wgsl },
     pipeline: { depth: false, cull: 'none', blend: { src: 'one', dst: 'one-minus-src-alpha' } },
     attributes: {
-      a_pos: { data: orbitSoup, size: 2, stride: 32, offset: 0, ...(isGL ? { bufferId: glDyn.orbits } : {}) },
-      a_dir: { data: orbitSoup, size: 2, stride: 32, offset: 8, ...(isGL ? { bufferId: glDyn.orbits } : {}) },
-      a_color: { data: orbitSoup, size: 4, stride: 32, offset: 16, ...(isGL ? { bufferId: glDyn.orbits } : {}) },
+      a_pos: { data: orbitSoup, size: 2, stride: 36, offset: 0, ...(isGL ? { bufferId: glDyn.orbits } : {}) },
+      a_dir: { data: orbitSoup, size: 2, stride: 36, offset: 8, ...(isGL ? { bufferId: glDyn.orbits } : {}) },
+      a_color: { data: orbitSoup, size: 4, stride: 36, offset: 16, ...(isGL ? { bufferId: glDyn.orbits } : {}) },
+      a_t: { data: orbitSoup, size: 1, stride: 36, offset: 32, ...(isGL ? { bufferId: glDyn.orbits } : {}) },
     },
     uniforms: {
       u_view: () => VIEW,
@@ -438,6 +503,8 @@ export function createGameRender(renderer, world, shell) {
       u_linek: () => LINEK,
       u_width: [2.2],
       u_fade: () => FADE,
+      u_time: () => CLOCK,
+      u_pulse: [0.06],
     },
     count: (p) => p.count,
   })
@@ -583,7 +650,13 @@ export function createGameRender(renderer, world, shell) {
       sysRecords[at + F.color] = c[0]
       sysRecords[at + F.color + 1] = c[1]
       sysRecords[at + F.color + 2] = c[2]
-      sysRecords[at + F.color + 3] = sys.planets.length > 0 ? 1.0 : 0.55
+      // THE HIERARCHY (the VLM read: "when everything glows with equal
+      // intensity, nothing feels important"): the brightness rides the
+      // class size — an O giant blazes (spikes + bloom), an M dwarf is a
+      // quiet point; planets and ownership add weight. The bloom threshold
+      // does the rest: dim stars never bloom, capitals do
+      const sizeW = 0.16 + Math.min(1, sys.cls.size / 15) * 0.84
+      sysRecords[at + F.color + 3] = sizeW * (sys.planets.length > 0 ? 1.0 : 0.6)
       sysRecords[at + F.state] = sys.owner
       sysRecords[at + F.state + 1] = sys.id === selectedSystem ? 1 : 0
       sysRecords[at + F.state + 2] = sys.colonizing !== null ? sys.colonizing.progress : 0
@@ -685,7 +758,12 @@ export function createGameRender(renderer, world, shell) {
       const tint = settlement ? [0.98, 0.99, 1.0] : [pc[0] * 0.5 + 0.5, pc[1] * 0.5 + 0.5, pc[2] * 0.5 + 0.5]
       planetRecords[at + F.pos] = sys.x
       planetRecords[at + F.pos + 1] = sys.y
-      planetRecords[at + F.meta] = planet.size * 0.5 * 1.55 // the visual scale (bigger, textured discs)
+      // THE SCALE: bigger, textured discs (the VLM read: "billiard
+      // balls" — at the old scale the procedural surface detail was
+      // invisible; ~1.9× reads as WORLDS, and the atmosphere shell +
+      // specular + city lights have room to show)
+      const visScale = planet.size * 0.5 * 1.9
+      planetRecords[at + F.meta] = visScale
       planetRecords[at + F.meta + 1] = planet.orbit
       planetRecords[at + F.color] = tint[0] * jitter
       planetRecords[at + F.color + 1] = tint[1] * jitter
@@ -698,7 +776,7 @@ export function createGameRender(renderer, world, shell) {
       // a ringed gas giant
       if (planet.type.key === 'gas' && planet.size >= 1.35 && prings < MAX_PRINGS) {
         const prAt = prings * RECORD_FLOATS
-        const r = planet.size * 0.5 * 1.55
+        const r = planet.size * 0.5 * 1.9
         pringRecords[prAt + F.pos] = sys.x
         pringRecords[prAt + F.pos + 1] = sys.y
         pringRecords[prAt + F.meta] = r * 1.45
@@ -722,12 +800,13 @@ export function createGameRender(renderer, world, shell) {
 
   function bakeOrbits(sys) {
     // the Stellaris read: orbit rings are quiet TEAL threads (the lane
-    // family), a hair brighter than the old grey
-    const alpha = 0.2
-    const rgb = 0.45 * alpha
-    const rgbG = 0.6 * alpha
-    const rgbB = 0.58 * alpha
-    const put = (x, y, dx, dy) => {
+    // family) with a SLOW pulse crawling around them (u_pulse 0.06 — a
+    // planet's system feels alive even when nothing moves)
+    const alpha = 0.3
+    const rgb = 0.5 * alpha
+    const rgbG = 0.62 * alpha
+    const rgbB = 0.60 * alpha
+    const put = (x, y, dx, dy, t) => {
       const v = orbitVerts * SOUP_FLOATS
       orbitSoup[v] = x
       orbitSoup[v + 1] = y
@@ -737,6 +816,7 @@ export function createGameRender(renderer, world, shell) {
       orbitSoup[v + 5] = rgbG
       orbitSoup[v + 6] = rgbB
       orbitSoup[v + 7] = alpha
+      orbitSoup[v + 8] = t
       orbitVerts++
     }
     let rings = 0
@@ -754,12 +834,12 @@ export function createGameRender(renderer, world, shell) {
         const tx = x1 - x0, ty = y1 - y0
         const tl = Math.hypot(tx, ty) || 1
         const nx = -ty / tl, ny = tx / tl
-        put(x0, y0, -nx, -ny)
-        put(x1, y1, -nx, -ny)
-        put(x1, y1, nx, ny)
-        put(x0, y0, -nx, -ny)
-        put(x1, y1, nx, ny)
-        put(x0, y0, nx, ny)
+        put(x0, y0, -nx, -ny, s / ORBIT_SEGMENTS)
+        put(x1, y1, -nx, -ny, (s + 1) / ORBIT_SEGMENTS)
+        put(x1, y1, nx, ny, (s + 1) / ORBIT_SEGMENTS)
+        put(x0, y0, -nx, -ny, s / ORBIT_SEGMENTS)
+        put(x1, y1, nx, ny, (s + 1) / ORBIT_SEGMENTS)
+        put(x0, y0, nx, ny, s / ORBIT_SEGMENTS)
       }
       rings++
     }
@@ -775,7 +855,7 @@ export function createGameRender(renderer, world, shell) {
         const ang = planet.phase + CLOCK[0] * planet.speed
         const px = view.system.x + Math.cos(ang) * planet.orbit
         const py = view.system.y + Math.sin(ang) * planet.orbit
-        n = writeRing(n, px, py, planet.size * 0.5 * 1.55 * 1.9, [0.45, 1.0, 0.88, 1], 0, 0, 1, CLOCK[0])
+        n = writeRing(n, px, py, planet.size * 0.5 * 1.9 * 1.9, [0.45, 1.0, 0.88, 1], 0, 0, 1, CLOCK[0])
       }
     }
     // the world effects
@@ -944,13 +1024,13 @@ export function createGameRender(renderer, world, shell) {
     if (!staticUploaded) {
       if (isGL) {
         gl.updateBuffer(glDyn.bg, bgRecords)
-        for (let i = 0; i < 3; i++) gl.updateBuffer(glDyn.nebs[i], nebRecords[i].subarray(0, nebCounts[i] * RECORD_FLOATS))
+        for (let i = 0; i < 4; i++) gl.updateBuffer(glDyn.nebs[i], nebRecords[i].subarray(0, nebCounts[i] * RECORD_FLOATS))
         gl.updateBuffer(glDyn.haze, hazeSoup)
         gl.updateBuffer(glDyn.terr, terrSoup)
         gl.updateBuffer(glDyn.sky, skySoup)
       } else {
         gpu.syncVertexBuffer(bgRecords, bgRecords.length * 4)
-        for (let i = 0; i < 3; i++) gpu.syncVertexBuffer(nebRecords[i], nebCounts[i] * RECORD_FLOATS * 4)
+        for (let i = 0; i < 4; i++) gpu.syncVertexBuffer(nebRecords[i], nebCounts[i] * RECORD_FLOATS * 4)
         gpu.syncVertexBuffer(hazeSoup, hazeSoup.length * 4)
         gpu.syncVertexBuffer(terrSoup, terrSoup.length * 4)
         gpu.syncVertexBuffer(skySoup, skySoup.length * 4)
@@ -965,23 +1045,29 @@ export function createGameRender(renderer, world, shell) {
       if (sysChanged && view.mode === 'system') gpu.syncVertexBuffer(orbitSoup, orbitVerts * SOUP_FLOATS * 4)
     }
 
-    // the draw list (the tape order = the painter's order; the fades cross the view blend)
-    record(cmdSky, {})
-    record(cmdBgStars, { count: BG_STARS })
-    for (let i = 0; i < 3; i++) {
-      if (nebCounts[i] > 0) record(cmdNebs[i], { count: nebCounts[i] })
+    // the draw list (the tape order = the painter's order; the fades cross the
+    // view blend). THE POST PASS: every command is captured INTO THE SCENE
+    // SURFACE (the first one clears it), then the post chain runs — the
+    // composite lands on the canvas (see post.js for the tape plumbing)
+    const [bufW, bufH] = bufferSize()
+    post.ensure(bufW, bufH)
+    record(post.capture(cmdSky, true), {})
+    record(post.capture(cmdBgStars, false), { count: BG_STARS })
+    for (let i = 0; i < 4; i++) {
+      if (nebCounts[i] > 0) record(post.capture(cmdNebs[i], false), { count: nebCounts[i] })
     }
-    record(cmdHaze, {})
-    record(cmdTerritory, {})
-    record(cmdLanes, { count: laneVerts })
-    if (orbitVerts > 0) record(cmdOrbits, { count: orbitVerts })
-    if (pringCount > 0 && view.blend > 0.05) record(cmdPRingsFar, { count: pringCount })
-    if (planetCount > 0) record(cmdPlanets, { count: planetCount })
-    if (pringCount > 0 && view.blend > 0.05) record(cmdPRingsNear, { count: pringCount })
-    record(cmdStars, { count: world.systems.length })
-    if (bhCount > 0) record(cmdBlackholes, { count: bhCount })
-    if (shipCount > 0) record(cmdShips, { count: shipCount })
-    if (ringCount > 0) record(cmdRings, { count: ringCount })
+    record(post.capture(cmdHaze, false), {})
+    record(post.capture(cmdTerritory, false), {})
+    record(post.capture(cmdLanes, false), { count: laneVerts })
+    if (orbitVerts > 0) record(post.capture(cmdOrbits, false), { count: orbitVerts })
+    if (pringCount > 0 && view.blend > 0.05) record(post.capture(cmdPRingsFar, false), { count: pringCount })
+    if (planetCount > 0) record(post.capture(cmdPlanets, false), { count: planetCount })
+    if (pringCount > 0 && view.blend > 0.05) record(post.capture(cmdPRingsNear, false), { count: pringCount })
+    record(post.capture(cmdStars, false), { count: world.systems.length })
+    if (bhCount > 0) record(post.capture(cmdBlackholes, false), { count: bhCount })
+    if (shipCount > 0) record(post.capture(cmdShips, false), { count: shipCount })
+    if (ringCount > 0) record(post.capture(cmdRings, false), { count: ringCount })
+    post.recordPost(record)
   }
 
   // ── the REAL space assets: fetch + swap into the live handles ──
@@ -1035,6 +1121,7 @@ export function createGameRender(renderer, world, shell) {
       return [sys.x + Math.cos(ang) * planet.orbit, sys.y + Math.sin(ang) * planet.orbit]
     },
     dispose() {
+      post.dispose()
       // the renderer's own dispose frees the facade buffers wholesale
     },
   }

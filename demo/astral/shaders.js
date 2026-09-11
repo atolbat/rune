@@ -66,10 +66,9 @@ export const SKY_CENTER = new Float32Array(3)
 export const SKY_HALF = new Float32Array(2)
 export const SKY_U0 = [0]
 export const SKY_WIN = [0.3]
-// darker than the photo-real ESO gain: the Stellaris galaxy background is
-// deep near-black with a whisper of dust — the nebulae and territory carry
-// the color story instead
-export const SKY_GAIN = [0.5]
+// the beauty pass: the panorama reads as DEEP SPACE now (the bloom chain
+// lifts it further) — the old 0.5 whisper left a dead grey void
+export const SKY_GAIN = [0.34]
 
 /** cam: { x, y, z (CSS px / world unit), yaw, tilt } — fills every matrix + basis. */
 export function setCamera3D(cam, aspect, w, h) {
@@ -281,7 +280,7 @@ void main() {
   float eyeZ = -(u_view * vec4(a_pos, 1.0)).z;
   eyeZ = max(eyeZ, 1.0);
   // true screen size through the perspective divide (CSS px)
-  float px = clamp(a_meta.x * u_pxk / eyeZ, 1.3, 44.0);
+  float px = clamp(a_meta.x * u_pxk / eyeZ, 1.3, 56.0);
   float size = px * eyeZ / u_pxk;
   float tw = 0.7 + 0.3 * sin(u_time * (0.5 + a_meta.y * 1.3) + a_meta.y * 61.0);
   vec3 world = a_pos + u_right * (corner.x * size) + u_up * (corner.y * size);
@@ -300,7 +299,7 @@ void main() {
   float d = length(v_uv);
   if (d > 1.0) discard;
   vec3 spr = texture(u_tex, v_uv * 0.5 + 0.5).rgb;
-  vec3 rgb = spr * v_color.rgb * v_color.a * 1.5;
+  vec3 rgb = spr * v_color.rgb * v_color.a * 1.8;
   o_color = vec4(rgb, v_color.a);
 }`
 
@@ -334,7 +333,7 @@ fn vsMain(@builtin(vertex_index) vi : u32,
   let corner = corners[vi];
   var eyeZ = -(params.u_view * vec4<f32>(a_pos, 1.0)).z;
   eyeZ = max(eyeZ, 1.0);
-  let px = clamp(a_meta.x * params.u_pxk / eyeZ, 1.3, 44.0);
+  let px = clamp(a_meta.x * params.u_pxk / eyeZ, 1.3, 56.0);
   let size = px * eyeZ / params.u_pxk;
   let tw = 0.7 + 0.3 * sin(params.u_time * (0.5 + a_meta.y * 1.3) + a_meta.y * 61.0);
   let world = a_pos + params.u_right * (corner.x * size) + params.u_up * (corner.y * size);
@@ -350,7 +349,7 @@ fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
   let d = length(frag.uv);
   if (d > 1.0) { discard; }
   let spr = textureSample(texTexture, texSampler, frag.uv * 0.5 + vec2<f32>(0.5, 0.5)).rgb;
-  let rgb = spr * frag.color.rgb * frag.color.a * 1.5;
+  let rgb = spr * frag.color.rgb * frag.color.a * 1.8;
   return vec4<f32>(rgb, frag.color.a);
 }`
 
@@ -539,10 +538,10 @@ void main() {
   // apparent size in true screen CSS px (a star is a glow — readable at any zoom)
   float eyeZ = -(u_view * vec4(a_pos, 1.0)).z;
   eyeZ = max(eyeZ, 1.0);
-  float px = clamp(a_meta.x * u_pxk / eyeZ, 6.0, 26.0);
+  float px = clamp(a_meta.x * u_pxk / eyeZ, 5.0, 15.0);
   float size = px * eyeZ / u_pxk;
-  // the halo quad is 3x the core: Stellaris stars are tight bright points
-  // with a short glow, not big fuzzy blobs
+  // the halo quad is 4x the core: the bloom chain carries the long glow,
+  // the sprite itself holds the tight luminous core + diffraction spikes
   vec3 world = a_pos + u_right * (corner.x * size * 3.0) + u_up * (corner.y * size * 3.0);
   gl_Position = u_mvp * vec4(world, 1.0);
   v_uv = corner;
@@ -566,14 +565,22 @@ out vec4 o_color;
 void main() {
   float d = length(v_uv);
   if (d > 1.0) discard;
-  vec3 spr = texture(u_tex, v_uv * 0.5 + 0.5).rgb;
+  // THE SPIKE HIERARCHY: the fetch stays unconditional (the WGSL twin's
+  // uniform-control-flow contract); the SPRITE (with its diffraction
+  // spikes) fades in only for heavy stars — v_color.a carries the class
+  // weight (0.16 = an M dwarf → a quiet analytic point; 1.0 = an O
+  // giant/capital → the full spiked, blooming sprite)
+  vec3 tex = texture(u_tex, v_uv * 0.5 + 0.5).rgb;
+  float spikeW = smoothstep(0.74, 0.96, v_color.a);
+  float analytic = exp(-d * d * 22.0) * 1.7 + exp(-d * d * 3.6) * 0.5;
+  vec3 spr = mix(vec3(analytic), tex, spikeW);
   float a = v_color.a;
-  vec3 rgb = spr * v_color.rgb * a * 1.7;
+  vec3 rgb = spr * v_color.rgb * a * 2.0;
 
   // ownership: a thin tinted ring at the halo's edge
   float ring = exp(-pow((d - 0.62) * 14.0, 2.0)) * 0.85;
-  if (v_state.x > 0.5 && v_state.x < 1.5) rgb += vec3(0.28, 0.5, 1.0) * ring * 0.55 * a;
-  else if (v_state.x > 1.5) rgb += vec3(1.0, 0.28, 0.24) * ring * 0.6 * a;
+  if (v_state.x > 0.5 && v_state.x < 1.5) rgb += vec3(0.28, 0.5, 1.0) * ring * 0.7 * a;
+  else if (v_state.x > 1.5) rgb += vec3(1.0, 0.28, 0.24) * ring * 0.8 * a;
 
   // selection: a dashed rotating ring just outside the halo (fade-aware:
   // the marker must not bleed through the system-view crossfade) — the
@@ -582,7 +589,7 @@ void main() {
     float ang = atan(v_uv.y, v_uv.x);
     float dashes = step(0.45, fract(ang * 2.5465 + v_state.x * 7.0));
     float sel = exp(-pow((d - 0.86) * 18.0, 2.0)) * dashes * u_fade;
-    rgb += vec3(0.45, 1.0, 0.88) * sel * 0.95;
+    rgb += vec3(0.45, 1.0, 0.88) * sel * 1.15;
     a += sel * 0.6;
   }
 
@@ -643,7 +650,7 @@ fn vsMain(@builtin(vertex_index) vi : u32,
   let tw = 0.82 + 0.18 * sin(params.u_time * (0.9 + a_meta.y * 1.7) + a_meta.y * 43.0);
   var eyeZ = -(params.u_view * vec4<f32>(a_pos, 1.0)).z;
   eyeZ = max(eyeZ, 1.0);
-  let px = clamp(a_meta.x * params.u_pxk / eyeZ, 6.0, 26.0);
+  let px = clamp(a_meta.x * params.u_pxk / eyeZ, 5.0, 15.0);
   let size = px * eyeZ / params.u_pxk;
   let world = a_pos + params.u_right * (corner.x * size * 3.0) + params.u_up * (corner.y * size * 3.0);
   var out : VSOut;
@@ -659,19 +666,23 @@ fn vsMain(@builtin(vertex_index) vi : u32,
 fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
   let d = length(frag.uv);
   if (d > 1.0) { discard; }
-  let spr = textureSample(texTexture, texSampler, frag.uv * 0.5 + vec2<f32>(0.5, 0.5)).rgb;
+  // THE SPIKE HIERARCHY (see the GLSL twin): the fetch stays unconditional
+  let tex = textureSample(texTexture, texSampler, frag.uv * 0.5 + vec2<f32>(0.5, 0.5)).rgb;
+  let spikeW = smoothstep(0.74, 0.96, frag.color.a);
+  let analytic = exp(-d * d * 22.0) * 1.7 + exp(-d * d * 3.6) * 0.5;
+  let spr = mix(vec3<f32>(analytic), tex, spikeW);
   var a = frag.color.a;
-  var rgb = spr * frag.color.rgb * a * 1.7;
+  var rgb = spr * frag.color.rgb * a * 2.0;
 
   let ring = exp(-pow((d - 0.62) * 14.0, 2.0)) * 0.85;
-  if (frag.state.x > 0.5 && frag.state.x < 1.5) { rgb += vec3<f32>(0.28, 0.5, 1.0) * ring * 0.55 * frag.color.a; }
-  else if (frag.state.x > 1.5) { rgb += vec3<f32>(1.0, 0.28, 0.24) * ring * 0.6 * frag.color.a; }
+  if (frag.state.x > 0.5 && frag.state.x < 1.5) { rgb += vec3<f32>(0.28, 0.5, 1.0) * ring * 0.7 * frag.color.a; }
+  else if (frag.state.x > 1.5) { rgb += vec3<f32>(1.0, 0.28, 0.24) * ring * 0.8 * frag.color.a; }
 
   if (frag.state.y > 0.5) {
     let ang = atan2(frag.uv.y, frag.uv.x);
     let dashes = step(0.45, fract(ang * 2.5465 + frag.state.x * 7.0));
     let sel = exp(-pow((d - 0.86) * 18.0, 2.0)) * dashes * params.u_fade;
-    rgb += vec3<f32>(0.45, 1.0, 0.88) * sel * 0.95;
+    rgb += vec3<f32>(0.45, 1.0, 0.88) * sel * 1.15;
     a += sel * 0.6;
   }
 
@@ -703,37 +714,65 @@ export const starShader = {
 
 // ─── 6. the lane pass (lanes + orbits: perspective screen-constant lines) ───
 // The quad is baked as CENTERLINE points + the unit perpendicular (times the
-// edge side ±1); the vertex shader expands it in EYE SPACE to a constant
+// edge side ±1) + the along-lane parameter t (0 at A, 1 at B — the bezier
+// bake subdivides real curves, so t is the CURVE parameter, monotone along
+// the polyline); the vertex shader expands it in EYE SPACE to a constant
 // ~2 CSS px — the world-space size of a pixel varies with depth under
 // perspective, so the width is measured against the true projected scale
 // (u_linek · |eyeZ| = world units per screen px at that depth). This is the
 // Task-166 thin-line-dropout fix, now in 3D.
+//
+// THE BEAUTY PASS: the fragment now shapes a SOFT GLOW PROFILE across the
+// line (|v_dir| interpolates 0 at the centerline → 1 at the baked edges —
+// a free cross-lane coordinate, no extra attribute math) and runs an ENERGY
+// PULSE along v_t — the Stellaris hyperlane read: quiet teal threads with
+// slow traveling brightenings, never flat ruled lines.
 
 const LANE_GLSL_VERT = `#version 300 es
 precision highp float;
 layout(location = 0) in vec2 a_pos;   // a centerline point (world)
 layout(location = 1) in vec2 a_dir;   // unit perpendicular * edge side (±1)
 layout(location = 2) in vec4 a_color; // premultiplied by the bake
+layout(location = 3) in float a_t;    // the along-lane parameter (0..1)
 uniform mat4 u_view;
 uniform mat4 u_proj;
 uniform float u_linek;   // 2·tan(fov/2)/h — world units per screen px at eyeZ=1
 uniform float u_width;   // the line width in screen px
 out vec4 v_color;
+out vec2 v_dir;
+out float v_t;
 void main() {
   vec4 eye = u_view * vec4(a_pos, 0.0, 1.0);
   vec2 eyeDir = (u_view * vec4(a_dir, 0.0, 0.0)).xy; // unit (the view is orthonormal)
   eye.xy += eyeDir * (u_width * (-eye.z) * u_linek);
   gl_Position = u_proj * eye;
   v_color = a_color;
+  v_dir = a_dir;
+  v_t = a_t;
 }`
 
 const LANE_GLSL_FRAG = `#version 300 es
 precision highp float;
 in vec4 v_color;
+in vec2 v_dir;
+in float v_t;
 uniform float u_fade;
+uniform float u_time;
+uniform float u_pulse;   // the traveling-pulse speed (lanes fast, orbits slow)
 out vec4 o_color;
 void main() {
-  o_color = vec4(v_color.rgb * u_fade, v_color.a * u_fade); // premultiplied by the builder
+  // the cross-lane coordinate: |v_dir| = 0 at the centerline, 1 at the edges
+  float across = length(v_dir);
+  float core = exp(-across * across * 7.0);
+  float glow = exp(-across * across * 2.1) * 0.75;
+
+  // the traveling energy pulse: a soft dash moving A → B
+  float ph = fract(v_t * 3.0 - u_time * u_pulse);
+  float pulse = smoothstep(0.04, 0.30, ph) * smoothstep(0.56, 0.30, ph);
+
+  vec3 rgb = v_color.rgb * (core * 1.9 + glow) + v_color.rgb * pulse * 1.4;
+  float a = v_color.a * (core * 1.35 + glow + pulse * 0.8);
+  o_color = vec4(rgb * u_fade, a * u_fade);
 }`
 
 const LANE_WGSL = `
@@ -743,30 +782,46 @@ struct Params {
   u_linek : f32,
   u_width : f32,
   u_fade : f32,
+  u_time : f32,
+  u_pulse : f32,
 }
 @group(0) @binding(0) var<uniform> params : Params;
 
 struct VSOut {
   @builtin(position) pos : vec4<f32>,
   @location(0) color : vec4<f32>,
+  @location(1) dir : vec2<f32>,
+  @location(2) t : f32,
 }
 
 @vertex
 fn vsMain(@location(0) a_pos : vec2<f32>,
           @location(1) a_dir : vec2<f32>,
-          @location(2) a_color : vec4<f32>) -> VSOut {
+          @location(2) a_color : vec4<f32>,
+          @location(3) a_t : f32) -> VSOut {
   var eye = params.u_view * vec4<f32>(a_pos, 0.0, 1.0);
   let eyeDir = (params.u_view * vec4<f32>(a_dir, 0.0, 0.0)).xy;
   eye = vec4<f32>(eye.xy + eyeDir * (params.u_width * (-eye.z) * params.u_linek), eye.z, eye.w);
   var out : VSOut;
   out.pos = params.u_proj * eye;
   out.color = a_color;
+  out.dir = a_dir;
+  out.t = a_t;
   return out;
 }
 
 @fragment
 fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
-  return vec4<f32>(frag.color.rgb * params.u_fade, frag.color.a * params.u_fade);
+  let across = length(frag.dir);
+  let core = exp(-across * across * 7.0);
+  let glow = exp(-across * across * 2.1) * 0.75;
+
+  let ph = fract(frag.t * 3.0 - params.u_time * params.u_pulse);
+  let pulse = smoothstep(0.04, 0.30, ph) * smoothstep(0.56, 0.30, ph);
+
+  let rgb = frag.color.rgb * (core * 1.9 + glow) + frag.color.rgb * pulse * 1.4;
+  let a = frag.color.a * (core * 1.35 + glow + pulse * 0.8);
+  return vec4<f32>(rgb * params.u_fade, a * params.u_fade);
 }`
 
 export const laneShader = {
@@ -846,12 +901,14 @@ void main() {
   float rim = exp(-pow((dTaper - 0.9) * 9.0, 2.0)) * 0.35;
   rgb += v_color.rgb * rim;
 
-  // the engine plume (moving ships only)
+  // the engine plume (moving ships only) — THE BEAUTY PASS: longer,
+  // hotter (blue-white core → orange tail), with a soft afterglow
   if (v_state.y > 0.5) {
     float flick = 0.6 + 0.4 * sin(u_time * 34.0 + v_state.w * 19.0);
-    float plume = exp(-pow((v_uv.y + 0.78) * 4.4, 2.0)) * exp(-pow(v_uv.x * 2.0, 2.0)) * flick;
-    rgb += vec3(1.0, 0.62, 0.25) * plume * 0.9;
-    a += plume * 0.6;
+    float plume = exp(-pow((v_uv.y + 0.92) * 3.4, 2.0)) * exp(-pow(v_uv.x * 1.75, 2.0)) * flick;
+    rgb += vec3(0.55, 0.75, 1.0) * plume * 0.55;
+    rgb += vec3(1.0, 0.62, 0.25) * plume * 0.75;
+    a += plume * 0.72;
   }
 
   // the selection ring
@@ -941,9 +998,10 @@ fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
 
   if (frag.state.y > 0.5) {
     let flick = 0.6 + 0.4 * sin(params.u_time * 34.0 + frag.state.w * 19.0);
-    let plume = exp(-pow((frag.uv.y + 0.78) * 4.4, 2.0)) * exp(-pow(frag.uv.x * 2.0, 2.0)) * flick;
-    rgb += vec3<f32>(1.0, 0.62, 0.25) * plume * 0.9;
-    a += plume * 0.6;
+    let plume = exp(-pow((frag.uv.y + 0.92) * 3.4, 2.0)) * exp(-pow(frag.uv.x * 1.75, 2.0)) * flick;
+    rgb = rgb + vec3<f32>(0.55, 0.75, 1.0) * plume * 0.55;
+    rgb = rgb + vec3<f32>(1.0, 0.62, 0.25) * plume * 0.75;
+    a += plume * 0.72;
   }
 
   if (frag.state.z > 0.5) {
@@ -1002,7 +1060,10 @@ void main() {
   vec3 center = a_pos + vec3(cos(ang), sin(ang), 0.0) * a_meta.y;
   float eyeZ = -(u_view * vec4(center, 1.0)).z;
   eyeZ = max(eyeZ, 1.0);
-  float apparent = max(a_meta.x, 6.0 * eyeZ / u_pxk);
+  // THE BEAUTY PASS: the quad is 1.45× the planet radius — the extra ring
+  // is the ATMOSPHERE shell (a fresnel halo beyond the limb, computed in
+  // the fragment); the sphere math divides the uv back down
+  float apparent = max(a_meta.x, 6.0 * eyeZ / u_pxk) * 1.45;
   vec3 world = center + u_right * (corner.x * apparent) + u_up * (corner.y * apparent);
   gl_Position = u_mvp * vec4(world, 1.0);
   // the sun direction AT THIS PLANET: toward the star = −the orbit direction
@@ -1032,16 +1093,20 @@ vec2 tileUV(float ty, vec2 uv) {
 }
 
 void main() {
-  float d = length(v_uv);
+  // pd — the distance in PLANET RADII (the quad spans 1.45 radii so the
+  // atmosphere shell fits inside it: sphere uv = v_uv × 1.45)
+  const float PQ = 1.45;
+  vec2 suv = v_uv * PQ;
+  float pd = length(suv);
   float ty = v_state.w;
 
   // ONE fetch, UV selected BY VALUE (the WGSL twin requires textureSample in
   // uniform control flow — a branch on the interpolated tile index would be
   // a validation error on real WebGPU hardware)
   float ca = cos(u_time * 0.05), sa = sin(u_time * 0.05);
-  vec2 ruv = vec2(v_uv.x * ca - v_uv.y * sa, v_uv.x * sa + v_uv.y * ca);
+  vec2 ruv = vec2(suv.x * ca - suv.y * sa, suv.x * sa + suv.y * ca);
   vec2 sunUv = clamp(ruv * 0.5 + 0.5, 0.0, 1.0);
-  vec3 N = vec3(v_uv, sqrt(max(0.0, 1.0 - d * d)));
+  vec3 N = vec3(suv, sqrt(max(0.0, 1.0 - pd * pd)));
   float lon = atan(N.x, N.z) + v_color.a * 6.2831853;
   float u0 = 0.5 + lon / 6.2831853;
   float v0 = 0.5 - asin(clamp(N.y, -1.0, 1.0)) / 3.14159265;
@@ -1055,46 +1120,73 @@ void main() {
     // whatever is behind it instead of replacing it with a dark disc. The
     // edge mask guarantees zero at the quad boundary — the sun owns its disc,
     // never its square
-    float core = exp(-d * d * 18.0) * 2.4;
-    float corona = exp(-d * d * 3.2) * 0.6;
+    float core = exp(-pd * pd * 18.0) * 3.2;
+    float corona = exp(-pd * pd * 3.2) * 1.0;
     vec3 spr = t.rgb;
-    float mask = smoothstep(1.0, 0.72, d);
+    float mask = smoothstep(1.0, 0.72, pd);
     float a = clamp(core + corona * 0.65 + spr.r * 0.35, 0.0, 1.0) * mask;
-    vec3 rgb = (v_color.rgb * (core + corona * 0.8) + v_color.rgb * spr * (1.1 + corona * 0.6)) * mask;
+    vec3 rgb = (v_color.rgb * (core + corona * 0.8) + v_color.rgb * spr * (1.55 + corona * 0.8)) * mask;
     o_color = vec4(rgb * u_fade, a * u_fade);
     return;
   }
 
+  // ── the atmosphere shell (the ring beyond the limb) — before the sphere
+  // discard so the halo survives it. Additive, tinted blue-ish, brightest
+  // at the limb and fading to the quad edge (the bloom chain lifts it)
+  vec3 atmoCol = normalize(mix(v_color.rgb, vec3(0.45, 0.75, 1.0), 0.65) + 0.001);
+  float ann = exp(-pow((pd - 1.0) * 4.4, 2.0)) * smoothstep(1.45, 1.1, pd);
+  vec3 rgb = atmoCol * ann * 0.62;
+  float a = ann * 0.3;
+
   // a planet: sphere shading over the equirect tile
-  if (d > 1.0) discard;
+  if (pd > 1.0) {
+    o_color = vec4(rgb * u_fade, a * u_fade);
+    return;
+  }
   vec3 L = normalize(vec3(v_light, 0.42));
   float lam = 0.30 + 0.70 * max(0.0, dot(N, L));
   lam = 0.17 + 0.83 * smoothstep(0.0, 0.55, lam);
-  vec3 rgb = t.rgb * v_color.rgb * lam;
+  rgb += t.rgb * v_color.rgb * lam;
   // the night side carries a cold ambient (planetshine) — a transiting
   // silhouette stays a readable sphere, never a flat black disc
   rgb += vec3(0.015, 0.025, 0.05) * (1.0 - lam) * 2.0;
 
+  // the specular glint — the ocean/ice sun-catch (view ≈ +z in quad space)
+  vec3 H = normalize(L + vec3(0.0, 0.0, 1.0));
+  float spec = pow(max(dot(N, H), 0.0), 42.0);
+  rgb += vec3(0.85, 0.92, 1.0) * spec * 0.38;
+
   // lava (tile 3): the emissive fissures glow through the night side
   if (ty > 2.5 && ty < 3.5) {
     float pulse = 0.8 + 0.2 * sin(u_time * 1.6 + v_color.a * 31.0);
-    rgb += vec3(1.0, 0.36, 0.08) * t.a * 1.5 * pulse;
+    rgb += vec3(1.0, 0.36, 0.08) * t.a * 1.6 * pulse;
   }
 
-  // the atmosphere rim (a fresnel-ish limb)
-  float fres = pow(1.0 - N.z, 3.0);
-  rgb += v_color.rgb * fres * 0.55;
+  // the settled world (tile 4): CITY LIGHTS — golden clusters on the
+  // night side's land (land = g > b in the garden tile's palette)
+  if (ty > 3.5 && ty < 4.5) {
+    float land = clamp((t.g - t.b) * 5.0, 0.0, 1.0);
+    float night = 1.0 - smoothstep(0.12, 0.42, lam);
+    vec2 cell = floor(vec2(u0, v0) * vec2(96.0, 48.0));
+    float cn = fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453);
+    float city = smoothstep(0.76, 0.94, cn) * land * night;
+    rgb += vec3(1.0, 0.72, 0.35) * city * 0.95;
+  }
 
-  float a = smoothstep(1.0, 0.94, d);
+  // the atmosphere rim (a fresnel-ish limb, in-disc now)
+  float fres = pow(1.0 - N.z, 3.0);
+  rgb += v_color.rgb * fres * 0.65;
+
+  a += smoothstep(1.0, 0.94, pd);
 
   // the build progress bar (an underline on the disc)
   if (v_state.z > 0.001) {
-    float bar = step(-0.9, v_uv.y) * step(v_uv.y, -0.62)
-              * step(-0.85, v_uv.x) * step(v_uv.x, -0.85 + 1.7 * v_state.z);
+    float bar = step(-0.9, suv.y) * step(suv.y, -0.62)
+              * step(-0.85, suv.x) * step(suv.x, -0.85 + 1.7 * v_state.z);
     rgb += vec3(0.4, 1.0, 0.6) * bar * 0.8;
     a = max(a, bar * 0.9);
   }
-  o_color = vec4(rgb, a);
+  o_color = vec4(rgb * u_fade, a * u_fade);
 }`
 
 const PLANET_WGSL = `
@@ -1138,7 +1230,9 @@ fn vsMain(@builtin(vertex_index) vi : u32,
   let center = a_pos + vec3<f32>(cos(ang), sin(ang), 0.0) * a_meta.y;
   var eyeZ = -(params.u_view * vec4<f32>(center, 1.0)).z;
   eyeZ = max(eyeZ, 1.0);
-  let apparent = max(a_meta.x, 6.0 * eyeZ / params.u_pxk);
+  // THE BEAUTY PASS: the quad is 1.45× the planet radius — the atmosphere
+  // shell ring (see the GLSL twin's comment)
+  let apparent = max(a_meta.x, 6.0 * eyeZ / params.u_pxk) * 1.45;
   let world = center + params.u_right * (corner.x * apparent) + params.u_up * (corner.y * apparent);
   let sunDir = -vec3<f32>(cos(ang), sin(ang), 0.0);
   var out : VSOut;
@@ -1152,7 +1246,9 @@ fn vsMain(@builtin(vertex_index) vi : u32,
 
 @fragment
 fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
-  let d = length(frag.uv);
+  let PQ = 1.45;
+  let suv = frag.uv * PQ;
+  let pd = length(suv);
   let ty = frag.state.w;
 
   // ONE fetch, UV selected BY VALUE — textureSample must live in uniform
@@ -1160,9 +1256,9 @@ fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
   // validation error on real hardware)
   let ca = cos(params.u_time * 0.05);
   let sa = sin(params.u_time * 0.05);
-  let ruv = vec2<f32>(frag.uv.x * ca - frag.uv.y * sa, frag.uv.x * sa + frag.uv.y * ca);
+  let ruv = vec2<f32>(suv.x * ca - suv.y * sa, suv.x * sa + suv.y * ca);
   let sunUv = clamp(ruv * 0.5 + vec2<f32>(0.5, 0.5), vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
-  let N = vec3<f32>(frag.uv, sqrt(max(0.0, 1.0 - d * d)));
+  let N = vec3<f32>(suv, sqrt(max(0.0, 1.0 - pd * pd)));
   let lon = atan2(N.x, N.z) + frag.color.a * 6.2831853;
   let u0 = 0.5 + lon / 6.2831853;
   let v0 = 0.5 - asin(clamp(N.y, -1.0, 1.0)) / 3.14159265;
@@ -1171,36 +1267,57 @@ fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
   let t = textureSample(texTexture, texSampler, tileUV(ty, sel));
 
   if (ty > 4.5) {
-    let core = exp(-d * d * 18.0) * 2.4;
-    let corona = exp(-d * d * 3.2) * 0.6;
+    let core = exp(-pd * pd * 18.0) * 3.2;
+    let corona = exp(-pd * pd * 3.2) * 1.0;
     let spr = t.rgb;
-    let mask = smoothstep(1.0, 0.72, d);
+    let mask = smoothstep(1.0, 0.72, pd);
     let a = clamp(core + corona * 0.65 + spr.r * 0.35, 0.0, 1.0) * mask;
-    let rgb = (frag.color.rgb * (core + corona * 0.8) + frag.color.rgb * spr * (1.1 + corona * 0.6)) * mask;
+    let rgb = (frag.color.rgb * (core + corona * 0.8) + frag.color.rgb * spr * (1.55 + corona * 0.8)) * mask;
     return vec4<f32>(rgb * params.u_fade, a * params.u_fade);
   }
 
-  if (d > 1.0) { discard; }
+  // the atmosphere shell (see the GLSL twin)
+  let atmoCol = normalize(mix(frag.color.rgb, vec3<f32>(0.45, 0.75, 1.0), 0.65) + vec3<f32>(0.001));
+  let ann = exp(-pow((pd - 1.0) * 4.4, 2.0)) * smoothstep(1.45, 1.1, pd);
+  var rgb = atmoCol * ann * 0.62;
+  var a = ann * 0.3;
+
+  if (pd > 1.0) {
+    return vec4<f32>(rgb * params.u_fade, a * params.u_fade);
+  }
   let L = normalize(vec3<f32>(frag.light, 0.42));
   var lam = 0.30 + 0.70 * max(0.0, dot(N, L));
   lam = 0.17 + 0.83 * smoothstep(0.0, 0.55, lam);
-  var rgb = t.rgb * frag.color.rgb * lam;
-  rgb += vec3<f32>(0.015, 0.025, 0.05) * (1.0 - lam) * 2.0;
+  rgb = rgb + t.rgb * frag.color.rgb * lam;
+  rgb = rgb + vec3<f32>(0.015, 0.025, 0.05) * (1.0 - lam) * 2.0;
+
+  let H = normalize(L + vec3<f32>(0.0, 0.0, 1.0));
+  let spec = pow(max(dot(N, H), 0.0), 42.0);
+  rgb = rgb + vec3<f32>(0.85, 0.92, 1.0) * spec * 0.38;
 
   if (ty > 2.5 && ty < 3.5) {
     let pulse = 0.8 + 0.2 * sin(params.u_time * 1.6 + frag.color.a * 31.0);
-    rgb += vec3<f32>(1.0, 0.36, 0.08) * t.a * 1.5 * pulse;
+    rgb = rgb + vec3<f32>(1.0, 0.36, 0.08) * t.a * 1.6 * pulse;
+  }
+
+  if (ty > 3.5 && ty < 4.5) {
+    let land = clamp((t.g - t.b) * 5.0, 0.0, 1.0);
+    let night = 1.0 - smoothstep(0.12, 0.42, lam);
+    let cell = floor(vec2<f32>(u0, v0) * vec2<f32>(96.0, 48.0));
+    let cn = fract(sin(dot(cell, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+    let city = smoothstep(0.76, 0.94, cn) * land * night;
+    rgb = rgb + vec3<f32>(1.0, 0.72, 0.35) * city * 0.95;
   }
 
   let fres = pow(1.0 - N.z, 3.0);
-  rgb += frag.color.rgb * fres * 0.55;
+  rgb = rgb + frag.color.rgb * fres * 0.65;
 
-  var a = smoothstep(1.0, 0.94, d);
+  a = a + smoothstep(1.0, 0.94, pd);
 
   if (frag.state.z > 0.001) {
-    let bar = step(-0.9, frag.uv.y) * step(frag.uv.y, -0.62)
-            * step(-0.85, frag.uv.x) * step(frag.uv.x, -0.85 + 1.7 * frag.state.z);
-    rgb += vec3<f32>(0.4, 1.0, 0.6) * bar * 0.8;
+    let bar = step(-0.9, suv.y) * step(suv.y, -0.62)
+            * step(-0.85, suv.x) * step(suv.x, -0.85 + 1.7 * frag.state.z);
+    rgb = rgb + vec3<f32>(0.4, 1.0, 0.6) * bar * 0.8;
     a = max(a, bar * 0.9);
   }
   return vec4<f32>(rgb * params.u_fade, a * params.u_fade);
@@ -1506,13 +1623,14 @@ void main() {
   if (dom < 0.02) discard;             // the cheap empty-space out
   // the winner's color paints the ground (Stellaris: the strongest claim)
   vec3 col = mix(vec3(1.0, 0.32, 0.28), vec3(0.32, 0.55, 1.0), step(wr, wp));
-  float fill = smoothstep(0.20, 0.46, dom);
-  // the soft contour sheen where the field crosses the boundary value
-  float edge = exp(-pow((dom - 0.46) * 7.5, 2.0)) * smoothstep(0.16, 0.30, dom);
+  float fill = smoothstep(0.14, 0.42, dom);
+  // THE CLOUD BORDER: the fill reads as the empire's nebula wash (the
+  // Stellaris territory cloud), the edge keeps a whisper of contour
+  float edge = exp(-pow((dom - 0.44) * 7.5, 2.0)) * smoothstep(0.16, 0.30, dom);
   // the contested frontier: both fields strong and nearly equal
   float front = exp(-pow((wp - wr) * 8.0, 2.0)) * smoothstep(0.24, 0.42, dom);
-  vec3 rgb = col * (fill * 0.60 + edge * 1.05) + vec3(1.0, 0.72, 0.45) * front * 0.6;
-  float a = fill * 0.34 + edge * 0.38 + front * 0.40;
+  vec3 rgb = col * (fill * 0.58 + edge * 1.15) + vec3(1.0, 0.72, 0.45) * front * 0.9;
+  float a = fill * 0.34 + edge * 0.42 + front * 0.40;
   o_color = vec4(rgb * u_fade, a * u_fade);
 }`
 
@@ -1548,11 +1666,11 @@ fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
   let dom = max(wp, wr);
   if (dom < 0.02) { discard; }
   let col = mix(vec3<f32>(1.0, 0.32, 0.28), vec3<f32>(0.32, 0.55, 1.0), step(wr, wp));
-  let fill = smoothstep(0.20, 0.46, dom);
-  let edge = exp(-pow((dom - 0.46) * 7.5, 2.0)) * smoothstep(0.16, 0.30, dom);
+  let fill = smoothstep(0.14, 0.42, dom);
+  let edge = exp(-pow((dom - 0.44) * 7.5, 2.0)) * smoothstep(0.16, 0.30, dom);
   let front = exp(-pow((wp - wr) * 8.0, 2.0)) * smoothstep(0.24, 0.42, dom);
-  let rgb = col * (fill * 0.60 + edge * 1.05) + vec3<f32>(1.0, 0.72, 0.45) * front * 0.6;
-  let a = fill * 0.34 + edge * 0.38 + front * 0.40;
+  let rgb = col * (fill * 0.58 + edge * 1.15) + vec3<f32>(1.0, 0.72, 0.45) * front * 0.9;
+  let a = fill * 0.34 + edge * 0.42 + front * 0.40;
   return vec4<f32>(rgb * params.u_fade, a * params.u_fade);
 }`
 

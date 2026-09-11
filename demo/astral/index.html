@@ -49,7 +49,10 @@
     }
     .as-root button { touch-action: manipulation; }
 
-    /* ── the top bar: a slate command strip ── */
+    /* ── the top bar: a slate command strip with a soft glow rim (the
+       beauty pass: the HUD now shares the canvas's luminescence — teal rim
+       light, glowing resource values, no dead-flat panels over a glowing
+       galaxy) ── */
     .as-top {
       position: absolute;
       top: calc(env(safe-area-inset-top, 0px) + 8px);
@@ -59,11 +62,11 @@
       align-items: center;
       gap: 10px;
       max-width: calc(100% - 20px);
-      padding: 6px 12px;
-      border-radius: 3px;
-      background: linear-gradient(180deg, rgb(23 30 39 / 0.92), rgb(13 18 24 / 0.92));
-      border: 1px solid var(--as-steel);
-      box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.05), 0 4px 18px rgb(0 0 0 / 0.45);
+      padding: 4px 10px;
+      border-radius: 2px;
+      background: linear-gradient(180deg, rgb(16 22 30 / 0.72), rgb(10 14 20 / 0.80));
+      border: 1px solid #32425499;
+      box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.05), 0 0 10px rgb(89 232 207 / 0.10), 0 3px 14px rgb(0 0 0 / 0.4);
       backdrop-filter: blur(8px);
       pointer-events: auto;
       flex-wrap: wrap;
@@ -92,17 +95,18 @@
       padding: 4px 9px;
       border-radius: 2px;
       background: rgb(10 14 19 / 0.85);
-      border: 1px solid #232e3b;
+      border: 1px solid #2b3545;
       box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
       font-size: 12px;
       font-weight: 600;
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
     }
-    /* Stellaris resource colors: minerals teal, energy gold, science violet */
-    .as-min { color: #7fe3d2; }
-    .as-energy { color: var(--as-gold-bright); }
-    .as-sci { color: #c9a2f5; }
+    /* Stellaris resource colors, now with a soft value glow (minerals
+       teal, energy gold, science violet) */
+    .as-min { color: #8ff0dd; text-shadow: 0 0 8px rgb(89 232 207 / 0.55); }
+    .as-energy { color: var(--as-gold-bright); text-shadow: 0 0 8px rgb(255 217 143 / 0.5); }
+    .as-sci { color: #d4b0ff; text-shadow: 0 0 8px rgb(201 162 245 / 0.55); }
 
     .as-territory { display: flex; flex-direction: column; gap: 3px; min-width: 132px; }
     .as-terr-bar {
@@ -339,6 +343,6 @@
 <body>
   <div id="app"></div>
   <script src="../shared/demo-shell.js"></script>
-  <script type="module" src="./main.js?v=4"></script>
+  <script type="module" src="./main.js?v=5"></script>
 </body>
 </html>

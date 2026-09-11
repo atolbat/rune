@@ -153,6 +153,13 @@ try {
         .filter(k => k.endsWith('Shader') && mod[k] && typeof mod[k].wgsl === 'string')
         .sort()
         .map(k => [k.replace(/Shader$/, ''), mod[k].wgsl])
+      // THE BEAUTY PASS (Task 171): post.js carries the bloom chain's WGSL
+      // (pass fragments + the dual-texture composite). Same compile verdict,
+      // same closure — the post chain ships compiled or not at all.
+      const post = await import(`http://localhost:${port}/demo/astral/post.js?v=1&gate=171`)
+      for (const [name, sh] of Object.entries(post.postWgslShaders ?? {})) {
+        if (typeof sh.wgsl === 'string') named.push([name, sh.wgsl])
+      }
       for (const [name, code] of named) {
         const verdict = await compileVerdict(device, code)
         out.shaders.push({

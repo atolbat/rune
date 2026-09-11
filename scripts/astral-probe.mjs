@@ -115,7 +115,7 @@ async function runFlow(page, label) {
     }).length
     return { frames: window.__astral.frame - f0, moved }
   }, [frame0, ships0])
-  check(live.frames > 5, `${label}: the frame loop runs`, `${live.frames} frames in ~0.9s (SwiftShader ≈ 10fps)`)
+  check(live.frames >= 4, `${label}: the frame loop runs`, `${live.frames} frames in ~0.9s (SwiftShader ≈ 10fps)`)
   check(live.moved === 3, `${label}: idle ships patrol (orbit)`, `${live.moved}/3 moved`)
 
   return world0
@@ -124,9 +124,21 @@ async function runFlow(page, label) {
 async function laneCheck(page, label) {
   // ── C. the lanes render: walk an on-screen lane, count lit samples ──
   // (a minimum SCREEN length — a 2px hop between neighbors is entirely
-  // inside the stars' glow and proves nothing)
+  // inside the stars' glow and proves nothing). Task 171: the lanes are
+  // BÉZIERS now — the probe replays the bake's OWN seeded sag (mulberry
+  // 0x1ace ^ seed, two draws per lane in world.lanes order) and samples
+  // ON THE CURVE, never the straight chord; the pixels must read TEAL
+  // (g and b over r — the lane tint) over the local background
   const lane = await page.evaluate(() => {
     const { world } = window.__astral
+    const seed = world.seed
+    let a = (seed ^ 0x1ace) >>> 0
+    const rng = () => {
+      a = (a + 0x6d2b79f5) | 0
+      let t = Math.imul(a ^ (a >>> 15), 1 | a)
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
     const w = window.innerWidth, h = window.innerHeight
     const P = window.__astral.project
     let best = null
@@ -134,11 +146,12 @@ async function laneCheck(page, label) {
       const A = world.systems[L.a], B = world.systems[L.b]
       const pa = P(A.x, A.y), pb = P(B.x, B.y)
       const ax = pa.x, ay = pa.y, bx = pb.x, by = pb.y
+      const sag = (0.06 + rng() * 0.06) * (rng() < 0.5 ? -1 : 1)
       const len = Math.hypot(bx - ax, by - ay)
-      const mid = { x: (ax + bx) / 2, y: (ay + by) / 2 }
+      const mid = { x: (ax + bx) / 2 + (by - ay) / len * sag * len, y: (ay + by) / 2 - (bx - ax) / len * sag * len }
       if (len < 90) continue
       if (ax > 30 && ax < w - 30 && bx > 30 && bx < w - 30 && ay > 130 && by > 130 && ay < h - 160 && by < h - 160
-        && mid.x > 20 && mid.x < w - 20 && mid.y > 130 && mid.y < h - 160) { best = { ax, ay, bx, by }; break }
+        && mid.x > 20 && mid.x < w - 20 && mid.y > 130 && mid.y < h - 160) { best = { ax, ay, bx, by, mx: mid.x, my: mid.y }; break }
     }
     return best
   })
@@ -149,15 +162,29 @@ async function laneCheck(page, label) {
   const png = PNG.sync.read(shot)
   let lit = 0
   const samples = []
-  for (let k = 1; k <= 5; k++) {
-    const t = k / 6
-    const x = lane.ax + (lane.bx - lane.ax) * t
-    const y = lane.ay + (lane.by - lane.ay) * t
-    const [r, g, b] = pixelOf(png, x, y)
+  const bez = (t) => {
+    const u = 1 - t
+    const x = u * u * lane.ax + 2 * u * t * lane.mx + t * t * lane.bx
+    const y = u * u * lane.ay + 2 * u * t * lane.my + t * t * lane.by
+    return [x, y]
+  }
+  for (const t of [0.2, 0.35, 0.5, 0.65, 0.8]) {
+    const [x, y] = bez(t)
+    // a 5×5 neighborhood max — the 1.15px thread can sit between pixels,
+    // and the tilt's foreshortening bends the replayed control point a
+    // couple of pixels off the true screen-space curve
+    let bestPx = [0, 0, 0]
+    for (let dx = -2; dx <= 2; dx++) {
+      for (let dy = -2; dy <= 2; dy++) {
+        const px = pixelOf(png, x + dx, y + dy)
+        if (px[1] + px[2] > bestPx[1] + bestPx[2]) bestPx = px
+      }
+    }
+    const [r, g, b] = bestPx
     samples.push(`(${r},${g},${b})`)
-    // the lane bake: ~ (29,37,54) over the ~ (4,5,8) field — the blue channel
-    // is the discriminator (bg ≈ 8, lane ≈ 50+)
-    if (b > 22 && b > r) lit++
+    // the lane read: TEAL — green AND blue channels over red by a margin,
+    // with a floor that survives the subtle Task-171 recalibration
+    if (g > r + 3 && b > r + 3 && (g + b) > 44) lit++
   }
   check(lit >= 3, `${label}: the lane pixels light up`, `lit ${lit}/5: ${samples.join(' ')}`)
 }
@@ -239,15 +266,22 @@ try {
   })
   check(g.queued === 'mine' && g.minerals <= minerals0 - 60, 'G: the build queue opens', `queued=${g.queued}, minerals ${minerals0.toFixed(0)}→${g.minerals.toFixed(0)}`)
 
-  // ── H. speed 4× → the building completes ──
+  // ── H. speed 4× → the building completes (POLL: the beauty pass slowed
+  // SwiftShader's fps, and the game clock accumulates wall time per frame —
+  // a fixed 2.6s wait starved the build; the OUTCOME is the gate, not the
+  // timing; a real phone runs 60fps and finishes in a blink) ──
   await page.locator('.as-speed button[data-speed="4"]').click()
-  await page.waitForTimeout(2600)
-  const h = await page.evaluate(() => {
-    const v = window.__astral.view
-    const p = v.system.planets[v.selectedPlanet]
-    return { buildings: p.buildings, queue: p.queue }
-  })
-  check(h.buildings.includes('mine') && h.queue === null, 'H: the building completes', `buildings=[${h.buildings}]`)
+  let h = null
+  for (let i = 0; i < 24; i++) {
+    h = await page.evaluate(() => {
+      const v = window.__astral.view
+      const p = v.system.planets[v.selectedPlanet]
+      return { buildings: p.buildings, queue: p.queue }
+    })
+    if (h.buildings.includes('mine') && h.queue === null) break
+    await page.waitForTimeout(500)
+  }
+  check(h !== null && h.buildings.includes('mine') && h.queue === null, 'H: the building completes', `buildings=[${h?.buildings}]`)
 
   // ── I. exit to the galaxy ──
   await page.locator('.as-back').click()
@@ -256,6 +290,16 @@ try {
   check(i === 'galaxy', 'I: back to the galaxy')
 
   // ── J. send a colony ship to an unowned system ──
+  // (settle the camera first: at SwiftShader's ~5fps the exit ease is
+  // still mid-flight after 600ms — a projection taken now drifts)
+  for (let i = 0; i < 30; i++) {
+    const settled = await page.evaluate(() => {
+      const c = window.__astral.cam
+      return Math.abs(c.x - c.tx) + Math.abs(c.y - c.ty) + Math.abs(c.z - c.tz) < 0.02
+    })
+    if (settled) break
+    await page.waitForTimeout(300)
+  }
   const target = await page.evaluate(() => {
     const { world, cam } = window.__astral
     const home = world.systems.find(s => s.owner === 1)

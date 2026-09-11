@@ -23,12 +23,12 @@ export function mulberry32(seed) {
 // ─── the star catalog ────────────────────────────────────────────────────────
 
 const STAR_CLASSES = [
-  { key: 'O', name: 'blue giant',  color: [0.62, 0.78, 1.0],  size: 15, weight: 6,  planets: [3, 6], planetBias: 1.0 },
-  { key: 'B', name: 'blue star',   color: [0.70, 0.84, 1.0],  size: 11, weight: 10, planets: [2, 5], planetBias: 0.9 },
+  { key: 'O', name: 'blue giant',  color: [0.48, 0.68, 1.0],  size: 15, weight: 6,  planets: [3, 6], planetBias: 1.0 },
+  { key: 'B', name: 'blue star',   color: [0.58, 0.74, 1.0],  size: 11, weight: 10, planets: [2, 5], planetBias: 0.9 },
   { key: 'A', name: 'white star',  color: [0.95, 0.97, 1.0],  size: 9,  weight: 16, planets: [1, 4], planetBias: 0.7 },
-  { key: 'G', name: 'yellow star', color: [1.0, 0.92, 0.68],  size: 8,  weight: 26, planets: [2, 5], planetBias: 1.25 },
-  { key: 'K', name: 'orange star', color: [1.0, 0.78, 0.52],  size: 7,  weight: 24, planets: [1, 4], planetBias: 1.1 },
-  { key: 'M', name: 'red dwarf',   color: [1.0, 0.55, 0.45],  size: 5,  weight: 18, planets: [0, 3], planetBias: 0.8 },
+  { key: 'G', name: 'yellow star', color: [1.0, 0.88, 0.55],  size: 8,  weight: 26, planets: [2, 5], planetBias: 1.25 },
+  { key: 'K', name: 'orange star', color: [1.0, 0.70, 0.38],  size: 7,  weight: 24, planets: [1, 4], planetBias: 1.1 },
+  { key: 'M', name: 'red dwarf',   color: [1.0, 0.44, 0.32],  size: 5,  weight: 18, planets: [0, 3], planetBias: 0.8 },
 ]
 
 const PLANET_TYPES = [

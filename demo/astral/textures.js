@@ -85,7 +85,18 @@ const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x)
 /**
  * The galaxy's glowing disc: 3 spiral arms traced with the world generator's
  * own arm equation (angle = armBase + t·ARM_TWIST·π at radius r), a warm
- * bulge, and fbm grain. Additive blend does the rest.
+ * bulge, and fbm grain.
+ *
+ * THE BEAUTY PASS — the color story (the Stellaris galaxy read):
+ *   • four regional hue ZONES (teal / violet / ember / gold), blended by a
+ *     large-scale angular noise field — each arm drifts through its own
+ *     color neighborhood instead of one uniform blue;
+ *   • INTERSTELLAR EXTINCTION dust lanes: the dust mask attenuates BLUE
+ *     more than red (real astrophysics — dust scatters blue away), so the
+ *     dark lanes read warm brown against the bright arms, not grey murk;
+ *   • HII star-forming KNOTS: sparse pink-magenta speckles riding the arm
+ *     crests — the "nebula chips" that make a galaxy map read alive;
+ *   • a cream-gold bulge with a hotter core.
  */
 export function makeGalaxyHaze(seed) {
   const S = 512
@@ -95,8 +106,15 @@ export function makeGalaxyHaze(seed) {
   const ARM_TWIST = 2.35 // must mirror galaxy.js
   const span = GALAXY_RADIUS * 2.15 // world units the quad covers
   const half = span / 2
-  // two dust-lane darkening seeds for depth
-  const dustA = 0.55 + rng() * 0.2
+  // the dust-lane darkening seeds for depth
+  const dustA = 0.62 + rng() * 0.16
+  // the four zone palettes (arm-tint RGB)
+  const ZONES = [
+    [0.38, 0.74, 0.88], // teal
+    [0.58, 0.46, 0.95], // violet
+    [0.96, 0.60, 0.40], // ember
+    [0.95, 0.80, 0.55], // gold
+  ]
   for (let py = 0; py < S; py++) {
     for (let px = 0; px < S; px++) {
       const wx = ((px + 0.5) / S) * span - half
@@ -121,17 +139,45 @@ export function makeGalaxyHaze(seed) {
       const bulge = Math.exp(-(r * r) / (2 * 150 * 150)) * 1.35
       const grain = 0.55 + 0.45 * fbm3(wx / 95, wy / 95, 0, 4, noiseSeed)
       const dust = clamp01(1 - dustA * fbm3(wx / 160, wy / 160, 7.7, 3, noiseSeed ^ 0x51))
-      let density = (arm * armFall * grain * 0.9 + bulge * (0.75 + 0.25 * grain)) * dust
+      // the regional zone: a large-scale angular noise picks the arm tint
+      // (θ-warped so the zones follow the spiral, not the screen axes)
+      const zoneF = fbm3(Math.cos(theta) * 1.3 + Math.sin(theta * 0.7), Math.sin(theta) * 1.3, 4.2, 3, noiseSeed ^ 0x33)
+      const zf = clamp01(zoneF * 3.1 - 0.35)
+      const zi = Math.min(2, Math.floor(zf * 3.999))
+      const zm = zf * 3.999 - zi
+      const za = ZONES[zi]
+      const zb = ZONES[Math.min(3, zi + 1)]
+      let zoneR = za[0] + (zb[0] - za[0]) * zm
+      let zoneG = za[1] + (zb[1] - za[1]) * zm
+      let zoneB = za[2] + (zb[2] - za[2]) * zm
+      // HII star-forming knots: pink-magenta chips on the arm crests
+      const hiiN = fbm3(wx / 38, wy / 38, 12.3, 2, noiseSeed ^ 0x77)
+      const hii = Math.pow(clamp01(arm * armFall * grain * (hiiN * 1.9 - 0.72)), 1.6) * 1.35
+      let density = (arm * armFall * grain * 0.95 + bulge * (0.75 + 0.25 * grain)) * dust
       density = clamp01(density)
       if (density <= 0.004) continue
-      // warm core → cool arms
+      // warm cream-gold core → the zone tint in the arms
       const mixW = clamp01(bulge / 1.2)
-      const cr = (0.62 + mixW * 0.33) * density
-      const cg = (0.70 + mixW * 0.20) * density
-      const cb = (0.95 - mixW * 0.10) * density
-      data[at] = Math.round(cr * 255)
-      data[at + 1] = Math.round(cg * 255)
-      data[at + 2] = Math.round(cb * 255)
+      let cr = (zoneR + mixW * (1.0 - zoneR) * 0.9) * density
+      let cg = (zoneG + mixW * (0.86 - zoneG) * 0.9) * density
+      let cb = (zoneB + mixW * (0.62 - zoneB) * 0.9) * density
+      // EXTINCTION: dust attenuates blue hardest → the lanes read warm brown
+      const ext = 1 - dust
+      cr *= 1 - ext * 0.30
+      cg *= 1 - ext * 0.55
+      cb *= 1 - ext * 0.78
+      // the HII knots ride ON TOP (emission, not extinction)
+      cr += 1.0 * hii * 0.24
+      cg += 0.42 * hii * 0.24
+      cb += 0.55 * hii * 0.24
+      // the hot core: a small cream-white peak over the bulge
+      const coreHot = Math.exp(-(r * r) / (2 * 42 * 42)) * 0.55
+      cr += coreHot * 1.0
+      cg += coreHot * 0.92
+      cb += coreHot * 0.78
+      data[at] = Math.round(clamp01(cr) * 255)
+      data[at + 1] = Math.round(clamp01(cg) * 255)
+      data[at + 2] = Math.round(clamp01(cb) * 255)
       data[at + 3] = 255
     }
   }
@@ -140,10 +186,10 @@ export function makeGalaxyHaze(seed) {
 
 // ─── 2. the star glow sprite (core + halo + diffraction spikes) ──────────────
 
-/** The sprite every star field quad samples: the Stellaris star — a hard
- *  bright point, a SHORT glow, and faint horizontal diffraction streaks on
- *  the brightest ones (the VLM read of the reference: "base point ~3-4px,
- *  glow to ~8-10px, subtle cross flares"). */
+/** The sprite every star field quad samples: THE BEAUTY PASS read — a
+ *  blazing hard point, a MEDIUM halo (the bloom chain extends it), and
+ *  LONG anamorphic diffraction spikes (the cinema lens flare that reads
+ *  as "a star photographed by a scope", not a dot with blur). */
 export function makeStarSprite() {
   const S = 128
   const data = new Uint8Array(S * S * 4)
@@ -154,13 +200,13 @@ export function makeStarSprite() {
       const dy = (py - c) / c
       const d = Math.hypot(dx, dy)
       const at = (py * S + px) * 4
-      const core = Math.exp(-d * d * 30) * 1.55
-      const halo = Math.exp(-d * d * 4.6) * 0.34
-      // the 4-point diffraction spikes: a long horizontal streak + a short
-      // vertical one (the anamorphic "cinema" flare reads as sci-fi star)
-      const spikeH = Math.exp(-(dy * dy) * 420) * Math.exp(-(dx * dx) * 2.1) * 0.62
-      const spikeV = Math.exp(-(dx * dx) * 520) * Math.exp(-(dy * dy) * 3.6) * 0.34
-      const spikeD = Math.exp(-Math.pow(Math.abs(dx * dy), 1.1) * 60) * Math.exp(-d * d * 3.5) * 0.12
+      const core = Math.exp(-d * d * 34) * 1.9
+      const halo = Math.exp(-d * d * 3.6) * 0.52
+      // the 4-point diffraction spikes: a LONG horizontal streak + a
+      // medium vertical one (the anamorphic cinema flare)
+      const spikeH = Math.exp(-(dy * dy) * 380) * Math.exp(-(dx * dx) * 1.35) * 0.95
+      const spikeV = Math.exp(-(dx * dx) * 460) * Math.exp(-(dy * dy) * 2.4) * 0.55
+      const spikeD = Math.exp(-Math.pow(Math.abs(dx * dy), 1.1) * 48) * Math.exp(-d * d * 2.6) * 0.2
       const v = clamp01(core + halo + spikeH + spikeV + spikeD)
       data[at] = data[at + 1] = data[at + 2] = Math.round(v * 255)
       data[at + 3] = 255
@@ -458,13 +504,14 @@ export function makeRingBands(seed) {
 
 // ─── the kitchen: everything the render layer needs, in one call ────────────
 
-/** The nebula palettes (deep → mid → hot) — tuned against Stellaris
- *  references: muted teals, dusty violets and ember browns over a near-black
- *  sky, never neon. */
+/** The nebula palettes (deep → mid → hot) — THE BEAUTY PASS: richer,
+ *  more saturated (the bloom chain lifts the hot tips into glow), a 4th
+ *  crimson; still the Stellaris restraint — jewel tones over neon. */
 export const NEBULA_PALETTES = [
-  [[0.015, 0.09, 0.10], [0.09, 0.40, 0.38], [0.55, 0.95, 0.86]], // muted teal
-  [[0.04, 0.03, 0.11], [0.30, 0.17, 0.52], [0.82, 0.62, 1.0]],  // dusty violet
-  [[0.11, 0.055, 0.03], [0.52, 0.27, 0.13], [0.95, 0.74, 0.48]], // ember dust
+  [[0.012, 0.08, 0.09], [0.08, 0.44, 0.44], [0.62, 1.0, 0.90]],  // teal
+  [[0.03, 0.02, 0.10], [0.36, 0.18, 0.62], [0.88, 0.66, 1.0]],   // violet
+  [[0.10, 0.04, 0.02], [0.58, 0.28, 0.12], [1.0, 0.78, 0.46]],   // ember
+  [[0.09, 0.015, 0.03], [0.52, 0.10, 0.18], [1.0, 0.52, 0.42]],  // crimson
 ]
 
 /**
@@ -476,9 +523,10 @@ export function makeTextures(seed) {
     haze: makeGalaxyHaze(seed),
     star: makeStarSprite(),
     sun: makeSunSprite(seed),
-    nebula0: makeNebula(seed + 1, NEBULA_PALETTES[0], 2.1, 1.0),
-    nebula1: makeNebula(seed + 2, NEBULA_PALETTES[1], 2.4, 1.0),
-    nebula2: makeNebula(seed + 3, NEBULA_PALETTES[2], 2.0, 0.85),
+    nebula0: makeNebula(seed + 1, NEBULA_PALETTES[0], 1.9, 1.25),
+    nebula1: makeNebula(seed + 2, NEBULA_PALETTES[1], 2.2, 1.2),
+    nebula2: makeNebula(seed + 3, NEBULA_PALETTES[2], 1.8, 1.1),
+    nebula3: makeNebula(seed + 4, NEBULA_PALETTES[3], 2.0, 1.05),
     rock: makeRockTexture(seed + 11),
     gas: makeGasTexture(seed + 12),
     ice: makeIceTexture(seed + 13),

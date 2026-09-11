@@ -33,13 +33,13 @@ import { createRenderer } from '../../dist/rune.esm.js?v=169'
 import {
   generateWorld, stepWorld, orderShip, queueBuilding, queueShip, shipName,
   OWNER, SHIPS, lanePath,
-} from './galaxy.js?v=2'
-import { createGameRender } from './render.js?v=4'
+} from './galaxy.js?v=3'
+import { createGameRender } from './render.js?v=5'
 import { createUI } from './ui.js?v=3'
 import {
   setCamera3D, screenToWorld, worldToScreen, panBy,
   MVP, PXK, CLOCK, FADE, GALAXY_FADE, NEB_FADE, SHIP_CAP,
-} from './shaders.js?v=4'
+} from './shaders.js?v=5'
 
 /* ─── the seed (the same seed replays the same galaxy) ───────────────────── */
 
@@ -332,7 +332,7 @@ function tap(sx, sy) {
       const ang = planet.phase + CLOCK[0] * planet.speed
       const px = sys.x + Math.cos(ang) * planet.orbit
       const py = sys.y + Math.sin(ang) * planet.orbit
-      const r = Math.max(planet.size * 0.5 * 1.55, 14 / cam.z) + 6 / cam.z
+      const r = Math.max(planet.size * 0.5 * 1.9, 14 / cam.z) + 6 / cam.z
       if (Math.hypot(px - wx, py - wy) < r) {
         view.selectedPlanet = view.selectedPlanet === pi ? -1 : pi
         if (view.selectedPlanet >= 0) shell.log.event(`${sys.name} · ${planet.type.name} selected`)
@@ -414,7 +414,7 @@ function enterSystem(sys) {
   const maxOrbit = sys.planets.length > 0 ? sys.planets[sys.planets.length - 1].orbit : 8
   cam.tx = sys.x
   cam.ty = sys.y
-  cam.tz = Math.min(30, Math.max(8, (Math.min(w, h) * 0.44) / (maxOrbit + 2)))
+  cam.tz = Math.min(30, Math.max(8, (Math.min(w, h) * 0.52) / (maxOrbit + 2)))
   shell.log.event(`entered ${sys.name} — ${sys.cls.name}`)
   ui?.refreshPanel()
 }
@@ -425,6 +425,7 @@ async function boot(mode) {
   const seq = ++bootSeq
 
   if (activeRenderer !== null) {
+    try { gameRender?.dispose() } catch { /* surfaces die with the context anyway */ }
     try { activeRenderer.dispose() } catch { /* the context may have died with the canvas */ }
     activeRenderer = null
     gameRender = null
@@ -451,7 +452,7 @@ async function boot(mode) {
     if (seq !== bootSeq) { renderer.dispose(); return }
     activeRenderer = renderer
     if (ui === null) ui = createUI(world, view, actions)
-    gameRender = createGameRender(renderer, world, shell)
+    gameRender = createGameRender(renderer, world, shell, canvas)
     renderer.frame(frameCallback)
     const backendName = renderer.backend === 'webgpu' ? 'WebGPU' : 'WebGL2'
     shell.setBadge(backendName, renderer.backend === 'webgpu' ? 'gpu' : 'gl')
