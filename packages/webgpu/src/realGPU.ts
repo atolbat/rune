@@ -140,6 +140,17 @@ export async function createRealGPU(
   let currentPipeline: GPURenderPipeline | null = null
   let currentPipelineId = -1
   let currentTarget = 0
+  // Task 172 — THE DEPTH-LESS PASS AXIS: a pipeline that declares a
+  // depthStencil format is INVALID in a render pass without that depth
+  // attachment (spec: "the pipeline's depthStencil format must match the
+  // pass's depthStencil attachment" — Chrome 150's Dawn enforces it: the
+  // astral field report's «Attachment state of RenderPipeline is not
+  // compatible with RenderPassEncoder» → three errors → the storm pause;
+  // the container's older Dawn does NOT, which is why the Task-169 gate
+  // passed while the phone died). Pipelines now carry a per-DEPTH-PRESENCE
+  // variant (× the Task-69 sampleType variants), chosen at bind time from
+  // the CURRENT pass's attachment state — bindTarget owns this flag.
+  let passHasDepth = true
   // Task 164 — THE MERGED COMPUTE PASS: runCompute used to open AND close a
   // GPUComputePassEncoder per call — the bitonic sort loop dispatches ~342
   // times per frame (171 (bitonic, sortStep) pairs at 160k particles), so
@@ -468,14 +479,19 @@ export async function createRealGPU(
       desc: desc ?? {},
       // Task 145: the two lazy variant slots as nullable fields (a Map per
       // record with string keys cost a hash lookup per draw; the variant set
-      // is exactly two — 'float' and 'unfilterable-float').
+      // is exactly two — 'float' and 'unfilterable-float'). Task 172 adds the
+      // depth-presence twins (lazy: only pipelines actually bound in a
+      // depth-less pass pay the build).
       variantFloat: null,
       variantUnfilterable: null,
+      variantFloatNoDepth: null,
+      variantUnfilterableNoDepth: null,
     }
     pipelineRecords[pipelineId] = record
     // The default 'float' variant — filterable textures (all except
-    // rgba32float on devices without 'float32-filterable').
-    record.variantFloat = buildPipeline(record, 'float')
+    // rgba32float on devices without 'float32-filterable'). Eagerly built
+    // WITH depth (the canvas default); the depth-less twins stay lazy.
+    record.variantFloat = buildPipeline(record, 'float', true)
   }
 
   /** Task 69: build a pipeline for a specific texture binding sampleType.
@@ -483,10 +499,14 @@ export async function createRealGPU(
    *  'unfilterable-float' → sampler 'non-filtering' + texture
    *  'unfilterable-float' (NEAREST; the only legal way to sample
    *  rgba32float without feature 'float32-filterable'). WGSL must use
-   *  textureSampleLevel (textureSample requires a filterable texture). */
+   *  textureSampleLevel (textureSample requires a filterable texture).
+   *  Task 172: withDepth=false — the depth-less pass twin (NO depthStencil
+   *  on the pipeline; a declared format is incompatible with a pass that
+   *  carries no depth attachment — the astral field report's storm pause). */
   function buildPipeline(
     record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; textureBindings: readonly number[]; textureCount: number; desc: GpuPipelineDesc },
     variant: TextureSampleVariant,
+    withDepth: boolean,
   ): GPURenderPipeline {
     const wgsl = record.wgsl
     const attrs = record.attrs
@@ -575,11 +595,6 @@ export async function createRealGPU(
           },
         }],
       },
-      // Task 75: depth from the descriptor. The canvas pass ALWAYS carries
-      // a depth24plus attachment → the pipeline must declare a compatible
-      // depthStencil; for "disabled" depth it is write:false +
-      // compare:'always' (we keep the format to avoid spawning a second
-      // branch of depth-less passes).
       primitive: {
         // Task 167 — the topology mapping twin: 'lines'/'points' were
         // silently drawn as triangle-list (the GL-side fossil's twin — the
@@ -596,11 +611,18 @@ export async function createRealGPU(
         cullMode: desc.raster?.cull === 'back' || desc.raster?.cull === 'front' ? desc.raster.cull : 'none',
         frontFace: desc.raster?.frontFace === 'cw' ? 'cw' : 'ccw',
       },
-      depthStencil: {
+      // Task 75 + Task 172: depth from the descriptor AND the pass kind. A
+      // pipeline bound in a pass WITH a depth attachment (the canvas — it
+      // always carries one; a depth:true target) declares a compatible
+      // depthStencil: "disabled" depth = write:false + compare:'always'. A
+      // pipeline bound in a DEPTH-LESS pass (a depth:false target) declares
+      // NO depthStencil at all — the format would be a validation error
+      // there (the astral phone report: the post chain's scene surface).
+      depthStencil: withDepth ? {
         format: 'depth24plus',
         depthWriteEnabled: desc.depth === false ? false : (desc.depth?.write ?? true),
         depthCompare: desc.depth === false ? 'always' : depthCompareOf(desc.depth?.test),
-      },
+      } : undefined,
     })
   }
 
@@ -637,16 +659,30 @@ export async function createRealGPU(
     setPipelineVariant(record, 'float')
   }
 
-  /** Set the pipeline variant (created lazily on first use). */
+  /** Set the pipeline variant (created lazily on first use). Task 172: the
+   *  variant space is sampleType × DEPTH PRESENCE of the current pass — a
+   *  depth-less pass binds the depth-less twin of the same pipeline (a
+   *  pipeline WITH depthStencil is a validation error there, see
+   *  passHasDepth's declaration). */
   function setPipelineVariant(
-    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; textureBindings: readonly number[]; textureCount: number; desc: GpuPipelineDesc; variantFloat: GPURenderPipeline | null; variantUnfilterable: GPURenderPipeline | null },
+    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; textureBindings: readonly number[]; textureCount: number; desc: GpuPipelineDesc; variantFloat: GPURenderPipeline | null; variantUnfilterable: GPURenderPipeline | null; variantFloatNoDepth: GPURenderPipeline | null; variantUnfilterableNoDepth: GPURenderPipeline | null },
     variant: TextureSampleVariant,
   ): void {
-    let pipeline = variant === 'float' ? record.variantFloat : record.variantUnfilterable
-    if (pipeline === null) {
-      pipeline = buildPipeline(record, variant)
-      if (variant === 'float') record.variantFloat = pipeline
-      else record.variantUnfilterable = pipeline
+    let pipeline: GPURenderPipeline | null
+    if (passHasDepth) {
+      pipeline = variant === 'float' ? record.variantFloat : record.variantUnfilterable
+      if (pipeline === null) {
+        pipeline = buildPipeline(record, variant, true)
+        if (variant === 'float') record.variantFloat = pipeline
+        else record.variantUnfilterable = pipeline
+      }
+    } else {
+      pipeline = variant === 'float' ? record.variantFloatNoDepth : record.variantUnfilterableNoDepth
+      if (pipeline === null) {
+        pipeline = buildPipeline(record, variant, false)
+        if (variant === 'float') record.variantFloatNoDepth = pipeline
+        else record.variantUnfilterableNoDepth = pipeline
+      }
     }
     if (pipeline === currentPipeline) return
     currentPipeline = pipeline
@@ -990,6 +1026,9 @@ export async function createRealGPU(
       colorAttachments: [{ view: colorView, clearValue, loadOp, storeOp: 'store' }],
       depthStencilAttachment: depthAttachment,
     })
+    // Task 172 — the pass's depth presence drives the pipeline variant (see
+    // passHasDepth's declaration): the first usePipeline after this re-picks.
+    passHasDepth = depthAttachment !== undefined
     // BEGIN stamp AFTER beginRenderPass: writeTimestamp(querySet, BEGIN_INDEX)
     if (timerHandle !== null) timerHandle.onBeginPass(pass)
     // New pass — the pipeline and its variant are set anew (usePipeline);
@@ -1577,9 +1616,14 @@ interface PipelineRecord {
   readonly desc: GpuPipelineDesc
   /** Task 145: the two lazy sampleType variants as nullable fields (was a
    *  Map<TextureSampleVariant, GPURenderPipeline> — a string-keyed hash
-   *  lookup per draw; the variant set is exactly two). */
+   *  lookup per draw; the variant set is exactly two). Task 172: the
+   *  depth-presence twins — a pipeline WITH a declared depthStencil format
+   *  is invalid in a depth-less pass, so depth-less binds get their own
+   *  (lazy) twins of the same shader+desc. */
   variantFloat: GPURenderPipeline | null
   variantUnfilterable: GPURenderPipeline | null
+  variantFloatNoDepth: GPURenderPipeline | null
+  variantUnfilterableNoDepth: GPURenderPipeline | null
 }
 
 /** Task 145: texture registry record (the dense textureRecords array). */

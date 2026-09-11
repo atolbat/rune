@@ -215,6 +215,37 @@ export function makeStarSprite() {
   return { width: S, height: S, data }
 }
 
+// ─── 2b. the dust sprite (the galaxy-generator particle — TASK 172) ───────
+
+/** THE PARTICLE GALAXY's grain: a hard little core inside a soft gaussian
+ *  halo — the Bruno-Simon galaxy-generator look (crisp star points riding
+ *  a luminous arm haze). NO diffraction spikes (those belong to the SYSTEM
+ *  stars); a dedicated sprite so 26k dust motes can carry the galaxy's
+ *  structure instead of one stretched 512-texel texture (the field report:
+ *  «сама галактика очень блюрнач» — a texture magnified 4.4× at DPR 3 is
+ *  mush; particles stay crisp at every zoom). */
+export function makeDustSprite() {
+  const S = 64
+  const data = new Uint8Array(S * S * 4)
+  const c = S / 2 - 0.5
+  for (let py = 0; py < S; py++) {
+    for (let px = 0; px < S; px++) {
+      const dx = (px - c) / c
+      const dy = (py - c) / c
+      const d = Math.hypot(dx, dy)
+      const at = (py * S + px) * 4
+      // the core: a tight quadratic peak (the crisp point)
+      const core = Math.exp(-d * d * 26) * 1.55
+      // the halo: a wide gaussian skirt (the luminous grain)
+      const halo = Math.exp(-d * d * 5.2) * 0.30
+      const v = clamp01(core + halo)
+      data[at] = data[at + 1] = data[at + 2] = Math.round(v * 255)
+      data[at + 3] = 255
+    }
+  }
+  return { width: S, height: S, data }
+}
+
 // ─── 3. the sun sprite (core + turbulent corona rays) ────────────────────────
 
 export function makeSunSprite(seed) {
@@ -522,6 +553,7 @@ export function makeTextures(seed) {
   return {
     haze: makeGalaxyHaze(seed),
     star: makeStarSprite(),
+    dust: makeDustSprite(),
     sun: makeSunSprite(seed),
     nebula0: makeNebula(seed + 1, NEBULA_PALETTES[0], 1.9, 1.25),
     nebula1: makeNebula(seed + 2, NEBULA_PALETTES[1], 2.2, 1.2),

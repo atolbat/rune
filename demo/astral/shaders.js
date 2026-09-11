@@ -61,14 +61,27 @@ export const NEB_FADE = [1]                  // the nebula layer's fade (survive
 export const SHIP_CAP = [240]                // the ships' apparent-size cap (px; the system view shrinks them to markers)
 export const SPLIT = new Float32Array(2)     // the ring split axis (eye side of the plane)
 
-// the sky quad (the Milky Way panorama) follows the camera: center + half-extents
+// the sky quad (the Milky Way panorama) follows the camera: center + half-extents.
+// TASK 172 — THE SKY IS WORLD-LOCKED IN ORIENTATION now: the panorama ROLLS
+// with the camera yaw (the old linear u-pan moved the sky one uniform way
+// while the galaxy ROTATED — half the field always read "the background
+// slides opposite", the field report's «они идут в противоположное
+// направление») and drifts a gentle PARALLAX with the pan (a fraction of
+// the galaxy's rate, same direction — an infinitely-distant backdrop glued
+// to the camera read as "opposite" too). Both are pure UV transforms on
+// the camera-glued quad — the geometry still covers the frustum exactly.
 export const SKY_CENTER = new Float32Array(3)
 export const SKY_HALF = new Float32Array(2)
-export const SKY_U0 = [0]
-export const SKY_WIN = [0.3]
+export const SKY_U0 = [0.06]         // base framing (fixed — the yaw pan is dead)
+export const SKY_WIN = [0.3]         // the panorama u-window per screen width
+export const SKY_VSPAN = [0.62]      // the panorama v-window per screen height
+export const SKY_ROLL = [0]          // the camera yaw — the sky rolls with it
+export const SKY_PAR = new Float32Array(2) // the pan parallax (window units)
 // the beauty pass: the panorama reads as DEEP SPACE now (the bloom chain
 // lifts it further) — the old 0.5 whisper left a dead grey void
-export const SKY_GAIN = [0.34]
+export const SKY_GAIN = [0.30]
+// the parallax rate: the sky drifts at this fraction of the galaxy's pan
+const SKY_PARALLAX = 0.22
 
 /** cam: { x, y, z (CSS px / world unit), yaw, tilt } — fills every matrix + basis. */
 export function setCamera3D(cam, aspect, w, h) {
@@ -125,7 +138,15 @@ export function setCamera3D(cam, aspect, w, h) {
   SKY_CENTER[2] = -fz * skyD
   SKY_HALF[1] = TANH * skyD * 1.06
   SKY_HALF[0] = SKY_HALF[1] * aspect * 1.06
-  SKY_U0[0] = yaw / (Math.PI * 2)
+  // TASK 172: the roll replaces the u-pan — the panorama rotates with the
+  // world's yaw exactly like the galaxy does; the parallax drifts the
+  // sample center by a fraction of the camera's world pan (window units,
+  // aspect-compensated so the drift is isotropic on screen)
+  SKY_ROLL[0] = yaw
+  const px2win = SKY_PARALLAX * cam.z * SKY_WIN[0] / Math.max(1, w)
+  const py2win = SKY_PARALLAX * cam.z * SKY_VSPAN[0] / Math.max(1, h)
+  SKY_PAR[0] = cam.x * px2win
+  SKY_PAR[1] = cam.y * py2win
 
   // the ring split axis: the direction from the target toward the eye,
   // projected on the plane (near halves of rings test > 0 against it)
@@ -205,13 +226,28 @@ in vec2 v_uv;
 uniform sampler2D u_tex;
 uniform float u_u0;
 uniform float u_win;
+uniform float u_vspan;
+uniform float u_roll;
+uniform vec2 u_par;
 uniform float u_gain;
 out vec4 o_color;
 void main() {
-  float su = fract(u_u0 + (v_uv.x - 0.5) * u_win);
-  float sv = 0.5 + (v_uv.y - 0.5) * 0.62;
+  // TASK 172 — the world-locked sky: rotate the sample coords by the camera
+  // yaw (the panorama ROLLS with the galaxy — a camera roll rotates an
+  // infinitely-distant sky the same way it rotates the world), then drift
+  // by the pan parallax (the sky pans WITH the world at 0.22x its rate)
+  vec2 p = v_uv - 0.5;
+  float ca = cos(u_roll), sa = sin(u_roll);
+  p = vec2(ca * p.x + sa * p.y, -sa * p.x + ca * p.y);
+  p -= u_par;
+  // both axes wrap: u is the full 360-degree circle, v wraps dark-pole to
+  // dark-pole (the seam is invisible at this gain)
+  float su = fract(u_u0 + p.x * u_win);
+  float sv = fract(0.5 + p.y * u_vspan);
   vec3 rgb = texture(u_tex, vec2(su, sv)).rgb * u_gain;
-  o_color = vec4(rgb, 1.0);
+  // a soft vertical falloff keeps the poles from brightening the corners
+  float pole = 1.0 - 0.35 * smoothstep(0.34, 0.5, abs(sv - 0.5));
+  o_color = vec4(rgb * pole, 1.0);
 }`
 
 const SKY_WGSL = `
@@ -223,7 +259,10 @@ struct Params {
   u_half : vec2<f32>,
   u_u0 : f32,
   u_win : f32,
+  u_vspan : f32,
+  u_roll : f32,
   u_gain : f32,
+  u_par : vec2<f32>,
 }
 @group(0) @binding(0) var<uniform> params : Params;
 @group(1) @binding(0) var texSampler : sampler;
@@ -245,10 +284,18 @@ fn vsMain(@location(0) a_pos : vec2<f32>) -> VSOut {
 
 @fragment
 fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
-  let su = fract(params.u_u0 + (frag.uv.x - 0.5) * params.u_win);
-  let sv = 0.5 + (frag.uv.y - 0.5) * 0.62;
+  // TASK 172 — the world-locked sky (the GLSL twin's comment, verbatim
+  // contract): roll with the yaw, drift with the pan parallax
+  var p = frag.uv - vec2<f32>(0.5, 0.5);
+  let ca = cos(params.u_roll);
+  let sa = sin(params.u_roll);
+  p = vec2<f32>(ca * p.x + sa * p.y, -sa * p.x + ca * p.y);
+  p = p - params.u_par;
+  let su = fract(params.u_u0 + p.x * params.u_win);
+  let sv = fract(0.5 + p.y * params.u_vspan);
   let rgb = textureSample(texTexture, texSampler, vec2<f32>(su, sv)).rgb * params.u_gain;
-  return vec4<f32>(rgb, 1.0);
+  let pole = 1.0 - 0.35 * smoothstep(0.34, 0.5, abs(sv - 0.5));
+  return vec4<f32>(rgb * pole, 1.0);
 }`
 
 export const skyShader = {
@@ -357,6 +404,124 @@ export const bgStarShader = {
   glsl: { vertex: BGSTAR_GLSL_VERT, fragment: BGSTAR_GLSL_FRAG },
   wgsl: BGSTAR_WGSL,
 }
+
+// ─── 2b. the galaxy dust (THE PARTICLE GALAXY — TASK 172) ───────────────────
+//
+// ~26k grains along the world generator's own arm math, drawn as billboard
+// sprite quads — the Bruno-Simon galaxy-generator technique the field report
+// pointed at («ищи лучше реализации галактик в 3d»): crisp star points riding
+// a luminous arm haze, per-particle color from the radial gradient, sizes
+// that GROW with the zoom (real galaxy structure, unlike the px-clamped
+// point stars). Replaces the blurry stretched haze texture as the carrier
+// of the galaxy's visual structure; the haze stays beneath as the smooth
+// under-glow.
+
+const DUST_GLSL_VERT = `#version 300 es
+precision highp float;
+layout(location = 0) in vec3 a_pos;
+layout(location = 1) in vec2 a_meta;   // (worldSize, phase)
+layout(location = 2) in vec4 a_color;
+layout(location = 3) in vec4 a_state;
+uniform mat4 u_mvp;
+uniform mat4 u_view;
+uniform vec3 u_right;
+uniform vec3 u_up;
+uniform float u_pxk;
+uniform float u_time;
+uniform float u_fade;
+out vec2 v_uv;
+out vec4 v_color;
+
+const vec2 CORNERS[6] = vec2[6](vec2(-1,-1), vec2(1,-1), vec2(-1,1), vec2(-1,1), vec2(1,-1), vec2(1,1));
+
+void main() {
+  vec2 corner = CORNERS[gl_VertexID];
+  float eyeZ = -(u_view * vec4(a_pos, 1.0)).z;
+  eyeZ = max(eyeZ, 1.0);
+  // the dust is REAL STRUCTURE: the size scales with the zoom (a floor of
+  // 1.1 px keeps the far grains alive; the cap only guards the giant glow
+  // motes at deep zoom-in)
+  float px = clamp(a_meta.x * u_pxk / eyeZ, 1.1, 240.0);
+  float size = px * eyeZ / u_pxk;
+  // a lazy twinkle — the dust breathes without boiling
+  float tw = 0.86 + 0.14 * sin(u_time * (0.22 + a_meta.y * 0.5) + a_meta.y * 97.0);
+  vec3 world = a_pos + u_right * (corner.x * size) + u_up * (corner.y * size);
+  gl_Position = u_mvp * vec4(world, 1.0);
+  v_uv = corner;
+  v_color = vec4(a_color.rgb * tw, a_color.a * u_fade);
+}`
+
+const DUST_GLSL_FRAG = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+in vec4 v_color;
+uniform sampler2D u_tex;
+out vec4 o_color;
+void main() {
+  float d = length(v_uv);
+  if (d > 1.0) discard;
+  vec3 spr = texture(u_tex, v_uv * 0.5 + 0.5).rgb;
+  vec3 rgb = spr * v_color.rgb * v_color.a;
+  o_color = vec4(rgb, v_color.a);
+}`
+
+const DUST_WGSL = `
+struct Params {
+  u_mvp : mat4x4<f32>,
+  u_view : mat4x4<f32>,
+  u_right : vec3<f32>,
+  u_up : vec3<f32>,
+  u_pxk : f32,
+  u_time : f32,
+  u_fade : f32,
+}
+@group(0) @binding(0) var<uniform> params : Params;
+@group(1) @binding(0) var texSampler : sampler;
+@group(1) @binding(1) var texTexture : texture_2d<f32>;
+
+struct VSOut {
+  @builtin(position) pos : vec4<f32>,
+  @location(0) uv : vec2<f32>,
+  @location(1) color : vec4<f32>,
+}
+
+@vertex
+fn vsMain(@builtin(vertex_index) vi : u32,
+          @location(0) a_pos : vec3<f32>,
+          @location(1) a_meta : vec2<f32>,
+          @location(2) a_color : vec4<f32>,
+          @location(3) a_state : vec4<f32>) -> VSOut {
+  var corners = array<vec2<f32>, 6>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0),
+                                     vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0));
+  let corner = corners[vi];
+  var eyeZ = -(params.u_view * vec4<f32>(a_pos, 1.0)).z;
+  eyeZ = max(eyeZ, 1.0);
+  // real structure: the size scales with the zoom (the GLSL twin's comment)
+  let px = clamp(a_meta.x * params.u_pxk / eyeZ, 1.1, 240.0);
+  let size = px * eyeZ / params.u_pxk;
+  let tw = 0.86 + 0.14 * sin(params.u_time * (0.22 + a_meta.y * 0.5) + a_meta.y * 97.0);
+  let world = a_pos + params.u_right * (corner.x * size) + params.u_up * (corner.y * size);
+  var out : VSOut;
+  out.pos = params.u_mvp * vec4<f32>(world, 1.0);
+  out.uv = corner;
+  out.color = vec4<f32>(a_color.rgb * tw, a_color.a * params.u_fade);
+  return out;
+}
+
+@fragment
+fn fsMain(frag : VSOut) -> @location(0) vec4<f32> {
+  let d = length(frag.uv);
+  if (d > 1.0) { discard; }
+  let spr = textureSample(texTexture, texSampler, frag.uv * 0.5 + vec2<f32>(0.5, 0.5)).rgb;
+  let rgb = spr * frag.color.rgb * frag.color.a;
+  return vec4<f32>(rgb, frag.color.a);
+}`
+
+export const dustShader = {
+  glsl: { vertex: DUST_GLSL_VERT, fragment: DUST_GLSL_FRAG },
+  wgsl: DUST_WGSL,
+}
+
 
 // ─── 3. the nebula pass (billboarded fbm puffs, slowly turning) ─────────────
 

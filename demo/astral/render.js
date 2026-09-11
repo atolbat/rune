@@ -28,14 +28,14 @@
 // field, the nebulas) upload once.
 
 import {
-  starShader, bgStarShader, skyShader, nebulaShader, hazeShader, laneShader,
+  starShader, bgStarShader, dustShader, skyShader, nebulaShader, hazeShader, laneShader,
   shipShader, planetShader, pringShader, ringShader, territoryShader, blackholeShader,
   MVP, VIEW, PROJ, RIGHT, UP, PXK, LINEK, YAW, CLOCK, FADE, GALAXY_FADE, NEB_FADE, SHIP_CAP,
-  SPLIT, SKY_CENTER, SKY_HALF, SKY_U0, SKY_WIN, SKY_GAIN,
-} from './shaders.js?v=5'
+  SPLIT, SKY_CENTER, SKY_HALF, SKY_U0, SKY_WIN, SKY_VSPAN, SKY_ROLL, SKY_PAR, SKY_GAIN,
+} from './shaders.js?v=6'
 import { BUILDINGS, buildTime, GALAXY_RADIUS, OWNER } from './galaxy.js?v=3'
-import { makeTextures } from './textures.js?v=3'
-import { createPostChain } from './post.js?v=1'
+import { makeTextures } from './textures.js?v=4'
+import { createPostChain } from './post.js?v=2'
 
 export const RECORD_FLOATS = 16 // 64-byte stride (pos vec3@0, meta@16, color@32, state@48)
 export const SOUP_FLOATS = 9    // 36-byte stride: pos vec2@0, dir vec2@8, color vec4@16, t@32
@@ -54,10 +54,47 @@ const MAX_ORBIT_RINGS = 7
 // perpendicular sag (6–12% of the lane length, seeded) — organic Stellaris
 // hyperlane arcs, never ruler-straight graph edges
 const LANE_SEGS = 8
-// the beauty pass: the spiral disc GLOWS again — with the arm color story
-// baked into the texture (teal→violet→ember zones + HII knots) and the
-// bloom chain lifting the arms, the galaxy reads as a luminous colored disc
-const HAZE_GAIN = [0.34]
+// THE PARTICLE GALAXY (Task 172, the field report's «сама галактика очень
+// блюрнач, ищи лучше реализации галактик в 3d»): the galaxy's structure now
+// rides ~25.5k billboard sprite particles laid along the WORLD GENERATOR'S
+// OWN arm math (3 arms, ARM_TWIST 2.35 — same as galaxy.js/textures.js), the
+// Bruno-Simon galaxy-generator technique: crisp grain motes + big soft glow
+// motes + pink HII knots, radial color story (cream core → per-arm zone tint
+// → cool rim). The haze quad stays beneath as a much-dimmed smooth under-glow
+// (0.34 → 0.15) — the stretched-4.4× texture is no longer the structure
+// carrier, so the mush is gone at any zoom.
+//
+// THE SOFTWARE-GL BUDGET (the gpuEmbers Task-138 probe, copied with
+// attribution): a SwiftShader/llvmpipe page RASTERIZES ON THE CPU — 25.5k
+// additive sprites at DPR 3 killed the renderer process (the astral-touch
+// gate's field evidence: cells A-C passed, the page died in D). Software
+// pages get a 10× lighter galaxy; every real GPU takes the full set (the
+// phone ran the 160k GPU-Embers tier live — 25.5k is nothing to it).
+const SOFTWARE_GL = (() => {
+  try {
+    if (typeof document === 'undefined') return false
+    const probe = document.createElement('canvas').getContext('webgl2')
+    if (probe === null) return false
+    const dbg = probe.getExtension('WEBGL_debug_renderer_info')
+    const name = dbg !== null ? String(probe.getParameter(dbg.UNMASKED_RENDERER_WEBGL) ?? '') : ''
+    const software = /swiftshader|software|llvmpipe|softpipe|basic render|angle \(google/i.test(name)
+    probe.getExtension('WEBGL_lose_context')?.loseContext()
+    return software
+  } catch { return false }
+})()
+const DUST_SCALE = SOFTWARE_GL ? 0.1 : 1
+const DUST_GRAINS = Math.round(21000 * DUST_SCALE)
+const DUST_GLOWS = Math.round(3600 * DUST_SCALE)
+const DUST_HII = Math.round(900 * DUST_SCALE)
+const DUST_COUNT = DUST_GRAINS + DUST_GLOWS + DUST_HII
+// the per-arm zone tints (teal / violet / ember-gold — the haze texture's
+// palette, one per arm so the arms read as distinct colored structures)
+const DUST_ARM_TINTS = [
+  [0.42, 0.78, 0.92],
+  [0.62, 0.52, 0.98],
+  [0.98, 0.72, 0.48],
+]
+const HAZE_GAIN = [0.15]
 
 // ── the empire territory field (the Stellaris border bake) ──
 // 256² RGBA over the galaxy plane; R = the player's metaball sum, G = the
@@ -94,6 +131,7 @@ export function createGameRender(renderer, world, shell, canvas) {
   // ── the instance record arrays (stable identities — the WG data-keyed cache) ──
   const sysRecords = new Float32Array(world.systems.length * RECORD_FLOATS)
   const bgRecords = new Float32Array(BG_STARS * RECORD_FLOATS)
+  const dustRecords = new Float32Array(DUST_COUNT * RECORD_FLOATS)
   const shipRecords = new Float32Array(MAX_SHIPS * RECORD_FLOATS)
   const planetRecords = new Float32Array(MAX_PLANETS * RECORD_FLOATS)
   const pringRecords = new Float32Array(MAX_PRINGS * RECORD_FLOATS)
@@ -178,6 +216,8 @@ export function createGameRender(renderer, world, shell, canvas) {
   atlasTex.upload(atlasData)
   const starTex = renderer.texture(tex.star.width, tex.star.height)
   starTex.upload(tex.star.data)
+  const dustTex = renderer.texture(tex.dust.width, tex.dust.height)
+  dustTex.upload(tex.dust.data)
   const hazeTex = renderer.texture(tex.haze.width, tex.haze.height)
   hazeTex.upload(tex.haze.data)
   const skyTex = renderer.texture(1024, 512)
@@ -210,6 +250,7 @@ export function createGameRender(renderer, world, shell, canvas) {
       haze: gl.createBuffer(hazeSoup),
       terr: gl.createBuffer(terrSoup),
       sky: gl.createBuffer(skySoup),
+      dust: gl.createBuffer(dustRecords),
     }
     : null
 
@@ -257,6 +298,108 @@ export function createGameRender(renderer, world, shell, canvas) {
     nebCounts[neb.tex] = n + 1
   }
 
+  // THE PARTICLE GALAXY — the dust bake (see the DUST_* declarations). Every
+  // mote follows the world generator's OWN arm equation (a particle
+  // scattered off a DIFFERENT spiral than the systems would sit visibly
+  // wrong next to them): armAngle = armBase + t·π·ARM_TWIST, r = 80 + t·730,
+  // the scatter tightening coreward — plus a cream bulge population, big
+  // glow motes and pink HII knots riding the arm crests.
+  {
+    const rngD = mulberry(0xd057 ^ world.seed)
+    // Box-Muller-ish cheap gaussian (deterministic)
+    const gauss = () => {
+      let s = 0
+      for (let k = 0; k < 4; k++) s += rngD()
+      return (s - 2) * 0.89
+    }
+    const ARM_TWIST = 2.35 // mirrors galaxy.js
+    let di = 0
+    const put = (x, y, z, size, phase, r, g, b, a) => {
+      const at = di * RECORD_FLOATS
+      dustRecords[at + F.pos] = x
+      dustRecords[at + F.pos + 1] = y
+      dustRecords[at + F.pos + 2] = z
+      dustRecords[at + F.meta] = size
+      dustRecords[at + F.meta + 1] = phase
+      dustRecords[at + F.color] = r
+      dustRecords[at + F.color + 1] = g
+      dustRecords[at + F.color + 2] = b
+      dustRecords[at + F.color + 3] = a
+      di++
+    }
+    // ── the grain motes (21k): crisp points tracing the arms + the bulge ──
+    for (let i = 0; i < DUST_GRAINS; i++) {
+      let x, y, t
+      if (rngD() < 0.16) {
+        // the bulge population: dense, cream-gold, thin in z — KEPT DIM
+        // (the VLM read: a blown-out core reads as a flat overlay; the
+        // structure must stay visible inside the glow)
+        const rr = Math.pow(rngD(), 1.9) * 150
+        const aa = rngD() * Math.PI * 2
+        x = Math.cos(aa) * rr
+        y = Math.sin(aa) * rr
+        t = 0
+        put(x, y, gauss() * (26 - rr * 0.08), 1.8 + rngD() * 3.4, rngD(),
+          1.0, 0.93, 0.76, 0.13 + rngD() * 0.33)
+        continue
+      }
+      const arm = i % 3
+      t = 0.06 + 0.94 * Math.pow(rngD(), 1.35)
+      const rr = 80 + t * 730 + gauss() * (13 + t * 44)
+      // the arm scatter loosens coreward (the inner disc merges toward the bulge)
+      const ang = (arm / 3) * Math.PI * 2 + t * Math.PI * ARM_TWIST + gauss() * 0.085 * (1.15 - t * 0.55)
+      x = Math.cos(ang) * rr
+      y = Math.sin(ang) * rr
+      // the color story: cream core → the arm's zone tint → cool rim
+      const tint = DUST_ARM_TINTS[arm]
+      const coreW = Math.max(0, 1 - t * 2.6)
+      const rimW = Math.max(0, t * 1.25 - 0.62)
+      const armW = Math.min(1, Math.max(0, 1 - coreW - rimW))
+      const r2 = 1.0 * coreW + tint[0] * armW + 0.5 * rimW
+      const g2 = 0.93 * coreW + tint[1] * armW + 0.58 * rimW
+      const b2 = 0.76 * coreW + tint[2] * armW + 1.0 * rimW
+      put(x, y, gauss() * (9 + t * 6), 1.8 + rngD() * 3.4, rngD(),
+        r2, g2, b2, 0.22 + rngD() * 0.46)
+    }
+    // ── the glow motes (3.6k): big soft sprites — the luminous arm haze ──
+    for (let i = 0; i < DUST_GLOWS; i++) {
+      let x, y
+      if (rngD() < 0.2) {
+        const rr = Math.pow(rngD(), 2.2) * 170
+        const aa = rngD() * Math.PI * 2
+        x = Math.cos(aa) * rr
+        y = Math.sin(aa) * rr
+        put(x, y, gauss() * 16, 30 + rngD() * 62, rngD(),
+          1.0, 0.92, 0.72, 0.028 + rngD() * 0.05)
+        continue
+      }
+      const arm = i % 3
+      const t = 0.08 + 0.92 * Math.pow(rngD(), 1.3)
+      const rr = 90 + t * 700 + gauss() * (26 + t * 60)
+      const ang = (arm / 3) * Math.PI * 2 + t * Math.PI * ARM_TWIST + gauss() * 0.12
+      x = Math.cos(ang) * rr
+      y = Math.sin(ang) * rr
+      const tint = DUST_ARM_TINTS[arm]
+      const coreW = Math.max(0, 1 - t * 2.6)
+      const rimW = Math.max(0, t * 1.25 - 0.62)
+      const armW = Math.min(1, Math.max(0, 1 - coreW - rimW))
+      put(x, y, gauss() * (11 + t * 7), 26 + rngD() * 64, rngD(),
+        1.0 * coreW + tint[0] * armW + 0.5 * rimW,
+        0.93 * coreW + tint[1] * armW + 0.58 * rimW,
+        0.76 * coreW + tint[2] * armW + 1.0 * rimW,
+        0.04 + rngD() * 0.07)
+    }
+    // ── the HII knots (900): pink-magenta star-forming chips on the crests ──
+    for (let i = 0; i < DUST_HII; i++) {
+      const arm = i % 3
+      const t = 0.2 + 0.8 * rngD()
+      const rr = 130 + t * 640 + gauss() * 16
+      const ang = (arm / 3) * Math.PI * 2 + t * Math.PI * ARM_TWIST + gauss() * 0.05
+      put(Math.cos(ang) * rr, Math.sin(ang) * rr, gauss() * 7,
+        2.6 + rngD() * 4.4, rngD(), 1.0, 0.45, 0.66, 0.5 + rngD() * 0.4)
+    }
+  }
+
   // the lane soup (centerline + unit perpendicular + the along-lane t —
   // the shader expands and pulses). THE BEAUTY PASS: every hyperlane is a
   // QUADRATIC BÉZIER with a seeded perpendicular sag — the arc reads organic
@@ -277,7 +420,7 @@ export function createGameRender(renderer, world, shell, canvas) {
       const sag = (0.06 + rngL() * 0.06) * len * (rngL() < 0.5 ? -1 : 1)
       const cx = (A.x + B.x) / 2 + nx * sag
       const cy = (A.y + B.y) / 2 + ny * sag
-      const alpha = 0.36
+      const alpha = 0.44
       const cr = 0.42 * alpha
       const cg = 0.88 * alpha
       const cb = 0.80 * alpha
@@ -394,6 +537,9 @@ export function createGameRender(renderer, world, shell, canvas) {
       u_half: () => SKY_HALF,
       u_u0: () => SKY_U0,
       u_win: () => SKY_WIN,
+      u_vspan: () => SKY_VSPAN,
+      u_roll: () => SKY_ROLL,
+      u_par: () => SKY_PAR,
       u_gain: () => SKY_GAIN,
     },
     textures: { u_tex: skyTex, texTexture: skyTex },
@@ -449,6 +595,29 @@ export function createGameRender(renderer, world, shell, canvas) {
     count: 6,
   })
 
+  // THE PARTICLE GALAXY: the dust pass — ~25.5k billboard motes carrying the
+  // arm structure above the (now dim) haze, under the lanes and territory.
+  // Sizes are WORLD-scaled (they grow with the zoom — real structure, not
+  // px-clamped point stars); the fade rides GALAXY_FADE so the system view
+  // crossfades it away with the rest of the galaxy layer.
+  const cmdDust = renderer.command({
+    shader: { glsl: dustShader.glsl, wgsl: dustShader.wgsl },
+    pipeline: { depth: false, blend: { src: 'one', dst: 'one' } },
+    attributes: instanceAttrs(dustRecords, glDyn?.dust),
+    uniforms: {
+      u_mvp: () => MVP,
+      u_view: () => VIEW,
+      u_right: () => RIGHT,
+      u_up: () => UP,
+      u_pxk: () => PXK,
+      u_time: () => CLOCK,
+      u_fade: () => GALAXY_FADE,
+    },
+    textures: { u_tex: dustTex, texTexture: dustTex },
+    count: 6,
+    instances: (p) => p.count,
+  })
+
   // THE STELLARIS BORDER: the empire territory field — drawn above the haze,
   // under the lanes (the fill tints the ground, the contour sheen and the
   // contested frontier glow ride the same quad)
@@ -480,7 +649,7 @@ export function createGameRender(renderer, world, shell, canvas) {
       u_view: () => VIEW,
       u_proj: () => PROJ,
       u_linek: () => LINEK,
-      u_width: [1.15],
+      u_width: [1.3],
       u_fade: () => GALAXY_FADE,
       u_time: () => CLOCK,
       u_pulse: [0.28],
@@ -1028,12 +1197,14 @@ export function createGameRender(renderer, world, shell, canvas) {
         gl.updateBuffer(glDyn.haze, hazeSoup)
         gl.updateBuffer(glDyn.terr, terrSoup)
         gl.updateBuffer(glDyn.sky, skySoup)
+        gl.updateBuffer(glDyn.dust, dustRecords)
       } else {
         gpu.syncVertexBuffer(bgRecords, bgRecords.length * 4)
         for (let i = 0; i < 4; i++) gpu.syncVertexBuffer(nebRecords[i], nebCounts[i] * RECORD_FLOATS * 4)
         gpu.syncVertexBuffer(hazeSoup, hazeSoup.length * 4)
         gpu.syncVertexBuffer(terrSoup, terrSoup.length * 4)
         gpu.syncVertexBuffer(skySoup, skySoup.length * 4)
+        gpu.syncVertexBuffer(dustRecords, dustRecords.length * 4)
       }
       staticUploaded = true
     }
@@ -1057,6 +1228,7 @@ export function createGameRender(renderer, world, shell, canvas) {
       if (nebCounts[i] > 0) record(post.capture(cmdNebs[i], false), { count: nebCounts[i] })
     }
     record(post.capture(cmdHaze, false), {})
+    record(post.capture(cmdDust, false), { count: DUST_COUNT })
     record(post.capture(cmdTerritory, false), {})
     record(post.capture(cmdLanes, false), { count: laneVerts })
     if (orbitVerts > 0) record(post.capture(cmdOrbits, false), { count: orbitVerts })

@@ -184,6 +184,10 @@ describe('Task 69: rgba32float without float32-filterable — unfilterable bind 
     const { calls, canvas, cleanup } = installMockGpu([])
     cleanups.push(cleanup)
     const gpu = await createRealGPU(canvas as never)
+    // Task 172: configure() gives the canvas pass its depth attachment (the
+    // real renderer always configures before drawing — the depth-presence
+    // pipeline variant then stays the eager depth-carrying one here)
+    gpu.configure(800, 600)
     const tex = gpu.createTexture(256, 256, 'rgba32float')
     // the sampler degrades to nearest (all three filters)
     const sampler = calls.samplers[calls.samplers.length - 1]!
@@ -258,6 +262,8 @@ describe('Task 69: rgba32float without float32-filterable — unfilterable bind 
     const { calls, canvas, cleanup } = installMockGpu([])
     cleanups.push(cleanup)
     const gpu = await createRealGPU(canvas as never)
+    // Task 172: the canvas pass carries depth after configure (real usage)
+    gpu.configure(800, 600)
     const tex = gpu.createTexture(256, 256)
     const sampler = calls.samplers[calls.samplers.length - 1]!
     expect(sampler.magFilter).toBe('linear')
@@ -276,6 +282,7 @@ describe('Task 69: rgba32float without float32-filterable — unfilterable bind 
     const { calls, canvas, cleanup } = installMockGpu(['float32-filterable'])
     cleanups.push(cleanup)
     const gpu = await createRealGPU(canvas as never)
+    gpu.configure(800, 600) // Task 172: the real-usage canvas pass (depth present)
     const tex = gpu.createTexture(256, 256, 'rgba32float')
     const sampler = calls.samplers[calls.samplers.length - 1]!
     expect(sampler.magFilter).toBe('linear')
@@ -293,6 +300,7 @@ describe('Task 69: rgba32float without float32-filterable — unfilterable bind 
     cleanups.push(cleanup)
     const errors: string[] = []
     const gpu = await createRealGPU(canvas as never, msg => errors.push(msg))
+    gpu.configure(800, 600) // Task 172: the real-usage canvas pass (depth present)
     const tex = gpu.createTexture(256, 256, 'rgba32float')
     gpu.ensurePipeline(1, WGSL_SAMPLE, [2, 2], true)
     gpu.beginPass(0)
@@ -305,6 +313,7 @@ describe('Task 69: rgba32float without float32-filterable — unfilterable bind 
     const { calls, canvas, cleanup } = installMockGpu([])
     cleanups.push(cleanup)
     const gpu = await createRealGPU(canvas as never)
+    gpu.configure(800, 600) // Task 172: the real-usage canvas pass (depth present)
     const tex32 = gpu.createTexture(256, 256, 'rgba32float')
     const tex8 = gpu.createTexture(256, 256)
     gpu.ensurePipeline(1, WGSL_LEVEL, [2, 2], true)

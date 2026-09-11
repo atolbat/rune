@@ -4,8 +4,8 @@
 // the UI floats). Labels are world-projected each frame (the vfx "labels
 // projected" standard).
 
-import { BUILDINGS, SHIPS, TECHS, OWNER, production } from './galaxy.js?v=2'
-import { worldToScreen } from './shaders.js?v=4'
+import { BUILDINGS, SHIPS, TECHS, OWNER, production } from './galaxy.js?v=3'
+import { worldToScreen } from './shaders.js?v=6'
 
 const ICON = { minerals: '◆', energy: '⚡', science: '✦' }
 

@@ -9680,6 +9680,7 @@ async function createRealGPU(canvas, onGpuError) {
   let currentPipeline = null;
   let currentPipelineId = -1;
   let currentTarget = 0;
+  let passHasDepth = true;
   let computePass = null;
   let computeGroup = null;
   const vertexBindMemo = [];
@@ -9828,12 +9829,14 @@ async function createRealGPU(canvas, onGpuError) {
       textureCount: hasTextures ? countGroup1TextureBindings(wgsl) : 0,
       desc: desc ?? {},
       variantFloat: null,
-      variantUnfilterable: null
+      variantUnfilterable: null,
+      variantFloatNoDepth: null,
+      variantUnfilterableNoDepth: null
     };
     pipelineRecords[pipelineId] = record;
-    record.variantFloat = buildPipeline(record, "float");
+    record.variantFloat = buildPipeline(record, "float", true);
   }
-  function buildPipeline(record, variant) {
+  function buildPipeline(record, variant, withDepth) {
     const wgsl = record.wgsl;
     const attrs = record.attrs;
     const desc = record.desc;
@@ -9898,11 +9901,11 @@ async function createRealGPU(canvas, onGpuError) {
         cullMode: desc.raster?.cull === "back" || desc.raster?.cull === "front" ? desc.raster.cull : "none",
         frontFace: desc.raster?.frontFace === "cw" ? "cw" : "ccw"
       },
-      depthStencil: {
+      depthStencil: withDepth ? {
         format: "depth24plus",
         depthWriteEnabled: desc.depth === false ? false : desc.depth?.write ?? true,
         depthCompare: desc.depth === false ? "always" : depthCompareOf(desc.depth?.test)
-      }
+      } : undefined
     });
   }
   function depthCompareOf(test) {
@@ -9943,13 +9946,25 @@ async function createRealGPU(canvas, onGpuError) {
     setPipelineVariant(record, "float");
   }
   function setPipelineVariant(record, variant) {
-    let pipeline = variant === "float" ? record.variantFloat : record.variantUnfilterable;
-    if (pipeline === null) {
-      pipeline = buildPipeline(record, variant);
-      if (variant === "float")
-        record.variantFloat = pipeline;
-      else
-        record.variantUnfilterable = pipeline;
+    let pipeline;
+    if (passHasDepth) {
+      pipeline = variant === "float" ? record.variantFloat : record.variantUnfilterable;
+      if (pipeline === null) {
+        pipeline = buildPipeline(record, variant, true);
+        if (variant === "float")
+          record.variantFloat = pipeline;
+        else
+          record.variantUnfilterable = pipeline;
+      }
+    } else {
+      pipeline = variant === "float" ? record.variantFloatNoDepth : record.variantUnfilterableNoDepth;
+      if (pipeline === null) {
+        pipeline = buildPipeline(record, variant, false);
+        if (variant === "float")
+          record.variantFloatNoDepth = pipeline;
+        else
+          record.variantUnfilterableNoDepth = pipeline;
+      }
     }
     if (pipeline === currentPipeline)
       return;
@@ -10196,6 +10211,7 @@ async function createRealGPU(canvas, onGpuError) {
       colorAttachments: [{ view: colorView, clearValue, loadOp, storeOp: "store" }],
       depthStencilAttachment: depthAttachment
     });
+    passHasDepth = depthAttachment !== undefined;
     if (timerHandle !== null)
       timerHandle.onBeginPass(pass);
     currentPipelineId = -1;

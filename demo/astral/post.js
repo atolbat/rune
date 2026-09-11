@@ -39,7 +39,7 @@
 // The chain is rebuilt on buffer resize (surfaces are fixed-size FBOs);
 // the rebuild is lazy — checked once per frame against the live size.
 
-import { CLOCK } from './shaders.js?v=5'
+import { CLOCK } from './shaders.js?v=6'
 
 // the serialized tape opcode (BindTarget) — see the header provenance
 const OP_BIND_TARGET = 4
@@ -330,11 +330,13 @@ export function createPostChain(renderer) {
     const frag = (glsl, wgsl) => (isGL ? glsl : wgsl)
     const qTexel = [1 / qw, 1 / qh]
 
-    // threshold reads the SCENE, writes bloomA (¼ res) — 0.60: only the
-    // star cores / suns / lane pulses / territory sheen ride the bloom; the
-    // disc haze and nebulas stay put (the "washed-out glitter" fix)
+    // threshold reads the SCENE, writes bloomA (¼ res) — 0.72: with the
+    // Task-172 particle galaxy the disc itself is luminous now; only the
+    // star cores / suns / lane pulses / territory sheen ride the bloom —
+    // the disc haze, nebulas and the dust arms stay put (the VLM's
+    // "blown-out core" read at 0.66: the whole bulge bloomed into a wash)
     const passThresh = bloomA.pass(frag(THRESH_GLSL, THRESH_WGSL), {
-      uniforms: { u_thresh: [0.66] },
+      uniforms: { u_thresh: [0.72] },
       inputs: passInputs(sceneSurf.texture),
       clear: true,
     })

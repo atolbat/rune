@@ -27,19 +27,19 @@
 // pinch (zoom at the midpoint), twist (yaw the camera — the 3D plane
 // rotates under you) and pan at once; taps stay taps (a 9px/400ms slop).
 //
-// The dist import carries the stale-cache guard: rune.esm.js is at ?v=169.
+// The dist import carries the stale-cache guard: rune.esm.js is at ?v=172.
 
-import { createRenderer } from '../../dist/rune.esm.js?v=169'
+import { createRenderer } from '../../dist/rune.esm.js?v=172'
 import {
   generateWorld, stepWorld, orderShip, queueBuilding, queueShip, shipName,
   OWNER, SHIPS, lanePath,
 } from './galaxy.js?v=3'
-import { createGameRender } from './render.js?v=5'
+import { createGameRender } from './render.js?v=6'
 import { createUI } from './ui.js?v=3'
 import {
   setCamera3D, screenToWorld, worldToScreen, panBy,
   MVP, PXK, CLOCK, FADE, GALAXY_FADE, NEB_FADE, SHIP_CAP,
-} from './shaders.js?v=5'
+} from './shaders.js?v=6'
 
 /* ─── the seed (the same seed replays the same galaxy) ───────────────────── */
 
