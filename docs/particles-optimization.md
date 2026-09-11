@@ -2421,3 +2421,14 @@ The six errors, two roots:
 recorded history the baseline is clean, not tolerated. The full stack
 re-verified: 1777/1777, lint 0 errors / 375 warnings, dist rebuilt,
 demo:smoke OK. CI goes green on this push.
+
+With the typecheck wall down, the CI test suite ran for the first time
+in four days — and the `segments.bench.test.ts` smoke flaked on its
+first CI appearance (4.06× measured against its 4× gate on a contended
+shared runner; the only failing test in the run, parsed from the job
+log). The smoke's subject is the MECHANISM (a broken cache replays the
+full record path, ratio ~1×) — the gate moved to 3× with best-of-12,
+still decisive, now with contention headroom. Commit 8a2dcad:
+**CI GREEN** — the first green `ci` run since before the journal's
+Sept-7 entries, and Pages re-deployed with the astral demo gone (404)
+and the Task-173 particles bundle live.
