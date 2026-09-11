@@ -25,6 +25,7 @@ type TextureSampleVariant = 'float' | 'unfilterable-float'
 export async function createRealGPU(
   canvas: AnyCanvas,
   onGpuError?: (message: string) => void,
+  onDeviceLost?: (reason: string) => void,
 ): Promise<GPUFacade> {
   const adapter = await navigator.gpu.requestAdapter()
   if (adapter === null) throw new Error('rune: WebGPU adapter unavailable')
@@ -73,6 +74,44 @@ export async function createRealGPU(
   device.addEventListener('uncapturederror', event => {
     onGpuError?.(String((event as GPUUncapturedErrorEvent).error.message ?? event))
   })
+
+  // ─── Task 175 — THE DEVICE-LOSS WIRE (gated: real hardware only) ──────
+  // device.lost is the ONE spec channel for a dead WebGPU device: a GPU
+  // process crash, an adapter removal, a driver reset. The uncapturederror
+  // listener above goes DEAD on a lost device: validation errors stop
+  // surfacing, submits silently no-op, and the renderer would keep
+  // "rendering" a frozen canvas forever. The renderer wires this callback
+  // into a FATAL storm pause — one report, immediate, no counting to three.
+  //
+  // THE GATE — the subscription itself is a hazard on known-broken
+  // software stacks: the container's SwiftShader+Vulkan Chrome destroys
+  // the whole instance the moment ANY handler subscribes to device.lost
+  // (traced raw: two devices, subscribe one — reason 'destroyed' at +2ms,
+  // the sibling's next submit throws "external Instance no longer
+  // exists"; the same stack also lets devices die unwatched right after
+  // their first present — every "copy fails after presents" symptom this
+  // task chased was a copy landing on an ALREADY-dead device). The
+  // adapter's info names those stacks (vendor 'google' / architecture
+  // 'swiftshader'; llvmpipe and lavapipe likewise) — on them the
+  // subscription is SKIPPED and the copy armor (the sync-throw report on
+  // copyExternalImageToTexture, the first call that notices a dead
+  // device) carries the detection instead. On real hardware the
+  // subscription is the spec channel and is safe — every major WebGPU
+  // application subscribes. Our own dispose() also fires device.lost
+  // (reason 'destroyed'); the facadeDisposed flag flips before
+  // device.destroy() runs, so the expected teardown stays silent.
+  const adapterInfo = (adapter as GPUAdapter & {
+    info?: { vendor?: string; architecture?: string; device?: string; description?: string }
+  }).info
+  const softwareAdapter = adapterInfo !== undefined
+    && /swiftshader|llvmpipe|lavapipe|software|basicrender/i
+      .test(`${adapterInfo.vendor ?? ''} ${adapterInfo.architecture ?? ''} ${adapterInfo.device ?? ''} ${adapterInfo.description ?? ''}`)
+  if (!softwareAdapter) {
+    device.lost.then((info: GPUDeviceLostInfo) => {
+      if (facadeDisposed) return // our own teardown — the expected path
+      onDeviceLost?.(info.reason)
+    })
+  }
 
   // ─── Task 174 — THE MULTI-DRAW TIER's capability probe ────────────────
   // drawIndirectCount was dropped from the WebGPU spec and ships nowhere
@@ -389,11 +428,27 @@ export async function createRealGPU(
     // the SOURCE to be straight-alpha: for canvas-derived bitmaps pass
     // createImageBitmap(canvas, { premultiplyAlpha: 'none' }) — the browser
     // un-premultiplies at bitmap creation (see the particles demo sprite).
-    device.queue.copyExternalImageToTexture(
-      { source: source as GPUCopyExternalImageSource, flipY: flipY === true },
-      { texture: record.texture, mipLevel: 0, origin: { x: dstX, y: dstY, z: 0 }, premultipliedAlpha: false },
-      { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 },
-    )
+    //
+    // Task 175 — THE COPY ARMOR: on some stacks this call dies with a SYNC
+    // TypeError ("Failed to copy content from external image") once the
+    // device has presented a frame — the container's SwiftShader+Vulkan
+    // Chrome is the documented case, traced with a raw-WebGPU matrix (0
+    // presents → the copy works; any present → the copy throws AND the
+    // WebGPU instance dies with it: device.lost fires, every later submit
+    // silently no-ops). The throw is reported through the GPU error
+    // channel so the renderer's storm sees it, then RETHROWN — the
+    // caller's own catch keeps its error UX (model-viewer's "Failed to
+    // load ..."), and the device-lost wire pauses the loop honestly.
+    try {
+      device.queue.copyExternalImageToTexture(
+        { source: source as GPUCopyExternalImageSource, flipY: flipY === true },
+        { texture: record.texture, mipLevel: 0, origin: { x: dstX, y: dstY, z: 0 }, premultipliedAlpha: false },
+        { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 },
+      )
+    } catch (error) {
+      onGpuError?.(`copyExternalImageToTexture rejected: ${errorMessage(error)} — the texture was NOT uploaded (the device may be lost; check for a device-loss report)`)
+      throw error
+    }
   }
 
   function copyExternalImageToTextureMip(
@@ -414,11 +469,18 @@ export async function createRealGPU(
     // flipY — see copyExternalImageToTexture above (GPUCopyExternalImageSourceInfo.flipY).
     // Task 116: premultipliedAlpha: false — the same straight-alpha contract
     // as copyExternalImageToTexture (see the comment there).
-    device.queue.copyExternalImageToTexture(
-      { source: source as GPUCopyExternalImageSource, flipY: flipY === true },
-      { texture: record.texture, mipLevel, origin: { x: dstX, y: dstY, z: 0 }, premultipliedAlpha: false },
-      { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 },
-    )
+    // Task 175 — THE COPY ARMOR: the same sync-throw report + rethrow as the
+    // mip-0 twin (see the comment there).
+    try {
+      device.queue.copyExternalImageToTexture(
+        { source: source as GPUCopyExternalImageSource, flipY: flipY === true },
+        { texture: record.texture, mipLevel, origin: { x: dstX, y: dstY, z: 0 }, premultipliedAlpha: false },
+        { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 },
+      )
+    } catch (error) {
+      onGpuError?.(`copyExternalImageToTextureMip (level ${mipLevel}) rejected: ${errorMessage(error)} — the texture was NOT uploaded (the device may be lost; check for a device-loss report)`)
+      throw error
+    }
   }
 
   function uploadUniforms(offset: number, data: Uint8Array): void {

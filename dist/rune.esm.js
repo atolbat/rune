@@ -9685,7 +9685,7 @@ function astcEntries() {
 }
 
 // packages/webgpu/src/realGPU.ts
-async function createRealGPU(canvas, onGpuError) {
+async function createRealGPU(canvas, onGpuError, onDeviceLost) {
   const adapter = await navigator.gpu.requestAdapter();
   if (adapter === null)
     throw new Error("rune: WebGPU adapter unavailable");
@@ -9705,6 +9705,15 @@ async function createRealGPU(canvas, onGpuError) {
   device.addEventListener("uncapturederror", (event) => {
     onGpuError?.(String(event.error.message ?? event));
   });
+  const adapterInfo = adapter.info;
+  const softwareAdapter = adapterInfo !== undefined && /swiftshader|llvmpipe|lavapipe|software|basicrender/i.test(`${adapterInfo.vendor ?? ""} ${adapterInfo.architecture ?? ""} ${adapterInfo.device ?? ""} ${adapterInfo.description ?? ""}`);
+  if (!softwareAdapter) {
+    device.lost.then((info) => {
+      if (facadeDisposed)
+        return;
+      onDeviceLost?.(info.reason);
+    });
+  }
   const encoderProto = typeof GPURenderPassEncoder === "function" ? GPURenderPassEncoder.prototype : null;
   const hasDrawIndirectCount = encoderProto !== null && typeof encoderProto.drawIndirectCount === "function";
   const context = canvas.getContext("webgpu");
@@ -9827,13 +9836,23 @@ async function createRealGPU(canvas, onGpuError) {
     const record = textureRecords[textureId];
     if (record === undefined)
       return;
-    device.queue.copyExternalImageToTexture({ source, flipY: flipY === true }, { texture: record.texture, mipLevel: 0, origin: { x: dstX, y: dstY, z: 0 }, premultipliedAlpha: false }, { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 });
+    try {
+      device.queue.copyExternalImageToTexture({ source, flipY: flipY === true }, { texture: record.texture, mipLevel: 0, origin: { x: dstX, y: dstY, z: 0 }, premultipliedAlpha: false }, { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 });
+    } catch (error) {
+      onGpuError?.(`copyExternalImageToTexture rejected: ${errorMessage(error)} — the texture was NOT uploaded (the device may be lost; check for a device-loss report)`);
+      throw error;
+    }
   }
   function copyExternalImageToTextureMip(textureId, mipLevel, source, dstX, dstY, copyWidth, copyHeight, flipY) {
     const record = textureRecords[textureId];
     if (record === undefined)
       return;
-    device.queue.copyExternalImageToTexture({ source, flipY: flipY === true }, { texture: record.texture, mipLevel, origin: { x: dstX, y: dstY, z: 0 }, premultipliedAlpha: false }, { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 });
+    try {
+      device.queue.copyExternalImageToTexture({ source, flipY: flipY === true }, { texture: record.texture, mipLevel, origin: { x: dstX, y: dstY, z: 0 }, premultipliedAlpha: false }, { width: copyWidth, height: copyHeight, depthOrArrayLayers: 1 });
+    } catch (error) {
+      onGpuError?.(`copyExternalImageToTextureMip (level ${mipLevel}) rejected: ${errorMessage(error)} — the texture was NOT uploaded (the device may be lost; check for a device-loss report)`);
+      throw error;
+    }
   }
   function uploadUniforms(offset, data) {
     const window2 = Math.ceil(data.length / 256) * 256;
@@ -11564,7 +11583,10 @@ var DEFAULT_CLEAR3 = { color: [0.07, 0.08, 0.11, 1], depth: 1 };
 async function createWebGpuRenderer(options) {
   const canvas = resolveCanvasAny(options.canvas);
   const storm = createErrorStorm(options.onGpuError);
-  const rawGpu = options.createGPU !== undefined ? await options.createGPU(canvas, storm.handle) : await createRealGPU(canvas, storm.handle);
+  const onDeviceLost = (reason) => {
+    storm.fatal(`WebGPU device lost (${reason}) — rendering stopped (device-loss pause); the device is gone and every later submit would silently no-op. Re-boot the renderer (auto mode: a WebGL2 re-boot) to continue.`);
+  };
+  const rawGpu = options.createGPU !== undefined ? await options.createGPU(canvas, storm.handle, onDeviceLost) : await createRealGPU(canvas, storm.handle, onDeviceLost);
   const session = options.resources !== undefined ? createResourceSessionGPU(rawGpu, options.resources) : null;
   const gpu = session !== null ? session.facade : options.journal !== undefined ? withJournalGpu(rawGpu, options.journal) : rawGpu;
   const epoch = createEpoch();
@@ -11807,6 +11829,13 @@ function createErrorStorm(report) {
         paused = true;
         report?.(`detected ${count} GPU errors — rendering stopped (storm pause)`);
       }
+    },
+    fatal: (message) => {
+      if (paused)
+        return;
+      count = ERROR_STORM_LIMIT;
+      paused = true;
+      report?.(message);
     },
     resume() {
       count = 0;

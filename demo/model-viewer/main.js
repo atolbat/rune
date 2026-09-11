@@ -15,7 +15,7 @@
 // drag (touch/mouse) + auto-spin; zoom via pinch (two fingers) and wheel.
 // The demo imports the BUILT bundles: dist/rune.esm.js + dist/rune-loaders.esm.js
 // + dist/rune-animation.esm.js + dist/rune-materials.esm.js.
-import { createRenderer } from '../../dist/rune.esm.js?v=123'
+import { createRenderer } from '../../dist/rune.esm.js?v=175'
 import { AssetLoader } from '../../dist/rune-loaders.esm.js?v=123'
 import { createAnimator } from '../../dist/rune-animation.esm.js?v=123'
 import {
@@ -656,6 +656,11 @@ dragHint.textContent = 'drag to rotate'
 
 let sheetOpen = false
 let currentModelId = MODELS[0].id
+// Task 175 — set by the device-loss handler of the CURRENT boot: the
+// auto fallback is in flight. loadModel's catch reads it to NOT overwrite
+// the recovering renderer's badge with 'load failed' (the WG load DID
+// fail — the log keeps the error — but the recovery owns the UI state).
+let lossRebooted = false
 const prepared = new Map() // id → prepared meshes (backend-independent)
 const attached = new Map() // id → scene on the CURRENT renderer (reset in boot)
 
@@ -765,7 +770,10 @@ async function loadModel(model) {
   } catch (error) {
     if (seq !== loadSeq) return
     shell.log.error(`Failed to load “${model.title}”: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`)
-    shell.setBadge('load failed', 'err')
+    // Task 175 — while the device-loss recovery is re-booting the fallback
+    // renderer, its badge owns the UI; the load error itself is still in
+    // the log (the WG load DID fail — the recovery re-attaches the parse).
+    if (!lossRebooted) shell.setBadge('load failed', 'err')
     hideProgress()
   } finally {
     loadBusy = false
@@ -1153,6 +1161,21 @@ async function boot(mode) {
   shell.log.event(`Booting: “${MODE_NAMES[mode] ?? mode}”`)
 
   try {
+    // Task 175 — THE DEVICE-LOSS RECOVERY (auto mode). The library now
+    // reports a lost WebGPU device as a FATAL pause ("WebGPU device lost
+    // (…) — rendering stopped"): a GPU process crash, an adapter removal,
+    // a driver reset — or the poisoned external-image copy this task
+    // traced on the container's SwiftShader stack (copyExternalImageToTexture
+    // kills the instance once the device has presented; model-viewer's WG
+    // leg died there: "Failed to copy content from external image" → a
+    // frozen canvas). The mode label promises "WebGPU → WebGL2 fallback" —
+    // honor it POST-boot too: ONE re-boot on WebGL2. The prepared-model
+    // cache carries the scene (the parse succeeded before the loss; only
+    // the GPU upload died with the device), so boot()'s own re-attach
+    // brings the model up on GL without a second download.
+    // Task 175 — the device-loss handler uses the MODULE-level lossRebooted
+    // (declared at the top with the demo state): it survives this boot's
+    // scope so loadModel's catch can see that the recovery owns the UI.
     const renderer = createRenderer({
       canvas,
       backend: mode === 'auto' ? undefined : mode,
@@ -1160,7 +1183,34 @@ async function boot(mode) {
       // Silent validation error channels (GL_INVALID_* / WebGPU uncaptured):
       // without them a “black canvas” explains nothing — the demo standard requires a log
       onGlError: (message) => shell.log.warn(`GL: ${message}`),
-      onGpuError: (message) => shell.log.warn(`GPU: ${message}`),
+      onGpuError: (message) => {
+        shell.log.warn(`GPU: ${message}`)
+        // Task 175 — THE DEVICE-LOSS RECOVERY (auto mode). Two report
+        // classes trigger it: the library's fatal device-loss pause ("WebGPU
+        // device lost (…) — rendering stopped" — real hardware, the spec
+        // channel), and the COPY ARMOR's report ("copyExternalImageToTexture
+        // rejected … the device may be lost" — the software stacks where
+        // the library SKIPS the device.lost subscription by design: the
+        // container's SwiftShader+Vulkan build destroys the instance on
+        // subscription AND lets devices die unwatched after their first
+        // present; the failed copy is the first honest symptom). The mode
+        // label promises "WebGPU → WebGL2 fallback" — honor it post-boot
+        // too: ONE re-boot on WebGL2. The prepared-model cache carries the
+        // scene (the parse succeeded before the loss), so boot()'s own
+        // re-attach brings the model up on GL without a second download.
+        if (!lossRebooted && (message.includes('device lost') || message.includes('copyExternalImageToTexture rejected'))) {
+          lossRebooted = true
+          if (mode === 'auto') {
+            shell.log.warn('WebGPU device lost — re-booting on WebGL2 (the auto fallback)')
+            void boot('webgl2')
+          } else {
+            // strict mode: the USER chose this backend — no silent switch.
+            // The honest badge + the recovery hint instead.
+            shell.setBadge('WebGPU lost — use Auto', 'err')
+            shell.log.info('The WebGPU device is gone (a driver/GPU-process death this page cannot survive). Switch the toggle to Auto or WebGL2 to continue.')
+          }
+        }
+      },
     })
     await renderer.start()
     if (seq !== bootSeq) { renderer.dispose(); return }
@@ -1173,10 +1223,24 @@ async function boot(mode) {
 
     // Loaded models compile on the new renderer on demand
     if (prepared.has(currentModelId)) {
-      await attachScene(currentModelId)
+      // Task 175 — showModel (not the bare attachScene): it attaches when
+      // needed AND sets the stats line + logs the scene — the recovery
+      // path lands here after a load that died before showModel ran, and
+      // the pre-existing bare attach left the stale 'pick a model' stats.
+      await showModel(currentModelId)
       if (seq !== bootSeq) return
+      // the re-attached scene takes over — the sheet goes down (the
+      // recovery path lands here with the sheet still open from the
+      // failed load; parity with loadModel's success path)
+      setSheetOpen(false)
       renderSheetState()
     }
+    // Task 175 — the boot has settled its UI: the loss-recovery flag arms
+    // again (a device loss in a LATER boot — e.g. a re-toggle to WebGPU —
+    // must be able to trigger the fallback once). The reset lives HERE,
+    // at the END: the failed load's catch runs DURING this boot's awaits
+    // and still needs the flag set to leave the recovering badge alone.
+    lossRebooted = false
   } catch (error) {
     if (seq !== bootSeq) return
     const message = error instanceof Error ? error.message : String(error)

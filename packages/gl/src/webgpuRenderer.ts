@@ -118,7 +118,7 @@ export interface WebGpuRendererOptions {
    *  background on WebGPU than on WebGL2. Default: DEFAULT_CLEAR. */
   readonly clear?: WebGL2RendererOptions['clear']
   /** GPU facade injection for headless tests. */
-  readonly createGPU?: (canvas: AnyCanvas, onError?: (message: string) => void) => Promise<GPUFacade>
+  readonly createGPU?: (canvas: AnyCanvas, onError?: (message: string) => void, onDeviceLost?: (reason: string) => void) => Promise<GPUFacade>
   /** Sink for silent WebGPU validation errors (they throw no exceptions). */
   readonly onGpuError?: (message: string) => void
   readonly requestFrame?: (callback: (timestamp: number) => void) => () => void
@@ -166,9 +166,20 @@ const DEFAULT_CLEAR = { color: [0.07, 0.08, 0.11, 1] as const, depth: 1 }
 export async function createWebGpuRenderer(options: WebGpuRendererOptions): Promise<WebGpuRenderer> {
   const canvas = resolveCanvasAny(options.canvas)
   const storm = createErrorStorm(options.onGpuError)
+  // Task 175 — THE DEVICE-LOSS WIRE: a lost WebGPU device is FATAL, not a
+  // three-error flake — the moment device.lost fires (the browser took the
+  // device away: GPU process crash, adapter removal, driver reset, or the
+  // poisoned external-image copy the task traced on SwiftShader+Vulkan),
+  // the storm pauses the loop IMMEDIATELY with one honest report. The
+  // message names the recovery path explicitly: re-boot the renderer (auto
+  // mode falls back to WebGL2; a strict webgpu renderer stays paused —
+  // resuming a dead device would only "render" frozen no-op frames).
+  const onDeviceLost = (reason: string): void => {
+    storm.fatal(`WebGPU device lost (${reason}) — rendering stopped (device-loss pause); the device is gone and every later submit would silently no-op. Re-boot the renderer (auto mode: a WebGL2 re-boot) to continue.`)
+  }
   const rawGpu = options.createGPU !== undefined
-    ? await options.createGPU(canvas, storm.handle)
-    : await createRealGPU(canvas, storm.handle)
+    ? await options.createGPU(canvas, storm.handle, onDeviceLost)
+    : await createRealGPU(canvas, storm.handle, onDeviceLost)
   // Task 62: resourceSession (v2) — priority over journal (v1).
   // Stable ids above the facade + content in the journal + restoreResources().
   const session = options.resources !== undefined ? createResourceSessionGPU(rawGpu, options.resources) : null
@@ -453,10 +464,15 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
 /** Default surface clear color — the renderer background. */
 const DEFAULT_SURFACE_COLOR: readonly [number, number, number, number] = [0.07, 0.08, 0.11, 1]
 
-/** Storm guard: counts GPU errors; past the limit it stops the loop. */
+/** Storm guard: counts GPU errors; past the limit it stops the loop.
+ * Task 175: fatal() — a device loss pauses IMMEDIATELY (one report, no
+ * counting): a lost device is a fact, not a flake, and every submit after
+ * it is a silent no-op (the frozen-canvas failure mode the task opened
+ * with). */
 interface ErrorStorm {
   readonly paused: boolean
   readonly handle: (message: string) => void
+  readonly fatal: (message: string) => void
   resume(): void
 }
 
@@ -473,6 +489,12 @@ function createErrorStorm(report?: (message: string) => void): ErrorStorm {
         paused = true
         report?.(`detected ${count} GPU errors — rendering stopped (storm pause)`)
       }
+    },
+    fatal: (message: string): void => {
+      if (paused) return // already paused — the first report stands
+      count = ERROR_STORM_LIMIT
+      paused = true
+      report?.(message)
     },
     resume(): void {
       count = 0
