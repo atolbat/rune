@@ -209,21 +209,29 @@ export async function createRealGPU(
   // the CURRENT pass's attachment state — bindTarget owns this flag.
   let passHasDepth = true
   // Task 164 — THE MERGED COMPUTE PASS: runCompute used to open AND close a
-  // GPUComputePassEncoder per call — the bitonic sort loop dispatches ~342
-  // times per frame (171 (bitonic, sortStep) pairs at 160k particles), so
-  // the frame paid ~342 begin/end pairs that all carried the SAME pass
-  // state. Consecutive dispatches now share ONE pass: it opens on the first
-  // runCompute and closes where the frame's structure demands it — before a
-  // render pass opens (bindTarget), before submit, before an encoder-level
-  // copy (readTargetPixels). Ordering between dispatches is a WebGPU
-  // guarantee (each dispatch is its own sync scope; the implementation
-  // barriers read-after-write on storage buffers — the property the whole
-  // barrier-free API is built on), so merging cannot reorder effects.
+  // GPUComputePassEncoder per call — the bitonic sort loop dispatches ~171
+  // times per frame (Task 179 halved the 342: the sortStep twin per pass
+  // is dead), so the frame paid ~342 begin/end pairs that all carried the
+  // SAME pass state. Consecutive dispatches now share ONE pass: it opens on
+  // the first runCompute and closes where the frame's structure demands it
+  // — before a render pass opens (bindTarget), before submit, before an
+  // encoder-level copy (readTargetPixels). Ordering between dispatches is a
+  // WebGPU guarantee (each dispatch is its own sync scope; the
+  // implementation barriers read-after-write on storage buffers — the
+  // property the whole barrier-free API is built on), so merging cannot
+  // reorder effects.
   let computePass: GPUComputePassEncoder | null = null
   // Task 164 — the compute bind-group memo: setBindGroup(0, family.group)
   // was re-asserted per dispatch; one family's dispatches share one group,
   // so the sort loop re-set the SAME group ~342 times per frame.
   let computeGroup: GPUBindGroup | null = null
+  // Task 179 — the compute PIPELINE memo: setPipeline was re-asserted per
+  // dispatch as well (the pre-179 alternating (bitonic, sortStep) entries
+  // made EVERY dispatch a pipeline switch; with the clock folded into
+  // bitonic, the sort loop's 171 dispatches ride ONE pipeline — the memo
+  // turns 171 setPipeline calls into 1). Reset with the group memo at
+  // every fresh pass (a fresh encoder binds nothing until told).
+  let computePipeline: GPUComputePipeline | null = null
   // Task 164 — THE VERTEX-BIND MEMO: the executor re-binds every command's
   // attribute buffers per draw (the Task-75b state discipline — the same
   // re-assert that GL's Task 163 unit-bind cache already dedupes). Within a
@@ -1600,30 +1608,34 @@ export async function createRealGPU(
       }
     }).catch(() => {})
     // THE FIXED LAYOUT (the particles contract; other consumers follow the
-    // same five slots): 0 uniform / 1 rw storage / 2 ro storage / 3 rw
-    // storage / 4 ro storage. Entries may use a subset — a pipeline layout
-    // may declare more than its entry reads.
-    const layout = device.createBindGroupLayout({
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-      ],
-    })
+    // same slots): 0 uniform / 1 rw storage / 2 ro storage / 3 rw storage /
+    // 4 ro storage / 5 rw storage (Task 179 — the sort family's NETWORK
+    // CLOCK). Entries may use a subset — a pipeline layout may declare more
+    // than its entry reads — and the layout is sized by the bufferIds the
+    // caller hands over (the four-buffer families keep the exact pre-179
+    // five-entry layout; a bind group must carry an entry for EVERY layout
+    // slot, so the layout never declares more than it binds).
+    const STORAGE_TYPES = ['storage', 'read-only-storage', 'storage', 'read-only-storage', 'storage'] as const
+    const bufferCount = Math.min(bufferIds.length, STORAGE_TYPES.length)
+    const entries: GPUBindGroupLayoutEntry[] = [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ]
+    for (let b = 0; b < bufferCount; b++) {
+      entries.push({ binding: b + 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: STORAGE_TYPES[b] } })
+    }
+    const layout = device.createBindGroupLayout({ entries })
     const uniformSize = Math.max(16, Math.ceil(uniformBytes / 16) * 16)
     const uniform = device.createBuffer({ size: uniformSize, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
-    const entries: GPUBindGroupEntry[] = [{ binding: 0, resource: { buffer: uniform } }]
-    for (let b = 0; b < 4; b++) {
+    const groupEntries: GPUBindGroupEntry[] = [{ binding: 0, resource: { buffer: uniform } }]
+    for (let b = 0; b < bufferCount; b++) {
       const buffer = externalBuffers.get(bufferIds[b])
       if (buffer === undefined) {
         onGpuError?.(`createCompute: binding ${b + 1} — no external buffer ${bufferIds[b]}`)
         return -1
       }
-      entries.push({ binding: b + 1, resource: { buffer } })
+      groupEntries.push({ binding: b + 1, resource: { buffer } })
     }
-    const group = device.createBindGroup({ layout, entries })
+    const group = device.createBindGroup({ layout, entries: groupEntries })
     const id = nextComputeId++
     computeFamilies.set(id, { module, layout, group, uniform, uniformBytes: uniformSize, pipelines: new Map(), lastUniform: null })
     return id
@@ -1636,6 +1648,7 @@ export async function createRealGPU(
       encoder ??= device.createCommandEncoder()
       computePass = encoder.beginComputePass()
       computeGroup = null // a fresh pass binds nothing until told
+      computePipeline = null // Task 179 — the pipeline memo dies with the pass
     }
     return computePass
   }
@@ -1713,11 +1726,15 @@ export async function createRealGPU(
       family.lastUniform = uniformData.slice(0, floats)
     }
     if (workgroups <= 0) return
-    // Task 164 — dispatches accumulate in the MERGED pass (see
-    // ensureComputePass); the bind group is memoed (same family — same
-    // group, the sort loop re-set it per dispatch).
+    // Task 164/179 — dispatches accumulate in the MERGED pass (see
+    // ensureComputePass); the bind group AND the pipeline are memoed (same
+    // family — same group; same entry — same pipeline: the sort loop's 171
+    // dispatches pay one setBindGroup and one setPipeline, not 342 of each).
     const cp = ensureComputePass()
-    cp.setPipeline(pipeline)
+    if (computePipeline !== pipeline) {
+      cp.setPipeline(pipeline)
+      computePipeline = pipeline
+    }
     if (computeGroup !== family.group) {
       cp.setBindGroup(0, family.group)
       computeGroup = family.group

@@ -302,7 +302,17 @@ function writeUniforms(
     let changed = false
     for (let at = 0; at < lanes; at++) {
       const next = scalar ? (at === 0 ? value : 0) : (numbers[at] ?? 0)
-      if (Math.fround(next) !== floats[base + at]) {
+      // Task 179 — THE NaN GUARD: fround(NaN) !== NaN is ALWAYS true, so a
+      // field whose resolved value is NaN (an upstream math bug — e.g. an
+      // array-of-arrays uniform) re-dirtied the slice EVERY frame, a silent
+      // per-frame re-upload leak that the Task-178 audit documented. A NaN
+      // lane now writes ONCE (the first time the slot was not NaN) and
+      // stays stable; NaN → number and number → NaN transitions still count
+      // as changes. The GPU keeps receiving the NaN — this is the upload
+      // leak fix, not a value sanitizer.
+      const cur = floats[base + at]
+      if (next !== next && cur !== cur) continue
+      if (Math.fround(next) !== cur) {
         floats[base + at] = next
         changed = true
       }

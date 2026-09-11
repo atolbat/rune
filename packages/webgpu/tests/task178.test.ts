@@ -198,6 +198,39 @@ function recordFrame(commands: readonly WgpuCommand[], time: number): ReturnType
   return writerView(writer)
 }
 
+// ────────────────────────── Task 179: the NaN guard ──────────────────────────
+
+describe('task179: the NaN guard (a stable NaN lane stops re-dirtying the slice)', () => {
+  test('a NaN-valued uniform uploads ONCE; NaN→number re-uploads (the per-frame re-upload leak is dead)', () => {
+    const mock = makeUboGpu()
+    const arena = createSliceArena(1 << 14)
+    const ctx = createWgpuContext(arena)
+    // the array-of-arrays hazard shape: a lane that resolves to NaN every
+    // frame (the pre-179 fround(NaN) !== NaN compare re-dirtied the slice
+    // EVERY frame — a silent per-frame writeBuffer)
+    const tint = [NaN, 0, 0, 1]
+    const command = compileWgslSpec({
+      shader: { wgsl: WGSL_SMALL },
+      pipeline: { depth: { test: 'less', write: true } },
+      uniforms: { u_mvp: () => IDENTITY, u_tint: tint, u_alpha: 0.8 },
+      count: 3,
+    }, ctx)
+    const executor = createGpuExecutor({ gpu: mock.gpu, arena, commands: ctx.commands, clears: [], context: ctx })
+    // frame 1: born dirty — one upload (the NaN lands on the GPU)
+    executor.run(recordFrame([command], 1))
+    expect(mock.calls.length).toBe(1)
+    // frames 2..4: the same NaN — STABLE, zero uploads
+    executor.run(recordFrame([command], 2))
+    executor.run(recordFrame([command], 3))
+    executor.run(recordFrame([command], 4))
+    expect(mock.calls.length).toBe(1)
+    // a NaN→number transition — dirty again, one more upload
+    tint[0] = 0.5
+    executor.run(recordFrame([command], 5))
+    expect(mock.calls.length).toBe(2)
+  })
+})
+
 describe('task178: the merged uniform uploads', () => {
   test('three adjacent dirty slices coalesce into ONE call; the union coverage is byte-identical', () => {
     const mock = makeUboGpu()

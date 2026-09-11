@@ -2,6 +2,12 @@
  * std140 arena: a uniform staging buffer with per-value comparison.
  * An unchanged value is NOT marked dirty (C theory: fround —
  * 0.8 as f64 ≠ 0.8 as f32, comparison in f32 suppresses false uploads).
+ * Task 179 — THE NaN GUARD: fround(NaN) !== NaN is ALWAYS true, so a
+ * NaN-valued lane re-dirtied its slot on EVERY write (a silent per-frame
+ * re-upload leak). A lane whose current AND next values are both NaN is
+ * now STABLE (writes once); NaN → number and number → NaN still count as
+ * changes. The GPU keeps receiving the NaN — this is the leak fix, not a
+ * value sanitizer.
  *
  * Two compatible surfaces:
  *  - float-API (active renderers): alloc(sizeFloats) → UniformSlot,
@@ -9,6 +15,14 @@
  *  - byte-API (uniformSet/frequencyArena/tape delivery): alloc(type) →
  *    {offset,size} in bytes, writeFloat/readFloat, dirtyRanges/importBytes.
  */
+
+/** Task 179 — the NaN-stable lane compare: changed unless BOTH are NaN
+ * (fround(NaN) !== NaN is always true — the pre-179 compare re-dirtied a
+ * NaN lane on every write; see the module's Task-179 note). */
+function laneChanged(next: number, cur: number): boolean {
+  if (next !== next && cur !== cur) return false
+  return Math.fround(next) !== cur
+}
 
 export interface DirtyRange {
   /** Range begin in buffer arrays. */
@@ -148,14 +162,24 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
     if (typeof values === 'number') {
       // Scalar float-uniform: comparison and write of the first element
       // (previously values[0] on a number gave undefined → a silent zero).
-      if (Math.fround(values) !== buffer[slot.base]) {
-        buffer[slot.base] = values
+      // Task 179 — THE NaN GUARD (see the module's Task-179 note): a NaN
+      // scalar would re-dirty the slot on EVERY write (fround(NaN) !== NaN);
+      // NaN → NaN is now stable — writes once, uploads once.
+      const next = values as number
+      if (next !== next && buffer[slot.base] !== buffer[slot.base]) return false
+      if (Math.fround(next) !== buffer[slot.base]) {
+        buffer[slot.base] = next
         changed = true
       }
     } else {
       for (let at = 0; at < slot.size; at++) {
         const next = values[at] ?? 0
-        if (Math.fround(next) !== buffer[slot.base + at]) {
+        const cur = buffer[slot.base + at]
+        // Task 179 — THE NaN GUARD: NaN === NaN for the compare only (a
+        // stable NaN lane stops re-dirtying the slot every frame — the
+        // silent re-upload leak class the Task-178 audit documented).
+        if (next !== next && cur !== cur) continue
+        if (Math.fround(next) !== cur) {
           buffer[slot.base + at] = next
           changed = true
         }
@@ -198,6 +222,9 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
       throw new Error(`rune: writeFloat — invalid offset ${offset}`)
     }
     const floatIndex = offset >> 2
+    // Task 179 — THE NaN GUARD: a stable NaN writes once (the compare's
+    // fround(NaN) !== NaN was a per-call re-dirty of the owning slot).
+    if (value !== value && buffer[floatIndex] !== buffer[floatIndex]) return
     if (Math.fround(value) !== buffer[floatIndex]) {
       buffer[floatIndex] = value
       const owner = slotAt(floatIndex)
@@ -218,10 +245,12 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
     const base = floatIndexOf(slot)
     let changed = false
     // Four direct scalar comparisons (no [x,y,z,w] allocation on the hot path).
-    if (Math.fround(x) !== buffer[base]) { buffer[base] = x; changed = true }
-    if (Math.fround(y) !== buffer[base + 1]) { buffer[base + 1] = y; changed = true }
-    if (Math.fround(z) !== buffer[base + 2]) { buffer[base + 2] = z; changed = true }
-    if (Math.fround(w) !== buffer[base + 3]) { buffer[base + 3] = w; changed = true }
+    // Task 179 — THE NaN GUARD per lane: a stable NaN lane no longer re-dirties
+    // the slot (the fround(NaN) !== NaN leak, every write call).
+    if (laneChanged(x, buffer[base])) { buffer[base] = x; changed = true }
+    if (laneChanged(y, buffer[base + 1])) { buffer[base + 1] = y; changed = true }
+    if (laneChanged(z, buffer[base + 2])) { buffer[base + 2] = z; changed = true }
+    if (laneChanged(w, buffer[base + 3])) { buffer[base + 3] = w; changed = true }
     if (changed) {
       const owner = slotAt(base)
       if (owner !== null) markDirty(owner)

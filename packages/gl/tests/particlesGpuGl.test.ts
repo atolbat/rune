@@ -409,12 +409,13 @@ describe('Task 134 — the compute render tier (the SSBO dispatch sequence)', ()
     })
     const gpu = createGpuParticles(facade, backend)
     // the ATTACH sequence: the sim family (kernel 1) + the sort family
-    // (kernel 2) over the SAME four buffers, one slot shifted:
-    // [pairs 5, state 1, records 3, ramp 4] — the sim family's uniform is
-    // 448 bytes now (Task 135's emit block), the sort family's own 144
+    // (kernel 2) over the SAME four buffers + THE NETWORK CLOCK (Task 179
+    // — the dedicated 16-byte atomic buffer, id 6), one slot shifted:
+    // [pairs 5, state 1, records 3, ramp 4, net 6] — the sim family's
+    // uniform is 448 bytes (Task 135's emit block), the sort family's own 144
     const attachSeq = calls.join('\n')
     expect(attachSeq).toContain('createCompute(448,1,2,3,4)')
-    expect(attachSeq).toContain('createCompute(144,5,1,3,4)')
+    expect(attachSeq).toContain('createCompute(144,5,1,3,4,6)')
     facade.burst(4, { shape: { kind: 'point', origin: [0, 0, 0] }, velocity: { mode: 'fixed', dir: [0, 1, 0] }, speed: [0, 0], life: [100, 100], size: [1, 1], color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 1 })
     facade.advance(0.016)
     calls.length = 0
@@ -423,11 +424,11 @@ describe('Task 134 — the compute render tier (the SSBO dispatch sequence)', ()
     // no deaths → no compact; the advance, then the render tier
     expect(seq).toContain('runCompute(1,advance,1)')
     expect(seq).toContain('runCompute(2,sortKeys,1)')
-    // the SELF-DRIVING network: [bitonic, sortStep] × 3 (N=4) — the (k, j)
-    // rides the records head, the uniform is pass-invariant
+    // Task 179 — THE LAST-BLOCK CLOCK: [bitonic] × 3 (N=4), the sortStep
+    // dispatch is DEAD (the last-arriving workgroup advances (k, j)); the
+    // (k, j) rides the net buffer's atomics, the uniform is pass-invariant
     expect(seq.match(/runCompute\(2,bitonic,1\)/g)).toHaveLength(3)
-    expect(seq.match(/runCompute\(2,sortStep,1\)/g)).toHaveLength(3)
-    expect(seq.indexOf('runCompute(2,bitonic,1)')).toBeLessThan(seq.indexOf('runCompute(2,sortStep,1)'))
+    expect(seq).not.toContain('sortStep')
     expect(seq).toContain('runCompute(2,pack,1)')
     expect(seq).not.toContain('runCompute(1,pack') // the sim pack is REPLACED
     // the order: advance → sortKeys → bitonic → pack

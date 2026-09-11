@@ -156,21 +156,25 @@ export const GPU_SIM_ENTRIES = ['emit', 'compact', 'advance', 'pack'] as const
 // tests, the WGSL template's interpolation) — re-exports, one source.
 
 /** The sort/cull family's uniform FLOAT count (SortParams in the WGSL below
- *  — the family is a SECOND compute kernel over the SAME four buffers; its
- *  uniform is PASS-INVARIANT: count/padN/renderMask, the camera forward,
- *  the six frustum planes, the pack passthrough. The network's (k, j)
- *  rides the RECORDS buffer's head instead of the uniform — the frame's
- *  compute dispatches share ONE encoder, and queue.writeBuffer lands
- *  before every dispatch in it (a per-pass uniform would collapse to the
- *  LAST write — the self-driving network is the fix; see sortStep). */
+ *  — the family is a SECOND compute kernel over the SAME four buffers +
+ *  THE NETWORK CLOCK (Task 179); its uniform is PASS-INVARIANT:
+ *  count/padN/renderMask/workgroups, the camera forward, the six frustum
+ *  planes, the pack passthrough. The network's (k, j) rides the NET
+ *  buffer's atomics instead of the uniform — the frame's compute
+ *  dispatches share ONE encoder, and queue.writeBuffer lands before every
+ *  dispatch in it (a per-pass uniform would collapse to the LAST write —
+ *  the self-driving network is the fix; see THE LAST-BLOCK CLOCK). */
 export const GPU_SORT_UNIFORM_FLOATS = 36
 
 /** The u32 fields of SortParams (their FLOAT indices — write via the u32
- *  view of the same scratch). */
-export const GPU_SORT_U32_FIELDS: Record<'count' | 'padN' | 'renderMask', number> = {
+ *  view of the same scratch). Task 179: `workgroups` replaces the padding
+ *  word — the bitonic entry's arrival counter needs the dispatch's own
+ *  workgroup count to spot the LAST arrival. */
+export const GPU_SORT_U32_FIELDS: Record<'count' | 'padN' | 'renderMask' | 'workgroups', number> = {
   count: 0,
   padN: 1,
   renderMask: 2,
+  workgroups: 3,
 }
 
 /** The f32/vec4 fields of SortParams (their FLOAT base indices). */
@@ -200,8 +204,13 @@ export const GPU_SORT_PAD_KEY = BITONIC_PAD_KEY
  *  instance draws nothing). */
 export const GPU_SORT_SENTINEL = BITONIC_SENTINEL
 
-/** The four sort-family entries (dispatch names). */
-export const GPU_SORT_ENTRIES = ['sortKeys', 'bitonic', 'sortStep', 'pack'] as const
+/** The three sort-family entries (dispatch names). Task 179 — 'sortStep'
+ *  is GONE: the bitonic entry itself advances (k, j) through THE
+ *  LAST-BLOCK CLOCK (the last-arriving workgroup of each dispatch runs
+ *  the advance after the arrival counter confirms every workgroup read
+ *  the old state) — the per-pass clock dispatch is dead, the network
+ *  costs HALF the dispatches. */
+export const GPU_SORT_ENTRIES = ['sortKeys', 'bitonic', 'pack'] as const
 
 /** The padded network size (core's bitonicPadCount, the old name kept —
  *  the orchestrators and the tests import it from here): the next power of
@@ -711,22 +720,27 @@ ${PACK_BODY_WGSL}}
  *    sortKeys — the (key, index) pairs for [0, padN): the live [0, count)
  *      get the NEGATED depth key (−dot(forward, position) — an ASCENDING
  *      network draws far-to-near, the painter's order); the frustum-culled
- *      and the pads [count, padN) get (PAD_KEY, SENTINEL);
+ *      and the pads [count, padN) get (PAD_KEY, SENTINEL); thread 0 also
+ *      seeds THE NETWORK CLOCK (binding 5: k=2, j=1, arrival counter 0);
  *    bitonic — ONE compare-exchange of the network: the (k, j) of THIS
- *      pass read from the RECORDS buffer's head (records[0] = k,
- *      records[1] = j — the SELF-DRIVING state: the frame's compute
- *      dispatches share ONE encoder, and a per-pass uniform would
- *      collapse to the LAST queue.writeBuffer — the state in a bound
- *      buffer travels with the dispatches). The LOW thread of each
- *      (i, i^j) pair owns the exchange (the pairs are disjoint per pass —
- *      in-place on the pairs buffer, no cross-thread hazard);
- *    sortStep — the network's clock: ONE thread advances (k, j) to the
- *      next pass of the canonical sequence (j > 1 → (k, j/2); else →
- *      (2k, k); k > padN → done, (0, 0)). The orchestrator dispatches
- *      [bitonic, sortStep] × passCount(padN) — the count of
- *      gpuSortPassSequence's walk (the SAME sequence the GLSL twin takes
- *      through its per-pass uniforms — the WebGL2 facade sets GL uniforms
- *      at pass EXECUTION time, so it can afford the direct form);
+ *      pass read from the NET buffer's atomics (the SELF-DRIVING state:
+ *      the frame's compute dispatches share ONE encoder, and a per-pass
+ *      uniform would collapse to the LAST queue.writeBuffer — the state
+ *      in a bound buffer travels with the dispatches). The LOW thread of
+ *      each (i, i^j) pair owns the exchange (the pairs are disjoint per
+ *      pass — in-place on the pairs buffer, no cross-thread hazard).
+ *      THE LAST-BLOCK CLOCK (Task 179): after the exchange every
+ *      workgroup barrier + its lane 0 bumps the arrival atomic; the LAST
+ *      arrival ALSO advances (k, j) to the next pass of the canonical
+ *      sequence (j > 1 → (k, j/2); else → (2k, k); k > padN → done) —
+ *      sortStep's own body, run by the last block instead of a separate
+ *      dispatch. Order is airtight: a workgroup counts only after its
+ *      barrier (every lane read (k, j)); the last block writes only
+ *      after EVERY workgroup counted; the dispatch boundary (WebGPU
+ *      dispatches in one compute pass run in order) publishes the write
+ *      to the next pass. The orchestrator dispatches [bitonic] ×
+ *      passCount(padN) — 342 → 171 dispatches per frame on a 160k
+ *      network (the sortStep twin per pass is dead);
  *    pack — the sorted record pack: slot i gathers the state of
  *      pairs[i].y (a SENTINEL index — the ZERO record, a degenerate
  *      instance that draws nothing; the visible prefix [0, V) lands
@@ -748,7 +762,7 @@ struct SortParams {
   count : u32,
   padN : u32,
   renderMask : u32,
-  _pad0 : u32,
+  workgroups : u32,
   forward : vec4<f32>,
   planes : array<vec4<f32>, 6>,
   tileU : f32,
@@ -762,6 +776,20 @@ struct SortParams {
 @group(0) @binding(2) var<storage, read> state : array<f32>;
 @group(0) @binding(3) var<storage, read_write> records : array<f32>;
 @group(0) @binding(4) var<storage, read> rampLUT : array<f32>;
+
+// Task 179 — THE NETWORK CLOCK: the self-driving (k, j) + the arrival
+// counter, a 12-byte rw storage buffer at binding 5 (created by the
+// orchestrator alongside the pairs). All atomics — the LAST-BLOCK
+// advance of the bitonic entry writes k/j only after every workgroup of
+// the dispatch counted its arrival (a barrier before each count), so the
+// reads of the dispatch are complete before the write exists, and the
+// dispatch boundary publishes it to the next pass.
+struct NetClock {
+  k : atomic<u32>,
+  j : atomic<u32>,
+  clock : atomic<u32>,
+}
+@group(0) @binding(5) var<storage, read_write> net : NetClock;
 
 const FSTRIDE : u32 = ${GPU_STATE_STRIDE}u;
 const RSTRIDE : u32 = 16u;
@@ -797,57 +825,80 @@ fn sortKeys(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
   }
   pairs[i] = vec2<f32>(key, idx);
-  // thread 0 seeds the SELF-DRIVING network state: records[0] = k,
-  // records[1] = j (the first canonical pass is (2, 1)). The pack entry
-  // overwrites the records AFTER the network — the scratch is safe.
+  // thread 0 seeds THE NETWORK CLOCK (Task 179 — the net buffer's
+  // atomics, not the records head: the first canonical pass is (2, 1),
+  // the arrival counter starts the frame's first bitonic dispatch from
+  // zero. The clock RE-ARMS itself at every advance (the last arrival
+  // zeroes it for the next dispatch), so this seed is the frame's own
+  // fresh start. The pack entry overwrites the records AFTER the network
+  // — with the clock on its own buffer, nothing collides at all.)
   if (i == 0u) {
-    records[0] = 2.0;
-    records[1] = 1.0;
+    atomicStore(&net.k, 2u);
+    atomicStore(&net.j, 1u);
+    atomicStore(&net.clock, 0u);
   }
 }
 
-// ── bitonic: ONE compare-exchange — the (k, j) of this pass read from the
-// records head (the self-driving state); the low thread of (i, i^j) swaps
-// the pair when it violates the block's direction ((i & k) == 0 →
-// ascending). The pairs are disjoint per pass — in-place, no hazard ──────
+// ── bitonic: ONE compare-exchange + THE LAST-BLOCK CLOCK (Task 179) ────
+// The (k, j) of this pass read from the net buffer's atomics; the low
+// thread of (i, i^j) swaps the pair when it violates the block's direction
+// ((i & k) == 0 → ascending). The pairs are disjoint per pass — in-place,
+// no hazard. AFTER the exchange every workgroup hits the barrier and its
+// lane 0 bumps the arrival counter; the LAST workgroup to arrive also
+// advances (k, j) — sortStep's own body, verbatim, run by the last block
+// instead of a separate dispatch (342 → 171 dispatches per frame). Every
+// invocation reaches the barrier (the exchange body is conditional, no
+// early return — a return would leave lanes out of the barrier, which is
+// undefined behavior in WGSL).
 @compute @workgroup_size(64)
 fn bitonic(@builtin(global_invocation_id) gid : vec3<u32>) {
   let i = gid.x;
-  if (i >= P.padN) { return; }
-  let k = u32(records[0]);
-  let j = u32(records[1]);
-  if (k == 0u || k > P.padN) { return; } // done (a defensive no-op)
-  let p = i ^ j;
-  if (p <= i) { return; }
-  let a = pairs[i];
-  let b = pairs[p];
-  let asc = (i & k) == 0u;
-  if ((a.x > b.x) == asc) {
-    pairs[i] = b;
-    pairs[p] = a;
+  if (i < P.padN) {
+    let k = atomicLoad(&net.k);
+    let j = atomicLoad(&net.j);
+    if (k != 0u && k <= P.padN) { // done — a defensive no-op
+      let p = i ^ j;
+      if (p > i) {
+        let a = pairs[i];
+        let b = pairs[p];
+        let asc = (i & k) == 0u;
+        if ((a.x > b.x) == asc) {
+          pairs[i] = b;
+          pairs[p] = a;
+        }
+      }
+    }
   }
-}
-
-// ── sortStep: the network's clock — ONE thread advances (k, j) to the
-// next pass of the canonical sequence: j > 1 → (k, j/2); j == 1 →
-// (2k, k); k > padN → done (0, 0). The GLSL twin walks the SAME sequence
-// through per-pass uniforms (the GL facade sets them at pass EXECUTION
-// time — the batched-encoder collapse is a WebGPU compute shape) ───────
-@compute @workgroup_size(1)
-fn sortStep(@builtin(global_invocation_id) gid : vec3<u32>) {
-  if (gid.x != 0u) { return; }
-  var k = u32(records[0]);
-  var j = u32(records[1]);
-  if (k == 0u || k > P.padN) { return; }
-  if (j > 1u) {
-    j = j >> 1u;
-  } else {
-    k = k << 1u;
-    j = k >> 1u;
+  // THE LAST-BLOCK CLOCK — the barrier orders THIS workgroup's (k, j)
+  // reads before its count; the count orders the reads of EVERY
+  // workgroup before the last block's write (the counter only reaches
+  // P.workgroups after all of them counted).
+  workgroupBarrier();
+  if ((gid.x & 63u) == 0u) { // lane 0 of each 64-wide workgroup
+    let arrived = atomicAdd(&net.clock, 1u);
+    if (arrived + 1u == P.workgroups) {
+      // RE-ARM the counter for the NEXT dispatch: the last arrival owns the
+      // reset too (no further atomicAdd can land in THIS dispatch — every
+      // workgroup already counted; the next dispatch starts beyond the
+      // boundary). Without the re-arm only the FIRST pass ever advances.
+      atomicStore(&net.clock, 0u);
+      // the last arrival owns the pass advance: j > 1 → (k, j/2);
+      // j == 1 → (2k, k); k > padN → done (0, 0).
+      var k = atomicLoad(&net.k);
+      var j = atomicLoad(&net.j);
+      if (k != 0u && k <= P.padN) {
+        if (j > 1u) {
+          j = j >> 1u;
+        } else {
+          k = k << 1u;
+          j = k >> 1u;
+        }
+        if (k > P.padN) { k = 0u; j = 0u; }
+        atomicStore(&net.k, k);
+        atomicStore(&net.j, j);
+      }
+    }
   }
-  if (k > P.padN) { k = 0u; j = 0u; }
-  records[0] = f32(k);
-  records[1] = f32(j);
 }
 
 // ── pack (the sorted twin): the record of slot i gathers the state of

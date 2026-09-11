@@ -195,14 +195,16 @@ export interface GPUFacade {
   externalBufferOf(bufferId: number): unknown
   bindExternalVertexBuffer(slot: number, bufferId: number): void
   /** Task 131 — COMPUTE: a pipeline FAMILY over one WGSL module with a
-   *  FIXED five-binding layout (0 uniform, 1 rw storage, 2 ro storage,
-   *  3 rw storage, 4 ro storage — one bind group for every entry).
-   *  createCompute(wgsl, uniformBytes, [stateId, swapsId, recordsId,
-   *  rampId]) binds the four external buffers ONCE; runCompute(id,
-   *  entry, uniformData, workgroups) dispatches one entry. The dispatch
-   *  is enqueued on the frame's encoder BEFORE the render pass opens
-   *  (the step() → record() tape order); a runCompute inside an open
-   *  render pass is a loud onGpuError, never a silent no-op. */
+   *  FIXED binding layout (0 uniform, 1 rw storage, 2 ro storage, 3 rw
+   *  storage, 4 ro storage, 5 rw storage — Task 179: the last slot is the
+   *  sort family's NETWORK CLOCK; the layout is sized by the bufferIds
+   *  handed over, so the four-buffer families keep their exact pre-179
+   *  five-slot layout). createCompute(wgsl, uniformBytes, [stateId,
+   *  swapsId, recordsId, rampId]) binds the external buffers ONCE;
+   *  runCompute(id, entry, uniformData, workgroups) dispatches one entry.
+   *  The dispatch is enqueued on the frame's encoder BEFORE the render
+   *  pass opens (the step() → record() tape order); a runCompute inside
+   *  an open render pass is a loud onGpuError, never a silent no-op. */
   createCompute(wgsl: string, uniformBytes: number, bufferIds: readonly number[]): number
   runCompute(computeId: number, entry: string, uniformData: Float32Array, workgroups: number): void
   /** Task 133 — deletes a compute family: the staging uniform buffer is

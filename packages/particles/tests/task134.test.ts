@@ -202,27 +202,44 @@ describe('Task 134 — the cull radius factor (gpuRampMaxSize)', () => {
 
 describe('Task 134 — the WGSL sort family (gpuSortWgsl)', () => {
   const src = gpuSortWgsl()
-  it('the three entries and the shifted bindings (pairs rw, state ro)', () => {
+  it('the three entries and the shifted bindings (pairs rw, state ro, net clock)', () => {
     expect(src).toContain('fn sortKeys(')
     expect(src).toContain('fn bitonic(')
-    expect(src).toContain('fn sortStep(')
     expect(src).toContain('fn pack(')
+    expect(src).not.toContain('fn sortStep(')
     expect(src).toContain('var<storage, read_write> pairs : array<vec2<f32>>;')
     expect(src).toContain('var<storage, read> state : array<f32>;')
     expect(src).toContain('var<storage, read_write> records : array<f32>;')
     expect(src).toContain('var<storage, read> rampLUT : array<f32>;')
+    // Task 179 — THE NETWORK CLOCK at binding 5: all atomics
+    expect(src).toContain('struct NetClock {')
+    expect(src).toContain('k : atomic<u32>')
+    expect(src).toContain('clock : atomic<u32>')
+    expect(src).toContain('@group(0) @binding(5) var<storage, read_write> net : NetClock;')
   })
-  it('the constants and the compare-exchange (the model twin)', () => {
+  it('the constants, the compare-exchange, and THE LAST-BLOCK CLOCK (the model twin)', () => {
     expect(src).toContain(`const PAD_KEY : f32 = ${GPU_SORT_PAD_KEY};`)
     expect(src).toContain(`const SENTINEL : f32 = ${GPU_SORT_SENTINEL}.0;`)
-    // the SELF-DRIVING (k, j): the state rides the records head
-    expect(src).toContain('records[0] = 2.0;')
-    expect(src).toContain('records[1] = 1.0;')
-    expect(src).toContain('let k = u32(records[0]);')
-    expect(src).toContain('let j = u32(records[1]);')
+    // Task 179 — the SELF-DRIVING (k, j): the state rides the NET clock's
+    // atomics; the clock advance is the bitonic entry's last block
+    expect(src).toContain('atomicStore(&net.k, 2u);')
+    expect(src).toContain('atomicStore(&net.j, 1u);')
+    expect(src).toContain('atomicStore(&net.clock, 0u);')
+    expect(src).toContain('let k = atomicLoad(&net.k);')
+    expect(src).toContain('let j = atomicLoad(&net.j);')
     expect(src).toContain('let p = i ^ j;')
     expect(src).toContain('let asc = (i & k) == 0u;')
     expect(src).toContain('if ((a.x > b.x) == asc)')
+    // the LAST-BLOCK CLOCK: barrier → arrival count → the last workgroup
+    // advances the pair (sortStep's body, folded into the entry) and
+    // RE-ARMS the counter (without the re-arm only the FIRST pass of the
+    // frame ever advances — the live gate caught exactly that)
+    expect(src).toContain('workgroupBarrier();')
+    expect(src).toContain('let arrived = atomicAdd(&net.clock, 1u);')
+    expect(src).toContain('if (arrived + 1u == P.workgroups)')
+    expect(src).toContain('atomicStore(&net.clock, 0u);')
+    // every invocation reaches the barrier (no early return before it)
+    expect(src).not.toMatch(/fn bitonic[^{]*\{[\s\S]*?\breturn\b[\s\S]*?workgroupBarrier/)
   })
   it('the sorted pack: the sentinel branch + the gather + the shared body', () => {
     expect(src).toContain('let m = pairs[i].y;')
@@ -239,10 +256,13 @@ describe('Task 134 — the WGSL sort family (gpuSortWgsl)', () => {
   })
   it('the uniform layout matches the field maps (36 floats, pass-invariant)', () => {
     expect(GPU_SORT_UNIFORM_FLOATS).toBe(36)
-    expect(GPU_SORT_ENTRIES).toEqual(['sortKeys', 'bitonic', 'sortStep', 'pack'])
+    expect(GPU_SORT_ENTRIES).toEqual(['sortKeys', 'bitonic', 'pack'])
     expect(GPU_SORT_U32_FIELDS.count).toBe(0)
     expect(GPU_SORT_U32_FIELDS.padN).toBe(1)
     expect(GPU_SORT_U32_FIELDS.renderMask).toBe(2)
+    expect(GPU_SORT_U32_FIELDS.workgroups).toBe(3)
+    expect(src).toContain('workgroups : u32')
+    expect(src).not.toContain('_pad0')
     expect(GPU_SORT_F32_FIELDS.forward).toBe(4)
     expect(GPU_SORT_F32_FIELDS.planes).toBe(8)
     expect(GPU_SORT_F32_FIELDS.rampMaxSize).toBe(35)

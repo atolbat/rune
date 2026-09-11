@@ -154,7 +154,12 @@ function createGpuParticlesCompute(facade: Particles, gpu: SsboComputeTier): Gpu
   if (tiered) {
     const maxPadN = bitonicPadCount(capacity)
     const pairsId = gpu.createBuffer(maxPadN * 8, GPU_BUFFER_USAGE.STORAGE)
-    sortId = gpu.createKernel(gpuSortWgsl(), GPU_SORT_UNIFORM_FLOATS * 4, [pairsId, stateId, recordsId, rampId])
+    // Task 179 — THE NETWORK CLOCK: the self-driving (k, j) + the arrival
+    // counter, a dedicated 12-byte atomic buffer at binding 5 (the
+    // last-block advance of the bitonic entry — the sortStep dispatch is
+    // dead; 342 → 171 dispatches per frame).
+    const netId = gpu.createBuffer(16, GPU_BUFFER_USAGE.STORAGE)
+    sortId = gpu.createKernel(gpuSortWgsl(), GPU_SORT_UNIFORM_FLOATS * 4, [pairsId, stateId, recordsId, rampId, netId])
     if (sortId < 0 || pairsId < 0) {
       gpu.dispose()
       throw new Error('rune/gl: createGpuParticles — the facade rejected the sort family (see the GPU error log)')
@@ -302,28 +307,32 @@ function createGpuParticlesCompute(facade: Particles, gpu: SsboComputeTier): Gpu
           sUni.set(frustumScratch, SU.planes)
         }
         // 1. sortKeys — the (key, index) pairs for [0, padN) AND the
-        //    network's initial (k, j) = (2, 1) seeded into records[0..1]
+        //    network clock's seed (k=2, j=1, the arrival counter zeroed)
         const netWorkgroups = Math.ceil(padN / WORKGROUP)
+        sU32[GPU_SORT_U32_FIELDS.workgroups] = netWorkgroups
         gpu.runKernel(sortId, 'sortKeys', sUni, netWorkgroups)
-        // 2. the bitonic network — SELF-DRIVING: the (k, j) lives in the
-        //    records head (sortKeys seeded it; sortStep advances it). The
-        //    frame's compute dispatches share ONE encoder — a per-pass
-        //    uniform would collapse to the LAST queue.writeBuffer (all the
-        //    writes land before ANY dispatch runs), so the pass state must
-        //    travel in a BOUND buffer. [bitonic, sortStep] × the canonical
-        //    pass count — the SAME (k, j) sequence bitonicPassSequence walks
-        //    (the GLSL twin's uniforms are set at pass EXECUTION time on
-        //    the immediate GL path — it takes the direct form).
+        // 2. the bitonic network — SELF-DRIVING: the (k, j) + the arrival
+        //    counter live in the NET buffer's atomics (sortKeys seeded
+        //    them; the bitonic entry's LAST-ARRIVING workgroup advances
+        //    the pair after every workgroup counted its arrival — Task
+        //    179, THE LAST-BLOCK CLOCK). The frame's compute dispatches
+        //    share ONE encoder — a per-pass uniform would collapse to the
+        //    LAST queue.writeBuffer (all the writes land before ANY
+        //    dispatch runs), so the pass state must travel in a BOUND
+        //    buffer. [bitonic] × the canonical pass count — the SAME
+        //    (k, j) sequence bitonicPassSequence walks (the GLSL twin's
+        //    uniforms are set at pass EXECUTION time on the immediate GL
+        //    path — it takes the direct form).
         if (cfg.sort) {
           let passes = 0
           bitonicPassSequence(padN, () => { passes++ })
           for (let p = 0; p < passes; p++) {
             gpu.runKernel(sortId, 'bitonic', sUni, netWorkgroups)
-            gpu.runKernel(sortId, 'sortStep', sUni, 1)
           }
         }
         // 3. the sorted pack — the records [0, count) in draw order (the
-        //    pack overwrites the network's (k, j) scratch at records[0..1])
+        //    pack overwrites nothing of the network's — the clock lives on
+        //    its own buffer since Task 179)
         gpu.runKernel(sortId, 'pack', sUni, workgroups)
       } else {
         gpu.runKernel(computeId, 'pack', uni, workgroups)

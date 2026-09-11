@@ -666,6 +666,11 @@ function buildFrameReRecording(lives, writer) {
 }
 
 // packages/core/src/uniforms/arena.ts
+function laneChanged(next, cur) {
+  if (next !== next && cur !== cur)
+    return false;
+  return Math.fround(next) !== cur;
+}
 function createUniformArena(floats = 1 << 16) {
   const buffer = new Float32Array(floats);
   const bytes = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
@@ -713,14 +718,20 @@ function createUniformArena(floats = 1 << 16) {
   function write(slot, values) {
     let changed = false;
     if (typeof values === "number") {
-      if (Math.fround(values) !== buffer[slot.base]) {
-        buffer[slot.base] = values;
+      const next = values;
+      if (next !== next && buffer[slot.base] !== buffer[slot.base])
+        return false;
+      if (Math.fround(next) !== buffer[slot.base]) {
+        buffer[slot.base] = next;
         changed = true;
       }
     } else {
       for (let at = 0;at < slot.size; at++) {
         const next = values[at] ?? 0;
-        if (Math.fround(next) !== buffer[slot.base + at]) {
+        const cur = buffer[slot.base + at];
+        if (next !== next && cur !== cur)
+          continue;
+        if (Math.fround(next) !== cur) {
           buffer[slot.base + at] = next;
           changed = true;
         }
@@ -765,6 +776,8 @@ function createUniformArena(floats = 1 << 16) {
       throw new Error(`rune: writeFloat — invalid offset ${offset}`);
     }
     const floatIndex = offset >> 2;
+    if (value !== value && buffer[floatIndex] !== buffer[floatIndex])
+      return;
     if (Math.fround(value) !== buffer[floatIndex]) {
       buffer[floatIndex] = value;
       const owner = slotAt(floatIndex);
@@ -782,19 +795,19 @@ function createUniformArena(floats = 1 << 16) {
   function writeVec4(slot, x, y, z, w) {
     const base = floatIndexOf(slot);
     let changed = false;
-    if (Math.fround(x) !== buffer[base]) {
+    if (laneChanged(x, buffer[base])) {
       buffer[base] = x;
       changed = true;
     }
-    if (Math.fround(y) !== buffer[base + 1]) {
+    if (laneChanged(y, buffer[base + 1])) {
       buffer[base + 1] = y;
       changed = true;
     }
-    if (Math.fround(z) !== buffer[base + 2]) {
+    if (laneChanged(z, buffer[base + 2])) {
       buffer[base + 2] = z;
       changed = true;
     }
-    if (Math.fround(w) !== buffer[base + 3]) {
+    if (laneChanged(w, buffer[base + 3])) {
       buffer[base + 3] = w;
       changed = true;
     }
@@ -9411,7 +9424,10 @@ function writeUniforms(command, arena, spec, props, frameCtx, queue) {
     let changed = false;
     for (let at = 0;at < lanes; at++) {
       const next = scalar ? at === 0 ? value : 0 : numbers[at] ?? 0;
-      if (Math.fround(next) !== floats[base + at]) {
+      const cur = floats[base + at];
+      if (next !== next && cur !== cur)
+        continue;
+      if (Math.fround(next) !== cur) {
         floats[base + at] = next;
         changed = true;
       }
@@ -9881,6 +9897,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
   let passHasDepth = true;
   let computePass = null;
   let computeGroup = null;
+  let computePipeline = null;
   const vertexBindMemo = [];
   const sabStaging = new Map;
   const pendingTextureIds = [];
@@ -10753,27 +10770,27 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
           onGpuError?.(`compute WGSL: ${message.message} (line ${message.lineNum})`);
       }
     }).catch(() => {});
-    const layout = device.createBindGroupLayout({
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } }
-      ]
-    });
+    const STORAGE_TYPES = ["storage", "read-only-storage", "storage", "read-only-storage", "storage"];
+    const bufferCount = Math.min(bufferIds.length, STORAGE_TYPES.length);
+    const entries = [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } }
+    ];
+    for (let b = 0;b < bufferCount; b++) {
+      entries.push({ binding: b + 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: STORAGE_TYPES[b] } });
+    }
+    const layout = device.createBindGroupLayout({ entries });
     const uniformSize = Math.max(16, Math.ceil(uniformBytes2 / 16) * 16);
     const uniform = device.createBuffer({ size: uniformSize, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const entries = [{ binding: 0, resource: { buffer: uniform } }];
-    for (let b = 0;b < 4; b++) {
+    const groupEntries = [{ binding: 0, resource: { buffer: uniform } }];
+    for (let b = 0;b < bufferCount; b++) {
       const buffer = externalBuffers.get(bufferIds[b]);
       if (buffer === undefined) {
         onGpuError?.(`createCompute: binding ${b + 1} — no external buffer ${bufferIds[b]}`);
         return -1;
       }
-      entries.push({ binding: b + 1, resource: { buffer } });
+      groupEntries.push({ binding: b + 1, resource: { buffer } });
     }
-    const group = device.createBindGroup({ layout, entries });
+    const group = device.createBindGroup({ layout, entries: groupEntries });
     const id = nextComputeId++;
     computeFamilies.set(id, { module, layout, group, uniform, uniformBytes: uniformSize, pipelines: new Map, lastUniform: null });
     return id;
@@ -10783,6 +10800,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
       encoder ??= device.createCommandEncoder();
       computePass = encoder.beginComputePass();
       computeGroup = null;
+      computePipeline = null;
     }
     return computePass;
   }
@@ -10845,7 +10863,10 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     if (workgroups <= 0)
       return;
     const cp = ensureComputePass();
-    cp.setPipeline(pipeline);
+    if (computePipeline !== pipeline) {
+      cp.setPipeline(pipeline);
+      computePipeline = pipeline;
+    }
     if (computeGroup !== family.group) {
       cp.setBindGroup(0, family.group);
       computeGroup = family.group;
@@ -12786,7 +12807,8 @@ var GPU_SORT_UNIFORM_FLOATS = 36;
 var GPU_SORT_U32_FIELDS = {
   count: 0,
   padN: 1,
-  renderMask: 2
+  renderMask: 2,
+  workgroups: 3
 };
 var GPU_SORT_F32_FIELDS = {
   forward: 4,
@@ -13272,7 +13294,7 @@ struct SortParams {
   count : u32,
   padN : u32,
   renderMask : u32,
-  _pad0 : u32,
+  workgroups : u32,
   forward : vec4<f32>,
   planes : array<vec4<f32>, 6>,
   tileU : f32,
@@ -13286,6 +13308,20 @@ struct SortParams {
 @group(0) @binding(2) var<storage, read> state : array<f32>;
 @group(0) @binding(3) var<storage, read_write> records : array<f32>;
 @group(0) @binding(4) var<storage, read> rampLUT : array<f32>;
+
+// Task 179 — THE NETWORK CLOCK: the self-driving (k, j) + the arrival
+// counter, a 12-byte rw storage buffer at binding 5 (created by the
+// orchestrator alongside the pairs). All atomics — the LAST-BLOCK
+// advance of the bitonic entry writes k/j only after every workgroup of
+// the dispatch counted its arrival (a barrier before each count), so the
+// reads of the dispatch are complete before the write exists, and the
+// dispatch boundary publishes it to the next pass.
+struct NetClock {
+  k : atomic<u32>,
+  j : atomic<u32>,
+  clock : atomic<u32>,
+}
+@group(0) @binding(5) var<storage, read_write> net : NetClock;
 
 const FSTRIDE : u32 = ${GPU_STATE_STRIDE}u;
 const RSTRIDE : u32 = 16u;
@@ -13321,57 +13357,80 @@ fn sortKeys(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
   }
   pairs[i] = vec2<f32>(key, idx);
-  // thread 0 seeds the SELF-DRIVING network state: records[0] = k,
-  // records[1] = j (the first canonical pass is (2, 1)). The pack entry
-  // overwrites the records AFTER the network — the scratch is safe.
+  // thread 0 seeds THE NETWORK CLOCK (Task 179 — the net buffer's
+  // atomics, not the records head: the first canonical pass is (2, 1),
+  // the arrival counter starts the frame's first bitonic dispatch from
+  // zero. The clock RE-ARMS itself at every advance (the last arrival
+  // zeroes it for the next dispatch), so this seed is the frame's own
+  // fresh start. The pack entry overwrites the records AFTER the network
+  // — with the clock on its own buffer, nothing collides at all.)
   if (i == 0u) {
-    records[0] = 2.0;
-    records[1] = 1.0;
+    atomicStore(&net.k, 2u);
+    atomicStore(&net.j, 1u);
+    atomicStore(&net.clock, 0u);
   }
 }
 
-// ── bitonic: ONE compare-exchange — the (k, j) of this pass read from the
-// records head (the self-driving state); the low thread of (i, i^j) swaps
-// the pair when it violates the block's direction ((i & k) == 0 →
-// ascending). The pairs are disjoint per pass — in-place, no hazard ──────
+// ── bitonic: ONE compare-exchange + THE LAST-BLOCK CLOCK (Task 179) ────
+// The (k, j) of this pass read from the net buffer's atomics; the low
+// thread of (i, i^j) swaps the pair when it violates the block's direction
+// ((i & k) == 0 → ascending). The pairs are disjoint per pass — in-place,
+// no hazard. AFTER the exchange every workgroup hits the barrier and its
+// lane 0 bumps the arrival counter; the LAST workgroup to arrive also
+// advances (k, j) — sortStep's own body, verbatim, run by the last block
+// instead of a separate dispatch (342 → 171 dispatches per frame). Every
+// invocation reaches the barrier (the exchange body is conditional, no
+// early return — a return would leave lanes out of the barrier, which is
+// undefined behavior in WGSL).
 @compute @workgroup_size(64)
 fn bitonic(@builtin(global_invocation_id) gid : vec3<u32>) {
   let i = gid.x;
-  if (i >= P.padN) { return; }
-  let k = u32(records[0]);
-  let j = u32(records[1]);
-  if (k == 0u || k > P.padN) { return; } // done (a defensive no-op)
-  let p = i ^ j;
-  if (p <= i) { return; }
-  let a = pairs[i];
-  let b = pairs[p];
-  let asc = (i & k) == 0u;
-  if ((a.x > b.x) == asc) {
-    pairs[i] = b;
-    pairs[p] = a;
+  if (i < P.padN) {
+    let k = atomicLoad(&net.k);
+    let j = atomicLoad(&net.j);
+    if (k != 0u && k <= P.padN) { // done — a defensive no-op
+      let p = i ^ j;
+      if (p > i) {
+        let a = pairs[i];
+        let b = pairs[p];
+        let asc = (i & k) == 0u;
+        if ((a.x > b.x) == asc) {
+          pairs[i] = b;
+          pairs[p] = a;
+        }
+      }
+    }
   }
-}
-
-// ── sortStep: the network's clock — ONE thread advances (k, j) to the
-// next pass of the canonical sequence: j > 1 → (k, j/2); j == 1 →
-// (2k, k); k > padN → done (0, 0). The GLSL twin walks the SAME sequence
-// through per-pass uniforms (the GL facade sets them at pass EXECUTION
-// time — the batched-encoder collapse is a WebGPU compute shape) ───────
-@compute @workgroup_size(1)
-fn sortStep(@builtin(global_invocation_id) gid : vec3<u32>) {
-  if (gid.x != 0u) { return; }
-  var k = u32(records[0]);
-  var j = u32(records[1]);
-  if (k == 0u || k > P.padN) { return; }
-  if (j > 1u) {
-    j = j >> 1u;
-  } else {
-    k = k << 1u;
-    j = k >> 1u;
+  // THE LAST-BLOCK CLOCK — the barrier orders THIS workgroup's (k, j)
+  // reads before its count; the count orders the reads of EVERY
+  // workgroup before the last block's write (the counter only reaches
+  // P.workgroups after all of them counted).
+  workgroupBarrier();
+  if ((gid.x & 63u) == 0u) { // lane 0 of each 64-wide workgroup
+    let arrived = atomicAdd(&net.clock, 1u);
+    if (arrived + 1u == P.workgroups) {
+      // RE-ARM the counter for the NEXT dispatch: the last arrival owns the
+      // reset too (no further atomicAdd can land in THIS dispatch — every
+      // workgroup already counted; the next dispatch starts beyond the
+      // boundary). Without the re-arm only the FIRST pass ever advances.
+      atomicStore(&net.clock, 0u);
+      // the last arrival owns the pass advance: j > 1 → (k, j/2);
+      // j == 1 → (2k, k); k > padN → done (0, 0).
+      var k = atomicLoad(&net.k);
+      var j = atomicLoad(&net.j);
+      if (k != 0u && k <= P.padN) {
+        if (j > 1u) {
+          j = j >> 1u;
+        } else {
+          k = k << 1u;
+          j = k >> 1u;
+        }
+        if (k > P.padN) { k = 0u; j = 0u; }
+        atomicStore(&net.k, k);
+        atomicStore(&net.j, j);
+      }
+    }
   }
-  if (k > P.padN) { k = 0u; j = 0u; }
-  records[0] = f32(k);
-  records[1] = f32(j);
 }
 
 // ── pack (the sorted twin): the record of slot i gathers the state of
@@ -14604,7 +14663,8 @@ function createGpuParticlesCompute(facade, gpu) {
   if (tiered) {
     const maxPadN = bitonicPadCount(capacity);
     const pairsId = gpu.createBuffer(maxPadN * 8, GPU_BUFFER_USAGE.STORAGE);
-    sortId = gpu.createKernel(gpuSortWgsl(), GPU_SORT_UNIFORM_FLOATS * 4, [pairsId, stateId, recordsId, rampId]);
+    const netId = gpu.createBuffer(16, GPU_BUFFER_USAGE.STORAGE);
+    sortId = gpu.createKernel(gpuSortWgsl(), GPU_SORT_UNIFORM_FLOATS * 4, [pairsId, stateId, recordsId, rampId, netId]);
     if (sortId < 0 || pairsId < 0) {
       gpu.dispose();
       throw new Error("rune/gl: createGpuParticles — the facade rejected the sort family (see the GPU error log)");
@@ -14754,6 +14814,7 @@ function createGpuParticlesCompute(facade, gpu) {
           sUni.set(frustumScratch, SU.planes);
         }
         const netWorkgroups = Math.ceil(padN / WORKGROUP);
+        sU32[GPU_SORT_U32_FIELDS.workgroups] = netWorkgroups;
         gpu.runKernel(sortId, "sortKeys", sUni, netWorkgroups);
         if (cfg.sort) {
           let passes = 0;
@@ -14762,7 +14823,6 @@ function createGpuParticlesCompute(facade, gpu) {
           });
           for (let p = 0;p < passes; p++) {
             gpu.runKernel(sortId, "bitonic", sUni, netWorkgroups);
-            gpu.runKernel(sortId, "sortStep", sUni, 1);
           }
         }
         gpu.runKernel(sortId, "pack", sUni, workgroups);

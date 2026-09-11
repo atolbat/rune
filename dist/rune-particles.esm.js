@@ -2896,7 +2896,8 @@ var GPU_SORT_UNIFORM_FLOATS = 36;
 var GPU_SORT_U32_FIELDS = {
   count: 0,
   padN: 1,
-  renderMask: 2
+  renderMask: 2,
+  workgroups: 3
 };
 var GPU_SORT_F32_FIELDS = {
   forward: 4,
@@ -2909,7 +2910,7 @@ var GPU_SORT_F32_FIELDS = {
 var GPU_SORT_RENDER_MASK = { cull: 1 };
 var GPU_SORT_PAD_KEY = BITONIC_PAD_KEY;
 var GPU_SORT_SENTINEL = BITONIC_SENTINEL;
-var GPU_SORT_ENTRIES = ["sortKeys", "bitonic", "sortStep", "pack"];
+var GPU_SORT_ENTRIES = ["sortKeys", "bitonic", "pack"];
 function gpuRampMaxSize(points) {
   let max = 1;
   for (const p of points)
@@ -3383,7 +3384,7 @@ struct SortParams {
   count : u32,
   padN : u32,
   renderMask : u32,
-  _pad0 : u32,
+  workgroups : u32,
   forward : vec4<f32>,
   planes : array<vec4<f32>, 6>,
   tileU : f32,
@@ -3397,6 +3398,20 @@ struct SortParams {
 @group(0) @binding(2) var<storage, read> state : array<f32>;
 @group(0) @binding(3) var<storage, read_write> records : array<f32>;
 @group(0) @binding(4) var<storage, read> rampLUT : array<f32>;
+
+// Task 179 — THE NETWORK CLOCK: the self-driving (k, j) + the arrival
+// counter, a 12-byte rw storage buffer at binding 5 (created by the
+// orchestrator alongside the pairs). All atomics — the LAST-BLOCK
+// advance of the bitonic entry writes k/j only after every workgroup of
+// the dispatch counted its arrival (a barrier before each count), so the
+// reads of the dispatch are complete before the write exists, and the
+// dispatch boundary publishes it to the next pass.
+struct NetClock {
+  k : atomic<u32>,
+  j : atomic<u32>,
+  clock : atomic<u32>,
+}
+@group(0) @binding(5) var<storage, read_write> net : NetClock;
 
 const FSTRIDE : u32 = ${GPU_STATE_STRIDE}u;
 const RSTRIDE : u32 = 16u;
@@ -3432,57 +3447,80 @@ fn sortKeys(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
   }
   pairs[i] = vec2<f32>(key, idx);
-  // thread 0 seeds the SELF-DRIVING network state: records[0] = k,
-  // records[1] = j (the first canonical pass is (2, 1)). The pack entry
-  // overwrites the records AFTER the network — the scratch is safe.
+  // thread 0 seeds THE NETWORK CLOCK (Task 179 — the net buffer's
+  // atomics, not the records head: the first canonical pass is (2, 1),
+  // the arrival counter starts the frame's first bitonic dispatch from
+  // zero. The clock RE-ARMS itself at every advance (the last arrival
+  // zeroes it for the next dispatch), so this seed is the frame's own
+  // fresh start. The pack entry overwrites the records AFTER the network
+  // — with the clock on its own buffer, nothing collides at all.)
   if (i == 0u) {
-    records[0] = 2.0;
-    records[1] = 1.0;
+    atomicStore(&net.k, 2u);
+    atomicStore(&net.j, 1u);
+    atomicStore(&net.clock, 0u);
   }
 }
 
-// ── bitonic: ONE compare-exchange — the (k, j) of this pass read from the
-// records head (the self-driving state); the low thread of (i, i^j) swaps
-// the pair when it violates the block's direction ((i & k) == 0 →
-// ascending). The pairs are disjoint per pass — in-place, no hazard ──────
+// ── bitonic: ONE compare-exchange + THE LAST-BLOCK CLOCK (Task 179) ────
+// The (k, j) of this pass read from the net buffer's atomics; the low
+// thread of (i, i^j) swaps the pair when it violates the block's direction
+// ((i & k) == 0 → ascending). The pairs are disjoint per pass — in-place,
+// no hazard. AFTER the exchange every workgroup hits the barrier and its
+// lane 0 bumps the arrival counter; the LAST workgroup to arrive also
+// advances (k, j) — sortStep's own body, verbatim, run by the last block
+// instead of a separate dispatch (342 → 171 dispatches per frame). Every
+// invocation reaches the barrier (the exchange body is conditional, no
+// early return — a return would leave lanes out of the barrier, which is
+// undefined behavior in WGSL).
 @compute @workgroup_size(64)
 fn bitonic(@builtin(global_invocation_id) gid : vec3<u32>) {
   let i = gid.x;
-  if (i >= P.padN) { return; }
-  let k = u32(records[0]);
-  let j = u32(records[1]);
-  if (k == 0u || k > P.padN) { return; } // done (a defensive no-op)
-  let p = i ^ j;
-  if (p <= i) { return; }
-  let a = pairs[i];
-  let b = pairs[p];
-  let asc = (i & k) == 0u;
-  if ((a.x > b.x) == asc) {
-    pairs[i] = b;
-    pairs[p] = a;
+  if (i < P.padN) {
+    let k = atomicLoad(&net.k);
+    let j = atomicLoad(&net.j);
+    if (k != 0u && k <= P.padN) { // done — a defensive no-op
+      let p = i ^ j;
+      if (p > i) {
+        let a = pairs[i];
+        let b = pairs[p];
+        let asc = (i & k) == 0u;
+        if ((a.x > b.x) == asc) {
+          pairs[i] = b;
+          pairs[p] = a;
+        }
+      }
+    }
   }
-}
-
-// ── sortStep: the network's clock — ONE thread advances (k, j) to the
-// next pass of the canonical sequence: j > 1 → (k, j/2); j == 1 →
-// (2k, k); k > padN → done (0, 0). The GLSL twin walks the SAME sequence
-// through per-pass uniforms (the GL facade sets them at pass EXECUTION
-// time — the batched-encoder collapse is a WebGPU compute shape) ───────
-@compute @workgroup_size(1)
-fn sortStep(@builtin(global_invocation_id) gid : vec3<u32>) {
-  if (gid.x != 0u) { return; }
-  var k = u32(records[0]);
-  var j = u32(records[1]);
-  if (k == 0u || k > P.padN) { return; }
-  if (j > 1u) {
-    j = j >> 1u;
-  } else {
-    k = k << 1u;
-    j = k >> 1u;
+  // THE LAST-BLOCK CLOCK — the barrier orders THIS workgroup's (k, j)
+  // reads before its count; the count orders the reads of EVERY
+  // workgroup before the last block's write (the counter only reaches
+  // P.workgroups after all of them counted).
+  workgroupBarrier();
+  if ((gid.x & 63u) == 0u) { // lane 0 of each 64-wide workgroup
+    let arrived = atomicAdd(&net.clock, 1u);
+    if (arrived + 1u == P.workgroups) {
+      // RE-ARM the counter for the NEXT dispatch: the last arrival owns the
+      // reset too (no further atomicAdd can land in THIS dispatch — every
+      // workgroup already counted; the next dispatch starts beyond the
+      // boundary). Without the re-arm only the FIRST pass ever advances.
+      atomicStore(&net.clock, 0u);
+      // the last arrival owns the pass advance: j > 1 → (k, j/2);
+      // j == 1 → (2k, k); k > padN → done (0, 0).
+      var k = atomicLoad(&net.k);
+      var j = atomicLoad(&net.j);
+      if (k != 0u && k <= P.padN) {
+        if (j > 1u) {
+          j = j >> 1u;
+        } else {
+          k = k << 1u;
+          j = k >> 1u;
+        }
+        if (k > P.padN) { k = 0u; j = 0u; }
+        atomicStore(&net.k, k);
+        atomicStore(&net.j, j);
+      }
+    }
   }
-  if (k > P.padN) { k = 0u; j = 0u; }
-  records[0] = f32(k);
-  records[1] = f32(j);
 }
 
 // ── pack (the sorted twin): the record of slot i gathers the state of

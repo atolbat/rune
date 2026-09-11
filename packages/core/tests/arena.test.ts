@@ -47,6 +47,69 @@ describe('uniform arena (value-compare, C theory)', () => {
   })
 })
 
+describe('Task 179 — THE NaN GUARD (a stable NaN lane stops re-dirtying)', () => {
+  it('write: a NaN lane writes once, then stays stable — number→NaN and NaN→number still change', () => {
+    const arena = createUniformArena(1024)
+    const slot = arena.alloc(4)
+    // number → NaN: a change (the NaN reaches the GPU exactly once)
+    expect(arena.write(slot, [1, 2, 3, 4])).toBe(true)
+    arena.clearDirty()
+    expect(arena.write(slot, [NaN, 2, 3, 4])).toBe(true)
+    expect(arena.buffer[slot.base]).toBeNaN()
+    arena.clearDirty() // the transition's own dirtying is LEGITIMATE — drain it
+    // NaN → NaN: STABLE (the pre-179 compare re-dirtied every frame — the
+    // silent per-frame re-upload leak)
+    expect(arena.write(slot, [NaN, 2, 3, 4])).toBe(false)
+    expect(slot.dirty).toBe(false)
+    // NaN → number: a change again
+    expect(arena.write(slot, [0.5, 2, 3, 4])).toBe(true)
+    expect(arena.buffer[slot.base]).toBe(0.5)
+  })
+
+  it('write: a NaN SCALAR writes once, then stays stable', () => {
+    const arena = createUniformArena(1024)
+    const slot = arena.alloc(1)
+    expect(arena.write(slot, 3)).toBe(true)
+    arena.clearDirty()
+    expect(arena.write(slot, NaN)).toBe(true)
+    arena.clearDirty() // the transition dirtied — drain before the stability probe
+    expect(arena.write(slot, NaN)).toBe(false)
+    expect(slot.dirty).toBe(false)
+    expect(arena.write(slot, 4)).toBe(true)
+  })
+
+  it('writeFloat: a stable NaN no longer re-dirties the owning slot', () => {
+    const arena = createUniformArena(1024)
+    const slot = arena.alloc(4)
+    arena.write(slot, [0, 0, 0, 0])
+    arena.clearDirty()
+    const bytes = { offset: slot.base * 4, size: 4 }
+    arena.writeFloat(bytes, NaN)
+    expect(slot.dirty).toBe(true)
+    arena.clearDirty()
+    arena.writeFloat(bytes, NaN) // the same NaN — stable
+    expect(slot.dirty).toBe(false)
+    arena.writeFloat(bytes, 1)
+    expect(slot.dirty).toBe(true)
+  })
+
+  it('writeVec4: a NaN LANE (not the whole vec) stays stable while the healthy lanes keep comparing', () => {
+    const arena = createUniformArena(1024)
+    const slot = arena.alloc(4)
+    arena.writeVec4(slot, 1, 2, 3, 4)
+    arena.clearDirty()
+    arena.writeVec4(slot, NaN, 2, 3, 4) // lane 0 flips to NaN
+    expect(slot.dirty).toBe(true)
+    arena.clearDirty()
+    arena.writeVec4(slot, NaN, 2, 3, 4) // all-NaN lane stable, rest equal
+    expect(slot.dirty).toBe(false)
+    arena.writeVec4(slot, NaN, 2, 3, 5) // lane 3 changed — dirty
+    expect(slot.dirty).toBe(true)
+    expect(arena.buffer[slot.base]).toBeNaN()
+    expect(arena.buffer[slot.base + 3]).toBe(5)
+  })
+})
+
 function identity(): number[] {
   return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
 }
