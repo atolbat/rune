@@ -44,6 +44,15 @@ export interface WgpuDrawSpec {
    *  Task 75: step='instance' — the record is read once per instance
    *  (quad-stars from the feed). */
   readonly attributes?: Record<string, { readonly data: Float32Array; readonly size: number; readonly stride?: number; readonly offset?: number; readonly step?: 'vertex' | 'instance'; readonly bufferId?: number }>
+  /** Task 180 — THE INDEX TIER: the static index array (Uint16Array or
+   *  Uint32Array). When present, the command draws INDEXED — the facade
+   *  creates the index buffer once (data-keyed, uploaded once — the array
+   *  is the shared static pattern) and `count` in the Draw op IS THE INDEX
+   *  COUNT (pass.drawIndexed). Absent — the classic non-indexed draw,
+   *  byte-identical to the pre-180 stream (every existing command
+   *  unchanged). The array's constructor decides the format: 'uint16' |
+   *  'uint32'. */
+  readonly indices?: { readonly data: Uint16Array | Uint32Array }
   readonly textures?: Record<string, TextureHandle>
   readonly count: WgpuDynamic<number>
   readonly instances?: WgpuDynamic<number>
@@ -123,6 +132,8 @@ export function createWgpuContext(arena: SliceArena): WgpuCompileContext {
 interface RichCommand extends WgpuCommand {
   readonly wgsl: string
   readonly attrOrder: readonly { readonly data: Float32Array; readonly size: number; readonly stride?: number; readonly offset?: number; readonly step?: 'vertex' | 'instance'; readonly bufferId?: number }[]
+  /** Task 180 — the static index array (undefined = the classic draw). */
+  readonly indices?: { readonly data: Uint16Array | Uint32Array }
   readonly pipeline: GpuPipelineDesc
   readonly textureIds: readonly number[]
   readonly fields: readonly WgslUniformInfo[]
@@ -158,6 +169,7 @@ export function compileWgslSpec(spec: WgpuDrawSpec, ctx: WgpuCompileContext): Wg
     pipelineId,
     wgsl: spec.shader.wgsl,
     attrOrder,
+    indices: spec.indices,
     pipeline: spec.pipeline ?? {},
     textureIds: boundTextures(reflection, spec),
     fields: reflection.uniforms,

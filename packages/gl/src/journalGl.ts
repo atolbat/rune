@@ -112,6 +112,11 @@ export function withJournal(gl: GLFacade, journal: Journal): GLFacade {
     setBlend: (src, dst, equation) => gl.setBlend(src, dst, equation),
     clear: (color, depth) => gl.clear(color, depth),
     drawArrays: (mode, first, count, instances) => gl.drawArrays(mode, first, count, instances),
+    // Task 180 — the index tier (frame ops, not journaled/sessioned —
+    //  the drawArrays twins; the element buffer is created lazily by the
+    //  executor and rides the facade's own buffer namespace).
+    createElementBuffer: (data) => gl.createElementBuffer(data),
+    drawElements: (elementBufferId, indexCount, instances, twoByte) => gl.drawElements(elementBufferId, indexCount, instances, twoByte),
     // Task 169 — the multi-draw tier: a frame op, passthrough. Forwarded
     // CONDITIONALLY so the wrapper's surface mirrors the inner facade
     // exactly (the executor arms the tier by the method's PRESENCE — an

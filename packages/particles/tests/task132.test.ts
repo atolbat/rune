@@ -122,7 +122,8 @@ describe('Task 132 — render.sort (the facade)', () => {
     const facade = sortedFacade('soup')
     const view = facade.view(LOOK_DOWN_Z)
     expect(view.draw).toBe('soup')
-    expect(view.vertexCount).toBe(30)
+    expect(view.vertexCount).toBe(20) // Task 180: 5 sorted quads × 4 corners
+    expect(view.indexCount).toBe(30) // the pattern's index count: 5 × 6
     // quad 0 (verts 0..5) = the farthest particle (z = −5); quad 4 = z = −1.
     // Corner offsets cancel pairwise even under the seed rotation (corner 2
     // = −corner 0 in the quad plane), so vert0 + vert2 = 2·p.
@@ -158,7 +159,7 @@ describe('Task 132 — render.sort (the facade)', () => {
     expect(records[2]).toBe(-5)
     const soup = new Float32Array(8 * VERTS_PER_PARTICLE * SOUP_STRIDE)
     const verts = fillBillboards(ps, LOOK_DOWN_Z, soup, { order: [4, 3, 2, 1, 0] })
-    expect(verts).toBe(30)
+    expect(verts).toBe(20) // Task 180: 5 quads × 4 unique corners
     expect(soup[2]).toBeCloseTo(-5, 5)
   })
 

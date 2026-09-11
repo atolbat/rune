@@ -17,6 +17,11 @@ import {
   type BillboardOptions,
 } from '../src/index.ts'
 import type { SpawnRecord } from '../src/index.ts'
+// Task 180 — the quad soup is four corners + the shared index pattern; the
+// bit-parity walk below compares the twin's six-vert expansion against the
+// reference's EXPANDED stream (the drawn stream — the exact bytes the GPU
+// assembles through the index buffer).
+import { expandQuadSoup } from './task180.test.ts'
 
 /**
  * Task 131 — the INSTANCE PATH parity suite.
@@ -240,7 +245,7 @@ describe('Task 131 — packInstances (the record packer)', () => {
         for (const tiles of [undefined, [4, 2]] as ([number, number] | undefined)[]) {
           const n = packInstances(system, records, { ramp, tiles, frameJitter: 3 })
           const v = fillBillboards(system, BASIS, soup, { ramp, mode, tiles, frameJitter: 3 })
-          expect(n).toBe(Math.round(v / 6))
+          expect(n).toBe(Math.round(v / 4)) // Task 180: 4 unique corners per quad
           expect(n).toBeGreaterThan(400) // the zero-size skip is real but rare here
         }
       }
@@ -318,12 +323,16 @@ describe('Task 131 — the shader twin vs fillBillboards (bit parity)', () => {
     it(`reproduces fillBillboards bit-exactly: ${c.name}`, () => {
       const n = packInstances(system, records, { ramp: RAMP, tiles: c.opts.tiles, frameJitter: c.opts.frameJitter })
       const refCount = fillBillboards(system, BASIS, ref, { ramp: RAMP, ...c.opts })
-      expect(n).toBe(Math.round(refCount / 6))
+      expect(n).toBe(Math.round(refCount / 4)) // Task 180: 4 unique corners per quad
       const twinCount = expandInstances(records, n, { ...c.twin, right: BASIS.right, up: BASIS.up, forward: BASIS.forward! }, twin)
-      expect(twinCount).toBe(refCount)
+      // The reference's four-corner soup EXPANDED through the shared index
+      // pattern — the stream the GPU actually draws; the twin (like the
+      // BILLBOARD shader) writes the six-vert form directly.
+      const six = expandQuadSoup(ref, refCount)
+      expect(twinCount).toBe(six.length / SOUP_STRIDE)
       let worst = 0
-      for (let at = 0; at < refCount * SOUP_STRIDE; at++) {
-        const d = Math.abs(twin[at] - ref[at])
+      for (let at = 0; at < six.length; at++) {
+        const d = Math.abs(twin[at] - six[at])
         if (d > worst) worst = d
       }
       // The quantization contract: the twin (like the shader) consumes the
@@ -339,11 +348,13 @@ describe('Task 131 — the shader twin vs fillBillboards (bit parity)', () => {
     const n = packInstances(system, records, { ramp: RAMP, tiles: [2, 2], frameJitter: 4 })
     const refCount = fillBillboards(system, BASIS, ref, { ramp: RAMP, tiles: [2, 2], frameJitter: 4 })
     expandInstances(records, n, { mode: 'camera', spin: 0, speedFactor: 0, lengthFactor: 1, spin3d: 0, tiles: [2, 2], axis: 'random', right: BASIS.right, up: BASIS.up, forward: BASIS.forward! }, twin)
-    // every vertex uv of the twin === the reference's (tile origin + scale)
-    for (let v = 0; v < refCount; v++) {
+    // every vertex uv of the twin === the reference's EXPANDED stream (tile
+    // origin + scale — the pattern expansion carries the uvs verbatim)
+    const six = expandQuadSoup(ref, refCount)
+    for (let v = 0; v < six.length / SOUP_STRIDE; v++) {
       const at = v * SOUP_STRIDE + 3
-      expect(twin[at]).toBe(ref[at])
-      expect(twin[at + 1]).toBe(ref[at + 1])
+      expect(twin[at]).toBe(six[at])
+      expect(twin[at + 1]).toBe(six[at + 1])
     }
   })
 })
@@ -370,7 +381,7 @@ describe('Task 131 — the facade integration (draw: instance)', () => {
     // facade's fields + count are the reference's whole read surface)
     const soupCheck = new Float32Array(512 * 6 * 9)
     const refCount = fillBillboards({ fields: ps.fields, count: ps.count } as never, BASIS, soupCheck, { ramp: RAMP, tiles: [2, 2], frameJitter: 3 })
-    expect(v.vertexCount).toBe(Math.round(refCount / 6))
+    expect(v.vertexCount).toBe(Math.round(refCount / 4)) // Task 180
     // the memory contract: the same reference, the same buffer
     const vertices = v.vertices
     for (let k = 0; k < 10; k++) {
@@ -389,7 +400,11 @@ describe('Task 131 — the facade integration (draw: instance)', () => {
     expect(v.stride).toBe(SOUP_STRIDE)
     expect(v.instanceCount).toBe(0)
     expect(v.instanceLayout).toBeNull()
-    expect(v.vertexCount).toBe(32 * 6)
+    // Task 180 — the LCD soup: FOUR unique corners per particle, the index
+    // pattern's count alongside, indices present (capacity 64 → Uint16).
+    expect(v.vertexCount).toBe(32 * 4)
+    expect(v.indexCount).toBe(32 * 6)
+    expect(v.indices).toBeInstanceOf(Uint16Array)
   })
 
   it('the allocation identity holds at capacity (16 floats/particle)', () => {

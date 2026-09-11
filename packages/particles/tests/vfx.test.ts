@@ -8,6 +8,11 @@ import {
   fillBillboards, fillTrails, createTrailHistory, fillMeshes, sampleRamp as sampleRampDirect,
   type SpawnRecord, type ForceFields,
 } from '../src/index.ts'
+// Task 180 — the quad soup is FOUR unique corners + the shared index
+// pattern; the legacy six-vert pins below read the EXPANSION (the exact
+// stream the pattern draws), so their historical assertions pin the same
+// bytes.
+import { expandQuadSoup } from './task180.test.ts'
 
 const TAU = 6.283185307179586
 
@@ -143,10 +148,12 @@ describe('Task 122: the atlas (FrameOverLife)', () => {
     const ramp = createRamp([{ t: 0, size: 1, r: 1, g: 1, b: 1, a: 1, frame: 5 }])
     const soup = new Float32Array(4 * 6 * 9)
     const verts = fillBillboards(system, BASIS, soup, { ramp, tiles: [4, 4] })
-    expect(verts).toBe(6)
+    expect(verts).toBe(4)
     // frame 5 → tile (1, 1) in a 4×4 sheet → u ∈ [0.25, 0.5), v ∈ [0.25, 0.5)
+    // — checked over the EXPANDED six-vert stream (the drawn stream).
+    const six = expandQuadSoup(soup, verts)
     for (let v = 0; v < 6; v++) {
-      const u = soup[v * 9 + 3], vv = soup[v * 9 + 4]
+      const u = six[v * 9 + 3], vv = six[v * 9 + 4]
       expect(u).toBeGreaterThanOrEqual(0.25 - 1e-9)
       expect(u).toBeLessThanOrEqual(0.5 + 1e-9)
       expect(vv).toBeGreaterThanOrEqual(0.25 - 1e-9)
@@ -179,13 +186,15 @@ describe('Task 122: the atlas (FrameOverLife)', () => {
     })
     const ramp = createRamp([{ t: 0, size: 1, r: 1, g: 1, b: 1, a: 1 }])
     const soup = new Float32Array(4 * 6 * 9)
-    fillBillboards(system, BASIS, soup, { ramp, tiles: [2, 2], frameJitter: 4 })
+    const verts = fillBillboards(system, BASIS, soup, { ramp, tiles: [2, 2], frameJitter: 4 })
+    expect(verts).toBe(8)
     // particle 0 (seed .1): frame = floor(.1·4) = 0 → tile (0, 0): v ∈ [0, .5)
     expect(soup[4]).toBeCloseTo(0, 9)
     // particle 1 (seed .6): frame = floor(.6·4) = 2 → tile (0, 1): v ∈ [.5, 1)
-    expect(soup[6 * 9 + 4]).toBeCloseTo(0.5, 9)
+    // (Task 180: particle 1's corner 0 lives at vert 4 = offset 4·9)
+    expect(soup[4 * 9 + 4]).toBeCloseTo(0.5, 9)
     // both share the column 0 → u starts at 0
-    expect(soup[6 * 9 + 3]).toBeCloseTo(0, 9)
+    expect(soup[4 * 9 + 3]).toBeCloseTo(0, 9)
   })
 })
 
@@ -204,25 +213,27 @@ describe('Task 122: the billboard render modes', () => {
 
   it('vertical: the quad is upright — up = world +Y, right horizontal', () => {
     const soup = new Float32Array(4 * 6 * 9)
-    fillBillboards(one(), BASIS, soup, { mode: 'vertical' })
+    const verts = fillBillboards(one(), BASIS, soup, { mode: 'vertical' })
+    const six = expandQuadSoup(soup, verts)
     for (let v = 0; v < 6; v++) {
       // every vert: y = py ± half (the vertical extent), the horizontal
       // offset lives in x/z only
-      expect(Math.abs(soup[v * 9 + 1] - 2)).toBeCloseTo(0.5, 9)
-      expect(Math.hypot(soup[v * 9] - 1, soup[v * 9 + 2] - 3)).toBeLessThanOrEqual(0.5 + 1e-9)
+      expect(Math.abs(six[v * 9 + 1] - 2)).toBeCloseTo(0.5, 9)
+      expect(Math.hypot(six[v * 9] - 1, six[v * 9 + 2] - 3)).toBeLessThanOrEqual(0.5 + 1e-9)
     }
     // the bottom row (verts 0, 1) is BELOW, the top row (2, 3) ABOVE
-    expect(soup[1]).toBeCloseTo(1.5, 9)
-    expect(soup[9 + 1]).toBeCloseTo(1.5, 9)
-    expect(soup[2 * 9 + 1]).toBeCloseTo(2.5, 9)
+    expect(six[1]).toBeCloseTo(1.5, 9)
+    expect(six[9 + 1]).toBeCloseTo(1.5, 9)
+    expect(six[2 * 9 + 1]).toBeCloseTo(2.5, 9)
   })
 
   it('horizontal: the quad is FLAT — every vert shares the particle y', () => {
     const soup = new Float32Array(4 * 6 * 9)
-    fillBillboards(one(), BASIS, soup, { mode: 'horizontal' })
+    const verts = fillBillboards(one(), BASIS, soup, { mode: 'horizontal' })
+    const six = expandQuadSoup(soup, verts)
     for (let v = 0; v < 6; v++) {
-      expect(soup[v * 9 + 1]).toBeCloseTo(2, 9)
-      expect(Math.hypot(soup[v * 9] - 1, soup[v * 9 + 2] - 3)).toBeLessThanOrEqual(0.708 + 1e-3)
+      expect(six[v * 9 + 1]).toBeCloseTo(2, 9)
+      expect(Math.hypot(six[v * 9] - 1, six[v * 9 + 2] - 3)).toBeLessThanOrEqual(0.708 + 1e-3)
     }
   })
 
@@ -236,13 +247,15 @@ describe('Task 122: the billboard render modes', () => {
     system.advance(0, { gravity: [0, 0, 0], drag: 0, turbulence: 0 } as ForceFields)
     const soup = new Float32Array(8 * 6 * 9)
     const verts = fillBillboards(system, BASIS, soup, { mode: 'stretched', lengthFactor: 1 })
-    expect(verts).toBe(12)
-    // the moving particle (index 1, verts 6..11): the HEAD edge (u = 0)
-    // sits ON the particle (x = 0), the TAIL edge (u = 1) trails BEHIND
-    // by lf·size = 1; the width spans ±size/2 along Y
+    expect(verts).toBe(8)
+    // the moving particle (index 1, corners 4..7 = the six-vert stream's
+    // verts 6..11): the HEAD edge (u = 0) sits ON the particle (x = 0),
+    // the TAIL edge (u = 1) trails BEHIND by lf·size = 1; the width spans
+    // ±size/2 along Y — read through the EXPANSION (the drawn stream).
+    const six = expandQuadSoup(soup, verts)
     let heads = 0, tails = 0
     for (let v = 6; v < 12; v++) {
-      const x = soup[v * 9], u = soup[v * 9 + 3]
+      const x = six[v * 9], u = six[v * 9 + 3]
       if (Math.abs(x) < 1e-9) {
         heads++
         expect(u).toBeCloseTo(0, 9)
@@ -251,29 +264,31 @@ describe('Task 122: the billboard render modes', () => {
         expect(x).toBeCloseTo(-1, 6)
         expect(u).toBeCloseTo(1, 9)
       }
-      expect(Math.abs(soup[v * 9 + 1])).toBeLessThanOrEqual(0.5 + 1e-9)
+      expect(Math.abs(six[v * 9 + 1])).toBeLessThanOrEqual(0.5 + 1e-9)
     }
     expect(heads).toBe(3)
     expect(tails).toBe(3)
     // the resting particle (verts 0..5) degrades to the camera quad — finite
     for (let v = 0; v < 6; v++) {
-      expect(Number.isFinite(soup[v * 9] + soup[v * 9 + 1] + soup[v * 9 + 2])).toBe(true)
+      expect(Number.isFinite(six[v * 9] + six[v * 9 + 1] + six[v * 9 + 2])).toBe(true)
     }
     // speedFactor 2: the tail gains (|v|·sf)·size = 20 → the tail edge at −21,
     // the head still at 0 (their avgSize scaling — NOT a world-unit streak)
     const soup2 = new Float32Array(8 * 6 * 9)
-    fillBillboards(system, BASIS, soup2, { mode: 'stretched', lengthFactor: 1, speedFactor: 2 })
+    const verts2 = fillBillboards(system, BASIS, soup2, { mode: 'stretched', lengthFactor: 1, speedFactor: 2 })
+    const six2 = expandQuadSoup(soup2, verts2)
     const xs = []
-    for (let v = 6; v < 12; v++) xs.push(soup2[v * 9])
+    for (let v = 6; v < 12; v++) xs.push(six2[v * 9])
     expect(Math.max(...xs)).toBeCloseTo(0, 6)
     expect(Math.min(...xs)).toBeCloseTo(-21, 6)
   })
 
   it('oriented: the quad rotates rigidly — every corner keeps its distance', () => {
     const soup = new Float32Array(4 * 6 * 9)
-    fillBillboards(one(), BASIS, soup, { mode: 'oriented', axis: [0, 1, 0], spin3d: 1 })
+    const verts = fillBillboards(one(), BASIS, soup, { mode: 'oriented', axis: [0, 1, 0], spin3d: 1 })
+    const six = expandQuadSoup(soup, verts)
     for (let v = 0; v < 6; v++) {
-      const d = Math.hypot(soup[v * 9] - 1, soup[v * 9 + 1] - 2, soup[v * 9 + 2] - 3)
+      const d = Math.hypot(six[v * 9] - 1, six[v * 9 + 1] - 2, six[v * 9 + 2] - 3)
       expect(d).toBeCloseTo(Math.SQRT2 * 0.5, 6)
     }
   })
@@ -282,10 +297,11 @@ describe('Task 122: the billboard render modes', () => {
     // seed 0 → angle 0; axis X: the rotation of the XY-plane quad about X
     const system = one()
     const soup = new Float32Array(4 * 6 * 9)
-    fillBillboards(system, BASIS, soup, { mode: 'oriented', axis: [1, 0, 0], spin3d: 0 })
+    const verts = fillBillboards(system, BASIS, soup, { mode: 'oriented', axis: [1, 0, 0], spin3d: 0 })
     // angle = seed·τ = 0 → the identity: the quad lies in the world XY plane
+    const six = expandQuadSoup(soup, verts)
     for (let v = 0; v < 6; v++) {
-      expect(soup[v * 9 + 2]).toBeCloseTo(3, 9)
+      expect(six[v * 9 + 2]).toBeCloseTo(3, 9)
     }
   })
 })

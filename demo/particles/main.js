@@ -4,11 +4,13 @@
 // Flow: eight presets (fountain / fireworks / galaxy / embers / drift /
 //   snow / orbit / meteor) built from
 //   createParticles({ capacity, rate, spawner, ramp, forces, spin });
-//   per frame: advance(dt) → billboards(basis) → ONE draw command with a
-//   dynamic vertex count. The soup (pos3 / uv2 / color4, 6 verts per
-//   particle, 36 B per vertex, interleaved in ONE Float32Array) is uploaded
-//   per frame:
-//     WebGL2 — renderer.inner.inner.gl.updateBuffer(bufferId, soup)
+//   per frame: advance(dt) → billboards(basis) → ONE INDEXED draw command
+//   with a dynamic index count. The soup (pos3 / uv2 / color4, FOUR unique
+//   corners per particle — Task 180's index tier, 36 B per vertex,
+//   interleaved in ONE Float32Array) is uploaded per frame as the LIVE
+//   PREFIX; the shared static index pattern [0,1,2,0,2,3] per quad rides
+//   the command's indices (uploaded once, never re-uploaded):
+//     WebGL2 — renderer.inner.inner.gl.updateBuffer(bufferId, livePrefix)
 //              (the bufferId dual-bind of the feed path)
 //     WebGPU — renderer.inner.gpu.syncVertexBuffer(soup, liveBytes)
 //              (the feed's dirty-range write, keyed by the array itself)
@@ -27,9 +29,9 @@
 //   Pages serves with max-age=600, and a browser that keeps an OLD bundle
 //   for those 10 minutes shows an OLD bug even after a deploy — a changed
 //   query string forces a fresh fetch. Bump the suffix on every release.
-import { createRenderer } from '../../dist/rune.esm.js?v=179'
+import { createRenderer } from '../../dist/rune.esm.js?v=180'
 import { materialOf, TEXTURE, VERTEX_COLOR } from '../../dist/rune-materials.esm.js?v=150'
-import { createParticles, createRamp } from '../../dist/rune-particles.esm.js?v=179'
+import { createParticles, createRamp } from '../../dist/rune-particles.esm.js?v=180'
 
 /* ─── Materials: the unlit sprite pair × 2 blend modes ─────────────────── */
 
@@ -637,11 +639,21 @@ function frameCallback(ctx, record) {
   const liveBytes = vertexCount * 36
 
   // ── upload the soup (the feed dual-bind path, per backend) ──
-  if (glDyn !== null) glDyn.gl.updateBuffer(glDyn.bufferId, soupView.vertices)
+  // Task 180 — both legs ship the LIVE PREFIX (the GL leg used to pour the
+  // whole capacity array every frame — 1.77 MiB at 8192 regardless of how
+  // few particles were alive; the WG leg's own liveBytes discipline, now
+  // shared). The quad soup is 36 B × live vertices.
+  if (glDyn !== null && vertexCount > 0) {
+    glDyn.gl.updateBuffer(glDyn.bufferId, soupView.vertices.subarray(0, vertexCount * 9))
+  }
   if (gpuDyn !== null && vertexCount > 0) gpuDyn.syncVertexBuffer(soupView.vertices, liveBytes)
 
   // ── one draw ──
-  if (drawCommand !== null && vertexCount > 0) record(drawCommand, { mvp, model: MODEL, vertexCount })
+  // Task 180: the props carry the INDEX count (the command's count resolver
+  // reads p.indexCount — the indexed draw's own count).
+  if (drawCommand !== null && vertexCount > 0) {
+    record(drawCommand, { mvp, model: MODEL, vertexCount, indexCount: soupView.indexCount })
+  }
 
   // the stats pill (~4 Hz)
   statsAccum += ctx.dt
@@ -859,7 +871,8 @@ async function attachCommand() {
   const preset = PRESETS[currentPresetId]
   // The soup command: three interleaved attribute views into ONE
   // Float32Array (the facade's vertex buffer, capacity-sized, stable).
-  const soup = particles.billboards(BASIS).vertices
+  const soupView0 = particles.billboards(BASIS)
+  const soup = soupView0.vertices
   // The dynamic upload path, per backend:
   //   WebGL2 — a facade buffer + updateBuffer per frame (bufferId dual-bind)
   //   WebGPU — the facade's syncVertexBuffer (keyed by the soup array)
@@ -886,7 +899,11 @@ async function attachCommand() {
     attributes: attrs,
     textures: { u_tex: soupTexture, texTexture: soupTexture },
     uniforms: { u_mvp: (p) => p.mvp, u_model: (p) => p.model },
-    count: (p) => p.vertexCount ?? 0,
+    // Task 180 — THE INDEX TIER: the quad soup draws four unique corners
+    // per particle through the shared static index pattern; `count` is the
+    // INDEX count (6 per live quad).
+    indices: { data: soupView0.indices },
+    count: (p) => p.indexCount ?? 0,
   })
 }
 

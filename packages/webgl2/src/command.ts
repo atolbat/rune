@@ -63,6 +63,13 @@ export interface DrawSpec {
     readonly raster?: { readonly cull?: 'none' | 'back' | 'front' }
   }
   readonly attributes?: Record<string, DrawAttribute>
+  /** Task 180 — THE INDEX TIER: the static index pattern (Uint16Array |
+   *  Uint32Array — the constructor picks the element type). When present,
+   *  the command draws INDEXED (drawElements / drawElementsInstanced over
+   *  a lazily created element buffer) and `count` in the Draw op IS THE
+   *  INDEX COUNT. Absent — the classic drawArrays stream, byte-identical
+   *  to the pre-180 behavior (every existing command unchanged). */
+  readonly indices?: { readonly data: Uint16Array | Uint32Array }
   readonly uniforms?: Record<string, unknown>
   readonly textures?: Record<string, TextureHandle>
   readonly count: Dynamic<number>
@@ -173,12 +180,15 @@ export function compileDrawSpec(spec: DrawSpec, ctx: GLCompileContext): Compiled
   const rich = command as never as {
     state: CompiledState; fields: UniformField[]; samplers: SamplerField[]
     attributes: typeof attributes; glsl: DrawSpec['shader']['glsl']
+    indices?: { readonly data: Uint16Array | Uint32Array }
+    elementId?: number
   }
   rich.state = state
   rich.fields = fields
   rich.samplers = samplers
   rich.attributes = attributes
   rich.glsl = spec.shader.glsl
+  rich.indices = spec.indices
 
   ctx.commands.push(command)
   return command

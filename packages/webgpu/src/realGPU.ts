@@ -247,6 +247,16 @@ export async function createRealGPU(
   // now cached per source view and grown on demand; only the copy itself
   // (unavoidable) remains per frame.
   const sabStaging = new Map<Float32Array, Uint8Array<ArrayBuffer>>()
+  // Task 180 — THE INDEX TIER: the shared static index patterns, keyed by
+  // the typed array (bindVertexBuffer's own discipline). The pattern is
+  // uploaded ONCE at first bind (it never changes — any live prefix draws
+  // through its own prefix of the same pattern); only the pass-scoped
+  // bind memo is per-frame state. dispose() cleans everything.
+  const indexBuffers = new Map<Uint16Array | Uint32Array, GPUBuffer>()
+  // The index buffer bound on the CURRENT pass (null = none) — the
+  // setIndexBuffer twin of vertexBindMemo: a fresh pass binds nothing until
+  // told, an identical re-bind within the pass is skipped.
+  let indexMemo: GPUBuffer | null = null
   /** Multi-textures (Nefertiti model base+normal): command textures
    *  accumulate via bindTexture, the bind group is fixed in draw(). */
   const pendingTextureIds: number[] = []
@@ -1162,6 +1172,36 @@ export async function createRealGPU(
     pass?.draw(count, instances)
   }
 
+  /** Task 180 — THE INDEX TIER: the data-keyed index buffer + the
+   *  pass-scoped bind memo. The buffer is created ONCE per array (INDEX |
+   *  COPY_DST) and written in full — the quad pattern is static; a Uint16Array
+   *  binds as 'uint16', a Uint32Array as 'uint32' (the array's own format,
+   *  the facade does not guess). An absent pass defers the bind to the
+   *  drawing frame (the buffer still lands in the cache — the upload is
+   *  queue-ordered regardless). */
+  function bindIndexBuffer(data: Uint16Array | Uint32Array): void {
+    let buffer = indexBuffers.get(data)
+    if (buffer === undefined) {
+      buffer = device.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST })
+      try {
+        device.queue.writeBuffer(buffer, 0, data.buffer as ArrayBuffer, data.byteOffset, data.byteLength)
+      } catch (error) {
+        onGpuError?.(`writeBuffer(index, ${data.byteLength} bytes) rejected: ${errorMessage(error)}`)
+      }
+      indexBuffers.set(data, buffer)
+    }
+    if (pass === null) return
+    if (indexMemo === buffer) return
+    pass.setIndexBuffer(buffer, data instanceof Uint16Array ? 'uint16' : 'uint32')
+    indexMemo = buffer
+  }
+
+  /** Task 180 — the indexed draw over the bound index buffer. */
+  function drawIndexed(indexCount: number, instances: number): void {
+    flushTextureBindGroup()
+    pass?.drawIndexed(indexCount, instances)
+  }
+
   // ─── Task 174 — THE MULTI-DRAW TIER's indirect ring ────────────────────
   // Two persistent INDIRECT buffers: the args ring (512 × 16-byte draw
   // structs) and the count ring (512 × 4-byte draw counts). Each flush of
@@ -1216,6 +1256,9 @@ export async function createRealGPU(
     pass = null
     // Task 164 — the vertex-bind memo is pass-scoped (see bindVertexBuffer).
     vertexBindMemo.length = 0
+    // Task 180 — the index bind memo dies with the pass (the setIndexBuffer
+    // twin of the vertex memo — a fresh pass binds nothing until told).
+    indexMemo = null
     // Task 165 — the bind-group memos die with the pass (see their
     // declarations): a fresh pass binds nothing until told.
     boundGroup0Offset = -1
@@ -1455,6 +1498,12 @@ export async function createRealGPU(
       buf.destroy()
     }
     vertexBuffers.clear()
+    // Task 180 — the index tier's cache dies with the same stroke.
+    for (const buf of indexBuffers.values()) {
+      buf.destroy()
+    }
+    indexBuffers.clear()
+    indexMemo = null
     // 5. Pipelines: GPURenderPipeline has no destroy() — device.destroy()
     //    will free them implicitly. Clear the array to avoid dragging references.
     pipelineRecords.length = 0
@@ -1756,6 +1805,8 @@ export async function createRealGPU(
     bindUniforms,
     bindVertexBuffer,
     syncVertexBuffer,
+    bindIndexBuffer,
+    drawIndexed,
     bindExternalVertexBuffer,
     bindTexture,
     beginPass,

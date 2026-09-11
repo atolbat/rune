@@ -43,6 +43,12 @@ export interface AutoDrawSpec {
    *  count = vertices per instance (e.g. 6 = a quad from gl_VertexID/vertex_index),
    *  instances = number of instances (e.g. feed.count — stars). */
   readonly instances?: unknown
+  /** Task 180 — THE INDEX TIER: the static index pattern (Uint16Array |
+   *  Uint32Array). When present, the command draws INDEXED on BOTH
+   *  backends (WebGL2: a lazily created element buffer + drawElements;
+   *  WebGPU: a data-keyed index buffer + pass.drawIndexed) and `count`
+   *  IS THE INDEX COUNT. Absent — the classic non-indexed stream. */
+  readonly indices?: { readonly data: Uint16Array | Uint32Array }
 }
 
 /** Coverage of a single spec: which shader variants it has. */

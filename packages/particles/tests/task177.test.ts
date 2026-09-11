@@ -233,11 +233,13 @@ describe('Task 177 — THE STAGED PAINTER BAKE', () => {
       facade.fields.pz[i] = (rnd() * 2 - 1) * 50
     }
     const view = facade.view(BASIS)
-    // The soup path bakes 6 verts × 9 floats per particle — the count is
-    // the parity surface here (the byte parity of the soup order is
+    // The soup path bakes 4 unique corners × 9 floats per particle (Task
+    // 180 — the index pattern completes the quads) — the count is the
+    // parity surface here (the byte parity of the soup order is
     // task132/task176's pin; this pin guards the facade's large-count
     // soup route through the NEW core digit branch).
-    expect(view.vertexCount).toBe(n * 6)
+    expect(view.vertexCount).toBe(n * 4)
+    expect(view.indexCount).toBe(n * 6)
     expect(view.instanceCount).toBe(0)
     // The first quad's CENTER is the painter's FIRST particle — the max
     // dot(FWD, p): corner offsets cancel pairwise in the quad plane, so

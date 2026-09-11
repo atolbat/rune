@@ -2,23 +2,10 @@
  * @rune/particles — the billboard soup: the GPU view of the particle store.
  *
  * ══════════════════════════════════════════════════════════════════════════
- * One quad per particle baked CPU-side into ONE reused Float32Array — the
- * draw command consumes the soup as plain vertex attributes (position, uv,
- * color), no instancing, no geometry shader, no per-pipeline surprises on
- * either backend.
- *
- * Task 180 — THE INDEX TIER: the quad is FOUR vertices (the unique corners
- * 0,1,2,3) + the SHARED STATIC INDEX PATTERN [0,1,2, 0,2,3] per quad —
- * makeQuadIndices() builds it once for the whole capacity and the draw
- * binds it as an index buffer. The pre-180 shape wrote SIX vertices per
- * particle (the two triangle corners duplicated: 0,1,2,0,2,3) — 54 floats
- * of CPU bake and upload traffic per particle where 36 carry information,
- * and SIX vertex-shader invocations per quad where the indexed draw runs
- * FOUR (the post-transform cache would have deduplicated the old form too,
- * but only after paying the invocations). The triangles themselves are
- * IDENTICAL: indices [0,1,2,0,2,3] over the corners reconstruct the exact
- * pre-180 vertex stream — the parity gate in the test suite pins this
- * byte-for-byte (the drawn image cannot change).
+ * One quad (6 vertices, 2 triangles) per particle, baked CPU-side into ONE
+ * reused Float32Array — the draw command consumes the soup as plain vertex
+ * attributes (position, uv, color), no instancing, no geometry shader, no
+ * per-pipeline surprises on either backend.
  *
  * Vertex layout (STRIDE = 9 floats):
  *   [0..2] position  — world-space, p + right·ox + up·oy (billboarded)
@@ -60,48 +47,18 @@
  * PERFORMANCE: zero allocations — the out array is caller-owned (the
  * facade allocates it once at capacity), the ramp scratch is one shared
  * 6-float array, all locals are hoisted. fillBillboards returns the
- * VERTEX COUNT (4 × live particles); the DRAW wants indexCount = 6 × live
- * particles over the shared pattern (makeQuadIndices).
+ * VERTEX COUNT (6 × live particles).
  * ══════════════════════════════════════════════════════════════════════════
  */
 
 import { sphereOutsideFrustum } from '@rune/core'
-import type { ParticleSource } from './system.ts'
-import { flatRamp, CONSTANT_RAMP, type Ramp } from './ramp.ts'
+import type { ParticleSource } from '../src/system.ts'
+import { flatRamp, CONSTANT_RAMP, type Ramp } from '../src/ramp.ts'
 
 /** Floats per vertex (position 3, uv 2, color 4). */
 export const SOUP_STRIDE = 9
-/** Vertices per particle — the quad's FOUR unique corners (Task 180; the
- * pre-180 shape was 6: the two shared triangle corners were duplicated in
- * the vertex stream — the index tier reconstructs the same six-vertex draw
- * sequence from the four unique corners + the shared pattern). */
-export const VERTS_PER_PARTICLE = 4
-/** Indices per particle in the shared static pattern. */
-export const INDICES_PER_PARTICLE = 6
-
-/** Task 180 — the shared static quad index pattern for `quads` quads:
- * quad q → vertices 4q+0, 4q+1, 4q+2, 4q+3; the pattern references them as
- * [4q, 4q+1, 4q+2, 4q, 4q+2, 4q+3] — the two triangles (0,1,2) and
- * (0,2,3), the EXACT sequence the pre-180 six-vertex soup drew inline.
- * Uint16 while 4·quads ≤ 65536 (half the index memory and half the
- * input-assembly fetch), Uint32 beyond. The pattern is FULLY STATIC — any
- * live prefix [0, quads) of the vertex soup draws through its own prefix
- * [0, 6·quads) of the SAME pattern: fill once at capacity, upload once,
- * draw with indexCount = 6 × live quads. */
-export function makeQuadIndices(quads: number): Uint16Array | Uint32Array {
-  if (!Number.isInteger(quads) || quads < 0) {
-    throw new Error(`rune/particles: makeQuadIndices needs an integer quad count >= 0 (got ${quads})`)
-  }
-  const twoByte = quads * 4 <= 65536
-  const indices = twoByte ? new Uint16Array(quads * 6) : new Uint32Array(quads * 6)
-  for (let q = 0; q < quads; q++) {
-    const v = q * 4
-    const at = q * 6
-    indices[at] = v; indices[at + 1] = v + 1; indices[at + 2] = v + 2
-    indices[at + 3] = v; indices[at + 4] = v + 2; indices[at + 5] = v + 3
-  }
-  return indices
-}
+/** Vertices per particle (two triangles). */
+export const VERTS_PER_PARTICLE = 6
 
 /** The camera basis for billboarding: two unit world-space vectors
  *  (right, up) — typically column 0 and 1 of the view matrix, negated
@@ -177,10 +134,8 @@ export interface BillboardOptions {
 }
 
 /** Bakes the live particles into `out` (a Float32Array of at least
- *  capacity × 36 floats — Task 180: the four unique corners; the draw
- *  completes the quads through makeQuadIndices' shared pattern). Returns
- *  the vertex count (4 × live). Deterministic: the same (store state,
- *  basis, options) writes the same bytes. */
+ *  capacity × 54 floats). Returns the vertex count. Deterministic:
+ *  the same (store state, basis, options) writes the same bytes. */
 export function fillBillboards(
   system: ParticleSource,
   basis: CameraBasis,
@@ -331,18 +286,24 @@ export function fillBillboards(
       const o2x = (c1 * half + c2 * half), o2y = (s1 * half + s2 * half)
       const o3x = (c1 * -half + c2 * half), o3y = (s1 * -half + s2 * half)
 
-      // Task 180 — the FOUR unique corners written inline (the index
-      // pattern [0,1,2,0,2,3] reconstructs the pre-180 six-vertex stream
-      // exactly — the parity gate pins the reconstruction byte-for-byte).
+      // Triangle 1: corners 0, 1, 2. Triangle 2: corners 0, 2, 3.
+      // (Same winding for both — CCW in the right/up plane.)
+      // Task 142 — the six verts written inline (the exact expressions the
+      // vert() helper evaluates — bit-identical; the 6×11-argument calls
+      // per particle die, ~28% off the bake walk).
       out[at] = px + o0x * rx + o0y * ux; out[at + 1] = py + o0x * ry + o0y * uy; out[at + 2] = pz + o0x * rz + o0y * uz
       out[at + 3] = u0; out[at + 4] = v0; out[at + 5] = cr; out[at + 6] = cg; out[at + 7] = cb; out[at + 8] = ca
       out[at + 9] = px + o1x * rx + o1y * ux; out[at + 10] = py + o1x * ry + o1y * uy; out[at + 11] = pz + o1x * rz + o1y * uz
       out[at + 12] = u0 + uS; out[at + 13] = v0; out[at + 14] = cr; out[at + 15] = cg; out[at + 16] = cb; out[at + 17] = ca
       out[at + 18] = px + o2x * rx + o2y * ux; out[at + 19] = py + o2x * ry + o2y * uy; out[at + 20] = pz + o2x * rz + o2y * uz
       out[at + 21] = u0 + uS; out[at + 22] = v0 + vS; out[at + 23] = cr; out[at + 24] = cg; out[at + 25] = cb; out[at + 26] = ca
-      out[at + 27] = px + o3x * rx + o3y * ux; out[at + 28] = py + o3x * ry + o3y * uy; out[at + 29] = pz + o3x * rz + o3y * uz
-      out[at + 30] = u0; out[at + 31] = v0 + vS; out[at + 32] = cr; out[at + 33] = cg; out[at + 34] = cb; out[at + 35] = ca
-      at += 4 * SOUP_STRIDE
+      out[at + 27] = px + o0x * rx + o0y * ux; out[at + 28] = py + o0x * ry + o0y * uy; out[at + 29] = pz + o0x * rz + o0y * uz
+      out[at + 30] = u0; out[at + 31] = v0; out[at + 32] = cr; out[at + 33] = cg; out[at + 34] = cb; out[at + 35] = ca
+      out[at + 36] = px + o2x * rx + o2y * ux; out[at + 37] = py + o2x * ry + o2y * uy; out[at + 38] = pz + o2x * rz + o2y * uz
+      out[at + 39] = u0 + uS; out[at + 40] = v0 + vS; out[at + 41] = cr; out[at + 42] = cg; out[at + 43] = cb; out[at + 44] = ca
+      out[at + 45] = px + o3x * rx + o3y * ux; out[at + 46] = py + o3x * ry + o3y * uy; out[at + 47] = pz + o3x * rz + o3y * uz
+      out[at + 48] = u0; out[at + 49] = v0 + vS; out[at + 50] = cr; out[at + 51] = cg; out[at + 52] = cb; out[at + 53] = ca
+      at += 6 * SOUP_STRIDE
       continue
     }
 
@@ -360,6 +321,8 @@ export function fillBillboards(
       const o3x = -half * arx + half * aux, o3y = -half * ary + half * auy, o3z = -half * arz + half * auz
       at = vert3(out, at, px, py, pz, o0x, o0y, o0z, u0, v0, cr, cg, cb, ca)
       at = vert3(out, at, px, py, pz, o1x, o1y, o1z, u0 + uS, v0, cr, cg, cb, ca)
+      at = vert3(out, at, px, py, pz, o2x, o2y, o2z, u0 + uS, v0 + vS, cr, cg, cb, ca)
+      at = vert3(out, at, px, py, pz, o0x, o0y, o0z, u0, v0, cr, cg, cb, ca)
       at = vert3(out, at, px, py, pz, o2x, o2y, o2z, u0 + uS, v0 + vS, cr, cg, cb, ca)
       at = vert3(out, at, px, py, pz, o3x, o3y, o3z, u0, v0 + vS, cr, cg, cb, ca)
       continue
@@ -399,6 +362,8 @@ export function fillBillboards(
       at = vert3(out, at, px, py, pz, h0x, h0y, h0z, u0, v0, cr, cg, cb, ca)
       at = vert3(out, at, px, py, pz, t0x, t0y, t0z, u0 + uS, v0, cr, cg, cb, ca)
       at = vert3(out, at, px, py, pz, t1x, t1y, t1z, u0 + uS, v0 + vS, cr, cg, cb, ca)
+      at = vert3(out, at, px, py, pz, h0x, h0y, h0z, u0, v0, cr, cg, cb, ca)
+      at = vert3(out, at, px, py, pz, t1x, t1y, t1z, u0 + uS, v0 + vS, cr, cg, cb, ca)
       at = vert3(out, at, px, py, pz, h1x, h1y, h1z, u0, v0 + vS, cr, cg, cb, ca)
       continue
     }
@@ -435,6 +400,8 @@ export function fillBillboards(
     at = vert3(out, at, px, py, pz, o0x, o0y, o0z, u0, v0, cr, cg, cb, ca)
     at = vert3(out, at, px, py, pz, o1x, o1y, o1z, u0 + uS, v0, cr, cg, cb, ca)
     at = vert3(out, at, px, py, pz, o2x, o2y, o2z, u0 + uS, v0 + vS, cr, cg, cb, ca)
+    at = vert3(out, at, px, py, pz, o0x, o0y, o0z, u0, v0, cr, cg, cb, ca)
+    at = vert3(out, at, px, py, pz, o2x, o2y, o2z, u0 + uS, v0 + vS, cr, cg, cb, ca)
     at = vert3(out, at, px, py, pz, o3x, o3y, o3z, u0, v0 + vS, cr, cg, cb, ca)
   }
   return at / SOUP_STRIDE
@@ -458,8 +425,8 @@ function cameraQuad(
   at = vert(out, at, px + aX * rx + aY * ux, py + aX * ry + aY * uy, pz + aX * rz + aY * uz, u0, v0, cr, cg, cb, ca)
   at = vert(out, at, px + bX * rx + bY * ux, py + bX * ry + bY * uy, pz + bX * rz + bY * uz, u0 + uS, v0, cr, cg, cb, ca)
   at = vert(out, at, px + cX * rx + cY * ux, py + cX * ry + cY * uy, pz + cX * rz + cY * uz, u0 + uS, v0 + vS, cr, cg, cb, ca)
-  // Task 180 — corner 3 replaces the pre-180 duplicate of corners 0 and 2:
-  // the shared index pattern completes the two triangles.
+  at = vert(out, at, px + aX * rx + aY * ux, py + aX * ry + aY * uy, pz + aX * rz + aY * uz, u0, v0, cr, cg, cb, ca)
+  at = vert(out, at, px + cX * rx + cY * ux, py + cX * ry + cY * uy, pz + cX * rz + cY * uz, u0 + uS, v0 + vS, cr, cg, cb, ca)
   at = vert(out, at, px + dX * rx + dY * ux, py + dX * ry + dY * uy, pz + dX * rz + dY * uz, u0, v0 + vS, cr, cg, cb, ca)
   return at
 }

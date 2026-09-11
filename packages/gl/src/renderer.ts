@@ -665,6 +665,8 @@ function adaptAndCompile(spec: AutoDrawSpec, backend: BackendId, inner: WebGL2Re
       count: spec.count,
       // Task 75: instances are passed through (star quads: instances=feed.count).
       instances: spec.instances,
+      // Task 180 — the index tier passes through to both compilers.
+      indices: spec.indices,
     } as never)
   }
   return (inner as WebGL2Renderer).command({
@@ -675,6 +677,8 @@ function adaptAndCompile(spec: AutoDrawSpec, backend: BackendId, inner: WebGL2Re
     textures: spec.textures,
     count: spec.count,
     instances: spec.instances,
+    // Task 180 — the index tier passes through to both compilers.
+    indices: spec.indices,
   } as never)
 }
 

@@ -142,6 +142,14 @@ export function createRecordingGL(): RecordingGL {
     frontFace: order => calls.push(`frontFace(${order})`),
     clear: (color, depth) => calls.push(`clear(${color.join(',')};${depth})`),
     drawArrays: (mode, first, count, instances) => calls.push(`drawArrays(${mode},${first},${count},${instances})`),
+    // Task 180 — the index tier (recorded; createElementBuffer allocates an id
+    // through the same counter discipline as the vertex buffers).
+    createElementBuffer: data => {
+      calls.push(`createElementBuffer(${data.length},${data instanceof Uint16Array ? 'u16' : 'u32'})`)
+      return nextBuffer++
+    },
+    drawElements: (elementBufferId, indexCount, instances, twoByte) =>
+      calls.push(`drawElements(${elementBufferId},${indexCount},${instances},${twoByte ? 'u16' : 'u32'})`),
     // Task 169 — the multi-draw tier: the batched form is logged in the
     // EXPANDED form (`multiDraw×N[c1×i1,c2×i2,...]`) so tape-level tests can
     // compare a batched and an unbatched run with one shared assertion —

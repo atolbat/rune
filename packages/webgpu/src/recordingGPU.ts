@@ -97,6 +97,9 @@ export function createRecordingGPU(): RecordingGPU {
       calls.push(`beginPass(${clearIndex})`)
     },
     draw: (count, instances) => calls.push(`draw(${count},${instances})`),
+    // Task 180 — the index tier (recorded; the recorder has no device)
+    bindIndexBuffer: data => calls.push(`bindIndexBuffer(${data.length},${data instanceof Uint16Array ? 'u16' : 'u32'})`),
+    drawIndexed: (indexCount, instances) => calls.push(`drawIndexed(${indexCount},${instances})`),
     endPass: () => {
       passOpen = false
       calls.push('endPass')
@@ -204,6 +207,8 @@ export function createCountingGPU(): GPUFacade & { totalCalls: number } {
     bindTexture: bump,
     beginPass: bump,
     draw: bump,
+    bindIndexBuffer: bump,
+    drawIndexed: bump,
     endPass: bump,
     submit: bump,
     readTargetPixels: () => {

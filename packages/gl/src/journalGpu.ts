@@ -124,6 +124,9 @@ export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
     bindTexture: textureOrViewId => gpu.bindTexture(textureOrViewId),
     beginPass: clearIndex => gpu.beginPass(clearIndex),
     draw: (count, instances) => gpu.draw(count, instances),
+    // Task 180 — the index tier (frame ops, not journaled/sessioned).
+    bindIndexBuffer: (data) => gpu.bindIndexBuffer(data),
+    drawIndexed: (indexCount, instances) => gpu.drawIndexed(indexCount, instances),
     ...(rawMultiDraw !== undefined ? { multiDraw: (args: Uint32Array, drawCount: number) => rawMultiDraw(args, drawCount) } : {}),
     endPass: () => gpu.endPass(),
     submit: () => gpu.submit(),

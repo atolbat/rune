@@ -1749,7 +1749,26 @@ function rangeOf(range, name) {
 }
 // packages/particles/src/billboards.ts
 var SOUP_STRIDE = 9;
-var VERTS_PER_PARTICLE = 6;
+var VERTS_PER_PARTICLE = 4;
+var INDICES_PER_PARTICLE = 6;
+function makeQuadIndices(quads) {
+  if (!Number.isInteger(quads) || quads < 0) {
+    throw new Error(`rune/particles: makeQuadIndices needs an integer quad count >= 0 (got ${quads})`);
+  }
+  const twoByte = quads * 4 <= 65536;
+  const indices = twoByte ? new Uint16Array(quads * 6) : new Uint32Array(quads * 6);
+  for (let q = 0;q < quads; q++) {
+    const v = q * 4;
+    const at = q * 6;
+    indices[at] = v;
+    indices[at + 1] = v + 1;
+    indices[at + 2] = v + 2;
+    indices[at + 3] = v;
+    indices[at + 4] = v + 2;
+    indices[at + 5] = v + 3;
+  }
+  return indices;
+}
 function fillBillboards(system, basis, out, options = {}) {
   const ramp = options.ramp ?? CONSTANT_RAMP;
   const spin = options.spin ?? 0;
@@ -1911,34 +1930,16 @@ function fillBillboards(system, basis, out, options = {}) {
       out[at + 24] = cg;
       out[at + 25] = cb;
       out[at + 26] = ca;
-      out[at + 27] = px + o0x2 * rx + o0y2 * ux;
-      out[at + 28] = py + o0x2 * ry + o0y2 * uy;
-      out[at + 29] = pz + o0x2 * rz + o0y2 * uz;
+      out[at + 27] = px + o3x2 * rx + o3y2 * ux;
+      out[at + 28] = py + o3x2 * ry + o3y2 * uy;
+      out[at + 29] = pz + o3x2 * rz + o3y2 * uz;
       out[at + 30] = u0;
-      out[at + 31] = v0;
+      out[at + 31] = v0 + vS;
       out[at + 32] = cr;
       out[at + 33] = cg;
       out[at + 34] = cb;
       out[at + 35] = ca;
-      out[at + 36] = px + o2x2 * rx + o2y2 * ux;
-      out[at + 37] = py + o2x2 * ry + o2y2 * uy;
-      out[at + 38] = pz + o2x2 * rz + o2y2 * uz;
-      out[at + 39] = u0 + uS;
-      out[at + 40] = v0 + vS;
-      out[at + 41] = cr;
-      out[at + 42] = cg;
-      out[at + 43] = cb;
-      out[at + 44] = ca;
-      out[at + 45] = px + o3x2 * rx + o3y2 * ux;
-      out[at + 46] = py + o3x2 * ry + o3y2 * uy;
-      out[at + 47] = pz + o3x2 * rz + o3y2 * uz;
-      out[at + 48] = u0;
-      out[at + 49] = v0 + vS;
-      out[at + 50] = cr;
-      out[at + 51] = cg;
-      out[at + 52] = cb;
-      out[at + 53] = ca;
-      at += 6 * SOUP_STRIDE;
+      at += 4 * SOUP_STRIDE;
       continue;
     }
     if (mode === "vertical" || mode === "horizontal") {
@@ -1952,8 +1953,6 @@ function fillBillboards(system, basis, out, options = {}) {
       const o3x2 = -half * arx + half * aux, o3y2 = -half * ary + half * auy, o3z2 = -half * arz + half * auz;
       at = vert3(out, at, px, py, pz, o0x2, o0y2, o0z2, u0, v0, cr, cg, cb, ca);
       at = vert3(out, at, px, py, pz, o1x2, o1y2, o1z2, u0 + uS, v0, cr, cg, cb, ca);
-      at = vert3(out, at, px, py, pz, o2x2, o2y2, o2z2, u0 + uS, v0 + vS, cr, cg, cb, ca);
-      at = vert3(out, at, px, py, pz, o0x2, o0y2, o0z2, u0, v0, cr, cg, cb, ca);
       at = vert3(out, at, px, py, pz, o2x2, o2y2, o2z2, u0 + uS, v0 + vS, cr, cg, cb, ca);
       at = vert3(out, at, px, py, pz, o3x2, o3y2, o3z2, u0, v0 + vS, cr, cg, cb, ca);
       continue;
@@ -1987,8 +1986,6 @@ function fillBillboards(system, basis, out, options = {}) {
       at = vert3(out, at, px, py, pz, h0x, h0y, h0z, u0, v0, cr, cg, cb, ca);
       at = vert3(out, at, px, py, pz, t0x, t0y, t0z, u0 + uS, v0, cr, cg, cb, ca);
       at = vert3(out, at, px, py, pz, t1x, t1y, t1z, u0 + uS, v0 + vS, cr, cg, cb, ca);
-      at = vert3(out, at, px, py, pz, h0x, h0y, h0z, u0, v0, cr, cg, cb, ca);
-      at = vert3(out, at, px, py, pz, t1x, t1y, t1z, u0 + uS, v0 + vS, cr, cg, cb, ca);
       at = vert3(out, at, px, py, pz, h1x, h1y, h1z, u0, v0 + vS, cr, cg, cb, ca);
       continue;
     }
@@ -2016,8 +2013,6 @@ function fillBillboards(system, basis, out, options = {}) {
     at = vert3(out, at, px, py, pz, o0x, o0y, o0z, u0, v0, cr, cg, cb, ca);
     at = vert3(out, at, px, py, pz, o1x, o1y, o1z, u0 + uS, v0, cr, cg, cb, ca);
     at = vert3(out, at, px, py, pz, o2x, o2y, o2z, u0 + uS, v0 + vS, cr, cg, cb, ca);
-    at = vert3(out, at, px, py, pz, o0x, o0y, o0z, u0, v0, cr, cg, cb, ca);
-    at = vert3(out, at, px, py, pz, o2x, o2y, o2z, u0 + uS, v0 + vS, cr, cg, cb, ca);
     at = vert3(out, at, px, py, pz, o3x, o3y, o3z, u0, v0 + vS, cr, cg, cb, ca);
   }
   return at / SOUP_STRIDE;
@@ -2027,8 +2022,6 @@ function cameraQuad(out, at, px, py, pz, half, rx, ry, rz, ux, uy, uz, u0, v0, u
   const aX = -half, aY = -half, bX = half, bY = -half, cX = half, cY = half, dX = -half, dY = half;
   at = vert(out, at, px + aX * rx + aY * ux, py + aX * ry + aY * uy, pz + aX * rz + aY * uz, u0, v0, cr, cg, cb, ca);
   at = vert(out, at, px + bX * rx + bY * ux, py + bX * ry + bY * uy, pz + bX * rz + bY * uz, u0 + uS, v0, cr, cg, cb, ca);
-  at = vert(out, at, px + cX * rx + cY * ux, py + cX * ry + cY * uy, pz + cX * rz + cY * uz, u0 + uS, v0 + vS, cr, cg, cb, ca);
-  at = vert(out, at, px + aX * rx + aY * ux, py + aX * ry + aY * uy, pz + aX * rz + aY * uz, u0, v0, cr, cg, cb, ca);
   at = vert(out, at, px + cX * rx + cY * ux, py + cX * ry + cY * uy, pz + cX * rz + cY * uz, u0 + uS, v0 + vS, cr, cg, cb, ca);
   at = vert(out, at, px + dX * rx + dY * ux, py + dX * ry + dY * uy, pz + dX * rz + dY * uz, u0, v0 + vS, cr, cg, cb, ca);
   return at;
@@ -5133,7 +5126,7 @@ function createParticles(desc) {
     layout = { position: { size: 3, offset: 0 }, normal: { size: 3, offset: 3 }, uv: { size: 2, offset: 6 }, color: { size: 4, offset: 8 } };
   } else if (kind === "trail") {
     const points = history.points;
-    soupFloats = capacity * points * VERTS_PER_PARTICLE * SOUP_STRIDE;
+    soupFloats = capacity * points * 6 * SOUP_STRIDE;
     stride = SOUP_STRIDE;
     layout = { position: { size: 3, offset: 0 }, uv: { size: 2, offset: 3 }, color: { size: 4, offset: 5 } };
   } else {
@@ -5150,6 +5143,7 @@ function createParticles(desc) {
     }
   }
   const vertices = new Float32Array(soupFloats);
+  const quadIndices = drawFormat === "soup" && kind !== "mesh" && kind !== "trail" ? makeQuadIndices(capacity) : null;
   const view = {
     vertices,
     vertexCount: 0,
@@ -5157,7 +5151,9 @@ function createParticles(desc) {
     layout,
     draw: drawFormat,
     instanceCount: 0,
-    instanceLayout: drawFormat === "instance" ? INSTANCE_LAYOUT : null
+    instanceLayout: drawFormat === "instance" ? INSTANCE_LAYOUT : null,
+    indices: quadIndices,
+    indexCount: 0
   };
   const sortIndices = sortOn ? new Int32Array(capacity) : null;
   const sortKeys = sortOn ? new Float32Array(capacity) : null;
@@ -5383,6 +5379,7 @@ function createParticles(desc) {
           billboardBakeOpts.frustum = frustum;
           view.vertexCount = fillBillboards(system, basis, vertices, billboardBakeOpts);
           view.instanceCount = 0;
+          view.indexCount = view.vertexCount / 4 * INDICES_PER_PARTICLE;
         }
       }
       return view;
@@ -5633,6 +5630,7 @@ export {
   readGpuEmitConfig,
   packInstancesPainter,
   packInstances,
+  makeQuadIndices,
   hash01,
   gpuSortWgsl,
   bitonicPassSequence as gpuSortPassSequence,
@@ -5673,6 +5671,7 @@ export {
   MAX_BOXES,
   INSTANCE_STRIDE,
   INSTANCE_LAYOUT,
+  INDICES_PER_PARTICLE,
   GPU_STATE_STRIDE,
   GPU_SORT_UNIFORM_FLOATS,
   GPU_SORT_U32_FIELDS,

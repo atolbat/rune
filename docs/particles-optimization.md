@@ -18,7 +18,7 @@ phases describe what moved where, and what remains.
 | stage | the soup (before) | the instanced path (after) | notes |
 |---|---|---|---|
 | **advance + bake** (100k live) | 10.5 ms | **5.3 ms** (advance 1.8 + pack 3.5) | the CPU frame of a draw:'instance' layer |
-| └─ **bake only** (the 6-vertex CPU expansion) | 8.7 ms | — | replaced by the GPU corner expansion |
+| └─ **bake only** (the quad-corner indexed expansion — Task 180) | ~7.0 ms (was 8.7 as the 6-vertex stream; 13.7 MiB, was 20.6) | — | the soup draws 4 unique corners + the shared index pattern; the pack path still wins on bytes |
 | └─ **pack only** (Task 131: the 16-float records) | — | **3.6 ms** | ~2.4 ms with a constant ramp |
 | the per-frame traffic | 20.6 MiB | **6.1 MiB** | 3.4× less |
 | forces-heavy (100k) | 19.6 ms | 19.6 ms (CPU) / ~0 CPU (GPU tier) | the GPU tier runs them as compute |
@@ -2894,3 +2894,74 @@ writes NaN lanes — `Math.fround(NaN) !== NaN` re-dirties the slice EVERY
 frame silently. The Task 178 test caught it by accident (the first
 draft's BIG command re-dirtied forever). A NaN guard in `writeUniforms`
 would change tolerance semantics — flagged for a future hardening pass.
+
+## Task 180 — THE INDEX TIER (the soup's four corners + the shared pattern)
+
+The etalon's own spotlight: the soup path — the library's DEFAULT draw
+format, the particles demo's eight presets — bakes and uploads **54 floats
+per particle where 36 carry information**: the six-vertex stream duplicates
+the two shared triangle corners (0,1,2,0,2,3), paying a third again the CPU
+writes, the upload bytes, and the vertex-shader invocations for data the
+assembler can reproduce from four unique corners + a static index pattern.
+
+**The shape** (`packages/particles/src/billboards.ts`):
+`fillBillboards` writes the quad's FOUR unique corners (36 floats); the
+draw completes the triangles through **the shared static index pattern**
+`[0,1,2, 0,2,3]` per quad — `makeQuadIndices(quads)` builds it once for the
+whole capacity (Uint16 while 4·quads ≤ 65536 — half the index memory —
+else Uint32). Any live prefix [0, quads) draws through its own prefix of
+the SAME pattern: fill once, upload once, never re-upload.
+`SoupView` carries `indices` + `indexCount` (6 × live quads); the facade
+allocates the pattern at make time, only for the billboard quad soup (the
+trail/mesh kinds keep their own inline triangle streams — their shapes are
+not quad-repeated).
+
+**Both backends** draw it (the command spec's `indices` field, passed
+through `AutoDrawSpec` → both compilers):
+- **WebGL2** — `createElementBuffer` (one-shot ELEMENT_ARRAY_BUFFER
+  upload, the shared buffer namespace, lazy at the first indexed draw —
+  the submit-all discipline) + `drawElements`/`drawElementsInstanced`
+  (bind → draw → unbind; the TF pass VAOs never see the element binding);
+  `invalidate()` re-arms the element buffer with the program/buffer twins.
+- **WebGPU** — `bindIndexBuffer` (data-keyed cache, uploaded ONCE; a
+  pass-scoped `setIndexBuffer` memo — the vertex memo's twin, dies at
+  endPass) + `drawIndexed`; `dispose()` cleans the cache.
+- **The multi-draw tiers exclude indexed commands** on both executors
+  (the run emit forms — `multiDrawArraysInstanced`/`drawIndirectCount`/
+  bare `draw` — are the non-indexed vocabulary); an indexed command rides
+  the classic path verbatim, and a mixed tape splits runs at the indexed
+  member (pinned: `multiDraw×2` around one `drawElements`).
+
+**The parity**: the pattern's expansion over the four corners IS the
+pre-180 six-vertex stream, byte-for-byte — pinned three ways: the
+`expandQuadSoup` test kit (the historical Task-122/131 pins now read the
+expansion, their expected values UNCHANGED), the Task-131 shader-twin bit
+parity (the twin's six-vert stream vs the reference's EXPANDED stream,
+worst-diff ≤ 1e-6 as before), and `bench/ab-soup.ts`'s parity gate (12
+cases × modes/ramps/atlas/cull, the frozen pre-180 baker in
+`bench/billboardsLegacy.ts` as the oracle — byte-identical). The task131
+count parity is `packInstances() === fillBillboards()/4` (was /6).
+
+**Measured** (`bench/ab-soup.ts`, median of 40 interleaved pairs, this
+container): the bake 11–27% faster (25k/100k); the soup bytes
+**−33%** (20.6 → 13.7 MiB/frame at 100k — deterministic); the GPU runs
+4 vertex-shader invocations per quad instead of 6. The etalon line:
+`bakeOnly 7.03 ms, soupBytesPerFrame 14.4 MB` (the pre-180 etalon read
+7.06 ms / 21.6 MB — the bake walk is ramp+trig-bound, so the write
+recovery is partial CPU-side but total on the wire).
+
+**The demo legs caught a leftover**: both demo soup uploads now ship the
+LIVE PREFIX on the GL leg too (`updateBuffer(bufferId,
+vertices.subarray(0, live))` — the WG leg's own liveBytes discipline; the
+GL leg used to pour the whole capacity array every frame, 1.77 MiB at
+8192 regardless of the live count).
+
+Gates: 1858/1858 (+11: the kit's pattern/expansion pins, the WG executor
+stream/format/run-exclusion/journal-forwarding, the GL executor
+lazy-create/once/type/exclusion/invalidate/degenerate); tsc 0; lint
+0 err/375 warn (baseline); build OK; `demo:smoke` 24/24 + 8 presets, GPU
+health clean (the particle vert counts now 4×live — e.g. Snow 690 · 2,760
+verts); live gates re-run on the built dist: task167 PASS, task168 PASS,
+task169 **pixel parity IDENTICAL** (e71fb821e69f), task174 **pixel parity
+IDENTICAL** (98cf6b6016ad), task175 PASS, task134 (the WG sort network)
+PASS. Cache-busts `?v=180` (8 sites).

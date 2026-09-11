@@ -182,6 +182,9 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
     },
     beginPass: clearIndex => raw.beginPass(clearIndex),
     draw: (count, instances) => raw.draw(count, instances),
+    // Task 180 — the index tier (frame ops, not journaled/sessioned).
+    bindIndexBuffer: (data) => raw.bindIndexBuffer(data),
+    drawIndexed: (indexCount, instances) => raw.drawIndexed(indexCount, instances),
     ...(rawMultiDraw !== undefined ? { multiDraw: (args: Uint32Array, drawCount: number) => rawMultiDraw(args, drawCount) } : {}),
     endPass: () => raw.endPass(),
     submit: () => raw.submit(),

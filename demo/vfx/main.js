@@ -20,12 +20,12 @@
 // restore wire — the context-loss recovery — rides the Task-167
 // sync-point pass; the dist changed, the mark moves), the untouched bundles
 // keep their Task 149 marks.
-import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=179'
+import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=180'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER, BILLBOARD,
 } from '../../dist/rune-materials.esm.js?v=150'
-import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=179'
+import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=180'
 
 /* ─── the demo registry (the carousel order) ────────────────────────────── */
 
@@ -1015,7 +1015,11 @@ function buildLayerCommand(layer) {
     attributes: attrs,
     textures,
     uniforms,
-    count: (p) => p.vertexCount ?? 0,
+    // Task 180 — the quad soup's index tier: `count` is the INDEX count
+    // when the layer's soup is the indexed quad form; mesh/trail soups keep
+    // their plain vertex count (their streams are inline triangles).
+    indices: soup.indices != null ? { data: soup.indices } : undefined,
+    count: (p) => p.indexCount ?? p.vertexCount ?? 0,
   })
   layer.soup = soup
 }
@@ -1225,10 +1229,22 @@ function frameCallback(ctx, record) {
     }
     const vertexCount = soup.vertexCount
     const liveBytes = vertexCount * soup.stride * 4
-    if (layer.glDyn !== undefined) layer.glDyn.gl.updateBuffer(layer.glDyn.bufferId, soup.vertices)
+    // Task 180 — both legs ship the LIVE PREFIX (the GL leg used to pour
+    // the whole capacity array every frame regardless of the live count —
+    // the WG leg's own liveBytes discipline, now shared).
+    if (layer.glDyn !== undefined && vertexCount > 0) layer.glDyn.gl.updateBuffer(layer.glDyn.bufferId, soup.vertices.subarray(0, vertexCount * soup.stride))
     else if (layer.gpuDyn !== undefined && vertexCount > 0) layer.gpuDyn.syncVertexBuffer(soup.vertices, liveBytes)
     if (vertexCount > 0) {
-      record(layer.command, { mvp, model: MODEL, camPos: camEye, vertexCount, ...(layer.props?.(frameCtx) ?? {}) })
+      // Task 180 — indexCount rides the props ONLY for the indexed quad
+      // soup (mesh/trail soups leave it out: their count stays the plain
+      // vertex count — a literal 0 would win the resolver's ?? and kill
+      // the layer).
+      const indexed = soup.indices != null
+      record(layer.command, {
+        mvp, model: MODEL, camPos: camEye, vertexCount,
+        ...(indexed ? { indexCount: soup.indexCount } : {}),
+        ...(layer.props?.(frameCtx) ?? {}),
+      })
       liveVerts += vertexCount
     }
   }

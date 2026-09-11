@@ -136,7 +136,8 @@ describe('Task 142 — the facade bake-options scratch (no per-call allocation, 
     // match a fresh no-tiles bake exactly (a stale tiles field in the scratch
     // would shift every uv)
     const withTiles = ps.view(NO_BASIS, { billboard: { tiles: [2, 2], frameJitter: 4 } })
-    expect(withTiles.vertexCount).toBe(4 * 6)
+    expect(withTiles.vertexCount).toBe(4 * 4) // Task 180: 4 corners per quad
+    expect(withTiles.indexCount).toBe(4 * 6)
     const plainView = ps.view(NO_BASIS)
     // snapshot: the reference bake runs AFTER the plain view (shared buffer)
     const reference = new Float32Array(plainView.vertexCount * plainView.stride)
@@ -176,7 +177,7 @@ describe('Task 142 — the facade bake-options scratch (no per-call allocation, 
     ps.emit(4, fixed)
     const soup = new Float32Array(4 * 54)
     const n = fillBillboards(ps, NO_BASIS, soup, { spin: 0 })
-    expect(n).toBe(24)
+    expect(n).toBe(16) // Task 180: 4 particles × 4 unique corners
     expect(soup[0]).toBe(-0.5)
     expect(soup[9 + 0]).toBe(0.5)
   })

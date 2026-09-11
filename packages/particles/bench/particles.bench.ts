@@ -121,7 +121,9 @@ function splitStages(): { advanceMs: number; bakeMs: number; packMs: number; cou
   })
   const view = soupPs.billboards(BASIS)
   return {
-    advanceMs, bakeMs, packMs, count: checksum / FRAMES / 6,
+    // Task 180: the quad soup is FOUR unique corners per particle (the
+    // index pattern completes the quads — 6 indices each).
+    advanceMs, bakeMs, packMs, count: checksum / FRAMES / 4,
     soupBytes: view.vertexCount * view.stride * 4,
     instanceBytes: packBytes,
   }
@@ -276,7 +278,7 @@ if (process.argv.includes('--json')) {
   console.log(`steady state (~${Math.round(steadyCount)} live) : ${(steady / 300).toFixed(3)} ms/frame (advance + bake)`)
   console.log(`full load (100k live)          : ${(load / 60).toFixed(2)} ms/frame (${(load / 60 / 100_000 * 1e6).toFixed(0)} ns/particle)`)
   console.log(`  ├─ advance only              : ${(split.advanceMs / 60).toFixed(2)} ms/frame (the GPGPU candidate)`)
-  console.log(`  ├─ bake only (the soup)      : ${(split.bakeMs / 60).toFixed(2)} ms/frame, ${(split.soupBytes / 1024 / 1024).toFixed(1)} MiB soup/frame (the 6-vertex CPU expansion)`)
+  console.log(`  ├─ bake only (the soup)      : ${(split.bakeMs / 60).toFixed(2)} ms/frame, ${(split.soupBytes / 1024 / 1024).toFixed(1)} MiB soup/frame (Task 180: the 4-corner indexed expansion)`)
   console.log(`  └─ pack only (Task 131)      : ${(split.packMs / 60).toFixed(2)} ms/frame, ${(split.instanceBytes / 1024 / 1024).toFixed(1)} MiB records/frame (the instanced path's CPU cost — the GPU expands)`)
   console.log(`forces-heavy (full stack)      : ${(heavy / 60).toFixed(2)} ms/frame (noise + seek + collide + limit)`)
   console.log(`emission (100k burst)          : ${emit.toFixed(2)} ms (${(emit / 100_000 * 1e6).toFixed(0)} ns/spawn)`)

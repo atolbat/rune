@@ -37,7 +37,7 @@ import { validateNoise, type NoiseField } from './noise.ts'
 import { packInstances, packInstancesPainter, INSTANCE_STRIDE, INSTANCE_LAYOUT, type PackOptions, type PainterScratch } from './instances.ts'
 import { GPU_STATE_STRIDE, gpuRampMaxSize } from './gpuSim.ts'
 import {
-  fillBillboards, SOUP_STRIDE, VERTS_PER_PARTICLE, type CameraBasis, type BillboardOptions,
+  fillBillboards, makeQuadIndices, SOUP_STRIDE, VERTS_PER_PARTICLE, INDICES_PER_PARTICLE, type CameraBasis, type BillboardOptions,
 } from './billboards.ts'
 import { createTrailHistory, fillTrails, type TrailOptions, type TrailBakeOptions, type TrailHistory } from './trails.ts'
 import { fillMeshes, MESH_STRIDE, type MeshGeometry, type MeshOptions } from './meshes.ts'
@@ -68,7 +68,8 @@ export interface BurstDesc {
 
 /** The render description — which soup the facade bakes.
  *  Task 131 — the billboard kind's `draw` picks the record format:
- *  'soup' (the classic 6-vertex expansion, the LCD of every draw path) or
+ *  'soup' (the classic quad-corner expansion + the shared index pattern —
+ *  Task 180 — the LCD of every draw path) or
  *  'instance' (16-float records + the BILLBOARD material's GPU expansion —
  *  the optimization program's Phase 1; see instances.ts).
  *  Task 132 — the billboard kind's `sort`: the painter's order for
@@ -214,8 +215,12 @@ export interface SoupLayout {
 /** The soup view — a REUSED result object (the scene.cull pattern): the
  *  same reference every frame, the counts updated. Task 131 — the view
  *  carries BOTH record formats: `draw` says which one `vertices` holds.
- *  'soup'     — vertices = the 6-vertex expansion (stride 9), vertexCount
- *               counts VERTICES (a plain drawArrays).
+ *  'soup'     — vertices = the QUAD-CORNER expansion (stride 9, FOUR unique
+ *               corners per particle — Task 180); vertexCount counts
+ *               VERTICES; the draw is INDEXED over `indices` (the shared
+ *               static [0,1,2,0,2,3] pattern) with indexCount = 6 × live
+ *               quads. Trail/mesh soups keep their own inline triangle
+ *               streams (indices null, a plain drawArrays).
  *  'instance' — vertices = the 16-float records (stride 16), vertexCount
  *               === instanceCount counts INSTANCES (draw 6 vertices ×
  *               instanceCount through the BILLBOARD material). */
@@ -225,8 +230,8 @@ export interface SoupView {
   readonly vertices: Float32Array
   /** Live vertices (soup) or instances (instance) this frame. */
   vertexCount: number
-  /** Floats per record of THIS view (36 billboard/trail, 48 mesh, 16 the
-   *  instance records). */
+  /** Floats per record of THIS view (36 billboard, 54 trail-per-segment,
+   *  48 mesh, 16 the instance records). */
   readonly stride: number
   /** The attribute layout (byte offsets are stride×4-based: offsets here
    *  are in FLOATS — multiply by 4 for bytes). In instance mode: position =
@@ -239,6 +244,15 @@ export interface SoupView {
   /** Task 131 — the instance record field offsets (instance mode; null
    *  in soup mode). The GPU-mapping contract of the BILLBOARD material. */
   readonly instanceLayout: typeof INSTANCE_LAYOUT | null
+  /** Task 180 — the shared static quad index pattern (the billboard soup
+   *  ONLY; trail/mesh soups and instance records — null, they draw plain
+   *  streams). The draw binds it as the index buffer and draws
+   *  [0, indexCount) of it: 6 indices per live quad, the same pattern for
+   *  every live prefix. Uint16 while 4 × capacity ≤ 65536, else Uint32. */
+  readonly indices: Uint16Array | Uint32Array | null
+  /** Task 180 — live indices this frame (the billboard soup: 6 × live
+   *  quads; 0 for the non-indexed kinds). */
+  indexCount: number
 }
 
 /** The facade. */
@@ -576,14 +590,20 @@ export function createParticles(desc: ParticlesDesc): Particles {
     stride = MESH_STRIDE
     layout = { position: { size: 3, offset: 0 }, normal: { size: 3, offset: 3 }, uv: { size: 2, offset: 6 }, color: { size: 4, offset: 8 } }
   } else if (kind === 'trail') {
+    // The trail's own shape — SIX verts per (particle, recorded point)
+    // segment pair upper bound (fillTrails emits two triangles per segment
+    // inline; it is NOT the billboard quad's indexed form). Task 180: this
+    // literal replaces the VERTS_PER_PARTICLE reference — that constant is
+    // now the billboard quad's FOUR unique corners.
     const points = history!.points
-    soupFloats = capacity * points * VERTS_PER_PARTICLE * SOUP_STRIDE
+    soupFloats = capacity * points * 6 * SOUP_STRIDE
     stride = SOUP_STRIDE
     layout = { position: { size: 3, offset: 0 }, uv: { size: 2, offset: 3 }, color: { size: 4, offset: 5 } }
   } else {
     // Task 131 — the DRAW FORMAT: 'instance' packs 16-float records (the
     // GPU expands the quad — the Phase-1 path); 'soup' (the default, the
-    // classic LCD) bakes the 6-vertex expansion CPU-side.
+    // classic LCD) bakes the quad-corner expansion CPU-side (Task 180:
+    // 4 unique corners + the shared index pattern, not 6 inline verts).
     const draw = (render as { draw?: 'soup' | 'instance' }).draw === 'instance' ? 'instance' : 'soup'
     drawFormat = draw
     if (draw === 'instance') {
@@ -591,17 +611,30 @@ export function createParticles(desc: ParticlesDesc): Particles {
       stride = INSTANCE_STRIDE
       layout = { position: { size: 3, offset: INSTANCE_LAYOUT.pos.offset }, uv: { size: 2, offset: INSTANCE_LAYOUT.uv0.offset }, color: { size: 4, offset: INSTANCE_LAYOUT.color.offset } }
     } else {
+      // Task 180 — THE INDEX TIER: the quad soup is FOUR unique corners per
+      // particle (36 floats); the shared static index pattern (built once
+      // at capacity below) completes the two triangles per quad — the draw
+      // is an indexed one, indexCount = INDICES_PER_PARTICLE × live.
       soupFloats = capacity * VERTS_PER_PARTICLE * SOUP_STRIDE
       stride = SOUP_STRIDE
       layout = { position: { size: 3, offset: 0 }, uv: { size: 2, offset: 3 }, color: { size: 4, offset: 5 } }
     }
   }
   const vertices = new Float32Array(soupFloats)
+  // Task 180 — the shared static index pattern, ONLY for the billboard quad
+  // soup (the trail/mesh kinds emit their own triangle streams inline; the
+  // instance records draw 6 GPU-expanded corners). Allocated once at
+  // capacity, uploaded once, drawn through a live prefix.
+  const quadIndices = drawFormat === 'soup' && kind !== 'mesh' && kind !== 'trail'
+    ? makeQuadIndices(capacity)
+    : null
   const view: SoupView = {
     vertices, vertexCount: 0, stride, layout,
     draw: drawFormat,
     instanceCount: 0,
     instanceLayout: drawFormat === 'instance' ? INSTANCE_LAYOUT : null,
+    indices: quadIndices,
+    indexCount: 0,
   }
   // Task 132 — the painter's-order scratch (allocated ONCE, only for sorted
   // billboard layers; the sort runs in-place on these arrays — zero
@@ -862,6 +895,10 @@ export function createParticles(desc: ParticlesDesc): Particles {
           billboardBakeOpts.frustum = frustum
           view.vertexCount = fillBillboards(system, basis, vertices, billboardBakeOpts)
           view.instanceCount = 0
+          // Task 180 — the indexed quad draw: 4 unique corners baked, the
+          // shared static pattern completes the triangles; the DRAW count is
+          // the index count (6 × live quads).
+          view.indexCount = view.vertexCount / 4 * INDICES_PER_PARTICLE
         }
       }
       return view

@@ -286,6 +286,11 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
     setBlend: (src, dst, equation) => raw.setBlend(src, dst, equation),
     clear: (color, depth) => raw.clear(color, depth),
     drawArrays: (mode, first, count, instances) => raw.drawArrays(mode, first, count, instances),
+    // Task 180 — the index tier (frame ops, not journaled/sessioned —
+    //  the drawArrays twins; the element buffer is created lazily by the
+    //  executor and rides the facade's own buffer namespace).
+    createElementBuffer: (data) => raw.createElementBuffer(data),
+    drawElements: (elementBufferId, indexCount, instances, twoByte) => raw.drawElements(elementBufferId, indexCount, instances, twoByte),
     // Task 169 — the multi-draw tier: a FRAME op (batched draws), not a
     // journaled one. Forwarded CONDITIONALLY so the wrapper's surface
     // mirrors the raw facade exactly: the executor detects the tier by the

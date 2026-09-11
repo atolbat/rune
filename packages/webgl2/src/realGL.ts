@@ -1261,6 +1261,36 @@ export function createRealGL(
     else gl.drawArrays(target, first, count)
   }
 
+  /** Task 180 — THE INDEX TIER: the element buffer's one-shot upload. The
+   *  buffer joins the shared `buffers` namespace (deleteBuffer frees it);
+   *  the ELEMENT_ARRAY_BUFFER bind is removed after the upload — the
+   *  binding is VAO state and the default VAO must stay clean (only
+   *  drawElements ever reads it, and it rebinds at call time). */
+  function createElementBuffer(data: Uint16Array | Uint32Array): number {
+    const buffer = gl.createBuffer()
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffer)
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, data, gl.STATIC_DRAW)
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null)
+    const id = nextBuffer++
+    buffers.set(id, buffer)
+    return id
+  }
+
+  /** Task 180 — the indexed draw: bind → drawElements → unbind. The bind
+   *  happens per call (no memo — one call per soup layer per frame; and the
+   *  discipline stays honest against the TF pass VAOs, which carry their own
+   *  element binding state). drawElementsInstanced only when instances > 1,
+   *  mirroring drawArrays's own branch. An unknown buffer id binds null and
+   *  the draw becomes a GL error — the same "caller bug, loud" contract as
+   *  bindVertexBuffer's unknown-id path. */
+  function drawElements(elementBufferId: number, indexCount: number, instances: number, twoByte: boolean): void {
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffers.get(elementBufferId) ?? null)
+    const type = twoByte ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT
+    if (instances > 1) gl.drawElementsInstanced(gl.TRIANGLES, indexCount, type, 0, instances)
+    else gl.drawElements(gl.TRIANGLES, indexCount, type, 0)
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null)
+  }
+
   /** Task 169 — the mode string → GL enum (shared by drawArrays and the
    *  multi-draw tier; the Task-167 mapping, extracted verbatim). */
   function primitiveTarget(mode: string): number {
@@ -1793,6 +1823,8 @@ export function createRealGL(
     setBlend,
     clear,
     drawArrays,
+    createElementBuffer,
+    drawElements,
     // Task 169 — the multi-draw tier: present IFF the context actually has
     // WEBGL_multi_draw (the executor arms the tier by this method's
     // PRESENCE — an always-present no-op would silently swallow every

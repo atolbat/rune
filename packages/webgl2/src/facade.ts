@@ -216,6 +216,20 @@ export interface GLFacade {
   setBlend(src: string | null, dst: string | null, equation?: string): void
   clear(color: readonly [number, number, number, number] | readonly number[], depth: number | null): void
   drawArrays(mode: string, first: number, count: number, instances: number): void
+  /** Task 180 — THE INDEX TIER: creates an element-array buffer with a
+   *  ONE-SHOT upload of the static index pattern (Uint16Array or
+   *  Uint32Array). The buffer registers in the facade's shared buffer
+   * namespace — deleteBuffer(id) frees it like any vertex buffer. The
+   * upload binds ELEMENT_ARRAY_BUFFER and unbinds after (the same
+   * no-state-leak discipline as createBuffer/updateBuffer). */
+  createElementBuffer(data: Uint16Array | Uint32Array): number
+  /** Task 180 — the indexed draw: binds the element buffer, issues
+   *  drawElements (drawElementsInstanced when instances > 1) over
+   *  [0, indexCount), unbinds after (a TF pass's own VAO never sees the
+   *  element binding — and the default VAO keeps its clean state). 
+   *  twoByte — the pattern is a Uint16Array (UNSIGNED_SHORT) vs
+   *  Uint32Array (UNSIGNED_INT). */
+  drawElements(elementBufferId: number, indexCount: number, instances: number, twoByte: boolean): void
   /** Task 169 — THE MULTI-DRAW TIER (WEBGL_multi_draw, the ANGLE batch-draw
    *  extension): submits `drawcount` instanced draws of the SAME GL state in
    *  ONE driver call — firsts/counts/instanceCounts are parallel Int32Array

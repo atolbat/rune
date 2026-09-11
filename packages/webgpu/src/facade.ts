@@ -218,6 +218,17 @@ export interface GPUFacade {
   bindTexture(textureId: number): void
   beginPass(clearIndex: number): void
   draw(count: number, instances: number): void
+  /** Task 180 — THE INDEX TIER: binds the index source for the pass's
+   *  indexed draws. Data-keyed by the typed array (the same discipline as
+   *  bindVertexBuffer): the first bind creates the GPUBuffer (usage INDEX |
+   *  COPY_DST) and uploads the array ONCE (the pattern is static); a
+   *  pass-scoped memo skips identical re-binds within one pass. Uint16Array
+   *  → 'uint16', Uint32Array → 'uint32' (the format is the array's own). */
+  bindIndexBuffer(data: Uint16Array | Uint32Array): void
+  /** Task 180 — the indexed draw: pass.drawIndexed(indexCount,
+   *  instances) over the index buffer bound by bindIndexBuffer. The tape's
+   *  Draw op count semantic for an indexed command IS the index count. */
+  drawIndexed(indexCount: number, instances: number): void
   /** Task 174 — THE MULTI-DRAW TIER (the WG dialect): PRESENCE ==
    *  CAPABILITY. The facade exposes this method IFF the device's
    *  GPURenderPassEncoder has drawIndirectCount (probed once at device

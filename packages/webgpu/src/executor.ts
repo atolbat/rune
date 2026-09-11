@@ -210,15 +210,14 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
 
   function drawCommand(command: RichWgpuCommand | undefined, count: number, instances: number): void {
     if (command === undefined) return
-    // Task 174 — the run's fast path. An APPEND (the run's command, a real
-    // draw, room in the batch) skips the prologue entirely — every
-    // assertion below is a memo no-op for a same-command repeat (proven
-    // at the tier's design; see the run block above). The multi shape
-    // packs the member into runArgs (flushRun emits the batch); the
-    // fast-path floor issues the bare pass.draw — the classic stream's
-    // own draw, just without the redundant JS prologue around it.
+    // Task 180 — an INDEXED command never joins a multi-draw run: the
+    // run's emit forms (bare gpu.draw / drawIndirectCount) are the
+    // non-indexed vocabulary. Runs of one ride the classic path verbatim;
+    // a mixed command sequence flushes the run at every boundary anyway
+    // (different commands).
+    const indexed = command.indices !== undefined
     let member0Pending = false
-    if (tierOn && count > 0 && instances > 0) {
+    if (tierOn && count > 0 && instances > 0 && !indexed) {
       if (command === runCommand && runLen < MAX_BATCH) {
         if (multiFn !== undefined) {
           const b = runLen * 4
@@ -282,6 +281,15 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
     // inlines array for..of, but the indexed form is guaranteed).
     const textureIds = command.textureIds
     for (let t = 0; t < textureIds.length; t++) gpu.bindTexture(textureIds[t])
+    // Task 180 — THE INDEX TIER: bind the static index pattern (data-keyed
+    // cache, pass-scoped bind memo inside the facade) and draw indexed.
+    // The tape's count IS the index count for an indexed command.
+    const indices = command.indices
+    if (indices !== undefined) {
+      gpu.bindIndexBuffer(indices.data)
+      gpu.drawIndexed(count, instances)
+      return
+    }
     if (!member0Pending) gpu.draw(count, instances)
   }
 
@@ -293,6 +301,8 @@ interface RichWgpuCommand extends WgpuCommand {
   readonly pipelineId: number
   readonly wgsl: string
   readonly attrOrder: readonly { readonly data: Float32Array; readonly size: number; readonly stride?: number; readonly offset?: number; readonly step?: 'vertex' | 'instance'; readonly bufferId?: number }[]
+  /** Task 180 — the static index array (undefined = the classic draw). */
+  readonly indices?: { readonly data: Uint16Array | Uint32Array }
   readonly pipeline: GpuPipelineDesc
   readonly textureIds: readonly number[]
   readonly sliceOffset: number

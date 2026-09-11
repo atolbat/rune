@@ -646,14 +646,14 @@ describe('createRamp / sampleRamp', () => {
 // ─── the billboard soup ─────────────────────────────────────────────────────
 
 describe('fillBillboards (the GPU view)', () => {
-  it('writes 6 verts × 9 floats per particle with the corner/uv/color layout', () => {
+  it('writes 4 verts × 9 floats per particle — the quad corners (Task 180)', () => {
     const ps = createParticleSystem(2)
     ps.emit(2, fixedSpawner({ x: 10, size: 2, r: 0.5, g: 1, b: 0.25, a: 0.75, seed: 0 }))
-    const soup = new Float32Array(2 * 54)
+    const soup = new Float32Array(2 * 36)
     const verts = fillBillboards(ps, NO_BASIS, soup, { spin: 0 })
-    expect(verts).toBe(12)
+    expect(verts).toBe(8)
     expect(SOUP_STRIDE).toBe(9)
-    expect(VERTS_PER_PARTICLE).toBe(6)
+    expect(VERTS_PER_PARTICLE).toBe(4)
     // particle at (10,0,0), size 2 → half = 1 (constant ramp), no rotation
     // (seed 0, spin 0). Corner 0 = (-1,-1): (9, -1, 0), uv (0,0).
     const v0 = 0
@@ -665,10 +665,12 @@ describe('fillBillboards (the GPU view)', () => {
     expect(soup[9 + 3]).toBe(1); expect(soup[9 + 4]).toBe(0)
     // corner 2 = (1,1): uv (1,1)
     expect(soup[18 + 0]).toBe(11); expect(soup[18 + 1]).toBe(1)
-    // triangle 2: corners 0, 2, 3 → uv (0,0), (1,1), (0,1)
-    expect(soup[27 + 3]).toBe(0); expect(soup[27 + 4]).toBe(0)
-    expect(soup[36 + 3]).toBe(1); expect(soup[36 + 4]).toBe(1)
-    expect(soup[45 + 3]).toBe(0); expect(soup[45 + 4]).toBe(1)
+    expect(soup[18 + 3]).toBe(1); expect(soup[18 + 4]).toBe(1)
+    // corner 3 = (-1,1): uv (0,1) — the fourth UNIQUE corner (the pre-180
+    // stream repeated corners 0 and 2 here; the index pattern completes
+    // the two triangles — the expansion parity is pinned in task180).
+    expect(soup[27 + 0]).toBe(9); expect(soup[27 + 1]).toBe(1)
+    expect(soup[27 + 3]).toBe(0); expect(soup[27 + 4]).toBe(1)
   })
 
   it('billboards face the camera: offsets follow right/up, not the world', () => {
@@ -706,7 +708,7 @@ describe('fillBillboards (the GPU view)', () => {
       { t: 1, size: 0, r: 1, g: 0.5, b: 0, a: 0.1 },
     ])
     const verts = fillBillboards(ps, NO_BASIS, soup, { ramp, spin: 0 })
-    expect(verts).toBe(6) // the t=1 particle is zero-size → skipped
+    expect(verts).toBe(4) // the t=1 particle is zero-size → skipped (4 corners)
     // t=0.5: size = 0.5 → half = 0.25; color = (1, 0.75, 0.5, 0.55)
     expect(soup[0]).toBe(-0.25)
     expect(soup[5]).toBeCloseTo(1, 5)
@@ -806,7 +808,9 @@ describe('createParticles (the facade)', () => {
     ps.burst(8)
     for (let k = 0; k < 30; k++) ps.advance(1 / 60)
     const view = ps.billboards(NO_BASIS)
-    expect(view.vertexCount).toBe(8 * 6)
+    expect(view.vertexCount).toBe(8 * 4) // Task 180: the four unique corners
+    expect(view.indexCount).toBe(8 * 6) // the shared pattern's index count
+    expect(view.indices).toBeInstanceOf(Uint16Array) // 8 × 4 verts ≤ 65536
     // they fell (gravity) — at least one vertex sank below the birth plane
     const ys = view.vertices
     let anyBelow = false

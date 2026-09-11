@@ -156,12 +156,28 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
 
   function drawCommand(command: CompiledCommand | undefined, count: number, instances: number): void {
     if (command === undefined) return
+    const rich = command as CompiledCommand & {
+      state: { depthTest: string; depthWrite: boolean; depthKey: string; cull: string; blend: { src: string; dst: string; equation: string } | null; blendKey: string }
+      fields: Array<{ name: string; type: string; slot: { base: number; size: number; dirty: boolean } }>
+      samplers: Array<{ name: string; unit: number; textureId: number }>
+      attributes: Array<{ location: number; size: number; data: Float32Array; stride?: number; offset?: number; bufferId?: number; instance?: boolean }>
+      glsl: { vertex: string; fragment: string }
+      indices?: { readonly data: Uint16Array | Uint32Array }
+      elementId?: number
+      programId?: number
+      bufferIds?: number[]
+    }
+    // Task 180 — an INDEXED command never joins a multi-draw run: the
+    // batch emit form (multiDrawArraysInstanced) is the non-indexed
+    // vocabulary. Indexed commands ride the classic path verbatim (the
+    // soup layer is ONE draw per command anyway — a run of one).
+    const indexed = rich.indices !== undefined
     // Task 169 — the multi-draw fast path: an APPEND (the run's command,
     // a real draw, room in the batch) skips the prologue entirely — every
     // assertion below is a no-op for a same-command repeat, proven at the
     // tier's design (see the batch block above). Runs of one stay classic.
     let batched = false
-    if (multiDraw && count > 0 && instances > 0) {
+    if (multiDraw && count > 0 && instances > 0 && !indexed) {
       if (command === batchCommand && batchLen < MAX_BATCH) {
         batchCounts[batchLen] = count
         batchInstances[batchLen] = instances
@@ -182,29 +198,21 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
       // must not absorb a draw whose classic behavior differs
       flushBatch()
     }
-    const rich = command as CompiledCommand & {
-      state: { depthTest: string; depthWrite: boolean; depthKey: string; cull: string; blend: { src: string; dst: string; equation: string } | null; blendKey: string }
-      fields: Array<{ name: string; type: string; slot: { base: number; size: number; dirty: boolean } }>
-      samplers: Array<{ name: string; unit: number; textureId: number }>
-      attributes: Array<{ location: number; size: number; data: Float32Array; stride?: number; offset?: number; bufferId?: number; instance?: boolean }>
-      glsl: { vertex: string; fragment: string }
-      programId?: number
-      bufferIds?: number[]
+    const richPrologue = rich
+    ensureProgram(richPrologue)
+    if (richPrologue.programId !== lastProgram) {
+      gl.useProgram(richPrologue.programId!)
+      lastProgram = richPrologue.programId!
     }
-    ensureProgram(rich)
-    if (rich.programId !== lastProgram) {
-      gl.useProgram(rich.programId!)
-      lastProgram = rich.programId!
-    }
-    applyState(rich)
-    uploadUniforms(rich)
-    for (let s = 0; s < rich.samplers.length; s++) {
-      const sampler = rich.samplers[s]
+    applyState(richPrologue)
+    uploadUniforms(richPrologue)
+    for (let s = 0; s < richPrologue.samplers.length; s++) {
+      const sampler = richPrologue.samplers[s]
       gl.bindTexture(sampler.textureId, sampler.unit)
-      gl.setUniform1i(rich.programId!, sampler.name, sampler.unit)
+      gl.setUniform1i(richPrologue.programId!, sampler.name, sampler.unit)
     }
-    for (let a = 0; a < rich.attributes.length; a++) {
-      const attribute = rich.attributes[a]
+    for (let a = 0; a < richPrologue.attributes.length; a++) {
+      const attribute = richPrologue.attributes[a]
       // M5 (Task 73): feed dual-bind — the feed renderer's external buffer with
       // interleaving (stride/offset); our own buffer — a tight layout.
       // Task 75: an instance attribute — divisor 1 (one feed record per instance,
@@ -217,8 +225,20 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
       if (attribute.bufferId !== undefined) {
         gl.bindVertexBuffer(attribute.bufferId, attribute.location, attribute.size, attribute.stride, attribute.offset, divisor)
       } else {
-        gl.bindVertexBuffer(rich.bufferIds![attribute.location], attribute.location, attribute.size, undefined, undefined, divisor)
+        gl.bindVertexBuffer(richPrologue.bufferIds![attribute.location], attribute.location, attribute.size, undefined, undefined, divisor)
       }
+    }
+    // Task 180 — THE INDEX TIER: the element buffer is created LAZILY at the
+    // first indexed draw (the submit-all sweep may have compiled programs of
+    // commands this frame never draws — the same discipline as the vertex
+    // buffers), then the indexed draw. The tape's count IS the index count.
+    const indices = rich.indices
+    if (indices !== undefined) {
+      if (rich.elementId === undefined) {
+        rich.elementId = gl.createElementBuffer(indices.data)
+      }
+      gl.drawElements(rich.elementId, count, instances, indices.data instanceof Uint16Array)
+      return
     }
     if (!batched) gl.drawArrays('triangles', 0, count, instances)
   }
@@ -323,10 +343,14 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
       const rich = command as CompiledCommand & {
         programId?: number
         bufferIds?: number[]
+        elementId?: number
         fields: Array<{ slot: { dirty: boolean } }>
       }
       rich.programId = undefined
       rich.bufferIds = undefined
+      // Task 180 — the element buffer dies with the restored context; the
+      // next indexed draw re-creates it lazily (the program/buffer twin).
+      rich.elementId = undefined
       for (let f = 0; f < rich.fields.length; f++) rich.fields[f].slot.dirty = true
     }
     // The per-frame state mirrors (lastProgram & co.) reset at beginPass of
