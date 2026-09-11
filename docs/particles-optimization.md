@@ -2432,3 +2432,141 @@ still decisive, now with contention headroom. Commit 8a2dcad:
 **CI GREEN** — the first green `ci` run since before the journal's
 Sept-7 entries, and Pages re-deployed with the astral demo gone (404)
 and the Task-173 particles bundle live.
+
+## Task 174 — THE WG MULTI-DRAW DIALECT + THE ADVANCE PASS
+
+The session's brief: «Давай мульти дроу и эдванс» — the multi-draw
+program's unfinished half (the WebGPU side; the GL tier shipped in Task
+169) and the advance pass. Part A closed the multi-draw story on WG;
+Part B measured the advance walk to its floor and rejected its own best
+idea with numbers.
+
+### Part A — THE WG MULTI-DRAW TIER (the GL discipline, the WG dialect)
+
+**THE PROBE (the fact the whole tier hangs on)**:
+`drawIndirectCount` was PROBED on the container's real WebGPU stack
+(Chrome 151, SwiftShader+Vulkan — scripts/task174-probe.mjs): the
+prototype DOES NOT have it (plain `drawIndirect` does). The
+Task-169 note ("not in shipping Chrome") was a memory claim — now a
+probed fact, and deeper than memory thought: the method was DROPPED
+from the WebGPU spec, and `@webgpu/types@0.1.72` does not even declare
+it (the tracking types mirror the spec's decision). So no browser this
+repo can test against exposes the N→1 call — the tier must be built to
+arm on a runtime probe and ride a floor everywhere else.
+
+**THE TIER — two levels over one run detector** (the executor's run =
+the GL tier's exact discipline: consecutive Draw ops of the SAME
+command, count > 0, instances > 0, ≤ 512, degenerates end runs, non-Draw
+ops flush first, run-of-1 rides classic verbatim):
+- **THE FAST-PATH FLOOR** (works on every browser): the run's first
+  member runs the prologue ONCE; members 2..N skip it entirely — every
+  per-draw assertion (usePipeline, bindUniforms, the attribute and
+  texture binds) is a Task-164/165 memo no-op for a same-command
+  repeat, and the Task-145 discipline already uploaded the uniform
+  slices before the pass opened. The floor's GPU call stream is
+  BYTE-IDENTICAL to the classic path — it can only skip JS calls, never
+  change one. This is Chrome's entire multi-draw story today.
+- **THE INDIRECT SHAPE** (capability-gated: the facade exposes
+  `multiDraw` IFF `GPURenderPassEncoder.prototype.drawIndirectCount`
+  exists — PRESENCE == CAPABILITY, probed once at device creation):
+  a run of length ≥ 2 collapses into ONE `pass.drawIndirectCount` over
+  two persistent INDIRECT ring buffers (512 × 16-byte draw structs +
+  512 × 4-byte counts). Each flush takes DISJOINT ring slots — the
+  `queue.writeBuffer` calls enqueue during pass encoding but the
+  WebGPU queue is a single ordered timeline (writes before the frame's
+  submit execute before it), so every flush's args land exactly where
+  its own drawIndirectCount reads them; the cursor resets at submit.
+  A frame that overflows the ring gets `false` back and the executor
+  replays the classic per-draw path for that flush.
+
+**THE WIRING** (the option reached the WG path for the first time):
+`WebGpuRendererOptions.multiDraw` (default true — the kill-switch),
+`renderer.multiDraw` as the live verdict, the unified renderer and the
+auto renderer forward it to the WG branch (both previously dropped it —
+the auto renderer's WG wrapper hardcoded `multiDraw: false`), and
+`caps.has('multi-draw-indirect')` reports the probe (the GL twin
+'multi-draw' is the extension — a different tier with the same story).
+The journal/resource-session decorators forward `multiDraw`
+CONDITIONALLY on the raw facade's presence — the Task-169 GL lesson
+(a dropped method silently disarms the tier, a stub silently eats
+draws; presence is the truth, never a no-op).
+
+**THE FIRST-DRAFT BUG, caught by an existing pin**: on the floor shape
+member 0 emitted its draw at the prologue's bottom but the run tracking
+still held it pending — the tape-end flush re-emitted it (every draw
+doubled). The command.test.ts "pipeline bound once" pin failed on
+exactly the doubled `draw(3,1)`; the fix is the floor's rule: the run
+is `runCommand`-only (the append detector), nothing pending — only the
+multi shape keeps member 0 pending.
+
+**THE VERIFICATION STACK**:
+- `packages/webgpu/tests/task174.test.ts` (10 pins): THE EXPANSION
+  PARITY (a batched run's args expand to the classic stream — same
+  draws, same order; zero classic draws leak around the batch),
+  run-of-1 classic, cross-command runs stay classic, non-Draw ops break
+  runs (the batch emits BEFORE the boundary op), degenerates keep
+  `draw(3,0)` verbatim, the 512 cap (600 → 512 + 88), the kill-switch,
+  THE FAST-PATH FLOOR's byte-identical call stream (vs the kill-switch,
+  over an incapable facade — Chrome 151's exact shape), the presence
+  contract through withJournalGpu (both directions), the ring-full
+  classic fallback.
+- `scripts/task174-wg-multidraw.mjs` — the live gate on the real
+  SwiftShader WebGPU stack: the presence probe (false here, honestly
+  reported), both renderers' verdicts, zero GPU errors, and THE PIXEL
+  PARITY (the same seeded scene — one command recorded four times per
+  frame, the exact multi-draw shape — on the tier and the kill-switch:
+  SHA-256-identical canvases). The indirect cell is an honest SKIP on
+  this Chrome (absent method); the floor cell is live-verified.
+- `scripts/task169-multidraw.mjs` re-run GREEN (the GL tier's gate —
+  the shared renderer surface changed), task167-syncpoint and
+  task168-restore GREEN (the executor paths changed).
+
+### Part B — THE ADVANCE PASS (measured to the floor; one idea rejected with numbers)
+
+The A/B bench (`packages/particles/bench/ab-advance.ts`, interleaved
+rounds, `git stash -- system.ts` as the switch — the Task-173
+discipline): the bare walk (100k, gravity+drag), the forces-heavy walk,
+the emission burst.
+
+**THE REJECTED SELECT**: the plan was to eliminate the death check's
+`f.life[i]` re-load — when no kill site is armed (the common case),
+read the hoisted `life` local instead. The semantics were airtight
+(all four mid-walk life writes are kill sites; the swap-remove writes
+after the check). The MEASUREMENT: **+34% on the bare walk**
+(0.53 → 0.72 ms/frame, three interleaved rounds each way, consistent) —
+V8's load elimination had ALREADY removed the "redundant" re-load for
+free, and the per-particle select broke the optimization it was
+supposed to improve. Rejected, reverted, and pinned instead: the
+kill-site retirement semantics (a kill plane still retires THIS frame)
+are now a test so the NEXT idea in that spot starts from a contract.
+
+**THE KEPT CHANGES** (both bit-identical, both pinned):
+- the gravity step hoist (`gx·dt` once per frame — V8's LICM already
+  did it, so the etalon is a wash; kept for the explicit invariant and
+  the engines whose LICM is weaker). Pinned at f32-storage parity: a
+  60-frame gravity+drag walk against a twin that keeps the per-particle
+  multiply — `Object.is` on every field (the SoA store is
+  Float32Array; the twin rounds through f32 per frame, the task131/142
+  rule the first draft of the pin forgot — all 64 particles mismatched
+  until it did).
+- the emission validation sentinel: ONE `Number.isFinite` over the
+  grand sum + the two sign compares, the granular checks deferred to
+  the throw path (identical messages, identical precedence — the
+  sentinel is a strict superset of the old triggers, so every true
+  trigger re-derives the original error). ~1% on the emission etalon —
+  marginal, kept for the shape. Pinned: the throw precedence
+  (life before size before vectors) and the false-positive class
+  (individually finite fields whose grand sum overflows pass CLEANLY,
+  exactly as the pre-174 form did).
+
+**THE VERDICT**: the CPU advance walk is at its floor on V8 — the
+Task-142/143/173 passes left nothing a micro-pass can reach. The
+advance-side headroom that remains is the GPU tier (shipped, opt-in),
+not the CPU walk.
+
+Gates: 1791/1791 tests (+14), tsc 0 errors, lint 0 errors / 375
+warnings (baseline held — the decorators' forwarding rewritten without
+non-null assertions), dist rebuilt, demo:smoke OK, task174-wg-multidraw
+PASS (pixel-identical), task169-multidraw PASS (pixel-identical),
+task167-syncpoint PASS, task168-restore PASS. Cache-busts: ?v=174
+(vfx main + gpuEmbers + particles main, both bundles).

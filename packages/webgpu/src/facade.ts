@@ -209,6 +209,28 @@ export interface GPUFacade {
   bindTexture(textureId: number): void
   beginPass(clearIndex: number): void
   draw(count: number, instances: number): void
+  /** Task 174 — THE MULTI-DRAW TIER (the WG dialect): PRESENCE ==
+   *  CAPABILITY. The facade exposes this method IFF the device's
+   *  GPURenderPassEncoder has drawIndirectCount (probed once at device
+   *  creation — the method was dropped from the WebGPU spec and shipped
+   *  nowhere in Chrome through 151; @webgpu/types does not even declare
+   *  it. The runtime probe decides: a browser that keeps the method
+   *  arms the tier, everything else rides the fast-path floor).
+   *  Emits one batched run: `args` holds drawCount × 4 uints —
+   *  [vertexCount, instanceCount, firstVertex, firstInstance] per member
+   *  (firstVertex/firstInstance are always 0 here — the tape's draws
+   *  carry only count/instances). The facade packs the run into its
+   *  persistent INDIRECT ring buffers (disjoint slots per flush —
+   *  queue.writeBuffer ops are ordered before the frame's single
+   *  submit, so every flush's args land exactly where its own
+   *  drawIndirectCount reads them) and issues ONE pass.drawIndirectCount.
+   *  Returns false when the ring is exhausted (the 512-draw-per-submit
+   *  budget) — the caller replays the classic per-draw path. The
+   *  kill-switch lives in the executor (multiDraw: false); a facade
+   *  without the method makes the executor ride the fast-path floor
+   *  (prologue-once, bare pass.draw per member — byte-identical GPU
+   *  call stream to the classic path). */
+  multiDraw?(args: Uint32Array, drawCount: number): boolean
   endPass(): void
   submit(): void
   /** Task 80 (readback): read the pixels of the TARGET (surface) — Promise<Uint8Array>.

@@ -48,6 +48,14 @@ export type GpuFrameCallback = (ctx: GpuFrameContext, record: GpuRecorder) => vo
 /** WebGPU renderer: device, auto loop, resize/DPR, sim-time. */
 export interface WebGpuRenderer {
   readonly gpu: GPUFacade
+  /** Task 174 — THE MULTI-DRAW TIER's live verdict on this path: true when
+   *  the option is on (default). The tier has two levels: the fast-path
+   *  floor (prologue-once for same-command runs — works on every browser)
+   *  and the indirect shape (drawIndirectCount — only where the browser's
+   *  encoder kept the spec-dropped method; the facade's PRESENCE ==
+   *  CAPABILITY probe decides). multiDraw: false restores the classic
+   *  per-draw path exactly. */
+  readonly multiDraw: boolean
   /** Task 62: replay ResourceJournal v2 on a FRESH facade of this session —
    *  device-loss recovery. Present only with the resources option.
    *  Task 65: options.workingSet — soft reset (restore only the scene;
@@ -137,6 +145,12 @@ export interface WebGpuRendererOptions {
   readonly resources?: ResourceJournal
   /** M5 (Task 73): reader transport client (renderer.transport). */
   readonly transport?: TransportClient
+  /** Task 174 — THE MULTI-DRAW TIER's kill-switch (the WG dialect; default
+   *  true). false restores the classic per-draw path exactly — the
+   *  batched and unbatched tapes are pixel-identical by construction (the
+   *  batch semantics are the verbatim expansion of the per-draw calls;
+   *  see the executor's run block for the two levels). */
+  readonly multiDraw?: boolean
 }
 
 /** Storm threshold: after this many GPU errors the renderer is paused. */
@@ -175,7 +189,7 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
   // the executor holds THE SAME reference to the command array: compileWgslSpec appends to it.
   // Task 145: context wiring — the O(dirty) pending-upload queue (the
   // writeUniforms mark bus replaces the per-frame O(ops) tape walk).
-  const executor: GpuTapeExecutor = createGpuExecutor({ gpu, arena, commands: wgslCtx.commands, clears: [], context: wgslCtx })
+  const executor: GpuTapeExecutor = createGpuExecutor({ gpu, arena, commands: wgslCtx.commands, clears: [], context: wgslCtx, multiDraw: options.multiDraw })
   const [initW, initH] = getCanvasCssSize(canvas)
   const size = signal<readonly [number, number]>([initW, initH])
   const aspect = derive(() => size.value[0] / size.value[1])
@@ -433,7 +447,7 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
     gpu.dispose()
   }
 
-  return { gpu, size, aspect, time, uploads, transients, transport: options.transport ?? null, feed, restoreResources: session !== null ? (options?: { workingSet?: WorkingSet }) => session.restore(options?.workingSet) : undefined, ensureResident: session !== null ? (resourceId: number) => session.ensureResident(resourceId) : undefined, evictLRU: session !== null ? (options?: { budgetBytes?: number; pinned?: WorkingSet }) => session.evictLRU(options) : undefined, residencyStats: session !== null ? () => session.residencyStats() : undefined, command, pass, surface, frame, resize, step, start, stop, restart, dispose }
+  return { gpu, multiDraw: options.multiDraw ?? true, size, aspect, time, uploads, transients, transport: options.transport ?? null, feed, restoreResources: session !== null ? (options?: { workingSet?: WorkingSet }) => session.restore(options?.workingSet) : undefined, ensureResident: session !== null ? (resourceId: number) => session.ensureResident(resourceId) : undefined, evictLRU: session !== null ? (options?: { budgetBytes?: number; pinned?: WorkingSet }) => session.evictLRU(options) : undefined, residencyStats: session !== null ? () => session.residencyStats() : undefined, command, pass, surface, frame, resize, step, start, stop, restart, dispose }
 }
 
 /** Default surface clear color — the renderer background. */

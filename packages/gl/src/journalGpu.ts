@@ -41,6 +41,11 @@ import { externalImageSize } from '@rune/webgpu'
 
 /** Decorates GPUFacade so that create/destroy ops are written to the Journal. */
 export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
+  // Task 174 — the tier's method, captured ONCE: the conditional spread
+  // below forwards it IFF the raw facade has it (presence mirrors the
+  // raw — the Task-169 GL lesson: a dropped method silently disarms the
+  // tier, a stub silently eats draws).
+  const rawMultiDraw = gpu.multiDraw
   // Task 61: sizes of created textures — for the "full upload" heuristic.
   // copyExternalImageToTexture is journaled as texImage2DFromSource ONLY
   // if the copy covers the WHOLE texture (dstX=dstY=0 and copyWidth/copyHeight
@@ -119,6 +124,7 @@ export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
     bindTexture: textureOrViewId => gpu.bindTexture(textureOrViewId),
     beginPass: clearIndex => gpu.beginPass(clearIndex),
     draw: (count, instances) => gpu.draw(count, instances),
+    ...(rawMultiDraw !== undefined ? { multiDraw: (args: Uint32Array, drawCount: number) => rawMultiDraw(args, drawCount) } : {}),
     endPass: () => gpu.endPass(),
     submit: () => gpu.submit(),
     createTarget: (textureId, w, h, depth, color) => {

@@ -95,6 +95,17 @@ export function probeGPUCaps(probe: GPUProbe): CapsQuery {
   features.add('depth-texture')
   features.add('offscreen-canvas') // browser environment, not a device feature
   if (typeof VideoFrame !== 'undefined') features.add('video-frame')
+  // Task 174 — 'multi-draw-indirect': the multi-draw tier's INDIRECT shape
+  // (one drawIndirectCount per run of same-command draws) is available.
+  // Probed from the PROTOTYPE — the method was dropped from the WebGPU
+  // spec and ships nowhere in Chrome through 151, so this is an ENGINE
+  // property, not a device one (the probe matches realGPU's arm gate:
+  // PRESENCE == CAPABILITY). The GL twin ('multi-draw') is the
+  // WEBGL_multi_draw extension — a different tier with the same story.
+  if (typeof GPURenderPassEncoder === 'function'
+    && typeof (GPURenderPassEncoder.prototype as GPURenderPassEncoder & { drawIndirectCount?: unknown }).drawIndirectCount === 'function') {
+    features.add('multi-draw-indirect')
+  }
 
   // ─── Limits (adapter.limits — always numbers for all GPU limits) ────────
   // IMPORTANT: 'maxAnisotropy' is included explicitly — this gives parity

@@ -74,6 +74,21 @@ export async function createRealGPU(
     onGpuError?.(String((event as GPUUncapturedErrorEvent).error.message ?? event))
   })
 
+  // ─── Task 174 — THE MULTI-DRAW TIER's capability probe ────────────────
+  // drawIndirectCount was dropped from the WebGPU spec and ships nowhere
+  // in Chrome through 151 (probed in this container: the prototype lacks
+  // it; plain drawIndirect IS present; @webgpu/types@0.1.72 does not even
+  // declare it). PRESENCE == CAPABILITY is the facade's contract: the
+  // multiDraw method is exposed IFF the encoder has it, so the executor
+  // arms the indirect shape exactly where the browser can and rides the
+  // fast-path floor everywhere else. Probed ONCE here — a prototype
+  // method does not appear mid-session. (The cast: the tracking types
+  // cannot declare a method the spec dropped; the probe is the truth.)
+  const encoderProto = typeof GPURenderPassEncoder === 'function'
+    ? GPURenderPassEncoder.prototype as GPURenderPassEncoder & { drawIndirectCount?: (indirectBuffer: GPUBuffer, indirectOffset: number, countBuffer: GPUBuffer, countOffset: number, maxDrawCount: number) => void }
+    : null
+  const hasDrawIndirectCount = encoderProto !== null && typeof encoderProto.drawIndirectCount === 'function'
+
   const context = canvas.getContext('webgpu') as GPUCanvasContext | null
   if (context === null) throw new Error('rune: webgpu canvas context unavailable')
   const gpuContext: GPUCanvasContext = context
@@ -1042,6 +1057,54 @@ export async function createRealGPU(
     pass?.draw(count, instances)
   }
 
+  // ─── Task 174 — THE MULTI-DRAW TIER's indirect ring ────────────────────
+  // Two persistent INDIRECT buffers: the args ring (512 × 16-byte draw
+  // structs) and the count ring (512 × 4-byte draw counts). Each flush of
+  // a batched run takes DISJOINT ring slots — the queue.writeBuffer calls
+  // (args + count) enqueue during pass encoding, but WebGPU's queue is a
+  // single ordered timeline: writes enqueued before the frame's submit
+  // execute before it, and each flush's drawIndirectCount reads only ITS
+  // OWN slots, so multiple flushes per submit cannot overwrite each
+  // other's arguments. The cursor resets at submit() — the next frame's
+  // writes are queue-ordered after this frame's draws, so reuse is safe.
+  // A frame needing more than 512 batched draws (pathological — the cap
+  // of one RUN is already 512) makes multiDraw return false; the executor
+  // replays the classic per-draw path for that flush.
+  let indirectArgsBuffer: GPUBuffer | null = null
+  let indirectCountBuffer: GPUBuffer | null = null
+  const INDIRECT_RING = 512
+  let indirectRingSlot = 0
+  const indirectCountScratch = new Uint32Array(1)
+
+  function multiDraw(args: Uint32Array, drawCount: number): boolean {
+    if (indirectRingSlot + drawCount > INDIRECT_RING) return false
+    if (indirectArgsBuffer === null || indirectCountBuffer === null) {
+      // Lazy creation — a session that never batches (no repeated
+      // commands, the kill-switch, a browser without the method) never
+      // allocates the rings.
+      indirectArgsBuffer = device.createBuffer({
+        size: INDIRECT_RING * 16,
+        usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+      })
+      indirectCountBuffer = device.createBuffer({
+        size: INDIRECT_RING * 4,
+        usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+      })
+    }
+    const byteOffset = indirectRingSlot * 16
+    // the 5-arg writeBuffer form — dataOffset/size, no subarray views
+    device.queue.writeBuffer(indirectArgsBuffer, byteOffset, args.buffer as ArrayBuffer, args.byteOffset, drawCount * 16)
+    indirectCountScratch[0] = drawCount
+    device.queue.writeBuffer(indirectCountBuffer, indirectRingSlot * 4, indirectCountScratch.buffer as ArrayBuffer, 0, 4)
+    // (the cast mirrors the probe's: the spec dropped the method, the
+    // probe proved THIS browser kept it — only callable when armed)
+    ;(pass as (GPURenderPassEncoder & { drawIndirectCount?: (a: GPUBuffer, b: number, c: GPUBuffer, d: number, e: number) => void }) | null)?.drawIndirectCount?.(
+      indirectArgsBuffer, byteOffset, indirectCountBuffer, indirectRingSlot * 4, drawCount,
+    )
+    indirectRingSlot += drawCount
+    return true
+  }
+
   function endPass(): void {
     if (pass !== null && timerHandle !== null) timerHandle.onEndPass(pass)
     pass?.end()
@@ -1066,6 +1129,11 @@ export async function createRealGPU(
     if (timerHandle !== null) timerHandle.onSubmit(encoder)
     device.queue.submit([encoder.finish()])
     encoder = null
+    // Task 174 — the multi-draw ring resets at the frame's structural end:
+    // the next frame's writeBuffer calls are queue-ordered AFTER this
+    // submit, so the slots are free to reuse (the GPU consumed this
+    // frame's args before any new write lands).
+    indirectRingSlot = 0
   }
 
   // ─── Task 80: readback (copyTextureToBuffer + mapAsync) ──────────────
@@ -1292,6 +1360,14 @@ export async function createRealGPU(
     pass = null
     currentPipeline = null
     currentTarget = 0
+    // Task 174 — the multi-draw ring buffers die with the facade (like the
+    // GPGPU staging buffers — device.destroy() covers them, the explicit
+    // destroy is the deterministic-parity arm of the same stroke).
+    indirectArgsBuffer?.destroy()
+    indirectArgsBuffer = null
+    indirectCountBuffer?.destroy()
+    indirectCountBuffer = null
+    indirectRingSlot = 0
     // Task 164 — the merged-compute/staging/memo state dies with the facade.
     computePass = null
     computeGroup = null
@@ -1570,6 +1646,10 @@ export async function createRealGPU(
     bindTexture,
     beginPass,
     draw,
+    // Task 174 — PRESENCE == CAPABILITY: the tier's indirect shape is
+    // armed exactly where the browser's encoder kept the spec-dropped
+    // method; a facade without it rides the executor's fast-path floor.
+    ...(hasDrawIndirectCount ? { multiDraw } : {}),
     endPass,
     submit,
     // Task 131 — the GPGPU tier

@@ -57,9 +57,12 @@ export interface RendererOptions {
   readonly dpr?: number
   readonly clear?: WebGL2RendererOptions['clear']
   readonly uploads?: UploadSchedulerOptions
-  /** Task 169 — the multi-draw batch tier's kill-switch (GL path only,
-   *  default true; renderer.multiDraw is the live verdict). */
-  readonly multiDraw?: WebGL2RendererOptions['multiDraw']
+  /** Task 169/174 — the multi-draw batch tier's kill-switch (BOTH
+   *  backends, default true; renderer.multiDraw is the live verdict).
+   *  GL: WEBGL_multi_draw batching; WG: the run tier (fast-path floor
+   *  everywhere + the indirect shape where the browser kept
+   *  drawIndirectCount). */
+  readonly multiDraw?: WebGL2RendererOptions['multiDraw'] | WebGpuRendererOptions['multiDraw']
   /** GL facade injection for headless tests. */
   readonly createGL?: WebGL2RendererOptions['createGL']
   /** GPU facade injection for headless tests. */
@@ -105,9 +108,11 @@ export interface Renderer {
   readonly transients: TransientPool
   /** Escape-hatch to the concrete backend (for WebGL2-only methods like .gl/.live). */
   readonly inner: WebGL2Renderer | WebGpuRenderer | null
-  /** Task 169 — the multi-draw batch tier's live verdict: true on the GL
-   *  path when the option left it on AND the context has WEBGL_multi_draw;
-   *  false on WebGPU (no multi-draw in core) and before .start(). */
+  /** Task 169/174 — the multi-draw batch tier's live verdict: GL — true
+   *  when the option left it on AND the context has WEBGL_multi_draw;
+   *  WG — the option's verdict (the tier's fast-path floor works on
+   *  every browser, the indirect shape rides the facade's presence
+   *  probe); false before .start(). */
   readonly multiDraw: boolean
   /** The chosen backend (null before .start()). */
   readonly backend: BackendId | null
@@ -372,6 +377,8 @@ export function createRenderer(options: RendererOptions): Renderer {
             journal: options.journal,
             resources: options.resources,
             transport: options.transport,
+            // Task 174 — the WG tier's kill-switch, forwarded like the GL one
+            multiDraw: options.multiDraw,
           })
         : createWebGL2Renderer({
             canvas: options.canvas,

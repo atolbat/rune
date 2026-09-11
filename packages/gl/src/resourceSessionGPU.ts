@@ -50,6 +50,10 @@ export interface ResourceSessionGPU {
 
 /** Create a session: stable ids + journaling on top of a raw GPUFacade. */
 export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJournal): ResourceSessionGPU {
+  // Task 174 — the tier's method, captured ONCE: the conditional spread
+  // below forwards it IFF the raw facade has it (presence mirrors the
+  // raw — the Task-169 GL lesson).
+  const rawMultiDraw = raw.multiDraw
   const texMap = new Map<number, number>()
   const viewMap = new Map<number, number>()
   const targetMap = new Map<number, number>()
@@ -178,6 +182,7 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
     },
     beginPass: clearIndex => raw.beginPass(clearIndex),
     draw: (count, instances) => raw.draw(count, instances),
+    ...(rawMultiDraw !== undefined ? { multiDraw: (args: Uint32Array, drawCount: number) => rawMultiDraw(args, drawCount) } : {}),
     endPass: () => raw.endPass(),
     submit: () => raw.submit(),
 

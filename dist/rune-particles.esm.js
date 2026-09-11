@@ -680,14 +680,16 @@ function createParticleSystem(capacity, options = {}) {
         dropped += n - room;
       for (let i = 0;i < actual; i++) {
         fill(i, out);
-        if (!Number.isFinite(out.life) || out.life <= 0) {
-          throw new Error(`rune/particles: spawn record has life <= 0 or NaN (slot ${count})`);
-        }
-        if (!Number.isFinite(out.size) || out.size < 0) {
-          throw new Error(`rune/particles: spawn record has size < 0 or NaN (slot ${count})`);
-        }
-        if (!Number.isFinite(out.x + out.y + out.z + out.vx + out.vy + out.vz + out.r + out.g + out.b + out.a)) {
-          throw new Error(`rune/particles: spawn record has NaN in its vectors (slot ${count})`);
+        if (out.life <= 0 || out.size < 0 || !Number.isFinite(out.life + out.size + out.x + out.y + out.z + out.vx + out.vy + out.vz + out.r + out.g + out.b + out.a)) {
+          if (!Number.isFinite(out.life) || out.life <= 0) {
+            throw new Error(`rune/particles: spawn record has life <= 0 or NaN (slot ${count})`);
+          }
+          if (!Number.isFinite(out.size) || out.size < 0) {
+            throw new Error(`rune/particles: spawn record has size < 0 or NaN (slot ${count})`);
+          }
+          if (!Number.isFinite(out.x + out.y + out.z + out.vx + out.vy + out.vz + out.r + out.g + out.b + out.a)) {
+            throw new Error(`rune/particles: spawn record has NaN in its vectors (slot ${count})`);
+          }
         }
         const s = count;
         f.px[s] = out.x;
@@ -719,6 +721,7 @@ function createParticleSystem(capacity, options = {}) {
         return;
       const { gravity, drag, turbulence } = forces;
       const gx = gravity[0] ?? 0, gy = gravity[1] ?? 0, gz = gravity[2] ?? 0;
+      const gdt = gx * dt, gdy = gy * dt, gdz = gz * dt;
       const dragFactor = drag > 0 ? Math.exp(-drag * dt) : 1;
       const hasTurb = turbulence !== 0 && Number.isFinite(turbulence);
       const at = forces.attract;
@@ -838,9 +841,9 @@ function createParticleSystem(capacity, options = {}) {
             vz *= k;
           }
         }
-        vx += gx * dt;
-        vy += gy * dt;
-        vz += gz * dt;
+        vx += gdt;
+        vy += gdy;
+        vz += gdz;
         if (hasAttract) {
           const dx = atx - f.px[i], dy = aty - f.py[i], dz = atz - f.pz[i];
           const r2 = dx * dx + dy * dy + dz * dz;

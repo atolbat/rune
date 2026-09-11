@@ -21,6 +21,25 @@ export interface GpuExecutorOptions {
    *  (the mark bus shared with writeUniforms). Absent — the legacy walk
    *  (backward compatible: every executor built before Task 145). */
   readonly context?: WgpuCompileContext
+  /** Task 174 — THE MULTI-DRAW TIER (the WG dialect): two levels over the
+   *  same run detection as the GL tier (Task 169):
+   *  • THE FAST-PATH FLOOR (works on every browser): consecutive Draw ops
+   *    of the SAME command run the prologue ONCE — every per-draw
+   *    assertion below (usePipeline, bindUniforms, the attribute and
+   *    texture binds) is a memo no-op for a same-command repeat, so
+   *    members 2..N skip the JS call sequence entirely and issue bare
+   *    pass.draw calls.
+   *  • THE INDIRECT SHAPE (drawIndirectCount — capability-gated at the
+   *    facade: the method exists IFF the device's pass encoder has it):
+   *    a run of length ≥ 2 collapses into ONE drawIndirectCount call over
+   *    ring buffers the facade owns. Chrome 151 (this container, probed)
+   *    still lacks the spec method — the tier rides the floor there;
+   *    browsers with the method get N→1.
+   *  Runs of length 1 ride the classic path verbatim (the GL tier's
+   *  discipline); degenerates (count 0 / instances 0) end runs; the cap
+   *  is 512 members; multiDraw: false restores the per-draw classic path
+   *  exactly. */
+  readonly multiDraw?: boolean
 }
 
 export interface GpuTapeExecutor {
@@ -36,15 +55,65 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
   // transitions + born-dirty pushes at compile).
   const queue = options.context !== undefined ? options.context.activateUploadQueue() : null
 
+  // ── Task 174 — THE MULTI-DRAW TIER (the WG dialect) ──
+  // A RUN is a maximal sequence of consecutive Draw ops referencing the
+  // SAME command with count > 0 and instances > 0 — the exact GL-tier
+  // (Task 169) discipline, translated to the WG executor's shape. Within
+  // a run every per-draw assertion of the prologue is a no-op by
+  // construction: usePipeline/bindUniforms/attribute binds/texture binds
+  // are the facade's memos (Task 164/165 — they skip re-asserts for the
+  // same command), and the uniform slices are uploaded BEFORE the pass
+  // opens (the Task-145 discipline: the record-then-execute tape means
+  // all arena writes are final before run() starts). The multi shape
+  // (drawIndirectCount present) keeps member 0 PENDING — flushRun emits
+  // it (len 1 → classic verbatim, len ≥ 2 → one indirect call); the
+  // fast-path floor draws every member directly (byte-identical call
+  // stream to the classic path — the tier's floor can only SKIP memo
+  // checks, never change a GPU call).
+  // Degenerate members (count 0 / instances 0) END the run instead of
+  // joining it (their classic behavior is pass.draw(count, 0) — a legal
+  // no-op — kept verbatim). The run is flushed on: any non-Draw op (a
+  // pending draw must not cross a pass/target boundary), a different
+  // command, a degenerate, the 512 cap, the tape's end.
+  const tierOn = options.multiDraw ?? true
+  const multiFn = gpu.multiDraw // presence == capability (the facade's contract)
+  const MAX_BATCH = 512
+  const runArgs = new Uint32Array(MAX_BATCH * 4) // [vertexCount, instanceCount, firstVertex, firstInstance] × members
+  let runCommand: RichWgpuCommand | undefined
+  let runLen = 0
+
+  function flushRun(): void {
+    if (runLen === 0) { runCommand = undefined; return }
+    if (runLen === 1 || multiFn === undefined) {
+      // a lone member rides the classic path — the pre-174 call, verbatim
+      // (the fast-path floor never keeps members pending — this is the
+      // multi shape's run of one)
+      gpu.draw(runArgs[0], runArgs[1])
+    } else {
+      const emitted = multiFn(runArgs, runLen)
+      if (!emitted) {
+        // the facade's ring is full — the classic expansion. The prologue
+        // ran for the run (the memos hold); each member is a bare draw.
+        for (let m = 0; m < runLen; m++) {
+          const b = m * 4
+          gpu.draw(runArgs[b], runArgs[b + 1])
+        }
+      }
+    }
+    runLen = 0
+    runCommand = undefined
+  }
+
   function run(view: TapeView): void {
     uploadDirtySlices(view)
     for (let at = 0; at < view.count; at++) {
       const op = view.op[at]
-      if (op === 1) beginPass()
+      if (op === 1) { flushRun(); beginPass() }
       else if (op === 2) drawCommand(commands[view.a[at]] as RichWgpuCommand, view.c[at], view.d[at])
-      else if (op === 3) gpu.endPass()
-      else if (op === 4) gpu.bindTarget(view.a[at], view.b[at] === 1)
+      else if (op === 3) { flushRun(); gpu.endPass() }
+      else if (op === 4) { flushRun(); gpu.bindTarget(view.a[at], view.b[at] === 1) }
     }
+    flushRun() // the tape's end — no draw may leak past the frame
     gpu.submit()
   }
 
@@ -98,6 +167,46 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
 
   function drawCommand(command: RichWgpuCommand | undefined, count: number, instances: number): void {
     if (command === undefined) return
+    // Task 174 — the run's fast path. An APPEND (the run's command, a real
+    // draw, room in the batch) skips the prologue entirely — every
+    // assertion below is a memo no-op for a same-command repeat (proven
+    // at the tier's design; see the run block above). The multi shape
+    // packs the member into runArgs (flushRun emits the batch); the
+    // fast-path floor issues the bare pass.draw — the classic stream's
+    // own draw, just without the redundant JS prologue around it.
+    let member0Pending = false
+    if (tierOn && count > 0 && instances > 0) {
+      if (command === runCommand && runLen < MAX_BATCH) {
+        if (multiFn !== undefined) {
+          const b = runLen * 4
+          runArgs[b] = count; runArgs[b + 1] = instances
+          runLen++
+          return
+        }
+        gpu.draw(count, instances)
+        return
+      }
+      flushRun()
+      runCommand = command
+      runArgs[0] = count; runArgs[1] = instances
+      if (multiFn !== undefined) {
+        // the multi shape keeps member 0 PENDING (flushRun emits it —
+        // alone it rides classic, with company it is one indirect call)
+        runLen = 1
+        member0Pending = true
+      } else {
+        // the fast-path floor: nothing pending — the run is runCommand
+        // ONLY (the append detector); member 0 emits at the bottom like
+        // the classic path
+        runLen = 0
+      }
+      // fall through to the prologue ONCE — for the whole run
+    }
+    else {
+      // degenerate (count 0 / instances 0) or the tier is off — the run
+      // must not absorb a draw whose classic behavior differs
+      flushRun()
+    }
     if (!command.pipelineReady) {
       // M5 (Task 73): feed interleaving — rich slot {size, stride, offset};
       // tight attributes — a number (arrayStride = size*4, offset 0).
@@ -130,7 +239,7 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
     // inlines array for..of, but the indexed form is guaranteed).
     const textureIds = command.textureIds
     for (let t = 0; t < textureIds.length; t++) gpu.bindTexture(textureIds[t])
-    gpu.draw(count, instances)
+    if (!member0Pending) gpu.draw(count, instances)
   }
 
   return { run }

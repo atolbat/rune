@@ -410,14 +410,28 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
         fill(i, out)
         // Validation: a broken spawner must fail loudly, not poison the
         // soup with NaNs that silently kill the whole draw.
-        if (!Number.isFinite(out.life) || out.life <= 0) {
-          throw new Error(`rune/particles: spawn record has life <= 0 or NaN (slot ${count})`)
-        }
-        if (!Number.isFinite(out.size) || out.size < 0) {
-          throw new Error(`rune/particles: spawn record has size < 0 or NaN (slot ${count})`)
-        }
-        if (!Number.isFinite(out.x + out.y + out.z + out.vx + out.vy + out.vz + out.r + out.g + out.b + out.a)) {
-          throw new Error(`rune/particles: spawn record has NaN in its vectors (slot ${count})`)
+        // Task 174 — THE SENTINEL: ONE finite probe (the grand sum — any
+        // NaN propagates into it, any ±Inf makes it non-finite) plus the
+        // two sign compares, instead of three Number.isFinite calls per
+        // spawn. The sentinel is a SUPERSET of the original triggers (the
+        // grand sum carries every field the old checks read): a false
+        // positive (individually finite fields whose sum overflows) falls
+        // through to the granular re-check below and passes cleanly — and
+        // every true trigger is re-derived with the ORIGINAL checks in
+        // the ORIGINAL order, so the throws are identical (message and
+        // precedence) to the pre-174 form.
+        if (out.life <= 0 || out.size < 0 || !Number.isFinite(
+          out.life + out.size + out.x + out.y + out.z + out.vx + out.vy + out.vz + out.r + out.g + out.b + out.a
+        )) {
+          if (!Number.isFinite(out.life) || out.life <= 0) {
+            throw new Error(`rune/particles: spawn record has life <= 0 or NaN (slot ${count})`)
+          }
+          if (!Number.isFinite(out.size) || out.size < 0) {
+            throw new Error(`rune/particles: spawn record has size < 0 or NaN (slot ${count})`)
+          }
+          if (!Number.isFinite(out.x + out.y + out.z + out.vx + out.vy + out.vz + out.r + out.g + out.b + out.a)) {
+            throw new Error(`rune/particles: spawn record has NaN in its vectors (slot ${count})`)
+          }
         }
         const s = count
         f.px[s] = out.x; f.py[s] = out.y; f.pz[s] = out.z
@@ -443,6 +457,11 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
       if (!Number.isFinite(dt) || dt <= 0) return
       const { gravity, drag, turbulence } = forces
       const gx = gravity[0] ?? 0, gy = gravity[1] ?? 0, gz = gravity[2] ?? 0
+      // Task 174 — the gravity step multiplied ONCE per frame (gx·dt is a
+      // loop-invariant; the adds keep the identical expression — the same
+      // operands, the same rounding, bit-identical to the per-particle
+      // multiply)
+      const gdt = gx * dt, gdy = gy * dt, gdz = gz * dt
       // One exp per FRAME, not per particle (the drag factor is shared).
       const dragFactor = drag > 0 ? Math.exp(-drag * dt) : 1
       const hasTurb = turbulence !== 0 && Number.isFinite(turbulence)
@@ -567,7 +586,7 @@ export function createParticleSystem(capacity: number, options: StoreOptions = {
             vx *= k; vy *= k; vz *= k
           }
         }
-        vx += gx * dt; vy += gy * dt; vz += gz * dt
+        vx += gdt; vy += gdy; vz += gdz
         if (hasAttract) {
           // Δv = strength·dt·dir / (r·(r² + soft²)): normalized direction,
           // softened magnitude. r→0 is guarded (the force at the exact

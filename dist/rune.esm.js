@@ -9333,19 +9333,49 @@ function createGpuExecutor(options) {
   const arena = options.arena;
   const commands = options.commands;
   const queue = options.context !== undefined ? options.context.activateUploadQueue() : null;
+  const tierOn = options.multiDraw ?? true;
+  const multiFn = gpu.multiDraw;
+  const MAX_BATCH = 512;
+  const runArgs = new Uint32Array(MAX_BATCH * 4);
+  let runCommand;
+  let runLen = 0;
+  function flushRun() {
+    if (runLen === 0) {
+      runCommand = undefined;
+      return;
+    }
+    if (runLen === 1 || multiFn === undefined) {
+      gpu.draw(runArgs[0], runArgs[1]);
+    } else {
+      const emitted = multiFn(runArgs, runLen);
+      if (!emitted) {
+        for (let m = 0;m < runLen; m++) {
+          const b = m * 4;
+          gpu.draw(runArgs[b], runArgs[b + 1]);
+        }
+      }
+    }
+    runLen = 0;
+    runCommand = undefined;
+  }
   function run(view) {
     uploadDirtySlices(view);
     for (let at = 0;at < view.count; at++) {
       const op = view.op[at];
-      if (op === 1)
+      if (op === 1) {
+        flushRun();
         beginPass();
-      else if (op === 2)
+      } else if (op === 2)
         drawCommand(commands[view.a[at]], view.c[at], view.d[at]);
-      else if (op === 3)
+      else if (op === 3) {
+        flushRun();
         gpu.endPass();
-      else if (op === 4)
+      } else if (op === 4) {
+        flushRun();
         gpu.bindTarget(view.a[at], view.b[at] === 1);
+      }
     }
+    flushRun();
     gpu.submit();
   }
   function uploadDirtySlices(view) {
@@ -9384,6 +9414,32 @@ function createGpuExecutor(options) {
   function drawCommand(command, count, instances) {
     if (command === undefined)
       return;
+    let member0Pending = false;
+    if (tierOn && count > 0 && instances > 0) {
+      if (command === runCommand && runLen < MAX_BATCH) {
+        if (multiFn !== undefined) {
+          const b = runLen * 4;
+          runArgs[b] = count;
+          runArgs[b + 1] = instances;
+          runLen++;
+          return;
+        }
+        gpu.draw(count, instances);
+        return;
+      }
+      flushRun();
+      runCommand = command;
+      runArgs[0] = count;
+      runArgs[1] = instances;
+      if (multiFn !== undefined) {
+        runLen = 1;
+        member0Pending = true;
+      } else {
+        runLen = 0;
+      }
+    } else {
+      flushRun();
+    }
     if (!command.pipelineReady) {
       gpu.ensurePipeline(command.pipelineId, command.wgsl, command.attrOrder.map((a) => a.stride !== undefined || a.step !== undefined ? { size: a.size, stride: a.stride, offset: a.offset ?? 0, step: a.step } : a.size), command.textureIds.length > 0, command.pipeline);
       command.pipelineReady = true;
@@ -9401,7 +9457,8 @@ function createGpuExecutor(options) {
     const textureIds = command.textureIds;
     for (let t = 0;t < textureIds.length; t++)
       gpu.bindTexture(textureIds[t]);
-    gpu.draw(count, instances);
+    if (!member0Pending)
+      gpu.draw(count, instances);
   }
   return { run };
 }
@@ -9648,6 +9705,8 @@ async function createRealGPU(canvas, onGpuError) {
   device.addEventListener("uncapturederror", (event) => {
     onGpuError?.(String(event.error.message ?? event));
   });
+  const encoderProto = typeof GPURenderPassEncoder === "function" ? GPURenderPassEncoder.prototype : null;
+  const hasDrawIndirectCount = encoderProto !== null && typeof encoderProto.drawIndirectCount === "function";
   const context = canvas.getContext("webgpu");
   if (context === null)
     throw new Error("rune: webgpu canvas context unavailable");
@@ -10221,6 +10280,32 @@ async function createRealGPU(canvas, onGpuError) {
     flushTextureBindGroup();
     pass?.draw(count, instances);
   }
+  let indirectArgsBuffer = null;
+  let indirectCountBuffer = null;
+  const INDIRECT_RING = 512;
+  let indirectRingSlot = 0;
+  const indirectCountScratch = new Uint32Array(1);
+  function multiDraw(args, drawCount) {
+    if (indirectRingSlot + drawCount > INDIRECT_RING)
+      return false;
+    if (indirectArgsBuffer === null || indirectCountBuffer === null) {
+      indirectArgsBuffer = device.createBuffer({
+        size: INDIRECT_RING * 16,
+        usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST
+      });
+      indirectCountBuffer = device.createBuffer({
+        size: INDIRECT_RING * 4,
+        usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST
+      });
+    }
+    const byteOffset = indirectRingSlot * 16;
+    device.queue.writeBuffer(indirectArgsBuffer, byteOffset, args.buffer, args.byteOffset, drawCount * 16);
+    indirectCountScratch[0] = drawCount;
+    device.queue.writeBuffer(indirectCountBuffer, indirectRingSlot * 4, indirectCountScratch.buffer, 0, 4);
+    pass?.drawIndirectCount?.(indirectArgsBuffer, byteOffset, indirectCountBuffer, indirectRingSlot * 4, drawCount);
+    indirectRingSlot += drawCount;
+    return true;
+  }
   function endPass() {
     if (pass !== null && timerHandle !== null)
       timerHandle.onEndPass(pass);
@@ -10238,6 +10323,7 @@ async function createRealGPU(canvas, onGpuError) {
       timerHandle.onSubmit(encoder);
     device.queue.submit([encoder.finish()]);
     encoder = null;
+    indirectRingSlot = 0;
   }
   function readTargetPixels(targetId) {
     return new Promise((resolve3, reject) => {
@@ -10417,6 +10503,11 @@ async function createRealGPU(canvas, onGpuError) {
     pass = null;
     currentPipeline = null;
     currentTarget = 0;
+    indirectArgsBuffer?.destroy();
+    indirectArgsBuffer = null;
+    indirectCountBuffer?.destroy();
+    indirectCountBuffer = null;
+    indirectRingSlot = 0;
     computePass = null;
     computeGroup = null;
     vertexBindMemo.length = 0;
@@ -10628,6 +10719,7 @@ async function createRealGPU(canvas, onGpuError) {
     bindTexture,
     beginPass,
     draw,
+    ...hasDrawIndirectCount ? { multiDraw } : {},
     endPass,
     submit,
     createExternalBuffer,
@@ -10718,6 +10810,9 @@ function probeGPUCaps(probe) {
   features.add("offscreen-canvas");
   if (typeof VideoFrame !== "undefined")
     features.add("video-frame");
+  if (typeof GPURenderPassEncoder === "function" && typeof GPURenderPassEncoder.prototype.drawIndirectCount === "function") {
+    features.add("multi-draw-indirect");
+  }
   const limitNames = [
     "maxTextureDimension1D",
     "maxTextureDimension2D",
@@ -10895,6 +10990,7 @@ init_src();
 
 // packages/gl/src/journalGpu.ts
 function withJournalGpu(gpu, journal) {
+  const rawMultiDraw = gpu.multiDraw;
   const texSizes = new Map;
   return {
     configure: (w, h) => gpu.configure(w, h),
@@ -10939,6 +11035,7 @@ function withJournalGpu(gpu, journal) {
     bindTexture: (textureOrViewId) => gpu.bindTexture(textureOrViewId),
     beginPass: (clearIndex) => gpu.beginPass(clearIndex),
     draw: (count, instances) => gpu.draw(count, instances),
+    ...rawMultiDraw !== undefined ? { multiDraw: (args, drawCount) => rawMultiDraw(args, drawCount) } : {},
     endPass: () => gpu.endPass(),
     submit: () => gpu.submit(),
     createTarget: (textureId, w, h, depth2, color) => {
@@ -11041,6 +11138,7 @@ function describeGpuSourceKind(source) {
 init_src();
 var VIEW_ID_BASE2 = 1e6;
 function createResourceSessionGPU(raw, journal) {
+  const rawMultiDraw = raw.multiDraw;
   const texMap = new Map;
   const viewMap = new Map;
   const targetMap = new Map;
@@ -11148,6 +11246,7 @@ function createResourceSessionGPU(raw, journal) {
     },
     beginPass: (clearIndex) => raw.beginPass(clearIndex),
     draw: (count, instances) => raw.draw(count, instances),
+    ...rawMultiDraw !== undefined ? { multiDraw: (args, drawCount) => rawMultiDraw(args, drawCount) } : {},
     endPass: () => raw.endPass(),
     submit: () => raw.submit(),
     createTarget: (textureId, width, height, depth2, color) => {
@@ -11477,7 +11576,7 @@ async function createWebGpuRenderer(options) {
   const writer = createTapeWriter(64);
   const arena = createSliceArena(1 << 16);
   const wgslCtx = createWgpuContext(arena);
-  const executor = createGpuExecutor({ gpu, arena, commands: wgslCtx.commands, clears: [], context: wgslCtx });
+  const executor = createGpuExecutor({ gpu, arena, commands: wgslCtx.commands, clears: [], context: wgslCtx, multiDraw: options.multiDraw });
   const [initW, initH] = getCanvasCssSize(canvas);
   const size = signal([initW, initH]);
   const aspect = derive(() => size.value[0] / size.value[1]);
@@ -11689,7 +11788,7 @@ async function createWebGpuRenderer(options) {
     feeds.clear();
     gpu.dispose();
   }
-  return { gpu, size, aspect, time, uploads, transients, transport: options.transport ?? null, feed, restoreResources: session !== null ? (options2) => session.restore(options2?.workingSet) : undefined, ensureResident: session !== null ? (resourceId) => session.ensureResident(resourceId) : undefined, evictLRU: session !== null ? (options2) => session.evictLRU(options2) : undefined, residencyStats: session !== null ? () => session.residencyStats() : undefined, command, pass, surface, frame, resize, step, start, stop, restart, dispose };
+  return { gpu, multiDraw: options.multiDraw ?? true, size, aspect, time, uploads, transients, transport: options.transport ?? null, feed, restoreResources: session !== null ? (options2) => session.restore(options2?.workingSet) : undefined, ensureResident: session !== null ? (resourceId) => session.ensureResident(resourceId) : undefined, evictLRU: session !== null ? (options2) => session.evictLRU(options2) : undefined, residencyStats: session !== null ? () => session.residencyStats() : undefined, command, pass, surface, frame, resize, step, start, stop, restart, dispose };
 }
 var DEFAULT_SURFACE_COLOR = [0.07, 0.08, 0.11, 1];
 function createErrorStorm(report) {
@@ -11884,7 +11983,8 @@ function createRenderer(options) {
         now: options.now,
         journal: options.journal,
         resources: options.resources,
-        transport: options.transport
+        transport: options.transport,
+        multiDraw: options.multiDraw
       }) : createWebGL2Renderer({
         canvas: options.canvas,
         dpr: options.dpr,
