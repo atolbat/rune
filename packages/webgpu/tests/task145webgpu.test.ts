@@ -183,12 +183,15 @@ describe('task145: the pending-upload queue (O(dirty) uploads)', () => {
     const view = recordFrame([commandB], FRAME)
     executor.run(view)
     const uploads = calls.filter(c => c.startsWith('uploadUniforms'))
-    // both the stale entry AND commandB's born-dirty entry drained
-    expect(uploads.length).toBe(2)
+    // both the stale entry AND commandB's born-dirty entry drained — Task 178's
+    // merged upload coalesces the two adjacent slices (gap < 256) into ONE
+    // writeBuffer covering the union (the pre-178 form: two calls; the
+    // arena bytes are the same — the inter-slice padding rides along, inert)
+    expect(uploads.length).toBe(1)
     // the NEXT frame with no changes: zero uploads (the flags are clean)
     const view2 = recordFrame([command, commandB], FRAME)
     executor.run(view2)
-    expect(calls.filter(c => c.startsWith('uploadUniforms')).length).toBe(2)
+    expect(calls.filter(c => c.startsWith('uploadUniforms')).length).toBe(1)
   })
 
   test('the queue is empty after every drain (no growth across frames)', () => {

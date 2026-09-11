@@ -2796,3 +2796,101 @@ the ceiling is the stage walk (~3.2 ms — the sequential pack's own
 physics, the same floor the unsorted layer pays) and the placement
 (~1.5 ms of pure line-gather); the next frontier beyond that is the GPU
 tier, which is shipped and opt-in.
+
+---
+
+## Task 178 — THE UPLOAD WIRE (the frame's JS→GPU crossing, both backends)
+
+The deep audit after Task 177 (two parallel Explore passes over the
+render/upload/compute paths) found the frame's remaining fat was not in
+JS at all — it was in the BYTES AND CALLS crossing the JS→GPU boundary
+every frame. Four shapes, all fixed in one pass:
+
+**A — THE WG FEED'S FULL-PREFIX WRITE** (the headline). The WG twin of
+the feed uploaded `[0, published·stride)` EVERY frame — the write grew
+with the TOTAL record count while the GL twin always shipped the dirty
+window. Measured (`bench/ab-upload.ts`, 160k×64 B SAB feed, +1000
+records/frame, 60 frames): **1.95 MB/frame queued at 60k published
+(1.0 ms/frame JS wall), 117 MB total** — at the full 160k that is
+10.24 MB/frame ≈ 614 MB/s of queue traffic at 60 fps, plus the SAB
+staging memcpy doubling it. The fix is the GL twin's own contract:
+`syncVertexBuffer(data, byteLength, byteOffset)` — the window
+`[synced, published)`, the staging copy sized to the window, the
+writeBuffer landed at the offset. After: **0.06 MB/frame, 3 MB total,
+0.03–0.13 ms/frame** (the append's own bytes — O(append), not
+O(total)); at full capacity that is a 160× reduction. Pinned: the
+windows TILE `[0, published·stride)` (the GPU image equals the source
+after every frame — no hole, no repeat), the bytes crossed are exactly
+the appends' sum, steady frames cross ZERO.
+
+**B — THE MERGED UNIFORM UPLOAD** (the queue's writeBuffer count). The
+WG executor issued one `writeBuffer` per dirty command (N animating
+commands = N queue ops/frame, each a JS→native crossing with fixed
+overhead). The dirty slices are disjoint 256-aligned windows in ONE
+arena — the drain now sorts them by offset (mark order ≠ allocation
+order; the sorted form also makes the queue/legacy legs merge
+IDENTICALLY, a stronger parity than the per-command logs had) and
+coalesces runs with gap < 256 (the SliceArena's own dirtyRanges rule)
+into ONE writeBuffer per run. The bytes between the slices ride along
+(inert — the shader reads only its declared struct; the arena is the
+source of truth). The binding window passed for a merged run is the MAX
+per-slice window, NOT `ceil(merged/256)` — the dynamic-offset range
+check needs only the largest single block; a merged-length window would
+over-provision and could push tail slices out of the buffer. A lone
+dirty command rides the pre-178 call verbatim (no window arg). Pinned:
+the union coverage (every slice's GPU bytes == arena bytes), far-apart
+slices stay separate, the queue/legacy merge parity under REVERSED mark
+order.
+
+**C — THE SPAN SIZING + THE WIPE HAZARD** (correctness). (1) `ensureUBO`
+sized the UBO from THIS call's offset only — a tail slice bound after a
+big-window slice grew the global window was a latent Dawn validation
+error (the storm-pause class); the sizing is now `maxSpanSeen +
+uboBindingWindow` — bulletproof for every slice base at a one-time ≤
+window bytes over-provision. (2) A UBO growth event WIPED
+`pipelineRecords` but never reset `command.pipelineReady` — `usePipeline`
+silently returned on the missing record and the pass kept the STALE
+pipeline forever (no `pass.setPipeline` for already-drawn commands). The
+wipe is GONE: pipelines hold the group-0 LAYOUT (structurally equal
+across builds), only the bind group follows the new buffer. Pinned:
+`setPipeline` keeps asserting after a growth event, zero rebuilds.
+
+**D — THE GL HALF** (the same wire, the GL dialect): the feed buffer is
+created `'dynamic'` (DYNAMIC_DRAW — it is rewritten every frame; the
+default 'static' took ANGLE's immutable-leaning heap, the Task-140
+lesson the TF tier's own buffers already took), and the TF tier's
+round-trips are LIVE-PREFIX: the state texture copies `ceil(count·5/W)`
+rows (not the capacity's H — 12.5 MiB/frame at 160k regardless of the
+live count), the pairs texture copies `ceil(padN/W)` rows per network
+pass (not pairsH — 171 passes × 4 MiB ≈ 686 MB/frame of driver traffic
+at the 160k demo with a 5k live count), and the map upload SKIPS the
+identity (a swap-free frame's prov[i]=i — the GPU already holds it; a
+steady stream stopped paying 640 KB/frame at 160k). The
+reader/writer invariant that makes the live prefix safe: the fresh
+writes tile `[0, preCount_next)` exactly (the round-trip's
+`[0, count)` + the emit upload's `[emitBase, preCount)` — emitBase IS
+the post-compaction count, the facade's gpuSynced contract); sortKeys
+guards `i < u_count`, the packSorted sentinel guards the tail. Pinned at
+the boundaries: 409 particles → 1 row, 410 → 2; pairs allocated
+capacity-scaled but round-tripped padN-scaled; the map state machine
+(burst → upload, steady → zero, growth → upload, swaps → upload, the
+identity restored once, steady again).
+
+**Gates**: full suite **1833/1833** (+12: `webgpu/tests/task178.test.ts`
+— the tiling/bytes/steady feed pins, the merge/coverage/window pins,
+the queue-vs-legacy reversed-order parity, the pipeline survival;
+`gl/tests/task178.test.ts` — the live-prefix boundaries, the pairs
+allocation-vs-round-trip split, the map identity state machine; the
+task145/rendererFeed assertions moved to the new contracts in place). tsc 0; lint 0 err /
+375 warn (baseline held). `demo:smoke` 24/24, GPU health clean.
+Live gates re-run on the built dist: task167 PASS, task168 PASS,
+task169 **pixel parity IDENTICAL** (e71fb821e69f), task174 PASS (Chrome
+still lacks drawIndirectCount — the fast-path floor), task175 PASS.
+Cache-busts `?v=178`.
+
+**One trap documented, not fixed** (a behavior change, not a bug fix):
+an array-of-arrays uniform (the natural mistake for a bone palette)
+writes NaN lanes — `Math.fround(NaN) !== NaN` re-dirties the slice EVERY
+frame silently. The Task 178 test caught it by accident (the first
+draft's BIG command re-dirtied forever). A NaN guard in `writeUniforms`
+would change tolerance semantics — flagged for a future hardening pass.

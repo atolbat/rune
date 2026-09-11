@@ -190,7 +190,12 @@ function createFeedCore(options: RendererFeedOptions | TransportFeedView): FeedC
  *  refills the contents). Dirty range — one bufferSubData call. */
 export function createRendererFeedGL(gl: GLFacade, options: RendererFeedOptions | TransportFeedView): RendererFeed {
   const core = createFeedCore(options)
-  const bufferId = gl.createBuffer(core.view.bytes()) // capacity*stride storage
+  // Task 178 — THE USAGE HINT: this buffer is REWRITTEN every frame (the
+  // per-frame dirty window lands via updateBuffer → bufferSubData) —
+  // 'dynamic' (DYNAMIC_DRAW) is the semantically correct hint; the default
+  // 'static' takes the immutable-leaning allocation path on some ANGLE
+  // backends (the exact Task-140 lesson the TF tier's own buffers took).
+  const bufferId = gl.createBuffer(core.view.bytes(), 'dynamic')
   let disposed = false
 
   function sync(): void {
@@ -237,7 +242,8 @@ export function createRendererFeedGL(gl: GLFacade, options: RendererFeedOptions 
 // ────────────────────────── WebGPU ──────────────────────────
 
 /** WebGPU renderer feed: a keyed buffer keyed by the stable Float32Array view
- *  (created by syncVertexBuffer), one writeBuffer per frame.
+ *  (created by syncVertexBuffer), one writeBuffer per frame — the DIRTY
+ *  WINDOW [synced, published) since Task 178 (the GL twin's contract).
  *  Device-loss: a fresh facade → the keyed cache is empty → the first sync re-creates it. */
 export function createRendererFeedGPU(gpu: GPUFacade, options: RendererFeedOptions | TransportFeedView): RendererFeed {
   const core = createFeedCore(options)
@@ -249,8 +255,15 @@ export function createRendererFeedGPU(gpu: GPUFacade, options: RendererFeedOptio
     // (protection against a writer violating the count ≤ capacity invariant).
     const published = Math.min(core.view.count(), core.capacity)
     if (published > core.synced) {
-      // Dirty range [0, published*stride) — ONE writeBuffer (append-only).
-      gpu.syncVertexBuffer(core.view.bytes(), published * core.stride)
+      // Task 178 — THE UPLOAD WIRE: the DIRTY WINDOW [synced, published)
+      // (append-only) — the GL twin's own contract since Task 73. The
+      // pre-178 shape wrote the full prefix [0, published·stride) every
+      // frame: the write grew with the TOTAL record count (10.24 MB/frame
+      // at a 160k×64 B feed ≈ 614 MB/s of queue traffic at 60 fps — plus
+      // the staging memcpy of the SAB view, doubling it; measured in
+      // bench/ab-upload.ts). writeBuffer accepts arbitrary 4-byte-aligned
+      // buffer offsets — the append-only feeds need no ring.
+      gpu.syncVertexBuffer(core.view.bytes(), (published - core.synced) * core.stride, core.synced * core.stride)
       core.synced = published
       core.countSignal.value = published
     }

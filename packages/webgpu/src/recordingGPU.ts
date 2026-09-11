@@ -49,7 +49,9 @@ export function createRecordingGPU(): RecordingGPU {
       const flipSuffix = flipY === true ? ',flipY' : ''
       calls.push(`copyExternalImageToTextureMip(${textureId},mip=${mipLevel},${kind},@${dstX},${dstY},${w}x${h}${flipSuffix})`)
     },
-    uploadUniforms: (offset, data) => calls.push(`uploadUniforms(${offset},${data.byteLength})`),
+    uploadUniforms: (offset, data, bindingWindow) => calls.push(bindingWindow === undefined
+      ? `uploadUniforms(${offset},${data.byteLength})`
+      : `uploadUniforms(${offset},${data.byteLength},${bindingWindow})`),
     ensurePipeline: (pipelineId, _wgsl, attrs, hasTextures, pipeline) => {
       // M5: numbers — tight (3x3x2); feed interleaving — size/stride@offset.
       // Task 75: instance-step suffix + blend/depth descriptor markers.
@@ -66,7 +68,7 @@ export function createRecordingGPU(): RecordingGPU {
     usePipeline: pipelineId => calls.push(`usePipeline(${pipelineId})`),
     bindUniforms: offset => calls.push(`bindUniforms(${offset})`),
     bindVertexBuffer: (slot, data, size) => calls.push(`bindVertexBuffer(${slot},${data.length},${size})`),
-    syncVertexBuffer: (data, byteLength) => calls.push(`syncVertexBuffer(${data.length},${byteLength})`),
+    syncVertexBuffer: (data, byteLength, byteOffset) => calls.push(`syncVertexBuffer(${data.length},${byteLength},${byteOffset ?? 0})`),
     // Task 131 — the GPGPU tier (recorded; the recorder has no device)
     bindExternalVertexBuffer: (slot, bufferId) => calls.push(`bindExternalVertexBuffer(${slot},${bufferId})`),
     createExternalBuffer: (byteLength, usage) => {

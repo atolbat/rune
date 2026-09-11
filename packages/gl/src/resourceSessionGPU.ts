@@ -159,14 +159,14 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
       const content = journal.storeSource(source, kind, copyWidth, copyHeight)
       journal.record({ kind: 'texture.writeMip', id: textureId, level: mipLevel, content, flipY: flipY === true })
     },
-    uploadUniforms: (offset, data) => raw.uploadUniforms(offset, data),
+    uploadUniforms: (offset, data, bindingWindow) => raw.uploadUniforms(offset, data, bindingWindow),
     ensurePipeline: (pipelineId, wgsl, attrSizes, hasTextures) =>
       raw.ensurePipeline(pipelineId, wgsl, attrSizes, hasTextures),
     usePipeline: pipelineId => raw.usePipeline(pipelineId),
     bindUniforms: dynamicOffset => raw.bindUniforms(dynamicOffset),
     bindVertexBuffer: (slot, data, size) => raw.bindVertexBuffer(slot, data, size),
     // M5 (Task 73): feed dual-bind — a frame op (per-frame dirty range), not journaled.
-    syncVertexBuffer: (data, byteLength) => raw.syncVertexBuffer(data, byteLength),
+    syncVertexBuffer: (data, byteLength, byteOffset) => raw.syncVertexBuffer(data, byteLength, byteOffset),
     bindExternalVertexBuffer: (slot, bufferId) => raw.bindExternalVertexBuffer(slot, bufferId),
     createExternalBuffer: (byteLength, usage) => raw.createExternalBuffer(byteLength, usage),
     writeExternalBuffer: (id, data, byteOffset, byteLength) => raw.writeExternalBuffer(id, data, byteOffset, byteLength),

@@ -155,7 +155,11 @@ export interface GPUFacade {
     copyHeight: number,
     flipY?: boolean,
   ): void
-  uploadUniforms(offset: number, data: Uint8Array): void
+  /** Task 178 — THE MERGED UPLOAD: bindingWindow is the executor's MAX
+   *  per-slice window for a coalesced run of adjacent dirty slices (the
+   *  range check needs the largest single block, not the merged length).
+   *  Omitted — the call's own length (the pre-178 contract). */
+  uploadUniforms(offset: number, data: Uint8Array, bindingWindow?: number): void
   /** M5 (Task 73): vertex buffer slot — a number (tight: size×4 bytes,
    *  offset 0 — backward compatibility) OR a feed interleaving descriptor
    *  (size components, stride record bytes, offset field bytes).
@@ -167,10 +171,13 @@ export interface GPUFacade {
   bindUniforms(dynamicOffset: number): void
   bindVertexBuffer(slot: number, data: Float32Array, size: number): void
   /** M5 (Task 73): the feed's dynamic vertex buffer — writeBuffer in a
-   *  single call per frame (dirty range [0, byteLength)). The key is the
-   *  Float32Array itself (stable in the feed renderer). Binding is done by
-   *  the executor via bindVertexBuffer (the same keyed cache). */
-  syncVertexBuffer(data: Float32Array, byteLength: number): void
+   *  single call per frame. The key is the Float32Array itself (stable in
+   *  the feed renderer). Binding is done by the executor via
+   *  bindVertexBuffer (the same keyed cache). Task 178 — THE UPLOAD WIRE:
+   *  byteOffset (default 0) is the dirty window's base — the append-only
+   *  feeds upload [byteOffset, byteOffset+byteLength) instead of the full
+   *  prefix [0, byteLength) (O(append) per frame, the GL twin's contract). */
+  syncVertexBuffer(data: Float32Array, byteLength: number, byteOffset?: number): void
   /** Task 131 (the GPGPU tier) — EXTERNAL BUFFERS: caller-owned GPU
    *  storage (usage flags are the caller's: STORAGE | COPY_DST |
    *  VERTEX | COPY_SRC...; the facade stays usage-agnostic). The ids are

@@ -100,7 +100,7 @@ export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
     copyExternalImageToTextureMip: (textureId, mipLevel, source, dstX, dstY, copyWidth, copyHeight, flipY) =>
       gpu.copyExternalImageToTextureMip(textureId, mipLevel, source, dstX, dstY, copyWidth, copyHeight, flipY),
     // Frame ops: uploadUniforms — writeBuffer into the UBO, per-frame.
-    uploadUniforms: (offset, data) => gpu.uploadUniforms(offset, data),
+    uploadUniforms: (offset, data, bindingWindow) => gpu.uploadUniforms(offset, data, bindingWindow),
     // ensurePipeline — lazy compilation of WGSL → GPURenderPipeline. Not
     // journaled: the WGSL source is stored in WgpuCommand (compiled), so for
     // device-loss recovery it is enough to replay only textures/targets/views —
@@ -111,7 +111,7 @@ export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
     bindUniforms: dynamicOffset => gpu.bindUniforms(dynamicOffset),
     bindVertexBuffer: (slot, data, size) => gpu.bindVertexBuffer(slot, data, size),
     // M5 (Task 73): feed dual-bind — a frame op (per-frame dirty range), not journaled.
-    syncVertexBuffer: (data, byteLength) => gpu.syncVertexBuffer(data, byteLength),
+    syncVertexBuffer: (data, byteLength, byteOffset) => gpu.syncVertexBuffer(data, byteLength, byteOffset),
     bindExternalVertexBuffer: (slot, bufferId) => gpu.bindExternalVertexBuffer(slot, bufferId),
     createExternalBuffer: (byteLength, usage) => gpu.createExternalBuffer(byteLength, usage),
     writeExternalBuffer: (id, data, byteOffset, byteLength) => gpu.writeExternalBuffer(id, data, byteOffset, byteLength),

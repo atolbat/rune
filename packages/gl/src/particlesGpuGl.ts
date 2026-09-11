@@ -357,6 +357,12 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
   }
 
   let frameIndex = 0
+  // Task 178 — the map's GPU-side identity tracking: mapIdentity = the GPU
+  // map buffer holds prov[i]=i on [0, mapSynced); mapSynced = the live
+  // count the upload covered (a growth past it needs a fresh identity
+  // prefix — the slots beyond are stale garbage, not identity).
+  let mapIdentity = false
+  let mapSynced = 0
 
   function step(dt: number, camera?: GpuRenderCamera): void {
     const count = facade.count
@@ -429,10 +435,21 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
 
     // 2. THE MAP — the provenance of the CPU compaction, replayed on
     //    indices exactly as the WGSL compact replays it on state.
+    //    Task 178 — THE IDENTITY SKIP: a swap-free frame's map is prov[i]=i
+    //    (identity). The GPU map buffer already holds the identity on
+    //    [0, mapSynced) whenever the last upload was identity-shaped — a
+    //    steady emission-only stream (no deaths) re-uploads count×4 bytes
+    //    for nothing (640 KB/frame at 160k). Upload only when the map is
+    //    NOT identity, or the live count outgrew what the GPU holds.
     const preCount = ho.emitBase + ho.emitCount
-    gpuGlProvenance(preCount, ho.swaps, ho.swapCount, prov)
-    for (let i = 0; i < count; i++) mapFloats[i] = prov[i]
-    gpu.updateBuffer(mapBuf, mapFloats.subarray(0, count))
+    const swapsThisFrame = ho.swapCount > 0
+    if (swapsThisFrame || !mapIdentity || count > mapSynced) {
+      gpuGlProvenance(preCount, ho.swaps, ho.swapCount, prov)
+      for (let i = 0; i < count; i++) mapFloats[i] = prov[i]
+      gpu.updateBuffer(mapBuf, mapFloats.subarray(0, count))
+      mapIdentity = !swapsThisFrame
+      mapSynced = count
+    }
 
     // 3. compact+advance: gather map[i] → integrate → write slot i.
     gpu.runPass(advPass, count, {
@@ -443,7 +460,17 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
     } satisfies TfRunBindings)
 
     // 4. the PBO round-trip: the TF output becomes the new state texture.
-    gpu.texSubImage2DBuffer(stateTex, 0, 0, W, H, stateOut, 0)
+    //    Task 178 — THE LIVE PREFIX: the advance TF streams `count` vertices
+    //    sequentially from row 0 — only the rows [0, count·5) texels are
+    //    fresh. The pre-178 form round-tripped ALL capacity rows
+    //    (capacity-scaled: 12.5 MiB/frame at 160k regardless of the live
+    //    count — pure driver traffic on llvmpipe/tiled GPUs). Every reader
+    //    is confined to the fresh union [0, count) ∪ [emitBase, preCount):
+    //    the next advance reads [0, preCount), the sort/pack family reads
+    //    [0, count) — the identity of readers/writers is pinned in the
+    //    task178 tests.
+    const stateRows = Math.max(1, Math.ceil((count * GPU_GL_TEXELS_PER_PARTICLE) / W))
+    gpu.texSubImage2DBuffer(stateTex, 0, 0, W, stateRows, stateOut, 0)
 
     if (count > 0 && tiered) {
       // Task 134 — THE GPU RENDER TIER: the camera contracts (loud, not
@@ -479,12 +506,17 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
       }
       // 5a. sortKeys — the (key, index) pairs for [0, padN), then the PBO
       //     round-trip (the pairs texture is the network's read side).
+      //     Task 178 — THE LIVE PREFIX: padN rows (the padded COUNT), not
+      //     the capacity's maxPadN rows — 171 network passes each paid the
+      //     capacity-scaled round-trip (the audit's ~686 MiB/frame at the
+      //     160k demo with a 5k live count; now ~4 rows vs 128).
+      const pairsRows = Math.max(1, Math.ceil(padN / W))
       gpu.runPass(sortKeysPass, padN, {
         bufferId: pairsOut,
         textures: [stateTex],
         uniformData: skUni,
       } satisfies TfRunBindings)
-      gpu.texSubImage2DBuffer(pairsTex, 0, 0, W, pairsH, pairsOut, 0)
+      gpu.texSubImage2DBuffer(pairsTex, 0, 0, W, pairsRows, pairsOut, 0)
       // 5b. the bitonic network — the canonical (k, j) sequence, each pass
       //     one TF run + one PBO round-trip.
       if (cfg.sort) {
@@ -497,7 +529,7 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
             textures: [pairsTex],
             uniformData: btUni,
           } satisfies TfRunBindings)
-          gpu.texSubImage2DBuffer(pairsTex, 0, 0, W, pairsH, pairsOut, 0)
+          gpu.texSubImage2DBuffer(pairsTex, 0, 0, W, pairsRows, pairsOut, 0)
         })
       }
       // 5c. the sorted pack — the records [0, count) in draw order (the

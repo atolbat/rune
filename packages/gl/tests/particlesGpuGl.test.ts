@@ -177,7 +177,8 @@ describe('Task 132 — the TF orchestrator (the recording sequence)', () => {
     expect(seq).toContain('updateBuffer(3,4,0)')
     // compact+advance: pass 1, 4 verts, out buffer 1, map attrib, state texture, 29 uniforms
     expect(seq).toContain('runTransformPass(1,4,buf:1,a:1,t:1,u:29)')
-    // the PBO round-trip: the whole texture from the state buffer 2
+    // the PBO round-trip: the LIVE-PREFIX rows from the state buffer 2
+    // (Task 178 — at this tiny count the live rows == the whole texture)
     const H = gpuGlStateTextureH(12)
     expect(seq).toContain(`texSubImage2DBuffer(1,0,0,${GPU_GL_STATE_TEXTURE_W},${H},buf:1,off:0)`)
     // pack: pass 2, 4 verts, records buffer 2, 2 textures, 4 uniforms

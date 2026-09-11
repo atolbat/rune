@@ -122,31 +122,59 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
    *  (each command's slice is DISJOINT, so inter-command order cannot
    *  change what lands on the GPU; for well-formed frame flows mark order
    *  === tape order — pinned by the task145 parity test). Without the
-   *  queue — the legacy O(ops) walk, verbatim. */
+   *  queue — the legacy O(ops) walk.
+   *  Task 178 — THE MERGED UPLOAD: both drains collect the same dirty
+   *  command list, SORT it by slice offset (mark order ≠ allocation
+   *  order — and the sorted form makes the queue/legacy merge identical
+   *  even for the divergent aborted-frame flows), then coalesce the
+   *  disjoint 256-aligned slice windows into ONE writeBuffer per run of
+   *  adjacent slices (gap < 256 — the SliceArena's own dirtyRanges rule;
+   *  the bytes BETWEEN the slices ride along: the arena is the source of
+   *  truth and the shader reads only its declared struct, so the extra
+   *  bytes are inert). The binding window passed for a merged run is the
+   *  MAX per-slice window — NOT ceil(merged length/256): the bind group's
+   *  dynamic-offset range check needs only the largest single block, and
+   *  a merged-length window would over-provision (a tail slice + window
+   *  could exceed the buffer). A single dirty command rides the pre-178
+   *  call verbatim (no window argument — the facade's own default). */
   function uploadDirtySlices(view: TapeView): void {
+    const dirty: RichWgpuCommand[] = []
     if (queue !== null) {
       for (let at = 0; at < queue.length; at++) {
         const command = queue[at] as RichWgpuCommand | undefined
-        if (command === undefined || !command.needsUpload) continue
-        // Upload — the actual uniform bytes (without the slice's trailing padding
-        // up to dynamic-offset granularity): writeBuffer allows a multiple-of-4
-        // size, the shader reads exactly as much as declared in the struct.
-        // The subarray view is cached on the command (the slice window is
-        // constant per command — no per-frame view allocation).
-        if (command.sliceView === undefined) {
-          const bytes = Math.min(command.uniformBytes ?? command.sliceBytes, command.sliceBytes)
-          command.sliceView = arena.bytes.subarray(command.sliceOffset, command.sliceOffset + bytes)
-        }
-        gpu.uploadUniforms(command.sliceOffset, command.sliceView)
-        command.needsUpload = false
+        if (command !== undefined && command.needsUpload) dirty.push(command)
       }
       queue.length = 0
-      return
+    } else {
+      for (let at = 0; at < view.count; at++) {
+        if (view.op[at] !== 2) continue
+        const command = commands[view.a[at]] as RichWgpuCommand | undefined
+        if (command !== undefined && command.needsUpload) dirty.push(command)
+      }
     }
-    for (let at = 0; at < view.count; at++) {
-      if (view.op[at] !== 2) continue
-      const command = commands[view.a[at]] as RichWgpuCommand | undefined
-      if (command === undefined || !command.needsUpload) continue
+    if (dirty.length === 0) return
+    if (dirty.length > 1) dirty.sort((a, b) => a.sliceOffset - b.sliceOffset)
+    // the merge walk: a run's window [from, to), the max per-slice binding
+    // window, the run's member count (1 member → the classic call verbatim)
+    let from = 0
+    let to = 0
+    let window = 0
+    let members = 0
+    // the run's FIRST member's cached view — set when a run starts, read
+    // by flushRun when the run stayed a lone slice (the classic call form)
+    let loneView: Uint8Array | undefined
+    const flushRun = (): void => {
+      if (members === 1 && loneView !== undefined) {
+        // the lone slice: the CACHED view, no window arg (the pre-178
+        // call, byte-identical call stream)
+        gpu.uploadUniforms(from, loneView)
+      } else if (members > 1) {
+        gpu.uploadUniforms(from, arena.bytes.subarray(from, to), window)
+      }
+      members = 0
+      loneView = undefined
+    }
+    for (const command of dirty) {
       // Upload — the actual uniform bytes (without the slice's trailing padding
       // up to dynamic-offset granularity): writeBuffer allows a multiple-of-4
       // size, the shader reads exactly as much as declared in the struct.
@@ -156,9 +184,24 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
         const bytes = Math.min(command.uniformBytes ?? command.sliceBytes, command.sliceBytes)
         command.sliceView = arena.bytes.subarray(command.sliceOffset, command.sliceOffset + bytes)
       }
-      gpu.uploadUniforms(command.sliceOffset, command.sliceView)
       command.needsUpload = false
+      const offset = command.sliceOffset
+      const bytes = command.sliceView.length
+      const w = Math.ceil(bytes / 256) * 256
+      if (members > 0 && offset - to < 256) {
+        if (w > window) window = w
+        if (offset + bytes > to) to = offset + bytes
+        members++
+      } else {
+        flushRun()
+        from = offset
+        to = offset + bytes
+        window = w
+        members = 1
+        loneView = command.sliceView
+      }
     }
+    flushRun()
   }
 
   function beginPass(): void {

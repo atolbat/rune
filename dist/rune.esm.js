@@ -8308,7 +8308,7 @@ function createFeedCore(options) {
 }
 function createRendererFeedGL(gl, options) {
   const core = createFeedCore(options);
-  const bufferId = gl.createBuffer(core.view.bytes());
+  const bufferId = gl.createBuffer(core.view.bytes(), "dynamic");
   let disposed = false;
   function sync() {
     if (disposed)
@@ -8366,7 +8366,7 @@ function createRendererFeedGPU(gpu, options) {
       return;
     const published = Math.min(core.view.count(), core.capacity);
     if (published > core.synced) {
-      gpu.syncVertexBuffer(core.view.bytes(), published * core.stride);
+      gpu.syncVertexBuffer(core.view.bytes(), (published - core.synced) * core.stride, core.synced * core.stride);
       core.synced = published;
       core.countSignal.value = published;
     }
@@ -9476,34 +9476,66 @@ function createGpuExecutor(options) {
     gpu.submit();
   }
   function uploadDirtySlices(view) {
+    const dirty = [];
     if (queue !== null) {
       for (let at = 0;at < queue.length; at++) {
         const command = queue[at];
-        if (command === undefined || !command.needsUpload)
-          continue;
-        if (command.sliceView === undefined) {
-          const bytes = Math.min(command.uniformBytes ?? command.sliceBytes, command.sliceBytes);
-          command.sliceView = arena.bytes.subarray(command.sliceOffset, command.sliceOffset + bytes);
-        }
-        gpu.uploadUniforms(command.sliceOffset, command.sliceView);
-        command.needsUpload = false;
+        if (command !== undefined && command.needsUpload)
+          dirty.push(command);
       }
       queue.length = 0;
-      return;
-    }
-    for (let at = 0;at < view.count; at++) {
-      if (view.op[at] !== 2)
-        continue;
-      const command = commands[view.a[at]];
-      if (command === undefined || !command.needsUpload)
-        continue;
-      if (command.sliceView === undefined) {
-        const bytes = Math.min(command.uniformBytes ?? command.sliceBytes, command.sliceBytes);
-        command.sliceView = arena.bytes.subarray(command.sliceOffset, command.sliceOffset + bytes);
+    } else {
+      for (let at = 0;at < view.count; at++) {
+        if (view.op[at] !== 2)
+          continue;
+        const command = commands[view.a[at]];
+        if (command !== undefined && command.needsUpload)
+          dirty.push(command);
       }
-      gpu.uploadUniforms(command.sliceOffset, command.sliceView);
-      command.needsUpload = false;
     }
+    if (dirty.length === 0)
+      return;
+    if (dirty.length > 1)
+      dirty.sort((a, b) => a.sliceOffset - b.sliceOffset);
+    let from = 0;
+    let to = 0;
+    let window2 = 0;
+    let members = 0;
+    let loneView;
+    const flushRun2 = () => {
+      if (members === 1 && loneView !== undefined) {
+        gpu.uploadUniforms(from, loneView);
+      } else if (members > 1) {
+        gpu.uploadUniforms(from, arena.bytes.subarray(from, to), window2);
+      }
+      members = 0;
+      loneView = undefined;
+    };
+    for (const command of dirty) {
+      if (command.sliceView === undefined) {
+        const bytes2 = Math.min(command.uniformBytes ?? command.sliceBytes, command.sliceBytes);
+        command.sliceView = arena.bytes.subarray(command.sliceOffset, command.sliceOffset + bytes2);
+      }
+      command.needsUpload = false;
+      const offset = command.sliceOffset;
+      const bytes = command.sliceView.length;
+      const w = Math.ceil(bytes / 256) * 256;
+      if (members > 0 && offset - to < 256) {
+        if (w > window2)
+          window2 = w;
+        if (offset + bytes > to)
+          to = offset + bytes;
+        members++;
+      } else {
+        flushRun2();
+        from = offset;
+        to = offset + bytes;
+        window2 = w;
+        members = 1;
+        loneView = command.sliceView;
+      }
+    }
+    flushRun2();
   }
   function beginPass() {
     gpu.beginPass(0);
@@ -9838,6 +9870,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
   let depthView = null;
   let ubo = null;
   let uboSize = 0;
+  let uboSpanSeen = 0;
   let uboGroup = null;
   let uboBindingWindow = 256;
   let encoder = null;
@@ -9951,13 +9984,16 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
       throw error;
     }
   }
-  function uploadUniforms(offset, data) {
-    const window2 = Math.ceil(data.length / 256) * 256;
+  function uploadUniforms(offset, data, bindingWindow) {
+    const window2 = bindingWindow ?? Math.ceil(data.length / 256) * 256;
     if (window2 > uboBindingWindow) {
       uboBindingWindow = window2;
       uboGroup = null;
     }
-    ensureUBO(offset + Math.max(data.length, uboBindingWindow));
+    const extent = offset + data.length;
+    if (extent > uboSpanSeen)
+      uboSpanSeen = extent;
+    ensureUBO(uboSpanSeen + uboBindingWindow);
     try {
       device.queue.writeBuffer(ubo, offset, data);
     } catch (error) {
@@ -9978,7 +10014,6 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
       uboSize = size;
       uboGroup = null;
       currentPipeline = null;
-      pipelineRecords.length = 0;
     }
     const layout = device.createBindGroupLayout({
       entries: [{
@@ -10168,7 +10203,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     pass.setVertexBuffer(slot, buffer);
     vertexBindMemo[slot] = buffer;
   }
-  function syncVertexBuffer(data, byteLength) {
+  function syncVertexBuffer(data, byteLength, byteOffset = 0) {
     let buffer = vertexBuffers.get(data);
     if (buffer === undefined) {
       buffer = device.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
@@ -10176,10 +10211,10 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     }
     if (byteLength <= 0)
       return;
-    guardedWriteVertex(buffer, data, byteLength);
+    guardedWriteVertex(buffer, data, byteLength, byteOffset);
   }
-  function guardedWriteVertex(buffer, data, byteLength) {
-    const capped = Math.min(byteLength, buffer.size);
+  function guardedWriteVertex(buffer, data, byteLength, byteOffset = 0) {
+    const capped = Math.min(byteLength, buffer.size - byteOffset);
     if (capped !== byteLength) {
       onGpuError?.(`writeBuffer(vertex) clamp: ${byteLength} → ${capped} bytes (buffer size ${buffer.size})`);
     }
@@ -10193,17 +10228,17 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
           staging = new Uint8Array(new ArrayBuffer(capped));
           sabStaging.set(data, staging);
         }
-        staging.set(new Uint8Array(data.buffer, data.byteOffset, capped));
-        device.queue.writeBuffer(buffer, 0, staging, 0, capped);
+        staging.set(new Uint8Array(data.buffer, data.byteOffset + byteOffset, capped));
+        device.queue.writeBuffer(buffer, byteOffset, staging, 0, capped);
         return;
       }
-      if (data.byteOffset === 0 && capped === data.byteLength) {
+      if (byteOffset === 0 && data.byteOffset === 0 && capped === data.byteLength) {
         device.queue.writeBuffer(buffer, 0, data);
         return;
       }
-      device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, capped);
+      device.queue.writeBuffer(buffer, byteOffset, data.buffer, data.byteOffset + byteOffset, capped);
     } catch (error) {
-      onGpuError?.(`writeBuffer(vertex, ${capped} bytes) rejected: ${errorMessage(error)}`);
+      onGpuError?.(`writeBuffer(vertex, ${capped} bytes @${byteOffset}) rejected: ${errorMessage(error)}`);
     }
   }
   function bindTexture(textureOrViewId) {
@@ -11133,12 +11168,12 @@ function withJournalGpu(gpu, journal) {
       }
     },
     copyExternalImageToTextureMip: (textureId, mipLevel, source, dstX, dstY, copyWidth, copyHeight, flipY) => gpu.copyExternalImageToTextureMip(textureId, mipLevel, source, dstX, dstY, copyWidth, copyHeight, flipY),
-    uploadUniforms: (offset, data) => gpu.uploadUniforms(offset, data),
+    uploadUniforms: (offset, data, bindingWindow) => gpu.uploadUniforms(offset, data, bindingWindow),
     ensurePipeline: (pipelineId, wgsl, attrSizes, hasTextures) => gpu.ensurePipeline(pipelineId, wgsl, attrSizes, hasTextures),
     usePipeline: (pipelineId) => gpu.usePipeline(pipelineId),
     bindUniforms: (dynamicOffset) => gpu.bindUniforms(dynamicOffset),
     bindVertexBuffer: (slot, data, size) => gpu.bindVertexBuffer(slot, data, size),
-    syncVertexBuffer: (data, byteLength) => gpu.syncVertexBuffer(data, byteLength),
+    syncVertexBuffer: (data, byteLength, byteOffset) => gpu.syncVertexBuffer(data, byteLength, byteOffset),
     bindExternalVertexBuffer: (slot, bufferId) => gpu.bindExternalVertexBuffer(slot, bufferId),
     createExternalBuffer: (byteLength, usage) => gpu.createExternalBuffer(byteLength, usage),
     writeExternalBuffer: (id, data, byteOffset, byteLength) => gpu.writeExternalBuffer(id, data, byteOffset, byteLength),
@@ -11341,12 +11376,12 @@ function createResourceSessionGPU(raw, journal) {
       const content = journal.storeSource(source, kind, copyWidth, copyHeight);
       journal.record({ kind: "texture.writeMip", id: textureId, level: mipLevel, content, flipY: flipY === true });
     },
-    uploadUniforms: (offset, data) => raw.uploadUniforms(offset, data),
+    uploadUniforms: (offset, data, bindingWindow) => raw.uploadUniforms(offset, data, bindingWindow),
     ensurePipeline: (pipelineId, wgsl, attrSizes, hasTextures) => raw.ensurePipeline(pipelineId, wgsl, attrSizes, hasTextures),
     usePipeline: (pipelineId) => raw.usePipeline(pipelineId),
     bindUniforms: (dynamicOffset) => raw.bindUniforms(dynamicOffset),
     bindVertexBuffer: (slot, data, size) => raw.bindVertexBuffer(slot, data, size),
-    syncVertexBuffer: (data, byteLength) => raw.syncVertexBuffer(data, byteLength),
+    syncVertexBuffer: (data, byteLength, byteOffset) => raw.syncVertexBuffer(data, byteLength, byteOffset),
     bindExternalVertexBuffer: (slot, bufferId) => raw.bindExternalVertexBuffer(slot, bufferId),
     createExternalBuffer: (byteLength, usage) => raw.createExternalBuffer(byteLength, usage),
     writeExternalBuffer: (id, data, byteOffset, byteLength) => raw.writeExternalBuffer(id, data, byteOffset, byteLength),
@@ -14371,6 +14406,8 @@ function createGpuParticlesTf(facade, gpu) {
     }
   }
   let frameIndex = 0;
+  let mapIdentity = false;
+  let mapSynced = 0;
   function step(dt, camera) {
     const count = facade.count;
     if (count <= 0 && ho.emitCount === 0 && ho.swapCount === 0)
@@ -14436,17 +14473,23 @@ function createGpuParticlesTf(facade, gpu) {
       }
     }
     const preCount = ho.emitBase + ho.emitCount;
-    gpuGlProvenance(preCount, ho.swaps, ho.swapCount, prov);
-    for (let i = 0;i < count; i++)
-      mapFloats[i] = prov[i];
-    gpu.updateBuffer(mapBuf, mapFloats.subarray(0, count));
+    const swapsThisFrame = ho.swapCount > 0;
+    if (swapsThisFrame || !mapIdentity || count > mapSynced) {
+      gpuGlProvenance(preCount, ho.swaps, ho.swapCount, prov);
+      for (let i = 0;i < count; i++)
+        mapFloats[i] = prov[i];
+      gpu.updateBuffer(mapBuf, mapFloats.subarray(0, count));
+      mapIdentity = !swapsThisFrame;
+      mapSynced = count;
+    }
     gpu.runPass(advPass, count, {
       bufferId: stateOut,
       attribBuffers: [mapBuf],
       textures: [stateTex],
       uniformData: advUni
     });
-    gpu.texSubImage2DBuffer(stateTex, 0, 0, W, H, stateOut, 0);
+    const stateRows = Math.max(1, Math.ceil(count * GPU_GL_TEXELS_PER_PARTICLE / W));
+    gpu.texSubImage2DBuffer(stateTex, 0, 0, W, stateRows, stateOut, 0);
     if (count > 0 && tiered) {
       let camForward = null;
       let camViewProj = null;
@@ -14478,12 +14521,13 @@ function createGpuParticlesTf(facade, gpu) {
         frustumPlanes(camViewProj, frustumScratch);
         skUni.set(frustumScratch, K.planes);
       }
+      const pairsRows = Math.max(1, Math.ceil(padN / W));
       gpu.runPass(sortKeysPass, padN, {
         bufferId: pairsOut,
         textures: [stateTex],
         uniformData: skUni
       });
-      gpu.texSubImage2DBuffer(pairsTex, 0, 0, W, pairsH, pairsOut, 0);
+      gpu.texSubImage2DBuffer(pairsTex, 0, 0, W, pairsRows, pairsOut, 0);
       if (cfg.sort) {
         const B = GPU_GL_BITONIC_F;
         bitonicPassSequence(padN, (k, j) => {
@@ -14494,7 +14538,7 @@ function createGpuParticlesTf(facade, gpu) {
             textures: [pairsTex],
             uniformData: btUni
           });
-          gpu.texSubImage2DBuffer(pairsTex, 0, 0, W, pairsH, pairsOut, 0);
+          gpu.texSubImage2DBuffer(pairsTex, 0, 0, W, pairsRows, pairsOut, 0);
         });
       }
       gpu.runPass(packSortedPass, count, {

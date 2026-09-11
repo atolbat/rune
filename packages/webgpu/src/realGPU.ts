@@ -179,6 +179,9 @@ export async function createRealGPU(
   let depthView: GPUTextureView | null = null
   let ubo: GPUBuffer | null = null
   let uboSize = 0
+  // Task 178: the max (offset + length) ever uploaded — the span the
+  // dynamic-offset binds must fit against (see uploadUniforms).
+  let uboSpanSeen = 0
   let uboGroup: GPUBindGroup | null = null
   // The dynamic-offset binding window: the bind group exposes [offset,
   // offset + window) of the UBO to the pipeline. Dawn validates it against
@@ -483,16 +486,29 @@ export async function createRealGPU(
     }
   }
 
-  function uploadUniforms(offset: number, data: Uint8Array): void {
+  function uploadUniforms(offset: number, data: Uint8Array, bindingWindow?: number): void {
     // The window must cover the WHOLE slice (the shader's uniform block +
     // any padding up to it) for the pipeline to accept the binding, and the
     // buffer must fit offset + window for the dynamic-offset range check.
-    const window = Math.ceil(data.length / 256) * 256
+    // Task 178 — THE MERGED UPLOAD: bindingWindow is the executor's MAX
+    // per-slice window for a coalesced run (the merged data can be LONGER
+    // than any single block — the range check still needs only the largest
+    // block; a merged-length window would over-provision and could push
+    // tail slices out of the buffer). Omitted — the call's own length.
+    const window = bindingWindow ?? Math.ceil(data.length / 256) * 256
     if (window > uboBindingWindow) {
       uboBindingWindow = window
       uboGroup = null // rebuilt with the larger window in ensureUBO
     }
-    ensureUBO(offset + Math.max(data.length, uboBindingWindow))
+    // Task 178 — THE SPAN SIZING: EVERY live slice's dynamic-offset bind
+    // validates offset + uboBindingWindow ≤ uboSize. The pre-178 form only
+    // ensured THIS call's offset — a tail slice (bound AFTER a big-window
+    // slice grew the global window) was a latent Dawn validation error
+    // (the error-storm pause class). The max span seen + the window covers
+    // every slice base ≤ span — a one-time ≤ window bytes over-provision.
+    const extent = offset + data.length
+    if (extent > uboSpanSeen) uboSpanSeen = extent
+    ensureUBO(uboSpanSeen + uboBindingWindow)
     try {
       device.queue.writeBuffer(ubo!, offset, data as Uint8Array<ArrayBuffer>)
     } catch (error) {
@@ -515,8 +531,17 @@ export async function createRealGPU(
       ubo = next
       uboSize = size
       uboGroup = null
-      currentPipeline = null // rebuild layout-dependent pipeline caches
-      pipelineRecords.length = 0
+      // Task 178: the UBO OBJECT feeds only the bind GROUP (rebuilt below)
+      // — the pipeline objects hold the group-0 LAYOUT, which is
+      // byte-identical across builds ("structurally equal layouts are
+      // pipeline-compatible"), and the executor's pipelineReady flags are
+      // NOT reset by a facade-side wipe. The pre-178 pipelineRecords wipe
+      // here was a correctness hazard: usePipeline silently returned on
+      // the missing record (pipelineReady still true → ensurePipeline
+      // never re-ran → pass.setPipeline NEVER called for already-drawn
+      // commands). The group rebuild + boundGroup0Offset = -1 below are
+      // the only state that must follow the new buffer.
+      currentPipeline = null // force one re-assert (harmless; the pass is closed during uploads)
     }
     // The shared group-0 bind group: the binding covers the window (not a
     // fixed 256 B). The BGL descriptor is byte-identical to buildPipeline's
@@ -802,33 +827,43 @@ export async function createRealGPU(
   }
 
   /** M5 (Task 73): the feed's dynamic vertex buffer — writeBuffer in a
-   *  single call per frame with the dirty range [0, byteLength). The key
-   *  is the feed renderer's stable Float32Array (SAB view / T3 mirror).
-   *  Binding — later, via bindVertexBuffer (the same keyed cache, no
-   *  repeated write). */
-  function syncVertexBuffer(data: Float32Array, byteLength: number): void {
+   *  single call per frame with the dirty range. The key is the feed
+   *  renderer's stable Float32Array (SAB view / T3 mirror). Binding —
+   *  later, via bindVertexBuffer (the same keyed cache, no repeated write).
+   *  Task 178 — THE UPLOAD WIRE: byteOffset lands the DIRTY WINDOW
+   *  [byteOffset, byteOffset+byteLength) — the pre-178 shape re-uploaded
+   *  the full prefix [0, published·stride) every frame (O(total records)
+   *  per frame: 10.24 MB/frame at a 160k×64 B feed, ~614 MB/s of queue
+   *  traffic at 60 fps — measured, bench/ab-upload.ts); the GL twin always
+   *  shipped the window. Append-only contract: the offset is the synced
+   *  mark, the length is the append — the same clamps and guards apply. */
+  function syncVertexBuffer(data: Float32Array, byteLength: number, byteOffset = 0): void {
     let buffer = vertexBuffers.get(data)
     if (buffer === undefined) {
       buffer = device.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST })
       vertexBuffers.set(data, buffer)
     }
     if (byteLength <= 0) return
-    guardedWriteVertex(buffer, data, byteLength)
+    guardedWriteVertex(buffer, data, byteLength, byteOffset)
   }
 
   /** Task 75: guarded vertex buffer write. Three lines of defense:
-   *  (1) clamp byteLength to the GPU buffer size (data.byteLength may
-   *      grow/diverge from the cache key under stress);
+   *  (1) clamp byteLength to the GPU buffer's remaining window (data
+   *      .byteLength may grow/diverge from the cache key under stress);
    *  (2) copy the SAB view into a plain ArrayBuffer (WebGPU forbids shared
    *      memory in writeBuffer — T1/T2 feeds);
    *  (3) try/catch around writeBuffer — a synchronous validation error
    *      ("Number of bytes to write is too large", non-multiple of 4 etc.)
    *      goes to onGpuError, the frame CONTINUES, the demo does not crash.
+   *  Task 178 — THE UPLOAD WIRE: byteOffset is the dirty window's base
+   *      (append-only feeds: synced·stride; the first upload is 0). The
+   *      staging copy sizes to the WINDOW, the source view starts at
+   *      data.byteOffset + byteOffset, writeBuffer lands at the offset.
    *  ⚠️ Call forms: TypedArray → dataOffset/size in ELEMENTS; ArrayBuffer →
-   *  in BYTES (GPUQueue.writeBuffer spec). */
-  function guardedWriteVertex(buffer: GPUBuffer, data: Float32Array, byteLength: number): void {
-    // (1) clamp: write no more than the GPU buffer size.
-    const capped = Math.min(byteLength, buffer.size)
+   *      in BYTES (GPUQueue.writeBuffer spec). */
+  function guardedWriteVertex(buffer: GPUBuffer, data: Float32Array, byteLength: number, byteOffset = 0): void {
+    // (1) clamp: write no more than the GPU buffer's remaining window.
+    const capped = Math.min(byteLength, buffer.size - byteOffset)
     if (capped !== byteLength) {
       onGpuError?.(`writeBuffer(vertex) clamp: ${byteLength} → ${capped} bytes (buffer size ${buffer.size})`)
     }
@@ -846,18 +881,18 @@ export async function createRealGPU(
           staging = new Uint8Array(new ArrayBuffer(capped))
           sabStaging.set(data, staging)
         }
-        staging.set(new Uint8Array(data.buffer, data.byteOffset, capped))
-        device.queue.writeBuffer(buffer, 0, staging, 0, capped)
+        staging.set(new Uint8Array(data.buffer, data.byteOffset + byteOffset, capped))
+        device.queue.writeBuffer(buffer, byteOffset, staging, 0, capped)
         return
       }
-      if (data.byteOffset === 0 && capped === data.byteLength) {
+      if (byteOffset === 0 && data.byteOffset === 0 && capped === data.byteLength) {
         device.queue.writeBuffer(buffer, 0, data as Float32Array<ArrayBuffer>)
         return
       }
       // ArrayBuffer form: offset and size — in BYTES.
-      device.queue.writeBuffer(buffer, 0, data.buffer as ArrayBuffer, data.byteOffset, capped)
+      device.queue.writeBuffer(buffer, byteOffset, data.buffer as ArrayBuffer, data.byteOffset + byteOffset, capped)
     } catch (error) {
-      onGpuError?.(`writeBuffer(vertex, ${capped} bytes) rejected: ${errorMessage(error)}`)
+      onGpuError?.(`writeBuffer(vertex, ${capped} bytes @${byteOffset}) rejected: ${errorMessage(error)}`)
     }
   }
 

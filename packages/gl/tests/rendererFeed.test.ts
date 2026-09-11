@@ -54,7 +54,9 @@ describe('rendererFeed WebGL2 (dual-bind)', () => {
     expect(feed.count.value).toBe(0)
 
     // The GPU storage is allocated immediately (capacity*stride bytes = 128 = 32 floats).
-    expect(calls).toContain('createBuffer(32)')
+    // Task 178: the usage hint is 'dynamic' — the feed buffer is rewritten
+    // every frame (bufferSubData), the STATIC_DRAW default was the wrong heap.
+    expect(calls).toContain('createBuffer(32,dynamic)')
 
     // The worker writes 3 records, publishes.
     const batch = feed.channel!.push(3)
@@ -201,14 +203,22 @@ describe('rendererFeed WebGPU (dual-bind)', () => {
     feed.channel!.publish()
     renderer.step(16)
     expect(feed.count.value).toBe(3)
-    // data.length = 8*4 floats; byteLength = 3 records * 16 bytes = 48.
-    expect(calls).toContain('syncVertexBuffer(32,48)')
+    // data.length = 8*4 floats; the first frame's dirty window is the full
+    // fresh prefix [0, 3 records) = 48 bytes @ 0.
+    expect(calls).toContain('syncVertexBuffer(32,48,0)')
     expect(calls.filter(c => c.startsWith('syncVertexBuffer')).length).toBe(1)
 
     feed.channel!.push(2).setFloat('radius', 0, 9)
     feed.channel!.publish()
     renderer.step(32)
-    expect(calls).toContain('syncVertexBuffer(32,80)') // [0, 5 records * 16)
+    // Task 178 — THE UPLOAD WIRE: the second frame uploads ONLY the append
+    // [3, 5) = 32 bytes @ byteOffset 48 (the pre-178 form rewrote the full
+    // prefix [0, 80) every frame — O(total records) per frame).
+    expect(calls).toContain('syncVertexBuffer(32,32,48)')
+    const syncs = calls.filter(c => c.startsWith('syncVertexBuffer'))
+    expect(syncs.length).toBe(2)
+    // and the two windows tile [0, 80) exactly — no byte written twice
+    expect(syncs[1]).toBe('syncVertexBuffer(32,32,48)')
     renderer.dispose()
   })
 
