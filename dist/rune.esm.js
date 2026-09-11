@@ -3935,10 +3935,60 @@ function bitonicPassSequence(padN, run) {
 var BITONIC_PAD_KEY = 1000000000000000000000000000000, BITONIC_SENTINEL = 33554432;
 
 // packages/core/src/sort.ts
-function sortBackToFront(px, py, pz, count, forward, indices, keys) {
+function sortBackToFront(px, py, pz, count, forward, indices, keys, aux) {
   if (count <= 0)
     return 0;
   const fx = forward[0], fy = forward[1], fz = forward[2];
+  if (count === 1) {
+    keys[0] = fx * px[0] + fy * py[0] + fz * pz[0];
+    indices[0] = 0;
+    return 1;
+  }
+  if (aux !== undefined && aux.k.length >= count && aux.kAlt.length >= count && aux.iAlt.length >= count) {
+    const k = aux.k;
+    const kAlt = aux.kAlt;
+    const iAlt = aux.iAlt;
+    for (let i = count - 1, j = 0;i >= 0; i--, j++) {
+      const t = fx * px[i] + fy * py[i] + fz * pz[i];
+      keys[i] = t;
+      BIT_F32[0] = t;
+      let bits = BIT_U32[0];
+      if (bits === 2147483648)
+        bits = 0;
+      bits = (bits & 2147483648) !== 0 ? ~bits : bits | 2147483648;
+      k[j] = ~bits >>> 0;
+      indices[j] = i;
+    }
+    let fromK = k;
+    let toK = kAlt;
+    let fromI = indices;
+    let toI = iAlt;
+    for (let pass = 0;pass < 4; pass++) {
+      const shift = pass * 8;
+      HIST.fill(0);
+      for (let i = 0;i < count; i++)
+        HIST[fromK[i] >>> shift & 255]++;
+      let sum = 0;
+      for (let b = 0;b < 256; b++) {
+        const h = HIST[b];
+        HIST[b] = sum;
+        sum += h;
+      }
+      for (let i = 0;i < count; i++) {
+        const key = fromK[i];
+        const at = HIST[key >>> shift & 255]++;
+        toK[at] = key;
+        toI[at] = fromI[i];
+      }
+      const swapK = fromK;
+      fromK = toK;
+      toK = swapK;
+      const swapI = fromI;
+      fromI = toI;
+      toI = swapI;
+    }
+    return count;
+  }
   for (let i = 0;i < count; i++) {
     indices[i] = i;
     keys[i] = fx * px[i] + fy * py[i] + fz * pz[i];
@@ -3946,6 +3996,12 @@ function sortBackToFront(px, py, pz, count, forward, indices, keys) {
   indices.subarray(0, count).sort((a, b) => keys[b] - keys[a] || b - a);
   return count;
 }
+var HIST, BIT_F32, BIT_U32;
+var init_sort = __esm(() => {
+  HIST = new Uint32Array(256);
+  BIT_F32 = new Float32Array(1);
+  BIT_U32 = new Uint32Array(BIT_F32.buffer);
+});
 
 // packages/core/src/index.ts
 var exports_src = {};
@@ -4057,6 +4113,7 @@ var init_src = __esm(() => {
   init_formats();
   init_gpgpu();
   init_noise();
+  init_sort();
 });
 
 // packages/gl/src/autoBackend.ts

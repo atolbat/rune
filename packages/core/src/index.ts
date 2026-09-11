@@ -179,3 +179,4 @@ export {
   bitonicPadCount, bitonicPassSequence, BITONIC_PAD_KEY, BITONIC_SENTINEL,
 } from './gpu/bitonic.ts'
 export { sortBackToFront } from './sort.ts'
+export type { SortScratch } from './sort.ts'

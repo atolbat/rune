@@ -28,6 +28,9 @@ import { createParticles, createRamp } from '../src/index.ts'
  */
 
 const BASIS = { right: [1, 0, 0], up: [0, 1, 0] }
+// Task 176 — the SORTED layer's basis: a full camera basis (the depth
+// key needs the forward). A realistic orbiting-camera forward.
+const BASIS_SORTED = { right: [0.96362411, -0.11244187, 0.24170232], up: [0.11244187, 0.99363231, -0.03637564], forward: [0.26726124, 0.53452248, 0.80178373] }
 const RAMP = createRamp([
   { t: 0, size: 0.4, r: 1, g: 0.9, b: 0.7, a: 0 },
   { t: 0.15, size: 1, r: 1, g: 0.95, b: 0.85, a: 1 },
@@ -141,6 +144,32 @@ function emission(): number {
   return ms
 }
 
+function sortedLayer(): { ms: number; msUnsorted: number; count: number } {
+  // Task 176's etalon — THE SORTED ALPHA LAYER at the 100k ceiling: the
+  // painter's-order frame cost (the radix tier). The sort was invisible
+  // to every scenario before this (32 ms/frame measured raw once the
+  // bench finally looked). The unsorted twin over the identical state
+  // isolates the sort's own cost (the delta).
+  const mk = (sort: boolean) => {
+    const ps = createParticles({
+      capacity: 100_000, spawner: SPAWNER, ramp: RAMP, spin: 1,
+      render: { kind: 'billboard', draw: 'instance', sort },
+    })
+    ps.burst(100_000, { ...SPAWNER, life: [30, 30] })
+    ps.advance(1 / 60)
+    return ps
+  }
+  const sorted = mk(true)
+  const unsorted = mk(false)
+  const FRAMES = 60
+  let cSorted = 0
+  let cUnsorted = 0
+  const msUnsorted = timed(FRAMES, () => { cUnsorted += unsorted.view(BASIS_SORTED).instanceCount })
+  const ms = timed(FRAMES, () => { cSorted += sorted.view(BASIS_SORTED).instanceCount })
+  if (cSorted !== cUnsorted) throw new Error('bench: sorted/unsorted count drift')
+  return { ms, msUnsorted, count: cSorted / FRAMES }
+}
+
 function allocationIdentity(): { stable: boolean; rssBefore: number; rssAfter: number } {
   const ps = createParticles({ capacity: 16_384, rate: 6000, spawner: SPAWNER, ramp: RAMP })
   for (let k = 0; k < 20; k++) ps.advance(1 / 60)
@@ -167,8 +196,10 @@ const split = splitStages()
 forcesHeavy()
 const heavy = med(Array.from({ length: R }, forcesHeavy))
 emission()
-const emit = med(Array.from({ length: R }, emission))
+const emit = med(Array.from({ length: R }, () => emission()))
 const identity = allocationIdentity()
+sortedLayer()
+const sorted = med(Array.from({ length: R }, sortedLayer))
 
 const steadyCount = fullFrame(6000, { gravity: [0, -4, 0], drag: 0.6 }).count
 const loadCount = split.count
@@ -182,6 +213,11 @@ if (process.argv.includes('--json')) {
     packOnly: { msPerFrame: +(split.packMs / 60).toFixed(2), instanceBytesPerFrame: split.instanceBytes },
     forcesHeavy: { msPerFrame: +(heavy / 60).toFixed(2) },
     emission: { msPer100k: +emit.toFixed(2), nsPerSpawn: +(emit / 100_000 * 1e6).toFixed(0) },
+    sortedLayer: {
+      msPerFrame: +(sorted.ms / 60).toFixed(2),
+      msPerFrameUnsorted: +(sorted.msUnsorted / 60).toFixed(2),
+      sortDelta: +((sorted.ms - sorted.msUnsorted) / 60).toFixed(2),
+    },
     allocationStable: identity.stable,
   }))
 } else {
@@ -193,6 +229,7 @@ if (process.argv.includes('--json')) {
   console.log(`  └─ pack only (Task 131)      : ${(split.packMs / 60).toFixed(2)} ms/frame, ${(split.instanceBytes / 1024 / 1024).toFixed(1)} MiB records/frame (the instanced path's CPU cost — the GPU expands)`)
   console.log(`forces-heavy (full stack)      : ${(heavy / 60).toFixed(2)} ms/frame (noise + seek + collide + limit)`)
   console.log(`emission (100k burst)          : ${emit.toFixed(2)} ms (${(emit / 100_000 * 1e6).toFixed(0)} ns/spawn)`)
+  console.log(`sorted layer (100k, instanced) : ${(sorted.ms / 60).toFixed(2)} ms/frame — the painter's order (Task 176's radix; unsorted twin ${(sorted.msUnsorted / 60).toFixed(2)}, the sort delta ${((sorted.ms - sorted.msUnsorted) / 60).toFixed(2)} ms)`)
   console.log(`allocation identity (500 frames): ${identity.stable ? 'STABLE (the soup + the view are the same references)' : 'BROKEN'}`)
   console.log(`rss before/after (Bun.gc)      : ${(identity.rssBefore / 1024).toFixed(0)} / ${(identity.rssAfter / 1024).toFixed(0)} KiB`)
 }

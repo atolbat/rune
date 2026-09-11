@@ -86,8 +86,11 @@ export interface PackOptions {
    *  sortDepthBackToFront) — the records are packed in this order instead
    *  of slot order. Omitted/null — the natural [0, count) walk. The
    *  parity contract with fillBillboards pins the SAME order in both
-   *  bakers (the soup's quad stream and this record stream). */
-  readonly order?: readonly number[] | null
+   *  bakers (the soup's quad stream and this record stream).
+   *  Task 176: ArrayLike — the facade hands the bakers the radix output
+   *  as a typed prefix view (Int32Array.subarray) directly; plain arrays
+   *  work exactly as before (the composable seam is unchanged). */
+  readonly order?: ArrayLike<number> | null
   /** The sprite sheet split [u, v] — the ramp's frame channel picks the
    *  tile (the same contract as fillBillboards). */
   readonly tiles?: readonly [number, number]

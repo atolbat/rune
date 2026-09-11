@@ -605,13 +605,19 @@ export function createParticles(desc: ParticlesDesc): Particles {
   }
   // Task 132 — the painter's-order scratch (allocated ONCE, only for sorted
   // billboard layers; the sort runs in-place on these arrays — zero
-  // per-frame allocation, the package's hot-path contract). `sortOrder` is
-  // a plain array REUSED via in-place truncation (length = count): its
-  // backing store survives the truncation, so the per-frame regrow to the
-  // live count allocates nothing.
+  // per-frame allocation, the package's hot-path contract).
+  // Task 176 — THE RADIX TIER: the sort now carries the caller-owned
+  // ping-pong aux (k/kAlt/iAlt at capacity) — @rune/core's four-pass LSD
+  // replaces the JS-comparator sort (the measured 100k frame 32 → 6.7 ms,
+  // byte-identical output). The old `sortOrder` JS array is GONE with its
+  // per-frame copy loop: the bakers take the typed prefix view directly
+  // (order: ArrayLike — one small view object per frame replaces 100k
+  // writes at the ceiling).
   const sortIndices = sortOn ? new Int32Array(capacity) : null
   const sortKeys = sortOn ? new Float32Array(capacity) : null
-  const sortOrder: number[] | null = sortOn ? new Array<number>(capacity).fill(0) : null
+  const sortAux = sortOn
+    ? { k: new Uint32Array(capacity), kAlt: new Uint32Array(capacity), iAlt: new Int32Array(capacity) }
+    : null
 
   // Task 142 (the performance pass) — the BAKE-OPTIONS SCRATCH: view()
   // used to build a fresh options object (and a fresh `?? {}` for the
@@ -766,19 +772,17 @@ export function createParticles(desc: ParticlesDesc): Particles {
         // blending over everything behind it). The SAME sequence feeds BOTH
         // bakers: the soup's quad stream and the instance-record stream get
         // the identical order (the draw-format parity contract).
-        let order: readonly number[] | null = null
+        let order: ArrayLike<number> | null = null
         if (sortOn) {
           const forward = basis.forward
           if (forward === undefined) {
             throw new Error('rune/particles: render.sort needs the camera basis forward (the depth key is dot(forward, position) — pass a full CameraBasis)')
           }
-          const n = sortDepthBackToFront(system.fields, system.count, forward, sortIndices!, sortKeys!)
+          const n = sortDepthBackToFront(system.fields, system.count, forward, sortIndices!, sortKeys!, sortAux!)
           // The bakers walk order.length entries — hand them the exact LIVE
-          // prefix, not the capacity-sized scratch (the tail is stale zeros
-          // that would bake duplicate quads).
-          for (let i = 0; i < n; i++) sortOrder![i] = sortIndices![i]
-          sortOrder!.length = n
-          order = sortOrder!
+          // prefix as a typed view (Task 176: the JS-array copy loop is
+          // gone; one view object per frame replaces the per-element writes).
+          order = n === sortIndices!.length ? sortIndices! : sortIndices!.subarray(0, n)
         }
         // Task 136 — render.cull on the CPU tier: the six frustum planes
         // from the basis view-projection (Task 141: @rune/core's

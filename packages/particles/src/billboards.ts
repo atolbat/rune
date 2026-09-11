@@ -89,8 +89,11 @@ export interface BillboardOptions {
    *  sortDepthBackToFront) — the particles are baked in this order instead
    *  of slot order. Omitted/null — the natural [0, count) walk. The facade
    *  passes its render.sort sequence here; the parity contract with the
-   *  instance-record path pins the SAME order in both bakers. */
-  readonly order?: readonly number[] | null
+   *  instance-record path pins the SAME order in both bakers.
+   *  Task 176: ArrayLike — the facade hands the bakers the radix output as
+   *  a typed prefix view (Int32Array.subarray) directly; plain arrays work
+   *  exactly as before (the composable seam is unchanged). */
+  readonly order?: ArrayLike<number> | null
   /** The spin speed, radians/second (the seed phases each particle). */
   readonly spin?: number
   /** The orientation mode (default 'camera' — the classic billboard). */

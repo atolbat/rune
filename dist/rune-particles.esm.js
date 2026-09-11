@@ -427,10 +427,63 @@ function bitonicPassSequence(padN, run) {
   }
 }
 // packages/core/src/sort.ts
-function sortBackToFront(px, py, pz, count, forward, indices, keys) {
+var HIST = new Uint32Array(256);
+var BIT_F32 = new Float32Array(1);
+var BIT_U32 = new Uint32Array(BIT_F32.buffer);
+function sortBackToFront(px, py, pz, count, forward, indices, keys, aux) {
   if (count <= 0)
     return 0;
   const fx = forward[0], fy = forward[1], fz = forward[2];
+  if (count === 1) {
+    keys[0] = fx * px[0] + fy * py[0] + fz * pz[0];
+    indices[0] = 0;
+    return 1;
+  }
+  if (aux !== undefined && aux.k.length >= count && aux.kAlt.length >= count && aux.iAlt.length >= count) {
+    const k = aux.k;
+    const kAlt = aux.kAlt;
+    const iAlt = aux.iAlt;
+    for (let i = count - 1, j = 0;i >= 0; i--, j++) {
+      const t = fx * px[i] + fy * py[i] + fz * pz[i];
+      keys[i] = t;
+      BIT_F32[0] = t;
+      let bits = BIT_U32[0];
+      if (bits === 2147483648)
+        bits = 0;
+      bits = (bits & 2147483648) !== 0 ? ~bits : bits | 2147483648;
+      k[j] = ~bits >>> 0;
+      indices[j] = i;
+    }
+    let fromK = k;
+    let toK = kAlt;
+    let fromI = indices;
+    let toI = iAlt;
+    for (let pass = 0;pass < 4; pass++) {
+      const shift = pass * 8;
+      HIST.fill(0);
+      for (let i = 0;i < count; i++)
+        HIST[fromK[i] >>> shift & 255]++;
+      let sum = 0;
+      for (let b = 0;b < 256; b++) {
+        const h = HIST[b];
+        HIST[b] = sum;
+        sum += h;
+      }
+      for (let i = 0;i < count; i++) {
+        const key = fromK[i];
+        const at = HIST[key >>> shift & 255]++;
+        toK[at] = key;
+        toI[at] = fromI[i];
+      }
+      const swapK = fromK;
+      fromK = toK;
+      toK = swapK;
+      const swapI = fromI;
+      fromI = toI;
+      toI = swapI;
+    }
+    return count;
+  }
   for (let i = 0;i < count; i++) {
     indices[i] = i;
     keys[i] = fx * px[i] + fy * py[i] + fz * pz[i];
@@ -2074,8 +2127,8 @@ function packInstances(system, out, options = {}) {
 }
 var SCRATCH2 = new Float32Array(6);
 // packages/particles/src/sort.ts
-function sortDepthBackToFront(fields, count, forward, indices, keys) {
-  return sortBackToFront(fields.px, fields.py, fields.pz, count, forward, indices, keys);
+function sortDepthBackToFront(fields, count, forward, indices, keys, aux) {
+  return sortBackToFront(fields.px, fields.py, fields.pz, count, forward, indices, keys, aux);
 }
 // packages/particles/src/gpuEmit.ts
 var GPU_EMIT_SHAPE = {
@@ -4812,7 +4865,7 @@ function createParticles(desc) {
   };
   const sortIndices = sortOn ? new Int32Array(capacity) : null;
   const sortKeys = sortOn ? new Float32Array(capacity) : null;
-  const sortOrder = sortOn ? new Array(capacity).fill(0) : null;
+  const sortAux = sortOn ? { k: new Uint32Array(capacity), kAlt: new Uint32Array(capacity), iAlt: new Int32Array(capacity) } : null;
   const EMPTY = Object.freeze({});
   const meshBakeOpts = { ramp, axis: undefined, spin: 0 };
   const trailBakeOpts = { ramp, length: 0, width: 0 };
@@ -4985,11 +5038,8 @@ function createParticles(desc) {
           if (forward === undefined) {
             throw new Error("rune/particles: render.sort needs the camera basis forward (the depth key is dot(forward, position) — pass a full CameraBasis)");
           }
-          const n = sortDepthBackToFront(system.fields, system.count, forward, sortIndices, sortKeys);
-          for (let i = 0;i < n; i++)
-            sortOrder[i] = sortIndices[i];
-          sortOrder.length = n;
-          order = sortOrder;
+          const n = sortDepthBackToFront(system.fields, system.count, forward, sortIndices, sortKeys, sortAux);
+          order = n === sortIndices.length ? sortIndices : sortIndices.subarray(0, n);
         }
         let frustum = null;
         if (cullOn && !gpuMode) {

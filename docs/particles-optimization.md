@@ -162,15 +162,17 @@ dust, the soft, the slash dust, the laser's charge wisps and boom smoke.
 - ~~**WebGL2 transform feedback**~~ — ✅ shipped (Phase 3b above).
 - ~~**Sorting**~~ — ✅ shipped (Phase 3c above: the full depth sort, the
   painter's order; a counting-sort bucket pass stays interesting for
-  100k+-sized alpha layers).
-- **Culling**: a per-particle distance cull in the pack loop (one
-  comparison) + the per-layer frustum reject.
+  100k+-sized alpha layers) — ✅ shipped (Task 176: the radix tier, the
+  list's own item).
+- ~~**Culling**~~ — ✅ shipped (Task 136: `render.cull` on the CPU
+  tier — the six-plane conservative sphere test in both bakers;
+  Task 134's GPU twin before it).
 - ~~**Emission on the GPU**~~ — ✅ shipped (Task 135 above: the hash-RNG
   append pass, both backends — the compute leg by default, the TF leg's
   `?emit=1`).
-- **The GPU-tier sort**: a compute/TF bitonic sort over the records (the
-  CPU tier's mirror holds no positions — the GPU-side key pass would
-  come with the culling pass above).
+- ~~**The GPU-tier sort**~~ — ✅ shipped (Task 134: the bitonic network
+  over the records, both backends — the self-driving (k, j) sequence on
+  WebGPU, per-pass uniforms on the TF twin).
 - **The ramp LUT as a texture** (the pack's binary search → a texture
   fetch): ~1 ms at 100k, only if the GPU pack ever needs the relief (the
   TF tier already does it — texture fetches in GLSL).
@@ -2570,3 +2572,111 @@ non-null assertions), dist rebuilt, demo:smoke OK, task174-wg-multidraw
 PASS (pixel-identical), task169-multidraw PASS (pixel-identical),
 task167-syncpoint PASS, task168-restore PASS. Cache-busts: ?v=174
 (vfx main + gpuEmbers + particles main, both bundles).
+
+## Task 176 — THE RADIX TIER (the 100k+ alpha layer; the roadmap's last CPU item)
+
+The brief: «Демо работают, продолжай оптимизацию». The roadmap's
+remaining-list check found exactly one open CPU-side item: the
+counting-sort bucket pass for 100k+ alpha layers — and a probe found
+something the etalon set had been hiding in plain sight.
+
+**THE HIDDEN CLIFF**: the sorted layer's cost was invisible to every
+etalon scenario — `fullFrame`/`splitStages` bake with no forward in the
+basis, so `render.sort` never ran. Measured raw (`ab-sort.ts`, interleaved
+A/B, medians): the shipped body — `indices.subarray().sort(cmp)` — costs
+**32.2 ms/frame at 100k** (a JS comparator call per comparison, ~1.7M
+calls; 69.4 ms at 200k). Through the real facade the sorted 100k instance
+layer measured **40.2 ms/frame (delta 37.0 over the unsorted twin)** —
+2.4× the entire 60 fps budget, for ONE layer. The five vfx demos that
+ship `render.sort` (dust, laser, muzzle, slash, soft) sit at thousands of
+particles, where the classic body is fine — the cliff was the scale the
+library advertises.
+
+**THE BENCH FIRST** (`bench/ab-sort.ts`, kept): three bodies over the
+same seeded scenes, parity asserted BEFORE timing — the classic
+comparator, a composite single `Float64Array.sort()` over packed 53-bit
+keys (descFlip × 2²¹ + (2²¹−1 − slot) — distinct by construction, so the
+native no-comparator sort is a total order), and a 4×8-bit stable LSD
+radix over the IEEE bit-flip with a parallel index shuffle. The radix
+wins at EVERY size: 0.015 vs 0.023 at 256, 1.05 vs 4.34 at 16k, **6.66
+vs 32.2 at 100k (−79%)**, 13.4 vs 69.4 at 200k. The composite sits
+between the two at every size — measured and REJECTED. No threshold, no
+hybrid: the radix is the body everywhere `aux` is provided.
+
+**THE EXACTNESS** (the part that made this a library pass, not a demo
+hack): the radix must be the comparator's total order to the byte — key
+DESCENDING (f32), ties → slot DESCENDING. Three realizers:
+- **THE FLIP**: the f32 key's IEEE bits map to a uint32 whose ascending
+  order is the key's descending order. −0 is canonicalized to +0 first —
+  JS compares them EQUAL, so a ±0-key tie must SURVIVE as a tie and fall
+  to the slot rule (a scene with an all-negative forward and
+  origin-sitting particles produces exactly this; the first parity draft
+  without the canonicalization orders them strictly — wrong).
+- **THE TIE-BREAK**: the LSD is stable, so equal keys keep the input
+  order — the input walk is slot-DESCENDING, and ties come out
+  slot-descending: the comparator's rule, by construction.
+- **THE PING-PONG**: the caller's `indices` doubles as the pass-0 index
+  source; four passes (even) land the answer back in it — no copy-out.
+
+**THE AUX CONTRACT** (the frustumScratch precedent): the ping-pong
+buffers (k/kAlt/iAlt) are CALLER-OWNED — `sortBackToFront`'s new optional
+`aux` param; pass it and the radix runs, omit it and the classic
+comparator body runs verbatim (byte-identical output, slower at scale —
+every pre-176 caller unchanged, zero hidden module state). The
+256-counter histogram is a fixed module const. The facade allocates the
+trio at capacity next to `sortIndices`/`sortKeys`.
+
+**THE COPY-LOOP KILL**: the facade's per-frame
+`for (i<n) sortOrder[i] = sortIndices[i]` + `sortOrder.length = n` —
+100k JS-array writes at the ceiling, existing only because the bakers
+typed `order: readonly number[]`. The type is now `ArrayLike<number>`
+(the structural truth — the bakers only index and length-check), and the
+facade hands the bakers `sortIndices.subarray(0, n)` directly: one small
+view object per frame replaces the writes. Plain arrays work exactly as
+before (the composable seam is pinned unchanged).
+
+**THE ETALON NOW SEES IT**: `particles.bench.ts` gained the
+`sortedLayer` scenario — the 100k instance layer with `sort: true` and a
+full camera basis, against its unsorted twin over the identical state
+(the delta isolates the painter's order). The sorted-layer line joins
+the `--json` snapshot shape.
+
+**THE NUMBERS, in situ** (the same bench, only the tier flipped — the
+facade call with/without `aux`):
+- classic: 40.2 ms/frame (delta 37.0)
+- radix: 14.0–15.6 ms/frame (delta 10.8–12.3)
+- the sorted 100k alpha layer: **2.6–2.9× faster**; the sort itself
+  37.0 → ~11 ms (3.4×). What remains of the delta is the physics of the
+  contract: a painter's-order bake is a random-access gather over the
+  SoA fields (cache-hostile by definition — any correct order is a
+  permutation).
+
+**NaN** (out of contract — spawn validation rejects non-finite): the
+comparator's NaN is an inconsistent comparator (engine-defined garbage);
+the radix is deterministic (NaN keys land just before +Inf). Documented,
+not pinned — there is no old behavior to be compatible with.
+
+**Gates**: `packages/core/tests/sort176.test.ts` (9): the parity gate
+across sizes [1..10000] × seeds × tie-heavy scenes, ±0 stays a TIE,
+±Inf/huge-finite extremes, count ≤ 0 / count 1, the keys contract on the
+radix path (keys[slot] = the f32 dot), the aux-too-small fallback (each
+buffer undersized in turn), THE PING-PONG (shared aux, alternating
+counts, no stale state), determinism. `packages/particles/tests/
+task176.test.ts` (5): THE END-TO-END PARITY (the facade's sorted stream
+vs a manual classic-comparator bake, bytes, BOTH draws), the ArrayLike
+seam (Int32Array order ≡ plain-array order), THE PREFIX VIEW (the live
+count changes frame to frame — exactly the live prefix bakes, no stale
+tail, parity at every count), cross-frame determinism. Full suite
+1809/1809 (+14), tsc 0, lint 0 err / 375 warn (baseline), dist rebuilt,
+demo:smoke OK (24/24, the five sorted demos alive, GPU health clean),
+task167-syncpoint PASS, task168-restore PASS, task169-multidraw PASS
+(pixel-identical), task174-wg-multidraw PASS (pixel-identical, the
+98cf6b6016ad hash — byte-stable, the WG tier does not CPU-sort).
+Cache-busts ?v=176 (vfx main + gpuEmbers + particles main +
+model-viewer dist import + both page entries).
+
+The remaining-list is now fully shipped except the conditional ramp-LUT
+item (only if the GPU pack ever needs the relief — the TF tier already
+fetches textures). The program's next frontier is field-shaped: real
+devices, real workloads, or the remaining ~11 ms gather physics of the
+sorted layer at the ceiling.

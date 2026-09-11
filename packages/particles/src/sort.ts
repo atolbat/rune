@@ -23,35 +23,47 @@
  * order — the soup's quad stream and the instance-record stream get the
  * IDENTICAL sequence, the backend-parity contract).
  *
- * DETERMINISM: the comparator breaks ties by the slot index (a total
+ * DETERMINISM: the tie rule breaks ties by the slot index (a total
  * order), so the sequence is engine-independent — the same store state
  * and camera basis produce the same draw order on every backend, every
- * engine, every run. The sort is in-place on caller-owned scratch
+ * engine, every run. The sort runs in-place on caller-owned scratch
  * (an Int32Array of capacity for the indices, a Float32Array for the
  * keys): ZERO allocations per frame.
  *
- * NOT FOR: the GPU sim tier (the records are packed GPU-side — the CPU
- * has no positions to sort; the facade rejects render.sort + sim:'gpu'
- * loudly) and the trail kind (a ribbon is one continuous strip — the
+ * Task 176: THE RADIX TIER — with `aux` (the caller-owned ping-pong
+ * scratch; the facade passes its capacity-sized buffers) @rune/core's
+ * four-pass 8-bit LSD radix runs instead of the comparator sort: the
+ * measured 100k frame is 32 ms → 6.7 ms, byte-identical output. Without
+ * `aux` the classic comparator body runs (identical output, slower at
+ * scale) — every pre-176 caller keeps working unchanged.
+ *
+ * NOT FOR: the plain CPU tier under sim:'gpu' is not this path (Task 134:
+ * the GPU render tier owns the order THERE — the records are packed
+ * GPU-side) and the trail kind (a ribbon is one continuous strip — the
  * per-particle painter's order does not apply).
  * ══════════════════════════════════════════════════════════════════════════
  */
 
 import { sortBackToFront } from '@rune/core'
+import type { SortScratch } from '@rune/core'
 import type { ParticleFields } from './system.ts'
+
+export type { SortScratch }
 
 /** Sorts the live [0, count) particles BACK TO FRONT (far first) by the
  *  camera-basis forward axis. Writes the descending-depth index sequence
  *  into `indices[0..count)` (caller-owned, at least `count` long — the
  *  facade allocates it at capacity) and returns `count`. Deterministic,
- *  zero allocations (the keys land in the caller's scratch; the sort is
- *  an in-place subarray sort with a total-order comparator). */
+ *  zero allocations per frame (the keys land in the caller's scratch;
+ *  with `aux` the radix tier runs — byte-identical to the classic
+ *  comparator sort, pinned in task176). */
 export function sortDepthBackToFront(
   fields: ParticleFields,
   count: number,
   forward: readonly number[],
   indices: Int32Array,
   keys: Float32Array,
+  aux?: SortScratch,
 ): number {
-  return sortBackToFront(fields.px, fields.py, fields.pz, count, forward, indices, keys)
+  return sortBackToFront(fields.px, fields.py, fields.pz, count, forward, indices, keys, aux)
 }
