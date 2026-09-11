@@ -24,7 +24,7 @@
  * ══════════════════════════════════════════════════════════════════════════
  */
 
-import type { ParticleSystem } from './system.ts'
+import type { ParticleSystem, ParticleSource } from './system.ts'
 import { SOUP_STRIDE } from './billboards.ts'
 import { sampleFlatRamp, flatRamp, CONSTANT_RAMP, type Ramp } from './ramp.ts'
 
@@ -157,7 +157,7 @@ const SCRATCH = new Float32Array(6)
  *  `basis.forward` (the unit look direction) is REQUIRED — the ribbon
  *  sides are perpendicular to the motion AND the view. */
 export function fillTrails(
-  system: ParticleSystem,
+  system: ParticleSource,
   history: TrailHistory,
   basis: { forward: readonly number[] },
   out: Float32Array,

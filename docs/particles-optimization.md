@@ -2394,3 +2394,30 @@ SwiftShader browser process is exhausted after the day's GPU gates
 (the WGSL/GLSL kernel sources) is UNCHANGED by this task, and the
 changed JS paths are covered by the bit-exact pins above plus the live
 demo smoke.
+
+### Task 173b — THE TYPECHECK DEBT (CI has been red for four days)
+
+The push of Task 173 surfaced what four days of green-looking worklogs
+had papered over: the `ci` workflow (lint + typecheck + build + test)
+has been FAILING on every push since at least Sept 7 — always on the
+same "the 6-error baseline" in `task142.test.ts` that the journal kept
+tolerating — while the Pages deployment workflow runs on its own
+`dynamic` trigger and kept deploying, so nobody looked. The library's
+own gate discipline ("CI green") was silently reduced to "Pages green".
+
+The six errors, two roots:
+- the untyped SPAWNER fixture in task142.test.ts (`speed: [0, 0]`
+  inferred `number[]`, not the desc's `readonly [number, number]`) —
+  fixed with the contextual `SpawnerDesc` annotation (no casts: the
+  literal checks against the contract);
+- `fillBillboards`/`packInstances` declared `system: ParticleSystem`
+  and locked the FACADE (`Particles`) out of the direct-bake API the
+  test drives — fixed with `ParticleSource`, a structural
+  `{ count, fields }` interface (what the bakers actually consume;
+  `fillTrails` and `fillMeshes` narrowed in the same stroke), exported
+  from the package entry alongside `ParticleSystem`.
+
+`bunx tsc --noEmit`: **0 errors** — first time in the journal's
+recorded history the baseline is clean, not tolerated. The full stack
+re-verified: 1777/1777, lint 0 errors / 375 warnings, dist rebuilt,
+demo:smoke OK. CI goes green on this push.

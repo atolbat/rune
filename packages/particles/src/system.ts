@@ -278,6 +278,17 @@ export interface StoreOptions {
   readonly onSwap?: (to: number, from: number) => void
 }
 
+/** The BAKER'S view of a particle system (Task 173 — the typecheck debt):
+ *  every soup/instance/trail/mesh baker consumes exactly `count` +
+ *  `fields`, and the facade (`Particles`) exposes both — the bakers
+ *  declared `ParticleSystem` and locked the facade out of the direct-bake
+ *  API the tests (and composable-core users) drive. Structural: the
+ *  system, the facade, and any wrap of either satisfies it. */
+export interface ParticleSource {
+  readonly count: number
+  readonly fields: ParticleFields
+}
+
 /** The mechanical particle store. */
 export interface ParticleSystem {
   /** Live particles (the field arrays are valid on [0, count)). */

@@ -46,7 +46,7 @@
  */
 
 import { sphereOutsideFrustum } from '@rune/core'
-import type { ParticleSystem } from './system.ts'
+import type { ParticleSource } from './system.ts'
 import { flatRamp, CONSTANT_RAMP, type Ramp } from './ramp.ts'
 
 /** Floats per instance record (see the module header). */
@@ -111,7 +111,7 @@ export interface PackOptions {
  *  exactly fillBillboards()/6 for the same options (the parity contract).
  *  Deterministic; zero allocations. */
 export function packInstances(
-  system: ParticleSystem,
+  system: ParticleSource,
   out: Float32Array,
   options: PackOptions = {},
 ): number {

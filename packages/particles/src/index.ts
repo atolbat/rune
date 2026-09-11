@@ -99,7 +99,7 @@
  */
 
 export type {
-  ParticleFields, SpawnRecord, ForceFields, Attractor, ParticleSystem,
+  ParticleFields, SpawnRecord, ForceFields, Attractor, ParticleSystem, ParticleSource,
   CollisionPlane, CollisionSphere, CollisionBox, Collision, CollideRecord, SeekForce, LimitSpeedForce, RetireRecord, StoreOptions,
 } from './system.ts'
 export { createParticleSystem, NO_FORCES, MAX_PLANES, MAX_SPHERES, MAX_BOXES, FIELD_NAMES, PARTICLE_FLOATS } from './system.ts'

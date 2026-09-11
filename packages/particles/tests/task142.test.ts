@@ -8,6 +8,7 @@ import {
   packInstances,
   SOUP_STRIDE,
   type CameraBasis,
+  type SpawnerDesc,
 } from '../src/index.ts'
 import { sampleFlatRamp, flatRamp } from '../src/ramp.ts'
 import { simplex3 } from '@rune/core'
@@ -100,9 +101,12 @@ describe('Task 142 — the facade bake-options scratch (no per-call allocation, 
     { t: 0, size: 1, r: 1, g: 1, b: 1, a: 1 },
     { t: 1, size: 1, r: 1, g: 0.5, b: 0.25, a: 0.5, frame: 3 },
   ])
-  const SPAWNER = {
-    shape: { kind: 'point' as const, origin: [0, 0, 0] },
-    velocity: { mode: 'fixed' as const, dir: [0, 1, 0] },
+  // Task 173 — the typed fixture: the contextual SpawnerDesc typing makes
+  // the range literals check as tuples (the old untyped object left
+  // `speed: number[]` — one of the 6 typecheck errors that kept CI red).
+  const SPAWNER: SpawnerDesc = {
+    shape: { kind: 'point', origin: [0, 0, 0] },
+    velocity: { mode: 'fixed', dir: [0, 1, 0] },
     speed: [0, 0], life: [10, 10], size: [1, 1],
     color: [[1, 1, 1, 1], [1, 1, 1, 1]], seed: 7,
   }

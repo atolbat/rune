@@ -28,7 +28,7 @@
  * ══════════════════════════════════════════════════════════════════════════
  */
 
-import type { ParticleSystem } from './system.ts'
+import type { ParticleSource } from './system.ts'
 import { sampleFlatRamp, flatRamp, CONSTANT_RAMP, type Ramp } from './ramp.ts'
 
 /** Floats per vertex (position 3, normal 3, uv 2, color 4). */
@@ -60,7 +60,7 @@ const SCRATCH = new Float32Array(6)
  *  capacity × vertexCount × 12 floats). Returns the vertex count.
  *  Deterministic: the same (store state, options) writes the same bytes. */
 export function fillMeshes(
-  system: ParticleSystem,
+  system: ParticleSource,
   geometry: MeshGeometry,
   out: Float32Array,
   options: MeshOptions = {},

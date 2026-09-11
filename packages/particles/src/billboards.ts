@@ -52,7 +52,7 @@
  */
 
 import { sphereOutsideFrustum } from '@rune/core'
-import type { ParticleSystem } from './system.ts'
+import type { ParticleSource } from './system.ts'
 import { flatRamp, CONSTANT_RAMP, type Ramp } from './ramp.ts'
 
 /** Floats per vertex (position 3, uv 2, color 4). */
@@ -134,7 +134,7 @@ export interface BillboardOptions {
  *  capacity × 54 floats). Returns the vertex count. Deterministic:
  *  the same (store state, basis, options) writes the same bytes. */
 export function fillBillboards(
-  system: ParticleSystem,
+  system: ParticleSource,
   basis: CameraBasis,
   out: Float32Array,
   options: BillboardOptions = {},
