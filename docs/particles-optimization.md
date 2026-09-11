@@ -2680,3 +2680,119 @@ item (only if the GPU pack ever needs the relief — the TF tier already
 fetches textures). The program's next frontier is field-shaped: real
 devices, real workloads, or the remaining ~11 ms gather physics of the
 sorted layer at the ceiling.
+
+## Task 177 — THE STAGED PAINTER BAKE + THE DIGIT TIER (the sorted layer's remaining gather physics)
+
+The brief: «Продолжай оптимизацию, глубоко копай». Task 176 closed the
+roadmap's last open CPU item and named the next frontier itself: "the
+remaining ~11 ms gather physics of the sorted layer at the ceiling".
+This task took both halves of that sentence — the gather, and the radix
+that feeds it.
+
+**THE BASELINE, freshly measured**: the sorted 100k instance layer
+12.95 ms/frame (unsorted twin 3.22; the order delta 9.73). The delta's
+anatomy: the radix ~6.3 (four 8-bit passes) + the gather ~3.4 (the
+baker's ordered walk).
+
+**THE GATHER, understood**: `packInstances` walks the painter's order —
+a RANDOM sequence over the SoA slots. Each particle touches ~14
+independent 4-byte reads across 14 arrays (~5.6 MiB working set at 100k
+— L3 territory, every read its own cache line) for ONE 64-byte record
+written sequentially. The permutation is applied at the wrong grain:
+fourteen random 4-byte reads where ONE random 64-byte line would do.
+
+**THE STAGED SHAPE** (`packInstancesPainter`, instances.ts): move the
+permutation to the RECORD level.
+- **THE STAGE** — a sequential, slot-DESCENDING walk (the same walk that
+  carries the stable LSD's tie rule): the frustum gate, the ramp sample,
+  the zero-size skip, and the record build all run in perfect streaming
+  order; each SURVIVOR's 16-float record lands sequentially in
+  `records`, its flipped depth key in `k`. The sort input shrinks to the
+  survivors — the shipped shape sorted every live slot, culled and
+  zero-size ones included. The key expression is `sortBackToFront`'s
+  verbatim dot product folded through the descending flip —
+  bit-identical floats by construction.
+- **THE RADIX** — over the survivors, payload = the compacted stage
+  position (pass 0's payload is the loop index: no identity array ever
+  materializes). The ping-pong is the facade's existing sort scratch;
+  `sortIndices` doubles as the painter's `perm`. ONE new buffer:
+  `records` (capacity × 16 floats — 6.4 MiB at 100k, once, only for
+  sorted instance layers; not per-frame traffic).
+- **THE PLACEMENT** — one gather pass: `out[r] ← records[perm[r]]` —
+  random full-LINE reads (independent, memory-level parallel), sequential
+  writes. The scatter form (sequential reads + random full-line writes +
+  an inverse-permutation pass) measured within noise at 100k and ~7%
+  better at 200k — the gather's simplicity won; revisit only if the
+  advertised ceiling doubles.
+
+**PARITY, structural**: the record is a pure function of the slot
+(nothing in `packInstances`' body depends on the output position), the
+survivor tests are the same, and the order is the same total order (key
+DESC, ties slot DESC — the slot-descending stage walk + the stable LSD
+reproduce the comparator's rule by construction; filtering a sorted
+sequence preserves relative order, so cull-first ≡ sort-then-cull for
+the OUTPUT sequence).
+
+**THE BENCH FIRST** (`bench/ab-staged.ts`, kept): parity gate — 3240
+cases (sizes × seeds × scenes × digit widths × placements), all
+byte-identical to the shipped frame (the real `sortBackToFront` + the
+real `packInstances`), INCLUDING a double-flip bug the gate caught in
+the first draft (a `descFlip∘ascFlip` chain that ordered NEAR-first).
+Then the interleaved A/B: the frame at 100k 15.60 → 8.40 ms (−46%), at
+200k 33.7 → 16.8 (−50%); **the half-culled frame 9.5 → 2.5 ms (−74%)**
+— the stage culls BEFORE the radix, so the sort input halves too.
+
+**THE DIGIT TIER** (`@rune/core` sort.ts): the radix's own cost is the
+pass COUNT (each pass = a full sequential read + a random-write scatter
+over the ping-pong) — the digit width buys passes with histogram span.
+The four 8-bit passes are RETIRED: **2×16-bit passes** (65536 counters,
+256 KiB — a ~0.1 ms fixed fill+scan) at `RADIX_16BIT_MIN = 8192` and up,
+**3×11-bit passes** (2048 counters, 8 KiB L1 span) below. Measured
+isolated (`bench/ab-digits.ts`, kept): the radix alone at 100k 7.2 →
+3.9 ms, at 200k 14.6 → 7.9; the crossover sits at 4–8k (11-bit below,
+16-bit above — threshold 8192, conservative side). A stable LSD's digit
+split cannot change the total order — the parity vs the classic
+comparator is pinned across the boundary (sort177). The particles
+staged radix shares the same threshold and the same discipline.
+
+**THE DEAD SORT** (found while wiring): in `sim:'gpu'` + `render.sort`,
+the facade ran the full CPU radix every `view()` and discarded it
+unread — the GPU render tier owns the order there (Task 134). The sort
+is now skipped in gpuMode (the forward contract stays loud — the throw
+survives; only the dead work is gone).
+
+**THE NUMBERS, in situ** (the etalon, the real facade):
+- the sorted 100k instance layer: **12.95 → 6.94–7.30 ms/frame** (the
+  order delta 9.73 → ~5.0)
+- **the sorted+CULLED etalon line** (new scenario `sortedCulledLayer`:
+  100k scattered, an ortho window keeping ~1/3): **4.36 ms/frame at
+  36,338 survivors** — the stage's cull-first shape; the classic shape
+  sorted all 100k first (the ab-staged culled A/B: 9.5 ms)
+- the unsorted twin is untouched (2.0–3.2, machine variance)
+
+**Gates**: `packages/core/tests/sort177.test.ts` (5): the threshold
+contract, the boundary (8191/8192/8193 + above) vs the classic
+comparator byte-exact, both branches across the sweep with ties, THE
+PING-PONG ACROSS THE BOUNDARY (one shared aux, alternating counts),
+determinism both branches. `packages/particles/tests/task177.test.ts`
+(7): THE PARITY GATE (staged ≡ classic order-walk — bytes and count —
+across plain/ties/zeros/origin scenes and counts straddling the
+boundary), the atlas seam, THE CULL×DIGIT COMBINATION (a
+barely-narrow window exercising 16-bit-with-culling, a tight one the
+11-bit heavily-culled), THE PREFIX DISCIPLINE (one shared scratch, the
+count decays 8300 → 0 crossing the boundary in both directions), THE
+FACADE LEG both draws (instance: both digit branches through the real
+wiring; soup: unchanged), determinism. Full suite **1821/1821** (+12),
+tsc 0, lint 0 err / 375 warn (baseline held — the new facade guards
+written without non-null assertions), the etalon gained the
+`sortedCulledLayer` line (count sanity-gated so the window cannot
+silently degenerate).
+
+The sorted layer's CPU story is now: the advance walk at V8's floor
+(Task 142/143/173), the radix at 2 passes (16-bit) with the pass count
+paid down to the digit floor, the gather at one 64-byte line per record,
+and the cull shrinking the sort itself in the field. What remains at
+the ceiling is the stage walk (~3.2 ms — the sequential pack's own
+physics, the same floor the unsorted layer pays) and the placement
+(~1.5 ms of pure line-gather); the next frontier beyond that is the GPU
+tier, which is shipped and opt-in.

@@ -111,8 +111,8 @@ export { createRamp, sampleRamp, CONSTANT_RAMP, RAMP_STRIDE } from './ramp.ts'
 export type { BillboardMode } from './billboards.ts'
 export { fillBillboards, SOUP_STRIDE, VERTS_PER_PARTICLE } from './billboards.ts'
 export type { CameraBasis, BillboardOptions } from './billboards.ts'
-export type { PackOptions, InstanceField } from './instances.ts'
-export { packInstances, INSTANCE_STRIDE, INSTANCE_LAYOUT } from './instances.ts'
+export type { PackOptions, InstanceField, PainterScratch } from './instances.ts'
+export { packInstances, packInstancesPainter, INSTANCE_STRIDE, INSTANCE_LAYOUT } from './instances.ts'
 export { sortDepthBackToFront } from './sort.ts'
 // Task 134's sort/cull family: the network plan + the frustum extraction
 // moved to @rune/core (Task 141 — gpu/bitonic.ts, frustum.ts, sort.ts);

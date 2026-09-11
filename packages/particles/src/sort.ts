@@ -32,8 +32,12 @@
  *
  * Task 176: THE RADIX TIER — with `aux` (the caller-owned ping-pong
  * scratch; the facade passes its capacity-sized buffers) @rune/core's
- * four-pass 8-bit LSD radix runs instead of the comparator sort: the
- * measured 100k frame is 32 ms → 6.7 ms, byte-identical output. Without
+ * stable LSD radix runs instead of the comparator sort: the measured
+ * 100k frame is 32 ms → 6.7 ms, byte-identical output. Task 177 added
+ * the DIGIT TIER inside (two 16-bit passes at 8192+, three 11-bit
+ * below — the pass count is the radix's cost driver) and the facade's
+ * INSTANCE draw moved to THE STAGED PAINTER BAKE (see instances.ts) —
+ * this wrapper now serves the soup draw and direct callers. Without
  * `aux` the classic comparator body runs (identical output, slower at
  * scale) — every pre-176 caller keeps working unchanged.
  *

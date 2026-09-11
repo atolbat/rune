@@ -3959,35 +3959,73 @@ function sortBackToFront(px, py, pz, count, forward, indices, keys, aux) {
       k[j] = ~bits >>> 0;
       indices[j] = i;
     }
-    let fromK = k;
-    let toK = kAlt;
-    let fromI = indices;
-    let toI = iAlt;
-    for (let pass = 0;pass < 4; pass++) {
-      const shift = pass * 8;
-      HIST.fill(0);
+    if (count >= RADIX_16BIT_MIN) {
+      HIST16.fill(0);
       for (let i = 0;i < count; i++)
-        HIST[fromK[i] >>> shift & 255]++;
+        HIST16[k[i] & 65535]++;
       let sum = 0;
-      for (let b = 0;b < 256; b++) {
-        const h = HIST[b];
-        HIST[b] = sum;
+      for (let b = 0;b < 65536; b++) {
+        const h = HIST16[b];
+        HIST16[b] = sum;
         sum += h;
       }
       for (let i = 0;i < count; i++) {
-        const key = fromK[i];
-        const at = HIST[key >>> shift & 255]++;
-        toK[at] = key;
-        toI[at] = fromI[i];
+        const key = k[i];
+        const at = HIST16[key & 65535]++;
+        kAlt[at] = key;
+        iAlt[at] = indices[i];
       }
-      const swapK = fromK;
-      fromK = toK;
-      toK = swapK;
-      const swapI = fromI;
-      fromI = toI;
-      toI = swapI;
+      HIST16.fill(0);
+      for (let i = 0;i < count; i++)
+        HIST16[kAlt[i] >>> 16]++;
+      sum = 0;
+      for (let b = 0;b < 65536; b++) {
+        const h = HIST16[b];
+        HIST16[b] = sum;
+        sum += h;
+      }
+      for (let i = 0;i < count; i++) {
+        const key = kAlt[i];
+        const at = HIST16[key >>> 16]++;
+        k[at] = key;
+        indices[at] = iAlt[i];
+      }
+      return count;
     }
-    return count;
+    {
+      let fromK = k;
+      let toK = kAlt;
+      let fromI = indices;
+      let toI = iAlt;
+      for (let pass = 0;pass < 3; pass++) {
+        const shift = pass === 0 ? 0 : pass === 1 ? 11 : 22;
+        const mask = pass === 2 ? 1023 : 2047;
+        HIST11.fill(0);
+        for (let i = 0;i < count; i++)
+          HIST11[fromK[i] >>> shift & mask]++;
+        let sum = 0;
+        for (let b = 0;b < 2048; b++) {
+          const h = HIST11[b];
+          HIST11[b] = sum;
+          sum += h;
+        }
+        for (let i = 0;i < count; i++) {
+          const key = fromK[i];
+          const at = HIST11[key >>> shift & mask]++;
+          toK[at] = key;
+          toI[at] = fromI[i];
+        }
+        const swapK = fromK;
+        fromK = toK;
+        toK = swapK;
+        const swapI = fromI;
+        fromI = toI;
+        toI = swapI;
+      }
+      if (fromI !== indices)
+        indices.set(fromI.subarray(0, count), 0);
+      return count;
+    }
   }
   for (let i = 0;i < count; i++) {
     indices[i] = i;
@@ -3996,9 +4034,10 @@ function sortBackToFront(px, py, pz, count, forward, indices, keys, aux) {
   indices.subarray(0, count).sort((a, b) => keys[b] - keys[a] || b - a);
   return count;
 }
-var HIST, BIT_F32, BIT_U32;
+var RADIX_16BIT_MIN = 8192, HIST16, HIST11, BIT_F32, BIT_U32;
 var init_sort = __esm(() => {
-  HIST = new Uint32Array(256);
+  HIST16 = new Uint32Array(65536);
+  HIST11 = new Uint32Array(2048);
   BIT_F32 = new Float32Array(1);
   BIT_U32 = new Uint32Array(BIT_F32.buffer);
 });
@@ -4081,6 +4120,7 @@ __export(exports_src, {
   SPHERE_INTERSECT: () => SPHERE_INTERSECT,
   SPHERE_INSIDE: () => SPHERE_INSIDE,
   SHARED_MAGIC: () => SHARED_MAGIC,
+  RADIX_16BIT_MIN: () => RADIX_16BIT_MIN,
   PERM: () => PERM,
   OpCode: () => OpCode,
   LOSS_STORM_WINDOW_MS: () => LOSS_STORM_WINDOW_MS,
@@ -12351,6 +12391,10 @@ var SCRATCH = new Float32Array(6);
 // packages/particles/src/instances.ts
 init_src();
 var SCRATCH2 = new Float32Array(6);
+var PAINTER_HIST16 = new Uint32Array(65536);
+var PAINTER_HIST11 = new Uint32Array(2048);
+var PAINTER_F32 = new Float32Array(1);
+var PAINTER_U32 = new Uint32Array(PAINTER_F32.buffer);
 // packages/particles/src/sort.ts
 init_src();
 // packages/particles/src/gpuSim.ts

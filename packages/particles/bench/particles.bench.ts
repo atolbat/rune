@@ -197,9 +197,56 @@ forcesHeavy()
 const heavy = med(Array.from({ length: R }, forcesHeavy))
 emission()
 const emit = med(Array.from({ length: R }, () => emission()))
+function sortedCulledLayer(): { ms: number; count: number } {
+  // Task 177's field etalon — THE SORTED+CULLED COMBO: the staged
+  // painter bake culls BEFORE the radix (the sort input shrinks to the
+  // survivors); the classic shape sorted every live slot, culled ones
+  // included, then paid the ordered gather on top. The scene: the burst
+  // cloud scattered into a wide deterministic spread (the fields are
+  // public views — the composable-core pattern), the camera an ortho
+  // window keeping roughly a third of it. The count sanity-gates the
+  // window (the line is meaningless if it degenerates to all/none).
+  const ps = createParticles({
+    capacity: 100_000, spawner: SPAWNER, ramp: RAMP, spin: 1,
+    render: { kind: 'billboard', draw: 'instance', sort: true, cull: true },
+  })
+  ps.burst(100_000, { ...SPAWNER, life: [30, 30] })
+  ps.advance(1 / 60)
+  const rnd = hashRng(177)
+  for (let i = 0; i < 100_000; i++) {
+    ps.fields.px[i] = (rnd() * 2 - 1) * 50
+    ps.fields.py[i] = (rnd() * 2 - 1) * 30
+    ps.fields.pz[i] = (rnd() * 2 - 1) * 50
+  }
+  const FRAMES = 60
+  let c = 0
+  const ms = timed(FRAMES, () => { c += ps.view(BASIS_CULLED).instanceCount })
+  const count = c / FRAMES
+  if (count < 20_000 || count > 60_000) throw new Error(`bench: the culled window kept ${count} — the scenario degenerated`)
+  return { ms, count }
+}
+
+function hashRng(seed: number): () => number {
+  let s = seed | 0
+  return () => {
+    s ^= s << 13; s ^= s >>> 17; s ^= s << 5
+    return ((s >>> 0) % 1000003) / 1000003
+  }
+}
+
+// Task 177 — the culled scenario's basis: the forward + the viewProj of
+// an ortho window (|x| ≤ 30, |y| ≤ 18 — the six planes come from
+// frustumPlanes(viewProj), the renderer's own extraction path).
+const BASIS_CULLED = {
+  right: [1, 0, 0], up: [0, 1, 0], forward: [0, 0, -1],
+  viewProj: [1 / 30, 0, 0, 0, 0, 1 / 18, 0, 0, 0, 0, -1 / 2000, 0, 0, 0, 0, 1],
+}
+
 const identity = allocationIdentity()
 sortedLayer()
 const sorted = med(Array.from({ length: R }, sortedLayer))
+sortedCulledLayer()
+const sortedCulled = med(Array.from({ length: R }, sortedCulledLayer))
 
 const steadyCount = fullFrame(6000, { gravity: [0, -4, 0], drag: 0.6 }).count
 const loadCount = split.count
@@ -218,6 +265,10 @@ if (process.argv.includes('--json')) {
       msPerFrameUnsorted: +(sorted.msUnsorted / 60).toFixed(2),
       sortDelta: +((sorted.ms - sorted.msUnsorted) / 60).toFixed(2),
     },
+    sortedCulledLayer: {
+      msPerFrame: +(sortedCulled.ms / 60).toFixed(2),
+      survivors: Math.round(sortedCulled.count),
+    },
     allocationStable: identity.stable,
   }))
 } else {
@@ -229,7 +280,8 @@ if (process.argv.includes('--json')) {
   console.log(`  └─ pack only (Task 131)      : ${(split.packMs / 60).toFixed(2)} ms/frame, ${(split.instanceBytes / 1024 / 1024).toFixed(1)} MiB records/frame (the instanced path's CPU cost — the GPU expands)`)
   console.log(`forces-heavy (full stack)      : ${(heavy / 60).toFixed(2)} ms/frame (noise + seek + collide + limit)`)
   console.log(`emission (100k burst)          : ${emit.toFixed(2)} ms (${(emit / 100_000 * 1e6).toFixed(0)} ns/spawn)`)
-  console.log(`sorted layer (100k, instanced) : ${(sorted.ms / 60).toFixed(2)} ms/frame — the painter's order (Task 176's radix; unsorted twin ${(sorted.msUnsorted / 60).toFixed(2)}, the sort delta ${((sorted.ms - sorted.msUnsorted) / 60).toFixed(2)} ms)`)
+  console.log(`sorted layer (100k, instanced) : ${(sorted.ms / 60).toFixed(2)} ms/frame — the painter's order (Task 177's staged bake; unsorted twin ${(sorted.msUnsorted / 60).toFixed(2)}, the order delta ${((sorted.ms - sorted.msUnsorted) / 60).toFixed(2)} ms)`)
+  console.log(`sorted+culled (100k, ~1/3 live): ${(sortedCulled.ms / 60).toFixed(2)} ms/frame — ${Math.round(sortedCulled.count)} survivors (the stage culls BEFORE the radix; the classic shape sorted all 100k first)`)
   console.log(`allocation identity (500 frames): ${identity.stable ? 'STABLE (the soup + the view are the same references)' : 'BROKEN'}`)
   console.log(`rss before/after (Bun.gc)      : ${(identity.rssBefore / 1024).toFixed(0)} / ${(identity.rssAfter / 1024).toFixed(0)} KiB`)
 }

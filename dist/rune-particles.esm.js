@@ -427,7 +427,9 @@ function bitonicPassSequence(padN, run) {
   }
 }
 // packages/core/src/sort.ts
-var HIST = new Uint32Array(256);
+var RADIX_16BIT_MIN = 8192;
+var HIST16 = new Uint32Array(65536);
+var HIST11 = new Uint32Array(2048);
 var BIT_F32 = new Float32Array(1);
 var BIT_U32 = new Uint32Array(BIT_F32.buffer);
 function sortBackToFront(px, py, pz, count, forward, indices, keys, aux) {
@@ -454,35 +456,73 @@ function sortBackToFront(px, py, pz, count, forward, indices, keys, aux) {
       k[j] = ~bits >>> 0;
       indices[j] = i;
     }
-    let fromK = k;
-    let toK = kAlt;
-    let fromI = indices;
-    let toI = iAlt;
-    for (let pass = 0;pass < 4; pass++) {
-      const shift = pass * 8;
-      HIST.fill(0);
+    if (count >= RADIX_16BIT_MIN) {
+      HIST16.fill(0);
       for (let i = 0;i < count; i++)
-        HIST[fromK[i] >>> shift & 255]++;
+        HIST16[k[i] & 65535]++;
       let sum = 0;
-      for (let b = 0;b < 256; b++) {
-        const h = HIST[b];
-        HIST[b] = sum;
+      for (let b = 0;b < 65536; b++) {
+        const h = HIST16[b];
+        HIST16[b] = sum;
         sum += h;
       }
       for (let i = 0;i < count; i++) {
-        const key = fromK[i];
-        const at = HIST[key >>> shift & 255]++;
-        toK[at] = key;
-        toI[at] = fromI[i];
+        const key = k[i];
+        const at = HIST16[key & 65535]++;
+        kAlt[at] = key;
+        iAlt[at] = indices[i];
       }
-      const swapK = fromK;
-      fromK = toK;
-      toK = swapK;
-      const swapI = fromI;
-      fromI = toI;
-      toI = swapI;
+      HIST16.fill(0);
+      for (let i = 0;i < count; i++)
+        HIST16[kAlt[i] >>> 16]++;
+      sum = 0;
+      for (let b = 0;b < 65536; b++) {
+        const h = HIST16[b];
+        HIST16[b] = sum;
+        sum += h;
+      }
+      for (let i = 0;i < count; i++) {
+        const key = kAlt[i];
+        const at = HIST16[key >>> 16]++;
+        k[at] = key;
+        indices[at] = iAlt[i];
+      }
+      return count;
     }
-    return count;
+    {
+      let fromK = k;
+      let toK = kAlt;
+      let fromI = indices;
+      let toI = iAlt;
+      for (let pass = 0;pass < 3; pass++) {
+        const shift = pass === 0 ? 0 : pass === 1 ? 11 : 22;
+        const mask = pass === 2 ? 1023 : 2047;
+        HIST11.fill(0);
+        for (let i = 0;i < count; i++)
+          HIST11[fromK[i] >>> shift & mask]++;
+        let sum = 0;
+        for (let b = 0;b < 2048; b++) {
+          const h = HIST11[b];
+          HIST11[b] = sum;
+          sum += h;
+        }
+        for (let i = 0;i < count; i++) {
+          const key = fromK[i];
+          const at = HIST11[key >>> shift & mask]++;
+          toK[at] = key;
+          toI[at] = fromI[i];
+        }
+        const swapK = fromK;
+        fromK = toK;
+        toK = swapK;
+        const swapI = fromI;
+        fromI = toI;
+        toI = swapI;
+      }
+      if (fromI !== indices)
+        indices.set(fromI.subarray(0, count), 0);
+      return count;
+    }
   }
   for (let i = 0;i < count; i++) {
     indices[i] = i;
@@ -2126,6 +2166,224 @@ function packInstances(system, out, options = {}) {
   return n;
 }
 var SCRATCH2 = new Float32Array(6);
+var PAINTER_HIST16 = new Uint32Array(65536);
+var PAINTER_HIST11 = new Uint32Array(2048);
+var PAINTER_F32 = new Float32Array(1);
+var PAINTER_U32 = new Uint32Array(PAINTER_F32.buffer);
+function packInstancesPainter(system, out, options, forward, scratch) {
+  const ramp = options.ramp ?? CONSTANT_RAMP;
+  const tiles = options.tiles;
+  const tileU = tiles !== undefined ? tiles[0] : 1;
+  const tileV = tiles !== undefined ? tiles[1] : 1;
+  const useAtlas = tiles !== undefined;
+  if (useAtlas && (!Number.isInteger(tileU) || tileU < 1 || !Number.isInteger(tileV) || tileV < 1)) {
+    throw new Error(`rune/particles: billboard tiles must be integers >= 1 (got [${tileU}, ${tileV}])`);
+  }
+  const maxFrame = tileU * tileV - 1;
+  const frameJitter = options.frameJitter ?? 0;
+  const f = system.fields;
+  const count = system.count;
+  const s = SCRATCH2;
+  const fx = forward[0], fy = forward[1], fz = forward[2];
+  const records = scratch.records;
+  const k = scratch.k;
+  let n = 0;
+  const frustum = options.frustum ?? null;
+  const radiusK = options.cullRadiusK ?? 0.5;
+  const rampFlat = flatRamp(ramp);
+  const rampN = rampFlat.length / 7;
+  const rampLast = (rampN - 1) * 7;
+  for (let i = count - 1;i >= 0; i--) {
+    if (frustum !== null && sphereOutsideFrustum(frustum, f.px[i], f.py[i], f.pz[i], f.size[i] * radiusK))
+      continue;
+    const age = f.age[i];
+    const life = f.life[i];
+    const t = life > 0 ? age / life : 0;
+    if (rampN === 1 || t <= rampFlat[0]) {
+      s[0] = rampFlat[1];
+      s[1] = rampFlat[2];
+      s[2] = rampFlat[3];
+      s[3] = rampFlat[4];
+      s[4] = rampFlat[5];
+      s[5] = rampFlat[6];
+    } else if (t >= rampFlat[rampLast]) {
+      s[0] = rampFlat[rampLast + 1];
+      s[1] = rampFlat[rampLast + 2];
+      s[2] = rampFlat[rampLast + 3];
+      s[3] = rampFlat[rampLast + 4];
+      s[4] = rampFlat[rampLast + 5];
+      s[5] = rampFlat[rampLast + 6];
+    } else {
+      let lo = 0, hi = rampN - 1;
+      while (hi - lo > 1) {
+        const mid = lo + hi >> 1;
+        if (rampFlat[mid * 7] <= t)
+          lo = mid;
+        else
+          hi = mid;
+      }
+      const a = lo * 7, b = hi * 7;
+      const span = rampFlat[b] - rampFlat[a];
+      const kk = span > 0 ? (t - rampFlat[a]) / span : 0;
+      s[0] = rampFlat[a + 1] + (rampFlat[b + 1] - rampFlat[a + 1]) * kk;
+      s[1] = rampFlat[a + 2] + (rampFlat[b + 2] - rampFlat[a + 2]) * kk;
+      s[2] = rampFlat[a + 3] + (rampFlat[b + 3] - rampFlat[a + 3]) * kk;
+      s[3] = rampFlat[a + 4] + (rampFlat[b + 4] - rampFlat[a + 4]) * kk;
+      s[4] = rampFlat[a + 5] + (rampFlat[b + 5] - rampFlat[a + 5]) * kk;
+      s[5] = rampFlat[a + 6] + (rampFlat[b + 6] - rampFlat[a + 6]) * kk;
+    }
+    const half = f.size[i] * s[0] * 0.5;
+    if (half <= 0)
+      continue;
+    let u0 = 0, v0 = 0;
+    if (useAtlas) {
+      let frame = Math.floor(s[5] + (frameJitter > 0 ? f.seed[i] * frameJitter : 0));
+      if (!Number.isFinite(frame))
+        frame = 0;
+      if (frame < 0)
+        frame = 0;
+      if (frame > maxFrame)
+        frame = maxFrame;
+      u0 = frame % tileU / tileU;
+      v0 = Math.floor(frame / tileU) / tileV;
+    }
+    const at = n * INSTANCE_STRIDE;
+    records[at] = f.px[i];
+    records[at + 1] = f.py[i];
+    records[at + 2] = f.pz[i];
+    records[at + 3] = f.vx[i];
+    records[at + 4] = f.vy[i];
+    records[at + 5] = f.vz[i];
+    records[at + 6] = f.cr[i] * s[1];
+    records[at + 7] = f.cg[i] * s[2];
+    records[at + 8] = f.cb[i] * s[3];
+    records[at + 9] = f.ca[i] * s[4];
+    records[at + 10] = half;
+    records[at + 11] = f.seed[i] * 6.283185307179586;
+    records[at + 12] = age;
+    records[at + 13] = f.seed[i];
+    records[at + 14] = u0;
+    records[at + 15] = v0;
+    const d = fx * f.px[i] + fy * f.py[i] + fz * f.pz[i];
+    PAINTER_F32[0] = d;
+    let bits = PAINTER_U32[0];
+    if (bits === 2147483648)
+      bits = 0;
+    bits = (bits & 2147483648) !== 0 ? ~bits : bits | 2147483648;
+    k[n] = ~bits >>> 0;
+    n++;
+  }
+  if (n <= 1) {
+    if (n === 1) {
+      for (let c = 0;c < INSTANCE_STRIDE; c++)
+        out[c] = records[c];
+    }
+    return n;
+  }
+  const kAlt = scratch.kAlt;
+  const iAlt = scratch.iAlt;
+  const perm = scratch.perm;
+  if (n >= RADIX_16BIT_MIN) {
+    PAINTER_HIST16.fill(0);
+    for (let i = 0;i < n; i++)
+      PAINTER_HIST16[k[i] & 65535]++;
+    let sum = 0;
+    for (let b = 0;b < 65536; b++) {
+      const h = PAINTER_HIST16[b];
+      PAINTER_HIST16[b] = sum;
+      sum += h;
+    }
+    for (let i = 0;i < n; i++) {
+      const key = k[i];
+      const at = PAINTER_HIST16[key & 65535]++;
+      kAlt[at] = key;
+      iAlt[at] = i;
+    }
+    PAINTER_HIST16.fill(0);
+    for (let i = 0;i < n; i++)
+      PAINTER_HIST16[kAlt[i] >>> 16]++;
+    sum = 0;
+    for (let b = 0;b < 65536; b++) {
+      const h = PAINTER_HIST16[b];
+      PAINTER_HIST16[b] = sum;
+      sum += h;
+    }
+    for (let i = 0;i < n; i++) {
+      const key = kAlt[i];
+      const at = PAINTER_HIST16[key >>> 16]++;
+      k[at] = key;
+      perm[at] = iAlt[i];
+    }
+  } else {
+    PAINTER_HIST11.fill(0);
+    for (let i = 0;i < n; i++)
+      PAINTER_HIST11[k[i] & 2047]++;
+    let sum = 0;
+    for (let b = 0;b < 2048; b++) {
+      const h = PAINTER_HIST11[b];
+      PAINTER_HIST11[b] = sum;
+      sum += h;
+    }
+    for (let i = 0;i < n; i++) {
+      const key = k[i];
+      const at = PAINTER_HIST11[key & 2047]++;
+      kAlt[at] = key;
+      iAlt[at] = i;
+    }
+    let fromK = kAlt;
+    let fromI = iAlt;
+    let toK = k;
+    let toI = perm;
+    for (let pass = 1;pass < 3; pass++) {
+      const shift = pass === 1 ? 11 : 22;
+      const mask = pass === 2 ? 1023 : 2047;
+      PAINTER_HIST11.fill(0);
+      for (let i = 0;i < n; i++)
+        PAINTER_HIST11[fromK[i] >>> shift & mask]++;
+      let sum2 = 0;
+      for (let b = 0;b < 2048; b++) {
+        const h = PAINTER_HIST11[b];
+        PAINTER_HIST11[b] = sum2;
+        sum2 += h;
+      }
+      for (let i = 0;i < n; i++) {
+        const key = fromK[i];
+        const at = PAINTER_HIST11[key >>> shift & mask]++;
+        toK[at] = key;
+        toI[at] = fromI[i];
+      }
+      const swapK = fromK;
+      fromK = toK;
+      toK = swapK;
+      const swapI = fromI;
+      fromI = toI;
+      toI = swapI;
+    }
+    if (fromI !== perm)
+      perm.set(fromI.subarray(0, n), 0);
+  }
+  for (let r = 0;r < n; r++) {
+    const src = perm[r] * INSTANCE_STRIDE;
+    const dst = r * INSTANCE_STRIDE;
+    out[dst] = records[src];
+    out[dst + 1] = records[src + 1];
+    out[dst + 2] = records[src + 2];
+    out[dst + 3] = records[src + 3];
+    out[dst + 4] = records[src + 4];
+    out[dst + 5] = records[src + 5];
+    out[dst + 6] = records[src + 6];
+    out[dst + 7] = records[src + 7];
+    out[dst + 8] = records[src + 8];
+    out[dst + 9] = records[src + 9];
+    out[dst + 10] = records[src + 10];
+    out[dst + 11] = records[src + 11];
+    out[dst + 12] = records[src + 12];
+    out[dst + 13] = records[src + 13];
+    out[dst + 14] = records[src + 14];
+    out[dst + 15] = records[src + 15];
+  }
+  return n;
+}
 // packages/particles/src/sort.ts
 function sortDepthBackToFront(fields, count, forward, indices, keys, aux) {
   return sortBackToFront(fields.px, fields.py, fields.pz, count, forward, indices, keys, aux);
@@ -4866,6 +5124,13 @@ function createParticles(desc) {
   const sortIndices = sortOn ? new Int32Array(capacity) : null;
   const sortKeys = sortOn ? new Float32Array(capacity) : null;
   const sortAux = sortOn ? { k: new Uint32Array(capacity), kAlt: new Uint32Array(capacity), iAlt: new Int32Array(capacity) } : null;
+  const painterScratch = sortOn && drawFormat === "instance" && sortAux !== null && sortIndices !== null ? {
+    records: new Float32Array(capacity * INSTANCE_STRIDE),
+    k: sortAux.k,
+    kAlt: sortAux.kAlt,
+    iAlt: sortAux.iAlt,
+    perm: sortIndices
+  } : null;
   const EMPTY = Object.freeze({});
   const meshBakeOpts = { ramp, axis: undefined, spin: 0 };
   const trailBakeOpts = { ramp, length: 0, width: 0 };
@@ -5033,13 +5298,18 @@ function createParticles(desc) {
         const renderOpts = render;
         const o = options?.billboard ?? EMPTY;
         let order = null;
+        let painterForward = null;
         if (sortOn) {
           const forward = basis.forward;
           if (forward === undefined) {
             throw new Error("rune/particles: render.sort needs the camera basis forward (the depth key is dot(forward, position) — pass a full CameraBasis)");
           }
-          const n = sortDepthBackToFront(system.fields, system.count, forward, sortIndices, sortKeys, sortAux);
-          order = n === sortIndices.length ? sortIndices : sortIndices.subarray(0, n);
+          if (drawFormat === "instance" && !gpuMode) {
+            painterForward = forward;
+          } else if (!gpuMode) {
+            const n = sortDepthBackToFront(system.fields, system.count, forward, sortIndices, sortKeys, sortAux);
+            order = n === sortIndices.length ? sortIndices : sortIndices.subarray(0, n);
+          }
         }
         let frustum = null;
         if (cullOn && !gpuMode) {
@@ -5055,9 +5325,13 @@ function createParticles(desc) {
         } else if (drawFormat === "instance") {
           packOptsScratch.tiles = o.tiles ?? renderOpts.tiles;
           packOptsScratch.frameJitter = o.frameJitter ?? renderOpts.frameJitter;
-          packOptsScratch.order = order;
+          packOptsScratch.order = null;
           packOptsScratch.frustum = frustum;
-          view.vertexCount = packInstances(system, vertices, packOptsScratch);
+          if (painterForward !== null && painterScratch !== null) {
+            view.vertexCount = packInstancesPainter(system, vertices, packOptsScratch, painterForward, painterScratch);
+          } else {
+            view.vertexCount = packInstances(system, vertices, packOptsScratch);
+          }
           view.instanceCount = view.vertexCount;
         } else {
           billboardBakeOpts.mode = o.mode ?? renderOpts.mode ?? "camera";
@@ -5319,6 +5593,7 @@ export {
   simplex3,
   sampleRamp,
   readGpuEmitConfig,
+  packInstancesPainter,
   packInstances,
   hash01,
   gpuSortWgsl,

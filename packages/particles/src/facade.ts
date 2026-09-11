@@ -34,7 +34,7 @@ import { frustumPlanes } from '@rune/core'
 import { GPU_EMIT_SALTS } from './gpuEmit.ts'
 import { CONSTANT_RAMP, type Ramp } from './ramp.ts'
 import { validateNoise, type NoiseField } from './noise.ts'
-import { packInstances, INSTANCE_STRIDE, INSTANCE_LAYOUT, type PackOptions } from './instances.ts'
+import { packInstances, packInstancesPainter, INSTANCE_STRIDE, INSTANCE_LAYOUT, type PackOptions, type PainterScratch } from './instances.ts'
 import { GPU_STATE_STRIDE, gpuRampMaxSize } from './gpuSim.ts'
 import {
   fillBillboards, SOUP_STRIDE, VERTS_PER_PARTICLE, type CameraBasis, type BillboardOptions,
@@ -618,6 +618,23 @@ export function createParticles(desc: ParticlesDesc): Particles {
   const sortAux = sortOn
     ? { k: new Uint32Array(capacity), kAlt: new Uint32Array(capacity), iAlt: new Int32Array(capacity) }
     : null
+  // Task 177 — THE STAGED PAINTER BAKE: the sorted INSTANCE layer's
+  // frame is the staged pipeline (sequential stage → survivor radix →
+  // 64-byte record gather) — the random 14-stream SoA gather the
+  // classic order walk pays is gone (measured: the 100k sorted layer
+  // 12.95 → ~8 ms; a half-culled layer 9.5 → 2.5 ms — the stage culls
+  // BEFORE the sort, so the radix runs on survivors only). The scratch
+  // shares the sort's ping-pong (k/kAlt/iAlt) and sortIndices (the
+  // painter's perm); the ONE new buffer is the staged records
+  // (capacity × 16 floats, allocated only for sorted instance layers —
+  // 6.4 MiB at the 100k ceiling, once, not per frame).
+  const painterScratch: PainterScratch | null = sortOn && drawFormat === 'instance' && sortAux !== null && sortIndices !== null
+    ? {
+        records: new Float32Array(capacity * INSTANCE_STRIDE),
+        k: sortAux.k, kAlt: sortAux.kAlt, iAlt: sortAux.iAlt,
+        perm: sortIndices,
+      }
+    : null
 
   // Task 142 (the performance pass) — the BAKE-OPTIONS SCRATCH: view()
   // used to build a fresh options object (and a fresh `?? {}` for the
@@ -769,20 +786,31 @@ export function createParticles(desc: ParticlesDesc): Particles {
         const o = options?.billboard ?? EMPTY
         // Task 132 — THE PAINTER'S ORDER: the back-to-front index sequence
         // (far first — the alpha layers composite correctly, the near sprite
-        // blending over everything behind it). The SAME sequence feeds BOTH
-        // bakers: the soup's quad stream and the instance-record stream get
-        // the identical order (the draw-format parity contract).
+        // blending over everything behind it). Task 177 — the staged shape:
+        // the INSTANCE draw bakes through packInstancesPainter (the order is
+        // the pipeline's own — stage, survivor radix, record gather; the
+        // classic `order` walk never runs); the SOUP draw keeps the classic
+        // sequence (the draw-format parity contract — both orders IDENTICAL,
+        // pinned in task176/task177). In gpuMode the CPU sort is SKIPPED —
+        // the GPU render tier owns the order there (Task 134); the sort that
+        // used to run was dead work, discarded unread. The forward contract
+        // stays loud for every sortOn path (unchanged).
         let order: ArrayLike<number> | null = null
+        let painterForward: readonly number[] | null = null
         if (sortOn) {
           const forward = basis.forward
           if (forward === undefined) {
             throw new Error('rune/particles: render.sort needs the camera basis forward (the depth key is dot(forward, position) — pass a full CameraBasis)')
           }
-          const n = sortDepthBackToFront(system.fields, system.count, forward, sortIndices!, sortKeys!, sortAux!)
-          // The bakers walk order.length entries — hand them the exact LIVE
-          // prefix as a typed view (Task 176: the JS-array copy loop is
-          // gone; one view object per frame replaces the per-element writes).
-          order = n === sortIndices!.length ? sortIndices! : sortIndices!.subarray(0, n)
+          if (drawFormat === 'instance' && !gpuMode) {
+            painterForward = forward
+          } else if (!gpuMode) {
+            const n = sortDepthBackToFront(system.fields, system.count, forward, sortIndices!, sortKeys!, sortAux!)
+            // The bakers walk order.length entries — hand them the exact LIVE
+            // prefix as a typed view (Task 176: the JS-array copy loop is
+            // gone; one view object per frame replaces the per-element writes).
+            order = n === sortIndices!.length ? sortIndices! : sortIndices!.subarray(0, n)
+          }
         }
         // Task 136 — render.cull on the CPU tier: the six frustum planes
         // from the basis view-projection (Task 141: @rune/core's
@@ -812,9 +840,15 @@ export function createParticles(desc: ParticlesDesc): Particles {
           // records ARE the draw's instances.
           packOptsScratch.tiles = o.tiles ?? renderOpts.tiles
           packOptsScratch.frameJitter = o.frameJitter ?? renderOpts.frameJitter
-          packOptsScratch.order = order
+          packOptsScratch.order = null
           packOptsScratch.frustum = frustum
-          view.vertexCount = packInstances(system, vertices, packOptsScratch)
+          if (painterForward !== null && painterScratch !== null) {
+            // Task 177 — the staged painter bake (the sorted layer's own
+            // pipeline; `order` is not consulted — the painter IS the order).
+            view.vertexCount = packInstancesPainter(system, vertices, packOptsScratch, painterForward, painterScratch)
+          } else {
+            view.vertexCount = packInstances(system, vertices, packOptsScratch)
+          }
           view.instanceCount = view.vertexCount
         } else {
           billboardBakeOpts.mode = o.mode ?? renderOpts.mode ?? 'camera'
