@@ -2325,3 +2325,72 @@ task169-wgsl-gate PASS (calibrated), task169-multidraw PASS
 (pixel-identical), task167-syncpoint PASS, task168-restore PASS.
 Cache-busts: `?v=169` (dist imports of astral + vfx), `?v=2`
 (astral shaders/render).
+
+## Task 173 — THE HYPOT RETIREMENT (the emission hot path; the astral demo retired)
+
+The session opened with the user's verdict on the astral demo — delete it,
+continue the library. The demo folder, its six gate/probe scripts, its
+smoke section, its gallery card and README rows are gone (the KERNEL fixes
+it provoked stay: the Task-172 depth-less pass axis and its regression
+tests are library contracts now, independent of any demo). The
+optimization program resumes on the etalon bench, benchmark-first.
+
+THE FINDING (the decomposition bench, Bun 1.3, one core, median of 7):
+the emission etalon — 221 ns/spawn — splits into the spawner closure
+(~95 ns: 8 hash01 draws ≈ 34 ns, the shape math, the record writes), the
+emit walk's validation+store (~10 ns on a WARM store — the walk's
+apparent 92 ns was almost entirely first-touch page faults on the fresh
+SoA), and the cold-array cost. Inside the spawner: **Math.hypot —
+32.5 ns vs 10.3 ns for Math.sqrt(x²+y²+z²) on the same normalize
+workload** (hypot's spec-mandated overflow-safe path costs real time in
+V8/JSC). And the CPU was the ONLY hypot user left: both GPU twins — the
+WGSL emit kernel (gpuSim.ts: `sqrt(rx*rx + ry*ry + rz*rz)`), the GLSL
+TF twin (`length()`) — normalize with sqrt(dot) semantics. The CPU's
+hypot was the outlier, quietly diverging from its own twins by one f64
+ulp per normalize.
+
+THE SWAP (eight sites, three files — every PER-PARTICLE walk, nothing
+else; the one-time SETUP normalizes at spawner creation are untouched):
+- `spawn.ts` — the radial and tangential velocity normalizes (per spawn);
+- `gpuEmit.ts` — `gpuEmitRowModel`'s radial/tangential, IN LOCKSTEP with
+  the spawner (the model is the parity oracle; the WGSL kernel itself is
+  unchanged — it already spoke sqrt);
+- `trails.ts` — the ribbon bake's length-cap walk, the central-difference
+  dir normalize, and the side normalize (2-3 hypots PER POINT PER FRAME);
+- `billboards.ts` — the stretched mode's velocity length and side
+  normalize (per particle per frame, the soup path).
+
+THE MEASUREMENT (interleaved A/B — three rounds each way, `git stash`
+as the switch, the drift control this container needs):
+- spawner closure: **95.1 → 80.8 ns/spawn (−15%)**;
+- the emission etalon (100k one-shot burst): **22.10 → 19.84 ms
+  (221 → 198 ns/spawn, −10%)**;
+- THE TRAIL FRAME (8k ribbons, K=24 history points, advance+bake):
+  **9.0 → 4.84 ms/frame (−45%)** — the ribbon bake was
+  hypot-DOMINATED (three hypots per ribbon point; ~88k in-cap points
+  per frame at that load).
+
+THE PINS (`packages/particles/tests/task173.test.ts`): the f32-parity
+suite could NOT hold this contract — one f64 ulp almost never crosses an
+f32 rounding boundary, so a hypot regression would sail through
+`Math.fround` comparisons. The new pins replicate the expression tree
+bit-exactly in the test (`v = (p − o)/Math.sqrt(dot) · (smin +
+(smax − smin)·hash01(seed, i, S_SPD))`, salt 2 — the same draw the GPU
+kernel bakes in) for the radial sphere AND the tangential dome —
+including the IEEE sign of zero (the tangential's `dy = 0·rx − 0·rz` is
+−0 when rx < 0; a naive `dy = 0` literal pins the wrong zero and the
+first draft of the test failed on exactly that). Calibrated both
+directions: against the OLD hypot code the pins FAIL (2/3), against the
+new sqrt code they PASS (3/3).
+
+VERIFIED: 1777/1777 tests (+3), typecheck at the 6-error baseline, lint
+0 errors / 375 warnings (baseline), dist rebuilt, demo:smoke OK (twice —
+one container flake re-run), task169-multidraw PASS (pixel-identical),
+task168-restore PASS, task167-syncpoint PASS on re-run (the documented
+3-27 frames/6s container variance flaked the first attempt). The
+task131 raw-device gates could not launch this session — the container's
+SwiftShader browser process is exhausted after the day's GPU gates
+(TargetClosedError at navigation, before any check runs); their subject
+(the WGSL/GLSL kernel sources) is UNCHANGED by this task, and the
+changed JS paths are covered by the bit-exact pins above plus the live
+demo smoke.

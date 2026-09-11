@@ -143,10 +143,10 @@ export async function createRealGPU(
   // Task 172 — THE DEPTH-LESS PASS AXIS: a pipeline that declares a
   // depthStencil format is INVALID in a render pass without that depth
   // attachment (spec: "the pipeline's depthStencil format must match the
-  // pass's depthStencil attachment" — Chrome 150's Dawn enforces it: the
-  // astral field report's «Attachment state of RenderPipeline is not
+  // pass's depthStencil attachment" — Chrome 150's Dawn enforces it: a
+  // phone field report's «Attachment state of RenderPipeline is not
   // compatible with RenderPassEncoder» → three errors → the storm pause;
-  // the container's older Dawn does NOT, which is why the Task-169 gate
+  // the container's older Dawn does NOT, which is why local gates
   // passed while the phone died). Pipelines now carry a per-DEPTH-PRESENCE
   // variant (× the Task-69 sampleType variants), chosen at bind time from
   // the CURRENT pass's attachment state — bindTarget owns this flag.
@@ -502,7 +502,7 @@ export async function createRealGPU(
    *  textureSampleLevel (textureSample requires a filterable texture).
    *  Task 172: withDepth=false — the depth-less pass twin (NO depthStencil
    *  on the pipeline; a declared format is incompatible with a pass that
-   *  carries no depth attachment — the astral field report's storm pause). */
+   *  carries no depth attachment — a phone field report's storm pause). */
   function buildPipeline(
     record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; textureBindings: readonly number[]; textureCount: number; desc: GpuPipelineDesc },
     variant: TextureSampleVariant,
@@ -617,7 +617,7 @@ export async function createRealGPU(
       // depthStencil: "disabled" depth = write:false + compare:'always'. A
       // pipeline bound in a DEPTH-LESS pass (a depth:false target) declares
       // NO depthStencil at all — the format would be a validation error
-      // there (the astral phone report: the post chain's scene surface).
+      // there (a phone field report: a post chain's scene surface).
       depthStencil: withDepth ? {
         format: 'depth24plus',
         depthWriteEnabled: desc.depth === false ? false : (desc.depth?.write ?? true),

@@ -597,7 +597,11 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
     // The velocity direction by mode.
     if (velocity.mode === 'radial') {
       dx = px - ox; dy = py - oy; dz = pz - oz
-      const l = Math.hypot(dx, dy, dz)
+      // Task 173 — sqrt, not Math.hypot: the GPU twins (the WGSL emit
+      // kernel, the GLSL TF twin) normalize with length() = sqrt(dot)
+      // — the CPU now speaks the same math, AND the op is ~3× cheaper
+      // (hypot's overflow-safe path costs real ns in this per-spawn walk).
+      const l = Math.sqrt(dx * dx + dy * dy + dz * dz)
       if (l > 1e-12) { dx /= l; dy /= l; dz /= l }
       else {
         // Task 124 — the degenerate case (a particle AT the shape origin: a
@@ -620,7 +624,8 @@ export function createSpawner(desc: SpawnerDesc): Spawner {
       // cross(axis, radial) normalized: the orbit direction.
       const rx = px - ox, ry = py - oy, rz = pz - oz
       dx = ay * rz - az * ry; dy = az * rx - ax * rz; dz = ax * ry - ay * rx
-      const l = Math.hypot(dx, dy, dz)
+      // Task 173 — the GPU twins' length() semantics (see the radial note).
+      const l = Math.sqrt(dx * dx + dy * dy + dz * dz)
       if (l > 1e-12) { dx /= l; dy /= l; dz /= l } else { dx = ax; dy = ay; dz = az }
     }
     // 'lobe' (cone) and 'fixed' keep the dx/dy/dz computed above.

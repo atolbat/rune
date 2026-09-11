@@ -24,14 +24,6 @@
  *      targets >= 40 px; in model-viewer the canvas fills the viewport;
  *  11. zero console/page errors.
  *
- * astral (/demo/astral/):
- *  12. the seeded world boots (72 systems, a connected lane graph, 3 ships,
- *      72 labels) through the __astral probe handle;
- *  13. the simulation is alive (canvas frames differ — the idle fleets
- *      patrol their orbits);
- *  14. a tap on the homeworld opens the system panel;
- *  15. the mobile viewport: no overflow, the canvas fills the width.
- *
  * Exit 0 — the demos follow the standard; 1 — they do not. Usage: bun run demo:smoke
  */
 import { join, resolve } from 'node:path'
@@ -570,53 +562,6 @@ try {
   const mobileVfxOk = mobileVfx.overflow <= 1 && mobileVfx.touchTarget >= 40
   await page.setViewportSize({ width: 960, height: 720 })
 
-  // ─── astral: the mini-4X — boot, live simulation, a tap, the probe handle ──
-  await page.goto(`http://localhost:${port}/demo/astral/?seed=1234`, { waitUntil: 'networkidle' })
-  await page.waitForFunction(() => window.__astral !== undefined && window.__astral.frame > 5, null, { timeout: 20_000 })
-  const astralBadge = await page.textContent('#backend')
-  console.log(`[smoke] astral backend: ${astralBadge}`)
-  const astralBoot = await page.evaluate(() => {
-    const w = window.__astral.world
-    return {
-      systems: w.systems.length,
-      lanes: w.lanes.length,
-      ships: w.ships.length,
-      labels: [...document.querySelectorAll('.as-label')].length,
-    }
-  })
-  const astralBootOk = astralBoot.systems === 72 && astralBoot.lanes >= 72 && astralBoot.ships === 3 && astralBoot.labels === 72
-  console.log(`[smoke] astral world: ${JSON.stringify(astralBoot)} ${astralBootOk ? 'ok' : 'BAD'}`)
-  // liveness: the idle ships patrol (their orbit moves them every frame)
-  const astralAlive = await framesDiffer(page)
-  console.log(`[smoke] astral animation: ${astralAlive ? 'alive' : 'STATIC'}`)
-  // a tap on the homeworld opens the system panel (its live screen position)
-  const astralTap = await page.evaluate(() => {
-    const home = window.__astral.world.systems.find(s => s.owner === 1)
-    const pt = window.__astral.project(home.x, home.y)
-    return { x: Math.round(pt.x), y: Math.round(pt.y) }
-  })
-  await page.mouse.click(astralTap.x, astralTap.y)
-  await page.waitForTimeout(600)
-  const astralPanel = await page.evaluate(() => {
-    const panel = document.querySelector('.as-panel')
-    return { open: panel?.classList.contains('as-open') ?? false, title: document.querySelector('.as-panel-title')?.textContent ?? '' }
-  })
-  const astralPanelOk = astralPanel.open && astralPanel.title.length > 0
-  console.log(`[smoke] astral tap → panel: ${astralPanelOk ? 'opens' : 'FAILS'} (${astralPanel.title})`)
-  // mobile viewport: the top bar stays in the viewport, no overflow
-  await page.setViewportSize({ width: 390, height: 844 })
-  await page.waitForTimeout(800)
-  const mobileAstral = await page.evaluate(() => {
-    const overflow = document.documentElement.scrollWidth - document.documentElement.clientWidth
-    const top = document.querySelector('.as-top')?.getBoundingClientRect()
-    const canvas = document.querySelector('#canvas')?.getBoundingClientRect()
-    return { overflow, topH: Math.round(top?.height ?? 0), canvasW: Math.round(canvas?.width ?? 0) }
-  })
-  const mobileAstralOk = mobileAstral.overflow <= 1 && mobileAstral.canvasW >= 380
-  console.log(`[smoke] astral mobile: overflow ${mobileAstral.overflow}px, canvas ${mobileAstral.canvasW}px`)
-  await page.setViewportSize({ width: 960, height: 720 })
-  const astralOk = astralBadge !== '…' && astralBootOk && astralAlive && astralPanelOk && mobileAstralOk
-
   if (errors.length) {
     console.error('[smoke] page errors:')
     for (const error of errors) console.error(`  ${error}`)
@@ -649,7 +594,6 @@ try {
     vfxLabels.visible >= 9 &&
     vfxGpuClean &&
     mobileVfxOk &&
-    astralOk &&
     viewerLogEntries > 0 &&
     mobileViewerOk &&
     errors.length === 0

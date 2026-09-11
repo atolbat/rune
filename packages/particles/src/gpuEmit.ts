@@ -442,7 +442,9 @@ export function gpuEmitRowModel(
   // position — the at() translation is a later step, the CPU's own order)
   if (cfg.velMode === GPU_EMIT_VEL.radial) {
     dx = px - cfg.shapeOrigin[0]; dy = py - cfg.shapeOrigin[1]; dz = pz - cfg.shapeOrigin[2]
-    const l = Math.hypot(dx, dy, dz)
+    // Task 173 — sqrt(dot), the kernel's own length() semantics (the JS
+    // spawner changed with it — the model and the spawner stay bit-identical).
+    const l = Math.sqrt(dx * dx + dy * dy + dz * dz)
     if (l > 1e-12) { dx /= l; dy /= l; dz /= l }
     else {
       const theta = TAU * hash01(sd, gi, S.scat0)
@@ -460,7 +462,8 @@ export function gpuEmitRowModel(
     dx = cfg.axis[1] * rz - cfg.axis[2] * ry
     dy = cfg.axis[2] * rx - cfg.axis[0] * rz
     dz = cfg.axis[0] * ry - cfg.axis[1] * rx
-    const l = Math.hypot(dx, dy, dz)
+    // Task 173 — the kernel's length() semantics (see the radial note).
+    const l = Math.sqrt(dx * dx + dy * dy + dz * dz)
     if (l > 1e-12) { dx /= l; dy /= l; dz /= l } else { dx = cfg.axis[0]; dy = cfg.axis[1]; dz = cfg.axis[2] }
   }
   // 'fixed' (1) and 'lobe' (5): keep the dx the shape branch computed

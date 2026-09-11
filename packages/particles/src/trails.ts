@@ -200,7 +200,9 @@ export function fillTrails(
       const idx = (heads[i] - (k - 1) + points * 2) % points
       const b = i * stride + idx * 3
       const dxx = hx[b] - headX, dyy = hx[b + 1] - headY, dzz = hx[b + 2] - headZ
-      if (Math.hypot(dxx, dyy, dzz) > lengthCap) break
+      // Task 173 — sqrt, not Math.hypot: ~3× on the op, and every other
+      // normalize in the package (the GPU twins included) is sqrt(dot).
+      if (Math.sqrt(dxx * dxx + dyy * dyy + dzz * dzz) > lengthCap) break
       K = k
     }
     if (K < 1) continue // only the head is within the cap — nothing to span
@@ -228,13 +230,15 @@ export function fillTrails(
       }
       // dir ≈ next − prev (a chord through the current point).
       let dirX = nextX - prevX, dirY = nextY - prevY, dirZ = nextZ - prevZ
-      const dl = Math.hypot(dirX, dirY, dirZ)
+      // Task 173 — sqrt(dot) in the per-point walk (see the cap note).
+      const dl = Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ)
       if (dl < 1e-9) { dirX = fx; dirY = fy; dirZ = fz }
       else { dirX /= dl; dirY /= dl; dirZ /= dl }
       // side = cross(forward, dir) — ⊥ the motion AND the view.
       let sx = fy * dirZ - fz * dirY, sy = fz * dirX - fx * dirZ, sz = fx * dirY - fy * dirX
-      let sl = Math.hypot(sx, sy, sz)
-      if (sl < 1e-6) { sx = dirY; sy = -dirX; sz = 0; sl = Math.hypot(sx, sy, sz) || 1 }
+      // Task 173 — sqrt(dot) in the per-point walk (see the cap note).
+      let sl = Math.sqrt(sx * sx + sy * sy + sz * sz)
+      if (sl < 1e-6) { sx = dirY; sy = -dirX; sz = 0; sl = Math.sqrt(sx * sx + sy * sy + sz * sz) || 1 }
       sx /= sl; sy /= sl; sz /= sl
       // The taper: k/K → 0 at the tail (the k = K point vanishes).
       const w = halfW * (1 - k / K)

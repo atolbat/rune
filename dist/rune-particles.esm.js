@@ -1566,7 +1566,7 @@ function createSpawner(desc) {
       dx = px - ox;
       dy = py - oy;
       dz = pz - oz;
-      const l = Math.hypot(dx, dy, dz);
+      const l = Math.sqrt(dx * dx + dy * dy + dz * dz);
       if (l > 0.000000000001) {
         dx /= l;
         dy /= l;
@@ -1588,7 +1588,7 @@ function createSpawner(desc) {
       dx = ay * rz - az * ry;
       dy = az * rx - ax * rz;
       dz = ax * ry - ay * rx;
-      const l = Math.hypot(dx, dy, dz);
+      const l = Math.sqrt(dx * dx + dy * dy + dz * dz);
       if (l > 0.000000000001) {
         dx /= l;
         dy /= l;
@@ -1864,19 +1864,19 @@ function fillBillboards(system, basis, out, options = {}) {
     }
     if (mode === "stretched") {
       const vx = f.vx[i], vy = f.vy[i], vz = f.vz[i];
-      const vlen = Math.hypot(vx, vy, vz);
+      const vlen = Math.sqrt(vx * vx + vy * vy + vz * vz);
       if (vlen < 0.0001) {
         at = cameraQuad(out, at, px, py, pz, half, rx, ry, rz, ux, uy, uz, u0, v0, uS, vS, cr, cg, cb, ca);
         continue;
       }
       const dx = vx / vlen, dy = vy / vlen, dz = vz / vlen;
       let sx = fy * dz - fz * dy, sy = fz * dx - fx * dz, sz = fx * dy - fy * dx;
-      let sl = Math.hypot(sx, sy, sz);
+      let sl = Math.sqrt(sx * sx + sy * sy + sz * sz);
       if (sl < 0.000001) {
         sx = dy;
         sy = -dx;
         sz = 0;
-        sl = Math.hypot(sx, sy, sz) || 1;
+        sl = Math.sqrt(sx * sx + sy * sy + sz * sz) || 1;
       }
       sx /= sl;
       sy /= sl;
@@ -2460,7 +2460,7 @@ function gpuEmitRowModel(cfg, i, atOrigin, emitterV, inheritK, out) {
     dx = px - cfg.shapeOrigin[0];
     dy = py - cfg.shapeOrigin[1];
     dz = pz - cfg.shapeOrigin[2];
-    const l = Math.hypot(dx, dy, dz);
+    const l = Math.sqrt(dx * dx + dy * dy + dz * dz);
     if (l > 0.000000000001) {
       dx /= l;
       dy /= l;
@@ -2482,7 +2482,7 @@ function gpuEmitRowModel(cfg, i, atOrigin, emitterV, inheritK, out) {
     dx = cfg.axis[1] * rz - cfg.axis[2] * ry;
     dy = cfg.axis[2] * rx - cfg.axis[0] * rz;
     dz = cfg.axis[0] * ry - cfg.axis[1] * rx;
-    const l = Math.hypot(dx, dy, dz);
+    const l = Math.sqrt(dx * dx + dy * dy + dz * dz);
     if (l > 0.000000000001) {
       dx /= l;
       dy /= l;
@@ -4018,7 +4018,7 @@ function fillTrails(system, history, basis, out, options = {}) {
       const idx = (heads[i] - (k - 1) + points * 2) % points;
       const b = i * stride + idx * 3;
       const dxx = hx[b] - headX, dyy = hx[b + 1] - headY, dzz = hx[b + 2] - headZ;
-      if (Math.hypot(dxx, dyy, dzz) > lengthCap)
+      if (Math.sqrt(dxx * dxx + dyy * dyy + dzz * dzz) > lengthCap)
         break;
       K = k;
     }
@@ -4040,7 +4040,7 @@ function fillTrails(system, history, basis, out, options = {}) {
         nextZ = hx[nb + 2];
       }
       let dirX = nextX - prevX, dirY = nextY - prevY, dirZ = nextZ - prevZ;
-      const dl = Math.hypot(dirX, dirY, dirZ);
+      const dl = Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
       if (dl < 0.000000001) {
         dirX = fx;
         dirY = fy;
@@ -4051,12 +4051,12 @@ function fillTrails(system, history, basis, out, options = {}) {
         dirZ /= dl;
       }
       let sx = fy * dirZ - fz * dirY, sy = fz * dirX - fx * dirZ, sz = fx * dirY - fy * dirX;
-      let sl = Math.hypot(sx, sy, sz);
+      let sl = Math.sqrt(sx * sx + sy * sy + sz * sz);
       if (sl < 0.000001) {
         sx = dirY;
         sy = -dirX;
         sz = 0;
-        sl = Math.hypot(sx, sy, sz) || 1;
+        sl = Math.sqrt(sx * sx + sy * sy + sz * sz) || 1;
       }
       sx /= sl;
       sy /= sl;

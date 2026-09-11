@@ -197,11 +197,10 @@ function wrapGpu(inner: WebGpuRenderer, decision: BackendDecision): AutoRenderer
           inner.gpu.texSubImage2D(textureId, 0, 0, w, h, source)
           return { progress: 1, cancel: (): void => {}, done: Promise.resolve() }
         },
-        // Task 170 (the Stellaris pass): the astral demo swaps the REAL
-        // bitmaps (ESO panorama, NASA moon/earth) through uploadImage /
-        // uploadSubImage — the GL handle has had them all along, this
-        // wrapper silently lacked them, so every WebGPU boot (the phone!)
-        // kept the procedural placeholders forever. copyExternalImageToTexture
+        // Task 170: the texture wrapper's ImageBitmap path — the GL
+        // handle has had uploadImage / uploadSubImage all along, this
+        // wrapper silently lacked them, so every WebGPU boot kept the
+        // procedural placeholders forever. copyExternalImageToTexture
         // is the facade's ImageBitmap path; copy size = the SOURCE's own
         // dims (externalImageSize, the renderer.ts convention).
         uploadImage: (source: GPUImageSource, options?: { flipY?: boolean }) => {

@@ -333,7 +333,8 @@ export function fillBillboards(
       // facing quad (their shader NaNs at |v| → 0 — they hack a 0.001
       // speedFactor floor; we degrade gracefully).
       const vx = f.vx[i], vy = f.vy[i], vz = f.vz[i]
-      const vlen = Math.hypot(vx, vy, vz)
+      // Task 173 — sqrt(dot), the walk's own convention (3× on the op).
+      const vlen = Math.sqrt(vx * vx + vy * vy + vz * vz)
       if (vlen < 1e-4) {
         at = cameraQuad(out, at, px, py, pz, half, rx, ry, rz, ux, uy, uz, u0, v0, uS, vS, cr, cg, cb, ca)
         continue
@@ -342,8 +343,9 @@ export function fillBillboards(
       // side = cross(forward, dir), normalized; degenerate (dir ∥ forward)
       // → any perpendicular of dir.
       let sx = fy * dz - fz * dy, sy = fz * dx - fx * dz, sz = fx * dy - fy * dx
-      let sl = Math.hypot(sx, sy, sz)
-      if (sl < 1e-6) { sx = dy; sy = -dx; sz = 0; sl = Math.hypot(sx, sy, sz) || 1 }
+      // Task 173 — sqrt(dot) in the per-particle walk.
+      let sl = Math.sqrt(sx * sx + sy * sy + sz * sz)
+      if (sl < 1e-6) { sx = dy; sy = -dx; sz = 0; sl = Math.sqrt(sx * sx + sy * sy + sz * sz) || 1 }
       sx /= sl; sy /= sl; sz /= sl
       const sizeFull = f.size[i] * s[0]
       const tail = (vlen * speedFactor + lengthFactor) * sizeFull

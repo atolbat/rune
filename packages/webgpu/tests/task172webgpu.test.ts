@@ -1,5 +1,5 @@
 /**
- * Task 172 — THE DEPTH-LESS PASS AXIS (the astral field report: the storm
+ * Task 172 — THE DEPTH-LESS PASS AXIS (a phone field report: the storm
  * pause on Chrome 150 / WebGPU):
  *
  *   «Attachment state of [RenderPipeline] is not compatible with
