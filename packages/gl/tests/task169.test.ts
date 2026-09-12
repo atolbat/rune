@@ -19,8 +19,12 @@ function fakeCanvas(): HTMLCanvasElement {
 
 /** A recording facade clone WITHOUT the multi-draw method — the extension-less context. */
 function classicFacade(recording: { gl: GLFacade }): GLFacade {
-  const gl = { ...recording.gl } as GLFacade & { multiDrawArraysInstanced?: unknown }
+  // a context WITHOUT WEBGL_multi_draw — Task 187: BOTH tier vocabularies
+  // must be deleted (the elements twin rides the same extension; the
+  // renderer's multiDraw flag is the union of the two methods).
+  const gl = { ...recording.gl } as GLFacade & { multiDrawArraysInstanced?: unknown; multiDrawElementsInstanced?: unknown }
   delete gl.multiDrawArraysInstanced
+  delete gl.multiDrawElementsInstanced
   return gl as unknown as GLFacade
 }
 

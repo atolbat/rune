@@ -4485,12 +4485,19 @@ function createExecutor(options) {
   let lastBlend = "";
   const multiDrawFn = typeof gl.multiDrawArraysInstanced === "function" ? gl.multiDrawArraysInstanced.bind(gl) : undefined;
   const multiDraw = (options.multiDraw ?? true) && multiDrawFn !== undefined;
+  const multiDrawElemsFn = typeof gl.multiDrawElementsInstanced === "function" ? gl.multiDrawElementsInstanced.bind(gl) : undefined;
   const MAX_BATCH = 512;
   const batchFirsts = new Int32Array(MAX_BATCH);
   const batchCounts = new Int32Array(MAX_BATCH);
   const batchInstances = new Int32Array(MAX_BATCH);
   let batchCommand;
   let batchLen = 0;
+  const batchElemsCounts = new Int32Array(MAX_BATCH);
+  const batchElemsInstances = new Int32Array(MAX_BATCH);
+  const batchElemsOffsets = new Int32Array(MAX_BATCH);
+  let batchElemsCommand;
+  let batchElemsLen = 0;
+  let batchElemsTwoByte = false;
   function flushBatch() {
     if (batchLen === 0) {
       batchCommand = undefined;
@@ -4504,6 +4511,23 @@ function createExecutor(options) {
     batchLen = 0;
     batchCommand = undefined;
   }
+  function flushBatchElems() {
+    if (batchElemsLen === 0) {
+      batchElemsCommand = undefined;
+      return;
+    }
+    const command = batchElemsCommand;
+    const elementId = command?.elementId;
+    if (batchElemsLen === 1 || elementId === undefined) {
+      if (elementId !== undefined) {
+        gl.drawElements(elementId, batchElemsCounts[0], batchElemsInstances[0], batchElemsTwoByte);
+      }
+    } else {
+      multiDrawElemsFn?.("triangles", elementId, batchElemsCounts, batchElemsInstances, batchElemsOffsets, batchElemsLen, batchElemsTwoByte);
+    }
+    batchElemsLen = 0;
+    batchElemsCommand = undefined;
+  }
   function run(view) {
     for (const command of commands)
       submitProgram(command);
@@ -4512,6 +4536,7 @@ function createExecutor(options) {
       if (op === 2)
         drawCommand(commands[view.a[at]], view.c[at], view.d[at]);
       else {
+        flushBatchElems();
         flushBatch();
         if (op === 1)
           beginPass();
@@ -4519,6 +4544,7 @@ function createExecutor(options) {
           gl.bindTarget(view.a[at], view.b[at] === 1);
       }
     }
+    flushBatchElems();
     flushBatch();
   }
   function beginPass() {
@@ -4536,20 +4562,42 @@ function createExecutor(options) {
     const rich = command;
     const indexed = rich.indices !== undefined;
     let batched = false;
-    if (multiDraw && count > 0 && instances > 0 && !indexed) {
-      if (command === batchCommand && batchLen < MAX_BATCH) {
-        batchCounts[batchLen] = count;
-        batchInstances[batchLen] = instances;
-        batchLen++;
-        return;
+    if (multiDraw && count > 0 && instances > 0) {
+      if (!indexed) {
+        if (command === batchCommand && batchLen < MAX_BATCH) {
+          batchCounts[batchLen] = count;
+          batchInstances[batchLen] = instances;
+          batchLen++;
+          return;
+        }
+        flushBatchElems();
+        flushBatch();
+        batchCommand = command;
+        batchCounts[0] = count;
+        batchInstances[0] = instances;
+        batchLen = 1;
+        batched = true;
+      } else if (multiDrawElemsFn !== undefined && rich.indices !== undefined) {
+        if (command === batchElemsCommand && batchElemsLen < MAX_BATCH) {
+          batchElemsCounts[batchElemsLen] = count;
+          batchElemsInstances[batchElemsLen] = instances;
+          batchElemsLen++;
+          return;
+        }
+        flushBatch();
+        flushBatchElems();
+        batchElemsCommand = command;
+        batchElemsCounts[0] = count;
+        batchElemsInstances[0] = instances;
+        batchElemsLen = 1;
+        batchElemsTwoByte = rich.indices.data instanceof Uint16Array;
+        batched = true;
+      } else {
+        flushBatchElems();
+        flushBatch();
       }
-      flushBatch();
-      batchCommand = command;
-      batchCounts[0] = count;
-      batchInstances[0] = instances;
-      batchLen = 1;
-      batched = true;
     } else {
+      flushBatchElems();
       flushBatch();
     }
     const richPrologue = rich;
@@ -4579,7 +4627,8 @@ function createExecutor(options) {
       if (rich.elementId === undefined) {
         rich.elementId = gl.createElementBuffer(indices.data);
       }
-      gl.drawElements(rich.elementId, count, instances, indices.data instanceof Uint16Array);
+      if (!batched)
+        gl.drawElements(rich.elementId, count, instances, indices.data instanceof Uint16Array);
       return;
     }
     if (!batched)
@@ -4655,6 +4704,8 @@ function createExecutor(options) {
     }
     batchLen = 0;
     batchCommand = undefined;
+    batchElemsLen = 0;
+    batchElemsCommand = undefined;
   }
   return { run, invalidate };
 }
@@ -4725,6 +4776,7 @@ function createRealGL(gl, onViewportHeal) {
   } catch {
     multiDrawExt = null;
   }
+  const multiDrawElementsExtFn = multiDrawExt !== null && typeof multiDrawExt.multiDrawElementsInstancedWEBGL === "function" ? multiDrawExt.multiDrawElementsInstancedWEBGL.bind(multiDrawExt) : undefined;
   let nextProgram = 1;
   const defaultAttribBindings = new Map;
   let passVaoActive = false;
@@ -5335,6 +5387,14 @@ function createRealGL(gl, onViewportHeal) {
       return;
     multiDrawExt.multiDrawArraysInstancedWEBGL(primitiveTarget(mode), firsts, 0, counts, 0, instanceCounts, 0, drawcount);
   }
+  function multiDrawElementsInstanced(mode, elementBufferId, counts, instanceCounts, offsets, drawcount, twoByte) {
+    if (multiDrawElementsExtFn === undefined || drawcount <= 0)
+      return;
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffers.get(elementBufferId) ?? null);
+    const type = twoByte ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT;
+    multiDrawElementsExtFn(primitiveTarget(mode), counts, 0, type, offsets, 0, instanceCounts, 0, drawcount);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+  }
   function deleteTexture(textureId) {
     const texture = textures.get(textureId);
     if (texture === undefined)
@@ -5650,6 +5710,7 @@ void main() {}
     createElementBuffer,
     drawElements,
     ...multiDrawExt !== null ? { multiDrawArraysInstanced } : {},
+    ...multiDrawElementsExtFn !== undefined ? { multiDrawElementsInstanced } : {},
     createTarget,
     bindTarget,
     readTargetPixels,
@@ -7789,6 +7850,9 @@ function withJournal(gl, journal) {
     ...gl.multiDrawArraysInstanced !== undefined ? {
       multiDrawArraysInstanced: (mode, firsts, counts, instanceCounts, drawcount) => gl.multiDrawArraysInstanced?.(mode, firsts, counts, instanceCounts, drawcount)
     } : {},
+    ...gl.multiDrawElementsInstanced !== undefined ? {
+      multiDrawElementsInstanced: (mode, elementBufferId, counts, instanceCounts, offsets, drawcount, twoByte) => gl.multiDrawElementsInstanced?.(mode, elementBufferId, counts, instanceCounts, offsets, drawcount, twoByte)
+    } : {},
     createTarget: (textureId, width, height, depth2, color) => {
       const id = gl.createTarget(textureId, width, height, depth2, color);
       journal.record({ kind: "createTarget", id, textureId, width, height, depth: depth2, color });
@@ -8058,6 +8122,9 @@ function createResourceSessionGL(raw, journal) {
     drawElements: (elementBufferId, indexCount, instances, twoByte) => raw.drawElements(elementBufferId, indexCount, instances, twoByte),
     ...raw.multiDrawArraysInstanced !== undefined ? {
       multiDrawArraysInstanced: (mode, firsts, counts, instanceCounts, drawcount) => raw.multiDrawArraysInstanced?.(mode, firsts, counts, instanceCounts, drawcount)
+    } : {},
+    ...raw.multiDrawElementsInstanced !== undefined ? {
+      multiDrawElementsInstanced: (mode, elementBufferId, counts, instanceCounts, offsets, drawcount, twoByte) => raw.multiDrawElementsInstanced?.(mode, elementBufferId, counts, instanceCounts, offsets, drawcount, twoByte)
     } : {},
     deleteProgram: (programId) => raw.deleteProgram(programId),
     deleteBuffer: (bufferId) => raw.deleteBuffer(bufferId),
@@ -8963,7 +9030,7 @@ function createWebGL2Renderer(options) {
       } catch {}
     }
   }
-  const multiDrawActive = (options.multiDraw ?? true) && typeof gl.multiDrawArraysInstanced === "function";
+  const multiDrawActive = (options.multiDraw ?? true) && (typeof gl.multiDrawArraysInstanced === "function" || typeof gl.multiDrawElementsInstanced === "function");
   const probedCaps = (() => {
     if (options.caps !== undefined)
       return options.caps;
@@ -9584,10 +9651,14 @@ function createGpuExecutor(options) {
   const queue = options.context !== undefined ? options.context.activateUploadQueue() : null;
   const tierOn = options.multiDraw ?? true;
   const multiFn = gpu.multiDraw;
+  const multiIndexedFn = gpu.multiDrawIndexed;
   const MAX_BATCH = 512;
   const runArgs = new Uint32Array(MAX_BATCH * 4);
   let runCommand;
   let runLen = 0;
+  const runIndexedArgs = new Uint32Array(MAX_BATCH * 5);
+  let runIndexedCommand;
+  let runIndexedLen = 0;
   function flushRun() {
     if (runLen === 0) {
       runCommand = undefined;
@@ -9607,23 +9678,46 @@ function createGpuExecutor(options) {
     runLen = 0;
     runCommand = undefined;
   }
+  function flushRunIndexed() {
+    if (runIndexedLen === 0) {
+      runIndexedCommand = undefined;
+      return;
+    }
+    if (runIndexedLen === 1 || multiIndexedFn === undefined) {
+      gpu.drawIndexed(runIndexedArgs[0], runIndexedArgs[1]);
+    } else {
+      const emitted = multiIndexedFn(runIndexedArgs, runIndexedLen);
+      if (!emitted) {
+        for (let m = 0;m < runIndexedLen; m++) {
+          const b = m * 5;
+          gpu.drawIndexed(runIndexedArgs[b], runIndexedArgs[b + 1]);
+        }
+      }
+    }
+    runIndexedLen = 0;
+    runIndexedCommand = undefined;
+  }
   function run(view) {
     uploadDirtySlices(view);
     for (let at = 0;at < view.count; at++) {
       const op = view.op[at];
       if (op === 1) {
+        flushRunIndexed();
         flushRun();
         beginPass();
       } else if (op === 2)
         drawCommand(commands[view.a[at]], view.c[at], view.d[at]);
       else if (op === 3) {
+        flushRunIndexed();
         flushRun();
         gpu.endPass();
       } else if (op === 4) {
+        flushRunIndexed();
         flushRun();
         gpu.bindTarget(view.a[at], view.b[at] === 1);
       }
     }
+    flushRunIndexed();
     flushRun();
     gpu.submit();
   }
@@ -9697,29 +9791,57 @@ function createGpuExecutor(options) {
       return;
     const indexed = command.indices !== undefined;
     let member0Pending = false;
-    if (tierOn && count > 0 && instances > 0 && !indexed) {
-      if (command === runCommand && runLen < MAX_BATCH) {
-        if (multiFn !== undefined) {
-          const b = runLen * 4;
-          runArgs[b] = count;
-          runArgs[b + 1] = instances;
-          runLen++;
+    let member0IndexedPending = false;
+    if (tierOn && count > 0 && instances > 0) {
+      if (!indexed) {
+        if (command === runCommand && runLen < MAX_BATCH) {
+          if (multiFn !== undefined) {
+            const b = runLen * 4;
+            runArgs[b] = count;
+            runArgs[b + 1] = instances;
+            runLen++;
+            return;
+          }
+          gpu.draw(count, instances);
           return;
         }
-        gpu.draw(count, instances);
-        return;
-      }
-      flushRun();
-      runCommand = command;
-      runArgs[0] = count;
-      runArgs[1] = instances;
-      if (multiFn !== undefined) {
-        runLen = 1;
-        member0Pending = true;
+        flushRunIndexed();
+        flushRun();
+        runCommand = command;
+        runArgs[0] = count;
+        runArgs[1] = instances;
+        if (multiFn !== undefined) {
+          runLen = 1;
+          member0Pending = true;
+        } else {
+          runLen = 0;
+        }
       } else {
-        runLen = 0;
+        if (command === runIndexedCommand && runIndexedLen < MAX_BATCH) {
+          if (multiIndexedFn !== undefined) {
+            const b = runIndexedLen * 5;
+            runIndexedArgs[b] = count;
+            runIndexedArgs[b + 1] = instances;
+            runIndexedLen++;
+            return;
+          }
+          gpu.drawIndexed(count, instances);
+          return;
+        }
+        flushRun();
+        flushRunIndexed();
+        runIndexedCommand = command;
+        runIndexedArgs[0] = count;
+        runIndexedArgs[1] = instances;
+        if (multiIndexedFn !== undefined) {
+          runIndexedLen = 1;
+          member0IndexedPending = true;
+        } else {
+          runIndexedLen = 0;
+        }
       }
     } else {
+      flushRunIndexed();
       flushRun();
     }
     if (!command.pipelineReady) {
@@ -9742,7 +9864,8 @@ function createGpuExecutor(options) {
     const indices = command.indices;
     if (indices !== undefined) {
       gpu.bindIndexBuffer(indices.data);
-      gpu.drawIndexed(count, instances);
+      if (!member0IndexedPending)
+        gpu.drawIndexed(count, instances);
       return;
     }
     if (!member0Pending)
@@ -10004,6 +10127,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
   }
   const encoderProto = typeof GPURenderPassEncoder === "function" ? GPURenderPassEncoder.prototype : null;
   const hasDrawIndirectCount = encoderProto !== null && typeof encoderProto.drawIndirectCount === "function";
+  const hasDrawIndexedIndirectCount = encoderProto !== null && typeof encoderProto.drawIndexedIndirectCount === "function";
   const context = canvas.getContext("webgpu");
   if (context === null)
     throw new Error("rune: webgpu canvas context unavailable");
@@ -10659,6 +10783,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
   }
   let indirectArgsBuffer = null;
   let indirectCountBuffer = null;
+  let indirectIndexedArgsBuffer = null;
   const INDIRECT_RING = 512;
   let indirectRingSlot = 0;
   const indirectCountScratch = new Uint32Array(1);
@@ -10680,6 +10805,29 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     indirectCountScratch[0] = drawCount;
     device.queue.writeBuffer(indirectCountBuffer, indirectRingSlot * 4, indirectCountScratch.buffer, 0, 4);
     pass?.drawIndirectCount?.(indirectArgsBuffer, byteOffset, indirectCountBuffer, indirectRingSlot * 4, drawCount);
+    indirectRingSlot += drawCount;
+    return true;
+  }
+  function multiDrawIndexed(args, drawCount) {
+    if (indirectRingSlot + drawCount > INDIRECT_RING)
+      return false;
+    if (indirectIndexedArgsBuffer === null || indirectCountBuffer === null) {
+      indirectIndexedArgsBuffer = device.createBuffer({
+        size: INDIRECT_RING * 20,
+        usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST
+      });
+      if (indirectCountBuffer === null) {
+        indirectCountBuffer = device.createBuffer({
+          size: INDIRECT_RING * 4,
+          usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST
+        });
+      }
+    }
+    const byteOffset = indirectRingSlot * 20;
+    device.queue.writeBuffer(indirectIndexedArgsBuffer, byteOffset, args.buffer, args.byteOffset, drawCount * 20);
+    indirectCountScratch[0] = drawCount;
+    device.queue.writeBuffer(indirectCountBuffer, indirectRingSlot * 4, indirectCountScratch.buffer, 0, 4);
+    pass?.drawIndexedIndirectCount?.(indirectIndexedArgsBuffer, byteOffset, indirectCountBuffer, indirectRingSlot * 4, drawCount);
     indirectRingSlot += drawCount;
     return true;
   }
@@ -11130,6 +11278,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     beginPass,
     draw,
     ...hasDrawIndirectCount ? { multiDraw } : {},
+    ...hasDrawIndexedIndirectCount ? { multiDrawIndexed } : {},
     endPass,
     submit,
     createExternalBuffer,
@@ -11401,6 +11550,7 @@ init_src();
 // packages/gl/src/journalGpu.ts
 function withJournalGpu(gpu, journal) {
   const rawMultiDraw = gpu.multiDraw;
+  const rawMultiDrawIndexed = gpu.multiDrawIndexed;
   const texSizes = new Map;
   return {
     configure: (w, h) => gpu.configure(w, h),
@@ -11448,6 +11598,7 @@ function withJournalGpu(gpu, journal) {
     bindIndexBuffer: (data) => gpu.bindIndexBuffer(data),
     drawIndexed: (indexCount, instances) => gpu.drawIndexed(indexCount, instances),
     ...rawMultiDraw !== undefined ? { multiDraw: (args, drawCount) => rawMultiDraw(args, drawCount) } : {},
+    ...rawMultiDrawIndexed !== undefined ? { multiDrawIndexed: (args, drawCount) => rawMultiDrawIndexed(args, drawCount) } : {},
     endPass: () => gpu.endPass(),
     submit: () => gpu.submit(),
     createTarget: (textureId, w, h, depth2, color) => {
@@ -11551,6 +11702,7 @@ init_src();
 var VIEW_ID_BASE2 = 1e6;
 function createResourceSessionGPU(raw, journal) {
   const rawMultiDraw = raw.multiDraw;
+  const rawMultiDrawIndexed = raw.multiDrawIndexed;
   const texMap = new Map;
   const viewMap = new Map;
   const targetMap = new Map;
@@ -11661,6 +11813,7 @@ function createResourceSessionGPU(raw, journal) {
     bindIndexBuffer: (data) => raw.bindIndexBuffer(data),
     drawIndexed: (indexCount, instances) => raw.drawIndexed(indexCount, instances),
     ...rawMultiDraw !== undefined ? { multiDraw: (args, drawCount) => rawMultiDraw(args, drawCount) } : {},
+    ...rawMultiDrawIndexed !== undefined ? { multiDrawIndexed: (args, drawCount) => rawMultiDrawIndexed(args, drawCount) } : {},
     endPass: () => raw.endPass(),
     submit: () => raw.submit(),
     createTarget: (textureId, width, height, depth2, color) => {

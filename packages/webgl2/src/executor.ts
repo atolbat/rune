@@ -17,15 +17,18 @@ export interface GLExecutorOptions {
   readonly clears: ReadonlyArray<{ readonly color: readonly [number, number, number, number]; readonly depth: number | null }>
   readonly segments?: SegmentStore
   readonly uniformStrategy?: UniformStrategy
-  /** Task 169 — THE MULTI-DRAW TIER: collapse runs of consecutive draws of
-   *  the SAME command into one WEBGL_multi_drawArraysInstanced call. Only
-   *  active when the facade actually exposes multiDrawArraysInstanced (the
-   *  extension is present); default true. A kill-switch for driver-bug
-   *  insurance: false restores the per-draw drawArrays path exactly — the
-   *  batched and unbatched tapes are pixel-identical by construction (the
-   *  batch semantics are the verbatim expansion of the per-draw calls).
-   *  Batched draws are ALSO unchanged for scenes that never repeat a
-   *  command: a run of length 1 takes the classic path verbatim. */
+  /** Task 169/187 — THE MULTI-DRAW TIERS: collapse runs of consecutive draws
+   *  of the SAME command into one WEBGL_multi_draw call — the arrays tier
+   *  (Task 169, non-indexed runs → multiDrawArraysInstanced) and the indexed
+   *  tier (Task 187, indexed runs → multiDrawElementsInstanced — one element
+   *  buffer, all offsets 0). Only active when the facade actually exposes the
+   *  matching method (the extension is present); default true. A kill-switch
+   *  for driver-bug insurance: false restores the per-draw drawArrays /
+   *  drawElements paths exactly — the batched and unbatched tapes are
+   *  pixel-identical by construction (the batch semantics are the verbatim
+   *  expansion of the per-draw calls). Batched draws are ALSO unchanged for
+   *  scenes that never repeat a command: a run of length 1 takes the classic
+   *  path verbatim. */
   readonly multiDraw?: boolean
 }
 
@@ -86,12 +89,31 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
     ? gl.multiDrawArraysInstanced.bind(gl)
     : undefined
   const multiDraw = (options.multiDraw ?? true) && multiDrawFn !== undefined
+  // Task 187 — the INDEXED twin: the tier arms for indexed commands IFF the
+  // facade exposes multiDrawElementsInstanced (a context/mock without it
+  // keeps indexed commands on the classic per-draw drawElements path —
+  // Task 180's behavior, verbatim).
+  const multiDrawElemsFn = typeof gl.multiDrawElementsInstanced === 'function'
+    ? gl.multiDrawElementsInstanced.bind(gl)
+    : undefined
   const MAX_BATCH = 512
   const batchFirsts = new Int32Array(MAX_BATCH) // all zeros — first is always 0
   const batchCounts = new Int32Array(MAX_BATCH)
   const batchInstances = new Int32Array(MAX_BATCH)
   let batchCommand: CompiledCommand | undefined
   let batchLen = 0
+  // Task 187 — THE INDEXED RUN: a maximal sequence of consecutive Draw ops
+  // of the SAME indexed command (count > 0, instances > 0). The members
+  // share ONE element buffer (created lazily at member 0's prologue — the
+  // Task-180 discipline) and every member starts at index 0, so the offsets
+  // list is all zeros (the facade's bind stays for the whole call). The
+  // two-byte flag is a per-command constant (the indices array's type).
+  const batchElemsCounts = new Int32Array(MAX_BATCH)
+  const batchElemsInstances = new Int32Array(MAX_BATCH)
+  const batchElemsOffsets = new Int32Array(MAX_BATCH) // all zeros — one element buffer, offset 0
+  let batchElemsCommand: CompiledCommand | undefined
+  let batchElemsLen = 0
+  let batchElemsTwoByte = false
 
   function flushBatch(): void {
     if (batchLen === 0) { batchCommand = undefined; return }
@@ -103,6 +125,25 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
     }
     batchLen = 0
     batchCommand = undefined
+  }
+
+  function flushBatchElems(): void {
+    if (batchElemsLen === 0) { batchElemsCommand = undefined; return }
+    const command = batchElemsCommand as (CompiledCommand & { elementId?: number }) | undefined
+    // member 0 always fell through the prologue (the run STARTS there), so
+    // the element buffer exists; the guard keeps a corrupted state from
+    // crashing — the draws are lost either way a classic call would be.
+    const elementId = command?.elementId
+    if (batchElemsLen === 1 || elementId === undefined) {
+      // the lone draw rides the classic path — the pre-187 call, verbatim
+      if (elementId !== undefined) {
+        gl.drawElements(elementId, batchElemsCounts[0], batchElemsInstances[0], batchElemsTwoByte)
+      }
+    } else {
+      multiDrawElemsFn?.('triangles', elementId, batchElemsCounts, batchElemsInstances, batchElemsOffsets, batchElemsLen, batchElemsTwoByte)
+    }
+    batchElemsLen = 0
+    batchElemsCommand = undefined
   }
 
   function run(view: TapeView): void {
@@ -121,14 +162,16 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
       const op = view.op[at]
       if (op === 2) drawCommand(commands[view.a[at]], view.c[at], view.d[at])
       else {
-        // Task 169: a non-Draw op ends the run FIRST — its pending draws
-        // were recorded for the state/target as they stood
+        // Task 169/187: a non-Draw op ends the runs FIRST — their pending
+        // draws were recorded for the state/target as they stood
+        flushBatchElems()
         flushBatch()
         if (op === 1) beginPass()
         else if (op === 4) gl.bindTarget(view.a[at], view.b[at] === 1)
         // EndPass (3): a frame bracket, requires no GL cleanup
       }
     }
+    flushBatchElems() // the tape's end — no draw may leak past the frame
     flushBatch() // the tape's end — no draw may leak past the frame
   }
 
@@ -167,35 +210,67 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
       programId?: number
       bufferIds?: number[]
     }
-    // Task 180 — an INDEXED command never joins a multi-draw run: the
-    // batch emit form (multiDrawArraysInstanced) is the non-indexed
-    // vocabulary. Indexed commands ride the classic path verbatim (the
-    // soup layer is ONE draw per command anyway — a run of one).
+    // Task 180/187 — an INDEXED command's batch membership: it joins the
+    // INDEXED run (multiDrawElementsInstanced) IFF the facade exposes the
+    // method; otherwise it rides the classic per-draw drawElements path
+    // verbatim (Task 180's behavior). The arrays tier (multiDrawArraysInstanced)
+    // remains the NON-indexed vocabulary — the two runs never mix.
     const indexed = rich.indices !== undefined
-    // Task 169 — the multi-draw fast path: an APPEND (the run's command,
+    // Task 169/187 — the multi-draw fast paths: an APPEND (the run's command,
     // a real draw, room in the batch) skips the prologue entirely — every
     // assertion below is a no-op for a same-command repeat, proven at the
     // tier's design (see the batch block above). Runs of one stay classic.
     let batched = false
-    if (multiDraw && count > 0 && instances > 0 && !indexed) {
-      if (command === batchCommand && batchLen < MAX_BATCH) {
-        batchCounts[batchLen] = count
-        batchInstances[batchLen] = instances
-        batchLen++
-        return
+    if (multiDraw && count > 0 && instances > 0) {
+      if (!indexed) {
+        if (command === batchCommand && batchLen < MAX_BATCH) {
+          batchCounts[batchLen] = count
+          batchInstances[batchLen] = instances
+          batchLen++
+          return
+        }
+        // the arrays run starts: the pending INDEXED draws emit first —
+        // under the state they were recorded with
+        flushBatchElems()
+        flushBatch()
+        batchCommand = command
+        batchCounts[0] = count
+        batchInstances[0] = instances
+        batchLen = 1
+        batched = true
+        // fall through to the prologue ONCE — for the whole run; the draw
+        // itself stays PENDING in the batch (flushBatch emits it)
+      } else if (multiDrawElemsFn !== undefined && rich.indices !== undefined) {
+        if (command === batchElemsCommand && batchElemsLen < MAX_BATCH) {
+          batchElemsCounts[batchElemsLen] = count
+          batchElemsInstances[batchElemsLen] = instances
+          batchElemsLen++
+          return
+        }
+        // the indexed run starts: the pending ARRAYS draws emit first —
+        // under the state they were recorded with
+        flushBatch()
+        flushBatchElems()
+        batchElemsCommand = command
+        batchElemsCounts[0] = count
+        batchElemsInstances[0] = instances
+        batchElemsLen = 1
+        batchElemsTwoByte = rich.indices.data instanceof Uint16Array
+        batched = true
+        // fall through to the prologue ONCE — for the whole run; member 0's
+        // pass creates the element buffer lazily (the Task-180 discipline),
+        // the draw itself stays PENDING in the batch (flushBatchElems emits it)
+      } else {
+        // the facade lacks the indexed batch call — the classic path, and
+        // any pending run of either kind must not absorb this draw
+        flushBatchElems()
+        flushBatch()
       }
-      flushBatch()
-      batchCommand = command
-      batchCounts[0] = count
-      batchInstances[0] = instances
-      batchLen = 1
-      batched = true
-      // fall through to the prologue ONCE — for the whole run; the draw
-      // itself stays PENDING in the batch (flushBatch emits it)
     }
     else {
       // degenerate (count 0 / instances 0) or the tier is off — the run
       // must not absorb a draw whose classic behavior differs
+      flushBatchElems()
       flushBatch()
     }
     const richPrologue = rich
@@ -232,12 +307,15 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
     // first indexed draw (the submit-all sweep may have compiled programs of
     // commands this frame never draws — the same discipline as the vertex
     // buffers), then the indexed draw. The tape's count IS the index count.
+    // Task 187: a BATCHED member 0 skips the draw itself — it stays PENDING
+    // in the indexed batch (flushBatchElems emits it; alone it rides the
+    // classic call verbatim).
     const indices = rich.indices
     if (indices !== undefined) {
       if (rich.elementId === undefined) {
         rich.elementId = gl.createElementBuffer(indices.data)
       }
-      gl.drawElements(rich.elementId, count, instances, indices.data instanceof Uint16Array)
+      if (!batched) gl.drawElements(rich.elementId, count, instances, indices.data instanceof Uint16Array)
       return
     }
     if (!batched) gl.drawArrays('triangles', 0, count, instances)
@@ -361,6 +439,9 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
     // hygiene arm of that invariant, not a reachable path).
     batchLen = 0
     batchCommand = undefined
+    // Task 187: the indexed twin of the same hygiene.
+    batchElemsLen = 0
+    batchElemsCommand = undefined
   }
 
   return { run, invalidate }

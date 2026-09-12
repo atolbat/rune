@@ -46,6 +46,9 @@ export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
   // raw — the Task-169 GL lesson: a dropped method silently disarms the
   // tier, a stub silently eats draws).
   const rawMultiDraw = gpu.multiDraw
+  // Task 187 — the indexed twin, captured with the same conditional-forward
+  // discipline (presence mirrors the raw).
+  const rawMultiDrawIndexed = gpu.multiDrawIndexed
   // Task 61: sizes of created textures — for the "full upload" heuristic.
   // copyExternalImageToTexture is journaled as texImage2DFromSource ONLY
   // if the copy covers the WHOLE texture (dstX=dstY=0 and copyWidth/copyHeight
@@ -128,6 +131,7 @@ export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
     bindIndexBuffer: (data) => gpu.bindIndexBuffer(data),
     drawIndexed: (indexCount, instances) => gpu.drawIndexed(indexCount, instances),
     ...(rawMultiDraw !== undefined ? { multiDraw: (args: Uint32Array, drawCount: number) => rawMultiDraw(args, drawCount) } : {}),
+    ...(rawMultiDrawIndexed !== undefined ? { multiDrawIndexed: (args: Uint32Array, drawCount: number) => rawMultiDrawIndexed(args, drawCount) } : {}),
     endPass: () => gpu.endPass(),
     submit: () => gpu.submit(),
     createTarget: (textureId, w, h, depth, color) => {

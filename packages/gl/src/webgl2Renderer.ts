@@ -63,11 +63,12 @@ export interface WebGL2Renderer {
   readonly gl: GLFacade
   /** Caps — backend capabilities. null in headless mode (createGL injected). */
   readonly caps: Caps | null
-  /** Task 169 — the multi-draw tier's live verdict: true when the option
-   *  left it on (default) AND the facade actually exposes
-   *  multiDrawArraysInstanced (the context has WEBGL_multi_draw). A
-   *  diagnostic surface for pills/log lines — the tier engages by itself
-   *  whenever a frame repeats a command. */
+  /** Task 169/187 — the multi-draw tier's live verdict: true when the option
+   *  left it on (default) AND the facade exposes at least one of the tier's
+   *  two vocabularies — multiDrawArraysInstanced (non-indexed runs) and/or
+   *  multiDrawElementsInstanced (indexed runs, Task 187). A diagnostic
+   *  surface for pills/log lines — the tier engages by itself whenever a
+   *  frame repeats a command. */
   readonly multiDraw: boolean
   readonly size: ReadableSignal<readonly [number, number]>
   readonly aspect: ReadableSignal<number>
@@ -1005,11 +1006,13 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     }
   }
 
-  // Task 169 — the multi-draw tier's live verdict: the option left it on
-  // (default) AND the (possibly decorated) facade exposes the method. The
-  // session/journal wrappers forward it conditionally, so presence through
+  // Task 169/187 — the multi-draw tier's live verdict: the option left it on
+  // (default) AND the (possibly decorated) facade exposes at least one of the
+  // tier's vocabularies (arrays — Task 169, elements — Task 187). The
+  // session/journal wrappers forward both conditionally, so presence through
   // the wrapping mirrors the raw context exactly.
-  const multiDrawActive = (options.multiDraw ?? true) && typeof gl.multiDrawArraysInstanced === 'function'
+  const multiDrawActive = (options.multiDraw ?? true)
+    && (typeof gl.multiDrawArraysInstanced === 'function' || typeof gl.multiDrawElementsInstanced === 'function')
 
   // Caps probing: on the real gl context (if present). Headless mode (createGL
   // injected) — caps = null; tests must inject their own caps.

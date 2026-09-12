@@ -81,14 +81,17 @@ describe('Task 181 — the instance tier\'s indexed quad (WG)', () => {
     expect(s.calls.filter(c => c.startsWith('draw('))).toEqual([])
   })
 
-  it('every Draw op emits the bind+draw pair (the dedup is the facade\'s pass-scoped memo, not the executor\'s)', () => {
+  it('the floor run: bind ONCE per run, every member draws (the dedup is now BOTH the executor\'s floor and the facade\'s memo)', () => {
     const s = setup(INSTANCE_QUAD_INDICES)
-    // the same command twice in one frame (two layers' instance draws):
-    // the executor emits the bind per Draw op — the DEDUP to one real
-    // setIndexBuffer per pass is the facade's indexMemo (realGPU, Task 180,
-    // pinned at the facade level); the mock sees the executor's raw form.
+    // the same command twice in one frame (two layers' instance draws).
+    // Task 187: the executor's fast-path floor skips the whole prologue for
+    // appends — bindIndexBuffer rides member 0 ONLY (on a real facade the
+    // per-draw re-binds were already indexMemo no-ops — Task 180; the GPU
+    // call stream is byte-identical, the tier may only REMOVE calls). The
+    // recording mock (no memo, no multiDrawIndexed) sees the floor's raw
+    // form: one bind, one draw per member.
     s.executor.run(tapeOfDraws([[s.command.id, 6, 4], [s.command.id, 6, 8]]))
-    expect(s.calls.filter(c => c === 'bindIndexBuffer(6,u16)').length).toBe(2)
+    expect(s.calls.filter(c => c === 'bindIndexBuffer(6,u16)').length).toBe(1)
     expect(s.calls.filter(c => c === 'drawIndexed(6,4)').length).toBe(1)
     expect(s.calls.filter(c => c === 'drawIndexed(6,8)').length).toBe(1)
   })

@@ -159,6 +159,14 @@ export function createRecordingGL(): RecordingGL {
       for (let i = 0; i < drawcount; i++) parts.push(`${counts[i]}×${instanceCounts[i]}@${firsts[i]}`)
       calls.push(`multiDraw×${drawcount}[${parts.join(',')}]`)
     },
+    // Task 187 — the indexed multi-draw tier, recorded in the expanded form
+    // (`multiDrawElems(id,u16)×N[c1×i1,c2×i2,...]`) — the same shared-assertion
+    // discipline as the arrays form (the expansion IS the extension's semantics).
+    multiDrawElementsInstanced: (mode, elementBufferId, counts, instanceCounts, offsets, drawcount, twoByte) => {
+      const parts: string[] = []
+      for (let i = 0; i < drawcount; i++) parts.push(`${counts[i]}×${instanceCounts[i]}@${offsets[i]}`)
+      calls.push(`multiDrawElems(${elementBufferId},${twoByte ? 'u16' : 'u32'})×${drawcount}[${parts.join(',')}]`)
+    },
     createTarget: (textureId, width, height, depth) => {
       calls.push(`createTarget(${textureId},${width},${height}${depth ? ',depth' : ''})`)
       return nextTarget++

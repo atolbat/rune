@@ -124,9 +124,15 @@ export async function createRealGPU(
   // method does not appear mid-session. (The cast: the tracking types
   // cannot declare a method the spec dropped; the probe is the truth.)
   const encoderProto = typeof GPURenderPassEncoder === 'function'
-    ? GPURenderPassEncoder.prototype as GPURenderPassEncoder & { drawIndirectCount?: (indirectBuffer: GPUBuffer, indirectOffset: number, countBuffer: GPUBuffer, countOffset: number, maxDrawCount: number) => void }
+    ? GPURenderPassEncoder.prototype as GPURenderPassEncoder & { drawIndirectCount?: (indirectBuffer: GPUBuffer, indirectOffset: number, countBuffer: GPUBuffer, countOffset: number, maxDrawCount: number) => void; drawIndexedIndirectCount?: (indirectBuffer: GPUBuffer, indirectOffset: number, countBuffer: GPUBuffer, countOffset: number, maxDrawCount: number) => void }
     : null
   const hasDrawIndirectCount = encoderProto !== null && typeof encoderProto.drawIndirectCount === 'function'
+  // Task 187 — the INDEXED twin of the probe: drawIndexedIndirectCount
+  // reads 5-word records (indexCount, instanceCount, firstIndex,
+  // baseVertex, firstInstance) — 20 bytes per member. Probed separately: a
+  // build could ship one and not the other; presence == capability, per
+  // the facade contract.
+  const hasDrawIndexedIndirectCount = encoderProto !== null && typeof encoderProto.drawIndexedIndirectCount === 'function'
 
   const context = canvas.getContext('webgpu') as GPUCanvasContext | null
   if (context === null) throw new Error('rune: webgpu canvas context unavailable')
@@ -1289,6 +1295,14 @@ export async function createRealGPU(
   // replays the classic per-draw path for that flush.
   let indirectArgsBuffer: GPUBuffer | null = null
   let indirectCountBuffer: GPUBuffer | null = null
+  // Task 187 — the INDEXED ring: 512 × 20-byte records. The COUNT ring is
+  // SHARED with the arrays tier: one member cursor (indirectRingSlot)
+  // allocates DISJOINT count slots for both kinds — the count buffer's
+  // slot k pairs with the args records starting at member k of EITHER
+  // ring (the buffers are separate, the byte strides differ, the member
+  // cursor is one). A frame exceeding 512 total batched members makes the
+  // matching multiDraw return false; the executor replays classic.
+  let indirectIndexedArgsBuffer: GPUBuffer | null = null
   const INDIRECT_RING = 512
   let indirectRingSlot = 0
   const indirectCountScratch = new Uint32Array(1)
@@ -1317,6 +1331,35 @@ export async function createRealGPU(
     // probe proved THIS browser kept it — only callable when armed)
     ;(pass as (GPURenderPassEncoder & { drawIndirectCount?: (a: GPUBuffer, b: number, c: GPUBuffer, d: number, e: number) => void }) | null)?.drawIndirectCount?.(
       indirectArgsBuffer, byteOffset, indirectCountBuffer, indirectRingSlot * 4, drawCount,
+    )
+    indirectRingSlot += drawCount
+    return true
+  }
+
+  // Task 187 — THE INDEXED MULTI-DRAW: the 5-word record twin of multiDraw.
+  // The count ring is created by whichever tier fires first (the shared
+  // cursor guarantees disjoint count slots across both rings — see the
+  // ring block above); the indexed ring itself is 20 bytes per member.
+  function multiDrawIndexed(args: Uint32Array, drawCount: number): boolean {
+    if (indirectRingSlot + drawCount > INDIRECT_RING) return false
+    if (indirectIndexedArgsBuffer === null || indirectCountBuffer === null) {
+      indirectIndexedArgsBuffer = device.createBuffer({
+        size: INDIRECT_RING * 20,
+        usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+      })
+      if (indirectCountBuffer === null) {
+        indirectCountBuffer = device.createBuffer({
+          size: INDIRECT_RING * 4,
+          usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+        })
+      }
+    }
+    const byteOffset = indirectRingSlot * 20
+    device.queue.writeBuffer(indirectIndexedArgsBuffer, byteOffset, args.buffer as ArrayBuffer, args.byteOffset, drawCount * 20)
+    indirectCountScratch[0] = drawCount
+    device.queue.writeBuffer(indirectCountBuffer, indirectRingSlot * 4, indirectCountScratch.buffer as ArrayBuffer, 0, 4)
+    ;(pass as (GPURenderPassEncoder & { drawIndexedIndirectCount?: (a: GPUBuffer, b: number, c: GPUBuffer, d: number, e: number) => void }) | null)?.drawIndexedIndirectCount?.(
+      indirectIndexedArgsBuffer, byteOffset, indirectCountBuffer, indirectRingSlot * 4, drawCount,
     )
     indirectRingSlot += drawCount
     return true
@@ -1926,6 +1969,7 @@ export async function createRealGPU(
     // armed exactly where the browser's encoder kept the spec-dropped
     // method; a facade without it rides the executor's fast-path floor.
     ...(hasDrawIndirectCount ? { multiDraw } : {}),
+    ...(hasDrawIndexedIndirectCount ? { multiDrawIndexed } : {}),
     endPass,
     submit,
     // Task 131 — the GPGPU tier

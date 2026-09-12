@@ -126,6 +126,11 @@ export function withJournal(gl: GLFacade, journal: Journal): GLFacade {
       multiDrawArraysInstanced: (mode: string, firsts: Int32Array, counts: Int32Array, instanceCounts: Int32Array, drawcount: number) =>
         gl.multiDrawArraysInstanced?.(mode, firsts, counts, instanceCounts, drawcount),
     } : {}),
+    // Task 187 — the indexed twin, the same conditional forward.
+    ...(gl.multiDrawElementsInstanced !== undefined ? {
+      multiDrawElementsInstanced: (mode: string, elementBufferId: number, counts: Int32Array, instanceCounts: Int32Array, offsets: Int32Array, drawcount: number, twoByte: boolean) =>
+        gl.multiDrawElementsInstanced?.(mode, elementBufferId, counts, instanceCounts, offsets, drawcount, twoByte),
+    } : {}),
     createTarget: (textureId, width, height, depth, color) => {
       const id = gl.createTarget(textureId, width, height, depth, color)
       journal.record({ kind: 'createTarget', id, textureId, width, height, depth, color })

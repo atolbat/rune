@@ -301,6 +301,11 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
       multiDrawArraysInstanced: (mode: string, firsts: Int32Array, counts: Int32Array, instanceCounts: Int32Array, drawcount: number) =>
         raw.multiDrawArraysInstanced?.(mode, firsts, counts, instanceCounts, drawcount),
     } : {}),
+    // Task 187 — the indexed twin, the same conditional forward.
+    ...(raw.multiDrawElementsInstanced !== undefined ? {
+      multiDrawElementsInstanced: (mode: string, elementBufferId: number, counts: Int32Array, instanceCounts: Int32Array, offsets: Int32Array, drawcount: number, twoByte: boolean) =>
+        raw.multiDrawElementsInstanced?.(mode, elementBufferId, counts, instanceCounts, offsets, drawcount, twoByte),
+    } : {}),
     deleteProgram: programId => raw.deleteProgram(programId),
     deleteBuffer: bufferId => raw.deleteBuffer(bufferId),
 

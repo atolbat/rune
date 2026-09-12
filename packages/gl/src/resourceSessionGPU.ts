@@ -54,6 +54,8 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
   // below forwards it IFF the raw facade has it (presence mirrors the
   // raw — the Task-169 GL lesson).
   const rawMultiDraw = raw.multiDraw
+  // Task 187 — the indexed twin, same conditional-forward discipline.
+  const rawMultiDrawIndexed = raw.multiDrawIndexed
   const texMap = new Map<number, number>()
   const viewMap = new Map<number, number>()
   const targetMap = new Map<number, number>()
@@ -186,6 +188,7 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
     bindIndexBuffer: (data) => raw.bindIndexBuffer(data),
     drawIndexed: (indexCount, instances) => raw.drawIndexed(indexCount, instances),
     ...(rawMultiDraw !== undefined ? { multiDraw: (args: Uint32Array, drawCount: number) => rawMultiDraw(args, drawCount) } : {}),
+    ...(rawMultiDrawIndexed !== undefined ? { multiDrawIndexed: (args: Uint32Array, drawCount: number) => rawMultiDrawIndexed(args, drawCount) } : {}),
     endPass: () => raw.endPass(),
     submit: () => raw.submit(),
 

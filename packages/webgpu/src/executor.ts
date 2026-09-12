@@ -40,6 +40,9 @@ export interface GpuExecutorOptions {
    *  is 512 members; multiDraw: false restores the per-draw classic path
    *  exactly. */
   readonly multiDraw?: boolean
+  /** Task 187 — the INDEXED twin rides the same flag: indexed runs join
+   *  the tier (their own run state — never mixed with arrays runs).
+   *  multiDraw: false disables BOTH tiers. */
 }
 
 export interface GpuTapeExecutor {
@@ -77,10 +80,21 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
   // command, a degenerate, the 512 cap, the tape's end.
   const tierOn = options.multiDraw ?? true
   const multiFn = gpu.multiDraw // presence == capability (the facade's contract)
+  // Task 187 — the indexed twin: presence == capability, probed separately
+  // (drawIndexedIndirectCount). On a browser without it (Chrome ≤ 151 —
+  // both spec-dropped) indexed runs still ride the fast-path floor.
+  const multiIndexedFn = gpu.multiDrawIndexed
   const MAX_BATCH = 512
   const runArgs = new Uint32Array(MAX_BATCH * 4) // [vertexCount, instanceCount, firstVertex, firstInstance] × members
   let runCommand: RichWgpuCommand | undefined
   let runLen = 0
+  // Task 187 — THE INDEXED RUN: the 5-word record twin
+  // ([indexCount, instanceCount, firstIndex, baseVertex, firstInstance] ×
+  // members — the last three always 0: one shared index buffer, every
+  // member starts at index 0).
+  const runIndexedArgs = new Uint32Array(MAX_BATCH * 5)
+  let runIndexedCommand: RichWgpuCommand | undefined
+  let runIndexedLen = 0
 
   function flushRun(): void {
     if (runLen === 0) { runCommand = undefined; return }
@@ -104,15 +118,42 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
     runCommand = undefined
   }
 
+  function flushRunIndexed(): void {
+    if (runIndexedLen === 0) { runIndexedCommand = undefined; return }
+    // No re-bind of the index buffer: the run's member-0 prologue bound it,
+    // and within a run only same-command appends happened (they return
+    // before any bind) — the buffer is still bound at flush time. On a real
+    // facade the re-bind was an indexMemo no-op; dropping it keeps the mock
+    // stream honest (the tier only REMOVES calls — the Task-169/174 rule).
+    if (runIndexedLen === 1 || multiIndexedFn === undefined) {
+      // a lone member rides the classic draw verbatim — the pre-187 call
+      // (the multi shape's run of one; the floor never keeps members)
+      gpu.drawIndexed(runIndexedArgs[0], runIndexedArgs[1])
+    } else {
+      const emitted = multiIndexedFn(runIndexedArgs, runIndexedLen)
+      if (!emitted) {
+        // the facade's ring is full — the classic expansion (the index
+        // buffer still bound from the run's prologue; bare draws)
+        for (let m = 0; m < runIndexedLen; m++) {
+          const b = m * 5
+          gpu.drawIndexed(runIndexedArgs[b], runIndexedArgs[b + 1])
+        }
+      }
+    }
+    runIndexedLen = 0
+    runIndexedCommand = undefined
+  }
+
   function run(view: TapeView): void {
     uploadDirtySlices(view)
     for (let at = 0; at < view.count; at++) {
       const op = view.op[at]
-      if (op === 1) { flushRun(); beginPass() }
+      if (op === 1) { flushRunIndexed(); flushRun(); beginPass() }
       else if (op === 2) drawCommand(commands[view.a[at]] as RichWgpuCommand, view.c[at], view.d[at])
-      else if (op === 3) { flushRun(); gpu.endPass() }
-      else if (op === 4) { flushRun(); gpu.bindTarget(view.a[at], view.b[at] === 1) }
+      else if (op === 3) { flushRunIndexed(); flushRun(); gpu.endPass() }
+      else if (op === 4) { flushRunIndexed(); flushRun(); gpu.bindTarget(view.a[at], view.b[at] === 1) }
     }
+    flushRunIndexed() // the tape's end — no draw may leak past the frame
     flushRun() // the tape's end — no draw may leak past the frame
     gpu.submit()
   }
@@ -210,43 +251,78 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
 
   function drawCommand(command: RichWgpuCommand | undefined, count: number, instances: number): void {
     if (command === undefined) return
-    // Task 180 — an INDEXED command never joins a multi-draw run: the
-    // run's emit forms (bare gpu.draw / drawIndirectCount) are the
-    // non-indexed vocabulary. Runs of one ride the classic path verbatim;
-    // a mixed command sequence flushes the run at every boundary anyway
-    // (different commands).
+    // Task 180/187 — an INDEXED command's run membership: it joins the
+    // INDEXED run (its own state — the two runs never mix). On the
+    // fast-path floor (no multiDrawIndexed) members 2..N still skip the
+    // prologue: each is a bare drawIndexed over the bound index buffer
+    // (the Task-180 memo holds the bind). Runs of one ride the classic
+    // path verbatim; a mixed command sequence flushes at every boundary
+    // anyway (different commands).
     const indexed = command.indices !== undefined
     let member0Pending = false
-    if (tierOn && count > 0 && instances > 0 && !indexed) {
-      if (command === runCommand && runLen < MAX_BATCH) {
-        if (multiFn !== undefined) {
-          const b = runLen * 4
-          runArgs[b] = count; runArgs[b + 1] = instances
-          runLen++
+    let member0IndexedPending = false
+    if (tierOn && count > 0 && instances > 0) {
+      if (!indexed) {
+        if (command === runCommand && runLen < MAX_BATCH) {
+          if (multiFn !== undefined) {
+            const b = runLen * 4
+            runArgs[b] = count; runArgs[b + 1] = instances
+            runLen++
+            return
+          }
+          gpu.draw(count, instances)
           return
         }
-        gpu.draw(count, instances)
-        return
-      }
-      flushRun()
-      runCommand = command
-      runArgs[0] = count; runArgs[1] = instances
-      if (multiFn !== undefined) {
-        // the multi shape keeps member 0 PENDING (flushRun emits it —
-        // alone it rides classic, with company it is one indirect call)
-        runLen = 1
-        member0Pending = true
+        flushRunIndexed()
+        flushRun()
+        runCommand = command
+        runArgs[0] = count; runArgs[1] = instances
+        if (multiFn !== undefined) {
+          // the multi shape keeps member 0 PENDING (flushRun emits it —
+          // alone it rides classic, with company it is one indirect call)
+          runLen = 1
+          member0Pending = true
+        } else {
+          // the fast-path floor: nothing pending — the run is runCommand
+          // ONLY (the append detector); member 0 emits at the bottom like
+          // the classic path
+          runLen = 0
+        }
+        // fall through to the prologue ONCE — for the whole run
       } else {
-        // the fast-path floor: nothing pending — the run is runCommand
-        // ONLY (the append detector); member 0 emits at the bottom like
-        // the classic path
-        runLen = 0
+        // the INDEXED run (Task 187)
+        if (command === runIndexedCommand && runIndexedLen < MAX_BATCH) {
+          if (multiIndexedFn !== undefined) {
+            const b = runIndexedLen * 5
+            runIndexedArgs[b] = count; runIndexedArgs[b + 1] = instances
+            runIndexedLen++
+            return
+          }
+          // the floor append: a bare drawIndexed (the index-buffer memo
+          // holds from the run's prologue — the bind below is a no-op)
+          gpu.drawIndexed(count, instances)
+          return
+        }
+        flushRun()
+        flushRunIndexed()
+        runIndexedCommand = command
+        runIndexedArgs[0] = count; runIndexedArgs[1] = instances
+        if (multiIndexedFn !== undefined) {
+          // the multi shape: member 0 PENDING (flushRunIndexed emits it)
+          runIndexedLen = 1
+          member0IndexedPending = true
+        } else {
+          // the floor: nothing pending — member 0 emits at the bottom
+          // (the classic bind+drawIndexed)
+          runIndexedLen = 0
+        }
+        // fall through to the prologue ONCE — for the whole run
       }
-      // fall through to the prologue ONCE — for the whole run
     }
     else {
       // degenerate (count 0 / instances 0) or the tier is off — the run
       // must not absorb a draw whose classic behavior differs
+      flushRunIndexed()
       flushRun()
     }
     if (!command.pipelineReady) {
@@ -284,10 +360,13 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
     // Task 180 — THE INDEX TIER: bind the static index pattern (data-keyed
     // cache, pass-scoped bind memo inside the facade) and draw indexed.
     // The tape's count IS the index count for an indexed command.
+    // Task 187: a BATCHED member 0 skips the draw itself — it stays PENDING
+    // in the indexed run (flushRunIndexed emits it; alone it rides the
+    // classic call verbatim).
     const indices = command.indices
     if (indices !== undefined) {
       gpu.bindIndexBuffer(indices.data)
-      gpu.drawIndexed(count, instances)
+      if (!member0IndexedPending) gpu.drawIndexed(count, instances)
       return
     }
     if (!member0Pending) gpu.draw(count, instances)

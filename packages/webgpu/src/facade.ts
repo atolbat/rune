@@ -251,6 +251,20 @@ export interface GPUFacade {
    *  (prologue-once, bare pass.draw per member — byte-identical GPU
    *  call stream to the classic path). */
   multiDraw?(args: Uint32Array, drawCount: number): boolean
+  /** Task 187 — THE INDEXED TWIN of multiDraw: PRESENCE == CAPABILITY, probed
+   *  on drawIndexedIndirectCount (separately from drawIndirectCount — a build
+   *  could ship either). `args` holds drawCount × 5 uints — [indexCount,
+   *  instanceCount, firstIndex, baseVertex, firstInstance] per member
+   *  (firstIndex/baseVertex/firstInstance are always 0 here — a same-command
+   *  run shares ONE index buffer, every member starts at index 0). The facade
+   *  packs the run into its persistent INDIRECT rings (the indexed ring is
+   *  20 bytes per member; the COUNT ring is SHARED with the arrays tier —
+   *  one member cursor allocates disjoint count slots across both kinds) and
+   *  issues ONE pass.drawIndexedIndirectCount over the bound index buffer.
+   *  Returns false on ring exhaustion — the caller replays the classic
+   *  per-draw drawIndexed path (the prologue already ran; each member is a
+   *  bare draw — byte-identical GPU call stream). */
+  multiDrawIndexed?(args: Uint32Array, drawCount: number): boolean
   endPass(): void
   submit(): void
   /** Task 80 (readback): read the pixels of the TARGET (surface) — Promise<Uint8Array>.

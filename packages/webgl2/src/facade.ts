@@ -246,6 +246,23 @@ export interface GLFacade {
    *  presence); the recording mocks implement it so tests can pin the batch
    *  arithmetic; absent — the executor stays on the per-draw drawArrays path. */
   multiDrawArraysInstanced?(mode: string, firsts: Int32Array, counts: Int32Array, instanceCounts: Int32Array, drawcount: number): void
+  /** Task 187 — the INDEXED twin: drawcount indexed instanced draws of the
+   *  bound element buffer in one driver call. Contract mirror of
+   *  multiDrawArraysInstanced: counts[i]/instanceCounts[i]/offsets[i] ride
+   *  the i-th draw (offsets — BYTE offsets into the element buffer; a
+   *  same-command run starts every member at 0), twoByte picks
+   *  UNSIGNED_SHORT vs UNSIGNED_INT. The expansion — multiDrawElementsInstanced(
+   *  …, counts[i], type, offsets[i], instanceCounts[i]) for i in [0, drawcount) —
+   *  is exactly the per-draw drawElementsInstanced sequence with the state
+   *  untouched between them, which the executor's indexed batch tier
+   *  guarantees (same command → one element buffer, one program, one
+   *  state; the record-then-execute discipline means no mid-run changes).
+   *  OPTIONAL — realGL exposes it IFF the context's WEBGL_multi_draw object
+   *  carries multiDrawElementsInstancedWEBGL (a partial polyfill may not);
+   *  the recording mocks implement it unconditionally so tests can pin the
+   *  batch arithmetic; absent — the executor keeps indexed commands on the
+   *  classic per-draw drawElements path verbatim. */
+  multiDrawElementsInstanced?(mode: string, elementBufferId: number, counts: Int32Array, instanceCounts: Int32Array, offsets: Int32Array, drawcount: number, twoByte: boolean): void
   /** Render target: an FBO with a color texture (and optional depth).
    *  targetId 0 — the canvas (a built-in target, not created). */
   createTarget(

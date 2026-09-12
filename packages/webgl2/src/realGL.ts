@@ -222,6 +222,14 @@ export function createRealGL(
       instanceCountsList: Int32Array, instanceCountsOffset: number,
       drawcount: number,
     ): void
+    multiDrawElementsInstancedWEBGL(
+      mode: number,
+      countsList: Int32Array, countsOffset: number,
+      type: number,
+      offsetsList: Int32Array, offsetsOffset: number,
+      instanceCountsList: Int32Array, instanceCountsOffset: number,
+      drawcount: number,
+    ): void
   } | null = null
   try {
     multiDrawExt = (gl as unknown as {
@@ -234,10 +242,26 @@ export function createRealGL(
         instanceCountsList: Int32Array, instanceCountsOffset: number,
         drawcount: number,
       ): void
+      multiDrawElementsInstancedWEBGL(
+        mode: number,
+        countsList: Int32Array, countsOffset: number,
+        type: number,
+        offsetsList: Int32Array, offsetsOffset: number,
+        instanceCountsList: Int32Array, instanceCountsOffset: number,
+        drawcount: number,
+      ): void
     } | null ?? null
   } catch {
     multiDrawExt = null
   }
+  // Task 187 — the INDEXED half of the extension, probed SEPARATELY: a
+  // polyfill or partial mock may expose only the arrays form, and the
+  // executor's indexed tier arms IFF this exact method exists (the
+  // presence==capability contract — the Task-169/174 lesson).
+  const multiDrawElementsExtFn = multiDrawExt !== null
+    && typeof multiDrawExt.multiDrawElementsInstancedWEBGL === 'function'
+    ? multiDrawExt.multiDrawElementsInstancedWEBGL.bind(multiDrawExt)
+    : undefined
   let nextProgram = 1
   // Task 137 — the DEFAULT VAO's attrib LEDGER: location → the facade
   // bufferId bindVertexBuffer last pointed there (the DEFAULT VAO only —
@@ -1313,6 +1337,21 @@ export function createRealGL(
     multiDrawExt.multiDrawArraysInstancedWEBGL(primitiveTarget(mode), firsts, 0, counts, 0, instanceCounts, 0, drawcount)
   }
 
+  // Task 187 — THE INDEXED MULTI-DRAW TIER: the same extension's
+  // multiDrawElementsInstancedWEBGL, the indexed twin of the arrays call.
+  // The element buffer is bound for the WHOLE call and unbound after (the
+  // classic drawElements discipline); the offsets list is the executor's
+  // all-zero array (a run shares ONE element buffer, every member starts
+  // at index 0). The two-byte flag picks UNSIGNED_SHORT vs UNSIGNED_INT —
+  // a per-COMMAND constant (the indices array's own type).
+  function multiDrawElementsInstanced(mode: string, elementBufferId: number, counts: Int32Array, instanceCounts: Int32Array, offsets: Int32Array, drawcount: number, twoByte: boolean): void {
+    if (multiDrawElementsExtFn === undefined || drawcount <= 0) return
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffers.get(elementBufferId) ?? null)
+    const type = twoByte ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT
+    multiDrawElementsExtFn(primitiveTarget(mode), counts, 0, type, offsets, 0, instanceCounts, 0, drawcount)
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null)
+  }
+
   // ─── Disposal: explicit release of the GPU resource ───
   // Idempotence: a repeated delete of the same id — a no-op (the entry is already gone from the Map).
   // If the id is not found — also a no-op (nothing can be done, but we do not throw either).
@@ -1831,6 +1870,7 @@ export function createRealGL(
     // batched draw on a context without the extension; this is exactly the
     // bug the first task165 run caught: 4 draws expected, 0 landed).
     ...(multiDrawExt !== null ? { multiDrawArraysInstanced } : {}),
+    ...(multiDrawElementsExtFn !== undefined ? { multiDrawElementsInstanced } : {}),
     createTarget,
     bindTarget,
     readTargetPixels,

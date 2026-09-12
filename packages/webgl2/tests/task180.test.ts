@@ -89,8 +89,12 @@ describe('Task 180 — the GL index tier', () => {
     const s = setup(INDICES_U16)
     s.executor.run(tapeOfDraws([[s.command.id, 36, 1], [s.command.id, 36, 1]]))
     expect(s.calls.filter(c => c.startsWith('createElementBuffer(')).length).toBe(1)
-    // both frames drew indexed (the multi-draw tier does NOT absorb them)
-    expect(s.calls.filter(c => c === 'drawElements(2,36,1,u16)').length).toBe(2)
+    // Task 187 lifts the Task-180 exclusion: two same-command indexed draws
+    // now collapse into ONE multiDrawElementsInstanced call (the element
+    // buffer shared, both members at index 0) — the lone-draw form stays
+    // the classic drawElements (see the first test).
+    expect(s.calls.filter(c => c === 'drawElements(2,36,1,u16)').length).toBe(0)
+    expect(s.calls.filter(c => c === 'multiDrawElems(2,u16)×2[36×1@0,36×1@0]').length).toBe(1)
   })
 
   it('the element type follows the array: Uint32Array → u32', () => {
