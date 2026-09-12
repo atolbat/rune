@@ -52,12 +52,6 @@ export function instancePoolBase(views: SceneViews, bufferIndex: number, cameraI
   return (bufferIndex * views.cameraMax + cameraIndex) * views.headerI[H_MAX_INSTANCES] * 16
 }
 
-/** Whether a rank is visible (bit + node flag). */
-function rankVisible(views: SceneViews, base: number, r: number, slot: number): boolean {
-  if ((views.bits[base + (r >>> 5)] & (1 << (r & 31))) === 0) return false
-  return (views.nodeFlags[slot] & NF_VISIBLE) !== 0
-}
-
 /**
  * Collects the instances of all groups for camera cameraIndex from buffer bufferIndex.
  * Returns the total number of collected matrices.
@@ -217,6 +211,23 @@ export function instanceMatricesView(
 /**
  * Simple instance collection into a user array (the T0 path without a pool):
  * the matrices of the group's visible nodes, back to back. Returns the number written.
+ *
+ * Task 186 — the walk is WORD-BLOCKED, the bit test is FIRST: the outer loop
+ * loads one visibility word per 32 ranks — a zero word skips the whole block
+ * (one load + test instead of 32 rank iterations), a nonzero word enters the
+ * rank loop where the register-only bit reject runs BEFORE the order/group
+ * loads (an invisible rank touches no memory at all). The measurements
+ * (scripts/task186-micro.mjs, 100k nodes / 45% visibility — the demo's band):
+ * −46% on a large group (~50% of nodes), −20% on a small group (~1%, 100
+ * groups), vs the old flat rank loop. The ctz-extraction walk (Task 143's
+ * pool-pass shape) was TRIED here and REJECTED: it pays bit-extraction for
+ * every VISIBLE rank of OTHER groups too — +15% on a small group, +33% on an
+ * all-groups sweep; it only wins when the group ≈ all visible nodes, and even
+ * there the word-blocked shape is within 4%. The 16-float copy is UNROLLED
+ * (Task 143's fill-pass measurement: JSC does not unroll the k-loop itself,
+ * the unroll alone was −30% there) and the capacity is hoisted: `out.length >>> 4`
+ * full matrices, one compare per written matrix instead of `k*16+16 > length`
+ * arithmetic per rank.
  */
 export function collectGroupMatrices(
   views: SceneViews,
@@ -226,17 +237,41 @@ export function collectGroupMatrices(
   out: Float32Array,
 ): number {
   const n = views.headerI[H_NODE_COUNT]
-  const { order, group, world } = views
+  const { order, group, world, bits, nodeFlags } = views
   const base = bitsBase(views, bufferIndex, cameraIndex)
+  const capacity = out.length >>> 4 // full 16-float matrices that fit in out
+  const wEnd = Math.min(views.bitsWords, (n + 31) >>> 5) // words carrying nodes
   let k = 0
-  for (let r = 0; r < n; r++) {
-    const slot = order[r]
-    if (group[slot] !== groupId) continue
-    if (!rankVisible(views, base, r, slot)) continue
-    if (k * 16 + 16 > out.length) break
-    const src = slot * 16
-    for (let j = 0; j < 16; j++) out[k * 16 + j] = world[src + j]
-    k++
+  scan: for (let w = 0; w < wEnd; w++) {
+    const word = bits[base + w]
+    if (word === 0) continue // a fully invisible block — 32 ranks skipped
+    const rEnd = Math.min((w << 5) + 32, n)
+    for (let r = w << 5; r < rEnd; r++) {
+      if ((word & (1 << (r & 31))) === 0) continue // register-only reject first
+      const slot = order[r]
+      if (group[slot] !== groupId) continue
+      if ((nodeFlags[slot] & NF_VISIBLE) === 0) continue
+      if (k >= capacity) break scan
+      const src = slot * 16
+      const dst = k * 16
+      out[dst] = world[src]
+      out[dst + 1] = world[src + 1]
+      out[dst + 2] = world[src + 2]
+      out[dst + 3] = world[src + 3]
+      out[dst + 4] = world[src + 4]
+      out[dst + 5] = world[src + 5]
+      out[dst + 6] = world[src + 6]
+      out[dst + 7] = world[src + 7]
+      out[dst + 8] = world[src + 8]
+      out[dst + 9] = world[src + 9]
+      out[dst + 10] = world[src + 10]
+      out[dst + 11] = world[src + 11]
+      out[dst + 12] = world[src + 12]
+      out[dst + 13] = world[src + 13]
+      out[dst + 14] = world[src + 14]
+      out[dst + 15] = world[src + 15]
+      k++
+    }
   }
   return k
 }
