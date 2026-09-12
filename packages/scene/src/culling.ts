@@ -96,15 +96,22 @@ export function fillBits(bits: Uint32Array, base: number, s: number, e: number, 
   }
 }
 
-/** The bitset population (for statistics). */
+/** The bitset population (for statistics).
+ * Task 182 — SWAR popcount: ~6 int ops per WORD (a constant), not
+ * Kernighan's loop of one iteration PER SET BIT. On a visible-heavy scene
+ * (70–100%) this is ~5–10× fewer operations for the same number; zero
+ * words cost one load + branch. Exercised once per camera per cull from
+ * cullViewsHierarchical — on a 1M-node scene the old form burned ~1M inner
+ * iterations per camera per frame. */
 export function popcountBits(bits: Uint32Array, base: number, words: number): number {
   let count = 0
   for (let w = 0; w < words; w++) {
     let v = bits[base + w]
-    while (v !== 0) {
-      v &= v - 1
-      count++
-    }
+    if (v === 0) continue
+    v = v - ((v >>> 1) & 0x55555555)
+    v = (v & 0x33333333) + ((v >>> 2) & 0x33333333)
+    v = (v + (v >>> 4)) & 0x0f0f0f0f
+    count += (v * 0x01010101) >>> 24
   }
   return count
 }
@@ -152,6 +159,10 @@ function splitChildrenOf(order: Int32Array, subtreeEnd: Int32Array, s: number, e
  * says nothing about the children) — the mask is inherited by the children
  * as is. On deep trees this turns 6 → ~2 plane tests per node with the same
  * result bitset (parity with brute — property tests in culling.test.ts).
+ *
+ * Task 182 — countVisible (default true): set false to skip the closing
+ * popcount over the whole bitset (the caller does not read `visible`);
+ * the field is then -1 ("not counted"). The other stats stay exact.
  */
 export function cullViewsHierarchical(
   views: SceneViews,
@@ -159,6 +170,7 @@ export function cullViewsHierarchical(
   bufferIndex: number,
   out?: MutableCullStats,
   masks: boolean = true,
+  countVisible: boolean = true,
 ): CullStats {
   const n = views.headerI[H_NODE_COUNT]
   const { order, parent, subtreeEnd, sphereW, bits, planes } = views
@@ -247,13 +259,22 @@ export function cullViewsHierarchical(
 
   if (out !== undefined) {
     out.tested = tested
-    out.visible = popcountBits(bits, base, views.bitsWords)
+    // Task 182: countVisible=false leaves the number uncounted (-1) — the
+    // worker/T0 pipeline (runScenePipeline) never reads the stats; counting
+    // was a per-camera-per-frame popcount over the whole bitset for nothing.
+    out.visible = countVisible ? popcountBits(bits, base, views.bitsWords) : -1
     out.trivialRejects = trivialRejects
     out.trivialAccepts = trivialAccepts
     out.planeTests = planeTests
     return out
   }
-  return { tested, visible: popcountBits(bits, base, views.bitsWords), trivialRejects, trivialAccepts, planeTests }
+  return {
+    tested,
+    visible: countVisible ? popcountBits(bits, base, views.bitsWords) : -1,
+    trivialRejects,
+    trivialAccepts,
+    planeTests,
+  }
 }
 
 /**

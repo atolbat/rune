@@ -44,6 +44,11 @@ scene.collectInstances(0)      // matrices of the visible instances of group 0
 const { matrices, count } = scene.instances(0)
 // matrices: Float32Array(count*16) — a ready instance attribute
 // (4 vec4 columns, stride 64 bytes, divisor 1 — rendererFeed/batchCommand).
+// Task 182: WITHOUT an explicit bufferIndex the cull/collect/read calls
+// alternate the double bitset buffer per frame (0,1,0,1…, reported in
+// result.bufferIndex; readers default to the latest one) — the visibility
+// diff between consecutive frames (the groupFlip upload-skip memo) works
+// out of the box. An explicit bufferIndex drives the buffers manually.
 
 scene.forEachVisible(0, (slot) => {
   const myObject = myTable[scene.views.payload[slot]]
@@ -64,6 +69,10 @@ await bridge.ready
 bridge.publish([cam])          // ~microseconds
 // …render the previous snapshot, GPU submits…
 const snap = bridge.take()     // bits + instances (copies, no tearing)
+// For zero big-array churn per fresh take: createSceneWorkerBridge({ …,
+// snapshotReuse: true }) — the snapshot memory lives in a ring of two
+// bridge-owned slots (valid until the fresh take after the next one);
+// bits are always copied live-sized (ceil(n/32) words).
 ```
 
 ```ts

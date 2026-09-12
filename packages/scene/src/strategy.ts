@@ -129,6 +129,9 @@ export function measureScenePipeline(
   scene.pack()
   // JIT + dirt warm-up. cull(reuse): the numbers are not read here — the
   // scratch result keeps the measured frames allocation-free (Task 113).
+  // Task 182: the DEFAULT buffers alternate (auto-parity) — the measurement
+  // exercises the live groupFlip diff (the upload-skip memo), exactly what
+  // a default T0 frame does; collectInstances' default tracks the cull.
   for (let i = 0; i < runs; i++) {
     scene.updateWorld()
     scene.refitGroupBounds()

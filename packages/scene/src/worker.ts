@@ -34,9 +34,12 @@ import { collectInstancesViews } from './instances.ts'
 import { refitGroupBoundsViews, updateWorldViews } from './transforms.ts'
 
 /** Cull stats scratch for the pipeline: the numbers are never read here —
- * an allocated result object per camera per frame was pure garbage (Task 113). */
+ * an allocated result object per camera per frame was pure garbage (Task 113).
+ * Task 182: countVisible=false — the closing popcount over the whole bitset
+ * is skipped too (on a 1M-node scene that was ~1M wasted iterations per
+ * camera per frame); out.visible stays -1 ("not counted"). */
 const pipelineCullStats: MutableCullStats = {
-  tested: 0, visible: 0, trivialRejects: 0, trivialAccepts: 0, planeTests: 0,
+  tested: 0, visible: -1, trivialRejects: 0, trivialAccepts: 0, planeTests: 0,
 }
 
 /**
@@ -51,7 +54,7 @@ export function runScenePipeline(views: SceneViews, bufferIndex: number): number
   if ((cmd & CMD_REFIT) !== 0) refitGroupBoundsViews(views)
   if ((cmd & CMD_CULL) !== 0) {
     const cameras = headerI[H_CAMERA_COUNT]
-    for (let k = 0; k < cameras; k++) cullViewsHierarchical(views, k, bufferIndex, pipelineCullStats)
+    for (let k = 0; k < cameras; k++) cullViewsHierarchical(views, k, bufferIndex, pipelineCullStats, true, false)
   }
   if ((cmd & CMD_INSTANCES) !== 0) {
     const cameras = headerI[H_CAMERA_COUNT]

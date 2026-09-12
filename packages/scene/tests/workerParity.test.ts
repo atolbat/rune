@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'bun:test'
 import { Worker } from 'node:worker_threads'
-import { createCamera, createScene, createSceneWorkerBridge } from '../src/index.ts'
+import { bitsBase, createCamera, createScene, createSceneWorkerBridge } from '../src/index.ts'
 import type { Scene } from '../src/index.ts'
 
 /** Bun worker port adapted to the bridge interface. */
@@ -59,7 +59,9 @@ describe('scene worker (SAB, real thread)', () => {
       cam.setViewLookAt(0, 6, 18, 0, 0, 0, 0, 1, 0)
       reference.updateWorld()
       reference.refitGroupBounds()
-      reference.cull([cam])
+      // Task 182: capture the cull result — its bufferIndex is where the
+      // DEFAULT (auto-parity) cull wrote; raw reads follow it.
+      const res1 = reference.cull([cam])
       reference.collectInstances(0)
 
       // Mirror: the same topology in a SAB + worker.
@@ -81,10 +83,15 @@ describe('scene worker (SAB, real thread)', () => {
         expect(Math.abs(mirror.views.world[i] - reference.views.world[i])).toBeLessThan(1e-6)
       }
 
-      // Visibility parity.
-      const t0Bits = reference.views.bits.subarray(0, reference.views.bitsWords)
+      // Visibility parity — the raw read follows the cull result's buffer.
+      const b1 = bitsBase(reference.views, res1.bufferIndex, 0)
+      const t0Bits = reference.views.bits.subarray(b1, b1 + reference.views.bitsWords)
       expect(popcount(snap!.bits[0])).toBe(popcount(t0Bits))
-      expect(snap!.bits[0].length).toBe(reference.views.bitsWords)
+      // Task 182: the snapshot bits are LIVE-SIZED (ceil(n/32) words — the
+      // capacity padding is zero and is not copied).
+      expect(snap!.bits[0].length).toBe((reference.count + 31) >>> 5)
+      expect(popcount(snap!.bits[0])).toBe(popcount(
+        reference.views.bits.subarray(b1, b1 + ((reference.count + 31) >>> 5))))
 
       // Parity of group 0 instance matrices.
       const t0Seg = reference.instances(0, { cameraIndex: 0 })
@@ -97,12 +104,14 @@ describe('scene worker (SAB, real thread)', () => {
       // Second epoch: the camera moved → a fresh snapshot with different visibility.
       cam.setViewLookAt(30, 6, 18, 0, 0, 0, 0, 1, 0)
       reference.updateWorld()
-      reference.cull([cam])
+      const res2 = reference.cull([cam])
       reference.collectInstances(0)
       bridge.publish([cam])
       const snap2 = await bridge.waitFresh(4000)
       expect(snap2!.epoch).toBe(2)
-      expect(popcount(snap2!.bits[0])).toBe(popcount(reference.views.bits.subarray(0, reference.views.bitsWords)))
+      const b2 = bitsBase(reference.views, res2.bufferIndex, 0)
+      expect(popcount(snap2!.bits[0])).toBe(
+        popcount(reference.views.bits.subarray(b2, b2 + reference.views.bitsWords)))
       expect(snap2!.instances[0][0].count).toBe(reference.instances(0, { cameraIndex: 0 }).count)
 
       const stats = bridge.stats()

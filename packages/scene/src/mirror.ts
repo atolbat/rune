@@ -14,7 +14,11 @@
  *      always has consistent data).
  *
  * A snapshot is plain ArrayBuffer copies: these are ready GPU upload buffers
- * (instance attributes), not "extra" work.
+ * (instance attributes), not "extra" work. Task 182: (a) the bits copy is
+ * live-sized (ceil(n/32) words — the capacity padding is always zero);
+ * (b) snapshotReuse — a ring of two bridge-owned slots: the big arrays are
+ * reused per fresh take (zero big-array churn; a snapshot's memory lives
+ * until the fresh take after the next one).
  */
 import type { Camera } from './camera.ts'
 import type { Scene } from './scene.ts'
@@ -26,6 +30,7 @@ import {
   H_GROUP_COUNT,
   H_INPUT_EPOCH,
   H_INSTANCE_POOL,
+  H_NODE_COUNT,
   H_OUTPUT_EPOCH,
   H_STALE_TAKES,
 } from './layout.ts'
@@ -38,13 +43,19 @@ export interface SceneWorkerPort {
   terminate?(): void | Promise<unknown>
 }
 
-/** A consistent snapshot of one epoch's visibility. */
+/** A consistent snapshot of one epoch's visibility.
+ * Task 182 — bits are copied LIVE-SIZED (ceil(n/32) words): the words above
+ * the live node count are always zero (fillBits never writes beyond n),
+ * copying them was pure bytes on the wire (capacity-sized copies on a
+ * sparse scene paid up to bitsWords/liveWords× more). */
 export interface SceneSnapshot {
   readonly epoch: number
   readonly cameraCount: number
-  /** Visibility bitsets (rank space), copies. */
+  /** Visibility bitsets (rank space), live words only. With snapshotReuse:
+   *  VIEWS into bridge-owned ring memory (see createSceneWorkerBridge). */
   readonly bits: readonly Uint32Array[]
-  /** Instance segments per camera and group: instances[camera][group]. */
+  /** Instance segments per camera and group: instances[camera][group].
+ *  With snapshotReuse: matrices are VIEWS into bridge-owned ring memory. */
   readonly instances: ReadonlyArray<ReadonlyArray<{ matrices: Float32Array; count: number }>>
 }
 
@@ -69,10 +80,29 @@ export interface SceneWorkerBridge {
 
 const EMPTY_MATRICES = new Float32Array(0)
 
-/** Create a bridge for a SAB scene and a worker running runSceneWorker. */
+/** One ring slot of the reuse mode (Task 182): the big buffers a snapshot
+ * is built from. bits — cameraMax rows of bitsWords (fixed, tiny); matrices —
+ * one geometrically grown row per camera (the total can never exceed
+ * maxInstances — collect drops beyond it). */
+interface SnapshotRingSlot {
+  readonly bits: Uint32Array
+  matrices: Float32Array[]
+}
+
+/** Create a bridge for a SAB scene and a worker running runSceneWorker.
+ * Task 182 — snapshotReuse (default false): the fresh-take snapshots are built
+ * in a RING of two slots — the bits/matrix MEMORY is bridge-owned and reused,
+ * zero big-array allocations per frame (the old copy mode churned ~pool-sized
+ * garbage per fresh take — at 100k instances that was megabytes per frame).
+ * A snapshot's memory stays valid until the fresh take AFTER the next one
+ * (the stale take in between returns the previous object, untouched). The
+ * default mode keeps the old contract: every fresh take returns independent
+ * copies (held snapshots stay valid forever). */
 export function createSceneWorkerBridge(options: {
   scene: Scene
   worker: SceneWorkerPort
+  /** Task 182 — ring-reuse of the snapshot memory (see above). */
+  snapshotReuse?: boolean
 }): SceneWorkerBridge {
   const { scene, worker } = options
   const views = scene.views
@@ -86,6 +116,15 @@ export function createSceneWorkerBridge(options: {
   let lastSnapshot: SceneSnapshot | null = null
   let lastSnapshotEpoch = 0
   let disposed = false
+  // Task 182: the reuse ring — two slots, alternating per fresh take.
+  const snapshotReuse = options.snapshotReuse === true
+  const ring: SnapshotRingSlot[] = snapshotReuse
+    ? [
+        { bits: new Uint32Array(views.cameraMax * views.bitsWords), matrices: [] },
+        { bits: new Uint32Array(views.cameraMax * views.bitsWords), matrices: [] },
+      ]
+    : []
+  let ringNext = 0
 
   const ready = new Promise<void>((resolve) => {
     worker.onMessage((message) => {
@@ -95,33 +134,64 @@ export function createSceneWorkerBridge(options: {
     worker.postMessage({ type: 'scene-init', sab: views.buffer })
   })
 
-  function snapshot(views: SceneViews, epoch: number): SceneSnapshot {
+  function snapshot(views: SceneViews, epoch: number, slot: number): SceneSnapshot {
     const cameraCount = views.headerI[H_CAMERA_COUNT]
     const groupCount = Math.min(views.headerI[H_GROUP_COUNT], views.groupMax)
     const bufferIndex = epoch & 1
+    // Task 182: live words only — the padding above the node count is zero.
+    const liveWords = (views.headerI[H_NODE_COUNT] + 31) >>> 5
     const bits: Uint32Array[] = []
     const instances: Array<Array<{ matrices: Float32Array; count: number }>> = []
+    const ringSlot = slot >= 0 ? ring[slot] : undefined
     for (let k = 0; k < cameraCount; k++) {
       const base = bitsBase(views, bufferIndex, k)
-      bits.push(views.bits.slice(base, base + views.bitsWords))
+      if (ringSlot !== undefined) {
+        // Reuse: memcpy the live words into the ring row, hand out a view.
+        ringSlot.bits.set(views.bits.subarray(base, base + liveWords), k * views.bitsWords)
+        bits.push(ringSlot.bits.subarray(k * views.bitsWords, k * views.bitsWords + liveWords))
+      } else {
+        bits.push(views.bits.slice(base, base + liveWords))
+      }
       const perCamera: Array<{ matrices: Float32Array; count: number }> = []
       const countsBase = (bufferIndex * views.cameraMax + k) * views.groupMax
       const poolBase = (bufferIndex * views.cameraMax + k) * views.headerI[H_INSTANCE_POOL] * 16
-      for (let g = 0; g < groupCount; g++) {
-        const count = Math.max(0, views.instCounts[countsBase + g])
-        if (count === 0) {
-          perCamera.push({ matrices: EMPTY_MATRICES, count: 0 })
-          continue
+      const pool = views.instPool
+      if (ringSlot !== undefined) {
+        // The ring row's prefix offsets are pool-compatible (both are
+        // 0-based prefix sums per camera) — segments land at the same
+        // offsets, then hand out views.
+        let total = 0
+        for (let g = 0; g < groupCount; g++) total += Math.max(0, views.instCounts[countsBase + g])
+        let row = ringSlot.matrices[k] ?? new Float32Array(0)
+        if (row.length < total * 16) {
+          row = new Float32Array(Math.max(total * 16, row.length * 2, 1024))
         }
-        const offset = views.instOffsets[countsBase + g]
-        const pool = views.instPool
-        perCamera.push({
-          matrices: pool.slice(
-            poolBase + offset * 16,
-            poolBase + (offset + count) * 16,
-          ),
-          count,
-        })
+        ringSlot.matrices[k] = row
+        for (let g = 0; g < groupCount; g++) {
+          const count = Math.max(0, views.instCounts[countsBase + g])
+          if (count === 0) {
+            perCamera.push({ matrices: EMPTY_MATRICES, count: 0 })
+            continue
+          }
+          const offset = views.instOffsets[countsBase + g]
+          const srcStart = poolBase + offset * 16
+          row.set(pool.subarray(srcStart, srcStart + count * 16), offset * 16)
+          perCamera.push({ matrices: row.subarray(offset * 16, offset * 16 + count * 16), count })
+        }
+      } else {
+        for (let g = 0; g < groupCount; g++) {
+          const count = Math.max(0, views.instCounts[countsBase + g])
+          if (count === 0) {
+            perCamera.push({ matrices: EMPTY_MATRICES, count: 0 })
+            continue
+          }
+          const offset = views.instOffsets[countsBase + g]
+          const srcStart = poolBase + offset * 16
+          perCamera.push({
+            matrices: pool.slice(srcStart, srcStart + count * 16),
+            count,
+          })
+        }
       }
       instances.push(perCamera)
     }
@@ -149,7 +219,10 @@ export function createSceneWorkerBridge(options: {
     take() {
       const output = Atomics.load(views.headerI, H_OUTPUT_EPOCH)
       if (output > 0 && output !== lastSnapshotEpoch) {
-        lastSnapshot = snapshot(views, output)
+        // Task 182: the reuse ring alternates slots per fresh take — the
+        // previous fresh snapshot's memory is never the target.
+        const slot = snapshotReuse ? (ringNext ^= 1) : -1
+        lastSnapshot = snapshot(views, output, slot)
         lastSnapshotEpoch = output
         freshTakes++
         return lastSnapshot

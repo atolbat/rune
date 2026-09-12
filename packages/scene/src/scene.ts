@@ -120,7 +120,17 @@ export interface Scene {
    *  masks=false — disable plane-mask inheritance (A/B "before Task 85":
    *  identical result, ~×2.6 more tests). out — reusable stats
    *  records (zero allocations per frame). reuse — a scene-owned result,
-   *  zero steady-state allocations (Task 113; see the opts field). */
+   *  zero steady-state allocations (Task 113; see the opts field).
+   *  Task 182 — AUTO-PARITY: without an explicit bufferIndex the scene
+   *  alternates the double bitset buffer per call (0,1,0,1… — the worker's
+   *  epoch&1 rhythm). This is what makes the Task-85 groupFlip diff
+   *  meaningful in T0: the default cull+collect loop (the README pattern)
+   *  diffs the CURRENT frame against the PREVIOUS one — with the old fixed
+   *  default buffer the diff always saw a dead (never-written) buffer and
+   *  the flip memo was silently dead (every group "flipped" every frame →
+   *  uploads never skipped). The written buffer is reported in the result's
+   *  bufferIndex; an explicit bufferIndex disables the alternation for that
+   *  call (manual buffer driving). */
   cull(cameras: readonly Camera[], opts?: {
     brute?: boolean
     bufferIndex?: number
@@ -134,17 +144,23 @@ export interface Scene {
     reuse?: boolean
   }): SceneCullResult
 
-  /** Collect instances of all groups for a camera (into buffer bufferIndex). */
+  /** Collect instances of all groups for a camera (into buffer bufferIndex).
+   *  Task 182 — the default buffer is the one the LAST auto cull wrote
+   *  (explicit bufferIndex wins): the internal diff runs against the
+   *  previous frame's bitset — the flip memo works in the default T0 loop. */
   collectInstances(cameraIndex: number, opts?: { bufferIndex?: number }): number
-  /** Segment of a group's matrices (a view over the camera's pool). */
+  /** Segment of a group's matrices (a view over the camera's pool).
+   *  Task 182 — the default buffer tracks the last auto cull (explicit wins). */
   instances(group: number, opts?: { cameraIndex?: number; bufferIndex?: number }): { matrices: Float32Array; count: number }
   /** Task 87 — NO ALLOCATIONS: the group pool count/offset/base as numbers
-   *  (the consumer reads views.instPool directly — no objects, no subarray). */
+   *  (the consumer reads views.instPool directly — no objects, no subarray).
+   *  Task 182 — the default buffer tracks the last auto cull (explicit wins). */
   instanceCountOf(group: number, cameraIndex: number, bufferIndex?: number): number
   instanceOffsetOf(group: number, cameraIndex: number, bufferIndex?: number): number
   instancePoolBase(cameraIndex: number, bufferIndex?: number): number
 
-  /** Iterate a camera's visible slots (bit ∩ node flag). */
+  /** Iterate a camera's visible slots (bit ∩ node flag).
+   *  Task 182 — the default buffer tracks the last auto cull (explicit wins). */
   forEachVisible(cameraIndex: number, cb: (slot: number, rank: number) => void, opts?: { bufferIndex?: number }): void
   /** Rank visibility (ignoring node flags). */
   isVisibleRank(cameraIndex: number, rank: number, opts?: { bufferIndex?: number }): boolean
@@ -182,6 +198,19 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
   let cullReuseStats: MutableCullStats[] | null = null
   let cullReuseViews: (readonly CullStats[] | undefined)[] | null = null
   let cullReuseResult: { cameraCount: number; stats: readonly CullStats[]; bufferIndex: number } | null = null
+
+  // ─── Task 182: auto-parity of the default buffers ────────────────────
+  /** The count of DEFAULT (bufferIndex-less) cull() calls. The k-th auto
+   *  cull writes buffer (k-1)&1 — 0,1,0,1… (the worker's epoch&1 rhythm).
+   *  Readers without an explicit bufferIndex default to the buffer of the
+   *  LATEST auto cull; before the first auto cull everything defaults to 0
+   *  (the pre-Task-182 behavior — explicit-buffer flows are untouched).
+   *  This is THE fix for the T0 flip memo: the default cull+collect loop
+   *  now diffs consecutive frames instead of a dead never-written buffer
+   *  (with the fixed default every group "flipped" every frame and the
+   *  Task-85 upload skip never fired once in T0). */
+  let autoEpoch = 0
+  const autoBufferIndex = (): number => (autoEpoch === 0 ? 0 : (autoEpoch - 1) & 1)
 
   function ensurePacked(): void {
     if (layoutDirty) packInternal()
@@ -489,7 +518,9 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
 
     cull(cameras, opts = {}) {
       ensurePacked()
-      const bufferIndex = opts.bufferIndex ?? 0
+      // Task 182: no explicit buffer — the auto-parity epoch buffer
+      // (alternates per call; see autoBufferIndex). Explicit — as given.
+      const bufferIndex = opts.bufferIndex ?? (autoEpoch++ & 1)
       const masks = opts.masks !== false
       const count = Math.min(cameras.length, views.cameraMax)
       for (let k = 0; k < count; k++) {
@@ -541,47 +572,64 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
 
     collectInstances(cameraIndex, opts = {}) {
       ensurePacked()
-      const bufferIndex = opts.bufferIndex ?? 0
+      const bufferIndex = opts.bufferIndex ?? autoBufferIndex()
       return collectInstancesViews(views, cameraIndex, bufferIndex)
     },
 
     instances(group, opts = {}) {
-      return instanceMatricesView(views, opts.bufferIndex ?? 0, opts.cameraIndex ?? 0, group)
+      return instanceMatricesView(views, opts.bufferIndex ?? autoBufferIndex(), opts.cameraIndex ?? 0, group)
     },
 
-    instanceCountOf(group, cameraIndex, bufferIndex = 0) {
+    instanceCountOf(group, cameraIndex, bufferIndex) {
       if (group < 0 || group >= views.groupMax) return 0
-      const base = (bufferIndex * views.cameraMax + cameraIndex) * views.groupMax
+      const base = ((bufferIndex ?? autoBufferIndex()) * views.cameraMax + cameraIndex) * views.groupMax
       return Math.max(0, views.instCounts[base + group])
     },
 
-    instanceOffsetOf(group, cameraIndex, bufferIndex = 0) {
+    instanceOffsetOf(group, cameraIndex, bufferIndex) {
       if (group < 0 || group >= views.groupMax) return 0
-      const base = (bufferIndex * views.cameraMax + cameraIndex) * views.groupMax
+      const base = ((bufferIndex ?? autoBufferIndex()) * views.cameraMax + cameraIndex) * views.groupMax
       return views.instOffsets[base + group]
     },
 
-    instancePoolBase(cameraIndex, bufferIndex = 0) {
-      return instancePoolBase(views, bufferIndex, cameraIndex)
+    instancePoolBase(cameraIndex, bufferIndex) {
+      return instancePoolBase(views, bufferIndex ?? autoBufferIndex(), cameraIndex)
     },
 
     forEachVisible(cameraIndex, cb, opts = {}) {
       ensurePacked()
-      const bufferIndex = opts.bufferIndex ?? 0
+      const base = (opts.bufferIndex ?? autoBufferIndex()) * views.cameraMax * views.bitsWords
+        + cameraIndex * views.bitsWords
       const n = views.headerI[H_NODE_COUNT]
-      const base = (bufferIndex * views.cameraMax + cameraIndex) * views.bitsWords
       const { bits, order, nodeFlags } = views
+      // Task 182 — strength reduction of the rank loop: the word is loaded
+      // once per 32 ranks (not per rank) and the bit mask rolls left. The
+      // iteration order and the callbacks are identical to the per-rank
+      // form; (1 << 31) << 1 wraps to exactly 0 — that is the reload signal
+      // (pinned by task182 tests against the per-bit reference).
+      let word = bits[base]
+      let mask = 1
+      let w = 0
       for (let r = 0; r < n; r++) {
-        if ((bits[base + (r >>> 5)] & (1 << (r & 31))) === 0) continue
-        const slot = order[r]
-        if ((nodeFlags[slot] & NF_VISIBLE) === 0) continue
-        cb(slot, r)
+        if ((word & mask) !== 0) {
+          const slot = order[r]
+          if ((nodeFlags[slot] & NF_VISIBLE) !== 0) cb(slot, r)
+        }
+        mask <<= 1
+        if (mask === 0) {
+          mask = 1
+          w++
+          // The next word is loaded only if a live rank actually lives in it
+          // (n a multiple of 32 would otherwise read one word past the
+          // camera's region — harmless, but undefined poisons the var's type).
+          if (r + 1 < n) word = bits[base + w]
+        }
       }
     },
 
     isVisibleRank(cameraIndex, rank, opts = {}) {
-      const bufferIndex = opts.bufferIndex ?? 0
-      const base = (bufferIndex * views.cameraMax + cameraIndex) * views.bitsWords
+      const base = (opts.bufferIndex ?? autoBufferIndex()) * views.cameraMax * views.bitsWords
+        + cameraIndex * views.bitsWords
       return (views.bits[base + (rank >>> 5)] & (1 << (rank & 31))) !== 0
     },
 
