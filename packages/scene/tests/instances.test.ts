@@ -1,6 +1,6 @@
 /** Instance-group and visible-matrix compaction tests (Task 81). */
 import { describe, expect, it } from 'bun:test'
-import { collectGroupMatrices, createCamera, createScene, cullViewsBrute, writeCameraPlanes } from '../src/index.ts'
+import { collectGroupMatrices, createCamera, createScene, cullViewsBrute, setGroupSphereReject, writeCameraPlanes } from '../src/index.ts'
 
 describe('collectInstancesViews', () => {
   function build() {
@@ -156,6 +156,12 @@ describe('task 186: word-blocked collectGroupMatrices', () => {
   })
 
   it('property parity with a brute reference over random bits, flags, buffers and cameras', () => {
+    // Task 191: this fixture writes bits DIRECTLY (no cull ever ran on them) —
+    // outside the pre-reject's soundness domain (the N4 sphere reasons about
+    // CULL-PRODUCED bits; raw bits desynchronize from the spheres). The
+    // walk-shape parity (this test's purpose) runs under the kill-switch.
+    setGroupSphereReject(false)
+    try {
     // reference: the OLD flat shape (rank loop, group first, bit+flag tests)
     function brute(views: ReturnType<typeof createScene>['views'], cam: number, buf: number, gid: number, o: Float32Array): number {
       const n = views.headerI[2] // H_NODE_COUNT
@@ -211,6 +217,9 @@ describe('task 186: word-blocked collectGroupMatrices', () => {
           }
         }
       }
+    }
+    } finally {
+      setGroupSphereReject(true)
     }
   })
 })

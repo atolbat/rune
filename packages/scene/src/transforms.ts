@@ -44,6 +44,13 @@ function touchGroup(views: SceneViews, group: number, stamp: number): void {
   if (group >= 0 && group < views.groupMax) views.groupTouch[group] = stamp
 }
 
+/** Task 191 — one step of the u32 monotonic clock; returns the new stamp. */
+function bumpClock(views: SceneViews): number {
+  const next = (views.headerU[H_CLOCK] + 1) >>> 0
+  views.headerU[H_CLOCK] = next
+  return next
+}
+
 /** Scratch of 16 floats — not allocated in hot loops. */
 const scratch = new Float32Array(16)
 
@@ -256,7 +263,7 @@ export function updateWorldForcedViews(views: SceneViews): number {
  */
 export function refitGroupBoundsViews(views: SceneViews): number {
   const n = views.headerI[H_NODE_COUNT]
-  const { order, parent, subtreeEnd, sphereL, sphereW, dirtyBounds } = views
+  const { order, parent, subtreeEnd, sphereL, sphereW, dirtyBounds, group } = views
 
   // Forest roots: subtree ranges, phase 0 (descend). Non-root ranks are
   // unreachable in a packed DFS forest — the defensive r++ only guards a
@@ -330,6 +337,10 @@ export function refitGroupBoundsViews(views: SceneViews): number {
       r2 = subtreeEnd[child]
     }
     if (first) continue // no children (should not happen after pack)
+    // Task 191: a grouped node's auto-bound just changed — version its
+    // group's sphere (the N4 pre-reject's stamp discipline).
+    const g = group[i]
+    if (g >= 0 && g < views.groupMax) touchGroup(views, g, bumpClock(views))
     const o4 = i * 4
     if (childCount === 1) {
       // Single child: its sphere is the minimal bound
@@ -423,5 +434,9 @@ export function refitGroupBoundsForcedViews(views: SceneViews): number {
   views.dirtyBounds.fill(0)
   // Task 190: the forced variant unconditionally rewrites every auto-bound.
   views.headerU[H_CLOCK] = (views.headerU[H_CLOCK] + 1) >>> 0
+  // Task 191: every group's auto-bounds may have changed — stamp them all
+  // (the updateWorldForced discipline).
+  const groupsAll = Math.min(views.headerI[H_GROUP_COUNT], views.groupMax)
+  for (let g = 0; g < groupsAll; g++) views.groupTouch[g] = views.headerU[H_CLOCK]
   return refit
 }

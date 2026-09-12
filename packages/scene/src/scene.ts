@@ -473,8 +473,19 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
     },
 
     setGroup(slot, group) {
+      const old = views.group[slot]
       views.group[slot] = group
       if (group >= 0) bumpGroupCount(group)
+      // Task 191: a composition change stamps BOTH groups — the Task-85
+      // family (setVisible stamps for exactly this reason). Without it the
+      // upload skip (Task 85) AND the pool memo (Task 190) served stale
+      // counts after a member moved between groups — a REAL hole found
+      // while integrating the group spheres: nothing else in the pipeline
+      // observes group[slot] edits.
+      const stamp = (views.headerU[H_CLOCK] + 1) >>> 0
+      views.headerU[H_CLOCK] = stamp
+      if (old >= 0 && old < views.groupMax) views.groupTouch[old] = stamp
+      if (group >= 0 && group < views.groupMax) views.groupTouch[group] = stamp
     },
 
     setPayload(slot, payload) { views.payload[slot] = payload },

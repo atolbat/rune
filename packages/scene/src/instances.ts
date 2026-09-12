@@ -108,6 +108,143 @@ export function collectMemoCounters(): { hits: number; misses: number } {
   return { hits: collectMemoHits, misses: collectMemoMisses }
 }
 
+// ─── Task 191: N4 — the GROUP-SPHERE PRE-REJECT (the Task-189 dossier) ──────
+//
+// THE ENCLOSING ARGUMENT: a group's bounding sphere (the minimal sphere
+// enclosing the members' world spheres) that is entirely OUTSIDE one of the
+// camera's six planes means every member sphere is outside that plane too —
+// the frustum cull left every member's bit at 0 — the whole scan below
+// would return 0. Six dot products instead of a word-walk over all ranks.
+//
+// The spheres live per scene (a WeakMap keyed by the views object — the
+// Task-190 lesson: module-level arrays collide across scenes) and are
+// maintained INCREMENTALLY through the Task-85 stamp discipline:
+//   • a member's sphereW changes — updateWorld already stamped groupTouch
+//     of that member's group;
+//   • a composition change — Task 191 makes setGroup stamp the OLD and the
+//     NEW group (it stamped NOTHING before — a hole in the Task-85 upload
+//     skip AND the Task-190 pool memo: a member moving between groups left
+//     both instance buffers stale);
+//   • a grouped INTERNAL node's auto-bound changes — Task 191 makes the
+//     refit stamp that group (the combine rewrites sphereW).
+// A rebuild is one O(n) rank walk over the group's members (AABB pass +
+// radius pass — the Task-189 probe's shape, without the N2 tail segments:
+// the segments make it O(|g|); until N2 lands the walk pays O(n) per dirty
+// group, honestly documented — static groups never rebuild).
+//
+// SOUNDNESS DOMAIN (the documented contract): the pre-reject reasons about
+// bits PRODUCED BY A REAL CULL over the same sphereW/planes — the pipeline
+// contract. Raw `views.bits[i] = …` hacks desynchronize the bits from the
+// spheres and fall outside every stamp family (the Task-186 property
+// fixture writes bits directly — it runs under the kill-switch).
+//
+// The kill-switch (setGroupSphereReject(false)) restores the pure
+// word-blocked scan bit-for-bit.
+
+/** Task 191 — enable/disable the group-sphere pre-reject. */
+let groupSphereEnabled = true
+/** Task 191 — honest counters. */
+let prejectRejects = 0
+let prejectChecks = 0
+let sphereBuilds = 0
+
+interface GroupSphereState {
+  /** groupMax × 4: (cx, cy, cz, r); r ≤ 0 — empty/unknown, never reject. */
+  readonly spheres: Float32Array
+  /** Per group: the groupTouch stamp the sphere covers (−1 — never built). */
+  readonly built: Int32Array
+}
+
+const groupSpheres = new WeakMap<SceneViews, GroupSphereState>()
+
+function groupSpheresFor(views: SceneViews): GroupSphereState {
+  let state = groupSpheres.get(views)
+  if (state === undefined) {
+    state = {
+      spheres: new Float32Array(views.groupMax * 4),
+      built: new Int32Array(views.groupMax).fill(-1),
+    }
+    groupSpheres.set(views, state)
+  }
+  return state
+}
+
+/** Builds group g's sphere: one rank walk — the AABB pass, then the
+ *  minimal enclosing radius of the members (the Task-189 probe's shape). */
+function buildGroupSphere(views: SceneViews, g: number): void {
+  const n = views.headerI[H_NODE_COUNT]
+  const { order, group, sphereW, groupTouch } = views
+  const state = groupSpheresFor(views)
+  const o4g = g * 4
+  let minX = Infinity, minY = Infinity, minZ = Infinity
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
+  let count = 0
+  for (let r = 0; r < n; r++) {
+    const slot = order[r]
+    if (group[slot] !== g) continue
+    const o4 = slot * 4
+    const cx = sphereW[o4], cy = sphereW[o4 + 1], cz = sphereW[o4 + 2], rad = sphereW[o4 + 3]
+    const x0 = cx - rad, x1 = cx + rad, y0 = cy - rad, y1 = cy + rad, z0 = cz - rad, z1 = cz + rad
+    if (x0 < minX) minX = x0
+    if (x1 > maxX) maxX = x1
+    if (y0 < minY) minY = y0
+    if (y1 > maxY) maxY = y1
+    if (z0 < minZ) minZ = z0
+    if (z1 > maxZ) maxZ = z1
+    count++
+  }
+  if (count === 0) {
+    state.spheres[o4g + 3] = -1 // empty — never reject (the scan is cheap)
+  } else {
+    const cx = (minX + maxX) * 0.5, cy = (minY + maxY) * 0.5, cz = (minZ + maxZ) * 0.5
+    let radius = 0
+    for (let r = 0; r < n; r++) {
+      const slot = order[r]
+      if (group[slot] !== g) continue
+      const o4 = slot * 4
+      const dx = sphereW[o4] - cx, dy = sphereW[o4 + 1] - cy, dz = sphereW[o4 + 2] - cz
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz) + sphereW[o4 + 3]
+      if (d > radius) radius = d
+    }
+    state.spheres[o4g] = cx
+    state.spheres[o4g + 1] = cy
+    state.spheres[o4g + 2] = cz
+    state.spheres[o4g + 3] = radius
+  }
+  state.built[g] = groupTouch[g]
+  sphereBuilds++
+}
+
+/** Task 191 — the kill-switch: false restores the pure word-blocked scan. */
+export function setGroupSphereReject(enabled: boolean): void {
+  groupSphereEnabled = enabled
+}
+
+/** Task 191 — the pre-reject's honest counters. */
+export function groupSphereCounters(): { rejects: number; checks: number; builds: number } {
+  return { rejects: prejectRejects, checks: prejectChecks, builds: sphereBuilds }
+}
+
+/** The pre-reject check: true ⟹ the scan below would return 0 (enclosure). */
+function groupSphereReject(views: SceneViews, cameraIndex: number, groupId: number): boolean {
+  const groupCount = Math.min(views.headerI[H_GROUP_COUNT], views.groupMax)
+  if (groupId < 0 || groupId >= groupCount) return false
+  const { groupTouch, planes } = views
+  const state = groupSpheresFor(views)
+  if (groupTouch[groupId] > state.built[groupId]) buildGroupSphere(views, groupId)
+  prejectChecks++
+  const o4 = groupId * 4
+  const r = state.spheres[o4 + 3]
+  if (r <= 0) return false // empty / unknown — never reject
+  const pb = cameraIndex * 24
+  const cx = state.spheres[o4], cy = state.spheres[o4 + 1], cz = state.spheres[o4 + 2]
+  for (let i = 0; i < 6; i++) {
+    const p = pb + i * 4
+    if (planes[p] * cx + planes[p + 1] * cy + planes[p + 2] * cz + planes[p + 3] < -r) return true
+  }
+  return false
+}
+
 /** Scratch cursors per group. */
 let cursors = new Int32Array(64)
 
@@ -335,6 +472,14 @@ export function collectGroupMatrices(
   const base = bitsBase(views, bufferIndex, cameraIndex)
   const capacity = out.length >>> 4 // full 16-float matrices that fit in out
   const wEnd = Math.min(views.bitsWords, (n + 31) >>> 5) // words carrying nodes
+  // Task 191 — N4: the group's enclosing sphere against the 6 planes. Outside
+  // one ⟹ every member's cull bit is 0 ⟹ the scan would return 0 — six dot
+  // products end it here. Sound under the pipeline contract (bits from a
+  // real cull over the same sphereW — see the N4 block's header note).
+  if (groupSphereEnabled && groupSphereReject(views, cameraIndex, groupId)) {
+    prejectRejects++
+    return 0
+  }
   let k = 0
   scan: for (let w = 0; w < wEnd; w++) {
     const word = bits[base + w]

@@ -73,6 +73,8 @@ export {
   collectGroupMatrices,
   setCollectMemo,
   collectMemoCounters,
+  setGroupSphereReject,
+  groupSphereCounters,
 } from './instances.ts'
 
 export {
