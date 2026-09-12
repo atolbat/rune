@@ -243,6 +243,16 @@ export function updateWorldForcedViews(views: SceneViews): number {
  * A dirty internal node pushes itself back (phase 1) AFTER its children —
  * LIFO pops children first, so the bottom-up union order of the old reverse
  * pass is preserved exactly (children's spheres are fresh when read).
+ *
+ * Task 190 — the CLOCK BUMP: refit WRITES sphereW without any stamp of its
+ * own (the dirt was set by updateWorld, which already moved the clock for
+ * the RECOMPUTED nodes). An off-pattern caller that runs cull BEFORE refit
+ * and culls again after (bounds appear late) would leave the Task-190 cull
+ * memo believing nothing changed — the bitset would stay stale. One clock
+ * bump per call that actually rebuilt ≥1 node closes that hole: sphereW
+ * content is now versioned by the same shared monotonic clock. On-pattern
+ * (the pipeline order: updateWorld → refit → cull) the bump is FREE — the
+ * frame's updateWorld has already moved the clock for exactly those nodes.
  */
 export function refitGroupBoundsViews(views: SceneViews): number {
   const n = views.headerI[H_NODE_COUNT]
@@ -342,6 +352,9 @@ export function refitGroupBoundsViews(views: SceneViews): number {
     )
     refit++
   }
+  // Task 190: this call rebuilt ≥1 auto-bound — version that content (see
+  // the header note). A clean frame rebuilds nothing and does not bump.
+  if (refit > 0) views.headerU[H_CLOCK] = (views.headerU[H_CLOCK] + 1) >>> 0
   return refit
 }
 
@@ -408,5 +421,7 @@ export function refitGroupBoundsForcedViews(views: SceneViews): number {
     refit++
   }
   views.dirtyBounds.fill(0)
+  // Task 190: the forced variant unconditionally rewrites every auto-bound.
+  views.headerU[H_CLOCK] = (views.headerU[H_CLOCK] + 1) >>> 0
   return refit
 }

@@ -36,6 +36,78 @@ import {
 } from './layout.ts'
 import { bitsBase } from './culling.ts'
 
+// ─── Task 190: the POOL MEMO (the Task-189 N3a theory, production) ──────────
+//
+// The pool pass (counting + prefix + fill) is a PURE function of the bits,
+// the worlds, the groups and the node flags — all of which mutate through
+// the API, which stamps the shared H_CLOCK. The flip-diff at the top of
+// collectInstancesViews already answers "did THIS camera's bits change since
+// the previous frame"; the pool memo answers the complementary question:
+// "did anything at all change since the LAST FULL COLLECT of THIS
+// (buffer, camera)". Both answers "no" ⟹ the counts, the offsets, the pool
+// bytes and the return value in the buffer are exactly what the full pass
+// would recompute ⟹ serve the cached total and skip counting+prefix+fill.
+//
+// The check is ONE integer compare: H_CLOCK has not moved since the memo was
+// written. Invalidation rides on the existing stamp discipline:
+//   • a flip frame — the diff stamps groupFlip (clock+1) → miss;
+//   • a pack — the diff's epoch branch stamps ALL groups (clock+1) → miss
+//     (it runs BEFORE the memo check, by construction);
+//   • setVisible / updateWorld / setLocal — the stamps move the clock → miss;
+//   • refit — Task 190 makes it bump the clock when it writes spheres (the
+//     collect does not read spheres, but one shared clock means one
+//     conservative re-collect on a refit frame — the same frame's
+//     updateWorld has already missed the memo anyway);
+//   • plane changes that flip bits — the diff catches them → miss. A plane
+//     change that flips NOTHING leaves the pool identical — a hit is correct.
+//
+// The miss price is the flip-diff itself (O(bitsWords) — ~0.002ms on a
+// 100k-node scene) + one WeakMap lookup. The memo state is keyed by the
+// views object (module-level arrays would collide across scenes — the
+// isolated probes had one scene; production has many). Thread-local by
+// construction (the worker's pipeline holds its own memo over the same SAB).
+//
+// The kill-switch (setCollectMemo(false)) restores the always-full behavior
+// bit-for-bit; the counters are the honest diagnostics (hits = skipped passes).
+
+/** Task 190 — enable/disable the pool memo (tests, A/B diagnostics). */
+let collectMemoEnabled = true
+/** Task 190 — honest counters. */
+let collectMemoHits = 0
+let collectMemoMisses = 0
+
+interface CollectMemoState {
+  /** Per (buffer, camera): the H_CLOCK at the last full collect (−1 — never). */
+  readonly clock: Int32Array
+  /** Per (buffer, camera): the cached return value (total − dropped). */
+  readonly total: Int32Array
+}
+
+const collectMemos = new WeakMap<SceneViews, CollectMemoState>()
+
+function collectMemoFor(views: SceneViews): CollectMemoState {
+  let memo = collectMemos.get(views)
+  if (memo === undefined) {
+    const slots = 2 * views.cameraMax
+    memo = {
+      clock: new Int32Array(slots).fill(-1),
+      total: new Int32Array(slots),
+    }
+    collectMemos.set(views, memo)
+  }
+  return memo
+}
+
+/** Task 190 — the kill-switch: false restores the pre-190 always-full collect. */
+export function setCollectMemo(enabled: boolean): void {
+  collectMemoEnabled = enabled
+}
+
+/** Task 190 — the memo's honest counters (diagnostics/tests). */
+export function collectMemoCounters(): { hits: number; misses: number } {
+  return { hits: collectMemoHits, misses: collectMemoMisses }
+}
+
 /** Scratch cursors per group. */
 let cursors = new Int32Array(64)
 
@@ -109,6 +181,19 @@ export function collectInstancesViews(
       }
     }
     if (touched) headerU[H_CLOCK] = stamp
+  }
+
+  // ── Task 190: the POOL MEMO check — after the flip-diff by construction:
+  // a pack already stamped everything (clock moved) inside the diff above,
+  // so ONE integer compare decides whether the counting+prefix+fill below
+  // would rewrite the very bytes that are already in the buffer.
+  const memoIdx = bufferIndex * views.cameraMax + cameraIndex
+  const memo: CollectMemoState | undefined = collectMemoEnabled ? collectMemoFor(views) : undefined
+  const memoClock = memo !== undefined ? memo.clock[memoIdx] : 0
+  if (memo !== undefined && memoClock === headerU[H_CLOCK]) {
+    collectMemoHits++
+    const cached = memo.total[memoIdx]
+    return cached !== undefined ? cached : 0
   }
 
   // 1) Counting per group (a rank traversal; Task 85 measurements — see the header).
@@ -188,7 +273,16 @@ export function collectInstancesViews(
     }
   }
   if (dropped > 0) views.headerI[H_DROPPED_INSTANCES] += dropped
-  return total - dropped
+  const collected = total - dropped
+  // ── Task 190: the memo save — the full pass has just rewritten this
+  // (buffer, camera)'s counts/offsets/pool deterministically; the clock NOW
+  // is the identity of that content until something stamps it.
+  if (collectMemoEnabled && memo !== undefined) {
+    memo.clock[memoIdx] = headerU[H_CLOCK]
+    memo.total[memoIdx] = collected
+    collectMemoMisses++
+  }
+  return collected
 }
 
 /** The matrix segment of group g of a camera in buffer b (a view — no copies). */

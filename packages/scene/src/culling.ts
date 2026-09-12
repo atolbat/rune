@@ -18,7 +18,160 @@
  * baseline for small/flat scenes: the benchmark decides what is cheaper.
  */
 import type { SceneViews } from './layout.ts'
-import { H_NODE_COUNT, NF_VISIBLE } from './layout.ts'
+import { H_CLOCK, H_LAYOUT_EPOCH, H_NODE_COUNT, NF_VISIBLE } from './layout.ts'
+
+// ─── Task 190: the CULL MEMO (the Task-189 N5 theory, production) ───────────
+//
+// A cull result is a PURE function of (order/subtreeEnd, sphereW, planes,
+// node count). Every input mutates through the API, which stamps the shared
+// monotonic H_CLOCK (setLocal/setSphereLocal/setVisible/updateWorld) or bumps
+// H_LAYOUT_EPOCH (pack — ranks change meaning); Task 190 also makes refit
+// bump the clock when it writes spheres. Therefore: clock + epoch + the
+// camera's 24 planes unchanged since the last real cull of THIS
+// (buffer, camera) ⟹ the bitset in the buffer is EXACTLY what a fresh cull
+// would write ⟹ skip the walk, serve the cached stats.
+//
+// The memo state is keyed by the views object (a WeakMap): module-level
+// arrays would COLLIDE across scenes (two scenes with equal clocks and equal
+// planes would validate each other's stale bits — an isolated-probe artifact
+// that cannot be allowed in production). Thread-local by construction: the
+// worker's memo lives in the worker (its own views object over the same SAB),
+// validated against the SAME shared clock/epoch — main-thread writes
+// invalidate it exactly when they should.
+//
+// Contract (documented, same family as the Task-85 upload skip): data written
+// THROUGH THE SCENE API. A raw `views.sphereW[i] = …` hack bypasses every
+// stamp in this file's family — the memo (like groupTouch) will not see it.
+//
+// The `masks` / `countVisible` flags change the STATS (planeTests / the
+// visible tally), so they are part of the memo key — an A/B masks=false call
+// never pollutes a default-mode cache slot.
+//
+// The kill-switch (setCullMemo(false)) restores the always-full behavior
+// bit-for-bit: the memo is an ellipsis over the real kernel, nothing else.
+
+/** Task 190 — enable/disable the cull memo (tests, A/B diagnostics). */
+let cullMemoEnabled = true
+/** Task 190 — honest counters (a hit is a skipped walk). */
+let cullMemoHits = 0
+let cullMemoMisses = 0
+
+interface CullMemoState {
+  /** Per (buffer, camera): the H_CLOCK at the last real cull (−1 — never). */
+  readonly clock: Int32Array
+  /** Per (buffer, camera): the H_LAYOUT_EPOCH at the last real cull. */
+  readonly epoch: Int32Array
+  /** Per (buffer, camera): the flag byte (bit0 — masks, bit1 — countVisible). */
+  readonly flags: Uint8Array
+  /** Per (buffer, camera) × 24: the planes snapshot. */
+  readonly planes: Float32Array
+  /** Per (buffer, camera) × 5: (tested, visible, trivialRejects, trivialAccepts, planeTests). */
+  readonly stats: Int32Array
+}
+
+const cullMemos = new WeakMap<SceneViews, CullMemoState>()
+
+function cullMemoFor(views: SceneViews): CullMemoState {
+  let memo = cullMemos.get(views)
+  if (memo === undefined) {
+    const slots = 2 * views.cameraMax
+    memo = {
+      clock: new Int32Array(slots).fill(-1),
+      epoch: new Int32Array(slots).fill(-1),
+      flags: new Uint8Array(slots),
+      planes: new Float32Array(slots * 24),
+      stats: new Int32Array(slots * 5),
+    }
+    cullMemos.set(views, memo)
+  }
+  return memo
+}
+
+/** Task 190 — the kill-switch: false restores the pre-190 always-full cull. */
+export function setCullMemo(enabled: boolean): void {
+  cullMemoEnabled = enabled
+}
+
+/** Task 190 — the memo's honest counters (diagnostics/tests). */
+export function cullMemoCounters(): { hits: number; misses: number } {
+  return { hits: cullMemoHits, misses: cullMemoMisses }
+}
+
+/** The memo check + serve: returns true when the caller may return early. */
+function cullMemoServe(
+  views: SceneViews,
+  bufferIndex: number,
+  cameraIndex: number,
+  flagByte: number,
+  out: MutableCullStats | undefined,
+): boolean {
+  const idx = bufferIndex * views.cameraMax + cameraIndex
+  const memo = cullMemoFor(views)
+  if (memo.clock[idx] !== views.headerU[H_CLOCK]) return false
+  if (memo.epoch[idx] !== views.headerI[H_LAYOUT_EPOCH]) return false
+  if (memo.flags[idx] !== flagByte) return false
+  const src = cameraIndex * 24
+  const snap = idx * 24
+  const planes = views.planes
+  const snapPlanes = memo.planes
+  for (let i = 0; i < 24; i++) {
+    if (planes[src + i] !== snapPlanes[snap + i]) return false
+  }
+  // A HIT: the bitset in the buffer is exactly what the kernel would rewrite.
+  cullMemoHits++
+  const s = idx * 5
+  const stats = memo.stats
+  if (out !== undefined) {
+    out.tested = stats[s]
+    out.visible = stats[s + 1]
+    out.trivialRejects = stats[s + 2]
+    out.trivialAccepts = stats[s + 3]
+    out.planeTests = stats[s + 4]
+    return true
+  }
+  return true // the caller builds the result object from the same numbers
+}
+
+/** The memo save after a real kernel run (the stats are already final). */
+function cullMemoSave(
+  views: SceneViews,
+  bufferIndex: number,
+  cameraIndex: number,
+  flagByte: number,
+  tested: number,
+  visible: number,
+  trivialRejects: number,
+  trivialAccepts: number,
+  planeTests: number,
+): void {
+  const idx = bufferIndex * views.cameraMax + cameraIndex
+  const memo = cullMemoFor(views)
+  memo.clock[idx] = views.headerU[H_CLOCK]
+  memo.epoch[idx] = views.headerI[H_LAYOUT_EPOCH]
+  memo.flags[idx] = flagByte
+  memo.planes.set(views.planes.subarray(cameraIndex * 24, cameraIndex * 24 + 24), idx * 24)
+  const s = idx * 5
+  memo.stats[s] = tested
+  memo.stats[s + 1] = visible
+  memo.stats[s + 2] = trivialRejects
+  memo.stats[s + 3] = trivialAccepts
+  memo.stats[s + 4] = planeTests
+  cullMemoMisses++
+}
+
+/** Reads the memo's cached stats (the hit path's result object). */
+function cullMemoStatsOf(views: SceneViews, bufferIndex: number, cameraIndex: number): CullStats {
+  const idx = bufferIndex * views.cameraMax + cameraIndex
+  const s = idx * 5
+  const stats = cullMemoFor(views).stats
+  return {
+    tested: stats[s],
+    visible: stats[s + 1],
+    trivialRejects: stats[s + 2],
+    trivialAccepts: stats[s + 3],
+    planeTests: stats[s + 4],
+  }
+}
 
 /** Internal mutable statistics (an out record — no per-frame allocations). */
 export interface MutableCullStats {
@@ -172,6 +325,15 @@ export function cullViewsHierarchical(
   masks: boolean = true,
   countVisible: boolean = true,
 ): CullStats {
+  // Task 190 — the memo hit: the kernel would rewrite the bitset bit-for-bit;
+  // serve the cached numbers instead of walking the tree. Bit2 marks the
+  // VARIANT (hierarchical) — the brute's (0) and a masks=false+countVisible=false
+  // hierarchical call must never share a slot: identical bits, different stats.
+  const flagByte = 4 | (masks ? 1 : 0) | (countVisible ? 2 : 0)
+  if (cullMemoEnabled && cullMemoServe(views, bufferIndex, cameraIndex, flagByte, out)) {
+    if (out !== undefined) return out
+    return cullMemoStatsOf(views, bufferIndex, cameraIndex)
+  }
   const n = views.headerI[H_NODE_COUNT]
   const { order, parent, subtreeEnd, sphereW, bits, planes } = views
   const base = bitsBase(views, bufferIndex, cameraIndex)
@@ -257,12 +419,17 @@ export function cullViewsHierarchical(
     if (!leaf) sp = splitChildrenOf(order, subtreeEnd, s, e, masks && enclosing ? interMask : mask, sp)
   }
 
+  const visible = countVisible ? popcountBits(bits, base, views.bitsWords) : -1
+  if (cullMemoEnabled) {
+    cullMemoSave(views, bufferIndex, cameraIndex, flagByte,
+      tested, visible, trivialRejects, trivialAccepts, planeTests)
+  }
   if (out !== undefined) {
     out.tested = tested
     // Task 182: countVisible=false leaves the number uncounted (-1) — the
     // worker/T0 pipeline (runScenePipeline) never reads the stats; counting
     // was a per-camera-per-frame popcount over the whole bitset for nothing.
-    out.visible = countVisible ? popcountBits(bits, base, views.bitsWords) : -1
+    out.visible = visible
     out.trivialRejects = trivialRejects
     out.trivialAccepts = trivialAccepts
     out.planeTests = planeTests
@@ -270,7 +437,7 @@ export function cullViewsHierarchical(
   }
   return {
     tested,
-    visible: countVisible ? popcountBits(bits, base, views.bitsWords) : -1,
+    visible,
     trivialRejects,
     trivialAccepts,
     planeTests,
@@ -287,6 +454,12 @@ export function cullViewsBrute(
   bufferIndex: number,
   out?: MutableCullStats,
 ): CullStats {
+  // Task 190 — the memo hit (the brute's flag byte is 0; the hierarchical
+  // always sets bit2 — the variants never share a slot even at equal bits).
+  if (cullMemoEnabled && cullMemoServe(views, bufferIndex, cameraIndex, 0, out)) {
+    if (out !== undefined) return out
+    return cullMemoStatsOf(views, bufferIndex, cameraIndex)
+  }
   const n = views.headerI[H_NODE_COUNT]
   const { order, sphereW, bits, planes } = views
   const base = bitsBase(views, bufferIndex, cameraIndex)
@@ -318,6 +491,9 @@ export function cullViewsBrute(
     }
   }
 
+  if (cullMemoEnabled) {
+    cullMemoSave(views, bufferIndex, cameraIndex, 0, n, visible, 0, 0, planeTests)
+  }
   if (out !== undefined) {
     out.tested = n
     out.visible = visible

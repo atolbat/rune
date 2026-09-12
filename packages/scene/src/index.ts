@@ -61,6 +61,8 @@ export {
   bitsBase,
   isVisibleRank,
   rankNodeVisible,
+  setCullMemo,
+  cullMemoCounters,
 } from './culling.ts'
 export type { CullStats, MutableCullStats } from './culling.ts'
 
@@ -69,6 +71,8 @@ export {
   instanceMatricesView,
   instancePoolBase,
   collectGroupMatrices,
+  setCollectMemo,
+  collectMemoCounters,
 } from './instances.ts'
 
 export {
