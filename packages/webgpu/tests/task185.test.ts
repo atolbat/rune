@@ -80,7 +80,7 @@ describe('task185: the nested uniform contract (the WG slice lane walk)', () => 
     executor.run(recordFrame([command], 1))
     expect(calls.length).toBe(1)
     // u_bones lives at slice offset 64 (after u_mvp) — 8 lanes of REAL data
-    const base = (command.sliceOffset + 64) / 4
+    const base = ((command as unknown as { sliceOffset: number }).sliceOffset + 64) / 4
     expect(Array.from(arena.floats.subarray(base, base + 8))).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
   })
 
@@ -121,7 +121,7 @@ describe('task185: the nested uniform contract (the WG slice lane walk)', () => 
     }, ctx)
     // warm the slice with the short row set, then re-read the lanes
     command.record({}, { time: 1, dt: 0.016, aspect: 1.5 }, createTapeWriter(4))
-    const base = (command.sliceOffset + 64) / 4
+    const base = ((command as unknown as { sliceOffset: number }).sliceOffset + 64) / 4
     expect(Array.from(arena.floats.subarray(base, base + 8))).toEqual([9, 8, 7, 0, 0, 0, 0, 0])
   })
 
@@ -140,7 +140,7 @@ describe('task185: the nested uniform contract (the WG slice lane walk)', () => 
     executor.run(recordFrame([command], 1))
     expect(calls.length).toBe(1)
     // the NaN lane stays NaN on the GPU (once), the slice stays stable
-    const base = (command.sliceOffset + 64) / 4
+    const base = ((command as unknown as { sliceOffset: number }).sliceOffset + 64) / 4
     expect(arena.floats[base]).toBeNaN()
     executor.run(recordFrame([command], 2))
     executor.run(recordFrame([command], 3))
@@ -162,7 +162,7 @@ describe('task185: the nested uniform contract (the WG slice lane walk)', () => 
       count: 3,
     }, ctx)
     command.record({}, { time: 1, dt: 0.016, aspect: 1.5 }, createTapeWriter(4))
-    const base = (command.sliceOffset + 64) / 4
+    const base = ((command as unknown as { sliceOffset: number }).sliceOffset + 64) / 4
     expect(Array.from(arena.floats.subarray(base, base + 8))).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
     // a SHORT flat array — the classic ?? 0 semantics, no nested detour
     const command2 = compileWgslSpec({
@@ -172,7 +172,7 @@ describe('task185: the nested uniform contract (the WG slice lane walk)', () => 
       count: 3,
     }, ctx)
     command2.record({}, { time: 1, dt: 0.016, aspect: 1.5 }, createTapeWriter(4))
-    const base2 = (command2.sliceOffset + 64) / 4
+    const base2 = ((command2 as unknown as { sliceOffset: number }).sliceOffset + 64) / 4
     expect(Array.from(arena.floats.subarray(base2, base2 + 8))).toEqual([9, 8, 7, 0, 0, 0, 0, 0])
   })
 })

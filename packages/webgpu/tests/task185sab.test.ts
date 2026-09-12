@@ -45,7 +45,6 @@ interface MockOptions {
 }
 
 function installMockGpu(options: MockOptions = {}): {
-  facade: GPUFacade
   calls: WriteCall[]
   errors: string[]
   cleanup: () => void

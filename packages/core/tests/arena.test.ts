@@ -271,13 +271,18 @@ describe('uniform arena dirtyRanges (Task 146: the O(dirty) list walk)', () => {
 
 // ────────────────── Task 185: the nested (array-of-arrays) contract ──────────────────
 
+
+/** Nested rows through the writer's ArrayLike contract (the cast: the TYPE
+ * is flat-only; the Task-185 CONTRACT accepts row shapes). */
+const rows = (r: unknown): ArrayLike<number> => r as never as ArrayLike<number>
+
 describe('Task 185 — THE NESTED CONTRACT (rows flatten row-major, NaN lanes stay stable)', () => {
   it('array-of-rows flattens exactly (the u_bones: [[x,y,z,w], …] shape — pre-185 every lane was NaN)', () => {
     const arena = createUniformArena(1024)
     const slot = arena.alloc(8)
     // THE TRAP: pre-185, numbers[at] ?? 0 handed the ROW OBJECT to the
     // Float32Array store — ToNumber([x,y,z,w]) = NaN — all 8 lanes NaN.
-    expect(arena.write(slot, [[1, 2, 3, 4], [5, 6, 7, 8]])).toBe(true)
+    expect(arena.write(slot, rows([[1, 2, 3, 4], [5, 6, 7, 8]]))).toBe(true)
     expect(Array.from(arena.buffer.subarray(slot.base, slot.base + 8))).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
   })
 
@@ -294,12 +299,12 @@ describe('Task 185 — THE NESTED CONTRACT (rows flatten row-major, NaN lanes st
     const slot = arena.alloc(4)
     // rows fill the lanes SEQUENTIALLY: [10,20] then [30,40,50…] — the 50+
     // never lands (lane 4 ≥ slot.size)
-    expect(arena.write(slot, [[10, 20], [30, 40, 50, 60, 70]])).toBe(true)
+    expect(arena.write(slot, rows([[10, 20], [30, 40, 50, 60, 70]]))).toBe(true)
     expect(Array.from(arena.buffer.subarray(slot.base, slot.base + 4))).toEqual([10, 20, 30, 40])
     // rows ran out before the lanes did — the TAIL zero-pads (a flat [1,2]
     // into a 4-lane slot writes [1,2,0,0]; a [[1,2]] must not leave the tail
     // STALE — the pre-fix draft did, caught by this very test)
-    expect(arena.write(slot, [[1, 2]])).toBe(true)
+    expect(arena.write(slot, rows([[1, 2]]))).toBe(true)
     expect(Array.from(arena.buffer.subarray(slot.base, slot.base + 4))).toEqual([1, 2, 0, 0])
   })
 
@@ -321,26 +326,26 @@ describe('Task 185 — THE NESTED CONTRACT (rows flatten row-major, NaN lanes st
   it('unchanged nested values are NOT dirty (the compare works per lane); a change re-dirties', () => {
     const arena = createUniformArena(1024)
     const slot = arena.alloc(4)
-    arena.write(slot, [[1, 2, 3, 4]])
+    arena.write(slot, rows([[1, 2, 3, 4]]))
     arena.clearDirty()
     // same rows — nothing changes, the slot is NOT re-marked (the pre-179
     // NaN-soup re-dirty leak is dead AND the flatten compares correctly)
-    expect(arena.write(slot, [[1, 2, 3, 4]])).toBe(false)
+    expect(arena.write(slot, rows([[1, 2, 3, 4]]))).toBe(false)
     expect(slot.dirty).toBe(false)
-    expect(arena.write(slot, [[1, 2, 9, 4]])).toBe(true)
+    expect(arena.write(slot, rows([[1, 2, 9, 4]]))).toBe(true)
     expect(slot.dirty).toBe(true)
   })
 
   it('NaN lanes inside rows keep the Task-179 stability (NaN→NaN writes once)', () => {
     const arena = createUniformArena(1024)
     const slot = arena.alloc(4)
-    expect(arena.write(slot, [[NaN, 2, 3, 4]])).toBe(true)
+    expect(arena.write(slot, rows([[NaN, 2, 3, 4]]))).toBe(true)
     arena.clearDirty()
-    expect(arena.write(slot, [[NaN, 2, 3, 4]])).toBe(false)
+    expect(arena.write(slot, rows([[NaN, 2, 3, 4]]))).toBe(false)
     expect(slot.dirty).toBe(false)
     expect(arena.buffer[slot.base]).toBeNaN() // the NaN reached the buffer once
     // NaN → number still changes
-    expect(arena.write(slot, [[0.5, 2, 3, 4]])).toBe(true)
+    expect(arena.write(slot, rows([[0.5, 2, 3, 4]]))).toBe(true)
     expect(arena.buffer[slot.base]).toBe(0.5)
   })
 
