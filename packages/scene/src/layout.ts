@@ -15,6 +15,31 @@
  * The visibility bitsets and the instance-matrix pool are DOUBLE-BUFFERED
  * (epoch & 1): the worker writes into the buffer of epoch k, main reads
  * the buffer of the previous fresh epoch — tearing is excluded without
+ * locks.
+ *
+ * Task 192 (the N1+N2 contracts, the Task-189 dossier):
+ *   • the WORLD matrices are RANK-MAJOR: `world[rank * 16]`, not
+ *     `world[slot * 16]`. updateWorld's walk is by rank (the loop counter
+ *     is the destination — the write pattern is sequential), the collect
+ *     reads matrices sequentially and block-copies whole segments. `rankOf`
+ *     (slot → rank) is maintained by pack(); `worldMatrix(slot)` serves
+ *     `world[rankOf[slot] * 16 …)` — the view is valid until the next pack.
+ *   • the GROUPED LEAVES live in the TAIL of the rank space: after the
+ *     tree nodes (the DFS forest), pack() emits per-group CONTIGUOUS
+ *     segments — `gStart[g] .. gStart[g+1]`. A group = one contiguous
+ *     rank range: the collect scans ONLY the range's words (no order[]/
+ *     group[] loads per rank), and a fully-visible group is ONE block copy.
+ *     `gStart[0]` is the tree/tail boundary (the hierarchical cull stops
+ *     there; the tail is brute-culled — leaves gain nothing from the tree
+ *     machinery). The CONTRACT: a tail member is a grouped LEAF (firstChild
+ *     < 0) with a dense group id — a grouped node with children keeps its
+ *     DFS placement in the tree region and is NOT an instance (the
+ *     documented leaf-domain contract; the pre-192 full-scan behavior is
+ *     preserved under the setTailLayout(false) kill-switch).
+ *   • `gHidden[g]` — the count of the segment's members with NF_VISIBLE
+ *     off (rebuilt by pack, maintained by setVisible): zero ⟹ the collect
+ *     may skip the per-member nodeFlags test entirely (popcount / block
+ *     copy paths).
  */
 
 /** Header word indices (Int32Array/Uint32Array, word 0..H_WORDS-1). */
@@ -41,8 +66,8 @@ export const H_GROUP_MAX = 18
 export const H_COLLECT_LAYOUT_EPOCH = 19
 export const H_WORDS = 20
 
-/** The magic word 'RNS2' (int32 LE; v2 — groupTouch + dirtyBounds). */
-export const SCENE_MAGIC = 0x3253_4e52
+/** The magic word 'RNS3' (int32 LE; v3 — Task 192: rankOf + gStart + gHidden). */
+export const SCENE_MAGIC = 0x3353_4e52
 
 /** Frame command flags (H_CMD_FLAGS) for the worker. */
 export const CMD_UPDATE_WORLD = 1
@@ -87,8 +112,12 @@ export interface SceneViews {
   readonly prevSibling: Int32Array
   /** rank → slot: the depth-first traversal order (a parent always before the children). */
   readonly order: Int32Array
-  /** slot → the end of the subtree (rank, exclusive). */
+  /** slot → the end of the subtree (rank, exclusive). Task 192: tail
+   * members are leaves — a parent's range never absorbs a tail child. */
   readonly subtreeEnd: Int32Array
+  /** Task 192: slot → rank (the inverse of order; maintained by pack).
+ * Needed wherever a slot must find its RANK-MAJOR world row. */
+  readonly rankOf: Int32Array
   readonly group: Int32Array
   readonly payload: Int32Array
   readonly nodeFlags: Int32Array
@@ -105,6 +134,16 @@ export interface SceneViews {
   readonly instCounts: Int32Array
   /** 2 × cameraMax × groupMax: the offset of group g in instPool (camera × buffer). */
   readonly instOffsets: Int32Array
+
+  // ─── Task 192: the tail layout (pack-maintained, shared via the SAB) ───
+  /** groupMax + 1: the TAIL segment starts. [gStart[g], gStart[g+1]) is
+ * group g's contiguous rank range of grouped leaves; gStart[0] = the
+ * tree/tail boundary (the hierarchical cull's stop; the tail brute start). */
+  readonly gStart: Int32Array
+  /** groupMax: the count of group g's segment members with NF_VISIBLE off
+ * (pack rebuilds it; setVisible maintains it). Zero ⟹ the collect's
+ * popcount / block-copy paths (no per-member nodeFlags loads). */
+  readonly gHidden: Int32Array
 
   // ─── Task 85: optimization regions ─────────────────────────────
   /** groupMax: the H_CLOCK stamp of the group's last CONTENT change (all
@@ -123,10 +162,14 @@ export interface SceneViews {
    *  CLEARED bit is impossible (only refit itself clears it after processing). */
   readonly dirtyBounds: Uint32Array
 
-  // ─── geometry (slots) ──────────────────────────────────────────────
+  // ─── geometry (slots; the WORLD is rank-major — Task 192) ───────────
   readonly pos: Float32Array
   readonly quat: Float32Array
   readonly scale: Float32Array
+  /** The WORLD matrices, RANK-MAJOR: row `r` is order[r]'s world (Task 192
+ * / N1: updateWorld writes by the loop counter, the collect reads
+ * sequentially). A view taken via worldMatrix(slot) is valid until the
+ * next pack. */
   readonly world: Float32Array
   /** The local sphere (cx, cy, cz, r); r ≤ 0 on an internal node — auto. */
   readonly sphereL: Float32Array
@@ -152,9 +195,33 @@ export function sceneBitsWords(capacity: number): number {
   return (capacity + 31) >> 5
 }
 
-/** The free list entry point in the int region (after the 12 slot arrays). */
+// ─── Task 192: the tail-layout kill-switch (here — the import leaf: scene,
+// culling and instances all read it; instances↔culling would cycle) ────────
+//
+// false restores the pre-192 layout family bit-for-bit: pack() emits the pure
+// DFS forest (gStart[0] = n — the cull's tail sweep and the collect's
+// segments degenerate to the legacy full walks; grouped INTERNAL nodes are
+// collected again — the leaf-domain contract applies only in the ON mode).
+// Toggling does NOT re-derive an already-packed layout: after a flip the
+// scene must repack (a structural edit or an explicit scene.pack()) before
+// the segment consumers are consistent — tests/probes toggle + rebuild.
+
+/** Task 192 — enable/disable the tail layout (the N2 kill-switch). */
+let tailLayoutEnabled = true
+
+/** Task 192 — the kill-switch (see above). */
+export function setTailLayout(enabled: boolean): void {
+  tailLayoutEnabled = enabled
+}
+
+/** Task 192 — the current kill-switch state (read by pack/cull/collects). */
+export function tailLayoutOn(): boolean {
+  return tailLayoutEnabled
+}
+
+/** The free list entry point in the int region (after the 13 slot arrays). */
 export function freeListWord(views: Pick<SceneViews, 'capacity'>): number {
-  return H_WORDS + views.capacity * 12
+  return H_WORDS + views.capacity * 13
 }
 
 /** Allocates the scene buffer and initializes the header. */
@@ -167,13 +234,15 @@ export function createSceneBuffer(options: SceneBufferOptions = {}): ArrayBuffer
 
   const intWords =
     H_WORDS +
-    capacity * 12 + // parent, firstChild, nextSibling, prevSibling, order, subtreeEnd, group, payload, nodeFlags, generation, localStamp, worldStamp
+    capacity * 13 + // parent, firstChild, nextSibling, prevSibling, order, subtreeEnd, rankOf, group, payload, nodeFlags, generation, localStamp, worldStamp
     2 + // freeHead, freeCount
     2 * cameraMax * bitsWords +
     2 * cameraMax * groupMax * 2 +
     groupMax + // groupTouch (Task 85)
     cameraMax * groupMax + // groupFlip — per-camera flip stamps (Task 85)
-    bitsWords // dirtyBounds (Task 85)
+    bitsWords + // dirtyBounds (Task 85)
+    (groupMax + 1) + // gStart (Task 192)
+    groupMax // gHidden (Task 192)
   const floatFloats =
     capacity * (3 + 4 + 3 + 16 + 4 + 4) +
     cameraMax * 24 +
@@ -218,6 +287,9 @@ export function createSceneBuffer(options: SceneBufferOptions = {}): ArrayBuffer
   views.groupTouch.fill(0)
   views.groupFlip.fill(0)
   views.dirtyBounds.fill(0)
+  views.rankOf.fill(0)
+  views.gStart.fill(0) // gStart[0] = 0: an empty scene is all tail, no tree
+  views.gHidden.fill(0)
 
   // The free list: slot i → slot i+1 (via nextSibling), head 0.
   // We write through the FULL int view (headerI is limited to H_WORDS words).
@@ -280,6 +352,7 @@ export function buildSceneViews(buffer: ArrayBufferLike): SceneViews {
   const prevSibling = int(capacity)
   const order = int(capacity)
   const subtreeEnd = int(capacity)
+  const rankOf = int(capacity) // Task 192 — slot → rank
   const group = int(capacity)
   const payload = int(capacity)
   const nodeFlags = int(capacity)
@@ -294,6 +367,8 @@ export function buildSceneViews(buffer: ArrayBufferLike): SceneViews {
   const groupTouch = int(groupMax)
   const groupFlip = int(cameraMax * groupMax)
   const dirtyBounds = uint(bitsWords)
+  const gStart = int(groupMax + 1) // Task 192 — the tail segments
+  const gHidden = int(groupMax) // Task 192 — hidden members per segment
   if (w !== intWords) {
     throw new Error(`scene: the int-region layout has drifted (${w} ≠ ${intWords})`)
   }
@@ -321,9 +396,10 @@ export function buildSceneViews(buffer: ArrayBufferLike): SceneViews {
     headerI,
     headerU,
     parent, firstChild, nextSibling, prevSibling,
-    order, subtreeEnd, group, payload, nodeFlags, generation,
+    order, subtreeEnd, rankOf, group, payload, nodeFlags, generation,
     localStamp, worldStamp,
     bits, instCounts, instOffsets, groupTouch, groupFlip, dirtyBounds,
+    gStart, gHidden,
     pos, quat, scale, world, sphereL, sphereW,
     planes, instPool,
     capacity, cameraMax, groupMax, maxInstances, bitsWords,

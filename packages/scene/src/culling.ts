@@ -18,7 +18,7 @@
  * baseline for small/flat scenes: the benchmark decides what is cheaper.
  */
 import type { SceneViews } from './layout.ts'
-import { H_CLOCK, H_LAYOUT_EPOCH, H_NODE_COUNT, NF_VISIBLE } from './layout.ts'
+import { H_CLOCK, H_LAYOUT_EPOCH, H_NODE_COUNT, NF_VISIBLE, tailLayoutOn } from './layout.ts'
 
 // ─── Task 190: the CULL MEMO (the Task-189 N5 theory, production) ───────────
 //
@@ -329,7 +329,9 @@ export function cullViewsHierarchical(
   // serve the cached numbers instead of walking the tree. Bit2 marks the
   // VARIANT (hierarchical) — the brute's (0) and a masks=false+countVisible=false
   // hierarchical call must never share a slot: identical bits, different stats.
-  const flagByte = 4 | (masks ? 1 : 0) | (countVisible ? 2 : 0)
+  // Task 192: bit3 marks the tail mode — the roots walk's bound and the tail
+  // sweep differ between the modes (the bits stay identical; the stats don't).
+  const flagByte = 4 | (masks ? 1 : 0) | (countVisible ? 2 : 0) | (tailLayoutOn() ? 8 : 0)
   if (cullMemoEnabled && cullMemoServe(views, bufferIndex, cameraIndex, flagByte, out)) {
     if (out !== undefined) return out
     return cullMemoStatsOf(views, bufferIndex, cameraIndex)
@@ -338,10 +340,16 @@ export function cullViewsHierarchical(
   const { order, parent, subtreeEnd, sphereW, bits, planes } = views
   const base = bitsBase(views, bufferIndex, cameraIndex)
   const pb = cameraIndex * 24
+  // Task 192: the tree/tail boundary — the forest-roots walk stops there
+  // (the tail holds LEAVES: the subtree machinery adds nothing for them);
+  // the tail itself is brute-culled below (six planes per leaf — exactly the
+  // leaf's bit). A scene without segments has gStart[0] = n — the walk is the
+  // old full one, bit-for-bit.
+  const treeN = views.gStart[0]
 
   // Forest roots: subtree ranges + the full mask (at the top — all 6).
   let sp = 0
-  for (let r = 0; r < n; ) {
+  for (let r = 0; r < treeN; ) {
     const slot = order[r]
     const end = subtreeEnd[slot]
     if (parent[slot] < 0 && end > r) {
@@ -417,6 +425,34 @@ export function cullViewsHierarchical(
     // nodes below test all 6 planes (the result is identical — only costlier).
     bits[base + (s >>> 5)] |= 1 << (s & 31)
     if (!leaf) sp = splitChildrenOf(order, subtreeEnd, s, e, masks && enclosing ? interMask : mask, sp)
+  }
+
+  // Task 192: the TAIL brute sweep — every grouped leaf outside the tree
+  // ranges gets its six-plane test here (a leaf's bit IS the sphere test;
+  // no tree range ever covers a tail rank — a parent's subtreeEnd excludes
+  // its tail children). Non-root tail leaves would otherwise never be
+  // visited — their bits would stay stale.
+  if (treeN < n) {
+    for (let r = treeN; r < n; r++) {
+      const slot = order[r]
+      const o4 = slot * 4
+      const cx = sphereW[o4], cy = sphereW[o4 + 1], cz = sphereW[o4 + 2]
+      const rad = sphereW[o4 + 3]
+      let vis = true
+      for (let i = 0; i < 6; i++) {
+        planeTests++
+        const o = pb + i * 4
+        if (planes[o] * cx + planes[o + 1] * cy + planes[o + 2] * cz + planes[o + 3] < -rad) {
+          vis = false
+          break
+        }
+      }
+      tested++
+      const w = base + (r >>> 5)
+      const m = 1 << (r & 31)
+      if (vis) bits[w] |= m
+      else bits[w] &= ~m
+    }
   }
 
   const visible = countVisible ? popcountBits(bits, base, views.bitsWords) : -1

@@ -56,6 +56,17 @@ function buildRandomScene(seed: number, targetNodes: number): { scene: Scene; vi
     if (rnd() < 0.3) parents.push(slot)
     created++
   }
+  // Task 192: the supported domain — instance groups are LEAF domains. A
+  // grouped node that gained children is demoted (the documented contract:
+  // setGroup on it would do exactly this; here we keep the historical
+  // fixtures' semantics under the tail layout).
+  {
+    const v = scene.views
+    for (let slot = 0; slot < v.capacity; slot++) {
+      if ((v.nodeFlags[slot] & 2) === 0) continue // NF_ALIVE
+      if (v.group[slot] >= 0 && v.firstChild[slot] >= 0) scene.setGroup(slot, -1)
+    }
+  }
   scene.pack()
   scene.updateWorld()
   return { scene, views: scene.views }

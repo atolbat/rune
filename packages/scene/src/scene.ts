@@ -26,6 +26,7 @@ import {
   H_NODE_COUNT,
   NF_VISIBLE,
   NF_ALIVE,
+  tailLayoutOn,
 } from './layout.ts'
 import type { SceneBufferOptions, SceneViews } from './layout.ts'
 import { cullViewsBrute, cullViewsHierarchical } from './culling.ts'
@@ -217,8 +218,9 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
   }
 
   function packInternal(): void {
-    const { parent, firstChild, nextSibling, order, subtreeEnd, nodeFlags, headerI } = views
+    const { parent, firstChild, nextSibling, order, subtreeEnd, nodeFlags, headerI, group, rankOf, world, worldStamp, gStart, gHidden } = views
     const n = views.headerI[H_NODE_COUNT]
+    const groupCount = Math.min(views.headerI[H_GROUP_COUNT], views.groupMax)
     // Slot stack: roots in slot order (pushed in reverse — LIFO).
     let stack = packStack
     if (stack.length < n + 1) {
@@ -250,12 +252,105 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
         c = nextSibling[c]
       }
     }
+
+    // ── Task 192 (N2): the TAIL REPACK — grouped LEAVES into per-group
+    // contiguous segments at the END of the rank space. The tree nodes keep
+    // their DFS order; a tail member is a grouped LEAF with a dense id (a
+    // grouped node WITH children keeps its DFS placement — parent-before-
+    // child and subtree contiguity hold for the whole tree region; the
+    // dossier's "all grouped nodes to the tail" variant breaks an animated
+    // grouped-internal parent (the parent lands AFTER its tree-region
+    // children — updateWorld would read its STALE world; found while
+    // integrating, leaf-eligibility is the fix). The scatter is a stable
+    // counting sort over the DFS order (the member order is preserved).
+    let treeN = n
+    if (tailLayoutOn()) {
+      let order2 = packOrder2
+      if (order2.length < n) order2 = packOrder2 = new Int32Array(Math.max(64, n * 2))
+      let cursor = packCursor
+      if (cursor.length < groupCount + 1) cursor = packCursor = new Int32Array(Math.max(8, (groupCount + 1) * 2))
+      cursor.fill(0, 0, groupCount + 1)
+      for (let r = 0; r < n; r++) {
+        const slot = order[r]
+        const g = group[slot]
+        if (g >= 0 && g < groupCount && firstChild[slot] < 0) cursor[g]++
+      }
+      // The prefix STARTS at treeN — the tree region [0, treeN) comes first,
+      // the segments follow: gStart[0] = treeN is the tree/tail boundary.
+      let tailTotal = 0
+      for (let g = 0; g < groupCount; g++) tailTotal += cursor[g]
+      treeN = n - tailTotal
+      let acc = treeN
+      for (let g = 0; g < groupCount; g++) {
+        const start = acc
+        acc += cursor[g]
+        cursor[g] = start
+        gStart[g] = start
+      }
+      gStart[groupCount] = acc
+      // gHidden — the hidden tally per segment (the collect's popcount /
+      // block-copy paths); rebuilt wholesale here, maintained by setVisible.
+      for (let g = 0; g < groupCount; g++) gHidden[g] = 0
+      let t = 0
+      for (let r = 0; r < n; r++) {
+        const slot = order[r]
+        const g = group[slot]
+        if (g >= 0 && g < groupCount && firstChild[slot] < 0) {
+          order2[cursor[g]++] = slot
+          if ((nodeFlags[slot] & NF_VISIBLE) === 0) gHidden[g]++
+        } else {
+          order2[t++] = slot
+        }
+      }
+      order.set(order2.subarray(0, n))
+    } else {
+      // The kill-switch: the pre-192 layout — everything is a tree node;
+      // gStart[0] = n kills the tail sweep in the cull and the segments in
+      // the collect (both degenerate to the legacy full walks).
+      for (let g = 0; g <= groupCount; g++) gStart[g] = n
+      for (let g = 0; g < groupCount; g++) gHidden[g] = 0
+    }
+
     // Reverse aggregation: a parent's subtree end = the last child's end.
-    for (let r = rank - 1; r >= 0; r--) {
+    // Task 192: a TAIL member is skipped — a grouped leaf's parent must NOT
+    // absorb its rank (the tail is outside every tree range; absorbing it
+    // was the deep bug the dossier's tree-fixture probe caught). The
+    // per-node subtreeEnd is rewritten first (the ranks moved).
+    for (let r = 0; r < n; r++) subtreeEnd[order[r]] = r + 1
+    for (let r = n - 1; r >= 0; r--) {
       const slot = order[r]
+      const g = group[slot]
+      if (treeN < n && g >= 0 && g < groupCount && firstChild[slot] < 0) continue // a TAIL node
       const p = parent[slot]
       if (p >= 0 && subtreeEnd[slot] > subtreeEnd[p]) subtreeEnd[p] = subtreeEnd[slot]
     }
+
+    // ── Task 192 (N1): the WORLD PERMUTATION — the matrices are rank-major,
+    // a repack moves the ranks, the rows must travel with their nodes. The
+    // permutation goes through a scratch (an in-place swap walk would alias
+    // source rows before they are read). Never-computed rows (worldStamp
+    // === 0 — fresh or untouched) take the IDENTITY: create() no longer
+    // writes worlds (the rank is unknown at create time — pack owns the
+    // identity contract now).
+    let w2 = packWorld
+    if (w2.length < n * 16) w2 = packWorld = new Float32Array(Math.max(1024 * 16, n * 32))
+    for (let r = 0; r < n; r++) {
+      const slot = order[r]
+      const d = r * 16
+      if (worldStamp[slot] === 0) {
+        for (let k = 0; k < 16; k++) w2[d + k] = 0
+        w2[d] = 1
+        w2[d + 5] = 1
+        w2[d + 10] = 1
+        w2[d + 15] = 1
+      } else {
+        const s = rankOf[slot] * 16
+        for (let k = 0; k < 16; k++) w2[d + k] = world[s + k]
+      }
+    }
+    world.set(w2.subarray(0, n * 16))
+    for (let r = 0; r < n; r++) rankOf[order[r]] = r
+
     headerI[H_LAYOUT_EPOCH] = (headerI[H_LAYOUT_EPOCH] + 1) | 0
     layoutDirty = false
   }
@@ -314,12 +409,13 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
 
     create(init = {}) {
       const slot = takeSlot()
-      const { pos, quat, scale, group, payload, nodeFlags, sphereL, world, sphereW, headerU } = views
+      const { pos, quat, scale, group, payload, nodeFlags, sphereL, sphereW, headerU } = views
       const i3 = slot * 3
       const i4 = slot * 4
-      const i16 = slot * 16
       // Initial dirt: the world must be computed at least once (the parent
-      // may already have a transform).
+      // may already have a transform). Task 192: the IDENTITY world is NOT
+      // written here — the rank is unknown until pack; pack writes identities
+      // for worldStamp === 0 rows (the same "untouched = identity" contract).
       const stamp = ++headerU[H_CLOCK]
       views.localStamp[slot] = stamp
       views.worldStamp[slot] = 0
@@ -327,8 +423,6 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
       pos[i3] = 0; pos[i3 + 1] = 0; pos[i3 + 2] = 0
       quat[i4] = 0; quat[i4 + 1] = 0; quat[i4 + 2] = 0; quat[i4 + 3] = 1
       scale[i3] = 1; scale[i3 + 1] = 1; scale[i3 + 2] = 1
-      world.fill(0, i16, i16 + 16)
-      world[i16] = world[i16 + 5] = world[i16 + 10] = world[i16 + 15] = 1
       sphereL[i4] = 0; sphereL[i4 + 1] = 0; sphereL[i4 + 2] = 0; sphereL[i4 + 3] = 0
       sphereW[i4] = 0; sphereW[i4 + 1] = 0; sphereW[i4 + 2] = 0; sphereW[i4 + 3] = 0
       group[slot] = init.group ?? -1
@@ -476,6 +570,11 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
       const old = views.group[slot]
       views.group[slot] = group
       if (group >= 0) bumpGroupCount(group)
+      // Task 192 (N2): the tail segments ARE the group composition — a
+      // member moving between groups moves SEGMENTS; without the repack the
+      // collect would serve it from the OLD group's segment. The same family
+      // as order[] freshness: every structural edit marks layoutDirty.
+      layoutDirty = true
       // Task 191: a composition change stamps BOTH groups — the Task-85
       // family (setVisible stamps for exactly this reason). Without it the
       // upload skip (Task 85) AND the pool memo (Task 190) served stale
@@ -490,15 +589,30 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
 
     setPayload(slot, payload) { views.payload[slot] = payload },
     setVisible(slot, visible) {
+      const was = (views.nodeFlags[slot] & NF_VISIBLE) !== 0
       if (visible) views.nodeFlags[slot] |= NF_VISIBLE
       else views.nodeFlags[slot] &= ~NF_VISIBLE
       // Task 85: a flag change changes the instance group COMPOSITION — a stamp
       // is mandatory (otherwise the upload skip misses a matrix swap at equal counters).
       const g = views.group[slot]
-      if (g >= 0 && g < views.groupMax) views.groupTouch[g] = ++views.headerU[H_CLOCK]
+      if (g >= 0 && g < views.groupMax) {
+        // Task 192: the segment's hidden tally (pack rebuilds it wholesale;
+        // this keeps it exact between packs — the was!==visible guard keeps
+        // repeated no-op calls symmetric).
+        if (was !== visible && views.firstChild[slot] < 0) {
+          views.gHidden[g] += visible ? -1 : 1
+        }
+        views.groupTouch[g] = ++views.headerU[H_CLOCK]
+      }
     },
 
-    worldMatrix(slot) { return views.world.subarray(slot * 16, slot * 16 + 16) },
+    worldMatrix(slot) {
+      // Task 192: RANK-MAJOR world — the row lives at the slot's rank; the
+      // view is valid until the next pack (a structural edit reshuffles).
+      ensurePacked()
+      const r16 = views.rankOf[slot] * 16
+      return views.world.subarray(r16, r16 + 16)
+    },
 
     pack: packInternal,
 
@@ -535,7 +649,7 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
       const masks = opts.masks !== false
       const count = Math.min(cameras.length, views.cameraMax)
       for (let k = 0; k < count; k++) {
-        const planes = cameras[k]!.planes
+        const planes = cameras[k].planes
         // A camera's planes is exactly 24 floats — a direct set without a subarray
         // view (Task 87: a slice per camera per frame is a hidden allocation)
         if (planes.length === 24) views.planes.set(planes, k * 24)
@@ -555,7 +669,7 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
           cullReuseResult = { cameraCount: 0, stats: records, bufferIndex: 0 }
         }
         for (let k = 0; k < count; k++) {
-          const rec = cullReuseStats![k]!
+          const rec = cullReuseStats![k]
           if (opts.brute === true) cullViewsBrute(views, k, bufferIndex, rec)
           else cullViewsHierarchical(views, k, bufferIndex, rec, masks)
         }
@@ -645,7 +759,9 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
     },
 
     cameraFromNode(camera, slot) {
-      return camera.setViewFromWorld(views.world.subarray(slot * 16, slot * 16 + 16))
+      ensurePacked()
+      const r16 = views.rankOf[slot] * 16
+      return camera.setViewFromWorld(views.world.subarray(r16, r16 + 16))
     },
   }
 
@@ -664,3 +780,9 @@ export function createSceneFromBuffer(buffer: ArrayBufferLike): Scene {
 
 /** Scratch stack for pack(). */
 let packStack = new Int32Array(1024)
+/** Task 192: pack scratch — the tail scatter destination (the new order). */
+let packOrder2 = new Int32Array(1024)
+/** Task 192: pack scratch — the per-group segment cursors. */
+let packCursor = new Int32Array(128)
+/** Task 192: pack scratch — the world permutation buffer (old rank → new). */
+let packWorld = new Float32Array(1024 * 16)

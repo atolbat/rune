@@ -68,6 +68,17 @@ function buildScene(seed: number, targetNodes: number): Scene {
     parents.push(slot)
     created++
   }
+  // Task 192: the leaf-domain contract — grouped internal nodes demoted. A
+  // grouped node that gained children is demoted (the documented contract:
+  // setGroup on it would do exactly this; here we keep the historical
+  // fixtures' semantics under the tail layout).
+  {
+    const v = scene.views
+    for (let slot = 0; slot < v.capacity; slot++) {
+      if ((v.nodeFlags[slot] & 2) === 0) continue // NF_ALIVE
+      if (v.group[slot] >= 0 && v.firstChild[slot] >= 0) scene.setGroup(slot, -1)
+    }
+  }
   scene.pack()
   return scene
 }

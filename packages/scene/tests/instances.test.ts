@@ -1,6 +1,6 @@
 /** Instance-group and visible-matrix compaction tests (Task 81). */
 import { describe, expect, it } from 'bun:test'
-import { collectGroupMatrices, createCamera, createScene, cullViewsBrute, setGroupSphereReject, writeCameraPlanes } from '../src/index.ts'
+import { collectGroupMatrices, createCamera, createScene, cullViewsBrute, setGroupSphereReject, setTailLayout, writeCameraPlanes } from '../src/index.ts'
 
 describe('collectInstancesViews', () => {
   function build() {
@@ -160,7 +160,12 @@ describe('task 186: word-blocked collectGroupMatrices', () => {
     // outside the pre-reject's soundness domain (the N4 sphere reasons about
     // CULL-PRODUCED bits; raw bits desynchronize from the spheres). The
     // walk-shape parity (this test's purpose) runs under the kill-switch.
+    // Task 192: the raw nodeFlags writes are ALSO outside the tail discipline
+    // (gHidden is maintained by setVisible; the segment fast paths trust it)
+    // — the parity runs under the N2 kill-switch: the LEGACY walk tests the
+    // flags per member, raw-safe.
     setGroupSphereReject(false)
+    setTailLayout(false)
     try {
     // reference: the OLD flat shape (rank loop, group first, bit+flag tests)
     function brute(views: ReturnType<typeof createScene>['views'], cam: number, buf: number, gid: number, o: Float32Array): number {
@@ -173,7 +178,8 @@ describe('task 186: word-blocked collectGroupMatrices', () => {
         if ((views.bits[base + (r >>> 5)] & (1 << (r & 31))) === 0) continue
         if ((views.nodeFlags[slot] & 1) === 0) continue
         if (k * 16 + 16 > o.length) break
-        for (let j = 0; j < 16; j++) o[k * 16 + j] = views.world[slot * 16 + j]
+        // Task 192: the world is RANK-major — the reference reads the row at r
+        for (let j = 0; j < 16; j++) o[k * 16 + j] = views.world[r * 16 + j]
         k++
       }
       return k
@@ -220,6 +226,7 @@ describe('task 186: word-blocked collectGroupMatrices', () => {
     }
     } finally {
       setGroupSphereReject(true)
+      setTailLayout(true)
     }
   })
 })

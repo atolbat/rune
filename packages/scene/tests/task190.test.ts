@@ -344,15 +344,24 @@ describe('Task 190: the stats contract on the hit path', () => {
     // side planes → descent — exactly where the Task-85 masks narrow the
     // children's plane set. (On the flat fixtures every node is a leaf:
     // masks change NOTHING there — the honest trap this fixture avoids.)
-    const scene = createScene({ capacity: 16, cameraMax: 1, groupMax: 2, maxInstances: 16 })
+    // Task 192: mids are UNGROUPED structure (tree-region descent — where
+    // the masks narrow); the grouped leaves live in the tail (brute-swept).
+    const scene = createScene({ capacity: 32, cameraMax: 1, groupMax: 2, maxInstances: 32 })
     const root = scene.create({ position: [0, 0, 50], sphere: [0, 0, 0, -1] })
-    for (let i = 0; i < 6; i++) {
-      scene.create({
+    for (let m = 0; m < 3; m++) {
+      const mid = scene.create({
         parent: root,
-        position: [-150 + i * 60, 0, 0],
-        sphere: [0, 0, 0, 4],
-        group: i % 2,
+        position: [-120 + m * 120, 0, 0],
+        sphere: [0, 0, 0, -1],
       })
+      for (let i = 0; i < 2; i++) {
+        scene.create({
+          parent: mid,
+          position: [-60 + i * 120, 0, 0],
+          sphere: [0, 0, 0, 4],
+          group: i % 2,
+        })
+      }
     }
     scene.updateWorld()
     scene.refitGroupBounds()

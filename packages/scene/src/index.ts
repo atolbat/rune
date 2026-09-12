@@ -11,6 +11,8 @@ export {
   sceneBitsWords,
   freeListWord,
   SCENE_MAGIC,
+  setTailLayout,
+  tailLayoutOn,
   H_MAGIC, H_CAPACITY, H_NODE_COUNT, H_CAMERA_MAX, H_CAMERA_COUNT,
   H_INPUT_EPOCH, H_OUTPUT_EPOCH, H_LAYOUT_EPOCH, H_CLOCK, H_CMD_FLAGS,
   H_BITS_WORDS, H_GROUP_COUNT, H_INSTANCE_POOL, H_DROPPED_INSTANCES,
@@ -74,6 +76,7 @@ export {
   setCollectMemo,
   collectMemoCounters,
   setGroupSphereReject,
+  tailCounters,
   groupSphereCounters,
 } from './instances.ts'
 

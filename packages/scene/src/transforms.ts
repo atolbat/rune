@@ -130,15 +130,17 @@ function mulAffineAt(
   out[o + 15] = 1
 }
 
-/** Recompute a node's world sphere from the local one (offset + max scale). */
-function sphereWorldAt(views: SceneViews, i: number): void {
+/** Recompute a node's world sphere from the local one (offset + max scale).
+ * Task 192: the world row is RANK-MAJOR — the rank comes from the caller
+ * (updateWorld's loop counter; no rankOf load on this path). */
+function sphereWorldAt(views: SceneViews, slot: number, rank: number): void {
   const w = views.world
-  const w16 = i * 16
+  const w16 = rank * 16
   const s = views.sphereL
-  const s4 = i * 4
+  const s4 = slot * 4
   const cx = s[s4], cy = s[s4 + 1], cz = s[s4 + 2], r = s[s4 + 3]
   const out = views.sphereW
-  const o4 = i * 4
+  const o4 = slot * 4
   out[o4] = w[w16] * cx + w[w16 + 4] * cy + w[w16 + 8] * cz + w[w16 + 12]
   out[o4 + 1] = w[w16 + 1] * cx + w[w16 + 5] * cy + w[w16 + 9] * cz + w[w16 + 13]
   out[o4 + 2] = w[w16 + 2] * cx + w[w16 + 6] * cy + w[w16 + 10] * cz + w[w16 + 14]
@@ -164,7 +166,7 @@ function sphereWorldAt(views: SceneViews, i: number): void {
  */
 export function updateWorldViews(views: SceneViews): number {
   const n = views.headerI[H_NODE_COUNT]
-  const { order, parent, pos, quat, scale, world, localStamp, worldStamp, headerU, group } = views
+  const { order, parent, pos, quat, scale, world, localStamp, worldStamp, headerU, group, rankOf } = views
   let clock = headerU[H_CLOCK]
   let recomputed = 0
   for (let r = 0; r < n; r++) {
@@ -174,9 +176,9 @@ export function updateWorldViews(views: SceneViews): number {
     if (localStamp[i] <= ws && (p < 0 || worldStamp[p] <= ws)) continue
     const i3 = i * 3
     const i4 = i * 4
-    const i16 = i * 16
+    const r16 = r * 16 // Task 192 (N1): the destination is the LOOP COUNTER — sequential writes
     if (p < 0) {
-      composeAt(world, i16,
+      composeAt(world, r16,
         quat[i4], quat[i4 + 1], quat[i4 + 2], quat[i4 + 3],
         pos[i3], pos[i3 + 1], pos[i3 + 2],
         scale[i3], scale[i3 + 1], scale[i3 + 2])
@@ -185,9 +187,11 @@ export function updateWorldViews(views: SceneViews): number {
         quat[i4], quat[i4 + 1], quat[i4 + 2], quat[i4 + 3],
         pos[i3], pos[i3 + 1], pos[i3 + 2],
         scale[i3], scale[i3 + 1], scale[i3 + 2])
-      mulAffineAt(world, i16, world, p * 16, scratch, 0)
+      // Task 192: the parent's row is at ITS rank (rankOf) — DFS locality:
+      // the parent's rank is close to the child's (near-sequential read).
+      mulAffineAt(world, r16, world, rankOf[p] * 16, scratch, 0)
     }
-    sphereWorldAt(views, i)
+    sphereWorldAt(views, i, r)
     clock++
     worldStamp[i] = clock
     markDirtyUp(views, i)
@@ -204,16 +208,16 @@ export function updateWorldViews(views: SceneViews): number {
  */
 export function updateWorldForcedViews(views: SceneViews): number {
   const n = views.headerI[H_NODE_COUNT]
-  const { order, parent, pos, quat, scale, world, worldStamp, headerU } = views
+  const { order, parent, pos, quat, scale, world, worldStamp, headerU, rankOf } = views
   let clock = headerU[H_CLOCK]
   for (let r = 0; r < n; r++) {
     const i = order[r]
     const p = parent[i]
     const i3 = i * 3
     const i4 = i * 4
-    const i16 = i * 16
+    const r16 = r * 16 // Task 192 (N1): rank-major destination
     if (p < 0) {
-      composeAt(world, i16,
+      composeAt(world, r16,
         quat[i4], quat[i4 + 1], quat[i4 + 2], quat[i4 + 3],
         pos[i3], pos[i3 + 1], pos[i3 + 2],
         scale[i3], scale[i3 + 1], scale[i3 + 2])
@@ -222,9 +226,9 @@ export function updateWorldForcedViews(views: SceneViews): number {
         quat[i4], quat[i4 + 1], quat[i4 + 2], quat[i4 + 3],
         pos[i3], pos[i3 + 1], pos[i3 + 2],
         scale[i3], scale[i3 + 1], scale[i3 + 2])
-      mulAffineAt(world, i16, world, p * 16, scratch, 0)
+      mulAffineAt(world, r16, world, rankOf[p] * 16, scratch, 0)
     }
-    sphereWorldAt(views, i)
+    sphereWorldAt(views, i, r)
     clock++
     worldStamp[i] = clock
   }
@@ -262,14 +266,18 @@ export function updateWorldForcedViews(views: SceneViews): number {
  * frame's updateWorld has already moved the clock for exactly those nodes.
  */
 export function refitGroupBoundsViews(views: SceneViews): number {
-  const n = views.headerI[H_NODE_COUNT]
   const { order, parent, subtreeEnd, sphereL, sphereW, dirtyBounds, group } = views
 
   // Forest roots: subtree ranges, phase 0 (descend). Non-root ranks are
   // unreachable in a packed DFS forest — the defensive r++ only guards a
   // corrupt layout (degrades to the old full walk, never wrong).
+  // Task 192: the walk stops at the TAIL boundary (gStart[0]) — tail
+  // members are LEAVES (their sphere is updateWorld's job), walking them
+  // one by one was pure O(tail) iteration; a scene without groups has
+  // gStart[0] = n (the walk is the old full one, bit-for-bit).
+  const treeN = views.gStart[0]
   let sp = 0
-  for (let r = 0; r < n; ) {
+  for (let r = 0; r < treeN; ) {
     const slot = order[r]
     const end = subtreeEnd[slot]
     if (parent[slot] < 0) {
@@ -292,7 +300,10 @@ export function refitGroupBoundsViews(views: SceneViews): number {
     if (phase === 0) {
       if ((dirtyBounds[w] & m) === 0) continue // clean node ⟹ clean subtree — skip wholesale
       dirtyBounds[w] &= ~m
-      if (e <= s + 1) continue // leaf — its sphere is handled by updateWorld
+      // Task 192: the leaf test needs the CHILD LIST — a tail-only parent
+      // (all children grouped in the tail) has range [s, s+1) but IS an
+      // internal node: its auto-bound must be combined from the children.
+      if (e <= s + 1 && views.firstChild[i] < 0) continue // a TRUE leaf — updateWorld handles its sphere
       // A dirty internal node: descend into the children either way — their own
       // bits are independent (markDirtyUp climbs UP only). A user sphere only
       // spares the node's OWN combine, not the children's processing.
@@ -308,15 +319,18 @@ export function refitGroupBoundsViews(views: SceneViews): number {
       continue
     }
     // phase 1 — combine: the children's spheres into the parent's (the union
-    // body of the old reverse pass, verbatim).
+    // body of the old reverse pass). Task 192: the children are walked by the
+    // CHILD LIST (firstChild/nextSibling) — the rank range no longer holds
+    // them all: the tail children sit outside [s, e) (a parent's subtreeEnd
+    // excludes them), and the list is layout-independent.
+    const { firstChild: fcList, nextSibling: nsList } = views
     let minx = 0, miny = 0, minz = 0, maxx = 0, maxy = 0, maxz = 0
-    let r2 = s + 1
+    let child2 = fcList[i]
     let first = true
     let singleChild = -1
     let childCount = 0
-    while (r2 < e) {
-      const child = order[r2]
-      const c4 = child * 4
+    while (child2 >= 0) {
+      const c4 = child2 * 4
       const cx = sphereW[c4], cy = sphereW[c4 + 1], cz = sphereW[c4 + 2]
       const cr = sphereW[c4 + 3]
       if (first) {
@@ -333,8 +347,8 @@ export function refitGroupBoundsViews(views: SceneViews): number {
         if (cz + cr > maxz) maxz = cz + cr
       }
       childCount++
-      singleChild = child
-      r2 = subtreeEnd[child]
+      singleChild = child2
+      child2 = nsList[child2]
     }
     if (first) continue // no children (should not happen after pack)
     // Task 191: a grouped node's auto-bound just changed — version its
@@ -376,20 +390,21 @@ export function refitGroupBoundsViews(views: SceneViews): number {
  */
 export function refitGroupBoundsForcedViews(views: SceneViews): number {
   const n = views.headerI[H_NODE_COUNT]
-  const { order, subtreeEnd, sphereL, sphereW } = views
+  const { order, subtreeEnd, sphereL, sphereW, firstChild, nextSibling } = views
   let refit = 0
   for (let r = n - 1; r >= 0; r--) {
     const i = order[r]
     const e = subtreeEnd[i]
-    if (e <= r + 1) continue // leaf — its sphere is handled by updateWorld
+    // Task 192: the child LIST decides leafness (a tail-only parent has
+    // range [r, r+1) but internal children in the tail).
+    if (e <= r + 1 && firstChild[i] < 0) continue // leaf — its sphere is handled by updateWorld
     if (sphereL[i * 4 + 3] > 0) continue // user sphere — do not touch
     let minx = 0, miny = 0, minz = 0, maxx = 0, maxy = 0, maxz = 0
-    let r2 = r + 1
+    let child = firstChild[i]
     let first = true
     let singleChild = -1
     let childCount = 0
-    while (r2 < e) {
-      const child = order[r2]
+    while (child >= 0) {
       const c4 = child * 4
       const cx = sphereW[c4], cy = sphereW[c4 + 1], cz = sphereW[c4 + 2]
       const cr = sphereW[c4 + 3]
@@ -408,7 +423,7 @@ export function refitGroupBoundsForcedViews(views: SceneViews): number {
       }
       childCount++
       singleChild = child
-      r2 = subtreeEnd[child]
+      child = nextSibling[child]
     }
     if (first) continue
     const o4 = i * 4
