@@ -151,7 +151,10 @@ function slerpOffset(
     const y = ay + (by - ay) * u
     const z = az + (bz - az) * u
     const w = aw + (bw - aw) * u
-    const len = Math.hypot(x, y, z, w) || 1
+    // Task 181 — sqrt, not Math.hypot: the non-inlined hypot call was the
+    // per-track hot path's only runtime call (Task 173's particles lesson,
+    // now on the animation kernel — quats are bounded, no overflow path).
+    const len = Math.sqrt(x * x + y * y + z * z + w * w) || 1
     out[off] = x / len
     out[off + 1] = y / len
     out[off + 2] = z / len
@@ -166,7 +169,9 @@ function slerpOffset(
   const y = ay * wa + by * wb
   const z = az * wa + bz * wb
   const w = aw * wa + bw * wb
-  const len = Math.hypot(x, y, z, w) || 1
+  // Task 181 — sqrt, not Math.hypot (the nlerp twin above; the true-slerp
+  // branch of unit quats is unit by construction, the divide is a ~1-guard).
+  const len = Math.sqrt(x * x + y * y + z * z + w * w) || 1
   out[off] = x / len
   out[off + 1] = y / len
   out[off + 2] = z / len

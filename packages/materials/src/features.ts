@@ -292,15 +292,24 @@ export const PBR_ENV: FeatureBit = 1 << 29
  *  has no normal and no per-vertex position — the record IS the vertex). */
 export const BILLBOARD: FeatureBit = 1 << 31
 
-/** Task 131 — the billboard vertex BODY (GLSL main lines): the 6-corner
- *  table from gl_VertexID, the record unpack, the atlas uv, and the five
- *  orientation modes → `bbWorld` (the assembler emits this preamble FIRST,
- *  before the features' varying writes, and closes with
+/** Task 181 — the billboard vertex BODY (GLSL main lines): the 4-corner
+ *  table, the record unpack, the atlas uv, and the five orientation modes →
+ *  `bbWorld` (the assembler emits this preamble FIRST, before the
+ *  features' varying writes, and closes with
  *  `gl_Position = u_mvp * vec4(bbWorld, 1.0)`). The math is @rune/particles
  *  fillBillboards() verbatim — the JS twin in the particles test suite is
- *  the bit-pinned reference. */
+ *  the bit-pinned reference.
+ *  Task 180's soup trick, applied to the instance tier: the table holds the
+ *  quad's FOUR unique corners and the draw is INDEXED over the shared
+ *  static [0,1,2,0,2,3] pattern — gl_VertexID takes only the values
+ *  0..3, and the post-transform vertex cache turns the two shared corners
+ *  into cache hits (4 real VS invocations per quad instead of 6 — the
+ *  pre-181 six-entry table duplicated them inline and ran the full billboard
+ *  math all six times). The indexed form is the BILLBOARD material's draw
+ *  contract: a NON-indexed 6-vertex draw would read past the 4-entry table
+ *  (gl_VertexID 4/5 — undefined corners). */
 export const BB_VERT_GLSL: readonly string[] = [
-  'const vec2 BB_CORNERS[6] = vec2[6](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, 1.0));',
+  'const vec2 BB_CORNERS[4] = vec2[4](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, 1.0));',
   'vec2 bbCu = BB_CORNERS[gl_VertexID];',
   'float bbA = bbCu.x;',
   'float bbB = bbCu.y;',
@@ -381,10 +390,11 @@ export const BB_VERT_GLSL: readonly string[] = [
 
 /** The WGSL twin of BB_VERT_GLSL (the same statements, the WGSL
  *  vocabulary; vi = @builtin(vertex_index), the uniforms read
- *  params.*). Consumed by assemble.ts alongside the GLSL lines. */
+ *  params.*). Consumed by assemble.ts alongside the GLSL lines.
+ *  Task 181: the 4-entry table + the indexed [0,1,2,0,2,3] draw — vi takes
+ *  only the values 0..3 (the index VALUES, not stream positions). */
 export const BB_VERT_WGSL: readonly string[] = [
-  'var bbCorners = array<vec2<f32>, 6>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),',
-  '                                   vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0));',
+  'var bbCorners = array<vec2<f32>, 4>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0));',
   'let bbCu = bbCorners[vi];',
   'let bbA = bbCu.x;',
   'let bbB = bbCu.y;',

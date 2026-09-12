@@ -121,7 +121,10 @@ export function batchCommand(spec: BatchSpec): BatchCommand {
         // For WebGPU a storage buffer could be used, but that requires more
         // infrastructure.
       }
-      const props = {
+      // The stub's intended props shape (kept as documentation; the
+      // recorder is ignored until the core grows native instance data —
+      // see the comment below).
+      const _props = {
         uniforms: {
           ...spec.uniforms,
           // Pass instance data as a uniform array (if the shader expects it).
@@ -140,18 +143,12 @@ export function batchCommand(spec: BatchSpec): BatchCommand {
       //
       // IN REALITY: this module knows nothing about CompiledCommand — it
       // delegates to the existing renderer.command() via injection (see createBatchHelper).
-      // For the current implementation — a stub: we put it into _batchProps for the outer loop.
-      lastRecordedProps = props
-      lastInstanceCount = instances.length
+      // For the current implementation — a stub: the recorder is ignored
+      // (Task 181 removed the _getLastBatchProps debug surface — zero
+      // references anywhere; two batches in one frame no longer share
+      // module-level state they never read).
     },
   }
-}
-
-/** The last recorded props — for tests and debugging. */
-let lastRecordedProps: unknown = null
-let lastInstanceCount: number = 0
-export function _getLastBatchProps(): { props: unknown; count: number } {
-  return { props: lastRecordedProps, count: lastInstanceCount }
 }
 
 function writeValue(buf: Float32Array, offset: number, value: unknown, _type: InstanceAttribute['type']): void {

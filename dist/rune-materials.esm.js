@@ -32,7 +32,7 @@ var OUTPUT_DITHER = 1 << 30;
 var PBR_ENV = 1 << 29;
 var BILLBOARD = 1 << 31;
 var BB_VERT_GLSL = [
-  "const vec2 BB_CORNERS[6] = vec2[6](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, 1.0));",
+  "const vec2 BB_CORNERS[4] = vec2[4](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, 1.0));",
   "vec2 bbCu = BB_CORNERS[gl_VertexID];",
   "float bbA = bbCu.x;",
   "float bbB = bbCu.y;",
@@ -111,8 +111,7 @@ var BB_VERT_GLSL = [
   "}"
 ];
 var BB_VERT_WGSL = [
-  "var bbCorners = array<vec2<f32>, 6>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),",
-  "                                   vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0));",
+  "var bbCorners = array<vec2<f32>, 4>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0));",
   "let bbCu = bbCorners[vi];",
   "let bbA = bbCu.x;",
   "let bbB = bbCu.y;",

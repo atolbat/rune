@@ -212,7 +212,7 @@ function slerpOffset(a, ao, b, bo, u, out, off) {
     const y2 = ay + (by - ay) * u;
     const z2 = az + (bz - az) * u;
     const w2 = aw + (bw - aw) * u;
-    const len2 = Math.hypot(x2, y2, z2, w2) || 1;
+    const len2 = Math.sqrt(x2 * x2 + y2 * y2 + z2 * z2 + w2 * w2) || 1;
     out[off] = x2 / len2;
     out[off + 1] = y2 / len2;
     out[off + 2] = z2 / len2;
@@ -227,7 +227,7 @@ function slerpOffset(a, ao, b, bo, u, out, off) {
   const y = ay * wa + by * wb;
   const z = az * wa + bz * wb;
   const w = aw * wa + bw * wb;
-  const len = Math.hypot(x, y, z, w) || 1;
+  const len = Math.sqrt(x * x + y * y + z * z + w * w) || 1;
   out[off] = x / len;
   out[off + 1] = y / len;
   out[off + 2] = z / len;

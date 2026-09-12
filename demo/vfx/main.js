@@ -20,12 +20,12 @@
 // restore wire — the context-loss recovery — rides the Task-167
 // sync-point pass; the dist changed, the mark moves), the untouched bundles
 // keep their Task 149 marks.
-import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=180'
+import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=181'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER, BILLBOARD,
 } from '../../dist/rune-materials.esm.js?v=150'
-import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=180'
+import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=181'
 
 /* ─── the demo registry (the carousel order) ────────────────────────────── */
 
@@ -1024,11 +1024,22 @@ function buildLayerCommand(layer) {
   layer.soup = soup
 }
 
+/** Task 181 — the shared static index pattern of ONE instanced quad: the
+ *  4-entry BB_CORNERS table + this 6-index pattern reconstruct the EXACT
+ *  six-vertex triangle sequence the pre-181 inline expansion drew (0,1,2)
+ *  + (0,2,3), while the post-transform vertex cache turns the two shared
+ *  corners into hits — 4 real VS invocations per instance instead of 6
+ *  (the Task-180 soup trick, now on the instance tier; the same buffer for
+ *  every instance — the index stream restarts per instance). */
+const INSTANCE_QUAD_INDICES = new Uint16Array([0, 1, 2, 0, 2, 3])
+
 /** Task 131 — the INSTANCED layer command: the facade's 16-float records as
  *  five instance-step attributes + the BILLBOARD uniforms (the mode, the
- *  spin, the stretch factors, the tile scales, the camera basis). The draw
- *  is ONE instanced call: 6 corners × the live instance count, the corner
- *  expansion on the GPU (the packer replaced the CPU bake). */
+ *  spin, the stretch factors, the tile scales, the camera basis). Task 181 —
+ *  the draw is ONE indexed instanced call: the [0,1,2,0,2,3] pattern × the
+ *  live instance count, the corner expansion on the GPU over the table's
+ *  four unique corners (the packer replaced the CPU bake; the index tier
+ *  replaced the 6-vertex inline walk). */
 function buildLayerInstanceCommand(layer, soup) {
   const strideBytes = soup.stride * 4 // 64 — INSTANCE_STRIDE × 4
   const L = soup.instanceLayout
@@ -1096,8 +1107,9 @@ function buildLayerInstanceCommand(layer, soup) {
     attributes: attrs,
     textures,
     uniforms,
-    count: 6, // the two triangles of one quad — from gl_VertexID
+    count: 6, // Task 181 — the INDEX COUNT of the shared quad pattern (the draw is indexed)
     instances: (p) => p.instanceCount ?? 0,
+    indices: { data: INSTANCE_QUAD_INDICES },
   })
   layer.soup = soup
 }
@@ -1210,7 +1222,8 @@ function frameCallback(ctx, record) {
     if (soup.draw === 'instance') {
       // Task 131 — the instanced path: upload the LIVE RECORD PREFIX (16
       // floats × instanceCount — a subarray, the rendererFeed pattern),
-      // draw 6 corners × the instance count through the BB command.
+      // draw the shared quad pattern × the instance count through the
+      // Task-181 indexed BB command (4 unique corners per instance).
       const instanceCount = soup.instanceCount
       if (instanceCount > 0) {
         // Task 132 — the GPU tier (BOTH backends: the WebGPU compute records
@@ -1223,7 +1236,10 @@ function frameCallback(ctx, record) {
           else if (layer.gpuDyn !== undefined) layer.gpuDyn.syncVertexBuffer(soup.vertices, liveFloats * 4)
         }
         record(layer.command, { mvp, model: MODEL, camPos: camEye, instanceCount, ...(layer.props?.(frameCtx) ?? {}) })
-        liveVerts += instanceCount * 6
+        // Task 181 — the soup's counting discipline (the pill's verts =
+        // UNIQUE corner records): 4 unique corners per instance, the two
+        // shared ones are vertex-cache hits, not records.
+        liveVerts += instanceCount * 4
       }
       continue
     }

@@ -3898,7 +3898,7 @@ function frustumPlanes(viewProj, out) {
     const ny = viewProj[7] + sign * viewProj[4 + axis];
     const nz = viewProj[11] + sign * viewProj[8 + axis];
     const d = viewProj[15] + sign * viewProj[12 + axis];
-    const len = Math.hypot(nx, ny, nz);
+    const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
     const inv = len > 0.000000000001 ? 1 / len : 0;
     o[p * 4] = nx * inv;
     o[p * 4 + 1] = ny * inv;

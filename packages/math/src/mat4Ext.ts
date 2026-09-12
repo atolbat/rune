@@ -138,13 +138,15 @@ export function mat4LookAt(
 ): Float32Array {
   // z = normalize(eye − center) — the camera looks along −Z
   let zx = eyeX - centerX, zy = eyeY - centerY, zz = eyeZ - centerZ
-  let len = Math.hypot(zx, zy, zz) || 1
+  // Task 181 — sqrt, not Math.hypot (the per-frame camera path; Task 173's
+  // measured ~3× on the op, now on mat4LookAt — both norms are bounded).
+  let len = Math.sqrt(zx * zx + zy * zy + zz * zz) || 1
   zx /= len; zy /= len; zz /= len
   // x = normalize(up × z)
   let xx = upY * zz - upZ * zy
   let xy = upZ * zx - upX * zz
   let xz = upX * zy - upY * zx
-  len = Math.hypot(xx, xy, xz)
+  len = Math.sqrt(xx * xx + xy * xy + xz * xz)
   if (len) { xx /= len; xy /= len; xz /= len }
   // y = z × x
   const yx = zy * xz - zz * xy

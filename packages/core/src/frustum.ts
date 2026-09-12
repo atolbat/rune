@@ -69,7 +69,10 @@ export function frustumPlanes(viewProj: ArrayLike<number>, out?: Float32Array): 
     const ny = viewProj[7] + sign * viewProj[4 + axis]
     const nz = viewProj[11] + sign * viewProj[8 + axis]
     const d = viewProj[15] + sign * viewProj[12 + axis]
-    const len = Math.hypot(nx, ny, nz)
+    // Task 181 — sqrt, not Math.hypot: the extraction runs 6× per camera per
+    // frame on the cull path; plane normals are bounded, no overflow path
+    // (Task 173's particles lesson applied to the core kernel).
+    const len = Math.sqrt(nx * nx + ny * ny + nz * nz)
     const inv = len > 1e-12 ? 1 / len : 0
     o[p * 4] = nx * inv
     o[p * 4 + 1] = ny * inv

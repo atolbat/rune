@@ -34,7 +34,9 @@
 /** A frame pass. The order = the order the presentation layer composites the frame. */
 export type RenderPassTag = 'opaque' | 'sky' | 'mirror' | 'transparent' | 'overlay'
 
-/** The numeric order of the passes (a sort key, see @rune/gl frameSort). */
+/** The numeric order of the passes (the classic frame-composition order;
+ *  the Task-86 state-key design it fed was retired with @rune/gl's
+ *  frameSort — the ordering itself stays as the registry's contract). */
 export const RENDER_PASS_ORDER: Readonly<Record<RenderPassTag, number>> = {
   opaque: 0,
   sky: 1,

@@ -176,3 +176,50 @@ describe('mat4FromQuatPosScale', () => {
     expect(z).toBeCloseTo(-2, 5)
   })
 })
+
+describe('Task 181 — sqrt, not Math.hypot (the lookAt norm swap)', () => {
+  it('the swap is 1-ulp-class: hypot and sqrt(dot) agree to <1e-12 relative on bounded vectors', () => {
+    // Task 173's particles lesson, applied to mat4LookAt: the swap is only
+    // safe because lookAt normals are bounded (no hypot overflow path is
+    // ever taken). Pin the equivalence on 256 bounded random vectors.
+    let maxRel = 0
+    let seed = 0x2f6e2b1
+    for (let i = 0; i < 256; i++) {
+      // xorshift — deterministic, no Math.random in pins
+      seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5
+      const x = (seed % 20001 - 10000) / 3000
+      seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5
+      const y = (seed % 20001 - 10000) / 3000
+      seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5
+      const z = (seed % 20001 - 10000) / 3000
+      const a = Math.hypot(x, y, z)
+      const b = Math.sqrt(x * x + y * y + z * z)
+      const rel = Math.abs(a - b) / a
+      if (rel > maxRel) maxRel = rel
+    }
+    expect(maxRel).toBeLessThan(1e-12)
+  })
+
+  it('mat4LookAt invariants survive the swap: unit axes, orthonormal basis (1e-12)', () => {
+    const out = new Float32Array(16)
+    // a non-trivial eye/center/up — all three axes off-axis
+    mat4LookAt(out, 3, -2, 5, -1, 0.5, -2, 0.1, 1, 0.2)
+    const zx = out[2], zy = out[6], zz = out[10]
+    const xx = out[0], xy = out[4], xz = out[8]
+    const yx = out[1], yy = out[5], yz = out[9]
+    // |z| = 1, |x| = 1, |y| = 1 (y = z × x of unit ⊥ vectors). The
+    // tolerance is the f32 STORAGE class (the matrix is a Float32Array —
+    // each component is rounded on store; the swap itself is 1-ulp f64,
+    // pinned above in isolation).
+    const f32 = 1e-6
+    expect(Math.abs(Math.sqrt(zx * zx + zy * zy + zz * zz) - 1)).toBeLessThan(f32)
+    expect(Math.abs(Math.sqrt(xx * xx + xy * xy + xz * xz) - 1)).toBeLessThan(f32)
+    expect(Math.abs(Math.sqrt(yx * yx + yy * yy + yz * yz) - 1)).toBeLessThan(f32)
+    // x ⊥ z, y ⊥ z, y ⊥ x
+    expect(Math.abs(xx * zx + xy * zy + xz * zz)).toBeLessThan(f32)
+    expect(Math.abs(yx * zx + yy * zy + yz * zz)).toBeLessThan(f32)
+    expect(Math.abs(yx * xx + yy * xy + yz * xz)).toBeLessThan(f32)
+    // z points from center to eye (the camera looks along −z)
+    expect(zx * (3 - -1) + zy * (-2 - 0.5) + zz * (5 - -2)).toBeGreaterThan(0)
+  })
+})

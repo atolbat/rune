@@ -828,9 +828,14 @@ describe('Task 131: BILLBOARD (the instanced particle vertex stage)', () => {
     resetMaterials()
     const mat = materialOf({ features: SPRITE_BB })
     const v = mat.glsl.vertex
-    // The 6-corner table + the gl_VertexID fetch.
-    expect(v).toContain('BB_CORNERS[6]')
+    // Task 181 — the 4-corner table + the gl_VertexID fetch: the indexed
+    // [0,1,2,0,2,3] draw feeds gl_VertexID only 0..3.
+    expect(v).toContain('BB_CORNERS[4]')
     expect(v).toContain('BB_CORNERS[gl_VertexID]')
+    // The four unique corners, exactly the soup's quad corners.
+    expect(v).toContain('vec2[4](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, 1.0))')
+    // The pre-181 six-entry inline expansion is GONE.
+    expect(v).not.toContain('BB_CORNERS[6]')
     // The mode chain: camera(0) / vertical+horizontal(1,2) / stretched(3) /
     // oriented(else) — the u_bbA.x switch.
     expect(v).toContain('int bbMode = int(u_bbA.x + 0.5);')
@@ -858,6 +863,9 @@ describe('Task 131: BILLBOARD (the instanced particle vertex stage)', () => {
     const w = mat.wgsl
     expect(w).toContain('@builtin(vertex_index) vi : u32')
     expect(w).toContain('bbCorners[vi]')
+    // Task 181 — the WGSL table is the 4-entry indexed form too.
+    expect(w).toContain('array<vec2<f32>, 4>')
+    expect(w).not.toContain('array<vec2<f32>, 6>')
     for (const name of ['i_pos', 'i_vel', 'i_color', 'i_par', 'i_uv0']) {
       expect(w).toMatch(new RegExp(`@location\\(\\d\\) ${name} :`))
     }
@@ -923,6 +931,10 @@ describe('Task 131: BILLBOARD (the instanced particle vertex stage)', () => {
       },
       count: 6,
       instances: 8,
+      // Task 181 — the BILLBOARD draw contract: indexed over the shared
+      // [0,1,2,0,2,3] quad pattern (the 4-entry corner table reads only
+      // index values 0..3; a non-indexed 6-vertex draw would read past it).
+      indices: { data: new Uint16Array([0, 1, 2, 0, 2, 3]) },
     }, ctx)
     expect(command.id).toBe(0)
     // Every record attribute compiled with the instance divisor.

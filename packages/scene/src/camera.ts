@@ -151,7 +151,9 @@ export function applyObliqueClipPlane(
   plane: readonly [number, number, number, number],
 ): void {
   const [nx, ny, nz, d] = plane
-  const len = Math.hypot(nx, ny, nz)
+  // Task 181 — sqrt, not Math.hypot (the per-mirror-camera normalization;
+  // the oblique plane's normal is bounded, Task 173's measured swap).
+  const len = Math.sqrt(nx * nx + ny * ny + nz * nz)
   if (len < 1e-9) throw new Error('scene: zero normal of the clip plane')
   // Normalization (the plane may arrive unnormalized).
   const a = nx / len, b = ny / len, c = nz / len, dd = d / len
