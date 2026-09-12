@@ -741,6 +741,10 @@ function createUniformArena(floats = 1 << 16) {
         changed = true;
       }
     } else {
+      const first = values[0];
+      if (first !== null && first !== undefined && typeof first === "object" && (Array.isArray(first) || ArrayBuffer.isView(first))) {
+        return writeRows(slot, values);
+      }
       for (let at = 0;at < slot.size; at++) {
         const next = values[at] ?? 0;
         const cur = buffer[slot.base + at];
@@ -750,6 +754,46 @@ function createUniformArena(floats = 1 << 16) {
           buffer[slot.base + at] = next;
           changed = true;
         }
+      }
+    }
+    if (changed)
+      markDirty(slot);
+    return changed;
+  }
+  function writeRows(slot, rows) {
+    let changed = false;
+    let lane = 0;
+    const base = slot.base;
+    const size = slot.size;
+    const rowEnd = rows.length;
+    for (let row = 0;row < rowEnd && lane < size; row++) {
+      const r = rows[row];
+      if (r !== null && r !== undefined && typeof r === "object" && (Array.isArray(r) || ArrayBuffer.isView(r))) {
+        const entries = r;
+        for (let j = 0;j < entries.length && lane < size; j++) {
+          const next = entries[j] ?? 0;
+          const cur = buffer[base + lane];
+          if (!(next !== next && cur !== cur) && Math.fround(next) !== cur) {
+            buffer[base + lane] = next;
+            changed = true;
+          }
+          lane++;
+        }
+      } else {
+        const next = typeof r === "number" ? r : r ?? 0;
+        const cur = buffer[base + lane];
+        if (!(next !== next && cur !== cur) && Math.fround(next) !== cur) {
+          buffer[base + lane] = next;
+          changed = true;
+        }
+        lane++;
+      }
+    }
+    for (;lane < size; lane++) {
+      const cur = buffer[base + lane];
+      if (cur !== 0) {
+        buffer[base + lane] = 0;
+        changed = true;
       }
     }
     if (changed)
@@ -9474,6 +9518,46 @@ function writeUniforms(command, arena, spec, props, frameCtx, queue) {
     const base = (sliceOffset + field.offset) / 4;
     const lanes = field.size / 4;
     let changed = false;
+    const first = scalar ? undefined : numbers[0];
+    if (first !== null && first !== undefined && typeof first === "object" && (Array.isArray(first) || ArrayBuffer.isView(first))) {
+      const rows = numbers;
+      let lane = 0;
+      for (let row = 0;row < rows.length && lane < lanes; row++) {
+        const r = rows[row];
+        if (r !== null && r !== undefined && typeof r === "object" && (Array.isArray(r) || ArrayBuffer.isView(r))) {
+          const entries = r;
+          for (let j = 0;j < entries.length && lane < lanes; j++) {
+            const next = entries[j] ?? 0;
+            const cur = floats[base + lane];
+            if (!(next !== next && cur !== cur) && Math.fround(next) !== cur) {
+              floats[base + lane] = next;
+              changed = true;
+            }
+            lane++;
+          }
+        } else {
+          const next = typeof r === "number" ? r : r ?? 0;
+          const cur = floats[base + lane];
+          if (!(next !== next && cur !== cur) && Math.fround(next) !== cur) {
+            floats[base + lane] = next;
+            changed = true;
+          }
+          lane++;
+        }
+      }
+      for (;lane < lanes; lane++) {
+        if (floats[base + lane] !== 0) {
+          floats[base + lane] = 0;
+          changed = true;
+        }
+      }
+      if (changed && queue !== null && !command.needsUpload) {
+        command.needsUpload = true;
+        queue.push(command);
+      } else if (changed)
+        command.needsUpload = true;
+      continue;
+    }
     for (let at = 0;at < lanes; at++) {
       const next = scalar ? at === 0 ? value : 0 : numbers[at] ?? 0;
       const cur = floats[base + at];
@@ -9959,6 +10043,34 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
   let computePipeline = null;
   const vertexBindMemo = [];
   const sabStaging = new Map;
+  let sabDirect = null;
+  function ensureSabDirectProbe() {
+    if (sabDirect !== null)
+      return;
+    try {
+      const probeView = new Float32Array(new SharedArrayBuffer(16));
+      const probeBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+      device.pushErrorScope("validation");
+      let threw = false;
+      try {
+        device.queue.writeBuffer(probeBuffer, 0, probeView);
+      } catch {
+        threw = true;
+      }
+      probeBuffer.destroy();
+      if (threw) {
+        sabDirect = false;
+        return;
+      }
+      device.popErrorScope().then((error) => {
+        sabDirect = error === null;
+      }, () => {
+        sabDirect = false;
+      });
+    } catch {
+      sabDirect = false;
+    }
+  }
   const indexBuffers = new Map;
   let indexMemo = null;
   const pendingTextureIds = [];
@@ -10301,6 +10413,20 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     try {
       const isSabView = typeof SharedArrayBuffer !== "undefined" && data.buffer instanceof SharedArrayBuffer;
       if (isSabView) {
+        ensureSabDirectProbe();
+        if (sabDirect === true) {
+          try {
+            if ((byteOffset & 3) === 0 && (data.byteOffset & 3) === 0 && (capped & 3) === 0) {
+              device.queue.writeBuffer(buffer, byteOffset, data, byteOffset >> 2, capped >> 2);
+            } else {
+              device.queue.writeBuffer(buffer, byteOffset, new Uint8Array(data.buffer, data.byteOffset + byteOffset, capped));
+            }
+            return;
+          } catch (error) {
+            sabDirect = false;
+            onGpuError?.(`writeBuffer(vertex SAB-direct) rejected: ${errorMessage(error)}`);
+          }
+        }
         let staging = sabStaging.get(data);
         if (staging === undefined || staging.byteLength < capped) {
           staging = new Uint8Array(new ArrayBuffer(capped));
@@ -10800,6 +10926,27 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     }
     if (capped <= 0)
       return;
+    const isSabView = typeof SharedArrayBuffer !== "undefined" && data.buffer instanceof SharedArrayBuffer;
+    if (isSabView) {
+      ensureSabDirectProbe();
+      if (sabDirect === true) {
+        try {
+          if ((byteOffset & 3) === 0 && (data.byteOffset & 3) === 0 && (capped & 3) === 0) {
+            device.queue.writeBuffer(buffer, byteOffset, data, 0, capped >> 2);
+          } else {
+            device.queue.writeBuffer(buffer, byteOffset, new Uint8Array(data.buffer, data.byteOffset, capped));
+          }
+          return;
+        } catch (error) {
+          sabDirect = false;
+          onGpuError?.(`writeExternalBuffer(${id}, SAB-direct) rejected: ${errorMessage(error)}`);
+        }
+      }
+      const staging = new Uint8Array(capped);
+      staging.set(new Uint8Array(data.buffer, data.byteOffset, capped));
+      device.queue.writeBuffer(buffer, byteOffset, staging);
+      return;
+    }
     try {
       device.queue.writeBuffer(buffer, byteOffset, data.buffer, data.byteOffset, capped);
     } catch (error) {

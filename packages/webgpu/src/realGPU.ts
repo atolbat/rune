@@ -241,12 +241,54 @@ export async function createRealGPU(
   // of Task 163's cache, with the same pass-scoped honesty.
   const vertexBindMemo: (GPUBuffer | undefined)[] = []
   // Task 164 — THE SAB STAGING CACHE: guardedWriteVertex copied SAB-backed
-  // vertex feeds into a FRESH Uint8Array every frame (WebGPU forbids shared
-  // memory in writeBuffer) — a ~MB-scale allocation per frame per feed, i.e.
-  // sustained GC churn for T1/T2-style shared feeds. The staging buffer is
-  // now cached per source view and grown on demand; only the copy itself
-  // (unavoidable) remains per frame.
+  // vertex feeds into a FRESH Uint8Array every frame — a ~MB-scale allocation
+  // per frame per feed, i.e. sustained GC churn for T1/T2-style shared feeds.
+  // The staging buffer is now cached per source view and grown on demand.
+  // Task 185 — THE STAGING DEMOTION: the copy itself is no longer the only
+  // path — queue.writeBuffer ACCEPTS SAB-backed views (verified on
+  // Chrome/Dawn: no throw, no validation error, the bytes land; the old
+  // "WebGPU forbids shared memory in writeBuffer" rationale was wrong) —
+  // so staging is now the FALLBACK: probe-pending frames, browsers that
+  // reject direct SAB writes (the probe or a late throw flips sabDirect
+  // false once), and unaligned writes. The steady state on Chrome is
+  // ZERO-COPY: the queue reads straight from the SAB view (it snapshots
+  // the bytes at call time, so a worker writing the next epoch's buffer
+  // — or even racing the same one — can never tear an enqueued write).
   const sabStaging = new Map<Float32Array, Uint8Array<ArrayBuffer>>()
+  // Task 185 — THE SAB DIRECT-WRITE VERDICT: null = not yet probed (SAB
+  // uploads stage while the async probe resolves); true = writeBuffer
+  // takes SAB-backed views directly (the Chrome/Dawn reality — the staging
+  // memcpy is skipped); false = this browser rejects them (probe threw,
+  // the probe's error scope fired, or a late direct write threw) — staging
+  // forever. The probe is a 16-byte throwaway buffer: a rejection there
+  // can never lose real data; a late rejection on a real write falls back
+  // to staging for THAT frame too, so no path ever drops a write.
+  let sabDirect: boolean | null = null
+  function ensureSabDirectProbe(): void {
+    if (sabDirect !== null) return
+    try {
+      // SharedArrayBuffer itself may be undefined (a non-cross-origin-
+      // isolated page) — but then no SAB-backed view can exist either; the
+      // catch just settles the verdict without side effects.
+      const probeView = new Float32Array(new SharedArrayBuffer(16))
+      const probeBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC })
+      device.pushErrorScope('validation')
+      let threw = false
+      // The cast: @webgpu/types pins writeBuffer's view to ArrayBufferView<ArrayBuffer>
+      // while the RUNTIME accepts SAB-backed views (the whole point of the probe).
+      try { device.queue.writeBuffer(probeBuffer, 0, probeView as unknown as Float32Array<ArrayBuffer>) } catch { threw = true }
+      probeBuffer.destroy()
+      if (threw) { sabDirect = false; return }
+      // A silent validation error (accepted by WebIDL, rejected by the
+      // implementation — the write would no-op) resolves the probe false.
+      void device.popErrorScope().then(
+        (error) => { sabDirect = error === null },
+        () => { sabDirect = false },
+      )
+    } catch {
+      sabDirect = false
+    }
+  }
   // Task 180 — THE INDEX TIER: the shared static index patterns, keyed by
   // the typed array (bindVertexBuffer's own discipline). The pattern is
   // uploaded ONCE at first bind (it never changes — any live prefix draws
@@ -868,8 +910,12 @@ export async function createRealGPU(
   /** Task 75: guarded vertex buffer write. Three lines of defense:
    *  (1) clamp byteLength to the GPU buffer's remaining window (data
    *      .byteLength may grow/diverge from the cache key under stress);
-   *  (2) copy the SAB view into a plain ArrayBuffer (WebGPU forbids shared
-   *      memory in writeBuffer — T1/T2 feeds);
+   *  (2) SAB-backed views: DIRECT writeBuffer first (Task 185 — the queue
+   *      accepts shared-memory views and snapshots the bytes at call time;
+   *      the element form costs zero allocations, the unaligned byte form
+   *      one small view). A not-yet-resolved probe, a rejecting browser,
+   *      or a late throw falls back to the Task-164 staging copy — never
+   *      a lost write;
    *  (3) try/catch around writeBuffer — a synchronous validation error
    *      ("Number of bytes to write is too large", non-multiple of 4 etc.)
    *      goes to onGpuError, the frame CONTINUES, the demo does not crash.
@@ -889,11 +935,37 @@ export async function createRealGPU(
     try {
       const isSabView = typeof SharedArrayBuffer !== 'undefined' && data.buffer instanceof SharedArrayBuffer
       if (isSabView) {
-        // capped — part of the write range (multiple of 4); copied into the
-        // REUSED staging buffer (Task 164 — see sabStaging's declaration:
-        // the per-frame allocation was pure GC churn; the copy is the only
-        // unavoidable part). Grown on demand; writeBuffer takes the element
-        // offset/size form so a larger staging writes exactly `capped` bytes.
+        // Task 185 — DIRECT FIRST (see ensureSabDirectProbe): the steady
+        // state skips the staging memcpy entirely — the queue reads the
+        // SAB view and snapshots it at call time.
+        ensureSabDirectProbe()
+        if (sabDirect === true) {
+          try {
+            if ((byteOffset & 3) === 0 && (data.byteOffset & 3) === 0 && (capped & 3) === 0) {
+              // element form: the source IS the SAB view, zero allocations
+              // (dataOffset/size in float elements from the view's start).
+              // The cast: the types pin ArrayBufferView<ArrayBuffer>, the
+              // runtime takes SAB views (the probe's verdict).
+              device.queue.writeBuffer(buffer, byteOffset, data as Float32Array<ArrayBuffer>, byteOffset >> 2, capped >> 2)
+            } else {
+              // unaligned — one small Uint8Array view over the same SAB
+              device.queue.writeBuffer(buffer, byteOffset, new Uint8Array(data.buffer, data.byteOffset + byteOffset, capped) as unknown as Uint8Array<ArrayBuffer>)
+            }
+            return
+          } catch (error) {
+            // A LATE rejection (the probe said yes, this call says no):
+            // settle the verdict false and stage THIS frame too.
+            sabDirect = false
+            onGpuError?.(`writeBuffer(vertex SAB-direct) rejected: ${errorMessage(error)}`)
+          }
+        }
+        // Staging — the probe is pending, the browser rejects direct SAB
+        // writes, or a late direct write just threw: capped is part of the
+        // write range (multiple of 4), copied into the REUSED staging
+        // buffer (Task 164 — the per-frame allocation was pure GC churn;
+        // the copy is the only cost of the fallback). Grown on demand;
+        // writeBuffer takes the element offset/size form so a larger
+        // staging writes exactly `capped` bytes.
         let staging = sabStaging.get(data)
         if (staging === undefined || staging.byteLength < capped) {
           staging = new Uint8Array(new ArrayBuffer(capped))
@@ -1578,6 +1650,45 @@ export async function createRealGPU(
       onGpuError?.(`writeExternalBuffer(${id}) clamp: ${byteLength} @${byteOffset} → ${capped} (buffer size ${buffer.size})`)
     }
     if (capped <= 0) return
+    // Task 185 — THE SAB HAZARD: external buffers are the T1/T2 handoff
+    // surface (a scene worker's snapshot matrices, a shared record pool),
+    // and the old ArrayBuffer-form call (`data.buffer as ArrayBuffer`)
+    // REJECTED a SharedArrayBuffer-backed view — WebIDL TypeError, caught,
+    // reported, and the write SILENTLY LOST (data dropped on the floor,
+    // never a crash). The element form takes the VIEW itself and works
+    // for BOTH backings; direct SAB writes ride the same probe verdict as
+    // the feed path (ensureSabDirectProbe), with a staging fallback so a
+    // rejecting browser still lands the bytes — never a lost write.
+    // The pre-185 offset contract is kept EXACTLY: byteOffset is the
+    // DESTINATION window base, the source is the data view from its start.
+    const isSabView = typeof SharedArrayBuffer !== 'undefined' && data.buffer instanceof SharedArrayBuffer
+    if (isSabView) {
+      ensureSabDirectProbe()
+      if (sabDirect === true) {
+        try {
+          if ((byteOffset & 3) === 0 && (data.byteOffset & 3) === 0 && (capped & 3) === 0) {
+            // element form (dataOffset/size in elements of `data` — 4 bytes
+            // each for f32/u32; dataOffset 0 = the view from its start).
+            // The cast: the types pin ArrayBufferView<ArrayBuffer>, the
+            // runtime takes SAB views (the probe's verdict).
+            device.queue.writeBuffer(buffer, byteOffset, data as Float32Array<ArrayBuffer> | Uint32Array<ArrayBuffer>, 0, capped >> 2)
+          } else {
+            device.queue.writeBuffer(buffer, byteOffset, new Uint8Array(data.buffer, data.byteOffset, capped) as unknown as Uint8Array<ArrayBuffer>)
+          }
+          return
+        } catch (error) {
+          sabDirect = false
+          onGpuError?.(`writeExternalBuffer(${id}, SAB-direct) rejected: ${errorMessage(error)}`)
+        }
+      }
+      // Staging fallback (probe pending / browser rejects): a per-call copy
+      // — external writes are bulk-but-rare (per frame per buffer), so the
+      // allocation is only paid where direct writes are unavailable.
+      const staging = new Uint8Array(capped)
+      staging.set(new Uint8Array(data.buffer, data.byteOffset, capped))
+      device.queue.writeBuffer(buffer, byteOffset, staging)
+      return
+    }
     try {
       device.queue.writeBuffer(buffer, byteOffset, data.buffer as ArrayBuffer, data.byteOffset, capped)
     } catch (error) {

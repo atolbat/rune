@@ -268,3 +268,97 @@ describe('uniform arena dirtyRanges (Task 146: the O(dirty) list walk)', () => {
     expect(slot.dirty).toBe(true)
   })
 })
+
+// ────────────────── Task 185: the nested (array-of-arrays) contract ──────────────────
+
+describe('Task 185 — THE NESTED CONTRACT (rows flatten row-major, NaN lanes stay stable)', () => {
+  it('array-of-rows flattens exactly (the u_bones: [[x,y,z,w], …] shape — pre-185 every lane was NaN)', () => {
+    const arena = createUniformArena(1024)
+    const slot = arena.alloc(8)
+    // THE TRAP: pre-185, numbers[at] ?? 0 handed the ROW OBJECT to the
+    // Float32Array store — ToNumber([x,y,z,w]) = NaN — all 8 lanes NaN.
+    expect(arena.write(slot, [[1, 2, 3, 4], [5, 6, 7, 8]])).toBe(true)
+    expect(Array.from(arena.buffer.subarray(slot.base, slot.base + 8))).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
+  })
+
+  it('typed-array rows flatten too (Float32Array/Uint32Array rows)', () => {
+    const arena = createUniformArena(1024)
+    const slot = arena.alloc(6)
+    const rows: unknown[] = [new Float32Array([0.5, 1.5]), new Uint32Array([7, 8, 9])]
+    expect(arena.write(slot, rows as never as ArrayLike<number>)).toBe(true)
+    expect(Array.from(arena.buffer.subarray(slot.base, slot.base + 6))).toEqual([0.5, 1.5, 7, 8, 9, 0])
+  })
+
+  it('a SHORT row set zero-pads the slot tail; rows past the slot size are ignored (the flat loop rules)', () => {
+    const arena = createUniformArena(1024)
+    const slot = arena.alloc(4)
+    // rows fill the lanes SEQUENTIALLY: [10,20] then [30,40,50…] — the 50+
+    // never lands (lane 4 ≥ slot.size)
+    expect(arena.write(slot, [[10, 20], [30, 40, 50, 60, 70]])).toBe(true)
+    expect(Array.from(arena.buffer.subarray(slot.base, slot.base + 4))).toEqual([10, 20, 30, 40])
+    // rows ran out before the lanes did — the TAIL zero-pads (a flat [1,2]
+    // into a 4-lane slot writes [1,2,0,0]; a [[1,2]] must not leave the tail
+    // STALE — the pre-fix draft did, caught by this very test)
+    expect(arena.write(slot, [[1, 2]])).toBe(true)
+    expect(Array.from(arena.buffer.subarray(slot.base, slot.base + 4))).toEqual([1, 2, 0, 0])
+  })
+
+  it('a NON-ROW element is ONE lane with the flat-path semantics (null → 0, object → NaN)', () => {
+    const arena = createUniformArena(1024)
+    const slot = arena.alloc(6)
+    // a bare number row = a 1-lane row; null row = one 0 lane (the ?? 0
+    // convention); an object row = NaN exactly as the flat store coerced it.
+    const rows: unknown[] = [[0.25], null, [9, 9], { odd: true }, [8, 8]]
+    expect(arena.write(slot, rows as never as ArrayLike<number>)).toBe(true)
+    expect(arena.buffer[slot.base + 0]).toBe(0.25) // [0.25] — a 1-lane row
+    expect(arena.buffer[slot.base + 1]).toBe(0)    // null — one zero lane
+    expect(arena.buffer[slot.base + 2]).toBe(9)    // [9, 9]
+    expect(arena.buffer[slot.base + 3]).toBe(9)
+    expect(arena.buffer[slot.base + 4]).toBeNaN()  // the object row — ToNumber
+    expect(arena.buffer[slot.base + 5]).toBe(8)    // [8, 8]'s first lane
+  })
+
+  it('unchanged nested values are NOT dirty (the compare works per lane); a change re-dirties', () => {
+    const arena = createUniformArena(1024)
+    const slot = arena.alloc(4)
+    arena.write(slot, [[1, 2, 3, 4]])
+    arena.clearDirty()
+    // same rows — nothing changes, the slot is NOT re-marked (the pre-179
+    // NaN-soup re-dirty leak is dead AND the flatten compares correctly)
+    expect(arena.write(slot, [[1, 2, 3, 4]])).toBe(false)
+    expect(slot.dirty).toBe(false)
+    expect(arena.write(slot, [[1, 2, 9, 4]])).toBe(true)
+    expect(slot.dirty).toBe(true)
+  })
+
+  it('NaN lanes inside rows keep the Task-179 stability (NaN→NaN writes once)', () => {
+    const arena = createUniformArena(1024)
+    const slot = arena.alloc(4)
+    expect(arena.write(slot, [[NaN, 2, 3, 4]])).toBe(true)
+    arena.clearDirty()
+    expect(arena.write(slot, [[NaN, 2, 3, 4]])).toBe(false)
+    expect(slot.dirty).toBe(false)
+    expect(arena.buffer[slot.base]).toBeNaN() // the NaN reached the buffer once
+    // NaN → number still changes
+    expect(arena.write(slot, [[0.5, 2, 3, 4]])).toBe(true)
+    expect(arena.buffer[slot.base]).toBe(0.5)
+  })
+
+  it('mixed rows-of-numbers (a flat number[] with a leading number) take the FLAT path', () => {
+    const arena = createUniformArena(1024)
+    const slot = arena.alloc(3)
+    // first element is a NUMBER — the flat loop runs; the object lane still
+    // coerces NaN (the pre-185 semantics preserved for non-nested shapes)
+    expect(arena.write(slot, [1, 2, 3])).toBe(true)
+    expect(Array.from(arena.buffer.subarray(slot.base, slot.base + 3))).toEqual([1, 2, 3])
+  })
+
+  it('scalar and empty values are untouched (the nested branch never fires)', () => {
+    const arena = createUniformArena(1024)
+    const slot = arena.alloc(4)
+    expect(arena.write(slot, 7)).toBe(true)
+    expect(arena.buffer[slot.base]).toBe(7)
+    expect(arena.write(slot, [])).toBe(true) // all-zero lanes (?? 0)
+    expect(Array.from(arena.buffer.subarray(slot.base, slot.base + 4))).toEqual([0, 0, 0, 0])
+  })
+})

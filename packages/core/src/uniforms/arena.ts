@@ -8,6 +8,18 @@
  * now STABLE (writes once); NaN → number and number → NaN still count as
  * changes. The GPU keeps receiving the NaN — this is the leak fix, not a
  * value sanitizer.
+ * Task 185 — THE NESTED CONTRACT (the array-of-arrays trap): a value
+ * whose first element is an Array/TypedArray ROW (the natural spelling
+ * of a std140 array-of-vec4 — `u_bones: [[x,y,z,w], …]`) used to flatten
+ * into pure NaN lanes: the old flat loop passed the ROW OBJECT to the
+ * Float32Array store and ToNumber(row) is NaN — every lane NaN, silently
+ * (the Task-178 audit's "array-of-arrays writes NaN lanes"; the Task-179
+ * guard only stopped the per-frame re-dirty, the garbage still shipped).
+ * Rows now flatten ROW-MAJOR; a non-row element (a bare number, null,
+ * an odd object) contributes EXACTLY ONE lane with the flat-path
+ * semantics (missing → 0, objects → ToNumber → NaN) — degenerate shapes
+ * stay byte-identical to the pre-185 flat behavior, proper rows become
+ * correct data.
  *
  * Two compatible surfaces:
  *  - float-API (active renderers): alloc(sizeFloats) → UniformSlot,
@@ -172,6 +184,16 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
         changed = true
       }
     } else {
+      // Task 185 — THE NESTED CONTRACT: rows flatten row-major (see the
+      // module doc). The check costs one load + two cheap tests on the
+      // flat hot path (Float32Array/number[] elements are numbers — the
+      // branch never fires); the row walk itself is a separate helper,
+      // out of the inlined lane loop's way.
+      const first = values[0]
+      if (first !== null && first !== undefined && typeof first === 'object'
+        && (Array.isArray(first) || ArrayBuffer.isView(first))) {
+        return writeRows(slot, values as ArrayLike<unknown>)
+      }
       for (let at = 0; at < slot.size; at++) {
         const next = values[at] ?? 0
         const cur = buffer[slot.base + at]
@@ -183,6 +205,60 @@ export function createUniformArena(floats: number = 1 << 16): UniformArena {
           buffer[slot.base + at] = next
           changed = true
         }
+      }
+    }
+    if (changed) markDirty(slot)
+    return changed
+  }
+
+  /** Task 185 — the nested (array-of-arrays) lane walk: rows fill the slot
+   * row-major; a row's missing entries and the slot's TAIL (rows ran out
+   * before the lanes did) are 0 — exactly the flat loop's own "missing → 0"
+   * rule; rows past the slot size are ignored; a non-row element is ONE
+   * lane with the flat-path semantics (null/undefined → 0, an object →
+   * ToNumber → NaN — byte-identical to what the pre-185 flat loop did with
+   * that element). Per-lane compare carries the Task-179 NaN-stable guard. */
+  function writeRows(slot: UniformSlot, rows: ArrayLike<unknown>): boolean {
+    let changed = false
+    let lane = 0
+    const base = slot.base
+    const size = slot.size
+    const rowEnd = rows.length
+    for (let row = 0; row < rowEnd && lane < size; row++) {
+      const r = rows[row]
+      if (r !== null && r !== undefined && typeof r === 'object'
+        && (Array.isArray(r) || ArrayBuffer.isView(r))) {
+        const entries = r as ArrayLike<number>
+        for (let j = 0; j < entries.length && lane < size; j++) {
+          const next = entries[j] ?? 0
+          const cur = buffer[base + lane]
+          if (!(next !== next && cur !== cur) && Math.fround(next) !== cur) {
+            buffer[base + lane] = next
+            changed = true
+          }
+          lane++
+        }
+      } else {
+        // one lane — the flat-path element semantics (a null/undefined
+        // row is ONE zero lane, not an empty row; an object row lands as
+        // NaN exactly as the flat store coerced it pre-185).
+        const next = (typeof r === 'number' ? r : (r ?? 0)) as number
+        const cur = buffer[base + lane]
+        if (!(next !== next && cur !== cur) && Math.fround(next) !== cur) {
+          buffer[base + lane] = next
+          changed = true
+        }
+        lane++
+      }
+    }
+    // The trailing pad: rows ran out before the lanes did — zero-fill the
+    // rest (the flat loop's own rule: a [1,2] on a 4-lane slot writes
+    // [1,2,0,0]; a [[1,2]] must not leave the tail stale).
+    for (; lane < size; lane++) {
+      const cur = buffer[base + lane]
+      if (cur !== 0) {
+        buffer[base + lane] = 0
+        changed = true
       }
     }
     if (changed) markDirty(slot)

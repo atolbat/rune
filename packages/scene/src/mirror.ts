@@ -13,12 +13,15 @@
  *      +1 frame, WITHOUT blocking main and without degradation: the render
  *      always has consistent data).
  *
- * A snapshot is plain ArrayBuffer copies: these are ready GPU upload buffers
- * (instance attributes), not "extra" work. Task 182: (a) the bits copy is
- * live-sized (ceil(n/32) words — the capacity padding is always zero);
- * (b) snapshotReuse — a ring of two bridge-owned slots: the big arrays are
- * reused per fresh take (zero big-array churn; a snapshot's memory lives
- * until the fresh take after the next one).
+ * A snapshot is plain ArrayBuffer copies by default: these are ready GPU
+ * upload buffers (instance attributes), not "extra" work. Task 182: (a)
+ * the bits copy is live-sized (ceil(n/32) words — the capacity padding is
+ * always zero); (b) snapshotReuse — a ring of two bridge-owned slots: the
+ * big arrays are reused per fresh take (zero big-array churn; a snapshot's
+ * memory lives until the fresh take after the next one). Task 185:
+ * snapshotViews — ZERO copies: the snapshot hands out SAB views directly
+ * (valid until publish×2 — the worker's own double-buffer rhythm), the
+ * zero-copy upload source for writeExternalBuffer/syncVertexBuffer.
  */
 import type { Camera } from './camera.ts'
 import type { Scene } from './scene.ts'
@@ -47,15 +50,19 @@ export interface SceneWorkerPort {
  * Task 182 — bits are copied LIVE-SIZED (ceil(n/32) words): the words above
  * the live node count are always zero (fillBits never writes beyond n),
  * copying them was pure bytes on the wire (capacity-sized copies on a
- * sparse scene paid up to bitsWords/liveWords× more). */
+ * sparse scene paid up to bitsWords/liveWords× more).
+ * Task 185 — snapshotViews: bits AND matrices are VIEWS into the worker's
+ * SAB (zero copies; valid until publish×2 — see createSceneWorkerBridge). */
 export interface SceneSnapshot {
   readonly epoch: number
   readonly cameraCount: number
   /** Visibility bitsets (rank space), live words only. With snapshotReuse:
-   *  VIEWS into bridge-owned ring memory (see createSceneWorkerBridge). */
+   *  VIEWS into bridge-owned ring memory; with snapshotViews: VIEWS into
+   *  the worker's SAB itself (see createSceneWorkerBridge). */
   readonly bits: readonly Uint32Array[]
   /** Instance segments per camera and group: instances[camera][group].
- *  With snapshotReuse: matrices are VIEWS into bridge-owned ring memory. */
+ *  With snapshotReuse: matrices are VIEWS into bridge-owned ring memory;
+ *  with snapshotViews: VIEWS into the worker's SAB (publish×2 validity). */
   readonly instances: ReadonlyArray<ReadonlyArray<{ matrices: Float32Array; count: number }>>
 }
 
@@ -97,17 +104,35 @@ interface SnapshotRingSlot {
  * A snapshot's memory stays valid until the fresh take AFTER the next one
  * (the stale take in between returns the previous object, untouched). The
  * default mode keeps the old contract: every fresh take returns independent
- * copies (held snapshots stay valid forever). */
+ * copies (held snapshots stay valid forever).
+ * Task 185 — snapshotViews (default false, mutually exclusive with
+ * snapshotReuse): THE ZERO-COPY TAKE — the snapshot's bits and matrix
+ * segments are VIEWS straight into the worker's double-buffered SAB (no
+ * ring, no memcpy, no allocation at all). The contract is the double
+ * buffer's own rhythm: a view taken at epoch E stays VALID (byte-stable)
+ * until the worker starts epoch E+2 — the same physical buffer returns
+ * into rotation two publishes later; "valid until publish×2". Consume
+ * the view (upload it, read it) within the frame you took it — or the
+ * next — and it is always safe; hold it longer and its CONTENT silently
+ * changes under you. This is the mode for the zero-copy upload pattern:
+ * writeExternalBuffer(gpuId, snap.instances[k][g].matrices) — the GPU
+ * queue snapshots the bytes at call time (Task 185's probe verdict), so
+ * even the E+2 rewrite cannot tear an already-enqueued upload. */
 export function createSceneWorkerBridge(options: {
   scene: Scene
   worker: SceneWorkerPort
   /** Task 182 — ring-reuse of the snapshot memory (see above). */
   snapshotReuse?: boolean
+  /** Task 185 — zero-copy SAB views (see above); exclusive with snapshotReuse. */
+  snapshotViews?: boolean
 }): SceneWorkerBridge {
   const { scene, worker } = options
   const views = scene.views
   if (scene.backing !== 'shared') {
     throw new Error('scene: the bridge needs a SAB scene (createScene({ shared: true }))')
+  }
+  if (options.snapshotViews === true && options.snapshotReuse === true) {
+    throw new Error('scene: snapshotViews and snapshotReuse are mutually exclusive (views need no ring — the SAB is the ring)')
   }
 
   let published = 0
@@ -118,6 +143,8 @@ export function createSceneWorkerBridge(options: {
   let disposed = false
   // Task 182: the reuse ring — two slots, alternating per fresh take.
   const snapshotReuse = options.snapshotReuse === true
+  // Task 185: the view mode — zero-copy SAB views (no ring, no copies).
+  const snapshotViews = options.snapshotViews === true
   const ring: SnapshotRingSlot[] = snapshotReuse
     ? [
         { bits: new Uint32Array(views.cameraMax * views.bitsWords), matrices: [] },
@@ -143,12 +170,19 @@ export function createSceneWorkerBridge(options: {
     const bits: Uint32Array[] = []
     const instances: Array<Array<{ matrices: Float32Array; count: number }>> = []
     const ringSlot = slot >= 0 ? ring[slot] : undefined
+    // Task 185 — the view mode flag: bits/pool segments become SAB views.
+    const asViews = snapshotViews && ringSlot === undefined
     for (let k = 0; k < cameraCount; k++) {
       const base = bitsBase(views, bufferIndex, k)
       if (ringSlot !== undefined) {
         // Reuse: memcpy the live words into the ring row, hand out a view.
         ringSlot.bits.set(views.bits.subarray(base, base + liveWords), k * views.bitsWords)
         bits.push(ringSlot.bits.subarray(k * views.bitsWords, k * views.bitsWords + liveWords))
+      } else if (asViews) {
+        // Task 185 — ZERO-COPY: the bitset view straight into the SAB (the
+        // worker's OTHER buffer is the one being rewritten; this one is
+        // frozen until epoch+2 — the publish×2 contract).
+        bits.push(views.bits.subarray(base, base + liveWords))
       } else {
         bits.push(views.bits.slice(base, base + liveWords))
       }
@@ -177,6 +211,22 @@ export function createSceneWorkerBridge(options: {
           const srcStart = poolBase + offset * 16
           row.set(pool.subarray(srcStart, srcStart + count * 16), offset * 16)
           perCamera.push({ matrices: row.subarray(offset * 16, offset * 16 + count * 16), count })
+        }
+      } else if (asViews) {
+        // Task 185 — ZERO-COPY: the per-(camera, group) segments are
+        // contiguous prefix-sum ranges of the camera's pool row — views,
+        // not copies (instanceMatricesView's own shape). Same publish×2
+        // validity contract as the bits above: this physical pool row is
+        // frozen until the worker starts epoch E+2.
+        for (let g = 0; g < groupCount; g++) {
+          const count = Math.max(0, views.instCounts[countsBase + g])
+          if (count === 0) {
+            perCamera.push({ matrices: EMPTY_MATRICES, count: 0 })
+            continue
+          }
+          const offset = views.instOffsets[countsBase + g]
+          const srcStart = poolBase + offset * 16
+          perCamera.push({ matrices: pool.subarray(srcStart, srcStart + count * 16), count })
         }
       } else {
         for (let g = 0; g < groupCount; g++) {
@@ -221,6 +271,8 @@ export function createSceneWorkerBridge(options: {
       if (output > 0 && output !== lastSnapshotEpoch) {
         // Task 182: the reuse ring alternates slots per fresh take — the
         // previous fresh snapshot's memory is never the target.
+        // Task 185: the view mode passes slot -1 as well (no ring) — the
+        // snapshot builder's own snapshotViews flag routes to SAB views.
         const slot = snapshotReuse ? (ringNext ^= 1) : -1
         lastSnapshot = snapshot(views, output, slot)
         lastSnapshotEpoch = output

@@ -73,6 +73,16 @@ const snap = bridge.take()     // bits + instances (copies, no tearing)
 // snapshotReuse: true }) — the snapshot memory lives in a ring of two
 // bridge-owned slots (valid until the fresh take after the next one);
 // bits are always copied live-sized (ceil(n/32) words).
+// Task 185 — ZERO-COPY take: createSceneWorkerBridge({ …, snapshotViews: true })
+// — bits and matrix segments become VIEWS straight into the worker's SAB
+// (no ring, no memcpy, no allocation). Contract: a view is valid until
+// publish×2 (the double buffer returns into rotation two publishes later) —
+// consume it within the frame you took it (or the next). This is the
+// zero-copy GPU upload source: writeExternalBuffer(gpuId,
+// snap.instances[0][0].matrices) — the queue snapshots the bytes at call
+// time (queue.writeBuffer accepts SAB-backed views — verified; the WG
+// facade probes once and falls back to a staging copy if a browser
+// rejects), so even the E+2 rewrite cannot tear an enqueued upload.
 ```
 
 ```ts

@@ -20,12 +20,12 @@
 // restore wire — the context-loss recovery — rides the Task-167
 // sync-point pass; the dist changed, the mark moves), the untouched bundles
 // keep their Task 149 marks.
-import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=184'
+import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=185'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER, BILLBOARD,
 } from '../../dist/rune-materials.esm.js?v=150'
-import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=184'
+import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=185'
 
 /* ─── the demo registry (the carousel order) ────────────────────────────── */
 

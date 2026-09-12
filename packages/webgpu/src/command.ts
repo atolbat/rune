@@ -312,6 +312,60 @@ function writeUniforms(
     const base = (sliceOffset + field.offset) / 4
     const lanes = field.size / 4
     let changed = false
+    // Task 185 — THE NESTED CONTRACT (the arena's twin): a value whose
+    // first element is an Array/TypedArray row (the natural spelling of
+    // array<vec4<f32>> — "u_bones: [[x,y,z,w], …]") used to flatten into
+    // pure NaN lanes (numbers[at] ?? 0 handed the ROW OBJECT to the
+    // Float32Array store; ToNumber(row) = NaN — the Task-178 audit's
+    // "array-of-arrays writes NaN lanes" trap; the Task-179 guard stopped
+    // the per-frame re-dirty, the NaN garbage still shipped). Rows now
+    // flatten ROW-MAJOR; a non-row element is ONE lane with the flat-path
+    // semantics (null/undefined → 0, objects → NaN), byte-identical to
+    // the pre-185 flat behavior for degenerate shapes.
+    const first = scalar ? undefined : numbers[0]
+    if (first !== null && first !== undefined && typeof first === 'object'
+      && (Array.isArray(first) || ArrayBuffer.isView(first))) {
+      const rows = numbers as ArrayLike<unknown>
+      let lane = 0
+      for (let row = 0; row < rows.length && lane < lanes; row++) {
+        const r = rows[row]
+        if (r !== null && r !== undefined && typeof r === 'object'
+          && (Array.isArray(r) || ArrayBuffer.isView(r))) {
+          const entries = r as ArrayLike<number>
+          for (let j = 0; j < entries.length && lane < lanes; j++) {
+            const next = entries[j] ?? 0
+            const cur = floats[base + lane]
+            if (!(next !== next && cur !== cur) && Math.fround(next) !== cur) {
+              floats[base + lane] = next
+              changed = true
+            }
+            lane++
+          }
+        } else {
+          const next = (typeof r === 'number' ? r : (r ?? 0)) as number
+          const cur = floats[base + lane]
+          if (!(next !== next && cur !== cur) && Math.fround(next) !== cur) {
+            floats[base + lane] = next
+            changed = true
+          }
+          lane++
+        }
+      }
+      // The trailing pad — rows ran out before the lanes did: zero-fill the
+      // rest (the flat loop's own "missing → 0" rule; a [[1,2]] into a
+      // vec4 must not leave lanes 2..3 stale).
+      for (; lane < lanes; lane++) {
+        if (floats[base + lane] !== 0) {
+          floats[base + lane] = 0
+          changed = true
+        }
+      }
+      if (changed && queue !== null && !command.needsUpload) {
+        command.needsUpload = true
+        queue.push(command)
+      } else if (changed) command.needsUpload = true
+      continue
+    }
     for (let at = 0; at < lanes; at++) {
       const next = scalar ? (at === 0 ? value : 0) : (numbers[at] ?? 0)
       // Task 179 — THE NaN GUARD: fround(NaN) !== NaN is ALWAYS true, so a
