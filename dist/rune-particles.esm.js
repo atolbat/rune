@@ -2051,14 +2051,84 @@ function vert3(out, at, px, py, pz, ox, oy, oz, u, v, cr, cg, cb, ca) {
   return at + SOUP_STRIDE;
 }
 // packages/particles/src/instances.ts
-var INSTANCE_STRIDE = 16;
+var INSTANCE_STRIDE = 9;
 var INSTANCE_LAYOUT = {
-  pos: { size: 3, offset: 0 },
-  vel: { size: 3, offset: 3 },
-  color: { size: 4, offset: 6 },
-  par: { size: 4, offset: 10 },
-  uv0: { size: 2, offset: 14 }
+  rec0: { size: 4, offset: 0 },
+  rec1: { size: 4, offset: 4 },
+  rec2: { size: 1, offset: 8 }
 };
+var INSTANCE_FIELDS = {
+  pos: { size: 3, offset: 0 },
+  age: { size: 1, offset: 3 },
+  velHalf: { size: 4, offset: 4 },
+  colorHalf: { size: 4, offset: 6 },
+  seedFrame: { size: 1, offset: 8 }
+};
+var F32_VIEW = new Float32Array(1);
+var U32_VIEW = new Uint32Array(F32_VIEW.buffer);
+function f32ToF16Bits(v) {
+  if (v !== v)
+    return 0;
+  F32_VIEW[0] = v;
+  const x = U32_VIEW[0];
+  const sign = x >>> 16 & 32768;
+  if (v > 65504)
+    return sign | 31743;
+  if (v < -65504)
+    return 32768 | 31743;
+  if ((x & 2139095040) <= 939524096)
+    return sign;
+  let m = (x & 8388607) + 4095 + ((x & 8388607) >>> 13 & 1);
+  let e = (x >>> 23 & 255) - 112;
+  if (m >= 8388608) {
+    m -= 8388608;
+    e++;
+  }
+  return sign | e << 10 | m >>> 13;
+}
+function f16BitsToF32(h) {
+  const sign = (h & 32768) !== 0 ? -1 : 1;
+  const e = h >>> 10 & 31;
+  const m = h & 1023;
+  if (e === 31)
+    return m === 0 ? sign * Infinity : NaN;
+  if (e === 0)
+    return sign * m * 0.00000005960464477539063;
+  return sign * Math.pow(2, e - 15) * (1 + m / 1024);
+}
+function packHalfPair(lo, hi) {
+  return (f32ToF16Bits(lo) | f32ToF16Bits(hi) << 16) >>> 0;
+}
+function decodeInstanceRecord(rec, index, tiles, out) {
+  const at = index * INSTANCE_STRIDE;
+  const w = (k) => {
+    F32_VIEW[0] = rec[at + k];
+    return U32_VIEW[0];
+  };
+  const w4 = w(4), w5 = w(5), w6 = w(6), w7 = w(7), w8 = w(8);
+  out.pos[0] = rec[at];
+  out.pos[1] = rec[at + 1];
+  out.pos[2] = rec[at + 2];
+  out.vel[0] = f16BitsToF32(w4 & 65535);
+  out.vel[1] = f16BitsToF32(w4 >>> 16);
+  out.vel[2] = f16BitsToF32(w5 & 65535);
+  const half = f16BitsToF32(w5 >>> 16);
+  out.color[0] = f16BitsToF32(w6 & 65535);
+  out.color[1] = f16BitsToF32(w6 >>> 16);
+  out.color[2] = f16BitsToF32(w7 & 65535);
+  out.color[3] = f16BitsToF32(w7 >>> 16);
+  const seed = f16BitsToF32(w8 & 65535);
+  out.par[0] = half;
+  out.par[1] = Math.fround(seed * 6.283185307179586);
+  out.par[2] = rec[at + 3];
+  out.par[3] = seed;
+  out.frame = w8 >>> 16;
+  const tileU = tiles[0] >= 1 ? tiles[0] : 1;
+  const tileV = tiles[1] >= 1 ? tiles[1] : 1;
+  const frame = out.frame;
+  out.uv0[0] = frame % tileU / tileU;
+  out.uv0[1] = Math.floor(frame / tileU) / tileV;
+}
 function packInstances(system, out, options = {}) {
   const ramp = options.ramp ?? CONSTANT_RAMP;
   const tiles = options.tiles;
@@ -2067,6 +2137,9 @@ function packInstances(system, out, options = {}) {
   const useAtlas = tiles !== undefined;
   if (useAtlas && (!Number.isInteger(tileU) || tileU < 1 || !Number.isInteger(tileV) || tileV < 1)) {
     throw new Error(`rune/particles: billboard tiles must be integers >= 1 (got [${tileU}, ${tileV}])`);
+  }
+  if (useAtlas && tileU * tileV > 65536) {
+    throw new Error(`rune/particles: the packed record's atlas frame is a u16 — tiles u×v must be <= 65536 (got ${tileU}×${tileV})`);
   }
   const maxFrame = tileU * tileV - 1;
   const frameJitter = options.frameJitter ?? 0;
@@ -2125,35 +2198,32 @@ function packInstances(system, out, options = {}) {
     const half = f.size[i] * s[0] * 0.5;
     if (half <= 0)
       continue;
-    let u0 = 0, v0 = 0;
+    let frame = 0;
     if (useAtlas) {
-      let frame = Math.floor(s[5] + (frameJitter > 0 ? f.seed[i] * frameJitter : 0));
-      if (!Number.isFinite(frame))
-        frame = 0;
-      if (frame < 0)
-        frame = 0;
-      if (frame > maxFrame)
-        frame = maxFrame;
-      u0 = frame % tileU / tileU;
-      v0 = Math.floor(frame / tileU) / tileV;
+      let fr = Math.floor(s[5] + (frameJitter > 0 ? f.seed[i] * frameJitter : 0));
+      if (!Number.isFinite(fr))
+        fr = 0;
+      if (fr < 0)
+        fr = 0;
+      if (fr > maxFrame)
+        fr = maxFrame;
+      frame = fr;
     }
     const at = n * INSTANCE_STRIDE;
     out[at] = f.px[i];
     out[at + 1] = f.py[i];
     out[at + 2] = f.pz[i];
-    out[at + 3] = f.vx[i];
-    out[at + 4] = f.vy[i];
-    out[at + 5] = f.vz[i];
-    out[at + 6] = f.cr[i] * s[1];
-    out[at + 7] = f.cg[i] * s[2];
-    out[at + 8] = f.cb[i] * s[3];
-    out[at + 9] = f.ca[i] * s[4];
-    out[at + 10] = half;
-    out[at + 11] = f.seed[i] * 6.283185307179586;
-    out[at + 12] = age;
-    out[at + 13] = f.seed[i];
-    out[at + 14] = u0;
-    out[at + 15] = v0;
+    out[at + 3] = age;
+    U32_VIEW[0] = packHalfPair(f.vx[i], f.vy[i]);
+    out[at + 4] = F32_VIEW[0];
+    U32_VIEW[0] = packHalfPair(f.vz[i], half);
+    out[at + 5] = F32_VIEW[0];
+    U32_VIEW[0] = packHalfPair(f.cr[i] * s[1], f.cg[i] * s[2]);
+    out[at + 6] = F32_VIEW[0];
+    U32_VIEW[0] = packHalfPair(f.cb[i] * s[3], f.ca[i] * s[4]);
+    out[at + 7] = F32_VIEW[0];
+    U32_VIEW[0] = (packHalfPair(f.seed[i], 0) | frame << 16) >>> 0;
+    out[at + 8] = F32_VIEW[0];
     n++;
   }
   return n;
@@ -2171,6 +2241,9 @@ function packInstancesPainter(system, out, options, forward, scratch) {
   const useAtlas = tiles !== undefined;
   if (useAtlas && (!Number.isInteger(tileU) || tileU < 1 || !Number.isInteger(tileV) || tileV < 1)) {
     throw new Error(`rune/particles: billboard tiles must be integers >= 1 (got [${tileU}, ${tileV}])`);
+  }
+  if (useAtlas && tileU * tileV > 65536) {
+    throw new Error(`rune/particles: the packed record's atlas frame is a u16 — tiles u×v must be <= 65536 (got ${tileU}×${tileV})`);
   }
   const maxFrame = tileU * tileV - 1;
   const frameJitter = options.frameJitter ?? 0;
@@ -2228,35 +2301,32 @@ function packInstancesPainter(system, out, options, forward, scratch) {
     const half = f.size[i] * s[0] * 0.5;
     if (half <= 0)
       continue;
-    let u0 = 0, v0 = 0;
+    let frame = 0;
     if (useAtlas) {
-      let frame = Math.floor(s[5] + (frameJitter > 0 ? f.seed[i] * frameJitter : 0));
-      if (!Number.isFinite(frame))
-        frame = 0;
-      if (frame < 0)
-        frame = 0;
-      if (frame > maxFrame)
-        frame = maxFrame;
-      u0 = frame % tileU / tileU;
-      v0 = Math.floor(frame / tileU) / tileV;
+      let fr = Math.floor(s[5] + (frameJitter > 0 ? f.seed[i] * frameJitter : 0));
+      if (!Number.isFinite(fr))
+        fr = 0;
+      if (fr < 0)
+        fr = 0;
+      if (fr > maxFrame)
+        fr = maxFrame;
+      frame = fr;
     }
     const at = n * INSTANCE_STRIDE;
     records[at] = f.px[i];
     records[at + 1] = f.py[i];
     records[at + 2] = f.pz[i];
-    records[at + 3] = f.vx[i];
-    records[at + 4] = f.vy[i];
-    records[at + 5] = f.vz[i];
-    records[at + 6] = f.cr[i] * s[1];
-    records[at + 7] = f.cg[i] * s[2];
-    records[at + 8] = f.cb[i] * s[3];
-    records[at + 9] = f.ca[i] * s[4];
-    records[at + 10] = half;
-    records[at + 11] = f.seed[i] * 6.283185307179586;
-    records[at + 12] = age;
-    records[at + 13] = f.seed[i];
-    records[at + 14] = u0;
-    records[at + 15] = v0;
+    records[at + 3] = age;
+    U32_VIEW[0] = packHalfPair(f.vx[i], f.vy[i]);
+    records[at + 4] = F32_VIEW[0];
+    U32_VIEW[0] = packHalfPair(f.vz[i], half);
+    records[at + 5] = F32_VIEW[0];
+    U32_VIEW[0] = packHalfPair(f.cr[i] * s[1], f.cg[i] * s[2]);
+    records[at + 6] = F32_VIEW[0];
+    U32_VIEW[0] = packHalfPair(f.cb[i] * s[3], f.ca[i] * s[4]);
+    records[at + 7] = F32_VIEW[0];
+    U32_VIEW[0] = (packHalfPair(f.seed[i], 0) | frame << 16) >>> 0;
+    records[at + 8] = F32_VIEW[0];
     const d = fx * f.px[i] + fy * f.py[i] + fz * f.pz[i];
     PAINTER_F32[0] = d;
     let bits = PAINTER_U32[0];
@@ -2367,13 +2437,6 @@ function packInstancesPainter(system, out, options, forward, scratch) {
     out[dst + 6] = records[src + 6];
     out[dst + 7] = records[src + 7];
     out[dst + 8] = records[src + 8];
-    out[dst + 9] = records[src + 9];
-    out[dst + 10] = records[src + 10];
-    out[dst + 11] = records[src + 11];
-    out[dst + 12] = records[src + 12];
-    out[dst + 13] = records[src + 13];
-    out[dst + 14] = records[src + 14];
-    out[dst + 15] = records[src + 15];
   }
   return n;
 }
@@ -2951,27 +3014,30 @@ var PACK_BODY_WGSL = `
   }
   let half = state[b + 8u] * size * 0.5;
   let seed = state[b + 13u];
-  // the tile origin: frame + seed·jitter → floor → clamp → row-major
+  // the tile frame: floor + seed·jitter + clamp (the WGSL pack's exact
+  // semantics); the frame index rides word 8's high half — the tile
+  // ORIGIN is derived shader-side (the material's unpack preamble)
   var fr = floor(frame + seed * P.frameJitter);
   // NaN-safe: every NaN comparison is FALSE — !(fr >= 0) catches NaN and
   // the negatives in one branch (WGSL has no isnan builtin)
   if (!(fr >= 0.0)) { fr = 0.0; }
   let maxFrame = P.tileU * P.tileV - 1.0;
   if (fr > maxFrame) { fr = maxFrame; }
-  var u0 = 0.0; var v0 = 0.0;
-  if (P.tileU >= 1.0 && P.tileV >= 1.0) {
-    u0 = (fr % P.tileU) / P.tileU;
-    v0 = floor(fr / P.tileU) / P.tileV;
-  }
-  records[o] = state[b]; records[o + 1u] = state[b + 1u]; records[o + 2u] = state[b + 2u];
-  records[o + 3u] = state[b + 3u]; records[o + 4u] = state[b + 4u]; records[o + 5u] = state[b + 5u];
-  records[o + 6u] = state[b + 9u] * r; records[o + 7u] = state[b + 10u] * g;
-  records[o + 8u] = state[b + 11u] * bl; records[o + 9u] = state[b + 12u] * a;
-  records[o + 10u] = half;
-  records[o + 11u] = seed * 6.283185307179586;
-  records[o + 12u] = age;
-  records[o + 13u] = seed;
-  records[o + 14u] = u0; records[o + 15u] = v0;
+  // Task 183 — THE PACKED RECORD (9 words / 36 bytes): words 0..3 native
+  // (pos, age — never quantized); words 4..8 the quantized pairs + the
+  // u16 frame. The quantizer's domain guards (NaN→0, ±65504 clamp,
+  // 2^-14 flush) run BEFORE pack2x16float — the RNE rounding then
+  // matches the JS/GL twins bit-for-bit (the three-dialect contract,
+  // instances.ts).
+  records[o] = bitcast<u32>(state[b]);
+  records[o + 1u] = bitcast<u32>(state[b + 1u]);
+  records[o + 2u] = bitcast<u32>(state[b + 2u]);
+  records[o + 3u] = bitcast<u32>(age);
+  records[o + 4u] = q2(state[b + 3u], state[b + 4u]);
+  records[o + 5u] = q2(state[b + 5u], half);
+  records[o + 6u] = q2(state[b + 9u] * r, state[b + 10u] * g);
+  records[o + 7u] = q2(state[b + 11u] * bl, state[b + 12u] * a);
+  records[o + 8u] = q2(seed, 0.0) | (u32(fr) << 16u);
 `;
 function gpuSimWgsl() {
   const perm = Array.from(PERM, (v) => `${v}u`).join(", ");
@@ -3046,11 +3112,30 @@ struct SimParams {
 @group(0) @binding(0) var<uniform> P : SimParams;
 @group(0) @binding(1) var<storage, read_write> state : array<f32>;
 @group(0) @binding(2) var<storage, read> swaps : array<vec2<u32>>;
-@group(0) @binding(3) var<storage, read_write> records : array<f32>;
+@group(0) @binding(3) var<storage, read_write> records : array<u32>;
 @group(0) @binding(4) var<storage, read> rampLUT : array<f32>;
 
 const FSTRIDE : u32 = ${GPU_STATE_STRIDE}u;
-const RSTRIDE : u32 = 16u;
+const RSTRIDE : u32 = 9u;
+
+// Task 183 — THE RECORD QUANTIZER (the three-dialect contract: this WGSL
+// kernel, the JS packer (instances.ts), the GLSL TF twin produce IDENTICAL
+// bits). Domain guards first (NaN→0 — WGSL NaN != NaN; ±65504 CLAMP —
+// never ±∞: a clamped velocity is a well-defined stretched quad, ∞ is a
+// NaN soup through the normalize; the 2^-14 flush kills the subnormal
+// halves — the decode stays branch-exact in every dialect), then
+// pack2x16float's RNE rounding (the CORE builtin — no enable f16 needed).
+fn q1(v: f32) -> f32 {
+  var x = v;
+  if (x != x) { return 0.0; }
+  if (x > 65504.0) { x = 65504.0; }
+  if (x < -65504.0) { x = -65504.0; }
+  if (abs(x) < 6.103515625e-5) { return x * 0.0; }
+  return x;
+}
+fn q2(a: f32, b: f32) -> u32 {
+  return pack2x16float(vec2<f32>(q1(a), q1(b)));
+}
 
 // ── the simplex noise (the SAME table the CPU evaluates — noise.ts) ────────
 var<private> SIM_PERM : array<u32, 512> = array<u32, 512>(${perm});
@@ -3355,8 +3440,8 @@ fn advance(@builtin(global_invocation_id) gid : vec3<u32>) {
   state[b + 6u] = age + P.dt;
 }
 
-// ── pack: the 16-float instance records (packInstances' GPU twin — the
-// record layout of the BILLBOARD material / INSTANCE_LAYOUT; the body is
+// ── pack: the 9-word packed instance records (packInstances' GPU twin —
+// the record layout of the BILLBOARD material / INSTANCE_LAYOUT; the body is
 // PACK_BODY_WGSL — SHARED with the sort family's sorted pack entry) ──────
 @compute @workgroup_size(64)
 fn pack(@builtin(global_invocation_id) gid : vec3<u32>) {
@@ -3389,7 +3474,7 @@ struct SortParams {
 @group(0) @binding(0) var<uniform> P : SortParams;
 @group(0) @binding(1) var<storage, read_write> pairs : array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read> state : array<f32>;
-@group(0) @binding(3) var<storage, read_write> records : array<f32>;
+@group(0) @binding(3) var<storage, read_write> records : array<u32>;
 @group(0) @binding(4) var<storage, read> rampLUT : array<f32>;
 
 // Task 179 — THE NETWORK CLOCK: the self-driving (k, j) + the arrival
@@ -3407,9 +3492,23 @@ struct NetClock {
 @group(0) @binding(5) var<storage, read_write> net : NetClock;
 
 const FSTRIDE : u32 = ${GPU_STATE_STRIDE}u;
-const RSTRIDE : u32 = 16u;
+const RSTRIDE : u32 = 9u;
 const PAD_KEY : f32 = ${GPU_SORT_PAD_KEY};
 const SENTINEL : f32 = ${GPU_SORT_SENTINEL}.0;
+
+// Task 183 — the record quantizer pair (q1/q2 — the sim family's own,
+// verbatim: the three-dialect contract of instances.ts).
+fn q1(v: f32) -> f32 {
+  var x = v;
+  if (x != x) { return 0.0; }
+  if (x > 65504.0) { x = 65504.0; }
+  if (x < -65504.0) { x = -65504.0; }
+  if (abs(x) < 6.103515625e-5) { return x * 0.0; }
+  return x;
+}
+fn q2(a: f32, b: f32) -> u32 {
+  return pack2x16float(vec2<f32>(q1(a), q1(b)));
+}
 
 // ── sortKeys: the (key, index) pairs — the negated depth for the visible
 // live, the sentinel pair for the culled and the pads ───────────────────
@@ -3526,7 +3625,7 @@ fn pack(@builtin(global_invocation_id) gid : vec3<u32>) {
   let o = i * RSTRIDE;
   let m = pairs[i].y;
   if (m >= SENTINEL) {
-    for (var f = 0u; f < RSTRIDE; f++) { records[o + f] = 0.0; }
+    for (var f = 0u; f < RSTRIDE; f++) { records[o + f] = 0u; }
     return;
   }
   let b = u32(m) * FSTRIDE;
@@ -3599,7 +3698,24 @@ var GPU_GL_PACK_F = {
   rampN: 3
 };
 var GPU_GL_ADVANCE_OUTPUTS = ["v_s0", "v_s1", "v_s2", "v_s3", "v_s4"];
-var GPU_GL_PACK_OUTPUTS = ["v_r0", "v_r1", "v_r2", "v_r3"];
+var GPU_GL_PACK_OUTPUTS = ["v_r0", "v_r1", "v_r8"];
+var PACK_HALF_GLSL = `
+uint bbPackHalf(float v) {
+  if (v != v) { return 0u; }                         // NaN → +0
+  float x = clamp(v, -65504.0, 65504.0);             // CLAMP, never ±∞
+  uint f = floatBitsToUint(x);
+  uint s = (f >> 16u) & 0x8000u;
+  // FLUSH |v| < 2^-14 → ±0 — the exponent field ≤ 112 (the subnormal
+  // range [0, 2^-14), INCLUDING [2^-15, 2^-14) at 112 — the RNE bias
+  // below assumes the hidden bit, the guard must be ≤)
+  if ((f & 0x7f800000u) <= 0x38000000u) { return s; }
+  uint m = (f & 0x7fffffu) + 0x0fffu + (((f & 0x7fffffu) >> 13u) & 1u); // RNE
+  uint e = ((f >> 23u) & 0xffu) - 112u;
+  if (m >= 0x800000u) { m -= 0x800000u; e = e + 1u; }
+  return s | (e << 10u) | (m >> 13u);
+}
+uint bbPack2(float a, float b) { return bbPackHalf(a) | (bbPackHalf(b) << 16u); }
+`;
 var GPU_GL_SORTKEYS_UNIFORMS = [
   { name: "u_count", size: 1 },
   { name: "u_cull", size: 1 },
@@ -3680,22 +3796,26 @@ function packBodyGlsl(slot) {
   }
   float halfExtent = s2.x * size * 0.5;
   float seed = s3.y;
-  // the tile origin: frame + seed·jitter → floor → clamp → row-major
+  // the tile frame: floor + seed·jitter → clamp
   // (NaN-safe: every NaN comparison is false — !(fr >= 0.0) catches NaN
-  // and the negatives in one branch).
+  // and the negatives in one branch); the frame index rides word 8's high
+  // half — the tile ORIGIN is derived shader-side (the material's
+  // unpack preamble).
   float fr = floor(frame + seed * u_frameJitter);
   if (!(fr >= 0.0)) { fr = 0.0; }
   float maxFrame = u_tileU * u_tileV - 1.0;
   if (fr > maxFrame) { fr = maxFrame; }
-  float u0 = 0.0; float v0 = 0.0;
-  if (u_tileU >= 1.0 && u_tileV >= 1.0) {
-    u0 = mod(fr, u_tileU) / u_tileU;
-    v0 = floor(fr / u_tileU) / u_tileV;
-  }
-  v_r0 = s0;
-  v_r1 = vec4(s1.x, s1.y, s2.y * r, s2.z * g);
-  v_r2 = vec4(s2.w * b, s3.x * a, halfExtent, seed * 6.283185307179586);
-  v_r3 = vec4(age, seed, u0, v0);
+  // Task 183 — THE PACKED RECORD (9 words / 36 bytes): v_r0 carries
+  // pos.xyz + age NATIVE; v_r1 the four quantized pair-words; v_r8 the
+  // seed|frame word — the packed halves ride as f32 bit patterns (the
+  // TF capture moves raw bits; the draw's instance attributes bitcast).
+  v_r0 = vec4(s0.x, s0.y, s0.z, age);
+  v_r1 = uintBitsToFloat(uvec4(
+    bbPack2(s0.w, s1.x),
+    bbPack2(s1.y, halfExtent),
+    bbPack2(s2.y * r, s2.z * g),
+    bbPack2(s2.w * b, s3.x * a)));
+  v_r8 = uintBitsToFloat(bbPack2(seed, 0.0) | (uint(fr) << 16u));
 `;
 }
 function gpuRampLUTTexture(points) {
@@ -3911,11 +4031,11 @@ uniform float u_tileU;
 uniform float u_tileV;
 uniform float u_frameJitter;
 uniform float u_rampN;
-// the TF outputs: the 16-float instance record (INSTANCE_LAYOUT).
-out vec4 v_r0; // px, py, pz, vx
-out vec4 v_r1; // vy, vz, cr, cg
-out vec4 v_r2; // cb, ca, halfExtent, angle0 (seed·tau)
-out vec4 v_r3; // age, seed, u0, v0
+${PACK_HALF_GLSL}
+// the TF outputs: the packed 9-word record (Task 183 — INSTANCE_LAYOUT).
+out vec4 v_r0;  // pos.xyz, age (NATIVE f32)
+out vec4 v_r1;  // vel.xy | vel.z+half | color.rg | color.ba (f16 pairs, bits)
+out float v_r8; // seed (f16, lo) | the atlas frame (u16, hi)
 // the ramp LUT: 2 texels per point k — (t, size, r, g) at 2k, (b, a, frame, 0) at 2k+1.
 vec4 rampA(int k) { return texelFetch(u_ramp, ivec2(k * 2, 0), 0); }
 vec4 rampB(int k) { return texelFetch(u_ramp, ivec2(k * 2 + 1, 0), 0); }
@@ -4013,11 +4133,11 @@ uniform float u_tileU;
 uniform float u_tileV;
 uniform float u_frameJitter;
 uniform float u_rampN;
-// the TF outputs: the 16-float instance record (INSTANCE_LAYOUT).
-out vec4 v_r0; // px, py, pz, vx
-out vec4 v_r1; // vy, vz, cr, cg
-out vec4 v_r2; // cb, ca, halfExtent, angle0 (seed·tau)
-out vec4 v_r3; // age, seed, u0, v0
+${PACK_HALF_GLSL}
+// the TF outputs: the packed 9-word record (Task 183 — INSTANCE_LAYOUT).
+out vec4 v_r0;  // pos.xyz, age (NATIVE f32)
+out vec4 v_r1;  // vel.xy | vel.z+half | color.rg | color.ba (f16 pairs, bits)
+out float v_r8; // seed (f16, lo) | the atlas frame (u16, hi)
 // the ramp LUT: 2 texels per point k — (t, size, r, g) at 2k, (b, a, frame, 0) at 2k+1.
 vec4 rampA(int k) { return texelFetch(u_ramp, ivec2(k * 2, 0), 0); }
 vec4 rampB(int k) { return texelFetch(u_ramp, ivec2(k * 2 + 1, 0), 0); }
@@ -4029,8 +4149,7 @@ void main() {
     // the pad/cull sentinel — the ZERO record (a degenerate instance)
     v_r0 = vec4(0.0);
     v_r1 = vec4(0.0);
-    v_r2 = vec4(0.0);
-    v_r3 = vec4(0.0);
+    v_r8 = 0.0;
     gl_Position = vec4(0.0, 0.0, 0.5, 1.0);
     return;
   }
@@ -5135,7 +5254,7 @@ function createParticles(desc) {
     if (draw === "instance") {
       soupFloats = capacity * INSTANCE_STRIDE;
       stride = INSTANCE_STRIDE;
-      layout = { position: { size: 3, offset: INSTANCE_LAYOUT.pos.offset }, uv: { size: 2, offset: INSTANCE_LAYOUT.uv0.offset }, color: { size: 4, offset: INSTANCE_LAYOUT.color.offset } };
+      layout = { position: { size: 3, offset: 0 }, uv: { size: 2, offset: 8 }, color: { size: 4, offset: 6 } };
     } else {
       soupFloats = capacity * VERTS_PER_PARTICLE * SOUP_STRIDE;
       stride = SOUP_STRIDE;
@@ -5630,6 +5749,7 @@ export {
   readGpuEmitConfig,
   packInstancesPainter,
   packInstances,
+  packHalfPair,
   makeQuadIndices,
   hash01,
   gpuSortWgsl,
@@ -5654,6 +5774,9 @@ export {
   fillTrails,
   fillMeshes,
   fillBillboards,
+  f32ToF16Bits,
+  f16BitsToF32,
+  decodeInstanceRecord,
   createTrailHistory,
   createSpawner,
   createRamp,
@@ -5671,6 +5794,7 @@ export {
   MAX_BOXES,
   INSTANCE_STRIDE,
   INSTANCE_LAYOUT,
+  INSTANCE_FIELDS,
   INDICES_PER_PARTICLE,
   GPU_STATE_STRIDE,
   GPU_SORT_UNIFORM_FLOATS,

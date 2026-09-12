@@ -209,7 +209,10 @@ describe('Task 134 — the WGSL sort family (gpuSortWgsl)', () => {
     expect(src).not.toContain('fn sortStep(')
     expect(src).toContain('var<storage, read_write> pairs : array<vec2<f32>>;')
     expect(src).toContain('var<storage, read> state : array<f32>;')
-    expect(src).toContain('var<storage, read_write> records : array<f32>;')
+    // Task 183 — the records are the PACKED words (array<u32> — the f16
+    // pairs + the u16 frame ride as raw bits; RSTRIDE 9).
+    expect(src).toContain('var<storage, read_write> records : array<u32>;')
+    expect(src).toContain('const RSTRIDE : u32 = 9u;')
     expect(src).toContain('var<storage, read> rampLUT : array<f32>;')
     // Task 179 — THE NETWORK CLOCK at binding 5: all atomics
     expect(src).toContain('struct NetClock {')
@@ -301,9 +304,10 @@ describe('Task 134 — the GLSL twins (the sort family)', () => {
     expect(src).toContain(`if (pr.y >= ${GPU_GL_SORT_SENTINEL}.0)`)
     expect(src).toContain('int slot = int(pr.y + 0.5);')
     expect(src).toContain('vec4 s0 = fetchState(slot, 0);')
-    // the shared pack body (the ramp walk + the record rows)
-    expect(src).toContain('seed * 6.283185307179586')
-    expect(src).toContain('mod(fr, u_tileU) / u_tileU')
+    // the shared pack body (the ramp walk + the Task-183 packed rows)
+    expect(src).toContain('bbPack2(seed, 0.0) | (uint(fr) << 16u)')
+    expect(src).not.toContain('seed * 6.283185307179586')
+    expect(src).not.toContain('mod(fr, u_tileU)')
     expect(/\bfloat half\b/.test(src)).toBe(false)
   })
   it('the sentinel constants are the WGSL twins (the cross-backend contract)', () => {

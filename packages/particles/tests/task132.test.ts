@@ -142,10 +142,10 @@ describe('Task 132 — render.sort (the facade)', () => {
   it('the sequence is stable across frames (deterministic, the reused scratch)', () => {
     const facade = sortedFacade('instance')
     const view = facade.view(LOOK_DOWN_Z)
-    const first = Array.from(view.vertices.subarray(0, view.instanceCount * INSTANCE_STRIDE), (v, i) => (i % 16 === 2 ? v : 0))
+    const first = Array.from(view.vertices.subarray(0, view.instanceCount * INSTANCE_STRIDE), (v, i) => (i % INSTANCE_STRIDE === 2 ? v : 0))
     facade.advance(0.016)
     facade.view(LOOK_DOWN_Z)
-    const second = Array.from(view.vertices.subarray(0, view.instanceCount * INSTANCE_STRIDE), (v, i) => (i % 16 === 2 ? v : 0))
+    const second = Array.from(view.vertices.subarray(0, view.instanceCount * INSTANCE_STRIDE), (v, i) => (i % INSTANCE_STRIDE === 2 ? v : 0))
     // only the POSITION channel is order-stable (the age channel legitimately
     // advances every frame)
     expect(second).toEqual(first)

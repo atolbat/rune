@@ -804,24 +804,38 @@ describe('Task 127/128: OUTPUT_DITHER (rgb noise + the Bayer alpha)', () => {
 describe('Task 131: BILLBOARD (the instanced particle vertex stage)', () => {
   const SPRITE_BB = TEXTURE | VERTEX_COLOR | BILLBOARD
 
-  it('replaces the vertex attributes with the instance record (the cross-package contract)', () => {
+  it('replaces the vertex attributes with the instance record words (the cross-package contract)', () => {
     resetMaterials()
     const mat = materialOf({ features: SPRITE_BB })
-    // The attribute set is EXACTLY @rune/particles' INSTANCE_LAYOUT names,
-    // in order — the record IS the vertex.
-    expect(mat.attributes.map(a => a.name)).toEqual(['i_pos', 'i_vel', 'i_color', 'i_par', 'i_uv0'])
-    expect(mat.attributes.map(a => a.glslType)).toEqual(['vec3', 'vec3', 'vec4', 'vec4', 'vec2'])
+    // The attribute set is EXACTLY @rune/particles' INSTANCE_LAYOUT word
+    // names, in order — the PACKED record IS the vertex (Task 183: 9 words
+    // / 36 bytes; the shader's unpack preamble derives the logical
+    // i_pos/i_vel/i_color/i_par/i_uv0).
+    expect(mat.attributes.map(a => a.name)).toEqual(['i_rec0', 'i_rec1', 'i_rec2'])
+    expect(mat.attributes.map(a => a.glslType)).toEqual(['vec4', 'vec4', 'float'])
     expect(mat.attributes.every(a => a.instance === true)).toBe(true)
     // No position/uv/color per-vertex attributes — the corner math owns them.
     expect(mat.glsl.vertex).not.toMatch(/in vec3 position;/)
     expect(mat.glsl.vertex).not.toMatch(/in vec2 uv;/)
     expect(mat.glsl.vertex).not.toMatch(/in vec4 color;/)
-    // The instance record attributes, dense locations 0..4.
-    for (let at = 0; at < 5; at++) {
+    // The instance record attributes, dense locations 0..2.
+    for (let at = 0; at < 3; at++) {
       expect(mat.glsl.vertex).toContain(`layout(location = ${at}) in`)
     }
-    expect(mat.glsl.vertex).toContain('in vec3 i_pos;')
-    expect(mat.glsl.vertex).toContain('in vec2 i_uv0;')
+    expect(mat.glsl.vertex).toContain('in vec4 i_rec0;')
+    expect(mat.glsl.vertex).toContain('in float i_rec2;')
+    // THE UNPACK (Task 183): the BB_H half decoder + the derived fields —
+    // the logical vocabulary materializes as LOCALS before the body.
+    expect(mat.glsl.vertex).toContain('#define BB_H(h)')
+    expect(mat.glsl.vertex).toContain('uintBitsToFloat')
+    expect(mat.glsl.vertex).toContain('floatBitsToUint(i_rec1.x)')
+    expect(mat.glsl.vertex).toContain('vec3 i_vel = vec3(BB_H(bbW4)')
+    expect(mat.glsl.vertex).toContain('vec4 i_color = vec4(BB_H(bbW6)')
+    // the derived par: the half extent, the seed·τ phase (the old word 11
+    // — now a pure function of the seed), the native age, the seed.
+    expect(mat.glsl.vertex).toContain('vec4 i_par = vec4(bbHalfE, bbSeed * 6.283185307179586, i_rec0.w, bbSeed);')
+    // the derived uv: the u16 frame + the tile scales (the reciprocals).
+    expect(mat.glsl.vertex).toContain('vec2 i_uv0 = vec2(float(bbFrame % bbTileU) * u_bbB.z, float(bbFrame / bbTileU) * u_bbB.w);')
   })
 
   it('emits the corner expansion (all five modes) and the bbWorld position', () => {
@@ -866,9 +880,17 @@ describe('Task 131: BILLBOARD (the instanced particle vertex stage)', () => {
     // Task 181 — the WGSL table is the 4-entry indexed form too.
     expect(w).toContain('array<vec2<f32>, 4>')
     expect(w).not.toContain('array<vec2<f32>, 6>')
-    for (const name of ['i_pos', 'i_vel', 'i_color', 'i_par', 'i_uv0']) {
+    // Task 183 — the three word-attributes + THE UNPACK: bitcast to u32 +
+    // unpack2x16float (the CORE builtin — no enable f16), the derived
+    // i_pos/i_vel/i_color/i_par/i_uv0 as LETS.
+    for (const name of ['i_rec0', 'i_rec1', 'i_rec2']) {
       expect(w).toMatch(new RegExp(`@location\\(\\d\\) ${name} :`))
     }
+    expect(w).toContain('bitcast<u32>(i_rec1.x)')
+    expect(w).toContain('unpack2x16float(bbW4)')
+    expect(w).toContain('let i_vel = vec3<f32>(bbVelXY.x, bbVelXY.y, bbVelZH.x);')
+    expect(w).toContain('let i_par = vec4<f32>(bbVelZH.y, bbSeedF.x * 6.283185307179586, i_rec0.w, bbSeedF.x);')
+    expect(w).toContain('let i_uv0 = vec2<f32>(f32(bbFrame % bbTileU) * params.u_bbB.z, f32(bbFrame / bbTileU) * params.u_bbB.w);')
     expect(w).toContain('out.pos = params.u_mvp * vec4<f32>(bbWorld, 1.0);')
     expect(w).toContain('out.uv = bbUv;')
     expect(w).toContain('out.color = i_color;')
@@ -879,16 +901,16 @@ describe('Task 131: BILLBOARD (the instanced particle vertex stage)', () => {
   it('reflects for BOTH compilers exactly like a drawable material (the binding contract)', () => {
     resetMaterials()
     const mat = materialOf({ features: SPRITE_BB })
-    // WGSL: 5 @location params (the builtin skipped), the uniforms parsed.
+    // WGSL: 3 @location params (the builtin skipped), the uniforms parsed.
     const r = reflectWgsl(mat.wgsl)
-    expect(r.attributes.map(a => a.name)).toEqual(['i_pos', 'i_vel', 'i_color', 'i_par', 'i_uv0'])
-    expect(r.attributes.map(a => a.location)).toEqual([0, 1, 2, 3, 4])
+    expect(r.attributes.map(a => a.name)).toEqual(['i_rec0', 'i_rec1', 'i_rec2'])
+    expect(r.attributes.map(a => a.location)).toEqual([0, 1, 2])
     for (const name of ['u_mvp', 'u_bbA', 'u_bbB', 'u_bbRight', 'u_bbUp', 'u_bbForward', 'u_bbAxis']) {
       expect(r.uniforms.map(u => u.name)).toContain(name)
     }
     // GLSL: the reflection drives the executor's attribute binding.
     const g = reflectGlsl(mat.glsl.vertex, mat.glsl.fragment)
-    expect(g.attributes.map(a => a.name)).toEqual(['i_pos', 'i_vel', 'i_color', 'i_par', 'i_uv0'])
+    expect(g.attributes.map(a => a.name)).toEqual(['i_rec0', 'i_rec1', 'i_rec2'])
     expect(g.uniforms.map(u => u.name)).toContain('u_bbA')
   })
 
@@ -899,8 +921,8 @@ describe('Task 131: BILLBOARD (the instanced particle vertex stage)', () => {
     expect(mat.glsl.fragment).toContain('u_depth')
     expect(mat.glsl.fragment).toContain('ditherA')
     expect(mat.wgsl).toContain('depthTexture')
-    // The instance attributes survived the composition.
-    expect(mat.attributes.map(a => a.name)).toEqual(['i_pos', 'i_vel', 'i_color', 'i_par', 'i_uv0'])
+    // The instance word-attributes survived the composition.
+    expect(mat.attributes.map(a => a.name)).toEqual(['i_rec0', 'i_rec1', 'i_rec2'])
   })
 
   it('compiles through the REAL GL command path (the executor contract)', async () => {
@@ -909,7 +931,10 @@ describe('Task 131: BILLBOARD (the instanced particle vertex stage)', () => {
     const arena = createUniformArena(1 << 16)
     const ctx = createCompileContext(arena, 'codegen')
     const mat = materialOf({ features: SPRITE_BB })
-    const records = new Float32Array(16 * 8)
+    // Task 183 — the PACKED record: 9 words / 36 bytes, three f32
+    // word-attributes at offsets 0/16/32 (the words ride as bit patterns;
+    // the shader bitcasts + unpacks).
+    const records = new Float32Array(9 * 8)
     const command = compileDrawSpec({
       shader: { glsl: mat.glsl },
       pipeline: { blend: { src: 'one', dst: 'one-minus-src-alpha' } },
@@ -923,11 +948,9 @@ describe('Task 131: BILLBOARD (the instanced particle vertex stage)', () => {
         u_bbAxis: [0, 0, 1],
       },
       attributes: {
-        i_pos: { data: records, size: 3, stride: 64, offset: 0, step: 'instance' },
-        i_vel: { data: records, size: 3, stride: 64, offset: 12, step: 'instance' },
-        i_color: { data: records, size: 4, stride: 64, offset: 24, step: 'instance' },
-        i_par: { data: records, size: 4, stride: 64, offset: 40, step: 'instance' },
-        i_uv0: { data: records, size: 2, stride: 64, offset: 56, step: 'instance' },
+        i_rec0: { data: records, size: 4, stride: 36, offset: 0, step: 'instance' },
+        i_rec1: { data: records, size: 4, stride: 36, offset: 16, step: 'instance' },
+        i_rec2: { data: records, size: 1, stride: 36, offset: 32, step: 'instance' },
       },
       count: 6,
       instances: 8,
@@ -937,15 +960,16 @@ describe('Task 131: BILLBOARD (the instanced particle vertex stage)', () => {
       indices: { data: new Uint16Array([0, 1, 2, 0, 2, 3]) },
     }, ctx)
     expect(command.id).toBe(0)
-    // Every record attribute compiled with the instance divisor.
+    // Every record word-attribute compiled with the instance divisor.
     const rich = command as unknown as { attributes: Array<{ location: number; instance: boolean; stride?: number; offset?: number }> }
-    expect(rich.attributes).toHaveLength(5)
+    expect(rich.attributes).toHaveLength(3)
     for (const attr of rich.attributes) {
       expect(attr.instance).toBe(true)
-      expect(attr.stride).toBe(64)
+      expect(attr.stride).toBe(36)
     }
     expect(rich.attributes[0].offset).toBe(0)
-    expect(rich.attributes[4].offset).toBe(56)
+    expect(rich.attributes[1].offset).toBe(16)
+    expect(rich.attributes[2].offset).toBe(32)
   })
 
   it('rejects the meaningless combinations (loud, at assembly)', () => {

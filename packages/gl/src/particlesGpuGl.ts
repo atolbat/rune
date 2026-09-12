@@ -22,9 +22,10 @@
  *      slot i (the WGSL compact + advance, composed);
  *   4. the PBO round-trip — the TF output becomes the new state texture
  *      (texSubImage2DBuffer — zero CPU traffic);
- *   5. pack — ONE TF pass: slot i + the ramp LUT → the 16-float record i.
- *      The records buffer is the draw's instance-attribute source
- *      (bufferId + stride 64 + divisor 1 — the same command path as the
+ *   5. pack — ONE TF pass: slot i + the ramp LUT → the 9-word packed
+ *      record i (Task 183 — the three-dialect f16 contract). The records
+ *      buffer is the draw's instance-attribute source
+ *      (bufferId + stride 36 + divisor 1 — the same command path as the
  *      WebGPU tier's recordsBufferId).
  *
  * THE STATE TEXTURE: rgba32f, W × H flat texel array, 5 texels per
@@ -42,6 +43,9 @@ import {
 } from '@rune/core'
 import type { Particles } from '@rune/particles'
 import {
+  // Task 183 — the packed record's decode (the TF diagnostics read the
+  // packed halves back as their logical fields).
+  f16BitsToF32, INSTANCE_STRIDE,
   gpuSimGlAdvanceGlsl, gpuSimGlPackGlsl, gpuSimGlSortKeysGlsl, gpuSimGlBitonicGlsl, gpuSimGlPackSortedGlsl,
   gpuSimGlEmitGlsl,
   gpuRampLUTTexture,
@@ -170,7 +174,7 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
   //    immutable-leaning allocation path on some ANGLE backends — the exact
   //    class a per-frame dual-use buffer should not ride.
   const stateOut = gpu.createBuffer(new Float32Array(W * H * 4), 'dynamic')
-  const records = gpu.createBuffer(new Float32Array(capacity * 16), 'dynamic')
+  const records = gpu.createBuffer(new Float32Array(capacity * INSTANCE_STRIDE), 'dynamic')
   const mapBuf = gpu.createBuffer(new Float32Array(capacity), 'dynamic')
 
   // ── Task 135 — THE GPU EMISSION (emit:'gpu'): the append pass — the
@@ -304,14 +308,19 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
   //    the draw issued, the framebuffer warm — so a live-driver drop of the
   //    TF write is the remaining suspect; this surfaces it ON the user's
   //    machine instead of a silent blank screen). The scan mirrors the
-  //    forensic probes' degenerate signature: a row of 16 floats is ZERO
-  //    when every float is 0 (the cull sentinel OR a dropped write — told
-  //    apart by how many: the sentinels zero only the off-screen fraction);
-  //    NaN anywhere is garbage, full stop.
+  //    forensic probes' degenerate signature: a packed record row (9
+  //    words) is ZERO when every word is 0 (the cull sentinel OR a
+  //    dropped write — told apart by how many: the sentinels zero only
+  //    the off-screen fraction); NaN anywhere is garbage, full stop.
   const DIAG_AT = 30
   let diagDone = false
   const diag = { checked: false, readable: true, sane: true, atFrame: 0, count: 0, zeroRows: 0, nan: 0, halfMax: 0, caMax: 0 }
-  const diagScratch = new Float32Array(64) // 4 record rows
+  // Task 183 — 7 packed record rows (9 words each; the words ride as f32
+  // bit patterns — the half/ca fields decode from their packed halves).
+  const DIAG_ROWS = 7
+  const diagScratch = new Float32Array(DIAG_ROWS * INSTANCE_STRIDE)
+  const diagF32 = new Float32Array(1)
+  const diagU32 = new Uint32Array(diagF32.buffer)
 
   function runDiagnostics(frame: number, count: number): void {
     diagDone = true
@@ -325,17 +334,22 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
     let nan = 0
     let halfMax = 0
     let caMax = 0
-    const rows = Math.floor(diagScratch.length / 16)
+    const rows = Math.floor(diagScratch.length / INSTANCE_STRIDE)
     for (let i = 0; i < rows; i++) {
-      const b = i * 16
+      const b = i * INSTANCE_STRIDE
       let allZero = true
-      for (let k = 0; k < 16; k++) {
+      for (let k = 0; k < INSTANCE_STRIDE; k++) {
         const v = diagScratch[b + k]
         if (v !== 0) { allZero = false; if (Number.isNaN(v)) nan++ }
       }
       if (allZero) { zeroRows++; continue }
-      const half = Math.abs(diagScratch[b + 10])
-      const ca = Math.abs(diagScratch[b + 9])
+      // the packed fields: halfExtent = word 5's high half, alpha = word
+      // 7's high half (the clamp contract keeps the packed words' f32
+      // view finite — a NaN read here is a poisoned write, full stop).
+      diagF32[0] = diagScratch[b + 5]
+      const half = f16BitsToF32(diagU32[0] >>> 16)
+      diagF32[0] = diagScratch[b + 7]
+      const ca = f16BitsToF32(diagU32[0] >>> 16)
       if (half > halfMax) halfMax = half
       if (ca > caMax) caMax = ca
     }
@@ -345,10 +359,10 @@ export function createGpuParticlesTf(facade: Particles, gpu: TfComputeTier): Gpu
     diag.caMax = caMax
     // THE VERDICT: live particles on the ledger but every sampled row
     // zero/NaN — the records the DRAW reads are degenerate (the sentinels
-    // zero only the off-screen fraction; 4 all-zero rows of 4 at a count
-    // ≥ 64 rows means the write never landed or was poisoned).
+    // zero only the off-screen fraction; all-zero rows at a count
+    // ≥ rows × words means the write never landed or was poisoned).
     const rowsSeen = rows - zeroRows
-    diag.sane = !(nan > 0 || (count >= rows * 16 && rowsSeen === 0))
+    diag.sane = !(nan > 0 || (count >= rows * INSTANCE_STRIDE && rowsSeen === 0))
     if (!diag.sane) {
       console.warn(
         `[rune/particles] GPGPU TF diagnostics: the records buffer read back DEGENERATE at frame ${frame} (count ${count}, zeroRows ${zeroRows}/${rows}, nan ${nan}) — the transform-feedback write was dropped or poisoned on this driver; the consumer should step down one rung at a time, pixel-confirming each (the readback itself can be the liar): a conservative reconfiguration of this tier (emit:'cpu', cull off) is worth one live re-verdict before the CPU-tier drop — the reporting Android-Chrome class drops only the full pipeline's passes and renders the minimal tier SANE at the full capacity (Task 149's live minimal-config proof); the terminal safe harbor is the CPU tier (sim:'cpu' — per-frame uploads, no transform feedback, the one configuration every driver renders).`,

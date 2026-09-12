@@ -9,6 +9,8 @@ import {
   sampleRamp,
   INSTANCE_STRIDE,
   INSTANCE_LAYOUT,
+  decodeInstanceRecord,
+  type DecodedRecord,
   SOUP_STRIDE,
   CONSTANT_RAMP,
   type Ramp,
@@ -27,17 +29,20 @@ import { expandQuadSoup } from './task180.test.ts'
  * Task 131 — the INSTANCE PATH parity suite.
  *
  * The contract under test (see instances.ts):
- *   1. COUNT PARITY — packInstances() returns exactly fillBillboards()/6
+ *   1. COUNT PARITY — packInstances() returns exactly fillBillboards()/4
  *      for the same options (the zero-size skip, the ramp, the atlas).
- *   2. RECORD PARITY — the 16 floats match the reference semantics
- *      (position, velocity, ramp-resolved color, half extent, the spin
- *      phase, the tile origin).
+ *   2. RECORD PARITY (Task 183 — the PACKED tier) — the 9 words decode to
+ *      the reference semantics: pos/age NATIVE-exact; vel/color/half/seed
+ *      within one f16 rounding (the three-dialect quantization contract);
+ *      the atlas frame EXACT (the u16 index); the spin phase derived.
  *   3. THE SHADER TWIN — expandInstances(), the JS reference of the
- *      BILLBOARD material's vertex stage (the exact math the GLSL/WGSL
- *      port must reproduce), rebuilds fillBillboards' vertex soup from
- *      the packed records. Bit-exact in every mode (the twin shares the
- *      reference's Math.cos/sin calls — the GPU's transcendentals differ
- *      sub-ULP, the twin's do not).
+ *      BILLBOARD material's vertex stage (the unpack preamble + the exact
+ *      math the GLSL/WGSL port must reproduce), rebuilds fillBillboards'
+ *      vertex soup from the packed records. Tolerance parity in every
+ *      mode (Task 183: the record's f16 quantization bounds the drift —
+ *      pos EXACT, vel/color/half/seed within one f16 rounding, the uv
+ *      EXACT; the twin shares the reference's Math.cos/sin calls — the
+ *      GPU's transcendentals differ sub-ULP, the twin's do not).
  *   4. The facade integration — render.draw:'instance' routes view() to
  *      the packer, the view carries the instance layout, and the memory
  *      contract holds (one allocation, reused across frames).
@@ -109,11 +114,16 @@ export interface TwinUniforms {
   forward: readonly number[]
 }
 
+/** The decoded-record scratch — the twin's read side (the same decode the
+ *  shader's unpack preamble performs; reused per record, zero allocation
+ *  in the walk). */
+const DEC: DecodedRecord = { pos: [0, 0, 0], vel: [0, 0, 0], color: [0, 0, 0, 0], par: [0, 0, 0, 0], uv0: [0, 0], frame: 0 }
+
 /** Expands the packed instance records into a 9-float vertex soup — the
  *  reference semantics of the BILLBOARD feature's vertex stage. Written to
  *  be ported VERBATIM to GLSL/WGSL (same operations, same order): the
  *  materials' port must reproduce this, and this must reproduce
- *  fillBillboards (pinned below, bit-exact). */
+ *  fillBillboards (pinned below, within the Task-183 f16 tolerance). */
 function expandInstances(
   records: Float32Array,
   recordCount: number,
@@ -146,15 +156,19 @@ function expandInstances(
   const uS = 1 / tileU, vS = 1 / tileV
   let at = 0
   for (let n = 0; n < recordCount; n++) {
-    const r = n * INSTANCE_STRIDE
-    const px = records[r], py = records[r + 1], pz = records[r + 2]
-    const vx = records[r + 3], vy = records[r + 4], vz = records[r + 5]
-    const cr = records[r + 6], cg = records[r + 7], cb = records[r + 8], ca = records[r + 9]
-    const half = records[r + 10]
-    const angle0 = records[r + 11]
-    const age = records[r + 12]
-    const seed = records[r + 13]
-    const u0 = records[r + 14], v0 = records[r + 15]
+    // Task 183 — THE UNPACK (the shader preamble's JS twin): the packed
+    // words → the logical fields. decodeInstanceRecord mirrors the
+    // GLSL/WGSL decode exactly (native pos/age, the f16 pairs, the u16
+    // frame → the tile origin, the derived seed·τ phase).
+    decodeInstanceRecord(records, n, u.tiles, DEC)
+    const px = DEC.pos[0], py = DEC.pos[1], pz = DEC.pos[2]
+    const vx = DEC.vel[0], vy = DEC.vel[1], vz = DEC.vel[2]
+    const cr = DEC.color[0], cg = DEC.color[1], cb = DEC.color[2], ca = DEC.color[3]
+    const half = DEC.par[0]
+    const angle0 = DEC.par[1]
+    const age = DEC.par[2]
+    const seed = DEC.par[3]
+    const u0 = DEC.uv0[0], v0 = DEC.uv0[1]
 
     for (let c = 0; c < 6; c++) {
       const a = CORNERS[c][0], b = CORNERS[c][1]
@@ -252,7 +266,7 @@ describe('Task 131 — packInstances (the record packer)', () => {
     }
   })
 
-  it('writes the reference record semantics (pos/vel/color/par/uv0)', () => {
+  it('writes the reference record semantics (the packed words decode to pos/vel/color/par/frame)', () => {
     const system = makeSystem(64)
     const records = new Float32Array(64 * INSTANCE_STRIDE)
     const n = packInstances(system, records, { ramp: RAMP, tiles: [2, 2] })
@@ -261,27 +275,37 @@ describe('Task 131 — packInstances (the record packer)', () => {
     const s = new Float32Array(6)
     // a sampleRamp call per particle — the SAME sampler the reference uses
     for (let i = 0; i < 4; i++) {
-      const r = i * INSTANCE_STRIDE
       const t = f.life[i] > 0 ? f.age[i] / f.life[i] : 0
       sampleRamp(RAMP, t, s)
-      expect(records[r]).toBe(f.px[i])
-      expect(records[r + 1]).toBe(f.py[i])
-      expect(records[r + 2]).toBe(f.pz[i])
-      expect(records[r + 3]).toBe(f.vx[i])
-      expect(records[r + 4]).toBe(f.vy[i])
-      expect(records[r + 5]).toBe(f.vz[i])
-      expect(records[r + 6]).toBeCloseTo(f.cr[i] * s[1], 6)
-      expect(records[r + 7]).toBeCloseTo(f.cg[i] * s[2], 6)
-      expect(records[r + 8]).toBeCloseTo(f.cb[i] * s[3], 6)
-      expect(records[r + 9]).toBeCloseTo(f.ca[i] * s[4], 6)
-      expect(records[r + 10]).toBeCloseTo(f.size[i] * s[0] * 0.5, 6)
-      expect(records[r + 11]).toBeCloseTo(f.seed[i] * 6.283185307179586, 6)
-      expect(records[r + 12]).toBe(f.age[i])
-      expect(records[r + 13]).toBe(f.seed[i])
-      // the tile origin: frame = floor(rampFrame) (no jitter here), 2×2 sheet
+      decodeInstanceRecord(records, i, [2, 2], DEC)
+      // NATIVE fields — bit-exact
+      expect(DEC.pos[0]).toBe(f.px[i])
+      expect(DEC.pos[1]).toBe(f.py[i])
+      expect(DEC.pos[2]).toBe(f.pz[i])
+      expect(DEC.par[2]).toBe(f.age[i])
+      // QUANTIZED fields — within one f16 rounding (2^-11 relative, the
+      // three-dialect contract; + the f32 product rounding)
+      const f16close = (got: number, want: number) => {
+        const tol = Math.max(1e-6, Math.abs(want) * 6.2e-4)
+        expect(Math.abs(got - want)).toBeLessThanOrEqual(tol)
+      }
+      f16close(DEC.vel[0], f.vx[i])
+      f16close(DEC.vel[1], f.vy[i])
+      f16close(DEC.vel[2], f.vz[i])
+      f16close(DEC.color[0], f.cr[i] * s[1])
+      f16close(DEC.color[1], f.cg[i] * s[2])
+      f16close(DEC.color[2], f.cb[i] * s[3])
+      f16close(DEC.color[3], f.ca[i] * s[4])
+      f16close(DEC.par[0], f.size[i] * s[0] * 0.5)
+      f16close(DEC.par[3], f.seed[i])
+      // the derived phase: f16(seed)·τ — bounded by the seed's f16 error
+      f16close(DEC.par[1], f.seed[i] * 6.283185307179586)
+      // the atlas frame — EXACT (the u16 index; no jitter here, 2×2 sheet)
       const frame = Math.max(0, Math.min(3, Math.floor(s[5])))
-      expect(records[r + 14]).toBe((frame % 2) / 2)
-      expect(records[r + 15]).toBe(Math.floor(frame / 2) / 2)
+      expect(DEC.frame).toBe(frame)
+      // the derived tile origin — exact from the frame
+      expect(DEC.uv0[0]).toBe((frame % 2) / 2)
+      expect(DEC.uv0[1]).toBe(Math.floor(frame / 2) / 2)
     }
   })
 
@@ -320,7 +344,7 @@ describe('Task 131 — the shader twin vs fillBillboards (bit parity)', () => {
   ]
 
   for (const c of cases) {
-    it(`reproduces fillBillboards bit-exactly: ${c.name}`, () => {
+    it(`reproduces fillBillboards within the Task-183 f16 tolerance: ${c.name}`, () => {
       const n = packInstances(system, records, { ramp: RAMP, tiles: c.opts.tiles, frameJitter: c.opts.frameJitter })
       const refCount = fillBillboards(system, BASIS, ref, { ramp: RAMP, ...c.opts })
       expect(n).toBe(Math.round(refCount / 4)) // Task 180: 4 unique corners per quad
@@ -330,21 +354,47 @@ describe('Task 131 — the shader twin vs fillBillboards (bit parity)', () => {
       // BILLBOARD shader) writes the six-vert form directly.
       const six = expandQuadSoup(ref, refCount)
       expect(twinCount).toBe(six.length / SOUP_STRIDE)
-      let worst = 0
-      for (let at = 0; at < six.length; at++) {
-        const d = Math.abs(twin[at] - six[at])
-        if (d > worst) worst = d
+      // THE TASK-183 TOLERANCE WALK — the twin (like the shader) consumes
+      // the f16-PACKED records, the reference computes f64 end-to-end. The
+      // quantized fields bound the drift: half/vel/color/seed within one
+      // f16 rounding (rel ≤ 2^-11 ≈ 4.9e-4); the derived spin phase
+      // ≤ seedErr·τ ≈ 1.5e-3 rad; the axis/velocity directions wobble by
+      // the same relative order. The vertex positions inherit those errors
+      // SCALED BY THE SPRITE EXTENT (and the stretched tail); the uv is
+      // EXACT (the u16 frame — the same f64 division the reference makes).
+      // A SEMANTIC drift (a wrong corner, a wrong axis, a swapped winding)
+      // is the extent's own magnitude — orders above these bounds.
+      let maxHalf = 0
+      for (let r = 0; r < n; r++) {
+        decodeInstanceRecord(records, r, c.twin.tiles, DEC)
+        if (DEC.par[0] > maxHalf) maxHalf = DEC.par[0]
       }
-      // The quantization contract: the twin (like the shader) consumes the
-      // f32-PACKED records, the reference computes in f64 end-to-end — the
-      // record quantization alone costs ~1 f32 ULP (2.4e-7 at |v|≈2). A
-      // SEMANTIC drift (a wrong corner, a wrong axis, a swapped winding) is
-      // orders of magnitude larger; 1e-6 still catches any of those.
-      expect(worst).toBeLessThanOrEqual(1e-6)
+      const posTol = 1e-3 + 0.025 * maxHalf
+      let worstPos = 0
+      let worstUv = 0
+      let worstCol = 0
+      for (let at = 0; at < six.length; at += SOUP_STRIDE) {
+        for (let k = 0; k < 9; k++) {
+          const d = Math.abs(twin[at + k] - six[at + k])
+          if (k < 3) {
+            if (d > worstPos) worstPos = d
+          } else if (k < 5) {
+            if (d > worstUv) worstUv = d
+          } else {
+            // color: one f16 rounding relative to the reference value
+            const tol = 6.2e-4 * Math.max(1e-3, Math.abs(six[at + k])) + 1e-6
+            expect(d).toBeLessThanOrEqual(tol)
+            if (d > worstCol) worstCol = d
+          }
+        }
+      }
+      expect(worstPos).toBeLessThanOrEqual(posTol)
+      expect(worstUv).toBeLessThanOrEqual(1e-6)
+      expect(worstCol).toBeLessThanOrEqual(1e-3)
     })
   }
 
-  it('the atlas tile origins round-trip through the twin (uv parity)', () => {
+  it('the atlas tile origins round-trip through the twin (uv parity — EXACT: the u16 frame)', () => {
     const n = packInstances(system, records, { ramp: RAMP, tiles: [2, 2], frameJitter: 4 })
     const refCount = fillBillboards(system, BASIS, ref, { ramp: RAMP, tiles: [2, 2], frameJitter: 4 })
     expandInstances(records, n, { mode: 'camera', spin: 0, speedFactor: 0, lengthFactor: 1, spin3d: 0, tiles: [2, 2], axis: 'random', right: BASIS.right, up: BASIS.up, forward: BASIS.forward! }, twin)
@@ -407,7 +457,7 @@ describe('Task 131 — the facade integration (draw: instance)', () => {
     expect(v.indices).toBeInstanceOf(Uint16Array)
   })
 
-  it('the allocation identity holds at capacity (16 floats/particle)', () => {
+  it('the allocation identity holds at capacity (9 words/particle — Task 183)', () => {
     const ps = createParticles({ capacity: 128, spawner: SPAWNER, render: { kind: 'billboard', draw: 'instance' } })
     ps.burst(128)
     const v = ps.view(BASIS)

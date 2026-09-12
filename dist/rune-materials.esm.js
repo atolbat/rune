@@ -32,6 +32,21 @@ var OUTPUT_DITHER = 1 << 30;
 var PBR_ENV = 1 << 29;
 var BILLBOARD = 1 << 31;
 var BB_VERT_GLSL = [
+  "#define BB_H(h) uintBitsToFloat((((h) & 0x8000u) << 16u) | (((((h) >> 10u) & 0x1fu) == 0u) ? 0u : ((((((h) >> 10u) & 0x1fu) + 112u) << 23u) | (((h) & 0x3ffu) << 13u))))",
+  "uint bbW4 = floatBitsToUint(i_rec1.x); // vel.xy",
+  "uint bbW5 = floatBitsToUint(i_rec1.y); // vel.z (lo) | halfExtent (hi)",
+  "uint bbW6 = floatBitsToUint(i_rec1.z); // color.rg",
+  "uint bbW7 = floatBitsToUint(i_rec1.w); // color.ba",
+  "uint bbW8 = floatBitsToUint(i_rec2);   // seed (lo, f16) | frame (hi, u16)",
+  "vec3 i_pos = i_rec0.xyz;",
+  "vec3 i_vel = vec3(BB_H(bbW4), BB_H(bbW4 >> 16u), BB_H(bbW5));",
+  "vec4 i_color = vec4(BB_H(bbW6), BB_H(bbW6 >> 16u), BB_H(bbW7), BB_H(bbW7 >> 16u));",
+  "float bbHalfE = BB_H(bbW5 >> 16u);",
+  "float bbSeed = BB_H(bbW8);",
+  "vec4 i_par = vec4(bbHalfE, bbSeed * 6.283185307179586, i_rec0.w, bbSeed);",
+  "uint bbTileU = uint(1.0 / u_bbB.z + 0.5);",
+  "uint bbFrame = bbW8 >> 16u;",
+  "vec2 i_uv0 = vec2(float(bbFrame % bbTileU) * u_bbB.z, float(bbFrame / bbTileU) * u_bbB.w);",
   "const vec2 BB_CORNERS[4] = vec2[4](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, 1.0));",
   "vec2 bbCu = BB_CORNERS[gl_VertexID];",
   "float bbA = bbCu.x;",
@@ -111,6 +126,23 @@ var BB_VERT_GLSL = [
   "}"
 ];
 var BB_VERT_WGSL = [
+  "let bbW4 = bitcast<u32>(i_rec1.x); // vel.xy",
+  "let bbW5 = bitcast<u32>(i_rec1.y); // vel.z (lo) | halfExtent (hi)",
+  "let bbW6 = bitcast<u32>(i_rec1.z); // color.rg",
+  "let bbW7 = bitcast<u32>(i_rec1.w); // color.ba",
+  "let bbW8 = bitcast<u32>(i_rec2);   // seed (lo, f16) | frame (hi, u16)",
+  "let i_pos = i_rec0.xyz;",
+  "let bbVelXY = unpack2x16float(bbW4);",
+  "let bbVelZH = unpack2x16float(bbW5);",
+  "let i_vel = vec3<f32>(bbVelXY.x, bbVelXY.y, bbVelZH.x);",
+  "let bbColRG = unpack2x16float(bbW6);",
+  "let bbColBA = unpack2x16float(bbW7);",
+  "let i_color = vec4<f32>(bbColRG, bbColBA);",
+  "let bbSeedF = unpack2x16float(bbW8);",
+  "let i_par = vec4<f32>(bbVelZH.y, bbSeedF.x * 6.283185307179586, i_rec0.w, bbSeedF.x);",
+  "let bbTileU = u32(1.0 / params.u_bbB.z + 0.5);",
+  "let bbFrame = bbW8 >> 16u;",
+  "let i_uv0 = vec2<f32>(f32(bbFrame % bbTileU) * params.u_bbB.z, f32(bbFrame / bbTileU) * params.u_bbB.w);",
   "var bbCorners = array<vec2<f32>, 4>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0));",
   "let bbCu = bbCorners[vi];",
   "let bbA = bbCu.x;",
@@ -824,11 +856,9 @@ var CATALOG = [
     bit: BILLBOARD,
     vert: (_ctx) => ({
       attrs: [
-        { name: "i_pos", glslType: "vec3", wgslType: "vec3<f32>", instance: true },
-        { name: "i_vel", glslType: "vec3", wgslType: "vec3<f32>", instance: true },
-        { name: "i_color", glslType: "vec4", wgslType: "vec4<f32>", instance: true },
-        { name: "i_par", glslType: "vec4", wgslType: "vec4<f32>", instance: true },
-        { name: "i_uv0", glslType: "vec2", wgslType: "vec2<f32>", instance: true }
+        { name: "i_rec0", glslType: "vec4", wgslType: "vec4<f32>", instance: true },
+        { name: "i_rec1", glslType: "vec4", wgslType: "vec4<f32>", instance: true },
+        { name: "i_rec2", glslType: "float", wgslType: "f32", instance: true }
       ],
       uniforms: [
         { name: "u_bbA", glsl: "uniform vec4 u_bbA;", wgsl: "u_bbA : vec4<f32>," },

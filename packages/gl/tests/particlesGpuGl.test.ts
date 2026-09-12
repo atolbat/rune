@@ -69,20 +69,37 @@ describe('Task 132 — the GLSL generation (gpuSimGl)', () => {
     expect(iNoise).toBeGreaterThan(iTurb)
   })
 
-  test('pack: gl_VertexID addresses the element, the ramp LUT walk, the record rows', () => {
+  test('pack: gl_VertexID addresses the element, the ramp LUT walk, the packed record rows', () => {
     const src = gpuSimGlPackGlsl()
     expect(src.startsWith('#version 300 es\n')).toBe(true)
     expect(src).toContain('int i = gl_VertexID;')
     for (const u of GPU_GL_PACK_UNIFORMS) {
       expect(src).toContain(`uniform float ${u.name};`)
     }
-    for (const out of ['v_r0', 'v_r1', 'v_r2', 'v_r3']) {
+    // Task 183 — THE PACKED OUTPUTS: two vec4 rows + the scalar seed|frame
+    // word (interleaved = 9 words / 36 bytes — INSTANCE_LAYOUT).
+    for (const out of ['v_r0', 'v_r1']) {
       expect(src).toContain(`out vec4 ${out};`)
     }
+    expect(src).toContain('out float v_r8;')
     expect(/\bfloat half\b/.test(src)).toBe(false)
-    // the record contract: the angle0 = seed·tau, the tile math
-    expect(src).toContain('seed * 6.283185307179586')
-    expect(src).toContain('mod(fr, u_tileU) / u_tileU')
+    // Task 183 — THE F16 PACKER (the three-dialect contract: the JS packer
+    // and the WGSL q1+pack2x16float produce the identical bits): the
+    // clamp / flush / RNE shape.
+    expect(src).toContain('uint bbPackHalf(float v)')
+    expect(src).toContain('clamp(v, -65504.0, 65504.0)')
+    expect(src).toContain('(f & 0x7f800000u) <= 0x38000000u')
+    expect(src).toContain('+ 0x0fffu + (((f & 0x7fffffu) >> 13u) & 1u)')
+    // the packed record writes: the native rows + the pair words + the
+    // u16 frame (the tile ORIGIN is derived shader-side — the old
+    // seed·τ / mod-math is GONE from the pack).
+    expect(src).toContain('v_r0 = vec4(s0.x, s0.y, s0.z, age);')
+    expect(src).toContain('uintBitsToFloat(uvec4(')
+    expect(src).toContain('bbPack2(s0.w, s1.x)')
+    expect(src).toContain('bbPack2(s1.y, halfExtent)')
+    expect(src).toContain('bbPack2(seed, 0.0) | (uint(fr) << 16u)')
+    expect(src).not.toContain('seed * 6.283185307179586')
+    expect(src).not.toContain('mod(fr, u_tileU)')
   })
 
   test('the ramp LUT texture: 8 floats per point (2 texels), the caps', () => {
@@ -194,7 +211,7 @@ describe('Task 132 — the TF orchestrator (the recording sequence)', () => {
     for (let i = 1; i < order.length; i++) expect(order[i]).toBeGreaterThan(order[i - 1])
   })
 
-  it('the records buffer is the draw-facing contract (stride 64 = INSTANCE_STRIDE)', () => {
+  it('the records buffer is the draw-facing contract (stride 36 = INSTANCE_STRIDE × 4 — Task 183)', () => {
     const { gl } = createRecordingGL()
     const facade = createParticles({
       capacity: 4,
@@ -203,8 +220,10 @@ describe('Task 132 — the TF orchestrator (the recording sequence)', () => {
     })
     const backend = createGpuParticlesTf(facade, createTfTier(gl))
     expect(backend.recordsBufferId).toBeGreaterThan(0)
-    // the record contract: 16 floats — the BILLBOARD material's instance layout
-    expect(INSTANCE_STRIDE).toBe(16)
+    // the record contract: 9 words / 36 bytes — the BILLBOARD material's
+    // packed instance layout (three f32 word-attributes).
+    expect(INSTANCE_STRIDE).toBe(9)
+    expect(INSTANCE_STRIDE * 4).toBe(36)
   })
 
   it('dispose is clean and the handoff detaches', () => {

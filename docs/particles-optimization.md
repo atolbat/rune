@@ -19,7 +19,7 @@ phases describe what moved where, and what remains.
 |---|---|---|---|
 | **advance + bake** (100k live) | 10.5 ms | **5.3 ms** (advance 1.8 + pack 3.5) | the CPU frame of a draw:'instance' layer |
 | └─ **bake only** (the quad-corner indexed expansion — Task 180) | ~7.0 ms (was 8.7 as the 6-vertex stream; 13.7 MiB, was 20.6) | — | the soup draws 4 unique corners + the shared index pattern; the pack path still wins on bytes |
-| └─ **pack only** (Task 131: the 16-float records) | — | **3.6 ms** | ~2.4 ms with a constant ramp |
+| └─ **pack only** (Task 131/183: the packed records) | — | **3.6 ms** | ~2.4 ms with a constant ramp |
 | the per-frame traffic | 20.6 MiB | **6.1 MiB** | 3.4× less |
 | forces-heavy (100k) | 19.6 ms | 19.6 ms (CPU) / ~0 CPU (GPU tier) | the GPU tier runs them as compute |
 | emission (100k one-shot) | 21.5 ms | 21.5 ms | CPU-side in both tiers |
@@ -35,7 +35,7 @@ CPU→GPU particle traffic is the emit block + the swap list only.
 
 `render: { kind: 'billboard', draw: 'instance' }` — one quad drawn N times:
 
-- `instances.ts` — `packInstances()`: ONE 16-float record per particle
+- `instances.ts` — `packInstances()`: ONE packed record per particle (Task 183: 9 words / 36 bytes — pos/age native, vel/color/half/seed f16, the atlas frame u16)
   (pos, vel, the ramp-resolved color, the half-extent/spin/seed/age
   parameters, the atlas tile origin). The count parity with
   `fillBillboards()/6` is pinned by tests; the JS twin of the shader math
@@ -64,7 +64,7 @@ CPU→GPU particle traffic is the emit block + the swap list only.
 - **The passes** (`gpuSim.ts`'s WGSL, dispatched by `@rune/gl`'s
   `createGpuParticles` between `advance()` and the draw): `compact` (the
   swap replay) → `advance` (gravity/drag/turbulence/attract/noise/limit +
-  the integration + age + the wrap) → `pack` (the same 16-float instance
+  the integration + age + the wrap) → `pack` (the same 9-word packed instance
   records, GPU-side — the render binds the buffer directly, ZERO
   per-frame CPU→GPU particle traffic).
 - **The forces supported**: gravity, drag, turbulence, attract (static),
@@ -103,7 +103,7 @@ code is identical for both backends; the tier is the library's business.
   final slot i reads the pre-state of particle `map[i]` through the
   texture, integrates it, writes slot i; the WGSL compact + advance
   composed) → the PBO round-trip → `pack` (vertex i = `gl_VertexID` — the
-  same 16-float instance records, bound directly as the draw's instance
+  same 9-word packed instance records, bound directly as the draw's instance
   attributes through `bufferId`).
 - **The map**: the CPU compaction's provenance — the swap list replayed
   on indices exactly as the WGSL compact replays it on state; `map[j]` =
@@ -2965,3 +2965,83 @@ verts); live gates re-run on the built dist: task167 PASS, task168 PASS,
 task169 **pixel parity IDENTICAL** (e71fb821e69f), task174 **pixel parity
 IDENTICAL** (98cf6b6016ad), task175 PASS, task134 (the WG sort network)
 PASS. Cache-busts `?v=180` (8 sites).
+
+---
+
+## Task 183 — THE PACKED RECORD (the f16/u16 tier)
+
+The instance record shrank **64 → 36 bytes** (16 f32 words → 9): the
+upload, the painter's staging traffic, and both GPU tiers' record stores
+all drop **−43.75%** (3.6 MiB per 100k instances, was 6.4; the
+`PainterScratch` records buffer likewise).
+
+**The layout** (9 words, three f32-attribute slots — `INSTANCE_LAYOUT`):
+
+```
+word 0..2  pos.xyz   f32 NATIVE  (the vertex placement never quantizes)
+word 3     age       f32 NATIVE  (the spin advance must not walk)
+word 4     vel.xy    2× f16      (the stretched axis: direction-tolerant)
+word 5     vel.z (lo) | halfExtent (hi)
+word 6     color.rg  2× f16
+word 7     color.ba  2× f16      (tint × ramp — the most tolerant fields)
+word 8     seed (f16, lo) | atlas frame (u16, hi)
+```
+
+DERIVED shader-side, zero bytes: the spin phase `angle0 = seed·τ` (the
+old word 11 was a pure function of the seed that already rode word 8) and
+the tile origin `u0/v0 = (frame%tileU)/tileU, floor(frame/tileU)/tileV`
+— EXACT from the u16 frame (an f16 uv would bleed tile seams at 2^-11).
+
+**THE F16 QUANTIZATION CONTRACT** — all three dialects (this JS packer,
+the WGSL pack kernel's `q1` guards + `pack2x16float`, the GLSL TF twin's
+`bbPackHalf`) produce IDENTICAL bits:
+
+- `NaN → +0`;
+- `|v| > 65504 → ±65504` (CLAMP, never ±∞ — a clamped velocity is a
+  well-defined stretched quad, ∞ is a NaN soup through the normalize);
+- `|v| < 2^-14 → ±0` (FLUSH — no subnormal halves ever stored; the decode
+  is branch-exact in every dialect. NOTE the boundary: the f32 exponent
+  field ≤ 112 — e32 = 112 is the [2^-15, 2^-14) band, subnormal
+  territory too; a `<` comparison there was the one real bug this task's
+  tests caught in draft);
+- otherwise IEEE round-to-nearest-even.
+
+**THE WORD TRANSPORT**: the record buffer stays a `Float32Array`
+end-to-end (the facade's soup, the SAB feeds, the TF buffers) — the
+packed words ride as f32 BIT PATTERNS. Both backends bind them as plain
+f32 attributes (`size` 4/4/1 at offsets 0/16/32, stride 36 — the
+gl/webgpu plumbing is UNTOUCHED, both are size-generic) and the shader
+bitcasts to u32: vertex fetch moves raw bits, no float op ever touches
+them. The material's unpack preamble (the FIRST lines of
+`BB_VERT_GLSL`/`BB_VERT_WGSL`) decodes the halves (GLSL: the `BB_H`
+macro — a `#define` inside `main`, legal per the ES 3.00 preprocessor;
+WGSL: the CORE builtin `unpack2x16float`, no `enable f16` needed) and
+derives the `i_pos/i_vel/i_color/i_par/i_uv0` LOCALS — the
+corner-expansion body below reads the same names as the 16-float era.
+
+**The GPU tiers**: the WGSL records binding became `array<u32>`
+(RSTRIDE 9, both families — sim + sort); the GL TF outputs became
+`v_r0/v_r1` (vec4s) + `v_r8` (a scalar — interleaved TF stride 36); the
+records buffers are 9×capacity words; the TF one-shot diagnostics decode
+the packed halves (half = word 5 hi, alpha = word 7 hi).
+
+**The parity gates** moved from bit-exact to TOLERANCE (the f16
+quantization is a real, documented semantic change — the audit's
+"ломает бит-парити-гейты"): the soup-vs-instance twin now bounds pos by
+the extent-scaled quantization error, color by one f16 rounding, uv
+EXACT; `packInstancesPainter ≡ packInstances(…, order)` stays
+BYTE-identical (both bakers quantize identically). The WG-side gate
+(`scripts/task183-wgsl-sim.mjs`) measured the GPU-vs-CPU pack on real
+WebGPU: **colors/half/seed BIT-IDENTICAL** (the three-dialect contract
+holds on hardware), velocities within one f16 ulp (the 1-ulp state
+drift straddling a rounding boundary), frames EXACT, zero NaN.
+
+Gates: 1880/1880 (+16: the quantizer contract, the RNE tie/carry
+vectors, the flush boundary band, the GLSL-port bit battery, the layout
+decode, the sheet cap, the pathological fields); tsc 0; lint 0 err/362
+warn (baseline); build; `demo:smoke` 24/24 all-instance-mode GPU health
+clean (the GLSL `#define`-in-main compiles on real ANGLE); the raw WG
+pixel gate (`scripts/task183-wgsl-raw.mjs`) PASS (the unpack preamble +
+the indexed draw on real WebGPU); live gates: task167/168/175 PASS,
+task169/174 pixel parity IDENTICAL to the pre-183 checksums; VLM eyeball
+×3 PASS (the f16 shift invisible). Cache-busts `?v=183` (8 sites).

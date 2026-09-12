@@ -26,7 +26,7 @@
  *        the CPU's own order);
  *     4. dispatch `advance` (ceil(count/64) workgroups — the force walk,
  *        the integration, age, the wrap);
- *     5. dispatch `pack` (the SAME 16-float instance records the CPU
+ *     5. dispatch `pack` (the SAME 9-word packed instance records the CPU
  *        packer writes — the render binds the buffer as the BILLBOARD
  *        material's instance source through `recordsBufferId`).
  *
@@ -135,7 +135,7 @@ function createGpuParticlesCompute(facade: Particles, gpu: SsboComputeTier): Gpu
   //    ramp LUT — all tracked (the tier's dispose() deletes them)
   const stateId = gpu.createBuffer(GPU_STATE_STRIDE * capacity * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST)
   const swapsId = gpu.createBuffer(2 * capacity * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST)
-  const recordsId = gpu.createBuffer(16 * capacity * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.VERTEX)
+  const recordsId = gpu.createBuffer(9 * capacity * 4, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.VERTEX)
   const lut = gpuRampLUT(facade.ramp.points)
   const rampId = gpu.createBuffer(lut.byteLength, GPU_BUFFER_USAGE.STORAGE | GPU_BUFFER_USAGE.COPY_DST)
   gpu.writeBuffer(rampId, lut)

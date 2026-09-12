@@ -20,12 +20,12 @@
 // restore wire — the context-loss recovery — rides the Task-167
 // sync-point pass; the dist changed, the mark moves), the untouched bundles
 // keep their Task 149 marks.
-import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=182'
+import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=183'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER, BILLBOARD,
 } from '../../dist/rune-materials.esm.js?v=150'
-import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=182'
+import { createParticles, createRamp, createSpawner, createGrassField } from '../../dist/rune-particles.esm.js?v=183'
 
 /* ─── the demo registry (the carousel order) ────────────────────────────── */
 
@@ -1033,15 +1033,18 @@ function buildLayerCommand(layer) {
  *  every instance — the index stream restarts per instance). */
 const INSTANCE_QUAD_INDICES = new Uint16Array([0, 1, 2, 0, 2, 3])
 
-/** Task 131 — the INSTANCED layer command: the facade's 16-float records as
- *  five instance-step attributes + the BILLBOARD uniforms (the mode, the
- *  spin, the stretch factors, the tile scales, the camera basis). Task 181 —
- *  the draw is ONE indexed instanced call: the [0,1,2,0,2,3] pattern × the
- *  live instance count, the corner expansion on the GPU over the table's
- *  four unique corners (the packer replaced the CPU bake; the index tier
- *  replaced the 6-vertex inline walk). */
+/** Task 131 — the INSTANCED layer command: the facade's packed records
+ *  (Task 183 — 9 words / 36 bytes) as THREE instance-step word-attributes
+ *  + the BILLBOARD uniforms (the mode, the spin, the stretch factors, the
+ *  tile scales, the camera basis). Task 181 — the draw is ONE indexed
+ *  instanced call: the [0,1,2,0,2,3] pattern × the live instance count,
+ *  the corner expansion on the GPU over the table's four unique corners
+ *  (the packer replaced the CPU bake; the index tier replaced the
+ *  6-vertex inline walk). Task 183 — the words ride as plain f32
+ *  attributes (both backends' plumbing is size-generic); the material's
+ *  unpack preamble bitcasts + decodes them in the shader. */
 function buildLayerInstanceCommand(layer, soup) {
-  const strideBytes = soup.stride * 4 // 64 — INSTANCE_STRIDE × 4
+  const strideBytes = soup.stride * 4 // 36 — INSTANCE_STRIDE × 4 (Task 183)
   const L = soup.instanceLayout
   // THE STALE-BINDING RESET (the same contract as the soup path — see
   // buildLayerCommand's comment): both dynamic bindings are cleared before
@@ -1056,8 +1059,10 @@ function buildLayerInstanceCommand(layer, soup) {
     bufferId = gl.createBuffer(soup.vertices)
     layer.glDyn = { gl, bufferId }
   }
-  // The record fields → five instance attributes (the cross-package
-  // contract: the material declares i_pos/i_vel/i_color/i_par/i_uv0).
+  // The record's WORD-ATTRIBUTES → three instance attributes (the
+  // cross-package contract: the material declares i_rec0/i_rec1/i_rec2 —
+  // the 9-word packed record; the shader's unpack preamble derives
+  // i_pos/i_vel/i_color/i_par/i_uv0 from them).
   // Task 131 — THE GPU TIER: a layer with gpuBackend binds the EXTERNAL
   // records buffer (the compute pack's output — no data array upload, no
   // data-keyed cache); a CPU-pack layer binds its own buffer as before.
@@ -1068,8 +1073,7 @@ function buildLayerInstanceCommand(layer, soup) {
     offset: field.offset * 4, bufferId: gpuTier ? recordsBufferId : bufferId, step: 'instance',
   })
   const attrs = {
-    i_pos: attr(L.pos), i_vel: attr(L.vel), i_color: attr(L.color),
-    i_par: attr(L.par), i_uv0: attr(L.uv0),
+    i_rec0: attr(L.rec0), i_rec1: attr(L.rec1), i_rec2: attr(L.rec2),
   }
   const layerTexture = typeof layer.texture === 'function' ? layer.texture() : layer.texture
   const textures = { u_tex: layerTexture ?? atlasTexture, texTexture: layerTexture ?? atlasTexture, ...(layer.textures ?? {}) }

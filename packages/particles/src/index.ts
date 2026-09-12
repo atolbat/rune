@@ -18,8 +18,8 @@
  *   The soup is the lowest common denominator of WebGL2 AND WebGPU draw
  *   paths — the default and the LCD.
  *   (Task 131: the OPTIONAL instanced path — render.draw:'instance' —
- *   packs 16-float records and lets the BILLBOARD material expand the
- *   quad on the GPU.
+ *   packs the Task-183 records (9 words / 36 bytes) and lets the
+ *   BILLBOARD material unpack + expand the quad on the GPU.
  *    Task 132: the GPGPU simulation tier — sim:'gpu' — runs the forces,
  *   the aging and the record pack ON THE GPU on BOTH backends: compute
  *   passes over a storage buffer (WebGPU) or transform-feedback passes
@@ -111,8 +111,14 @@ export { createRamp, sampleRamp, CONSTANT_RAMP, RAMP_STRIDE } from './ramp.ts'
 export type { BillboardMode } from './billboards.ts'
 export { fillBillboards, makeQuadIndices, SOUP_STRIDE, VERTS_PER_PARTICLE, INDICES_PER_PARTICLE } from './billboards.ts'
 export type { CameraBasis, BillboardOptions } from './billboards.ts'
-export type { PackOptions, InstanceField, PainterScratch } from './instances.ts'
-export { packInstances, packInstancesPainter, INSTANCE_STRIDE, INSTANCE_LAYOUT } from './instances.ts'
+export type { PackOptions, InstanceField, PainterScratch, DecodedRecord } from './instances.ts'
+export {
+  packInstances, packInstancesPainter, INSTANCE_STRIDE, INSTANCE_LAYOUT, INSTANCE_FIELDS,
+  // Task 183 — the f16 tier + the packed-record codec (the test twin and
+  // the debug surface; the three shader-side dialects produce/consume the
+  // identical bits — see instances.ts's quantization contract).
+  f32ToF16Bits, f16BitsToF32, packHalfPair, decodeInstanceRecord,
+} from './instances.ts'
 export { sortDepthBackToFront } from './sort.ts'
 // Task 134's sort/cull family: the network plan + the frustum extraction
 // moved to @rune/core (Task 141 — gpu/bitonic.ts, frustum.ts, sort.ts);

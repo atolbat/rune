@@ -70,7 +70,8 @@ export interface BurstDesc {
  *  Task 131 — the billboard kind's `draw` picks the record format:
  *  'soup' (the classic quad-corner expansion + the shared index pattern —
  *  Task 180 — the LCD of every draw path) or
- *  'instance' (16-float records + the BILLBOARD material's GPU expansion —
+ *  'instance' (the Task-183 packed records + the BILLBOARD material's GPU
+ *  expansion —
  *  the optimization program's Phase 1; see instances.ts).
  *  Task 132 — the billboard kind's `sort`: the painter's order for
  *  alpha-blended layers (back to front, far first — see sort.ts).
@@ -221,28 +222,35 @@ export interface SoupLayout {
  *               static [0,1,2,0,2,3] pattern) with indexCount = 6 × live
  *               quads. Trail/mesh soups keep their own inline triangle
  *               streams (indices null, a plain drawArrays).
- *  'instance' — vertices = the 16-float records (stride 16), vertexCount
- *               === instanceCount counts INSTANCES (draw 6 vertices ×
- *               instanceCount through the BILLBOARD material). */
+ *  'instance' — vertices = the PACKED records (Task 183: stride 9 words /
+ *               36 bytes — three f32-attribute slots the BILLBOARD
+ *               material bitcasts and unpacks), vertexCount ===
+ *               instanceCount counts INSTANCES (draw the indexed
+ *               [0,1,2,0,2,3] pattern × instanceCount). */
 export interface SoupView {
   /** The vertex soup or the instance records, valid on
    *  [0, vertexCount × stride). */
   readonly vertices: Float32Array
   /** Live vertices (soup) or instances (instance) this frame. */
   vertexCount: number
-  /** Floats per record of THIS view (36 billboard, 54 trail-per-segment,
-   *  48 mesh, 16 the instance records). */
+  /** 32-bit words per record of THIS view (36 billboard, 54
+ *  trail-per-segment, 48 mesh, 9 the packed instance records — Task 183:
+ *  36 bytes). */
   readonly stride: number
-  /** The attribute layout (byte offsets are stride×4-based: offsets here
-   *  are in FLOATS — multiply by 4 for bytes). In instance mode: position =
-   *  i_pos, uv = i_uv0 (the tile origin), color = i_color. */
+  /** The attribute layout (offsets are in 32-bit WORDS — multiply by 4
+   *  for bytes). In instance mode the record is PACKED (Task 183):
+   *  position is NATIVE (3 @ 0); uv points at the seed|frame word (8 — the
+   *  shader derives the tile origin from the u16 frame); color points at
+   *  the packed color words (6..7). The word-attribute binding contract is
+   *  `instanceLayout` (rec0/rec1/rec2). */
   readonly layout: SoupLayout
   /** Task 131 — which record format `vertices` holds. */
   readonly draw: 'soup' | 'instance'
   /** Task 131 — the live instance count (instance mode; 0 in soup mode). */
   instanceCount: number
-  /** Task 131 — the instance record field offsets (instance mode; null
-   *  in soup mode). The GPU-mapping contract of the BILLBOARD material. */
+  /** Task 131 — the instance record WORD-ATTRIBUTE layout (instance mode;
+   *  null in soup mode). The GPU-mapping contract of the BILLBOARD material
+   *  (Task 183: rec0/rec1/rec2 — the 9-word packed record). */
   readonly instanceLayout: typeof INSTANCE_LAYOUT | null
   /** Task 180 — the shared static quad index pattern (the billboard soup
    *  ONLY; trail/mesh soups and instance records — null, they draw plain
@@ -320,7 +328,7 @@ export interface Particles {
   /** Bakes the soup for the camera basis (the render kind chooses the
    *  baker). Returns the REUSED view — hold no reference across frames,
    *  read it and draw. Task 131: a billboard desc with draw:'instance'
-   *  packs the 16-float records instead (see SoupView.draw). */
+   *  packs the Task-183 packed records instead (see SoupView.draw). */
   view(basis: CameraBasis, options?: RenderBakeOverride): SoupView
   /** The billboard alias of view() (the classic API — back-compat). */
   billboards(basis: CameraBasis): SoupView
@@ -600,16 +608,20 @@ export function createParticles(desc: ParticlesDesc): Particles {
     stride = SOUP_STRIDE
     layout = { position: { size: 3, offset: 0 }, uv: { size: 2, offset: 3 }, color: { size: 4, offset: 5 } }
   } else {
-    // Task 131 — the DRAW FORMAT: 'instance' packs 16-float records (the
-    // GPU expands the quad — the Phase-1 path); 'soup' (the default, the
-    // classic LCD) bakes the quad-corner expansion CPU-side (Task 180:
+    // Task 131 — the DRAW FORMAT: 'instance' packs the Task-183 records
+    // (9 words / 36 bytes — the GPU expands the quad from the unpacked
+    // fields); 'soup' (the default, the classic LCD) bakes the
+    // quad-corner expansion CPU-side (Task 180:
     // 4 unique corners + the shared index pattern, not 6 inline verts).
     const draw = (render as { draw?: 'soup' | 'instance' }).draw === 'instance' ? 'instance' : 'soup'
     drawFormat = draw
     if (draw === 'instance') {
       soupFloats = capacity * INSTANCE_STRIDE
       stride = INSTANCE_STRIDE
-      layout = { position: { size: 3, offset: INSTANCE_LAYOUT.pos.offset }, uv: { size: 2, offset: INSTANCE_LAYOUT.uv0.offset }, color: { size: 4, offset: INSTANCE_LAYOUT.color.offset } }
+      // Task 183 — the packed tier's logical offsets: position NATIVE
+      // (3 @ 0); uv/color point at their packed WORDS (the shader derives
+      // the fields — INSTANCE_FIELDS documents the layout).
+      layout = { position: { size: 3, offset: 0 }, uv: { size: 2, offset: 8 }, color: { size: 4, offset: 6 } }
     } else {
       // Task 180 — THE INDEX TIER: the quad soup is FOUR unique corners per
       // particle (36 floats); the shared static index pattern (built once
@@ -659,8 +671,9 @@ export function createParticles(desc: ParticlesDesc): Particles {
   // BEFORE the sort, so the radix runs on survivors only). The scratch
   // shares the sort's ping-pong (k/kAlt/iAlt) and sortIndices (the
   // painter's perm); the ONE new buffer is the staged records
-  // (capacity × 16 floats, allocated only for sorted instance layers —
-  // 6.4 MiB at the 100k ceiling, once, not per frame).
+  // (capacity × INSTANCE_STRIDE words — Task 183 shrank it: 3.6 MiB at
+  // the 100k ceiling, was 6.4; allocated only for sorted instance
+  // layers — once, not per frame).
   const painterScratch: PainterScratch | null = sortOn && drawFormat === 'instance' && sortAux !== null && sortIndices !== null
     ? {
         records: new Float32Array(capacity * INSTANCE_STRIDE),
@@ -867,10 +880,10 @@ export function createParticles(desc: ParticlesDesc): Particles {
           view.vertexCount = system.count
           view.instanceCount = system.count
         } else if (drawFormat === 'instance') {
-          // Task 131 — the instanced path: the 16-float records (the CPU
-          // resolves the ramp/tint/tile; the BILLBOARD material's vertex
-          // stage expands the quad on the GPU). The counts alias: the
-          // records ARE the draw's instances.
+          // Task 131 — the instanced path: the packed records (Task 183 —
+          // the CPU resolves the ramp/tint/tile; the BILLBOARD material's
+          // vertex stage unpacks + expands the quad on the GPU). The
+          // counts alias: the records ARE the draw's instances.
           packOptsScratch.tiles = o.tiles ?? renderOpts.tiles
           packOptsScratch.frameJitter = o.frameJitter ?? renderOpts.frameJitter
           packOptsScratch.order = null

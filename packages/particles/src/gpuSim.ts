@@ -27,7 +27,7 @@
  *     3. dispatch `advance` — the force walk (gravity/drag/turbulence/
  *        attract/noise/limit — the reference order) + the integration +
  *        age += dt (f32) + the wrap volume;
- *     4. dispatch `pack` — the SAME 16-float instance records the CPU
+ *     4. dispatch `pack` — the SAME 9-word packed instance records the CPU
  *        packer writes (packInstances), GPU-side: the ramp LUT (the 7-
  *        float rows), the tile math, the record fields. The render pass
  *        binds this buffer as the BILLBOARD material's instance source —
@@ -43,7 +43,7 @@
  *     @group(0) @binding(0) — SimParams (uniform, 144 bytes)
  *     @binding(1) — the state  (read_write storage, 17 × capacity floats)
  *     @binding(2) — the swaps  (read storage, vec2<u32> pairs)
- *     @binding(3) — the records (read_write storage, 16 × capacity floats)
+ *     @binding(3) — the records (read_write storage, 9 × capacity u32 words)
  *     @binding(4) — the ramp LUT (read storage, 7-float rows)
  *
  *   forceMask bits: 1 gravity · 2 drag · 4 turbulence · 8 attract ·
@@ -290,27 +290,30 @@ const PACK_BODY_WGSL = `
   }
   let half = state[b + 8u] * size * 0.5;
   let seed = state[b + 13u];
-  // the tile origin: frame + seed·jitter → floor → clamp → row-major
+  // the tile frame: floor + seed·jitter + clamp (the WGSL pack's exact
+  // semantics); the frame index rides word 8's high half — the tile
+  // ORIGIN is derived shader-side (the material's unpack preamble)
   var fr = floor(frame + seed * P.frameJitter);
   // NaN-safe: every NaN comparison is FALSE — !(fr >= 0) catches NaN and
   // the negatives in one branch (WGSL has no isnan builtin)
   if (!(fr >= 0.0)) { fr = 0.0; }
   let maxFrame = P.tileU * P.tileV - 1.0;
   if (fr > maxFrame) { fr = maxFrame; }
-  var u0 = 0.0; var v0 = 0.0;
-  if (P.tileU >= 1.0 && P.tileV >= 1.0) {
-    u0 = (fr % P.tileU) / P.tileU;
-    v0 = floor(fr / P.tileU) / P.tileV;
-  }
-  records[o] = state[b]; records[o + 1u] = state[b + 1u]; records[o + 2u] = state[b + 2u];
-  records[o + 3u] = state[b + 3u]; records[o + 4u] = state[b + 4u]; records[o + 5u] = state[b + 5u];
-  records[o + 6u] = state[b + 9u] * r; records[o + 7u] = state[b + 10u] * g;
-  records[o + 8u] = state[b + 11u] * bl; records[o + 9u] = state[b + 12u] * a;
-  records[o + 10u] = half;
-  records[o + 11u] = seed * 6.283185307179586;
-  records[o + 12u] = age;
-  records[o + 13u] = seed;
-  records[o + 14u] = u0; records[o + 15u] = v0;
+  // Task 183 — THE PACKED RECORD (9 words / 36 bytes): words 0..3 native
+  // (pos, age — never quantized); words 4..8 the quantized pairs + the
+  // u16 frame. The quantizer's domain guards (NaN→0, ±65504 clamp,
+  // 2^-14 flush) run BEFORE pack2x16float — the RNE rounding then
+  // matches the JS/GL twins bit-for-bit (the three-dialect contract,
+  // instances.ts).
+  records[o] = bitcast<u32>(state[b]);
+  records[o + 1u] = bitcast<u32>(state[b + 1u]);
+  records[o + 2u] = bitcast<u32>(state[b + 2u]);
+  records[o + 3u] = bitcast<u32>(age);
+  records[o + 4u] = q2(state[b + 3u], state[b + 4u]);
+  records[o + 5u] = q2(state[b + 5u], half);
+  records[o + 6u] = q2(state[b + 9u] * r, state[b + 10u] * g);
+  records[o + 7u] = q2(state[b + 11u] * bl, state[b + 12u] * a);
+  records[o + 8u] = q2(seed, 0.0) | (u32(fr) << 16u);
 `
 
 /** The full WGSL module (the three entries + the fixed binding contract).
@@ -388,11 +391,30 @@ struct SimParams {
 @group(0) @binding(0) var<uniform> P : SimParams;
 @group(0) @binding(1) var<storage, read_write> state : array<f32>;
 @group(0) @binding(2) var<storage, read> swaps : array<vec2<u32>>;
-@group(0) @binding(3) var<storage, read_write> records : array<f32>;
+@group(0) @binding(3) var<storage, read_write> records : array<u32>;
 @group(0) @binding(4) var<storage, read> rampLUT : array<f32>;
 
 const FSTRIDE : u32 = ${GPU_STATE_STRIDE}u;
-const RSTRIDE : u32 = 16u;
+const RSTRIDE : u32 = 9u;
+
+// Task 183 — THE RECORD QUANTIZER (the three-dialect contract: this WGSL
+// kernel, the JS packer (instances.ts), the GLSL TF twin produce IDENTICAL
+// bits). Domain guards first (NaN→0 — WGSL NaN != NaN; ±65504 CLAMP —
+// never ±∞: a clamped velocity is a well-defined stretched quad, ∞ is a
+// NaN soup through the normalize; the 2^-14 flush kills the subnormal
+// halves — the decode stays branch-exact in every dialect), then
+// pack2x16float's RNE rounding (the CORE builtin — no enable f16 needed).
+fn q1(v: f32) -> f32 {
+  var x = v;
+  if (x != x) { return 0.0; }
+  if (x > 65504.0) { x = 65504.0; }
+  if (x < -65504.0) { x = -65504.0; }
+  if (abs(x) < 6.103515625e-5) { return x * 0.0; }
+  return x;
+}
+fn q2(a: f32, b: f32) -> u32 {
+  return pack2x16float(vec2<f32>(q1(a), q1(b)));
+}
 
 // ── the simplex noise (the SAME table the CPU evaluates — noise.ts) ────────
 var<private> SIM_PERM : array<u32, 512> = array<u32, 512>(${perm});
@@ -697,8 +719,8 @@ fn advance(@builtin(global_invocation_id) gid : vec3<u32>) {
   state[b + 6u] = age + P.dt;
 }
 
-// ── pack: the 16-float instance records (packInstances' GPU twin — the
-// record layout of the BILLBOARD material / INSTANCE_LAYOUT; the body is
+// ── pack: the 9-word packed instance records (packInstances' GPU twin —
+// the record layout of the BILLBOARD material / INSTANCE_LAYOUT; the body is
 // PACK_BODY_WGSL — SHARED with the sort family's sorted pack entry) ──────
 @compute @workgroup_size(64)
 fn pack(@builtin(global_invocation_id) gid : vec3<u32>) {
@@ -774,7 +796,7 @@ struct SortParams {
 @group(0) @binding(0) var<uniform> P : SortParams;
 @group(0) @binding(1) var<storage, read_write> pairs : array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read> state : array<f32>;
-@group(0) @binding(3) var<storage, read_write> records : array<f32>;
+@group(0) @binding(3) var<storage, read_write> records : array<u32>;
 @group(0) @binding(4) var<storage, read> rampLUT : array<f32>;
 
 // Task 179 — THE NETWORK CLOCK: the self-driving (k, j) + the arrival
@@ -792,9 +814,23 @@ struct NetClock {
 @group(0) @binding(5) var<storage, read_write> net : NetClock;
 
 const FSTRIDE : u32 = ${GPU_STATE_STRIDE}u;
-const RSTRIDE : u32 = 16u;
+const RSTRIDE : u32 = 9u;
 const PAD_KEY : f32 = ${GPU_SORT_PAD_KEY};
 const SENTINEL : f32 = ${GPU_SORT_SENTINEL}.0;
+
+// Task 183 — the record quantizer pair (q1/q2 — the sim family's own,
+// verbatim: the three-dialect contract of instances.ts).
+fn q1(v: f32) -> f32 {
+  var x = v;
+  if (x != x) { return 0.0; }
+  if (x > 65504.0) { x = 65504.0; }
+  if (x < -65504.0) { x = -65504.0; }
+  if (abs(x) < 6.103515625e-5) { return x * 0.0; }
+  return x;
+}
+fn q2(a: f32, b: f32) -> u32 {
+  return pack2x16float(vec2<f32>(q1(a), q1(b)));
+}
 
 // ── sortKeys: the (key, index) pairs — the negated depth for the visible
 // live, the sentinel pair for the culled and the pads ───────────────────
@@ -911,7 +947,7 @@ fn pack(@builtin(global_invocation_id) gid : vec3<u32>) {
   let o = i * RSTRIDE;
   let m = pairs[i].y;
   if (m >= SENTINEL) {
-    for (var f = 0u; f < RSTRIDE; f++) { records[o + f] = 0.0; }
+    for (var f = 0u; f < RSTRIDE; f++) { records[o + f] = 0u; }
     return;
   }
   let b = u32(m) * FSTRIDE;

@@ -9,8 +9,8 @@
  * float texture. One tier controller drives both (Task 133: the
  * controller is @rune/core's createGpgpu; @rune/gl's createGpuParticles
  * binds the particles facade to it): it reads the same facade.gpuHandoff,
- * uploads the same emit rows, and produces the SAME 16-float instance
- * records the BILLBOARD material draws. The parity contract is semantic,
+ * uploads the same emit rows, and produces the SAME 9-word packed
+ * instance records the BILLBOARD material draws. The parity contract is semantic,
  * not bit-exact (f32 both sides, each backend's own transcendentals) —
  * the same constants, the same force order, the same noise table, the
  * same ramp walk.
@@ -39,9 +39,10 @@
  *      pass is the same result, one pass cheaper;
  *   3. the PBO upload — the TF output becomes the new state texture;
  *   4. `pack` — VERTEX i = gl_VertexID: the state of slot i (texelFetch) +
- *      the ramp LUT texture + the tile math → the SAME 16-float instance
- *      records the CPU packer writes. The records buffer is the DRAW's
- *      instance-attribute source (bufferId + stride 64 + divisor 1).
+ *      the ramp LUT texture + the tile math → the SAME 9-word packed
+ *      instance records the CPU packer writes (the three-dialect f16
+ *      contract — instances.ts). The records buffer is the DRAW's
+ *      instance-attribute source (bufferId + stride 36 + divisor 1).
  *
  * THE READBACK-FREE SPLIT: identical to the WebGPU tier — the CPU mirrors
  * age/life only (emission, death, compaction); the positions/velocities
@@ -149,8 +150,32 @@ export const GPU_GL_PACK_F: Record<'tileU' | 'tileV' | 'frameJitter' | 'rampN', 
 /** The TF output declarations: the five 20-float state rows. */
 export const GPU_GL_ADVANCE_OUTPUTS = ['v_s0', 'v_s1', 'v_s2', 'v_s3', 'v_s4'] as const
 
-/** The TF output declarations: the four 16-float record rows. */
-export const GPU_GL_PACK_OUTPUTS = ['v_r0', 'v_r1', 'v_r2', 'v_r3'] as const
+/** The TF output declarations: the packed 9-word record rows (Task 183 —
+ *  v_r0 + v_r1 are vec4s, v_r8 a scalar; interleaved = 36 bytes per
+ *  record, the INSTANCE_LAYOUT word order). */
+export const GPU_GL_PACK_OUTPUTS = ['v_r0', 'v_r1', 'v_r8'] as const
+
+// ─── Task 183 — THE GLSL F16 PACKER (the three-dialect contract's GL twin:
+// NaN→0, ±65504 CLAMP, 2^-14 FLUSH, RNE within range — identical bits to
+// the JS packer (instances.ts) and the WGSL q1+pack2x16float; spliced at
+// module level into BOTH pack pass sources) ────────────────────────────────
+const PACK_HALF_GLSL = `
+uint bbPackHalf(float v) {
+  if (v != v) { return 0u; }                         // NaN → +0
+  float x = clamp(v, -65504.0, 65504.0);             // CLAMP, never ±∞
+  uint f = floatBitsToUint(x);
+  uint s = (f >> 16u) & 0x8000u;
+  // FLUSH |v| < 2^-14 → ±0 — the exponent field ≤ 112 (the subnormal
+  // range [0, 2^-14), INCLUDING [2^-15, 2^-14) at 112 — the RNE bias
+  // below assumes the hidden bit, the guard must be ≤)
+  if ((f & 0x7f800000u) <= 0x38000000u) { return s; }
+  uint m = (f & 0x7fffffu) + 0x0fffu + (((f & 0x7fffffu) >> 13u) & 1u); // RNE
+  uint e = ((f >> 23u) & 0xffu) - 112u;
+  if (m >= 0x800000u) { m -= 0x800000u; e = e + 1u; }
+  return s | (e << 10u) | (m >> 13u);
+}
+uint bbPack2(float a, float b) { return bbPackHalf(a) | (bbPackHalf(b) << 16u); }
+`
 
 // ─── Task 134 — THE GPU RENDER TIER (the GLSL twins of gpuSim.ts's sort
 // family): the bitonic sort + the frustum cull as transform-feedback
@@ -276,22 +301,26 @@ function packBodyGlsl(slot: string): string {
   }
   float halfExtent = s2.x * size * 0.5;
   float seed = s3.y;
-  // the tile origin: frame + seed·jitter → floor → clamp → row-major
+  // the tile frame: floor + seed·jitter → clamp
   // (NaN-safe: every NaN comparison is false — !(fr >= 0.0) catches NaN
-  // and the negatives in one branch).
+  // and the negatives in one branch); the frame index rides word 8's high
+  // half — the tile ORIGIN is derived shader-side (the material's
+  // unpack preamble).
   float fr = floor(frame + seed * u_frameJitter);
   if (!(fr >= 0.0)) { fr = 0.0; }
   float maxFrame = u_tileU * u_tileV - 1.0;
   if (fr > maxFrame) { fr = maxFrame; }
-  float u0 = 0.0; float v0 = 0.0;
-  if (u_tileU >= 1.0 && u_tileV >= 1.0) {
-    u0 = mod(fr, u_tileU) / u_tileU;
-    v0 = floor(fr / u_tileU) / u_tileV;
-  }
-  v_r0 = s0;
-  v_r1 = vec4(s1.x, s1.y, s2.y * r, s2.z * g);
-  v_r2 = vec4(s2.w * b, s3.x * a, halfExtent, seed * 6.283185307179586);
-  v_r3 = vec4(age, seed, u0, v0);
+  // Task 183 — THE PACKED RECORD (9 words / 36 bytes): v_r0 carries
+  // pos.xyz + age NATIVE; v_r1 the four quantized pair-words; v_r8 the
+  // seed|frame word — the packed halves ride as f32 bit patterns (the
+  // TF capture moves raw bits; the draw's instance attributes bitcast).
+  v_r0 = vec4(s0.x, s0.y, s0.z, age);
+  v_r1 = uintBitsToFloat(uvec4(
+    bbPack2(s0.w, s1.x),
+    bbPack2(s1.y, halfExtent),
+    bbPack2(s2.y * r, s2.z * g),
+    bbPack2(s2.w * b, s3.x * a)));
+  v_r8 = uintBitsToFloat(bbPack2(seed, 0.0) | (uint(fr) << 16u));
 `
 }
 
@@ -508,7 +537,7 @@ void main() {
 }
 
 /** The pack pass: vertex i = gl_VertexID — the state of slot i + the ramp
- *  LUT texture + the tile math → the 16-float instance records (the
+ *  LUT texture + the tile math → the 9-word packed instance records (the
  *  INSTANCE_LAYOUT contract, the WGSL pack's twin; the body is
  *  packBodyGlsl — SHARED with the sorted pack pass). */
 export function gpuSimGlPackGlsl(): string {
@@ -522,11 +551,11 @@ uniform float u_tileU;
 uniform float u_tileV;
 uniform float u_frameJitter;
 uniform float u_rampN;
-// the TF outputs: the 16-float instance record (INSTANCE_LAYOUT).
-out vec4 v_r0; // px, py, pz, vx
-out vec4 v_r1; // vy, vz, cr, cg
-out vec4 v_r2; // cb, ca, halfExtent, angle0 (seed·tau)
-out vec4 v_r3; // age, seed, u0, v0
+${PACK_HALF_GLSL}
+// the TF outputs: the packed 9-word record (Task 183 — INSTANCE_LAYOUT).
+out vec4 v_r0;  // pos.xyz, age (NATIVE f32)
+out vec4 v_r1;  // vel.xy | vel.z+half | color.rg | color.ba (f16 pairs, bits)
+out float v_r8; // seed (f16, lo) | the atlas frame (u16, hi)
 // the ramp LUT: 2 texels per point k — (t, size, r, g) at 2k, (b, a, frame, 0) at 2k+1.
 vec4 rampA(int k) { return texelFetch(u_ramp, ivec2(k * 2, 0), 0); }
 vec4 rampB(int k) { return texelFetch(u_ramp, ivec2(k * 2 + 1, 0), 0); }
@@ -645,11 +674,11 @@ uniform float u_tileU;
 uniform float u_tileV;
 uniform float u_frameJitter;
 uniform float u_rampN;
-// the TF outputs: the 16-float instance record (INSTANCE_LAYOUT).
-out vec4 v_r0; // px, py, pz, vx
-out vec4 v_r1; // vy, vz, cr, cg
-out vec4 v_r2; // cb, ca, halfExtent, angle0 (seed·tau)
-out vec4 v_r3; // age, seed, u0, v0
+${PACK_HALF_GLSL}
+// the TF outputs: the packed 9-word record (Task 183 — INSTANCE_LAYOUT).
+out vec4 v_r0;  // pos.xyz, age (NATIVE f32)
+out vec4 v_r1;  // vel.xy | vel.z+half | color.rg | color.ba (f16 pairs, bits)
+out float v_r8; // seed (f16, lo) | the atlas frame (u16, hi)
 // the ramp LUT: 2 texels per point k — (t, size, r, g) at 2k, (b, a, frame, 0) at 2k+1.
 vec4 rampA(int k) { return texelFetch(u_ramp, ivec2(k * 2, 0), 0); }
 vec4 rampB(int k) { return texelFetch(u_ramp, ivec2(k * 2 + 1, 0), 0); }
@@ -661,8 +690,7 @@ void main() {
     // the pad/cull sentinel — the ZERO record (a degenerate instance)
     v_r0 = vec4(0.0);
     v_r1 = vec4(0.0);
-    v_r2 = vec4(0.0);
-    v_r3 = vec4(0.0);
+    v_r8 = 0.0;
     gl_Position = vec4(0.0, 0.0, 0.5, 1.0);
     return;
   }

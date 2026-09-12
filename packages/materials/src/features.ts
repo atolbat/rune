@@ -260,13 +260,19 @@ export const PBR_ENV: FeatureBit = 1 << 29
  *  the material's vertex shader expands ONE QUAD PER INSTANCE from
  *  gl_VertexID / @builtin(vertex_index) — the GPU half of the
  *  instanced-draw path (see @rune/particles instances.ts, the CPU half:
- *  packInstances writes the 16-float records this stage consumes).
+ *  packInstances writes the Task-183 packed records this stage unpacks).
  *
  *  THE ATTRIBUTE CONTRACT (all step='instance', one record = one quad,
- *  draw count = 6 × instances):
- *    i_pos vec3, i_vel vec3, i_color vec4, i_par vec4, i_uv0 vec2
+ *  draw = the indexed [0,1,2,0,2,3] × instances; Task 183 — the PACKED
+ *  record, 9 words / 36 bytes, three f32-attribute slots):
+ *    i_rec0 vec4 — pos.xyz (f32, native) | age (f32, native)
+ *    i_rec1 vec4 — vel.xy | vel.z+halfExtent | color.rg | color.ba
+ *                 (each component: two f16 halves as the f32's bits)
+ *    i_rec2 float — seed (f16, lo) | the atlas frame (u16, hi)
  *  — EXACTLY @rune/particles' INSTANCE_LAYOUT (the names and the order
- *  are the cross-package contract; both sides pin them with tests).
+ *  are the cross-package contract; both sides pin them with tests). The
+ *  unpack preamble derives i_pos/i_vel/i_color/i_par/i_uv0 (the body's
+ *  vocabulary) from the words.
  *
  *  THE UNIFORM CONTRACT (the caller derives them from CameraBasis +
  *  BillboardOptions — the demo harness's instance-layer builder):
@@ -292,23 +298,53 @@ export const PBR_ENV: FeatureBit = 1 << 29
  *  has no normal and no per-vertex position — the record IS the vertex). */
 export const BILLBOARD: FeatureBit = 1 << 31
 
-/** Task 181 — the billboard vertex BODY (GLSL main lines): the 4-corner
- *  table, the record unpack, the atlas uv, and the five orientation modes →
- *  `bbWorld` (the assembler emits this preamble FIRST, before the
- *  features' varying writes, and closes with
- *  `gl_Position = u_mvp * vec4(bbWorld, 1.0)`). The math is @rune/particles
- *  fillBillboards() verbatim — the JS twin in the particles test suite is
- *  the bit-pinned reference.
- *  Task 180's soup trick, applied to the instance tier: the table holds the
- *  quad's FOUR unique corners and the draw is INDEXED over the shared
- *  static [0,1,2,0,2,3] pattern — gl_VertexID takes only the values
- *  0..3, and the post-transform vertex cache turns the two shared corners
- *  into cache hits (4 real VS invocations per quad instead of 6 — the
- *  pre-181 six-entry table duplicated them inline and ran the full billboard
- *  math all six times). The indexed form is the BILLBOARD material's draw
- *  contract: a NON-indexed 6-vertex draw would read past the 4-entry table
+/** Task 131 — the billboard vertex BODY (GLSL main lines). Task 183 —
+ *  THE PACKED-RECORD UNPACK PREAMBLE (the first lines): the record's
+ *  three f32 word-attributes arrive (rec0: pos.xyz + age NATIVE; rec1 /
+ *  rec2: the f16 pairs as f32 bit patterns); BB_H decodes one half and
+ *  the i_pos/i_vel/i_color/i_par/i_uv0 LOCALS materialize — the
+ *  corner-expansion body below reads them exactly as in the 16-float
+ *  era. The 4-corner table, the atlas uv, and the five orientation modes
+ *  → `bbWorld` follow (the assembler emits this preamble FIRST, before
+ *  the features' varying writes, and closes with
+ *  `gl_Position = u_mvp * vec4(bbWorld, 1.0)`). The math is
+ *  @rune/particles fillBillboards() verbatim — the JS twin in the
+ *  particles test suite is the tolerance-pinned reference.
+ *  Task 180's soup trick, applied to the instance tier: the table holds
+ *  the quad's FOUR unique corners and the draw is INDEXED over the
+ *  shared static [0,1,2,0,2,3] pattern — gl_VertexID takes only the
+ *  values 0..3, and the post-transform vertex cache turns the two shared
+ *  corners into cache hits (4 real VS invocations per quad instead of 6).
+ *  The indexed form is the BILLBOARD material's draw contract: a
+ *  NON-indexed 6-vertex draw would read past the 4-entry table
  *  (gl_VertexID 4/5 — undefined corners). */
 export const BB_VERT_GLSL: readonly string[] = [
+  // THE UNPACK (Task 183) — BB_H: one f16 half → f32, branch-free. The
+  // pack contract guarantees the stored halves are normals or zeros
+  // (subnormals flushed, ±65504 clamp, NaN→0 — see instances.ts): a zero
+  // half's exponent is 0 and the ternary zeroes the assembly → ±0 exact;
+  // a normal's bits reassemble to the identical f32. The #define is
+  // preprocessor text — legal anywhere a line can be, including here
+  // inside main (whitespace before # is allowed by the ES 3.00 grammar).
+  '#define BB_H(h) uintBitsToFloat((((h) & 0x8000u) << 16u) | (((((h) >> 10u) & 0x1fu) == 0u) ? 0u : ((((((h) >> 10u) & 0x1fu) + 112u) << 23u) | (((h) & 0x3ffu) << 13u))))',
+  'uint bbW4 = floatBitsToUint(i_rec1.x); // vel.xy',
+  'uint bbW5 = floatBitsToUint(i_rec1.y); // vel.z (lo) | halfExtent (hi)',
+  'uint bbW6 = floatBitsToUint(i_rec1.z); // color.rg',
+  'uint bbW7 = floatBitsToUint(i_rec1.w); // color.ba',
+  'uint bbW8 = floatBitsToUint(i_rec2);   // seed (lo, f16) | frame (hi, u16)',
+  'vec3 i_pos = i_rec0.xyz;',
+  'vec3 i_vel = vec3(BB_H(bbW4), BB_H(bbW4 >> 16u), BB_H(bbW5));',
+  'vec4 i_color = vec4(BB_H(bbW6), BB_H(bbW6 >> 16u), BB_H(bbW7), BB_H(bbW7 >> 16u));',
+  'float bbHalfE = BB_H(bbW5 >> 16u);',
+  'float bbSeed = BB_H(bbW8);',
+  // the derived fields: the spin phase seed·τ (the old record's word 11
+  // — a pure function of the seed that rides word 8) and the tile origin
+  // from the u16 frame (the tile scales u_bbB.zw are the split's
+  // reciprocals — the origin reconstructs exactly: no f16 seam bleed).
+  'vec4 i_par = vec4(bbHalfE, bbSeed * 6.283185307179586, i_rec0.w, bbSeed);',
+  'uint bbTileU = uint(1.0 / u_bbB.z + 0.5);',
+  'uint bbFrame = bbW8 >> 16u;',
+  'vec2 i_uv0 = vec2(float(bbFrame % bbTileU) * u_bbB.z, float(bbFrame / bbTileU) * u_bbB.w);',
   'const vec2 BB_CORNERS[4] = vec2[4](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, 1.0));',
   'vec2 bbCu = BB_CORNERS[gl_VertexID];',
   'float bbA = bbCu.x;',
@@ -391,9 +427,38 @@ export const BB_VERT_GLSL: readonly string[] = [
 /** The WGSL twin of BB_VERT_GLSL (the same statements, the WGSL
  *  vocabulary; vi = @builtin(vertex_index), the uniforms read
  *  params.*). Consumed by assemble.ts alongside the GLSL lines.
+ *  Task 183 — THE PACKED-RECORD UNPACK PREAMBLE (the first lines): the
+ *  word-attributes bitcast to u32 and unpack2x16float (the CORE WGSL
+ *  builtin — no enable f16 needed) decodes the pairs; the
+ *  i_pos/i_vel/i_color/i_par/i_uv0 LETS materialize (the corner body
+ *  below reads the same names as the 16-float era).
  *  Task 181: the 4-entry table + the indexed [0,1,2,0,2,3] draw — vi takes
  *  only the values 0..3 (the index VALUES, not stream positions). */
 export const BB_VERT_WGSL: readonly string[] = [
+  // THE UNPACK (Task 183) — the record's three f32 word-attributes:
+  // rec0 (pos.xyz + age NATIVE), rec1/rec2 (the f16 pairs as f32 bit
+  // patterns). unpack2x16float is IEEE-exact; the pack contract (flush /
+  // clamp / NaN→0 — instances.ts) keeps the domain branch-free.
+  'let bbW4 = bitcast<u32>(i_rec1.x); // vel.xy',
+  'let bbW5 = bitcast<u32>(i_rec1.y); // vel.z (lo) | halfExtent (hi)',
+  'let bbW6 = bitcast<u32>(i_rec1.z); // color.rg',
+  'let bbW7 = bitcast<u32>(i_rec1.w); // color.ba',
+  'let bbW8 = bitcast<u32>(i_rec2);   // seed (lo, f16) | frame (hi, u16)',
+  'let i_pos = i_rec0.xyz;',
+  'let bbVelXY = unpack2x16float(bbW4);',
+  'let bbVelZH = unpack2x16float(bbW5);',
+  'let i_vel = vec3<f32>(bbVelXY.x, bbVelXY.y, bbVelZH.x);',
+  'let bbColRG = unpack2x16float(bbW6);',
+  'let bbColBA = unpack2x16float(bbW7);',
+  'let i_color = vec4<f32>(bbColRG, bbColBA);',
+  'let bbSeedF = unpack2x16float(bbW8);',
+  // the derived fields: the spin phase seed·τ (the old word 11 — a pure
+  // function of the seed) and the tile origin from the u16 frame (the
+  // tile scales u_bbB.zw are the split's reciprocals — exact origin).
+  'let i_par = vec4<f32>(bbVelZH.y, bbSeedF.x * 6.283185307179586, i_rec0.w, bbSeedF.x);',
+  'let bbTileU = u32(1.0 / params.u_bbB.z + 0.5);',
+  'let bbFrame = bbW8 >> 16u;',
+  'let i_uv0 = vec2<f32>(f32(bbFrame % bbTileU) * params.u_bbB.z, f32(bbFrame / bbTileU) * params.u_bbB.w);',
   'var bbCorners = array<vec2<f32>, 4>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0));',
   'let bbCu = bbCorners[vi];',
   'let bbA = bbCu.x;',
@@ -1295,11 +1360,16 @@ export const CATALOG: readonly FeatureDef[] = [
     bit: BILLBOARD,
     vert: (_ctx: AsmCtx): VertSnippets => ({
       attrs: [
-        { name: 'i_pos', glslType: 'vec3', wgslType: 'vec3<f32>', instance: true },
-        { name: 'i_vel', glslType: 'vec3', wgslType: 'vec3<f32>', instance: true },
-        { name: 'i_color', glslType: 'vec4', wgslType: 'vec4<f32>', instance: true },
-        { name: 'i_par', glslType: 'vec4', wgslType: 'vec4<f32>', instance: true },
-        { name: 'i_uv0', glslType: 'vec2', wgslType: 'vec2<f32>', instance: true },
+        // Task 183 — THE PACKED RECORD (9 words / 36 bytes): three f32-
+        // attribute slots bound at offsets 0/16/32 with stride 36. rec0
+        // carries pos.xyz + age NATIVE; rec1/rec2 carry the f16 pairs as
+        // f32 BIT PATTERNS — the unpack preamble at the top of
+        // BB_VERT_GLSL/BB_VERT_WGSL bitcasts and derives
+        // i_pos/i_vel/i_color/i_par/i_uv0 locals (the corner body reads
+        // the same names as the 16-float era).
+        { name: 'i_rec0', glslType: 'vec4', wgslType: 'vec4<f32>', instance: true },
+        { name: 'i_rec1', glslType: 'vec4', wgslType: 'vec4<f32>', instance: true },
+        { name: 'i_rec2', glslType: 'float', wgslType: 'f32', instance: true },
       ],
       uniforms: [
         { name: 'u_bbA', glsl: 'uniform vec4 u_bbA;', wgsl: 'u_bbA : vec4<f32>,' },
