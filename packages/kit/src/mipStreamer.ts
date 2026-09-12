@@ -59,13 +59,38 @@ export function createMipStreamer(options: MipStreamerOptions = {}): MipStreamer
     }
     levels = Math.max(0, levels)
 
+    // The source's own dimensions (ImageBitmap / both canvas flavors carry them).
+    const srcW = source.width
+    const srcH = source.height
+
     // Stream from the smallest to the largest (progressive)
     for (let level = levels; level >= 0; level--) {
       const scale = 1 / Math.pow(2, level)
-      const targetW = Math.max(1, Math.round(w * scale))
-      const targetH = Math.max(1, Math.round(h * scale))
+      // A GPU mip level's storage is floor(d / 2^level) (min 1) — round()
+      // could overshoot the level's true size (1920/256: round 8, floor 7)
+      // and the upload would fail validation against the level's storage.
+      const targetW = Math.max(1, Math.floor(w * scale))
+      const targetH = Math.max(1, Math.floor(h * scale))
+      // The finest level at the source's own size: the pixels are already
+      // decoded in the source — upload it directly. This skips the FULL-RES
+      // createImageBitmap copy the old loop used to make (and then leak —
+      // a bitmap's decoded/GPU-side memory is held until close(), not until
+      // GC; see below).
+      if (targetW === srcW && targetH === srcH) {
+        tex.uploadMip(level, source)
+        continue
+      }
       const downsampled = await downsample(source, targetW, targetH, useImageBitmap)
       tex.uploadMip(level, downsampled)
+      // The upload COPIED the pixels — everything the downsample allocated
+      // (a fresh ImageBitmap, or our own OffscreenCanvas) is now garbage.
+      // ImageBitmaps are not freed by dereferencing alone in engines that
+      // pin them outside the JS heap: close() them; an HTMLCanvasElement has
+      // no close() and rides GC like any DOM node. Never close the SOURCE —
+      // the caller owns it.
+      if (downsampled !== source && typeof (downsampled as ImageBitmap).close === 'function') {
+        (downsampled as ImageBitmap).close()
+      }
     }
   }
 

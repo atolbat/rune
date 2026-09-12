@@ -68,6 +68,9 @@ function schedule(job) {
   else
     pending.push(job);
 }
+function inBatch() {
+  return depth > 0;
+}
 var depth = 0, pending;
 var init_batch = __esm(() => {
   pending = [];
@@ -82,6 +85,17 @@ function signal(initial, _options = {}) {
     subscribers.add(fn);
     return () => subscribers.delete(fn);
   }
+  function notify(snapshot) {
+    if (subscribers.size === 1) {
+      for (const fn of subscribers) {
+        fn(snapshot);
+        break;
+      }
+      return;
+    }
+    for (const fn of [...subscribers])
+      fn(snapshot);
+  }
   const cell = {
     get value() {
       reportRead(cell);
@@ -94,11 +108,12 @@ function signal(initial, _options = {}) {
       version++;
       if (subscribers.size === 0)
         return;
-      const snapshot = current;
-      schedule(() => {
-        for (const fn of [...subscribers])
-          fn(snapshot);
-      });
+      if (inBatch()) {
+        const snapshot = current;
+        schedule(() => notify(snapshot));
+      } else {
+        notify(next);
+      }
     },
     peek: () => current,
     subscribe,

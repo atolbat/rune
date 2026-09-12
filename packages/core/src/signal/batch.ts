@@ -50,3 +50,10 @@ export function schedule(job: Job): void {
   if (depth === 0) job()
   else pending.push(job)
 }
+
+/** Is a batch currently open? (signal.set uses this to skip the per-write
+ * closure on the immediate path — schedule() would run the job synchronously
+ * anyway, but only after the closure has been allocated.) */
+export function inBatch(): boolean {
+  return depth > 0
+}

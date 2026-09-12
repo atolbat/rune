@@ -44,7 +44,12 @@ export interface RectPackerOptions {
 
 /** Packer state. */
 export interface RectPacker {
-  /** Pack a set of rectangles. Returns null if they do not fit. */
+  /** Pack a set of rectangles. Returns null if they do not fit.
+   *
+   *  The pack is INCREMENTAL and ATOMIC: repeated calls fill the FREE space
+   *  of the same atlas (never re-placing over earlier slots), and a null
+   *  return leaves the packer state exactly as it was before the call —
+   *  a failed batch changes nothing. */
   pack(items: readonly RectInput[]): RectSlot[] | null
   /** Current fill ratio (by area). */
   readonly usedArea: number
@@ -58,6 +63,19 @@ export function createRectPacker(width: number, height: number, options: RectPac
   const padding = options.padding ?? 0
 
   let usedArea = 0
+
+  // ─── persistent layout state ─────────────────────────────────────────────
+  // The incremental contract: pack() used to be STATELESS — every call
+  // restarted from the top-left corner, so the second batch silently
+  // OVERLAPPED the first (the atlas docstring promised "repeated calls pack
+  // into the free space" — the packer never delivered it). Now the layout
+  // state lives in the closure and survives across calls.
+  // shelf: the cursor of the row being filled + that row's height.
+  let shelfX = padding
+  let shelfY = padding
+  let shelfRowHeight = 0
+  // maxrects: the free-rectangle list, seeded with the whole atlas ONCE.
+  let freeList: FreeRect[] | null = null
 
   function pack(items: readonly RectInput[]): RectSlot[] | null {
     if (algorithm === 'shelf') return packShelf(items)
@@ -73,25 +91,38 @@ export function createRectPacker(width: number, height: number, options: RectPac
     // Sort by height descending — this is the First-Fit Decreasing heuristic.
     const sorted = [...items].sort((a, b) => b.h - a.h || b.w - a.w)
     const slots: RectSlot[] = []
-    let x = padding
-    let y = padding
-    let rowHeight = 0
+    // Atomicity: a null return rolls the cursor back — a failed batch
+    // changes nothing.
+    const startX = shelfX
+    const startY = shelfY
+    const startRowHeight = shelfRowHeight
+    const startArea = usedArea
 
     for (const item of sorted) {
       const w = item.w + padding * 2
       const h = item.h + padding * 2
       // Does not fit into the current row — move to a new row
-      if (x + w > width + padding) {
-        y += rowHeight
-        x = padding
-        rowHeight = 0
+      if (shelfX + w > width + padding) {
+        shelfY += shelfRowHeight
+        shelfX = padding
+        shelfRowHeight = 0
+        // An item wider than a FRESH row fits nowhere in this atlas (the
+        // wrap above assumed the next row is wide enough — a wide-but-short
+        // item used to be placed out of bounds here).
+        if (shelfX + w > width + padding) {
+          shelfX = startX; shelfY = startY; shelfRowHeight = startRowHeight; usedArea = startArea
+          return null
+        }
       }
       // Does not fit vertically — the atlas is too small
-      if (y + h > height + padding) return null
-      slots.push({ id: item.id, x, y, w: item.w, h: item.h })
+      if (shelfY + h > height + padding) {
+        shelfX = startX; shelfY = startY; shelfRowHeight = startRowHeight; usedArea = startArea
+        return null
+      }
+      slots.push({ id: item.id, x: shelfX, y: shelfY, w: item.w, h: item.h })
       usedArea += item.w * item.h
-      x += w
-      rowHeight = Math.max(rowHeight, h)
+      shelfX += w
+      shelfRowHeight = Math.max(shelfRowHeight, h)
     }
     return slots
   }
@@ -105,10 +136,25 @@ export function createRectPacker(width: number, height: number, options: RectPac
   interface FreeRect { x: number; y: number; w: number; h: number }
 
   function packMaxRects(items: readonly RectInput[]): RectSlot[] | null {
-    // Free rectangles. Initially — the whole atlas.
-    const free: FreeRect[] = [{ x: padding, y: padding, w: width - padding * 2, h: height - padding * 2 }]
+    // Free rectangles. Initially — the whole atlas; then PERSISTENT across
+    // calls (the incremental contract).
+    if (freeList === null) {
+      freeList = [{ x: padding, y: padding, w: width - padding * 2, h: height - padding * 2 }]
+    }
+    const free = freeList
     const slots: RectSlot[] = []
     const sorted = [...items].sort((a, b) => (b.w * b.h) - (a.w * a.h))
+    // Atomicity: a null return restores the free list exactly (the splits
+    // below mutate it in place).
+    const backup = free.map(r => ({ x: r.x, y: r.y, w: r.w, h: r.h }))
+    const startArea = usedArea
+
+    const fail = (): null => {
+      free.length = 0
+      for (const r of backup) free.push(r)
+      usedArea = startArea
+      return null
+    }
 
     for (const item of sorted) {
       const w = item.w + padding * 2
@@ -126,7 +172,7 @@ export function createRectPacker(width: number, height: number, options: RectPac
           }
         }
       }
-      if (best === null) return null // does not fit
+      if (best === null) return fail() // does not fit
       const chosen = best.rect
       slots.push({ id: item.id, x: chosen.x + padding, y: chosen.y + padding, w: item.w, h: item.h })
       usedArea += item.w * item.h

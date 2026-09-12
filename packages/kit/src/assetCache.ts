@@ -14,6 +14,9 @@
  *    eviction candidate under the byte budget.
  *  - churn-window: if many dispose events happened within the last churnWindowMs,
  *    the cache "cools down" — it stops evicting and waits (against thrashing).
+ *  - byte budget: an acquire may declare its byte cost (AcquireOptions.bytes);
+ *    when the total crosses maxBytes, tick() evicts IDLE entries — LRU by
+ *    lastTouched, lower priority first — until the budget is met again.
  *  - scope(): creates a child cache whose dispose automatically releases all of
  *    its acquires (for a level/scene).
  *
@@ -21,12 +24,21 @@
  * the separation "a texture primitive knows nothing about the loader" is preserved.
  */
 
-/** acquire option: TTL and priority can be overridden. */
+/** acquire option: TTL, priority and byte cost can be overridden. */
 export interface AcquireOptions {
   /** Override baseTtlFrames for this entry. */
   readonly ttlFrames?: number
   /** Eviction priority: higher = survives longer under pressure. Default 1. */
   readonly priority?: number
+  /** The asset's byte cost for the maxBytes budget (a texture's
+   *  width*height*4, a decoded bitmap's byte length, ...). Counted from the
+   *  acquire (the value may still be loading) until eviction/disposal.
+   *  Default 0 — the entry is invisible to the byte budget.
+   *
+   *  This is the ONLY accounting the cache maintains itself. The `bytes`
+   *  setter on the cache is a manual override for user-managed totals —
+   *  re-sync it yourself after evictions if you use it. */
+  readonly bytes?: number
 }
 
 /** AssetCache creation parameters. */
@@ -40,7 +52,11 @@ export interface AssetCacheOptions {
   readonly churnWindowMs?: number
   /** Churn threshold: how many dispose events in the window pause eviction. Default 8. */
   readonly churnThreshold?: number
-  /** Frame counter source. Default: external, see tick(). */
+  /** Frame counter / wall-clock source for the churn window. Default: the
+   *  wall clock (Date.now). A frozen clock (`() => 0`) makes the churn
+   *  window never decay — once the threshold is hit, eviction is paused
+   *  FOREVER (the timestamps never fall out of the window); pass an explicit
+   *  clock in tests, never in production. */
   readonly now?: () => number
 }
 
@@ -69,6 +85,8 @@ interface Entry<T> {
   zeroSinceFrame: number | null
   readonly ttlFrames: number
   readonly priority: number
+  /** Declared byte cost (AcquireOptions.bytes) — maintained in totalBytes. */
+  readonly bytes: number
   /** If the asset has a dispose — we call it on eviction. */
   disposer: ((value: T) => void) | null
   /** Load error (if any). After an error the entry can be re-requested. */
@@ -86,7 +104,16 @@ export function createAssetCache<T>(options: AssetCacheOptions, disposer?: (valu
   const baseTtl = options.baseTtlFrames ?? 60
   const churnWindowMs = options.churnWindowMs ?? 60_000
   const churnThreshold = options.churnThreshold ?? 8
-  const externalNow = options.now ?? (() => 0)
+  const maxBytes = options.maxBytes
+  // THE CLOCK (the audit's "clock=0 disables eviction forever"): the old
+  // default `() => 0` froze the churn window — cutoff went negative, the
+  // timestamps NEVER fell out, and after the 8th unref the pause stuck for
+  // the cache's whole life while the array grew without bound. The default
+  // is now the wall clock; a test can still pin a frozen one explicitly.
+  const externalNow = options.now
+    ?? (typeof Date !== 'undefined' && typeof Date.now === 'function'
+      ? () => Date.now()
+      : () => 0)
 
   const entries = new Map<string, Entry<T>>()
   const childCaches = new Set<AssetCache<T>>()
@@ -130,10 +157,12 @@ export function createAssetCache<T>(options: AssetCacheOptions, disposer?: (valu
       zeroSinceFrame: null,
       ttlFrames: opts.ttlFrames ?? baseTtl,
       priority: opts.priority ?? 1,
+      bytes: opts.bytes ?? 0,
       disposer: disposer ?? null,
       error: null,
     }
     entries.set(key, entry)
+    if (entry.bytes > 0) totalBytes += entry.bytes
     return makeHandle(entry)
   }
 
@@ -154,6 +183,7 @@ export function createAssetCache<T>(options: AssetCacheOptions, disposer?: (valu
         // the disposer must not throw — but we won't let it break the cache
       }
     }
+    if (entry.bytes > 0) totalBytes -= entry.bytes
     entries.delete(entry.key)
   }
 
@@ -195,9 +225,26 @@ export function createAssetCache<T>(options: AssetCacheOptions, disposer?: (valu
       }
     }
 
-    // LRU eviction under the byte budget — if one exists (the user counts bytes
-    // via markBytes). For now we don't evict by entry count alone (the budget
-    // is optional — it may be unset).
+    // LRU eviction under the byte budget (the audit's "maxBytes declared
+    // but never read"): the budget is over → evict IDLE entries until it is
+    // not — the least recently touched first, lower priority first within
+    // the same recency. ACTIVE (refcount > 0) entries are untouchable: if
+    // the budget is still over with nothing idle left, it stays over — that
+    // is live memory, not cache memory; the caller is over-committing.
+    // Entry bytes come from AcquireOptions.bytes (the only accounting the
+    // cache adjusts itself; a manual `cache.bytes = v` override is the
+    // user's to maintain).
+    if (totalBytes > maxBytes) {
+      const idle: Entry<T>[] = []
+      for (const entry of entries.values()) {
+        if (entry.refcount === 0) idle.push(entry)
+      }
+      idle.sort((a, b) => (a.priority - b.priority) || (a.lastTouchedFrame - b.lastTouchedFrame))
+      for (const entry of idle) {
+        if (totalBytes <= maxBytes) break
+        disposeEntry(entry)
+      }
+    }
   }
 
   /** Reset everything: call the disposer for all live entries.
@@ -259,14 +306,14 @@ export function createAssetCache<T>(options: AssetCacheOptions, disposer?: (valu
   }
 
   /** Current state for debugging. */
-  function stats(): { size: number; refcounted: number; idle: number } {
+  function stats(): { size: number; refcounted: number; idle: number; bytes: number } {
     let refcounted = 0
     let idle = 0
     for (const e of entries.values()) {
       if (e.refcount > 0) refcounted++
       else idle++
     }
-    return { size: entries.size, refcounted, idle }
+    return { size: entries.size, refcounted, idle, bytes: totalBytes }
   }
 
   function dispose(): void {
@@ -308,14 +355,14 @@ export function createAssetCache<T>(options: AssetCacheOptions, disposer?: (valu
 /** Public cache interface. */
 export interface AssetCache<T> {
   acquire(key: string, loader: (key: string) => Promise<T>, opts?: AcquireOptions): AssetHandle<T>
-  /** Frame tick: advances the TTL, evicts. */
+  /** Frame tick: advances the TTL, evicts (TTL expiry + the byte-budget LRU). */
   tick(): void
   /** Reset everything: call the disposer for all live entries. */
   flush(): void
   /** Create a child cache (a scope). */
   scope(): AssetCache<T>
   /** Current state for debugging. */
-  stats(): { size: number; refcounted: number; idle: number }
+  stats(): { size: number; refcounted: number; idle: number; bytes: number }
   /** Full teardown. */
   dispose(): void
   readonly size: number
