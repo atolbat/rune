@@ -23,7 +23,7 @@ try {
     for (const cam of verdict.cameras) {
       const cs = cam.crossStats
       console.log(`  yaw ${cam.yaw.toFixed(2)}: parity ${cam.parity} · cross-tier ${cam.crossParity}${cs ? ` ${cs.pct}% px, dmax ${cs.maxD}, drawn d${cs.drawnDelta}` : ''} · drawn ON ${cam.drawnOn} / OFF ${cam.drawnOff} · occluded ${cam.occludedOn}`)
-      if (cam.parity !== 'IDENTICAL' || cam.crossParity === 'DIVERGED' || !cam.ok) failed = true
+      if (cam.policy === 'framegraph' ? !cam.ok : (cam.parity !== 'IDENTICAL' || cam.crossParity === 'DIVERGED' || !cam.ok)) failed = true
     }
     console.log(`[task197-live] verdict: ${verdict.pass ? 'PASS' : 'FAIL'}`)
     if (!verdict.pass) failed = true

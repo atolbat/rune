@@ -5402,6 +5402,483 @@ function rayBoxes(view, ox, oy, oz, dx, dy, dz) {
 }
 var HYST_STREAK_SCALE = 32;
 
+// packages/core/src/framegraph.ts
+function laneOf(kind) {
+  if (kind === "compute")
+    return "C";
+  if (kind === "copy")
+    return "T";
+  return "G";
+}
+function recordPolicy(props) {
+  const seen = new Map;
+  const proxy = new Proxy(props, {
+    get(target, prop, receiver) {
+      if (typeof prop !== "string")
+        return Reflect.get(target, prop, receiver);
+      const v = target[prop];
+      if (typeof v === "object" && v !== null || typeof v === "function") {
+        throw new Error(`rune/framegraph: declarations must read only primitive policy props — '${prop}' is an object/function; move the per-frame data into the pass execute (the cache keys on the policy, the data rides the run)`);
+      }
+      if (!seen.has(prop))
+        seen.set(prop, v);
+      return v;
+    }
+  });
+  const key = () => Array.from(seen.keys()).sort().map((k) => `${k}=${String(seen.get(k))}`).join("|");
+  return { proxy, key };
+}
+function createFrameGraph(hooks = {}) {
+  const resources = [];
+  const resourceByName = new Map;
+  const passes = [];
+  const passNames = new Set;
+  const writtenVersion = new Map;
+  const writtenFrame = new Map;
+  let frameNo = 0;
+  let compiles = 0;
+  let lastStale = {};
+  const cache = new Map;
+  function resource(desc) {
+    if (resourceByName.has(desc.name)) {
+      throw new Error(`rune/framegraph: resource '${desc.name}' is declared twice — one handle is one identity`);
+    }
+    const bytes = desc.bytes !== undefined ? desc.bytes : desc.width !== undefined && desc.height !== undefined ? desc.width * desc.height * 4 : 0;
+    const res = {
+      name: desc.name,
+      kind: desc.kind,
+      bytes,
+      transient: desc.transient !== false,
+      external: desc.external,
+      exported: desc.exported === true,
+      at(version) {
+        if (version < 0 || !Number.isInteger(version)) {
+          throw new Error(`rune/framegraph: at(${version}) — a pinned version is a non-negative integer`);
+        }
+        return { resource: res, pinned: version };
+      }
+    };
+    resources.push(res);
+    resourceByName.set(desc.name, res);
+    return res;
+  }
+  function pass(desc) {
+    if (passNames.has(desc.name)) {
+      throw new Error(`rune/framegraph: pass '${desc.name}' is declared twice — one name is one node`);
+    }
+    passNames.add(desc.name);
+    passes.push({ desc, index: passes.length });
+    return api;
+  }
+  function resolveUsageList(list, props) {
+    const value = typeof list === "function" ? list(props) : list;
+    for (const item of value) {
+      const res = "resource" in item ? item.resource : item;
+      if (!resourceByName.has(res.name) || resourceByName.get(res.name) !== res) {
+        throw new Error(`rune/framegraph: pass reads '${res.name}' — a handle from ANOTHER graph (handles are per-graph identities)`);
+      }
+    }
+    return value;
+  }
+  function compile(props) {
+    const { proxy, key } = recordPolicy(props);
+    const enabled = [];
+    const gated = [];
+    for (const p of passes) {
+      const on = p.desc.when === undefined ? true : p.desc.when(proxy);
+      if (on)
+        enabled.push(p);
+      else
+        gated.push(p.desc.name);
+    }
+    const pending2 = new Map;
+    const usages = new Map;
+    for (const r of resources) {
+      if (!r.transient)
+        pending2.set(r.name, writtenVersion.get(r.name) ?? 0);
+    }
+    for (const p of enabled) {
+      const own = [];
+      const readList = p.desc.reads === undefined ? [] : resolveUsageList(p.desc.reads, proxy);
+      for (const item of readList) {
+        const pinned = "pinned" in item;
+        const res = pinned ? item.resource : item;
+        const version = pinned ? item.pinned : pending2.get(res.name) ?? 0;
+        own.push({ resource: res, version, access: "read", pinned });
+      }
+      const writeList = p.desc.writes === undefined ? [] : resolveUsageList(p.desc.writes, proxy);
+      for (const item of writeList) {
+        if ("pinned" in item) {
+          throw new Error(`rune/framegraph: pass '${p.desc.name}' WRITES a pinned handle — pins are read-only views (res.at(v))`);
+        }
+        const res = item;
+        const version = (pending2.get(res.name) ?? 0) + 1;
+        pending2.set(res.name, version);
+        own.push({ resource: res, version, access: "write", pinned: false });
+      }
+      usages.set(p.index, own);
+    }
+    const policyKey = key();
+    const hit = cache.get(policyKey);
+    if (hit !== undefined)
+      return hit;
+    compiles++;
+    const writerOf = new Map;
+    const readersOf = new Map;
+    for (const p of enabled) {
+      for (const u of usages.get(p.index) ?? []) {
+        const k = `${u.resource.name}@${u.version}`;
+        if (u.access === "write") {
+          writerOf.set(k, p.index);
+        } else {
+          const arr = readersOf.get(k) ?? [];
+          arr.push(p.index);
+          readersOf.set(k, arr);
+        }
+      }
+    }
+    const liveSet = new Set;
+    const stack = [];
+    for (const p of enabled) {
+      const writesNothing = (usages.get(p.index) ?? []).every((u) => u.access !== "write");
+      if (p.desc.kind === "present" || p.desc.keep === true || p.desc.kind === "copy" && writesNothing) {
+        liveSet.add(p.index);
+        stack.push(p.index);
+      }
+    }
+    const deps = new Map;
+    for (const p of enabled)
+      deps.set(p.index, []);
+    for (const [k, readers] of readersOf) {
+      const w = writerOf.get(k);
+      if (w === undefined)
+        continue;
+      for (const r of readers) {
+        if (r === w)
+          continue;
+        deps.get(r)?.push(w);
+      }
+    }
+    while (stack.length > 0) {
+      const cur = stack.pop();
+      for (const d of deps.get(cur) ?? []) {
+        if (!liveSet.has(d)) {
+          liveSet.add(d);
+          stack.push(d);
+        }
+      }
+    }
+    const live = enabled.filter((p) => liveSet.has(p.index));
+    const culled = enabled.filter((p) => !liveSet.has(p.index)).map((p) => p.desc.name);
+    const edges = [];
+    for (const [k, readers] of readersOf) {
+      const [resName, vRaw] = k.split("@");
+      const w = writerOf.get(k);
+      for (const r of readers) {
+        if (w === r)
+          continue;
+        if (!liveSet.has(r) || w !== undefined && !liveSet.has(w))
+          continue;
+        edges.push({ from: w === undefined ? null : passes[w].desc.name, to: passes[r].desc.name, resource: resName, version: Number(vRaw), lane: w === undefined ? null : laneOf(passes[w].desc.kind) });
+      }
+    }
+    for (const p of live) {
+      for (const u of usages.get(p.index) ?? []) {
+        if (u.access !== "read" || !u.resource.transient)
+          continue;
+        const k = `${u.resource.name}@${u.version}`;
+        const w = writerOf.get(k);
+        if (w === undefined || !liveSet.has(w)) {
+          const writerNote = w === undefined ? `no pass writes it this frame` : `its writer '${passes[w].desc.name}' left the frame (gated off or culled)`;
+          throw new Error(`rune/framegraph: pass '${p.desc.name}' reads '${k}' but ${writerNote} — a transient's content exists only inside its frame; gate the READER too, or keep the writer (this is the shadows-off class: the consumer must die with the producer)`);
+        }
+      }
+    }
+    const order = live.map((p) => p.index);
+    const topoIndex = new Map;
+    order.forEach((passIdx, i) => topoIndex.set(passIdx, i));
+    {
+      const rank = new Map;
+      for (const passIdx of order) {
+        let r = 0;
+        for (const d of deps.get(passIdx) ?? []) {
+          const dr = rank.get(d);
+          if (dr === undefined) {
+            throw new Error(`rune/framegraph: the frame graph is not a DAG ('${passes[passIdx].desc.name}' precedes its producer) — declaration order must write before it reads`);
+          }
+          r = Math.max(r, dr + 1);
+        }
+        rank.set(passIdx, r);
+      }
+    }
+    const lifetimesRaw = [];
+    for (const [k, readers] of readersOf) {
+      const w = writerOf.get(k);
+      if (w === undefined || !liveSet.has(w))
+        continue;
+      const resName = k.split("@")[0];
+      const res = resourceByName.get(resName);
+      if (res === undefined || !res.transient)
+        continue;
+      let last = topoIndex.get(w);
+      for (const r of readers) {
+        if (!liveSet.has(r) || r === w)
+          continue;
+        last = Math.max(last, topoIndex.get(r));
+      }
+      lifetimesRaw.push({
+        resource: resName,
+        version: Number(k.split("@")[1]),
+        from: topoIndex.get(w),
+        to: last,
+        bytes: res.bytes
+      });
+    }
+    for (const p of live) {
+      for (const u of usages.get(p.index) ?? []) {
+        if (u.access !== "write" || !u.resource.transient)
+          continue;
+        const k = `${u.resource.name}@${u.version}`;
+        if (readersOf.has(k))
+          continue;
+        lifetimesRaw.push({ resource: u.resource.name, version: u.version, from: topoIndex.get(p.index), to: topoIndex.get(p.index), bytes: u.resource.bytes });
+      }
+    }
+    lifetimesRaw.sort((a, b) => a.from - b.from || a.to - b.to || a.bytes - b.bytes);
+    const slotEnds = [];
+    const slotIntervals = [];
+    const slotExternal = [];
+    const lifetimes = lifetimesRaw.map((iv) => {
+      const res = resourceByName.get(iv.resource);
+      const external = res?.external !== undefined;
+      let slot;
+      if (external) {
+        slot = slotEnds.length;
+        slotEnds.push(iv.to);
+        slotIntervals.push([]);
+        slotExternal.push(true);
+      } else {
+        slot = slotEnds.findIndex((end) => end < iv.from);
+        if (slot === -1 || slotExternal[slot]) {
+          slot = slotEnds.length;
+          slotEnds.push(iv.to);
+          slotIntervals.push([]);
+          slotExternal.push(false);
+        } else {
+          slotEnds[slot] = iv.to;
+        }
+      }
+      const withSlot = { ...iv, slot };
+      slotIntervals[slot].push(withSlot);
+      return withSlot;
+    });
+    const slots = slotIntervals.map((intervals, index) => ({
+      index,
+      intervals,
+      peakBytes: intervals.reduce((m, iv) => Math.max(m, iv.bytes), 0),
+      external: slotExternal[index]
+    }));
+    const naiveBytes = lifetimes.reduce((s, iv) => s + iv.bytes, 0);
+    const peakBytes = slots.reduce((s, slot) => s + slot.peakBytes, 0);
+    const barriers = [];
+    {
+      const barrierKeys = new Set;
+      const kindByName = new Map;
+      for (const passIdx of order)
+        kindByName.set(passes[passIdx].desc.name, passes[passIdx].desc.kind);
+      const topoOfName = new Map;
+      order.forEach((passIdx, i) => topoOfName.set(passes[passIdx].desc.name, i));
+      const emit = (after, before, resource2, cls, lanes) => {
+        const k = `${after}|${before}|${resource2}|${cls}|${lanes}`;
+        if (barrierKeys.has(k))
+          return;
+        barrierKeys.add(k);
+        barriers.push({ after, before, resource: resource2, class: cls, lanes });
+      };
+      for (const e of edges) {
+        if (e.from === null || e.lane === null)
+          continue;
+        const consumerKind = kindByName.get(e.to);
+        if (consumerKind === undefined)
+          continue;
+        const consumerLane = laneOf(consumerKind);
+        if (consumerLane !== e.lane)
+          emit(e.from, e.to, e.resource, "RAW", `${e.lane}->${consumerLane}`);
+      }
+      const lastBefore = new Map;
+      for (const passIdx of order) {
+        const p = passes[passIdx];
+        const own = new Map;
+        for (const u of usages.get(passIdx) ?? []) {
+          own.set(u.resource.name, own.get(u.resource.name) === "write" || u.access === "write" ? "write" : "read");
+        }
+        for (const [name, access] of own) {
+          const prev = lastBefore.get(name);
+          if (prev !== undefined && prev.pass !== p.desc.name) {
+            const hazard = prev.access === "write" || access === "write";
+            if (hazard && laneOf(prev.kind) !== laneOf(p.desc.kind)) {
+              const cls = prev.access === "write" && access === "read" ? "RAW" : prev.access === "read" && access === "write" ? "WAR" : "WAW";
+              emit(prev.pass, p.desc.name, name, cls, `${laneOf(prev.kind)}->${laneOf(p.desc.kind)}`);
+            }
+          }
+          lastBefore.set(name, { pass: p.desc.name, kind: p.desc.kind, access });
+        }
+      }
+      barriers.sort((a, b) => (topoOfName.get(a.before) ?? 0) - (topoOfName.get(b.before) ?? 0) || (topoOfName.get(a.after) ?? 0) - (topoOfName.get(b.after) ?? 0));
+    }
+    const finishOf = new Map;
+    const busy = { G: 0, C: 0, T: 0 };
+    const parallel = [];
+    let overlapUnits = 0;
+    for (const passIdx of order) {
+      const p = passes[passIdx];
+      const lane = laneOf(p.desc.kind);
+      const cost = p.desc.cost ?? 1;
+      let ready = 0;
+      for (const d of deps.get(passIdx) ?? []) {
+        const f = finishOf.get(d);
+        if (f !== undefined)
+          ready = Math.max(ready, f);
+      }
+      const othersBusy = ["G", "C", "T"].filter((l) => l !== lane && busy[l] > ready);
+      const start = Math.max(ready, busy[lane]);
+      const finish = start + cost;
+      busy[lane] = finish;
+      finishOf.set(passIdx, finish);
+      if ((lane === "C" || lane === "T") && othersBusy.length > 0) {
+        const until = Math.min(...othersBusy.map((l) => busy[l]), finish);
+        const units = Math.max(0, until - start);
+        if (units > 0) {
+          parallel.push({ pass: p.desc.name, lane, units });
+          overlapUnits += units;
+        }
+      }
+    }
+    const criticalPath = Math.max(busy.G, busy.C, busy.T);
+    const statsSnapshot = {
+      declared: passes.length,
+      live: live.length,
+      gated: gated.length,
+      culled: culled.length,
+      barriers: barriers.length,
+      slots: slots.length,
+      naiveBytes,
+      peakBytes,
+      savedBytes: Math.max(0, naiveBytes - peakBytes),
+      savedPct: naiveBytes > 0 ? 100 * (naiveBytes - peakBytes) / naiveBytes : 0,
+      overlapUnits
+    };
+    const frame = {
+      key: policyKey,
+      passes: live.map((p) => ({ name: p.desc.name, kind: p.desc.kind, execute: p.desc.execute })),
+      gated,
+      culled,
+      edges,
+      barriers,
+      lifetimes,
+      slots,
+      overlap: { busy, criticalPath, parallel, overlapUnits },
+      get stats() {
+        return { ...statsSnapshot, compiles };
+      },
+      run(runProps) {
+        const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
+        const executed = [];
+        const slotFirstStart = new Map;
+        const slotLastEnd = new Map;
+        for (const iv of lifetimes) {
+          slotFirstStart.set(iv.slot, Math.min(slotFirstStart.get(iv.slot) ?? Infinity, iv.from));
+          slotLastEnd.set(iv.slot, Math.max(slotLastEnd.get(iv.slot) ?? -1, iv.to));
+        }
+        const slotBacking = new Map;
+        const ctx = {
+          props: runProps,
+          frame: frameNo,
+          graph: api,
+          view(name) {
+            const res = resourceByName.get(name);
+            if (res === undefined)
+              throw new Error(`rune/framegraph: view('${name}') — no such resource`);
+            const ver = pending2.get(name) ?? writtenVersion.get(name) ?? 0;
+            const wf = writtenFrame.get(name);
+            const iv = lifetimes.find((l) => l.resource === name && l.version === ver);
+            return {
+              name,
+              version: ver,
+              stale: wf === undefined ? -1 : frameNo - wf,
+              slot: iv?.slot ?? -1,
+              external: res.external,
+              object: slotBacking.get(iv?.slot ?? -1) ?? res.external
+            };
+          }
+        };
+        for (let i = 0;i < order.length; i++) {
+          const passIdx = order[i];
+          const p = passes[passIdx];
+          if (hooks.acquire !== undefined) {
+            for (const [slot, start] of slotFirstStart) {
+              if (start === i && !slotBacking.has(slot) && !slots[slot]?.external) {
+                slotBacking.set(slot, hooks.acquire(slot, lifetimes.find((l) => l.slot === slot && l.from === start)));
+              }
+            }
+          }
+          p.desc.execute(ctx);
+          executed.push(p.desc.name);
+          for (const u of usages.get(passIdx) ?? []) {
+            if (u.access === "write" && !u.resource.transient) {
+              writtenVersion.set(u.resource.name, u.version);
+              writtenFrame.set(u.resource.name, frameNo);
+            }
+          }
+          if (hooks.release !== undefined) {
+            for (const [slot, end] of slotLastEnd) {
+              if (end === i && slotBacking.has(slot)) {
+                hooks.release(slot, slotBacking.get(slot));
+                slotBacking.delete(slot);
+              }
+            }
+          }
+        }
+        if (hooks.release !== undefined) {
+          for (const [slot, backing] of slotBacking)
+            hooks.release(slot, backing);
+        }
+        frameNo++;
+        const stale = {};
+        for (const r of resources) {
+          if (r.transient)
+            continue;
+          const wf = writtenFrame.get(r.name);
+          stale[r.name] = wf === undefined ? -1 : frameNo - 1 - wf;
+        }
+        lastStale = stale;
+        const t1 = typeof performance !== "undefined" ? performance.now() : Date.now();
+        return { executed, stale, ms: t1 - t0 };
+      }
+    };
+    cache.set(policyKey, frame);
+    return frame;
+  }
+  const api = {
+    resource,
+    pass,
+    compile,
+    get lastStale() {
+      return lastStale;
+    },
+    get declaredResources() {
+      return resources;
+    },
+    reset() {
+      writtenVersion.clear();
+      writtenFrame.clear();
+      cache.clear();
+      frameNo = 0;
+    }
+  };
+  return api;
+}
+
 // packages/core/src/gpu/bitonic.ts
 function bitonicPadCount(count) {
   if (!Number.isFinite(count) || count < 0) {
@@ -5594,6 +6071,7 @@ __export(exports_src, {
   createGpuScratch: () => createGpuScratch,
   createGpgpu: () => createGpgpu,
   createFrequencyArena: () => createFrequencyArena,
+  createFrameGraph: () => createFrameGraph,
   createFeed: () => createFeed,
   createEpoch: () => createEpoch,
   createCaps: () => createCaps,
@@ -18806,6 +19284,7 @@ export {
   createRenderer,
   createPortability,
   createGpuParticles,
+  createFrameGraph,
   createDevice,
   computeMipLevels,
   combineWebgpuScope,

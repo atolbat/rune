@@ -200,6 +200,21 @@ export type {
   RecordView, ProjectedBox, HysteresisPolicy, FlatCull,
   LayerVerdict, SpatialCluster,
 } from './culling.ts'
+// ─── Task 203: THE FRAME GRAPH — the «супер рендеринг» architecture ────────
+// Render passes as declarative data (versioned resource handles), the
+// frame compiled into a DAG: dead-branch culling (the shadows-off class),
+// transient lifetimes + the memory-aliasing planner (the console's slot
+// math), automatic barrier emission, the 3-lane async-compute overlap
+// plan, and the cross-frame version law that makes temporal reuse (the
+// amortized cull, the two-pass HZB) a first-class, MEASURED concept.
+// Pure/DOM-free — the executes are the caller's own brick calls.
+export { createFrameGraph } from './framegraph.ts'
+export type {
+  FgResourceDesc, FgResource, FgPinnedRead, FgPassDesc, FgRunCtx, FgViewInfo,
+  FgEdge, FgBarrier, FgLifetime, FgSlot, FgOverlap, FgStats, FgRunReport,
+  CompiledFrame, FrameGraph, FgResolveHooks,
+  FgResourceKind, FgPassKind, FgLane,
+} from './framegraph.ts'
 export {
   bitonicPadCount, bitonicPassSequence, BITONIC_PAD_KEY, BITONIC_SENTINEL,
 } from './gpu/bitonic.ts'

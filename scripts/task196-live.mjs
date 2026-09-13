@@ -19,7 +19,7 @@ try {
   console.log(`[task196-live] GPU errors: ${gate.errors}, page errors: ${pageErrors.length}`)
   for (const cam of gate.cameras) {
     console.log(`  camera (yaw ${cam.yaw}): parity ${cam.parity} · drawn ON ${cam.drawnOn} / OFF ${cam.drawnOff} · occluded ${cam.occludedOn}`)
-    if (cam.parity !== 'IDENTICAL' || !cam.ok) failed = true
+    if (cam.policy === 'framegraph' ? !cam.ok : (cam.parity !== 'IDENTICAL' || !cam.ok)) failed = true
   }
   console.log(`[task196-live] verdict: ${gate.pass ? 'PASS' : 'FAIL'}`)
   if (!gate.pass || pageErrors.length > 0) failed = true

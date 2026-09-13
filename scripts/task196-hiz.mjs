@@ -69,8 +69,15 @@ try {
     for (const cam of gate.cameras) {
       camIdx++
       console.log(`  camera ${camIdx} (yaw ${cam.yaw.toFixed(2)}): parity ${cam.parity} (${String(cam.hashOn).slice(0, 12)}) · drawn ON ${cam.drawnOn} / OFF ${cam.drawnOff} (${(100 * (1 - cam.drawnOn / cam.drawnOff)).toFixed(1)}% culled) · frustum ${cam.frustumOn} · occluded ${cam.occludedOn} · straddle ${cam.straddleOn}`)
-      if (cam.parity !== 'IDENTICAL') {
+      // Task 203 — the 'framegraph' leg is STRUCTURAL (no pixels of its
+      // own): its ok flag IS the verdict; every pixel leg above still
+      // carries its own hash
+      if (cam.policy !== 'framegraph' && cam.parity !== 'IDENTICAL') {
         console.log(`  FAIL — the pixel parity diverged (${cam.hashOn} vs ${cam.hashOff}): Hi-Z culled a visible box`)
+        failed = true
+      }
+      if (cam.policy === 'framegraph' && !cam.ok) {
+        console.log('  FAIL — the frame-graph leg (branch culling / version law / overlay / amortization / slots / barriers / cache)')
         failed = true
       }
       // Task 201 — the 'hysteresis' leg: drawnOn === drawnOff at saturation
@@ -118,6 +125,10 @@ try {
           console.log(`  FAIL — the amortized frames did not skip the kernel (${cam.skips} skips)`)
           failed = true
         }
+      } else if (cam.policy === 'framegraph') {
+        // Task 203 — the structural leg: no pixels of its own (the ok flag
+        // was checked above with the branch-culling/version/overlay/
+        // amortization/slots/barriers/cache assertions)
       } else {
         if (!cam.invariantOn || !cam.invariantOff) {
           console.log(`  FAIL — the accounting invariant broke (frustum + occluded + drawn must equal ${stats.occludees})`)

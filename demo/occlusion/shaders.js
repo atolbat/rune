@@ -36,7 +36,7 @@
 //     height; WG reads @builtin(position).xy as-is). This kills the fog
 //     banding — the «flickering gray triangles on the empty spaces» field
 //     report — without adding a single cross-tier ULP.
-import { HIZ_W, HIZ_H, LEVELS, MAX_LEVEL, LEVEL_DIMS, LEVEL_OFF } from './scene.js?v=202'
+import { HIZ_W, HIZ_H, LEVELS, MAX_LEVEL, LEVEL_DIMS, LEVEL_OFF } from './scene.js?v=203'
 
 const SKY = 'vec3<f32>(0.045, 0.055, 0.09)'
 const SKY_GLSL = 'vec3(0.045, 0.055, 0.09)'

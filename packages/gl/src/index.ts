@@ -42,11 +42,22 @@ export {
   hysteresisPolicy, decodeVerdict, decodeStreak, HYST_STREAK_SCALE,
   flatCull, layerPolicy, clusterize, softwareOccluder,
   cameraRay, rayBoxes,
+  // Task 203 — THE FRAME GRAPH (the «супер рендеринг» architecture): the
+  // declarative pass/resource DAG the engine compiles (branch culling,
+  // transient lifetimes + the aliasing planner, barrier emission, the
+  // 3-lane overlap plan, the cross-frame version law) — pure, and the
+  // executes are the caller's own brick calls. The dist surface carries
+  // it for the demos.
+  createFrameGraph,
 } from '@rune/core'
 export type { SpatialBox, SpatialIndex, RayHit } from '@rune/core'
 export type {
   RecordView, ProjectedBox, HysteresisPolicy, FlatCull,
   LayerVerdict, SpatialCluster,
+  FgResourceDesc, FgResource, FgPinnedRead, FgPassDesc, FgRunCtx, FgViewInfo,
+  FgEdge, FgBarrier, FgLifetime, FgSlot, FgOverlap, FgStats, FgRunReport,
+  CompiledFrame, FrameGraph, FgResolveHooks,
+  FgResourceKind, FgPassKind, FgLane,
 } from '@rune/core'
 
 // M5 (Task 73): feed dual-bind — renderer.feed() on both backends.

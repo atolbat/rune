@@ -24,16 +24,16 @@
 // window.__hizStats — the live counters (the smoke/gates read it);
 // window.__hizGate — the probe verdict (?probe=1: WG-only, the Task-196
 // contract; ?probe=1&mode=webgl2: both tiers + the cross-tier parity).
-import { buildTier } from './tier.js?v=202'
+import { buildTier } from './tier.js?v=203'
 import {
   createScene, cameraAt, VAL_CAMERAS,
   HIZ_W, HIZ_H, LEVELS,
-} from './scene.js?v=202'
+} from './scene.js?v=203'
 import {
   buildOctree, buildBVH, frustumPlanes, aabbOutsideFrustum,
   recordView, flatCull, clusterize, softwareOccluder, cameraRay, rayBoxes,
   layerPolicy,
-} from '../../dist/rune.esm.js?v=202'
+} from '../../dist/rune.esm.js?v=203'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -48,7 +48,7 @@ const democtl = { pause() {}, resume() {} }
 const shell = window.RuneDemoShell.mount({
   layout: 'page',
   title: 'Hi-Z occlusion culling',
-  desc: 'Hierarchical Z-buffer culling, GPU-driven — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts). Task 201: the scenario composes its frame from PASS BRICKS (depthPass → pyramid → occlusionPass → hysteresisPass → visiblePass — the regl/WebGPU syntax the scenario owns), the Frostbite temporal policy runs device-side (an occluded verdict needs 3 consecutive frames — no popping, pixel-parity-safe), and the pure CPU kit (octree/BVH rays + hit tests + picking, the flat/billboard edge-on test, vegetation clustering, the layer policy for transparency, and the software occluder — the boxes\u2019 front faces rasterized CPU-side into a tiny depth pyramid) gates the GPU\u2019s own verdicts. Task 202: the web-searched research techniques, implemented and pushed further — the HISTORY FEEDBACK brick (the two-pass HZB: Nanite\u2019s «first pass uses the HZB from last frame», Aaltonen\u2019s two-phase, the CryEngine coverage buffer — but WITHOUT reprojection: the prev-visible set re-renders at the current camera, so the lag never costs a pixel) and the AMORTIZED-CULL policy (the verdicts reuse while the camera stands bit-still).',
+  desc: 'Hierarchical Z-buffer culling, GPU-driven — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts). Task 201: the scenario composes its frame from PASS BRICKS (depthPass → pyramid → occlusionPass → hysteresisPass → visiblePass — the regl/WebGPU syntax the scenario owns), the Frostbite temporal policy runs device-side (an occluded verdict needs 3 consecutive frames — no popping, pixel-parity-safe), and the pure CPU kit (octree/BVH rays + hit tests + picking, the flat/billboard edge-on test, vegetation clustering, the layer policy for transparency, and the software occluder — the boxes\u2019 front faces rasterized CPU-side into a tiny depth pyramid) gates the GPU\u2019s own verdicts. Task 202: the web-searched research techniques, implemented and pushed further — the HISTORY FEEDBACK brick (the two-pass HZB: Nanite\u2019s «first pass uses the HZB from last frame», Aaltonen\u2019s two-phase, the CryEngine coverage buffer — but WITHOUT reprojection: the prev-visible set re-renders at the current camera, so the lag never costs a pixel) and the AMORTIZED-CULL policy (the verdicts reuse while the camera stands bit-still). Task 203: THE FRAME GRAPH — the recipe is now a DECLARATION (versioned resource handles, conditional reads, per-pass gates) that the engine compiles into a frame DAG: dead branches leave the frame (Hi-Z off → the whole prepass branch disappears), transient lifetimes schedule into aliasing slots, barriers are emitted at every cross-lane hazard, and the amortized cull becomes a first-class graph concept — the staleness of the reused verdicts is counted, not hidden.',
   hint: 'Drag — orbit · wheel/pinch — zoom · CLICK — pick a box (the octree/BVH ray) · the buttons toggle the culling tiers, the pyramid view, the occluder policy (the «City occludes» experiment), the temporal policy (hysteresis: watch the drawn count decay over 3 frames), and the history feedback (the two-pass HZB: the city occludes itself — watch the occluded count climb). The WebGPU / WebGL2 radios boot the same bricks on each backend\u2019s own mechanisms — and the parity gates hold on both.',
   defaults: { mode: MODE_PARAM === 'webgl2' ? 'webgl2' : 'webgpu' },
   onPause() { democtl.pause() },
@@ -242,6 +242,7 @@ function refreshHud() {
     `drawn <b>${stats.drawn}</b> (${pct}%) · near-straddle ${stats.nearStraddle} · hysteresis <b>${stats.hysteresis ? `ON (K=3${hysteresisOn ? '' : '·idle'}` : 'OFF'}</b> · history <b>${historyOn ? 'ON (prev-visible occluders)' : 'OFF'}</b>\n` +
     `Hi-Z ${HIZ_W}x${HIZ_H} · ${LEVELS} mips · tier <b>${hizOn ? 'ON' : 'OFF'}</b>\n` +
     `kit: clusters <b>${stats.clusters}</b> (cell 8) · cluster-cull ${stats.clusterCulled} · flat-culled ${stats.flatCulled} · soft-HiZ ${stats.softOccluded}\n` +
+    `${tier !== null && tier.graphLine !== undefined ? tier.graphLine() + '\n' : ''}` +
     `${tier !== null ? tier.drawsLine : ''}\n` +
     `${tier !== null ? tier.tierLine : ''}\n` +
     `frame ${msAvg.toFixed(1)} ms CPU · ${stats.mode}`
@@ -299,7 +300,11 @@ function loop(t) {
   camEyeCache = eye
   try {
     if (tier !== null && tier.drain !== null && tier.drain !== undefined) tier.drain(t)
-    tier.frame(mvp, eye, hizOn ? 1 : 0, showPyramid, cityOccludes ? scene.N : scene.K, hysteresisOn, historyOn)
+    // Task 203 — the stats cadence rides the graph: the 12th frame arms the
+    // read-stats COPY PASS (the copy-lane root — the overlap plan's one
+    // web-real parallelism: the async readback beside the color render)
+    const wantStats = frameIndex % 12 === 0 && frameIndex > 2
+    tier.frame(mvp, eye, hizOn ? 1 : 0, showPyramid, cityOccludes ? scene.N : scene.K, hysteresisOn, historyOn, false, wantStats)
   } catch (e) {
     noteError(`frame failed: ${e instanceof Error ? e.message : String(e)}`)
   }
@@ -724,6 +729,77 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     if (!frozenBuckets) shell.log.error(`amortized-cull buckets FAILED @yaw ${camV.yaw} — the frozen frame's drawn/occluded/frustum must not move`)
     if (skips < 2) shell.log.error(`amortized-cull reuse FAILED @yaw ${camV.yaw} — the second and third frames must skip the kernel (got ${skips} skips)`)
     cameras.push({ yaw: camV.yaw, policy: 'amortized', parity: frozenIdentical ? 'IDENTICAL' : 'DIFFERS', drawnOn: cachedStats.drawn, drawnOff: freshStats.drawn, occludedOn: cachedStats.occluded, skips, invariantOn: true, invariantOff: true, ok: amortizedOk })
+  }
+  // ── Task 203 — THE FRAME-GRAPH GATE (the «супер рендеринг» architecture:
+  //    the recipe is a DECLARATION the engine compiles into a DAG). Five
+  //    honest properties, all read off the tier's own compiled frame:
+  //    (a) BRANCH CULLING — the shadows-off law: with the Hi-Z gate off
+  //        the kernel stops READING the pyramid → z-fill + pyramid-reduce
+  //        leave the frame entirely (the branch died with its consumer),
+  //        while the kernel itself still runs (the OFF legs need fresh
+  //        frustum verdicts);
+  //    (b) THE VERSION LAW — the prepass (declared first) binds the
+  //        scene version BEFORE this frame's cull write — the edge comes
+  //        from `import` (the previous frame's verdicts: exactly what the
+  //        two-pass HZB's phase 1 consumes, the no-reprojection contract);
+  //    (c) THE OVERLAY LAW — the view off → the strip gated; the view on
+  //        → the strip live AND the color pass live under it (a pure write
+  //        would have cull-chain the color pass out of the frame);
+  //    (d) GATED AMORTIZATION — the frozen frame gates cull-verdicts +
+  //        hysteresis out, and the scene's consumed version counts its
+  //        STALENESS in frames (the temporal reuse is a measured graph
+  //        concept, not a hidden cache trick);
+  //    (e) THE MACHINE'S OWN AXIOMS — no slot carries overlapping
+  //        lifetimes (aliasing soundness), the barrier set matches the
+  //        backend's lanes (WG: the cross-lane hazards exist; GL: one
+  //        lane, honestly zero), and the compile count stays bounded (the
+  //        policy cache — one compile per distinct policy, not per frame).
+  {
+    const camV = VAL_CAMERAS[0]
+    const { eye, mvp } = cameraAt(camV.yaw, camV.pitch, camV.dist)
+    // (a) Hi-Z off + view off: the prepass branch dies
+    t.renderTo(t.surface.targetId, mvp, eye, 0, false)
+    const off = t.graphStats()
+    const branchDead = off.culled.includes('z-fill') && off.culled.includes('pyramid-reduce')
+      && !off.live.includes('z-fill') && !off.live.includes('pyramid-reduce')
+    const cullStillRuns = off.live.includes('cull-verdicts')
+    // (b)+(c) the ON frame, view off then on
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false)
+    const on = t.graphStats()
+    const prepassBindsPrev = on.edges.some(e => e.startsWith('import→z-fill scene@'))
+    const stripGated = on.gated.includes('pyramid-view') && !on.live.includes('pyramid-view')
+    const colorLive = on.live.includes('color')
+    t.renderTo(t.surface.targetId, mvp, eye, 1, true)
+    const view = t.graphStats()
+    const overlayOk = view.live.includes('pyramid-view') && view.live.includes('color') && view.live.includes('z-fill')
+    // (d) the amortized frame: arm then freeze
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, true)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, true)
+    const frozen = t.graphStats()
+    const amortGated = frozen.gated.includes('cull-verdicts') && frozen.gated.includes('hysteresis')
+      && !frozen.live.includes('cull-verdicts')
+    const staleScene = frozen.stale.scene ?? 0
+    // (e) the machine's own axioms on the view frame (the richest one)
+    const slotsOk = view.slots.every(s => {
+      const ivs = [...s.intervals].sort((a, b) => a.from - b.from)
+      for (let i = 1; i < ivs.length; i++) if (ivs[i - 1].to >= ivs[i].from) return false
+      return true
+    })
+    const barrierOk = t.mode === 'webgl2' ? view.stats.barriers === 0 : view.stats.barriers >= 3
+    const compilesOk = view.stats.compiles >= 3 && view.stats.compiles <= 12
+    const graphOk = branchDead && cullStillRuns && prepassBindsPrev && stripGated && colorLive
+      && overlayOk && amortGated && staleScene >= 1 && slotsOk && barrierOk && compilesOk
+    allOk = allOk && graphOk
+    shell.log.event(`frame graph @yaw ${camV.yaw.toFixed(2)}: ${off.live.length}-pass frame · Hi-Z OFF kills [${off.culled.join(', ')}] (the kernel keeps running) · the prepass binds the PREV scene version (${prepassBindsPrev ? 'the two-pass HZB law' : 'MISSING'}) · view ON keeps the color pass alive under the strip · frozen frame gates [${frozen.gated.join(', ')}], verdicts ${staleScene}f stale · ${view.stats.slots} slot${view.stats.slots === 1 ? '' : 's'} sound · ${view.stats.barriers} barriers (${t.mode === 'webgl2' ? 'the GL frame is one lane — none needed' : 'the WG cross-lane set'}) · ${view.stats.compiles} compiles — ${graphOk ? 'PASS' : 'FAIL'}`)
+    if (!branchDead) shell.log.error(`frame-graph branch culling FAILED — the Hi-Z-off frame must drop z-fill + pyramid-reduce (got culled [${off.culled.join(', ')}])`)
+    if (!cullStillRuns) shell.log.error(`frame-graph cull FAILED — the OFF legs need the kernel running with the gate off (frustum verdicts)`)
+    if (!prepassBindsPrev) shell.log.error(`frame-graph version law FAILED — the prepass must bind the scene version before this frame's cull write (the two-pass HZB's no-reprojection contract)`)
+    if (!overlayOk) shell.log.error(`frame-graph overlay FAILED — the strip must stay a read-modify-write (the color pass live under it): live [${view.live.join(', ')}]`)
+    if (!amortGated || staleScene < 1) shell.log.error(`frame-graph amortization FAILED — the frozen frame must gate cull-verdicts + hysteresis and count the staleness (gated [${frozen.gated.join(', ')}], stale ${staleScene})`)
+    if (!slotsOk) shell.log.error(`frame-graph aliasing FAILED — a slot carries overlapping lifetimes (the planner's own soundness law)`)
+    if (!barrierOk) shell.log.error(`frame-graph barriers FAILED — ${view.stats.barriers} barriers on the ${t.mode} frame (the lane model's honest count)`)
+    if (!compilesOk) shell.log.error(`frame-graph compile cache FAILED — ${view.stats.compiles} compiles (one per distinct policy, not per frame)`)
+    cameras.push({ yaw: camV.yaw, policy: 'framegraph', parity: 'N/A', drawnOn: 0, drawnOff: 0, invariantOn: true, invariantOff: true, ok: graphOk })
   }
   const verdict = { pass: allOk && crossOk && errors.length === 0, tier: t.mode, cameras, crossChecked, errors: errors.length }
   stats.validation = verdict
