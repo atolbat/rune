@@ -15,7 +15,7 @@
 //
 //   ── THE PASS BRICKS (built once, run per frame — each one packs its
 //      own uniform lanes, owns its own program states) ────────────────
-//   const depth  = device.depthPass({ scene, mesh, shaders: dict.z, pyramid })
+//   const hist   = device.historyPass({ scene, mesh, pyramid, shaders: dict.hist, fill: dict.z })
 //   const occl   = device.occlusionPass({ scene, pyramid, kernel: dict.cull })
 //   const smooth = device.hysteresisPass({ scene, frames: 3 })   // Frostbite
 //   const color  = device.visiblePass({ scene, mesh, shaders: dict.color, surface })
@@ -24,7 +24,11 @@
 //   ── THE FRAME — the scenario's OWN recipe (the order is ours to keep,
 //      change, or extend: a CPU software-occlusion brick would slot in the
 //      same shape) ─────────────────────────────────────────────────────
-//   depth.run({ camera, occluders })        // 1. the z prepass (the policy)
+//   hist.run({ camera, occluders, gate })  // 1. the prepass: gate OFF = the
+//                                          //    K-wall fill (byte-identical
+//                                          //    to depthPass); gate ON = the
+//                                          //    two-pass HZB — the
+//                                          //    prev-visible set + the fill
 //   pyramid.build()                         // 2. the 2×2 MAX reduce
 //   occl.run({ camera, gate })              // 3. frustum + Hi-Z verdicts
 //   smooth.run({ gate })                    // 4. the temporal policy
@@ -40,13 +44,33 @@
 // compacted set (WG: one drawIndexedIndirect; GL: one instanced draw +
 // the vertex collapse).
 //
+// Task 202 — THE TWO RESEARCH BRICKS the frame grew (the web-searched
+// techniques, found in the papers/blogs, then pushed further here):
+//   · HISTORY FEEDBACK (hist.run, gate on) — the two-pass HZB's phase 1
+//     (Nanite: «the first pass uses the HZB from last frame»; Aaltonen's
+//     two-phase occlusion; CryEngine's coverage buffer). OUR TWIST beyond
+//     the papers: NO REPROJECTION — the previous frame's visible set is
+//     RE-RENDERED at the current camera (the set lags one frame, the
+//     geometry is exact — no dilation heuristics, no disocclusion holes,
+//     sound by construction: everything the brick draws exists this
+//     frame at this camera). The city occludes ITSELF; the pyramid's
+//     coverage becomes the full scene's, for one extra depth-only draw
+//     of the survivors.
+//   · AMORTIZED CULLING (the frame's own cache policy, cacheOn) — the
+//     temporal-coherence practice (cull at half rate while the camera
+//     stands still): a frame whose camera AND policy are bit-identical to
+//     the last culled frame REUSES its verdicts — the cull kernel and the
+//     temporal fold both stay idle (the streaks must not advance on stale
+//     raw verdicts — both freeze together). The image cannot change: the
+//     same verdicts feed the same draw.
+//
 // Task 200 — THE GL SUBMIT FIX rides the device: submit() runs the
 // renderer's SERVICE boundary (canvas-state heal + error drain), never the
 // renderer's own recorded tape — the empty BeginPass used to CLEAR THE
 // CANVAS after every frame (the «WebGL2 renders empty» field report).
-import { createDevice } from '../../dist/rune.esm.js?v=201'
-import { buildShaders } from './shaders.js?v=201'
-import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H } from './scene.js?v=201'
+import { createDevice } from '../../dist/rune.esm.js?v=202'
+import { buildShaders } from './shaders.js?v=202'
+import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H } from './scene.js?v=202'
 const SKY = [0.045, 0.055, 0.09, 1]
 const LIGHT = [0.5, 0.8, 0.35]
 const SURF_W = 480, SURF_H = 270
@@ -106,6 +130,10 @@ export async function buildTier(deps) {
   // first, then one handle per pass. The dictionary (buildShaders) stays
   // the scenario's own data — the per-language sources as columns; the
   // bricks build their programs and pack their lanes from it.
+  // Task 202 — THE PREPASS BRICK IS THE HISTORY PASS: gate off = the K-wall
+  // fill alone (byte-identical to the Task-201 depthPass frame); gate on =
+  // the two-pass HZB (the prev-visible set drawn first, the fill merging
+  // on top — the depth test keeps the nearest surface per texel).
   const sceneHandle = device.scene({
     total: N,
     occluders: K,
@@ -122,7 +150,7 @@ export async function buildTier(deps) {
   const mesh = device.geometry(BOX_VERTS, BOX_INDICES)
   const surface = device.surface(SURF_W, SURF_H, { depth: true })
 
-  const depth = device.depthPass({ scene: sceneHandle, mesh, shaders: dict.z, pyramid })
+  const hist = device.historyPass({ scene: sceneHandle, mesh, pyramid, shaders: dict.hist, fill: dict.z })
   const occl = device.occlusionPass({ scene: sceneHandle, pyramid, kernel: dict.cull })
   const smooth = device.hysteresisPass({ scene: sceneHandle, frames: HYST_FRAMES })
   const color = device.visiblePass({ scene: sceneHandle, mesh, shaders: dict.color, surface })
@@ -131,16 +159,47 @@ export async function buildTier(deps) {
   // ── THE FRAME — the recipe is THE COMPOSITION (see the file header):
   //    each brick runs with semantic props; the uniform lanes are the
   //    bricks' own business. `occluders` is THE POLICY knob (how many
-  //    records write the z prepass — the boot default K=23, the whole
-  //    city N, anything between); `hizOn` gates the Hi-Z leg (the parity
+  //    records write the z fill — the boot default K=23, the whole city
+  //    N, anything between); `hizOn` gates the Hi-Z leg (the parity
   //    gates' OFF leg); `hysteresis` gates the temporal fold (the identity
-  //    pass keeps every frame byte-identical when it is off).
-  function renderTo(targetId, mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false) {
+  //    pass keeps every frame byte-identical when it is off); `historyOn`
+  //    gates the two-pass HZB (the prev-visible occluder set); `cacheOn`
+  //    arms the AMORTIZED-CULL policy (the verdicts reuse while the camera
+  //    AND the policy stand bit-still).
+  //
+  //    THE AMORTIZED-CULL CONTRACT: a cached frame skips BOTH the verdict
+  //    kernel and the temporal fold — the streaks must never advance on
+  //    stale raw verdicts (a frozen fold + a frozen draw read the SAME
+  //    frozen words — the image cannot change). The cache keys on the mvp
+  //    WORDS + the full policy tuple (hiz/occluders/hysteresis/history):
+  //    a leg that flips any of them at the same camera is a NEW policy and
+  //    re-culls honestly.
+  let lastCulled = null // { key: string, mvp: Float32Array } — the last CULLED frame's cache key
+  let cullSkips = 0
+  function renderTo(targetId, mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false) {
     const camera = { mvp, eye }
-    depth.run({ camera, occluders })
+    // NOTE the boolean hygiene: `historyOn !== 0` with historyOn === false
+    // is TRUE (strict compare, boolean vs number) — the feedback leaked
+    // into every identity leg until this line learned `!!`. hizOn rides
+    // the same law for the same reason (main.js passes 1/0, the probe
+    // legs pass booleans — both spellings must answer the same gate).
+    hist.run({ camera, occluders, gate: !!historyOn })
     pyramid.build()
-    occl.run({ camera, gate: hizOn !== 0 })
-    smooth.run({ gate: hysteresisOn })
+    const key = `${hizOn ? 1 : 0}|${occluders}|${hysteresisOn ? 1 : 0}|${historyOn ? 1 : 0}`
+    let cached = cacheOn && lastCulled !== null && lastCulled.key === key
+    if (cached) {
+      for (let i = 0; i < 16; i++) {
+        if (lastCulled.mvp[i] !== mvp[i]) { cached = false; break }
+      }
+    }
+    if (cached) {
+      cullSkips++ // the verdicts + the streaks + the draw all reuse — the
+      // frame's only work is the tile, the reduce, and the visible draw
+    } else {
+      lastCulled = { key, mvp: Float32Array.from(mvp) }
+      occl.run({ camera, gate: !!hizOn })
+      smooth.run({ gate: !!hysteresisOn })
+    }
     color.run({ target: targetId, camera, light: LIGHT })
     if (debug === true) strip.run({ target: targetId })
     device.submit()
@@ -168,8 +227,8 @@ export async function buildTier(deps) {
     }).catch(() => { blitPending = false })
   }
 
-  function frame(mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false) {
-    renderTo(SNAPSHOT ? surface.targetId : 0, mvp, eye, hizOn, debug, occluders, hysteresisOn)
+  function frame(mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false) {
+    renderTo(SNAPSHOT ? surface.targetId : 0, mvp, eye, hizOn, debug, occluders, hysteresisOn, historyOn, cacheOn)
     if (SNAPSHOT) blitSnapshot()
   }
 
@@ -221,8 +280,8 @@ export async function buildTier(deps) {
       ? `WebGL2 — FBO pyramid + TF cull + vertex-collapse draw${device.antialias ? ' · context MSAA' : ''}`
       : `WebGPU — storage pyramid + compute cull + one drawIndexedIndirect${device.antialias ? ' · MSAA 4x resolve' : ''}`,
     drawsLine: backend === 'webgl2'
-      ? `draws: 1 (instanced, vertex-collapse) · TF passes: 2 (cull + hysteresis) · ${pyramid.levels - 1} reduce quads`
-      : `draws: 1 (indirect, GPU-driven) · dispatches: 3 (cull + hysteresis + compact) · ${pyramid.levels - 1} reduce quads`,
+      ? `draws: 2 (fill + collapse color; +1 history set draw ON) · TF passes: 2 (cull + hysteresis) · ${pyramid.levels - 1} reduce quads`
+      : `draws: 2 (fill + indirect color; +1 history set draw ON) · dispatches: 3 (cull + hysteresis + compact) · ${pyramid.levels - 1} reduce quads`,
     canvas: displayCanvas,
     surface,
     renderTo,
@@ -230,6 +289,9 @@ export async function buildTier(deps) {
     readStats,
     readVerdicts,
     aspect,
+    /** Task 202 — the amortized-cull counter (the freeze leg's channel:
+     *  how many frames reused the verdicts instead of re-culling). */
+    cullSkips: () => cullSkips,
     // Task 200 — the submit fix lives in the device (the GL service
     // boundary: the canvas-state heal + the error drain, NO empty pass);
     // WG surfaces through the onGpuError channel — nothing to drain here.

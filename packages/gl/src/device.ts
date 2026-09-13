@@ -394,6 +394,45 @@ export interface HysteresisPassHandle {
   run(call: HysteresisPassCall): void
 }
 
+// ─── Task 202 — THE HISTORY PASS BRICK (the two-pass HZB, phase 1) ─────────
+// The published shape (Nanite: «the first pass uses the HZB from last
+// frame»; Aaltonen's two-phase occlusion; the CryEngine coverage buffer):
+// last frame's visible geometry becomes this frame's occluder set, so the
+// pyramid's coverage is the FULL SCENE's, not the K walls' — the city
+// occludes itself at the cost of ONE extra depth-only draw of the
+// survivors. THE OPTIMIZATION BEYOND THE PAPERS: no reprojection. The
+// published variants reproject the previous frame's DEPTH TEXTURE into
+// the current camera (a gather with dilation heuristics, disocclusion
+// holes, stale near depth from moved geometry); this brick RE-RENDERS the
+// previous frame's VISIBLE SET at the current camera instead — the set
+// lags one frame, the geometry is exact. Sound by construction: every
+// texel the history draw writes is a surface that exists THIS frame at
+// THIS camera; a box the feedback culls is behind geometry drawn this
+// frame. The lag costs coverage (freshly disoccluded regions carry no
+// history — the K-wall fill covers them, the set catches up one frame
+// later), never a pixel. WG: the indirect draw over the compacted list
+// (the args carry the last frame's instanceCount — zero on a cold start,
+// the honest no-op); GL: the collapse draw over all records reading the
+// verdict feed (hist-encoded or raw — floor() decodes both).
+export interface HistoryPassCall {
+  readonly camera: { readonly mvp: ArrayLike<number> }
+  /** THE FILL POLICY: how many records run the plain z prepass on top of
+   *  the history (the K walls — the hole-filler; the identity leg when the
+   *  gate is off; the whole city, anything between). */
+  readonly occluders?: number
+  /** false (default) = the IDENTITY gate: only the fill prepass runs —
+   *  the frame is byte-identical to depthPass's (the parity gates' OFF
+   *  leg). true = the prev-visible set draws first, the fill merges on
+   *  top (the depth test keeps the nearest surface per texel). */
+  readonly gate?: boolean
+  readonly indexCount?: number
+}
+export interface HistoryPassHandle {
+  /** THE FEEDBACK PREPASS — the pyramid's level-0 tile: the previous
+   *  frame's visible set (gate on) + the occluder fill, depth-only. */
+  run(call: HistoryPassCall): void
+}
+
 export interface VisiblePassCall {
   readonly target: number
   readonly camera: { readonly mvp: ArrayLike<number>; readonly eye: ArrayLike<number> }
@@ -424,11 +463,15 @@ export interface HizPassSources {
 }
 
 /** The scenario's whole shader dictionary (the demo's buildShaders()
- *  product): z / color / panel pass columns + the cull kernel pair. */
+ *  product): z / color / panel pass columns + the cull kernel pair.
+ *  Task 202 — the OPTIONAL `hist` column (the prev-visible depth pass):
+ *  present = the sugar composes a historyPass brick and frame({ history })
+ *  runs the two-pass HZB; absent = the recipe stays the Task-201 shape. */
 export interface HizShaderDict {
   readonly z: HizPassSources
   readonly color: HizPassSources
   readonly panel: HizPassSources
+  readonly hist?: HizPassSources
   readonly cull: {
     readonly wg: { readonly code: string; readonly entry?: string; readonly uniformBytes: number }
     readonly gl: string
@@ -477,6 +520,10 @@ export interface HizSceneFrame {
    *  with a hist region; the identity gate keeps the frame byte-identical
    *  otherwise — this knob only decides WHEN the streak starts counting). */
   readonly hysteresis?: boolean
+  /** Task 202 — the two-pass HZB's phase 1 (needs a dictionary that carries
+   *  the `hist` column): the previous frame's visible set becomes this
+   *  frame's occluder set, the K walls fill the holes. Default false. */
+  readonly history?: boolean
 }
 
 export interface HizSceneHandle {
@@ -542,6 +589,11 @@ export interface RenderDevice {
   depthPass(spec: { scene: SceneHandle; mesh: GeometryHandle; shaders: PassShaders; pyramid: PyramidHandle }): DepthPassHandle
   occlusionPass(spec: { scene: SceneHandle; pyramid: PyramidHandle; kernel: KernelShaders }): OcclusionPassHandle
   hysteresisPass(spec: { scene: SceneHandle; frames?: number }): HysteresisPassHandle
+  /** Task 202 — THE HISTORY PASS: the previous frame's visible set,
+   *  re-rendered depth-only at the current camera (the two-pass HZB's
+   *  phase 1) + the occluder fill on top. `shaders` = the prev-set
+   *  column (the dictionary's `hist`), `fill` = the plain z column. */
+  historyPass(spec: { scene: SceneHandle; mesh: GeometryHandle; pyramid: PyramidHandle; shaders: PassShaders; fill: PassShaders }): HistoryPassHandle
   visiblePass(spec: { scene: SceneHandle; mesh: GeometryHandle; shaders: PassShaders; surface?: DeviceSurface }): VisiblePassHandle
   debugStrip(spec: { pyramid: PyramidHandle; shaders: PassShaders }): DebugStripHandle
   /** Task 201 — the RAW per-record verdicts (1..4, pre-hysteresis): the
@@ -866,6 +918,79 @@ function attachDebugStrip(device: RenderDevice, spec: { pyramid: PyramidHandle; 
   }
 }
 
+/** Task 202 — THE HISTORY PASS brick: the previous frame's visible set,
+ *  re-rendered depth-only at the CURRENT camera (the two-pass HZB's phase
+ *  1), with the occluder fill merging on top — the nearest surface per
+ *  texel wins (the depth test does the merge; the pyramid's max-reduce
+ *  stays conservative over the footprint). Backend-agnostic by
+ *  construction: the set draw rides drawVisible (WG: the compact + the
+ *  indirect draw over the list the last frame left behind; GL: the
+ *  collapse draw over all records reading the verdict feed), the fill
+ *  rides drawInstanced (the plain z prepass, no clear when it follows the
+ *  set). The identity gate (gate off) runs the fill ALONE with the clear —
+ *  byte-identical to depthPass's own frame. */
+function attachHistoryPass(device: RenderDevice, spec: { scene: SceneHandle; mesh: GeometryHandle; pyramid: PyramidHandle; shaders: PassShaders; fill: PassShaders }): HistoryPassHandle {
+  // the set column (the prev-visible pass) + the fill column (the plain z)
+  // — the same intrinsic states as the depth passes (less + write + the
+  // consistent-winding cull 'back')
+  const setProg = device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: spec.shaders.wg, gl: spec.shaders.gl })
+  const fillProg = device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: spec.fill.wg, gl: spec.fill.gl })
+  const setBlock = new Float32Array(16)
+  const fillBlock = new Float32Array(16)
+  const indexCount = spec.mesh.indices !== undefined ? spec.mesh.indices.length : 36
+  return {
+    run(call: HistoryPassCall): void {
+      const occluders = call.occluders !== undefined
+        ? Math.max(0, Math.min(spec.scene.total, call.occluders | 0))
+        : spec.scene.occluders
+      const count = call.indexCount ?? indexCount
+      fillBlock.set(call.camera.mvp, 0)
+      if (call.gate === true) {
+        // 1. THE PREV-VISIBLE SET — exactly what the last frame drew
+        //    (WG: the compacted list + the GPU-written instanceCount, zero
+        //    on a cold start; GL: the collapse draw, floor(a_flag) decode).
+        //    The draw CLEARS the tile — the depth attachment starts fresh.
+        setBlock.set(call.camera.mvp, 0)
+        device.drawVisible({
+          target: spec.pyramid.zTarget,
+          clear: true,
+          program: setProg,
+          geometry: spec.mesh,
+          records: spec.scene,
+          uniforms: setBlock,
+          indexCount: count,
+        })
+        // 2. THE FILL — the K walls on top, NO clear: the depth test merges
+        //    (a nearer surface wins its texel — the fill is exact THIS
+        //    frame, the history is the one-frame-old superset)
+        device.drawInstanced({
+          target: spec.pyramid.zTarget,
+          clear: false,
+          program: fillProg,
+          geometry: spec.mesh,
+          records: spec.scene,
+          uniforms: fillBlock,
+          instances: occluders,
+          indexCount: count,
+        })
+      } else {
+        // THE IDENTITY GATE — the plain prepass alone (byte-identical to
+        // depthPass's own frame; the parity gates' OFF leg)
+        device.drawInstanced({
+          target: spec.pyramid.zTarget,
+          clear: true,
+          program: fillProg,
+          geometry: spec.mesh,
+          records: spec.scene,
+          uniforms: fillBlock,
+          instances: occluders,
+          indexCount: count,
+        })
+      }
+    },
+  }
+}
+
 /** Task 200 (Task 201 body) — the scenario brick's shared composition: the
  *  five pass bricks above, ONE frame() sentence. Backend-agnostic by
  *  construction (it drives ONLY the RenderDevice surface — every call
@@ -880,6 +1005,13 @@ function attachHizScene(device: RenderDevice, spec: HizSceneSpec): HizSceneHandl
   // THE BRICKS — the scenario's recipe is the composition's own:
   const depth = device.depthPass({ scene: spec.scene, mesh: spec.geometry, shaders: spec.shaders.z, pyramid: pyr })
   const occl = device.occlusionPass({ scene: spec.scene, pyramid: pyr, kernel: spec.shaders.cull })
+  // Task 202 — THE FEEDBACK BRICK joins ONLY when the dictionary carries
+  // the prev-set column (absent: the recipe stays the Task-201 shape —
+  // frame({ history }) would be a silent no-op, so the brick is not
+  // composed at all)
+  const hist = spec.shaders.hist !== undefined
+    ? device.historyPass({ scene: spec.scene, mesh: spec.geometry, pyramid: pyr, shaders: spec.shaders.hist, fill: spec.shaders.z })
+    : null
   // the temporal policy joins the frame ONLY when the scene carries a hist
   // region (honest: a hist-less scene composes no smoothing at all — the
   // frame stays byte-identical to the pre-201 shape)
@@ -896,8 +1028,15 @@ function attachHizScene(device: RenderDevice, spec: HizSceneSpec): HizSceneHandl
       ? Math.max(0, Math.min(spec.scene.total, call.occluders | 0))
       : spec.scene.occluders
     const light = call.light !== undefined ? call.light : baseLight
-    // 1..5 — THE COMPOSITION (the bricks, in the recipe's order):
-    depth.run({ camera: call.camera, occluders })
+    // 1..5 — THE COMPOSITION (the bricks, in the recipe's order): the
+    // feedback brick replaces the bare prepass when the frame asks for
+    // the two-pass HZB (gate on = the prev-visible set + the fill; gate
+    // off = the fill alone — byte-identical to depthPass's frame)
+    if (hist !== null && call.history === true) {
+      hist.run({ camera: call.camera, occluders, gate: true })
+    } else {
+      depth.run({ camera: call.camera, occluders })
+    }
     pyr.build()
     occl.run({ camera: call.camera, gate: call.culling !== false })
     if (smooth !== null) smooth.run({ gate: call.hysteresis === true })
@@ -1344,6 +1483,7 @@ ${REDUCE}`
     depthPass: (spec) => attachDepthPass(device, spec),
     occlusionPass: (spec) => attachOcclusionPass(device, spec),
     hysteresisPass,
+    historyPass: (spec) => attachHistoryPass(device, spec),
     visiblePass: (spec) => attachVisiblePass(device, spec),
     debugStrip: (spec) => attachDebugStrip(device, spec),
     readVerdicts,
@@ -1785,6 +1925,7 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     depthPass: (spec) => attachDepthPass(device, spec),
     occlusionPass: (spec) => attachOcclusionPass(device, spec),
     hysteresisPass,
+    historyPass: (spec) => attachHistoryPass(device, spec),
     visiblePass: (spec) => attachVisiblePass(device, spec),
     debugStrip: (spec) => attachDebugStrip(device, spec),
     readVerdicts,

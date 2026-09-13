@@ -17,6 +17,12 @@
 //            compacted LIST in the scene storage (the indirect draw); GL:
 //            the per-instance attributes + the a_flag collapse.
 //   panel  — one pyramid level as a tinted quad (the debug strip).
+//   hist   — Task 202 — THE PREV-VISIBLE DEPTH PASS: the previous frame's
+//            visible set, drawn DEPTH-ONLY into the pyramid tile at the
+//            CURRENT camera (the two-pass HZB's phase 1). WG: the indirect
+//            draw over the compacted list (whatever the last frame's
+//            compact wrote is exactly what the last frame DREW); GL: the
+//            collapse draw over all records reading the verdict feed.
 //
 // THE CONVENTIONS each language keeps its own (documented where they bite):
 //   · WG framebuffer rows grow DOWN from NDC +y — GL FBO rows grow UP:
@@ -30,7 +36,7 @@
 //     height; WG reads @builtin(position).xy as-is). This kills the fog
 //     banding — the «flickering gray triangles on the empty spaces» field
 //     report — without adding a single cross-tier ULP.
-import { HIZ_W, HIZ_H, LEVELS, MAX_LEVEL, LEVEL_DIMS, LEVEL_OFF } from './scene.js?v=201'
+import { HIZ_W, HIZ_H, LEVELS, MAX_LEVEL, LEVEL_DIMS, LEVEL_OFF } from './scene.js?v=202'
 
 const SKY = 'vec3<f32>(0.045, 0.055, 0.09)'
 const SKY_GLSL = 'vec3(0.045, 0.055, 0.09)'
@@ -479,6 +485,81 @@ void main() {
     },
   }
 
+  // ── hist: Task 202 — THE PREV-VISIBLE DEPTH PASS (the two-pass HZB's
+  // phase 1 — Nanite's «the first pass uses the HZB from last frame»,
+  // Aaltonen's two-phase occlusion, the CryEngine coverage-buffer family).
+  // THE OPTIMIZATION BEYOND THE PAPERS: instead of REPROJECTING last
+  // frame's depth texture (the gather + dilation heuristics, the
+  // disocclusion holes a moving camera tears into it — the «don't even
+  // dream of reprojecting last frame depth» lesson), this column
+  // RE-RENDERS the previous frame's visible set at the CURRENT camera.
+  // The occluder SET lags one frame; the occluder GEOMETRY is exact — no
+  // reprojection error, no dilation, no stale near depth from a surface
+  // that has since moved. Sound by construction: everything drawn here is
+  // geometry that exists this frame at this camera, so a box the feedback
+  // culls is behind a surface drawn THIS frame. The one-frame lag only
+  // ever costs COVERAGE (a freshly disoccluded region has no history yet
+  // — the K-wall fill pass covers it, and one frame later the set catches
+  // up), never a pixel.
+  const hist = {
+    wg: {
+      code: `
+struct ZParams { mvp: mat4x4<f32> }
+@group(0) @binding(0) var<uniform> params: ZParams;
+@group(2) @binding(0) var<storage, read> scene: array<u32>;
+struct VOut { @builtin(position) pos: vec4<f32> }
+@vertex fn vsMain(@location(0) corner: vec3<f32>, @builtin(instance_index) ii: u32) -> VOut {
+  // THE LIST INDIRECTION (the color pass's own trick): instance ii = the
+  // ii-th entry of the compacted visible list — whatever the LAST frame's
+  // compact wrote is exactly what the last frame drew. A cold start (the
+  // args buffer zeroed) draws zero instances — the honest first frame.
+  let absIdx = scene[ii];
+  let wo = ${INST_OFF}u + absIdx * ${STRIDE}u;
+  let c = vec3<f32>(bitcast<f32>(scene[wo + ${CENTER}u]), bitcast<f32>(scene[wo + ${CENTER + 1}u]), bitcast<f32>(scene[wo + ${CENTER + 2}u]));
+  let h = vec3<f32>(bitcast<f32>(scene[wo + ${HALF}u]), bitcast<f32>(scene[wo + ${HALF + 1}u]), bitcast<f32>(scene[wo + ${HALF + 2}u]));
+  let world = c + h * (corner * 2.0 - 1.0);
+  var o: VOut;
+  o.pos = params.mvp * vec4<f32>(world, 1.0);
+  return o;
+}
+@fragment fn fsMain(i: VOut) -> @location(0) vec4<f32> {
+  // the EXACT depth — the z pass's own fragment (@builtin(position).z)
+  return vec4<f32>(i.pos.z, 0.0, 0.0, 1.0);
+}`,
+      attrs: [3],
+      hasTextures: false,
+    },
+    gl: {
+      vs: `#version 300 es
+layout(location=0) in vec3 a_corner;
+layout(location=1) in vec3 a_c;
+layout(location=2) in vec3 a_h;
+layout(location=4) in float a_flag; // the PREVIOUS verdict (raw or encoded)
+uniform mat4 u_mvp;
+void main() {
+  // the color pass's own collapse: the flag feed carries last frame's
+  // verdicts (raw 1..4, or the hist-encoded word); floor() decodes both,
+  // and a record not in the previous visible set collapses to nothing
+  if (floor(a_flag) != 1.0 && floor(a_flag) != 4.0) {
+    gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+    return;
+  }
+  vec3 world = a_c + a_h * (a_corner * 2.0 - 1.0);
+  gl_Position = u_mvp * vec4(world, 1.0);
+}`,
+      fs: `#version 300 es
+precision highp float;
+out vec4 o;
+void main() { o = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0); }`,
+      attrs: [
+        { location: 1, from: 'records', size: 3, stride: STRIDE_BYTES, offset: F.center * 4, divisor: 1 },
+        { location: 2, from: 'records', size: 3, stride: STRIDE_BYTES, offset: F.half * 4, divisor: 1 },
+        { location: 4, from: 'flags', size: 1, stride: 4, offset: 0, divisor: 1 },
+      ],
+      lanes: [{ name: 'u_mvp', kind: 'mat4', words: 16 }],
+    },
+  }
+
   // ── panel: the pyramid debug strip (one quad per level) ─────────────────
   // ONE info lane both backends: (offset, w, h, 0) — the WG reads the flat
   // offset into the storage pyramid; the GL clamps with (w, h) = .yz.
@@ -541,5 +622,5 @@ void main() {
     },
   }
 
-  return { z, cull, color, panel }
+  return { z, cull, color, hist, panel }
 }

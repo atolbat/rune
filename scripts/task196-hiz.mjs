@@ -86,6 +86,38 @@ try {
           console.log(`  FAIL — the hysteresis decay did not show (${cam.drawnDecay} vs ${cam.drawnOff})`)
           failed = true
         }
+      } else if (cam.policy === 'history') {
+        // Task 202 — the temporal-feedback leg: the prev-visible occluder
+        // set must cull STRICTLY more than the K walls (the coverage) and
+        // stay pixel-sound under motion (the set lags, the pixels never)
+        if (!(cam.drawnOn < cam.drawnOff) || cam.occludedOn <= 0) {
+          console.log('  FAIL — the history feedback is not culling anything')
+          failed = true
+        }
+        if (cam.occludedOn < (cam.occludedOff ?? 0)) {
+          console.log(`  FAIL — the feedback must occlude at least the K walls (${cam.occludedOn} vs ${cam.occludedOff})`)
+          failed = true
+        }
+        if (!cam.movedIdentical) {
+          console.log('  FAIL — the feedback motion soundness broke (the set is drawn at the CURRENT camera)')
+          failed = true
+        }
+        if (!cam.invariantOn || !cam.invariantOff) {
+          console.log('  FAIL — the feedback leg accounting invariant broke')
+          failed = true
+        }
+      } else if (cam.policy === 'amortized') {
+        // Task 202 — the amortized-cull leg: drawnOn === drawnOff is the
+        // POINT (the frozen frame reuses the verdicts — bit-identical);
+        // the skips prove the kernel idled
+        if (cam.drawnOn !== cam.drawnOff) {
+          console.log(`  FAIL — the frozen-cull frame must reproduce the fresh buckets (${cam.drawnOn} vs ${cam.drawnOff})`)
+          failed = true
+        }
+        if (!((cam.skips ?? 0) >= 2)) {
+          console.log(`  FAIL — the amortized frames did not skip the kernel (${cam.skips} skips)`)
+          failed = true
+        }
       } else {
         if (!cam.invariantOn || !cam.invariantOff) {
           console.log(`  FAIL — the accounting invariant broke (frustum + occluded + drawn must equal ${stats.occludees})`)

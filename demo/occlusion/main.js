@@ -24,16 +24,16 @@
 // window.__hizStats — the live counters (the smoke/gates read it);
 // window.__hizGate — the probe verdict (?probe=1: WG-only, the Task-196
 // contract; ?probe=1&mode=webgl2: both tiers + the cross-tier parity).
-import { buildTier } from './tier.js?v=201'
+import { buildTier } from './tier.js?v=202'
 import {
   createScene, cameraAt, VAL_CAMERAS,
   HIZ_W, HIZ_H, LEVELS,
-} from './scene.js?v=201'
+} from './scene.js?v=202'
 import {
   buildOctree, buildBVH, frustumPlanes, aabbOutsideFrustum,
   recordView, flatCull, clusterize, softwareOccluder, cameraRay, rayBoxes,
   layerPolicy,
-} from '../../dist/rune.esm.js?v=201'
+} from '../../dist/rune.esm.js?v=202'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -48,8 +48,8 @@ const democtl = { pause() {}, resume() {} }
 const shell = window.RuneDemoShell.mount({
   layout: 'page',
   title: 'Hi-Z occlusion culling',
-  desc: 'Hierarchical Z-buffer culling, GPU-driven — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts). Task 201: the scenario composes its frame from PASS BRICKS (depthPass → pyramid → occlusionPass → hysteresisPass → visiblePass — the regl/WebGPU syntax the scenario owns), the Frostbite temporal policy runs device-side (an occluded verdict needs 3 consecutive frames — no popping, pixel-parity-safe), and the pure CPU kit (octree/BVH rays + hit tests + picking, the flat/billboard edge-on test, vegetation clustering, the layer policy for transparency, and the software occluder — the boxes\u2019 front faces rasterized CPU-side into a tiny depth pyramid) gates the GPU\u2019s own verdicts.',
-  hint: 'Drag — orbit · wheel/pinch — zoom · CLICK — pick a box (the octree/BVH ray) · the buttons toggle the culling tiers, the pyramid view, the occluder policy (the «City occludes» experiment), and the temporal policy (hysteresis: watch the drawn count decay over 3 frames). The WebGPU / WebGL2 radios boot the same bricks on each backend\u2019s own mechanisms — and the parity gates hold on both.',
+  desc: 'Hierarchical Z-buffer culling, GPU-driven — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts). Task 201: the scenario composes its frame from PASS BRICKS (depthPass → pyramid → occlusionPass → hysteresisPass → visiblePass — the regl/WebGPU syntax the scenario owns), the Frostbite temporal policy runs device-side (an occluded verdict needs 3 consecutive frames — no popping, pixel-parity-safe), and the pure CPU kit (octree/BVH rays + hit tests + picking, the flat/billboard edge-on test, vegetation clustering, the layer policy for transparency, and the software occluder — the boxes\u2019 front faces rasterized CPU-side into a tiny depth pyramid) gates the GPU\u2019s own verdicts. Task 202: the web-searched research techniques, implemented and pushed further — the HISTORY FEEDBACK brick (the two-pass HZB: Nanite\u2019s «first pass uses the HZB from last frame», Aaltonen\u2019s two-phase, the CryEngine coverage buffer — but WITHOUT reprojection: the prev-visible set re-renders at the current camera, so the lag never costs a pixel) and the AMORTIZED-CULL policy (the verdicts reuse while the camera stands bit-still).',
+  hint: 'Drag — orbit · wheel/pinch — zoom · CLICK — pick a box (the octree/BVH ray) · the buttons toggle the culling tiers, the pyramid view, the occluder policy (the «City occludes» experiment), the temporal policy (hysteresis: watch the drawn count decay over 3 frames), and the history feedback (the two-pass HZB: the city occludes itself — watch the occluded count climb). The WebGPU / WebGL2 radios boot the same bricks on each backend\u2019s own mechanisms — and the parity gates hold on both.',
   defaults: { mode: MODE_PARAM === 'webgl2' ? 'webgl2' : 'webgpu' },
   onPause() { democtl.pause() },
   onResume() { democtl.resume() },
@@ -205,6 +205,12 @@ let cityOccludes = false
 // the identity pass (byte-identical frames); ON = the streak fold — watch
 // the drawn count decay over K=3 frames when the camera moves.
 let hysteresisOn = false
+// Task 202 — THE HISTORY FEEDBACK toggle (the two-pass HZB, phase 1 —
+// Nanite/Aaltonen/the coverage-buffer family, with our no-reprojection
+// twist): OFF = the K-wall fill alone (the Task-201 frame); ON = the
+// previous frame's visible set re-rendered at the current camera + the
+// fill — the city occludes ITSELF.
+let historyOn = false
 let paused = false
 let rafId = 0
 let frameIndex = 0
@@ -218,7 +224,7 @@ const stats = {
   hizW: HIZ_W, hizH: HIZ_H, levels: LEVELS, hizOn: 1,
   frustumCulled: 0, occlusionCulled: 0, drawn: 0, nearStraddle: 0,
   drawCalls: 1, dispatches: 2, msAvg: 0,
-  hysteresis: 0, flatCulled: 0, clusters: clusters.stats.clusters, clusterCulled: 0, softOccluded: 0,
+  hysteresis: 0, history: 0, flatCulled: 0, clusters: clusters.stats.clusters, clusterCulled: 0, softOccluded: 0,
   tierLine: '', drawsLine: '', validation: null, errors,
 }
 if (typeof window !== 'undefined') window.__hizStats = stats
@@ -233,7 +239,7 @@ function refreshHud() {
   hud.innerHTML =
     `instances <b>${scene.N}</b> (occluders <b>${stats.occluders}</b>${cityOccludes ? ' — the whole city writes depth' : ` · occludees ${OCCL}`})\n` +
     `frustum-culled ${stats.frustumCulled} · <b>occlusion-culled ${stats.occlusionCulled}</b>\n` +
-    `drawn <b>${stats.drawn}</b> (${pct}%) · near-straddle ${stats.nearStraddle} · hysteresis <b>${stats.hysteresis ? `ON (K=3${hysteresisOn ? '' : '·idle'}` : 'OFF'}</b>\n` +
+    `drawn <b>${stats.drawn}</b> (${pct}%) · near-straddle ${stats.nearStraddle} · hysteresis <b>${stats.hysteresis ? `ON (K=3${hysteresisOn ? '' : '·idle'}` : 'OFF'}</b> · history <b>${historyOn ? 'ON (prev-visible occluders)' : 'OFF'}</b>\n` +
     `Hi-Z ${HIZ_W}x${HIZ_H} · ${LEVELS} mips · tier <b>${hizOn ? 'ON' : 'OFF'}</b>\n` +
     `kit: clusters <b>${stats.clusters}</b> (cell 8) · cluster-cull ${stats.clusterCulled} · flat-culled ${stats.flatCulled} · soft-HiZ ${stats.softOccluded}\n` +
     `${tier !== null ? tier.drawsLine : ''}\n` +
@@ -252,6 +258,7 @@ async function maybeReadStats() {
     stats.hizOn = hizOn ? 1 : 0
     stats.occluders = cityOccludes ? scene.N : scene.K
     stats.hysteresis = hysteresisOn ? 1 : 0
+    stats.history = historyOn ? 1 : 0
     stats.msAvg = +msAvg.toFixed(2)
     // the kit's per-camera stats: the flat-cull count (the edge-on slivers)
     // + the cluster-cull count (the two-tier vegetation math) — one sweep
@@ -292,7 +299,7 @@ function loop(t) {
   camEyeCache = eye
   try {
     if (tier !== null && tier.drain !== null && tier.drain !== undefined) tier.drain(t)
-    tier.frame(mvp, eye, hizOn ? 1 : 0, showPyramid, cityOccludes ? scene.N : scene.K, hysteresisOn)
+    tier.frame(mvp, eye, hizOn ? 1 : 0, showPyramid, cityOccludes ? scene.N : scene.K, hysteresisOn, historyOn)
   } catch (e) {
     noteError(`frame failed: ${e instanceof Error ? e.message : String(e)}`)
   }
@@ -631,6 +638,93 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     if (satStats.drawn !== offStats.drawn) shell.log.error(`hysteresis saturation FAILED @yaw ${camV.yaw} — saturated streaks must reproduce the raw buckets (${satStats.drawn} vs ${offStats.drawn})`)
     cameras.push({ yaw: camV.yaw, policy: 'hysteresis', parity: hystIdentical ? 'IDENTICAL' : 'DIFFERS', drawnOn: satStats.drawn, drawnOff: offStats.drawn, drawnDecay: oneStats.drawn, invariantOn: invariantSat, ok: hystOk })
   }
+  // ── Task 202 — THE TEMPORAL-FEEDBACK GATE (the two-pass HZB, phase 1 —
+  //    the web-searched technique, implemented + pushed further): the
+  //    previous frame's VISIBLE SET becomes this frame's occluder set,
+  //    re-rendered at the CURRENT camera (no reprojection — our twist),
+  //    the K walls fill on top. Four honest properties:
+  //    (a) PIXEL PARITY at a FIXED camera after the feedback converges —
+  //        a box the feedback culls is behind a surface drawn THIS frame
+  //        at THIS camera (the soundness argument in the brick's doc);
+  //    (b) RICHER coverage: occluded(history) ≥ occluded(plain K walls) —
+  //        the tile's per-texel values can only come NEARER (the fill is
+  //        still rendered; the city's own surfaces add on top);
+  //    (c) SOUNDNESS UNDER MOTION: step the camera a hair with the
+  //        feedback on — the parity vs the plain ON frame must STILL hold
+  //        (the prev set is drawn at the CURRENT camera; the one-frame lag
+  //        costs coverage, never a pixel);
+  //    (d) THE ACCOUNTING INVARIANT at every step of the warm-up.
+  {
+    const camV = VAL_CAMERAS[0]
+    const fixed = cameraAt(camV.yaw, camV.pitch, camV.dist)
+    const moved = cameraAt(camV.yaw + 0.04, camV.pitch, camV.dist)
+    // the plain reference (history OFF = the K-wall fill alone)
+    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false)
+    const plainStats = await t.readStats()
+    const plain = await t.surface.read()
+    const plainInvariant = plainStats.frustum + plainStats.occluded + plainStats.drawn === scene.N
+    // warm the feedback: three frames at the FIXED camera — the visible
+    // set accretes into the pyramid (frame 2's history = frame 1's set)
+    let histInvariant = true
+    for (let f = 0; f < 3; f++) {
+      t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, true)
+      const stepStats = await t.readStats()
+      histInvariant = histInvariant && stepStats.frustum + stepStats.occluded + stepStats.drawn === scene.N
+    }
+    const histStats = await t.readStats()
+    const hist = await t.surface.read()
+    const fixedIdentical = hist.data.length === plain.data.length && hist.data.every((v, i) => v === plain.data[i])
+    const richer = histStats.occluded >= plainStats.occluded && histStats.drawn <= plainStats.drawn
+    // the MOTION leg: plain reference at the stepped camera vs the
+    // feedback-on frame there (the history still carries the fixed
+    // camera's set — a real one-frame-old set at a moved camera)
+    t.renderTo(t.surface.targetId, moved.mvp, moved.eye, 1, false)
+    const movedPlainStats = await t.readStats()
+    const movedPlain = await t.surface.read()
+    t.renderTo(t.surface.targetId, moved.mvp, moved.eye, 1, false, scene.K, false, true)
+    const movedHistStats = await t.readStats()
+    const movedHist = await t.surface.read()
+    const movedIdentical = movedHist.data.length === movedPlain.data.length && movedHist.data.every((v, i) => v === movedPlain.data[i])
+    const movedRicher = movedHistStats.occluded >= movedPlainStats.occluded
+    const histOk = fixedIdentical && richer && histInvariant && plainInvariant && movedIdentical && movedRicher
+    allOk = allOk && histOk
+    shell.log.event(`history feedback @yaw ${camV.yaw.toFixed(2)}: occluded plain ${plainStats.occluded} → history ${histStats.occluded} (drawn ${plainStats.drawn} → ${histStats.drawn}) · pixel parity ${fixedIdentical ? 'IDENTICAL' : 'DIFFERS'} · after the yaw step +0.04: parity ${movedIdentical ? 'IDENTICAL' : 'DIFFERS'}, occluded ${movedPlainStats.occluded} → ${movedHistStats.occluded} — the set lags one frame, the pixels never (no reprojection: the set re-renders at the current camera)`)
+    if (!fixedIdentical) shell.log.error(`history pixel parity FAILED @yaw ${camV.yaw} — the feedback culled a VISIBLE box (its occluder must be drawn this frame)`)
+    if (!richer) shell.log.error(`history coverage FAILED @yaw ${camV.yaw} — the prev-visible pyramid must occlude at least what the K walls do (occluded ${histStats.occluded} vs ${plainStats.occluded})`)
+    if (!histInvariant || !plainInvariant) shell.log.error(`history accounting invariant FAILED @yaw ${camV.yaw} — frustum+occluded+drawn must equal ${scene.N} at every warm-up step`)
+    if (!movedIdentical) shell.log.error(`history motion soundness FAILED @yaw ${camV.yaw + 0.04} — the prev set is drawn at the CURRENT camera; the lag must never cost a pixel`)
+    if (!movedRicher) shell.log.error(`history motion coverage FAILED @yaw ${camV.yaw + 0.04} — occluded(history) must stay ≥ occluded(plain) after the camera step`)
+    cameras.push({ yaw: camV.yaw, policy: 'history', parity: fixedIdentical ? 'IDENTICAL' : 'DIFFERS', drawnOn: histStats.drawn, drawnOff: plainStats.drawn, occludedOn: histStats.occluded, occludedOff: plainStats.occluded, movedIdentical, invariantOn: histInvariant, invariantOff: plainInvariant, ok: histOk })
+  }
+  // ── Task 202 — THE AMORTIZED-CULL GATE (the temporal-coherence
+  //    practice): a frame whose camera AND policy are bit-identical to the
+  //    last culled frame reuses its verdicts — BOTH the cull kernel and
+  //    the temporal fold stay idle (the streaks must not advance on stale
+  //    raw verdicts). The frozen frame must render BIT-IDENTICAL and the
+  //    buckets must not move; the skip counter proves the kernel idled.
+  {
+    const camV = VAL_CAMERAS[2]
+    const { eye, mvp } = cameraAt(camV.yaw, camV.pitch, camV.dist)
+    const skipsBefore = t.cullSkips()
+    // the fresh cull (arms the cache), then two frozen frames (both skip)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, true)
+    const fresh = await t.surface.read()
+    const freshStats = await t.readStats()
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, true)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, true)
+    const cached = await t.surface.read()
+    const cachedStats = await t.readStats()
+    const skips = t.cullSkips() - skipsBefore
+    const frozenIdentical = cached.data.length === fresh.data.length && cached.data.every((v, i) => v === fresh.data[i])
+    const frozenBuckets = cachedStats.drawn === freshStats.drawn && cachedStats.occluded === freshStats.occluded && cachedStats.frustum === freshStats.frustum
+    const amortizedOk = frozenIdentical && frozenBuckets && skips >= 2
+    allOk = allOk && amortizedOk
+    shell.log.event(`amortized cull @yaw ${camV.yaw.toFixed(2)}: ${skips} kernel skips (the cull + the temporal fold idle) · pixels ${frozenIdentical ? 'IDENTICAL' : 'DIFFERS'} · buckets identical ${frozenBuckets ? 'YES' : 'NO'} — the verdicts reuse while the camera and the policy stand bit-still (the temporal-coherence practice, cull at half rate)`)
+    if (!frozenIdentical) shell.log.error(`amortized-cull pixel parity FAILED @yaw ${camV.yaw} — a frozen-cull frame must render bit-identical (the same verdicts feed the same draw)`)
+    if (!frozenBuckets) shell.log.error(`amortized-cull buckets FAILED @yaw ${camV.yaw} — the frozen frame's drawn/occluded/frustum must not move`)
+    if (skips < 2) shell.log.error(`amortized-cull reuse FAILED @yaw ${camV.yaw} — the second and third frames must skip the kernel (got ${skips} skips)`)
+    cameras.push({ yaw: camV.yaw, policy: 'amortized', parity: frozenIdentical ? 'IDENTICAL' : 'DIFFERS', drawnOn: cachedStats.drawn, drawnOff: freshStats.drawn, occludedOn: cachedStats.occluded, skips, invariantOn: true, invariantOff: true, ok: amortizedOk })
+  }
   const verdict = { pass: allOk && crossOk && errors.length === 0, tier: t.mode, cameras, crossChecked, errors: errors.length }
   stats.validation = verdict
   if (anchor !== null) wgProbeHashes = anchor
@@ -812,6 +906,20 @@ tierButton('Hysteresis: OFF', false, on => {
   hysteresisOn = on
   stats.hysteresis = on ? 1 : 0
   shell.log.event(`the temporal policy ${on ? 'ON (K=3 — the occluded verdict needs 3 consecutive frames; watch the drawn count decay when the camera moves)' : 'OFF (the identity pass — the raw verdicts, byte-identical)'}`)
+  refreshHud()
+})
+// Task 202 — THE HISTORY FEEDBACK TOGGLE (the two-pass HZB): OFF = the
+// K-wall fill alone (the Task-201 frame); ON = the previous frame's
+// visible set re-rendered at the current camera + the fill on top. Watch
+// the occluded count climb: the city occludes ITSELF — the coverage the
+// K walls alone never had — for one extra depth-only draw of the
+// survivors. (Nanite: «the first pass uses the HZB from last frame»;
+// Aaltonen's two-phase; the CryEngine coverage buffer — with our
+// no-reprojection twist: the set lags one frame, the geometry is exact.)
+tierButton('History: OFF', false, on => {
+  historyOn = on
+  stats.history = on ? 1 : 0
+  shell.log.event(`the history feedback ${on ? 'ON (the two-pass HZB — the prev-visible set becomes this frame\'s occluder set; watch the occluded count climb, the city occludes itself)' : 'OFF (the K-wall fill alone — the Task-201 prepass)'}`)
   refreshHud()
 })
 const valButton = document.createElement('button')

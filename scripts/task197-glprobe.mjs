@@ -85,6 +85,19 @@ try {
         if (cam.policy === 'hysteresis') {
           if (cam.drawnOn !== cam.drawnOff) { console.log(`  FAIL — the saturated hysteresis must reproduce the raw buckets (${cam.drawnOn} vs ${cam.drawnOff})`); failed = true }
           if (!(cam.drawnDecay > cam.drawnOff)) { console.log(`  FAIL — the hysteresis decay did not show (${cam.drawnDecay} vs ${cam.drawnOff})`); failed = true }
+        } else if (cam.policy === 'history') {
+          // Task 202 — the feedback leg: culls MORE than the K walls, sound
+          // under motion; drawnOn === the plain ON leg is impossible (the
+          // set is richer), drawnOff here = the plain ON reference
+          if (!(cam.drawnOn < cam.drawnOff) || cam.occludedOn <= 0) { console.log('  FAIL — the history feedback is not culling'); failed = true }
+          if (cam.occludedOn < (cam.occludedOff ?? 0)) { console.log(`  FAIL — the feedback must occlude at least the K walls (${cam.occludedOn} vs ${cam.occludedOff})`); failed = true }
+          if (!cam.movedIdentical) { console.log('  FAIL — the feedback motion soundness broke'); failed = true }
+          if (!cam.invariantOn || !cam.invariantOff) { console.log('  FAIL — the feedback leg accounting invariant broke'); failed = true }
+        } else if (cam.policy === 'amortized') {
+          // Task 202 — the frozen-cull leg: drawnOn === drawnOff IS the
+          // point (the verdicts reuse — bit-identical frame)
+          if (cam.drawnOn !== cam.drawnOff) { console.log(`  FAIL — the frozen-cull frame must reproduce the fresh buckets (${cam.drawnOn} vs ${cam.drawnOff})`); failed = true }
+          if (!((cam.skips ?? 0) >= 2)) { console.log(`  FAIL — the amortized frames did not skip the kernel (${cam.skips} skips)`); failed = true }
         } else {
           if (!cam.invariantOn || !cam.invariantOff) { console.log('  FAIL — the accounting invariant broke'); failed = true }
           if (!(cam.drawnOn < cam.drawnOff) || cam.occludedOn <= 0) { console.log('  FAIL — the occlusion tier is not culling'); failed = true }

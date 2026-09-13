@@ -14705,11 +14705,59 @@ function attachDebugStrip(device, spec) {
     }
   };
 }
+function attachHistoryPass(device, spec) {
+  const setProg = device.program({ depth: { test: "less", write: true }, cull: "back", wg: spec.shaders.wg, gl: spec.shaders.gl });
+  const fillProg = device.program({ depth: { test: "less", write: true }, cull: "back", wg: spec.fill.wg, gl: spec.fill.gl });
+  const setBlock = new Float32Array(16);
+  const fillBlock = new Float32Array(16);
+  const indexCount = spec.mesh.indices !== undefined ? spec.mesh.indices.length : 36;
+  return {
+    run(call) {
+      const occluders = call.occluders !== undefined ? Math.max(0, Math.min(spec.scene.total, call.occluders | 0)) : spec.scene.occluders;
+      const count = call.indexCount ?? indexCount;
+      fillBlock.set(call.camera.mvp, 0);
+      if (call.gate === true) {
+        setBlock.set(call.camera.mvp, 0);
+        device.drawVisible({
+          target: spec.pyramid.zTarget,
+          clear: true,
+          program: setProg,
+          geometry: spec.mesh,
+          records: spec.scene,
+          uniforms: setBlock,
+          indexCount: count
+        });
+        device.drawInstanced({
+          target: spec.pyramid.zTarget,
+          clear: false,
+          program: fillProg,
+          geometry: spec.mesh,
+          records: spec.scene,
+          uniforms: fillBlock,
+          instances: occluders,
+          indexCount: count
+        });
+      } else {
+        device.drawInstanced({
+          target: spec.pyramid.zTarget,
+          clear: true,
+          program: fillProg,
+          geometry: spec.mesh,
+          records: spec.scene,
+          uniforms: fillBlock,
+          instances: occluders,
+          indexCount: count
+        });
+      }
+    }
+  };
+}
 function attachHizScene(device, spec) {
   const pyr = spec.pyramid.build !== undefined ? spec.pyramid : device.pyramid(spec.pyramid.width, spec.pyramid.height);
   const surf = spec.surface !== undefined ? device.surface(spec.surface.width, spec.surface.height, { depth: true }) : null;
   const depth2 = device.depthPass({ scene: spec.scene, mesh: spec.geometry, shaders: spec.shaders.z, pyramid: pyr });
   const occl = device.occlusionPass({ scene: spec.scene, pyramid: pyr, kernel: spec.shaders.cull });
+  const hist = spec.shaders.hist !== undefined ? device.historyPass({ scene: spec.scene, mesh: spec.geometry, pyramid: pyr, shaders: spec.shaders.hist, fill: spec.shaders.z }) : null;
   const smooth = spec.scene.histWord !== null ? device.hysteresisPass({ scene: spec.scene, frames: spec.hysteresisFrames ?? 3 }) : null;
   const color = device.visiblePass({ scene: spec.scene, mesh: spec.geometry, shaders: spec.shaders.color, surface: surf ?? undefined });
   const strip = device.debugStrip({ pyramid: pyr, shaders: spec.shaders.panel });
@@ -14717,7 +14765,11 @@ function attachHizScene(device, spec) {
   function frame(call) {
     const occluders = call.occluders !== undefined ? Math.max(0, Math.min(spec.scene.total, call.occluders | 0)) : spec.scene.occluders;
     const light = call.light !== undefined ? call.light : baseLight;
-    depth2.run({ camera: call.camera, occluders });
+    if (hist !== null && call.history === true) {
+      hist.run({ camera: call.camera, occluders, gate: true });
+    } else {
+      depth2.run({ camera: call.camera, occluders });
+    }
     pyr.build();
     occl.run({ camera: call.camera, gate: call.culling !== false });
     if (smooth !== null)
@@ -15087,6 +15139,7 @@ ${REDUCE}`;
     depthPass: (spec) => attachDepthPass(device, spec),
     occlusionPass: (spec) => attachOcclusionPass(device, spec),
     hysteresisPass,
+    historyPass: (spec) => attachHistoryPass(device, spec),
     visiblePass: (spec) => attachVisiblePass(device, spec),
     debugStrip: (spec) => attachDebugStrip(device, spec),
     readVerdicts,
@@ -15465,6 +15518,7 @@ function createGlDevice(renderer, options, clear) {
     depthPass: (spec) => attachDepthPass(device, spec),
     occlusionPass: (spec) => attachOcclusionPass(device, spec),
     hysteresisPass,
+    historyPass: (spec) => attachHistoryPass(device, spec),
     visiblePass: (spec) => attachVisiblePass(device, spec),
     debugStrip: (spec) => attachDebugStrip(device, spec),
     readVerdicts,
