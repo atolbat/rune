@@ -59,6 +59,8 @@ function mockGL(): { calls: string[]; gl: WebGL2RenderingContext } {
     TEXTURE0, MAX_TEXTURE_IMAGE_UNITS,
     createProgram: () => ({ id: ++program }),
     attachShader: () => {},
+
+    bindAttribLocation: () => {},
     linkProgram: () => calls.push('linkProgram'),
     getProgramParameter: () => true,
     getProgramInfoLog: () => '',

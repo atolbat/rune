@@ -300,7 +300,11 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
       if (attribute.bufferId !== undefined) {
         gl.bindVertexBuffer(attribute.bufferId, attribute.location, attribute.size, attribute.stride, attribute.offset, divisor)
       } else {
-        gl.bindVertexBuffer(richPrologue.bufferIds![attribute.location], attribute.location, attribute.size, undefined, undefined, divisor)
+        // Task 194: bufferIds is indexed by the ATTRIBUTE LIST POSITION (the
+        // map in ensureProgram), never by the GL location — a shader whose
+        // declaration order differs from its location order (layout(location=1)
+        // first) used to bind the WRONG buffer to the wrong slot here.
+        gl.bindVertexBuffer(richPrologue.bufferIds![a], attribute.location, attribute.size, undefined, undefined, divisor)
       }
     }
     // Task 180 — THE INDEX TIER: the element buffer is created LAZILY at the

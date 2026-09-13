@@ -8,15 +8,24 @@
 //   B. THE PIXEL PARITY — the same seeded scene (ONE command recorded
 //      FOUR times per frame — the exact multi-draw shape) on two WG
 //      renderers: the tier on (default) and the kill-switch. Identical
-//      canvas screenshots (SHA-256). On a drawIndirectCount browser the
-//      tiered renderer batches (floor+indirect); on Chrome 151 the floor
-//      (prologue-once, bare pass.draw) — both must render the same
-//      pixels as the classic path.
+//      SURFACE READBACKS (SHA-256 over RGBA bytes, Task 80).
 //   C. THE HEALTH — zero GPU errors through the onGpuError storm channel
 //      on both renderers across the frames.
+//
+// Task 194 — THE CHANNEL FIX: the old gate read canvas screenshots, but a
+// canvas present KILLS this container's GPU process (the Task-175
+// "devices die unwatched right after their first present") — the old
+// parity was literally comparing two BLANK screenshots (98cf6b6016ad),
+// and its toDataURL<2000 blank check cannot catch a solid-color 256x256
+// PNG. The honest channel: every renderer draws into a Task-80 SURFACE
+// via a facade-level target redirect (bindTarget/beginPass are public
+// facade methods the executor calls late-bound; the Surface contract
+// itself documents target substitution). The canvas is never acquired,
+// no present ever happens, the GPU process lives. The blank check is
+// now REAL: the readback must contain a minimum number of non-clear
+// pixels, or the gate FAILS loudly.
 // Exit 0 — live-verified (or honestly skipped); 1 — it broke.
 // Usage: bun scripts/task174-wg-multidraw.mjs
-import { createHash } from 'node:crypto'
 import { chromium } from 'playwright'
 
 const root = '/home/z/my-project/rune'
@@ -26,18 +35,16 @@ const server = Bun.serve({
   port,
   async fetch(request) {
     const pathname = decodeURIComponent(new URL(request.url).pathname)
-    if (pathname === '/gate.html') {
-      return new Response(GATE_HTML, { headers: { 'content-type': 'text/html; charset=utf-8' } })
-    }
+    if (pathname === '/gate.html') return new Response(GATE_HTML, { headers: { 'content-type': 'text/html; charset=utf-8' } })
     const file = Bun.file(`${root}${pathname}`)
     if (!(await file.exists())) return new Response('not found', { status: 404 })
     return new Response(await file.text(), { headers: { 'content-type': 'text/javascript; charset=utf-8' } })
   },
 })
 
-// The gate page: two canvases, two WG renderers from the FRESH dist, one
-// seeded scene recorded identically on both — the SAME command four times
-// per frame with per-record counts. The window.__md handle exposes the
+// The gate page: two canvases (never presented — the redirect sends every
+// canvas bind to the surface), two WG renderers from the FRESH dist, one
+// seeded scene recorded identically on both. window.__md carries the
 // verdicts + the GPU error log.
 const GATE_HTML = `<!doctype html>
 <html><body style="margin:0;background:#222">
@@ -46,14 +53,21 @@ const GATE_HTML = `<!doctype html>
 <script type="module">
 import { createRenderer } from '/dist/rune.esm.js?v=174'
 
+// Task 194: the production facade contract — entry points vsMain/fsMain
+// (camelCase), the color rides an explicit @location(0) output, and every
+// statement carries its semicolon (the WGSL lessons of Task 193; the OLD
+// gate's WGSL was never compilable by this stack).
 const WGSL = \`
 struct Params { u_mvp: mat4x4<f32>, u_tint: vec4<f32>, u_alpha: f32 }
 @group(0) @binding(0) var<uniform> params: Params;
-@vertex fn vs_main(@location(0) position: vec3<f32>, @location(1) a_color: vec3<f32>)
-  -> @builtin(position) vec4<f32> {
-  return vec4<f32>(position.x * params.u_alpha, position.y, position.z, 1.0);
+struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) color: vec3<f32> }
+@vertex fn vsMain(@location(0) position: vec3<f32>, @location(1) a_color: vec3<f32>) -> VsOut {
+  var out: VsOut;
+  out.pos = vec4<f32>(position.x * params.u_alpha, position.y, position.z, 1.0);
+  out.color = a_color;
+  return out;
 }
-@fragment fn fs_main(@location(0) v_color: vec3<f32>) -> @location(0) vec4<f32> {
+@fragment fn fsMain(@location(0) v_color: vec3<f32>) -> @location(0) vec4<f32> {
   return vec4<f32>(v_color, 1.0);
 }\`
 
@@ -64,6 +78,24 @@ function seededData() {
   const rng = () => { s = (s ^ (s >>> 15)) * 2246822519; s = (s ^ (s >>> 13)) * 3266489917; return ((s ^= s >>> 16) >>> 0) / 4294967296 }
   for (let i = 0; i < 9; i++) data[i * 2] = rng() * 1.6 - 0.8
   for (let i = 0; i < 9; i++) data[i * 2 + 1] = rng() * 1.6 - 0.8
+  // Task 194: wind every RENDERED triangle CCW. The attribute reads the soup
+  // interleaved (size 3, tight stride): triangle t's vertices live at
+  // data[9t..9t+8] as (x,y,z) triples. The GL pipeline culls back faces by
+  // DEFAULT (raster.cull ?? 'back'); the WG one defaults to cullMode 'none'
+  // — a documented backend asymmetry. The seeded soup's first triangle
+  // happened to be CW: this gate had drawn NOTHING on GL since its birth
+  // (the blank-parity root cause #2, under the blank compositor channel).
+  for (let t = 0; t < 3; t++) {
+    const o = t * 9
+    const cross = (data[o + 3] - data[o]) * (data[o + 7] - data[o + 1]) - (data[o + 6] - data[o]) * (data[o + 4] - data[o + 1])
+    if (cross < 0) { // swap v1 (data[o+3..5]) with v2 (data[o+6..8])
+      for (let k = 0; k < 3; k++) {
+        const tmp = data[o + 3 + k]
+        data[o + 3 + k] = data[o + 6 + k]
+        data[o + 6 + k] = tmp
+      }
+    }
+  }
   return data
 }
 const soup = seededData()
@@ -99,6 +131,22 @@ async function boot(canvas, multiDraw, errors) {
         record(command, { count: 3 })
       })
       await renderer.start()
+
+      // ── Task 194: THE TARGET REDIRECT ────────────────────────────────────
+      // Every canvas (0) bind goes to the surface instead: the whole
+      // production pipeline (rAF → step → tape → executor → facade) renders
+      // into the Task-80 surface; getCurrentTexture is never called, so no
+      // present ever happens on this present-dead stack.
+      const surface = renderer.surface({ width: 256, height: 256, depth: true, color: [0.05, 0.06, 0.09, 1] })
+      const facade = renderer.inner.gpu
+      const origBind = facade.bindTarget.bind(facade)
+      facade.bindTarget = (id, clear) => origBind(id === 0 ? surface.targetId : id, clear)
+      // WG beginPass(0) reaches the canvas through the INTERNAL bindTarget —
+      // the property patch cannot see it. Replace beginPass itself: the
+      // surface pass opens with clear=true (exactly what the canvas pass
+      // would have done — the memos reset identically inside bindTarget).
+      facade.beginPass = () => origBind(surface.targetId, true)
+      renderer.__surface = surface
       return renderer
     } catch (e) {
       lastError = e
@@ -111,9 +159,25 @@ let bootFail = ''
 try {
   const ra = await boot(document.querySelector('#a'), undefined, errorsA)
   const rb = await boot(document.querySelector('#b'), false, errorsB)
+  // settle: a few frames of the loop render into the surfaces
+  await new Promise(r => setTimeout(r, 1500))
+  const read = async (renderer) => {
+    renderer.stop()
+    const { data } = await renderer.__surface.read()
+    const digest = await crypto.subtle.digest('SHA-256', data)
+    const hex = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('')
+    const cr = Math.round(0.05 * 255), cg = Math.round(0.06 * 255), cb = Math.round(0.09 * 255)
+    let nonClear = 0
+    for (let i = 0; i < data.length; i += 4) {
+      if (Math.abs(data[i] - cr) > 8 || Math.abs(data[i + 1] - cg) > 8 || Math.abs(data[i + 2] - cb) > 8) nonClear++
+    }
+    return { hash: hex, nonClear, len: data.length }
+  }
+  const pa = await read(ra), pb = await read(rb)
   window.__md = {
     multiDrawA: ra.multiDraw, multiDrawB: rb.multiDraw,
     errorsA, errorsB,
+    hashA: pa.hash, hashB: pb.hash, nonClearA: pa.nonClear, nonClearB: pb.nonClear,
     indirectCount: typeof GPURenderPassEncoder !== 'undefined'
       && typeof GPURenderPassEncoder.prototype.drawIndirectCount === 'function',
   }
@@ -134,8 +198,6 @@ try {
   const page = await browser.newPage({ viewport: { width: 600, height: 300 } })
   await page.goto(`http://localhost:${port}/gate.html`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
   await page.waitForFunction(() => window.__md !== undefined, null, { timeout: 90_000 })
-  // settle: a few frames of the loop
-  await page.waitForTimeout(1200)
 
   const md = await page.evaluate(() => window.__md)
   if (md.bootFail) {
@@ -158,28 +220,15 @@ try {
       failed = true
     }
 
-    // THE PIXEL PARITY — the clipped screenshots of the two canvases
-    const hashOf = async (sel) => {
-      const box = await page.evaluate((s) => {
-        const r = document.querySelector(s).getBoundingClientRect()
-        return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }
-      }, sel)
-      const shot = await page.screenshot({ clip: box, timeout: 60_000 })
-      return createHash('sha256').update(shot).digest('hex')
-    }
-    const hashA = await hashOf('#a')
-    const hashB = await hashOf('#b')
-    const same = hashA === hashB
-    console.log(`[task174-wgmd] pixel parity: ${same ? 'IDENTICAL' : 'DIFFERS'} (a=${hashA.slice(0, 12)} b=${hashB.slice(0, 12)})`)
+    // THE PIXEL PARITY — the surface readbacks (Task 80), the honest channel
+    const same = md.hashA === md.hashB
+    console.log(`[task174-wgmd] pixel parity (surface readback): ${same ? 'IDENTICAL' : 'DIFFERS'} (a=${md.hashA.slice(0, 12)} b=${md.hashB.slice(0, 12)}, nonClear a=${md.nonClearA} b=${md.nonClearB}/${256 * 256})`)
     if (!same) failed = true
-    // the scene is not blank (a hash of pure background would mean the draw
-    // never landed — parity of two black canvases is not a verdict)
-    const blank = await page.evaluate(() => {
-      const c = document.querySelector('#a')
-      return c.width > 0 && c.toDataURL().length < 2000
-    })
-    if (blank) {
-      console.log('[task174-wgmd] FAIL — the scene is blank (the draws never landed)')
+    // THE REAL BLANK CHECK — the draws must have LANDED (the old
+    // toDataURL<2000 check could never catch a solid-color canvas)
+    const MIN_PAINTED = 500
+    if (md.nonClearA < MIN_PAINTED || md.nonClearB < MIN_PAINTED) {
+      console.log(`[task174-wgmd] FAIL — the surface is (near-)blank: nonClear a=${md.nonClearA} b=${md.nonClearB} < ${MIN_PAINTED} (the draws never landed)`)
       failed = true
     }
     if (!md.indirectCount) {

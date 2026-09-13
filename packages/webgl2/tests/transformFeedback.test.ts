@@ -63,6 +63,8 @@ function mockGL(): MockCallLog {
     TEXTURE_WRAP_S: 0x2802, TEXTURE_WRAP_T: 0x2803, CLAMP_TO_EDGE: 0x812f,
     createProgram: () => ({ id: ++program }),
     attachShader: () => {},
+
+    bindAttribLocation: () => {},
     linkProgram: (p: unknown) => { linkedProgram = p; calls.push('linkProgram') },
     getProgramParameter: () => true,
     getProgramInfoLog: () => '',

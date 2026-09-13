@@ -116,6 +116,11 @@ describe('stub → player (a cross-world frame)', () => {
     expect(frame.arena.byteLength).toBe(0)
 
     player.play(frame)
-    expect(calls).toEqual(['drawArrays(triangles,0,3,1)']) // draw only
+    // Task 194: the vertex bind rides along — the player replays the Draw op
+    // through the recording facade (no realGL memo there), and the command
+    // NOW HAS attributes (the GLSL-100 `attribute` declarations used to
+    // reflect as NOTHING — this very test used to pass on that bug: no
+    // buffers were ever bound, so frame 2 was literally draw-only).
+    expect(calls).toEqual(['bindVertexBuffer(1,0,3)', 'drawArrays(triangles,0,3,1)']) // draw + the bind re-assert
   })
 })

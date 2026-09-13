@@ -2,6 +2,7 @@
 // attribute buffers, textures. One hidden class, lazy caches.
 
 import type { GLFacade, GLImageSource, GLTextureFormat } from './facade.ts'
+import { reflectGlsl } from './glslReflect.ts'
 
 interface ProgramRecord {
   readonly program: WebGLProgram
@@ -411,6 +412,17 @@ export function createRealGL(
     const program = gl.createProgram()
     gl.attachShader(program, compile(gl.VERTEX_SHADER, vertex))
     gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragment))
+    // Task 194 — THE LOCATION PIN: attributes declared WITHOUT a layout
+    // qualifier (GLSL 100 `attribute`, bare 300 es `in`) get their locations
+    // from the DRIVER at link time — an assignment the executor's binds
+    // could not know. Pin them with bindAttribLocation to the SAME free
+    // slots the reflection assigned (reflectGlsl resolves −1 → free slots
+    // in declaration order; explicit layout qualifiers win over
+    // bindAttribLocation per the GLES3 spec, so qualified attributes are
+    // unaffected by this call). Called BEFORE the link, as the spec demands.
+    for (const attr of reflectGlsl(vertex, fragment).attributes) {
+      gl.bindAttribLocation(program, attr.location, attr.name)
+    }
     gl.linkProgram(program)
     const record: ProgramRecord = {
       program, uniforms: new Map(), label: 'program',

@@ -64,6 +64,8 @@ function glMock(): { calls: string[]; gl: WebGL2RenderingContext } {
     isContextLost: () => false,
     createProgram: () => ({ id: ++program }),
     attachShader: () => {},
+
+    bindAttribLocation: () => {},
     linkProgram: () => {},
     getProgramParameter: (_p: unknown, pname: number) => (pname === KHR_COMPLETION_STATUS ? true : true),
     getProgramInfoLog: () => 'info-log',

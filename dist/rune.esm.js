@@ -2408,8 +2408,9 @@ function parseGlsl(vertexSource, fragmentSource) {
   const uniforms = new Map;
   collectUniforms(vertexSource, uniforms);
   collectUniforms(fragmentSource, uniforms);
-  const attributes = collectAttributes(vertexSource);
-  return { uniforms: [...uniforms.values()], attributes };
+  const scanned = collectAttributes(vertexSource);
+  const pinned = resolveAttribLocations(scanned);
+  return { uniforms: [...uniforms.values()], attributes: scanned.map((a, i) => ({ ...a, location: pinned[i] ?? a.location })) };
 }
 function collectUniforms(source, into) {
   const lines = stripComments(source).split(`
@@ -2453,11 +2454,31 @@ function matchUniform(line) {
     return null;
   return { name: match[2], type, arrayLength: match[3] !== undefined ? Number(match[3]) : 1 };
 }
+function resolveAttribLocations(attributes) {
+  const resolved = attributes.map((a) => a.location);
+  const taken = new Set;
+  for (const l of resolved)
+    if (l >= 0)
+      taken.add(l);
+  let next = 0;
+  for (let i = 0;i < resolved.length; i++) {
+    if ((resolved[i] ?? -1) >= 0)
+      continue;
+    while (taken.has(next))
+      next++;
+    resolved[i] = next;
+    taken.add(next);
+  }
+  return resolved;
+}
 function matchAttribute(line) {
   const match = /^\s*(?:layout\(\s*location\s*=\s*(\d+)\s*\)\s*)?in\s+(\w+)\s+(\w+)\s*;/.exec(line);
-  if (match === null)
-    return null;
-  return { name: match[3], location: match[1] !== undefined ? Number(match[1]) : -1 };
+  if (match !== null)
+    return { name: match[3], location: match[1] !== undefined ? Number(match[1]) : -1 };
+  const legacy = /^\s*attribute\s+(\w+)\s+(\w+)\s*;/.exec(line);
+  if (legacy !== null)
+    return { name: legacy[2], location: -1 };
+  return null;
 }
 function stripComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
@@ -4329,9 +4350,11 @@ var SIZE = {
   sampler2D: 1
 };
 function reflectGlsl2(vertex, fragment) {
+  const scannedAttributes = [...scanAttributes(vertex)].sort(byLocation);
+  const pinned = resolveAttribLocations2(scannedAttributes);
   return {
     uniforms: [...scanUniforms(vertex), ...scanUniforms(fragment)],
-    attributes: [...scanAttributes(vertex)].sort(byLocation),
+    attributes: scannedAttributes.map((attr, i) => ({ ...attr, location: pinned[i] ?? attr.location })),
     samplers: [...scanUniforms(vertex), ...scanUniforms(fragment)].filter((u) => u.type === "sampler2D").map((u) => u.name)
   };
 }
@@ -4347,11 +4370,29 @@ function scanUniforms(source) {
 }
 function scanAttributes(source) {
   const found = [];
-  const re = /layout\s*\(\s*location\s*=\s*(\d+)\s*\)\s*in\s+(vec4|vec3|vec2|float)\s+(\w+)\s*;/g;
+  source = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  const re = /(?:layout\s*\(\s*location\s*=\s*(\d+)\s*\)\s*)?\b(?:in|attribute)\s+(vec4|vec3|vec2|float)\s+(\w+)\s*;/g;
   for (const match of source.matchAll(re)) {
-    found.push({ name: match[3], location: Number(match[1]), size: vecSize(match[2]) });
+    found.push({ name: match[3], location: match[1] !== undefined ? Number(match[1]) : -1, size: vecSize(match[2]) });
   }
   return found;
+}
+function resolveAttribLocations2(attributes) {
+  const resolved = attributes.map((a) => a.location);
+  const taken = new Set;
+  for (const l of resolved)
+    if (l >= 0)
+      taken.add(l);
+  let next = 0;
+  for (let i = 0;i < resolved.length; i++) {
+    if ((resolved[i] ?? -1) >= 0)
+      continue;
+    while (taken.has(next))
+      next++;
+    resolved[i] = next;
+    taken.add(next);
+  }
+  return resolved;
 }
 function vecSize(type) {
   if (type === "vec4")
@@ -4619,7 +4660,7 @@ function createExecutor(options) {
       if (attribute.bufferId !== undefined) {
         gl.bindVertexBuffer(attribute.bufferId, attribute.location, attribute.size, attribute.stride, attribute.offset, divisor);
       } else {
-        gl.bindVertexBuffer(richPrologue.bufferIds[attribute.location], attribute.location, attribute.size, undefined, undefined, divisor);
+        gl.bindVertexBuffer(richPrologue.bufferIds[a], attribute.location, attribute.size, undefined, undefined, divisor);
       }
     }
     const indices = rich.indices;
@@ -4834,6 +4875,9 @@ function createRealGL(gl, onViewportHeal) {
     const program = gl.createProgram();
     gl.attachShader(program, compile(gl.VERTEX_SHADER, vertex));
     gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragment));
+    for (const attr of reflectGlsl2(vertex, fragment).attributes) {
+      gl.bindAttribLocation(program, attr.location, attr.name);
+    }
     gl.linkProgram(program);
     const record = {
       program,

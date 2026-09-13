@@ -82,6 +82,8 @@ function khrMock(options?: { completeAfter?: number; linkOk?: boolean; withExt?:
     isContextLost: () => false,
     createProgram: () => ({ id: ++program }),
     attachShader: () => {},
+
+    bindAttribLocation: () => {},
     linkProgram: () => calls.push('linkProgram'),
     getProgramParameter: (_p: unknown, pname: number) => {
       if (pname === KHR_COMPLETION_STATUS) {

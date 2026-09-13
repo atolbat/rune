@@ -6,13 +6,20 @@
 //      indexed tier by that; absent here the live cells are an honest SKIP).
 //   B. THE PIXEL PARITY — the same seeded INDEXED scene on two renderers,
 //      one with the tier on (default), one with the kill-switch: identical
-//      canvas screenshots. The scene records ONE INDEXED command FOUR
-//      times per frame with per-record counts — the batched renderer emits
-//      ONE multiDrawElems×4, the classic four drawElements.
+//      SURFACE READBACKS (Task 80). The scene records ONE INDEXED command
+//      FOUR times per frame with per-record counts — the batched renderer
+//      emits ONE multiDrawElems×4, the classic four drawElements.
 //   C. THE HEALTH — zero GL errors on both renderers across the frames.
+//
+// Task 194 — THE CHANNEL FIX: the old canvas-screenshot parity was comparing
+// two BLANK screenshots (this stack's compositor channel never shows rune's
+// GL frames, and the seeded soup's first triangle was BACK-FACING — the GL
+// pipeline culls back faces by default — so the gate had drawn NOTHING
+// since Task 187). The honest channel: the Task-80 surface readback via a
+// facade-level bindTarget redirect (no compositor in the verdict path), a
+// CCW-wound soup, and a REAL non-clear-pixel blank check.
 // Exit 0 — the tier is live-verified (or honestly skipped); 1 — it broke.
 // Usage: bun scripts/task187-multidraw.mjs
-import { createHash } from 'node:crypto'
 import { chromium } from 'playwright'
 
 const root = '/home/z/my-project/rune'
@@ -59,7 +66,20 @@ function seededIndexedSoup() {
   const rng = () => { s = (s ^ (s >>> 15)) * 2246822519; s = (s ^ (s >>> 13)) * 3266489917; return ((s ^= s >>> 16) >>> 0) / 4294967296 }
   for (let i = 0; i < 12; i++) data[i * 2] = rng() * 1.6 - 0.8
   for (let i = 0; i < 12; i++) data[i * 2 + 1] = rng() * 1.6 - 0.8
-  for (let t = 0; t < 4; t++) { indices[t * 3] = t * 3; indices[t * 3 + 1] = t * 3 + 1; indices[t * 3 + 2] = t * 3 + 2 }
+  // Task 194: wind every RENDERED triangle CCW (the attribute reads the soup
+  // interleaved — size 3, tight stride — so triangle t's vertices are the
+  // triples at data[9t..9t+8]; the index pattern walks them 0,1,2). The GL
+  // pipeline culls back faces by DEFAULT; the seeded first triangle was CW
+  // — the old gate drew NOTHING. Fix the winding in the INDEX ORDER only
+  // (a data swap here would need its own index flip — and both together
+  // re-reverse the triangle back to back-facing).
+  for (let t = 0; t < 4; t++) {
+    const o = t * 9
+    const cross = (data[o + 3] - data[o]) * (data[o + 7] - data[o + 1]) - (data[o + 6] - data[o]) * (data[o + 4] - data[o + 1])
+    indices[t * 3] = t * 3
+    indices[t * 3 + 1] = t * 3 + (cross < 0 ? 2 : 1)
+    indices[t * 3 + 2] = t * 3 + (cross < 0 ? 1 : 2)
+  }
   return { data, indices }
 }
 const soup = seededIndexedSoup()
@@ -90,13 +110,36 @@ async function boot(canvas, multiDraw, errors) {
     record(command, { count: 3 })
   })
   await renderer.start()
+
+  // ── Task 194: THE TARGET REDIRECT (the honest verdict channel) ────────
+  const surface = renderer.surface({ width: 256, height: 256, depth: true, color: [0.05, 0.06, 0.09, 1] })
+  const facade = renderer.inner.gl
+  const origBind = facade.bindTarget.bind(facade)
+  facade.bindTarget = (id, clear) => origBind(id === 0 ? surface.targetId : id, clear)
+  renderer.__surface = surface
   return renderer
 }
 const ra = await boot(document.querySelector('#a'), undefined, errorsA)
 const rb = await boot(document.querySelector('#b'), false, errorsB)
+// settle: a few frames of the loop render into the surfaces
+await new Promise(r => setTimeout(r, 1500))
+const read = async (renderer) => {
+  renderer.stop()
+  const { data } = await renderer.__surface.read()
+  const digest = await crypto.subtle.digest('SHA-256', data)
+  const hex = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('')
+  const cr = Math.round(0.05 * 255), cg = Math.round(0.06 * 255), cb = Math.round(0.09 * 255)
+  let nonClear = 0
+  for (let i = 0; i < data.length; i += 4) {
+    if (Math.abs(data[i] - cr) > 8 || Math.abs(data[i + 1] - cg) > 8 || Math.abs(data[i + 2] - cb) > 8) nonClear++
+  }
+  return { hash: hex, nonClear }
+}
+const pa = await read(ra), pb = await read(rb)
 window.__md = {
   multiDrawA: ra.multiDraw, multiDrawB: rb.multiDraw,
   errorsA, errorsB,
+  hashA: pa.hash, hashB: pb.hash, nonClearA: pa.nonClear, nonClearB: pb.nonClear,
   ext: (() => {
     const c = document.createElement('canvas')
     const gl = c.getContext('webgl2')
@@ -117,7 +160,6 @@ try {
   const page = await browser.newPage({ viewport: { width: 600, height: 300 } })
   await page.goto(`http://localhost:${port}/gate.html`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
   await page.waitForFunction(() => window.__md !== undefined, null, { timeout: 60_000 })
-  await page.waitForTimeout(900)
 
   const md = await page.evaluate(() => window.__md)
   console.log(`[task187-md] elements ext present: ${md.ext}; renderer A (default): multiDraw=${md.multiDrawA}; renderer B (kill-switch): multiDraw=${md.multiDrawB}`)
@@ -134,25 +176,14 @@ try {
       console.log('[task187-md] FAIL — the kill-switch renderer reports multiDraw=true (the option does not reach the executor)')
       failed = true
     }
-    const hashOf = async (sel) => {
-      const box = await page.evaluate((s) => {
-        const r = document.querySelector(s).getBoundingClientRect()
-        return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }
-      }, sel)
-      const shot = await page.screenshot({ clip: box, timeout: 60_000 })
-      return createHash('sha256').update(shot).digest('hex')
-    }
-    const hashA = await hashOf('#a')
-    const hashB = await hashOf('#b')
-    const same = hashA === hashB
-    console.log(`[task187-md] pixel parity: ${same ? 'IDENTICAL' : 'DIFFERS'} (a=${hashA.slice(0, 12)} b=${hashB.slice(0, 12)})`)
+    // THE PIXEL PARITY — the surface readbacks (Task 80), the honest channel
+    const same = md.hashA === md.hashB
+    console.log(`[task187-md] pixel parity (surface readback): ${same ? 'IDENTICAL' : 'DIFFERS'} (a=${md.hashA.slice(0, 12)} b=${md.hashB.slice(0, 12)}, nonClear a=${md.nonClearA} b=${md.nonClearB}/${256 * 256})`)
     if (!same) failed = true
-    const blank = await page.evaluate(() => {
-      const c = document.querySelector('#a')
-      return c.width > 0 && c.toDataURL().length < 2000
-    })
-    if (blank) {
-      console.log('[task187-md] FAIL — the scene is blank (the draws never landed)')
+    // THE REAL BLANK CHECK — the draws must have LANDED
+    const MIN_PAINTED = 500
+    if (md.nonClearA < MIN_PAINTED || md.nonClearB < MIN_PAINTED) {
+      console.log(`[task187-md] FAIL — the surface is (near-)blank: nonClear a=${md.nonClearA} b=${md.nonClearB} < ${MIN_PAINTED} (the draws never landed)`)
       failed = true
     }
   }

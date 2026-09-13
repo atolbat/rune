@@ -1,7 +1,7 @@
 // @rune/webgl2 — the WebGL2 backend: GLSL reflection, the DrawSpec compiler,
 // the tape executor, real and recording facades, state programs.
 
-export { reflectGlsl } from './glslReflect.ts'
+export { reflectGlsl, resolveAttribLocations } from './glslReflect.ts'
 export type { GlslReflection, UniformInfo, AttributeInfo, UniformGlType } from './glslReflect.ts'
 
 export { compileDrawSpec, createCompileContext } from './command.ts'

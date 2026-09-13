@@ -62,6 +62,8 @@ function restoreMock(): {
     isContextLost: () => false,
     createProgram: () => { counts.createProgram++; return { id: ++program } },
     attachShader: () => {},
+
+    bindAttribLocation: () => {},
     linkProgram: () => {},
     getProgramParameter: () => true,
     getProgramInfoLog: () => '',
