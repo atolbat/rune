@@ -39,16 +39,15 @@ void diff
 // drive the tiers directly through the page's own module graph is awkward;
 // instead rebuild both tiers here via dynamic import of the tier modules.
 const out = await page.evaluate(async () => {
-  const wgTierMod = await import('/demo/occlusion/wgTier.js?v=197')
-  const glTierMod = await import('/demo/occlusion/glTier.js?v=197')
-  const sceneMod = await import('/demo/occlusion/scene.js?v=197')
+  const tierMod = await import('/demo/occlusion/tier.js?v=198')
+  const sceneMod = await import('/demo/occlusion/scene.js?v=198')
   const scene = sceneMod.createScene(16384)
   const shellStub = { log: { info() {}, event() {}, error() {}, warn() {} }, setBadge() {}, markReady() {}, slot: document.createElement('div') }
   const noteError = () => {}
   const deps = { scene, shell: shellStub, noteError, stage: document.createElement('div'), PROBE: true, FORCE_SNAPSHOT: false, attachControls() {}, pauseLoop() {}, resumeLoop() {} }
 
-  const wg = await wgTierMod.buildWgTier(deps)
-  const gl = await glTierMod.buildGlTier(deps)
+  const wg = await tierMod.buildTier({ ...deps, backend: 'webgpu' })
+  const gl = await tierMod.buildTier({ ...deps, backend: 'webgl2' })
   const cameras = sceneMod.VAL_CAMERAS
   const report = []
   for (const cam of cameras) {
@@ -57,6 +56,10 @@ const out = await page.evaluate(async () => {
       tier.renderTo(tier.surface.targetId, mvp, eye, 1, false)
       const r = await tier.surface.read()
       return new Uint8Array(r.data)
+    }
+    const statsOf = async tier => {
+      const s = await tier.readStats()
+      return { drawn: s.drawn, occluded: s.occluded }
     }
     const a = await read(wg)
     const b = await read(gl)

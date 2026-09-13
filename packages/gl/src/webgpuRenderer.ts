@@ -117,10 +117,20 @@ export interface WebGpuRendererOptions {
    *  {0.07, 0.08, 0.11} — the same demo rendered a noticeably lighter
    *  background on WebGPU than on WebGL2. Default: DEFAULT_CLEAR. */
   readonly clear?: WebGL2RendererOptions['clear']
-  /** GPU facade injection for headless tests. */
-  readonly createGPU?: (canvas: AnyCanvas, onError?: (message: string) => void, onDeviceLost?: (reason: string) => void) => Promise<GPUFacade>
+  /** GPU facade injection for headless tests. The optional fourth argument
+   *  (Task 198) carries the renderer's antialias hint — an injected facade
+   *  may honor it the same way createRealGPU does. */
+  readonly createGPU?: (canvas: AnyCanvas, onError?: (message: string) => void, onDeviceLost?: (reason: string) => void, hints?: { antialias?: boolean }) => Promise<GPUFacade>
   /** Sink for silent WebGPU validation errors (they throw no exceptions). */
   readonly onGpuError?: (message: string) => void
+  /** Task 198 — THE CANVAS MSAA: WebGPU has no sampleCount on the canvas
+   *  context's configure(); the antialiased shape is a persistent 4x color
+   *  texture + 4x depth attachment with a resolveTarget into the canvas
+   *  texture (see realGPU's bindTarget). Pipelines gain a sample-count
+   *  variant axis. WebGL2's twin is the context's `antialias: true` (the
+   *  default cascade rung) — the two backends agree by default, WG needs
+   *  the option ON. Default: false (the historical 1x canvas). */
+  readonly antialias?: boolean
   readonly requestFrame?: (callback: (timestamp: number) => void) => () => void
   readonly observeResize?: boolean
   readonly now?: () => number
@@ -178,8 +188,8 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
     storm.fatal(`WebGPU device lost (${reason}) — rendering stopped (device-loss pause); the device is gone and every later submit would silently no-op. Re-boot the renderer (auto mode: a WebGL2 re-boot) to continue.`)
   }
   const rawGpu = options.createGPU !== undefined
-    ? await options.createGPU(canvas, storm.handle, onDeviceLost)
-    : await createRealGPU(canvas, storm.handle, onDeviceLost)
+    ? await options.createGPU(canvas, storm.handle, onDeviceLost, { antialias: options.antialias === true })
+    : await createRealGPU(canvas, storm.handle, onDeviceLost, { antialias: options.antialias === true })
   // Task 62: resourceSession (v2) — priority over journal (v1).
   // Stable ids above the facade + content in the journal + restoreResources().
   const session = options.resources !== undefined ? createResourceSessionGPU(rawGpu, options.resources) : null

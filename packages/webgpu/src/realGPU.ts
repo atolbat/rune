@@ -26,6 +26,7 @@ export async function createRealGPU(
   canvas: AnyCanvas,
   onGpuError?: (message: string) => void,
   onDeviceLost?: (reason: string) => void,
+  hints?: { antialias?: boolean },
 ): Promise<GPUFacade> {
   const adapter = await navigator.gpu.requestAdapter()
   if (adapter === null) throw new Error('rune: WebGPU adapter unavailable')
@@ -183,6 +184,20 @@ export async function createRealGPU(
   let canvasDepthClear = 1
   let depthTexture: GPUTexture | null = null
   let depthView: GPUTextureView | null = null
+  // ─── Task 198 — THE CANVAS MSAA (the `antialias` option) ─────────────────
+  // WebGPU cannot configure the canvas context for multisampling (the spec
+  // has no sampleCount on configure()); the ONLY spec shape is: render into
+  // a 4x color texture + 4x depth attachment, then RESOLVE into the canvas
+  // texture (resolveTarget) at the pass's end. The 1x depthTexture above
+  // stays the non-antialiased path's own; the msaa twins are created in
+  // resize() and follow the canvas size (a stale-size MSAA texture is a
+  // validation death at the first bindTarget after a resize).
+  const canvasAntialias = hints?.antialias === true
+  const MSAA_SAMPLES = 4
+  let msaaColorTexture: GPUTexture | null = null
+  let msaaColorView: GPUTextureView | null = null
+  let msaaDepthTexture: GPUTexture | null = null
+  let msaaDepthView: GPUTextureView | null = null
   let ubo: GPUBuffer | null = null
   let uboSize = 0
   // Task 178: the max (offset + length) ever uploaded — the span the
@@ -214,6 +229,12 @@ export async function createRealGPU(
   // variant (× the Task-69 sampleType variants), chosen at bind time from
   // the CURRENT pass's attachment state — bindTarget owns this flag.
   let passHasDepth = true
+  // Task 198 — THE SAMPLE-COUNT AXIS: a pipeline built for a 4x pass is
+  // INVALID in a 1x pass and vice versa (multisample.count is part of the
+  // compatibility key). bindTarget(0) sets passSamples=4 when the canvas
+  // rides MSAA; every other target stays 1x — and the variant cache keys
+  // on it (see setPipelineVariant).
+  let passSamples = 1
   // Task 196 — THE TARGET-FORMAT AXIS: a render pipeline's fragment target
   // must match the CURRENT pass's color attachment format. Pre-196 the
   // facade built every pipeline for the CANVAS format — valid while all
@@ -370,6 +391,27 @@ export async function createRealGPU(
       usage: GPUTextureUsage.RENDER_ATTACHMENT,
     })
     depthView = depthTexture.createView()
+    if (canvasAntialias) {
+      // Task 198: the MSAA twins follow the canvas size — a resolve into a
+      // size-mismatched canvas texture is a validation error, and the
+      // depth attachment must carry the SAME sample count as the color.
+      msaaColorTexture?.destroy()
+      msaaDepthTexture?.destroy()
+      msaaColorTexture = device.createTexture({
+        size: [w, h],
+        format,
+        sampleCount: MSAA_SAMPLES,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      })
+      msaaColorView = msaaColorTexture.createView()
+      msaaDepthTexture = device.createTexture({
+        size: [w, h],
+        format: 'depth24plus',
+        sampleCount: MSAA_SAMPLES,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      })
+      msaaDepthView = msaaDepthTexture.createView()
+    }
   }
 
   /** Canonical id → native GPUTextureFormat (Task 110, restoration). */
@@ -687,7 +729,7 @@ export async function createRealGPU(
     // rgba32float on devices without 'float32-filterable'). Eagerly built
     // WITH depth (the canvas default); the depth-less and non-canvas-format
     // twins stay lazy.
-    record.variants.set('float|1|' + format, buildPipeline(record, 'float', true, format))
+    record.variants.set('float|1|' + format + '|1', buildPipeline(record, 'float', true, format, 1))
   }
 
   /** Task 69: build a pipeline for a specific texture binding sampleType.
@@ -707,6 +749,9 @@ export async function createRealGPU(
     // canvas format pre-196, always; now the pass's own color attachment
     // format — an r32float z-tile, an HDR surface, the canvas).
     targetFormat: GPUTextureFormat,
+    // Task 198 — the pass's sample count (1 everywhere except the MSAA
+    // canvas; a pipeline's multisample.count MUST equal the pass's).
+    samples = 1,
   ): GPURenderPipeline {
     const wgsl = record.wgsl
     const attrs = record.attrs
@@ -846,6 +891,9 @@ export async function createRealGPU(
         depthWriteEnabled: desc.depth === false ? false : (desc.depth?.write ?? true),
         depthCompare: desc.depth === false ? 'always' : depthCompareOf(desc.depth?.test),
       } : undefined,
+      // Task 198 — THE MSAA CANVAS: the pipeline's sample count must equal
+      // the pass's (the variant axis above); 1x targets keep the default.
+      multisample: samples > 1 ? { count: samples } : undefined,
     })
   }
 
@@ -897,10 +945,13 @@ export async function createRealGPU(
     // Task 196: the pass's own color format; unknown (null) only before
     // the first bindTarget — the canvas format is the safe default.
     const targetFormat = currentTargetFormat ?? format
-    const key = `${variant}|${passHasDepth ? 1 : 0}|${targetFormat}`
+    // Task 198: × the pass's SAMPLE COUNT — the MSAA canvas (4x) and the
+    // 1x targets (the r32f z tile, the 1x surfaces) need separate
+    // pipeline twins; multisample.count is part of compatibility.
+    const key = `${variant}|${passHasDepth ? 1 : 0}|${targetFormat}|${passSamples}`
     let pipeline = record.variants.get(key)
     if (pipeline === undefined) {
-      pipeline = buildPipeline(record, variant, passHasDepth, targetFormat)
+      pipeline = buildPipeline(record, variant, passHasDepth, targetFormat, passSamples)
       record.variants.set(key, pipeline)
     }
     if (pipeline === currentPipeline) return
@@ -1247,6 +1298,12 @@ export async function createRealGPU(
     boundGroup0Offset = -1 // Task 165 — the bind-group memos die with the pass
     boundGroup1 = null
     boundStorageId = -1 // Task 193 — the storage memo dies with the pass too
+    // Task 198 — THE INDEX MEMO TWIN: bindTarget ends the open pass INLINE
+    // (the endPass path resets it, this path did not) — a pass switch with
+    // clear=true kept the memo armed, the re-opened pass silently skipped
+    // setIndexBuffer, and every indexed draw on it died validation ("Index
+    // buffer was not set") — the draw dropped with no other symptom.
+    indexMemo = null
     if (pass !== null) {
       // END stamp BEFORE pass.end(): writeTimestamp(querySet, END_INDEX)
       if (timerHandle !== null) timerHandle.onEndPass(pass)
@@ -1263,20 +1320,46 @@ export async function createRealGPU(
     encoder ??= device.createCommandEncoder()
     const loadOp: GPULoadOp = clear ? 'clear' : 'load'
     let colorView: GPUTextureView
+    // Task 198 — the MSAA canvas resolve: the pass's color attachment
+    // resolves INTO the canvas texture; null on every 1x target (the
+    // plain canvas path included — resolveTarget: null is the default).
+    let resolveTarget: GPUTextureView | undefined
+    let storeOp: GPUStoreOp = 'store'
     let depthAttachment: GPURenderPassDepthStencilAttachment | undefined
     let clearValue: GPUColor
     if (targetId === 0) {
-      colorView = gpuContext.getCurrentTexture().createView()
+      // Task 198 — THE MSAA CANVAS: the pass renders into the 4x color
+      // texture and RESOLVES into the canvas texture (resolveTarget, the
+      // only spec shape for a multisampled canvas — configure() has no
+      // sampleCount). storeOp:'discard' — the MSAA texture's own contents
+      // are never read again, only the resolve matters. The depth rides
+      // the 4x twin (the attachment sample counts must all match).
+      passSamples = canvasAntialias ? MSAA_SAMPLES : 1
+      const canvasView = gpuContext.getCurrentTexture().createView()
       // The canvas clear — setCanvasClearColor state (the renderer's `clear`
       // option; the legacy default 0.07/0.08/0.11 if never set).
       clearValue = { r: canvasClearR, g: canvasClearG, b: canvasClearB, a: canvasClearA }
-      depthAttachment = depthView !== null ? {
-        view: depthView,
-        depthClearValue: canvasDepthClear,
-        depthLoadOp: loadOp,
-        depthStoreOp: 'store',
-      } : undefined
+      if (canvasAntialias && msaaColorView !== null) {
+        colorView = msaaColorView
+        resolveTarget = canvasView
+        storeOp = 'discard'
+        depthAttachment = msaaDepthView !== null ? {
+          view: msaaDepthView,
+          depthClearValue: canvasDepthClear,
+          depthLoadOp: loadOp,
+          depthStoreOp: 'store',
+        } : undefined
+      } else {
+        colorView = canvasView
+        depthAttachment = depthView !== null ? {
+          view: depthView,
+          depthClearValue: canvasDepthClear,
+          depthLoadOp: loadOp,
+          depthStoreOp: 'store',
+        } : undefined
+      }
     } else {
+      passSamples = 1
       const target = targets.get(targetId)
       if (target === undefined) return
       colorView = target.view
@@ -1289,7 +1372,13 @@ export async function createRealGPU(
       } : undefined
     }
     pass = encoder.beginRenderPass({
-      colorAttachments: [{ view: colorView, clearValue, loadOp, storeOp: 'store' }],
+      colorAttachments: [{
+        view: colorView,
+        resolveTarget,
+        clearValue,
+        loadOp,
+        storeOp,
+      }],
       depthStencilAttachment: depthAttachment,
     })
     // Task 172 — the pass's depth presence drives the pipeline variant (see
@@ -1694,6 +1783,13 @@ export async function createRealGPU(
     depthTexture?.destroy()
     depthTexture = null
     depthView = null
+    // Task 198: the MSAA canvas twins die with the 1x ones.
+    msaaColorTexture?.destroy()
+    msaaColorTexture = null
+    msaaColorView = null
+    msaaDepthTexture?.destroy()
+    msaaDepthTexture = null
+    msaaDepthView = null
     for (const target of targets.values()) {
       target.depthTexture?.destroy()
     }

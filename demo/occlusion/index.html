@@ -7,10 +7,23 @@
   <link rel="stylesheet" href="../shared/demo-shell.css" />
   <style>
     /* the Hi-Z demo's own chrome: the HUD overlay + the tier controls.
-       The shell provides the page layout, the log and the backend toggle;
-       everything drawn ON the stage lives here. */
-    .hiz-stage { position: relative; }
-    .hiz-canvas { display: block; width: 100%; height: auto; background: #0b0d13; border-radius: 8px; }
+       The shell provides the page layout, the log and the backend toggle.
+
+       Task 198 — MOBILE-FIRST: the stage grows a TALL aspect in portrait
+       (the shell's 4/3 is a landscape bet), and the canvas is FULL-BLEED —
+       the renderers' own ResizeObservers re-derive the backing store from
+       the live CSS size × DPR (capped at 2), so a phone renders at its
+       real pixel density instead of an upscaled 960×540 letterbox. */
+    .hiz-stage { position: relative; aspect-ratio: 16 / 10; }
+    @media (orientation: portrait) {
+      .hiz-stage { aspect-ratio: 4 / 5; }
+    }
+    .hiz-canvas {
+      display: block; width: 100%; height: 100%;
+      background: #0b0d13; border-radius: 8px;
+      touch-action: none; /* the orbit drag owns the gestures */
+    }
+    .hiz-snapshot { image-rendering: auto; }
     .hiz-hud {
       position: absolute; left: 10px; top: 10px; margin: 0;
       padding: 8px 10px; border-radius: 8px;
@@ -18,6 +31,13 @@
       font: 12px/1.55 ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
       color: #dfe5f1; white-space: pre; pointer-events: none;
       text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+    }
+    @media (max-width: 720px) {
+      .hiz-hud {
+        left: 6px; top: 6px; padding: 5px 8px;
+        font: 10px/1.5 ui-monospace, Menlo, Consolas, monospace;
+        max-width: calc(100% - 12px); overflow: hidden;
+      }
     }
     .hiz-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; }
     .hiz-controls button {
@@ -32,6 +52,6 @@
 <body>
   <div id="app"></div>
   <script src="../shared/demo-shell.js"></script>
-  <script type="module" src="./main.js?v=197"></script>
+  <script type="module" src="./main.js?v=198"></script>
 </body>
 </html>

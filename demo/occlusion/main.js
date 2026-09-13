@@ -23,12 +23,17 @@
 // window.__hizStats — the live counters (the smoke/gates read it);
 // window.__hizGate — the probe verdict (?probe=1: WG-only, the Task-196
 // contract; ?probe=1&mode=webgl2: both tiers + the cross-tier parity).
-import { buildWgTier } from './wgTier.js?v=197'
-import { buildGlTier } from './glTier.js?v=197'
+//
+// Task 198 — THE COMMON BRICKS: ONE tier builder (tier.js) drives BOTH
+// backends — the boot, the frame, the stats, the gates are one code path;
+// the shell's WebGPU/WebGL2 radios only choose the backend string. The
+// live camera takes the canvas's real aspect (portrait widens the fov),
+// the canvas is full-bleed and DPR-aware (the renderers' own observers).
+import { buildTier } from './tier.js?v=198'
 import {
   createScene, cameraAt, VAL_CAMERAS,
   HIZ_W, HIZ_H, LEVELS,
-} from './scene.js?v=197'
+} from './scene.js?v=198'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -43,8 +48,8 @@ const democtl = { pause() {}, resume() {} }
 const shell = window.RuneDemoShell.mount({
   layout: 'page',
   title: 'Hi-Z occlusion culling',
-  desc: 'Hierarchical Z-buffer culling, GPU-driven: a depth prepass, a reduced-Z pyramid, a cull pass that decides visibility, then the visible set — the whole rune facade contract, 16384 boxes behind a city of occluders, on BOTH backends: WebGPU (compute + indirect draws) and WebGL2 (a FBO pyramid + a transform-feedback cull + a vertex-collapse draw).',
-  hint: 'Drag — orbit · wheel — zoom · the buttons toggle the culling tiers and the pyramid view. The WebGPU / WebGL2 radios boot the same Hi-Z on each backend\u2019s own contracts — and the parity gates hold on both.',
+  desc: 'Hierarchical Z-buffer culling, GPU-driven: a depth prepass, a reduced-Z pyramid, a cull pass that decides visibility, then the visible set — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts): ONE demo tier, one syntax — WebGPU (compute + an indirect draw) and WebGL2 (transform feedback + vertex collapse) run the identical frame code.',
+  hint: 'Drag — orbit · wheel/pinch — zoom · the buttons toggle the culling tiers and the pyramid view. The WebGPU / WebGL2 radios boot the same Hi-Z on each backend\u2019s own mechanisms through the common bricks — and the parity gates hold on both.',
   defaults: { mode: MODE_PARAM === 'webgl2' ? 'webgl2' : 'webgpu' },
   onPause() { democtl.pause() },
   onResume() { democtl.resume() },
@@ -131,7 +136,7 @@ const stats = {
   mode: 'boot', total: scene.N, occluders: scene.K, occludees: OCCL,
   hizW: HIZ_W, hizH: HIZ_H, levels: LEVELS, hizOn: 1,
   frustumCulled: 0, occlusionCulled: 0, drawn: 0, nearStraddle: 0,
-  drawCalls: 2, dispatches: 2 + LEVELS, msAvg: 0,
+  drawCalls: 1, dispatches: 2, msAvg: 0,
   tierLine: '', drawsLine: '', validation: null, errors,
 }
 if (typeof window !== 'undefined') window.__hizStats = stats
@@ -176,7 +181,11 @@ function loop(t) {
   lastT = t
   frameIndex++
   cam.yaw += cam.auto * 0.016
-  const { eye, mvp } = cameraAt(cam.yaw, cam.pitch, cam.dist)
+  // Task 198 — THE LIVE ASPECT (mobile-first): the canvas's own shape; a
+  // portrait view widens the fov so the canyon fills the tall stage
+  const aspect = tier !== null ? tier.aspect() : 16 / 9
+  const fov = Math.PI / 3 * Math.min(1.5, Math.max(1, (16 / 9) / aspect))
+  const { eye, mvp } = cameraAt(cam.yaw, cam.pitch, cam.dist, aspect, fov)
   try {
     if (tier !== null && tier.drain !== null && tier.drain !== undefined) tier.drain(t)
     tier.frame(mvp, eye, hizOn ? 1 : 0, showPyramid)
@@ -303,11 +312,9 @@ async function bootTier(mode) {
     await teardownTier()
     tierMode = mode
     stats.mode = mode === 'webgl2' ? (PROBE ? 'webgl2-probe' : 'webgl2-live') : (PROBE ? 'probe' : 'boot')
-    shell.log.event(`booting the ${mode === 'webgl2' ? 'WebGL2' : 'WebGPU'} Hi-Z tier`)
-    const build = mode === 'webgl2'
-      ? buildGlTier
-      : buildWgTier
-    tier = await build({
+    shell.log.event(`booting the ${mode === 'webgl2' ? 'WebGL2' : 'WebGPU'} Hi-Z tier (the common bricks — one tier code, both backends)`)
+    tier = await buildTier({
+      backend: mode,
       scene, shell, noteError, stage, PROBE, FORCE_SNAPSHOT,
       attachControls,
       pauseLoop: () => { paused = true; if (rafId !== 0) { cancelAnimationFrame(rafId); rafId = 0 } },
@@ -316,8 +323,8 @@ async function bootTier(mode) {
     stats.mode = tier.kind === 'snapshot' ? 'snapshot' : tier.kind === 'probe' ? 'probe' : tier.mode === 'webgl2' ? 'webgl2-live' : 'live'
     stats.tierLine = tier.tierLine
     stats.drawsLine = tier.drawsLine
-    stats.drawCalls = mode === 'webgl2' ? 2 + (LEVELS - 1) : 2
-    stats.dispatches = mode === 'webgl2' ? 1 : 2 + LEVELS
+    stats.drawCalls = 1
+    stats.dispatches = mode === 'webgl2' ? 1 : 2
     shell.setBadge(mode === 'webgl2' ? 'WebGL2' : tier.kind === 'snapshot' ? 'WebGPU (software)' : 'WebGPU', mode === 'webgl2' ? 'gl' : 'gpu')
     if (tier !== null && tier.canvas !== null && !PROBE) {
       stage.appendChild(hud) // (re)positions the HUD over the tier's canvas
@@ -377,8 +384,8 @@ async function runProbe() {
     // the cross-tier leg: the WG tier validates first (its hashes become
     // the reference), then the GL verdict compares against them.
     try {
-      const wg = await buildWgTier({
-        scene, shell, noteError, stage, PROBE: true, FORCE_SNAPSHOT,
+      const wg = await buildTier({
+        backend: 'webgpu', scene, shell, noteError, stage, PROBE: true, FORCE_SNAPSHOT,
         attachControls, pauseLoop: () => {}, resumeLoop: () => {},
       })
       const v = await validate(wg, null)

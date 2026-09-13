@@ -10196,7 +10196,7 @@ function astcEntries() {
 }
 
 // packages/webgpu/src/realGPU.ts
-async function createRealGPU(canvas, onGpuError, onDeviceLost) {
+async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
   const adapter = await navigator.gpu.requestAdapter();
   if (adapter === null)
     throw new Error("rune: WebGPU adapter unavailable");
@@ -10251,6 +10251,12 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
   let canvasDepthClear = 1;
   let depthTexture = null;
   let depthView = null;
+  const canvasAntialias = hints?.antialias === true;
+  const MSAA_SAMPLES = 4;
+  let msaaColorTexture = null;
+  let msaaColorView = null;
+  let msaaDepthTexture = null;
+  let msaaDepthView = null;
   let ubo = null;
   let uboSize = 0;
   let uboSpanSeen = 0;
@@ -10262,6 +10268,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
   let currentPipelineId = -1;
   let currentTarget = 0;
   let passHasDepth = true;
+  let passSamples = 1;
   let currentTargetFormat = null;
   let computePass = null;
   let computeGroup = null;
@@ -10329,6 +10336,24 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
       usage: GPUTextureUsage.RENDER_ATTACHMENT
     });
     depthView = depthTexture.createView();
+    if (canvasAntialias) {
+      msaaColorTexture?.destroy();
+      msaaDepthTexture?.destroy();
+      msaaColorTexture = device.createTexture({
+        size: [w, h],
+        format,
+        sampleCount: MSAA_SAMPLES,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT
+      });
+      msaaColorView = msaaColorTexture.createView();
+      msaaDepthTexture = device.createTexture({
+        size: [w, h],
+        format: "depth24plus",
+        sampleCount: MSAA_SAMPLES,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT
+      });
+      msaaDepthView = msaaDepthTexture.createView();
+    }
   }
   function resolveGpuFormat(id) {
     const info = GPU_FORMATS[id];
@@ -10462,9 +10487,9 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
       variants: new Map
     };
     pipelineRecords[pipelineId] = record;
-    record.variants.set("float|1|" + format, buildPipeline(record, "float", true, format));
+    record.variants.set("float|1|" + format + "|1", buildPipeline(record, "float", true, format, 1));
   }
-  function buildPipeline(record, variant, withDepth, targetFormat) {
+  function buildPipeline(record, variant, withDepth, targetFormat, samples = 1) {
     const wgsl = record.wgsl;
     const attrs = record.attrs;
     const desc = record.desc;
@@ -10544,7 +10569,8 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
         format: "depth24plus",
         depthWriteEnabled: desc.depth === false ? false : desc.depth?.write ?? true,
         depthCompare: desc.depth === false ? "always" : depthCompareOf(desc.depth?.test)
-      } : undefined
+      } : undefined,
+      multisample: samples > 1 ? { count: samples } : undefined
     });
   }
   function depthCompareOf(test) {
@@ -10586,10 +10612,10 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
   }
   function setPipelineVariant(record, variant) {
     const targetFormat = currentTargetFormat ?? format;
-    const key = `${variant}|${passHasDepth ? 1 : 0}|${targetFormat}`;
+    const key = `${variant}|${passHasDepth ? 1 : 0}|${targetFormat}|${passSamples}`;
     let pipeline = record.variants.get(key);
     if (pipeline === undefined) {
-      pipeline = buildPipeline(record, variant, passHasDepth, targetFormat);
+      pipeline = buildPipeline(record, variant, passHasDepth, targetFormat, passSamples);
       record.variants.set(key, pipeline);
     }
     if (pipeline === currentPipeline)
@@ -10814,6 +10840,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     boundGroup0Offset = -1;
     boundGroup1 = null;
     boundStorageId = -1;
+    indexMemo = null;
     if (pass !== null) {
       if (timerHandle !== null)
         timerHandle.onEndPass(pass);
@@ -10825,18 +10852,35 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     encoder ??= device.createCommandEncoder();
     const loadOp = clear ? "clear" : "load";
     let colorView;
+    let resolveTarget;
+    let storeOp = "store";
     let depthAttachment;
     let clearValue;
     if (targetId === 0) {
-      colorView = gpuContext.getCurrentTexture().createView();
+      passSamples = canvasAntialias ? MSAA_SAMPLES : 1;
+      const canvasView = gpuContext.getCurrentTexture().createView();
       clearValue = { r: canvasClearR, g: canvasClearG, b: canvasClearB, a: canvasClearA };
-      depthAttachment = depthView !== null ? {
-        view: depthView,
-        depthClearValue: canvasDepthClear,
-        depthLoadOp: loadOp,
-        depthStoreOp: "store"
-      } : undefined;
+      if (canvasAntialias && msaaColorView !== null) {
+        colorView = msaaColorView;
+        resolveTarget = canvasView;
+        storeOp = "discard";
+        depthAttachment = msaaDepthView !== null ? {
+          view: msaaDepthView,
+          depthClearValue: canvasDepthClear,
+          depthLoadOp: loadOp,
+          depthStoreOp: "store"
+        } : undefined;
+      } else {
+        colorView = canvasView;
+        depthAttachment = depthView !== null ? {
+          view: depthView,
+          depthClearValue: canvasDepthClear,
+          depthLoadOp: loadOp,
+          depthStoreOp: "store"
+        } : undefined;
+      }
     } else {
+      passSamples = 1;
       const target = targets.get(targetId);
       if (target === undefined)
         return;
@@ -10850,7 +10894,13 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
       } : undefined;
     }
     pass = encoder.beginRenderPass({
-      colorAttachments: [{ view: colorView, clearValue, loadOp, storeOp: "store" }],
+      colorAttachments: [{
+        view: colorView,
+        resolveTarget,
+        clearValue,
+        loadOp,
+        storeOp
+      }],
       depthStencilAttachment: depthAttachment
     });
     passHasDepth = depthAttachment !== undefined;
@@ -11144,6 +11194,12 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     depthTexture?.destroy();
     depthTexture = null;
     depthView = null;
+    msaaColorTexture?.destroy();
+    msaaColorTexture = null;
+    msaaColorView = null;
+    msaaDepthTexture?.destroy();
+    msaaDepthTexture = null;
+    msaaDepthView = null;
     for (const target of targets.values()) {
       target.depthTexture?.destroy();
     }
@@ -12344,7 +12400,7 @@ async function createWebGpuRenderer(options) {
   const onDeviceLost = (reason) => {
     storm.fatal(`WebGPU device lost (${reason}) — rendering stopped (device-loss pause); the device is gone and every later submit would silently no-op. Re-boot the renderer (auto mode: a WebGL2 re-boot) to continue.`);
   };
-  const rawGpu = options.createGPU !== undefined ? await options.createGPU(canvas, storm.handle, onDeviceLost) : await createRealGPU(canvas, storm.handle, onDeviceLost);
+  const rawGpu = options.createGPU !== undefined ? await options.createGPU(canvas, storm.handle, onDeviceLost, { antialias: options.antialias === true }) : await createRealGPU(canvas, storm.handle, onDeviceLost, { antialias: options.antialias === true });
   const session = options.resources !== undefined ? createResourceSessionGPU(rawGpu, options.resources) : null;
   const gpu = session !== null ? session.facade : options.journal !== undefined ? withJournalGpu(rawGpu, options.journal) : rawGpu;
   const epoch = createEpoch();
@@ -13015,6 +13071,621 @@ function removeItem3(list, item) {
   const at = list.indexOf(item);
   if (at >= 0)
     list.splice(at, 1);
+}
+// packages/gl/src/device.ts
+var REDUCE_GLSL_VS = `#version 300 es
+layout(location=0) in vec2 a_q;
+void main() { gl_Position = vec4(a_q, 0.0, 1.0); }`;
+var REDUCE_GLSL_FS = `#version 300 es
+precision highp float;
+uniform sampler2D u_src;
+out vec4 o;
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy) * 2;
+  ivec2 d = textureSize(u_src, 0);
+  int x0 = min(p.x, d.x - 1);
+  int x1 = min(p.x + 1, d.x - 1);
+  int y0 = min(p.y, d.y - 1);
+  int y1 = min(p.y + 1, d.y - 1);
+  float a = texelFetch(u_src, ivec2(x0, y0), 0).r;
+  float b = texelFetch(u_src, ivec2(x1, y0), 0).r;
+  float c = texelFetch(u_src, ivec2(x0, y1), 0).r;
+  float dd = texelFetch(u_src, ivec2(x1, y1), 0).r;
+  o = vec4(max(max(a, b), max(c, dd)), 0.0, 0.0, 1.0);
+}`;
+var COMPACT_WGSL = `
+struct CompactParams { words: vec4<u32> }
+@group(0) @binding(0) var<uniform> params: CompactParams;
+@group(0) @binding(1) var<storage, read_write> scene: array<u32>;
+@group(0) @binding(3) var<storage, read_write> args: array<u32>;
+@compute @workgroup_size(64)
+fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x != 0u) { return; }
+  let n = params.words.x;      // the record count
+  let k = params.words.y;      // the occluders (always visible, first)
+  let indexCount = params.words.z;
+  let flagsOff = params.words.w;
+  var out = 0u; var frustum = 0u; var occluded = 0u; var straddle = 0u;
+  for (var i = 0u; i < n; i = i + 1u) {
+    let f = scene[flagsOff + i];
+    let visible = i < k || f == 1u || f == 4u;
+    if (visible) {
+      scene[out] = i;          // the list region (word 0) — ascending, stable
+      out = out + 1u;
+      if (i >= k && f == 4u) { straddle = straddle + 1u; }
+    } else if (f == 2u) {
+      frustum = frustum + 1u;
+    } else if (f == 3u) {
+      occluded = occluded + 1u;
+    }
+  }
+  // the stats block (drawn = OCCLUDEE-visible — the GL CPU-sweep twin)
+  args[0u] = out - k;
+  args[1u] = frustum;
+  args[2u] = occluded;
+  args[3u] = straddle;
+  // drawIndexedIndirect at byte 32: [indexCount, instanceCount, firstIndex,
+  // baseVertex, firstInstance] — words 8..12
+  args[8u] = indexCount;
+  args[9u] = out;
+}`;
+var QUAD_LIST = new Float32Array([-1, -1, 1, -1, -1, 1, 1, -1, 1, 1, -1, 1]);
+var QUAD_STRIP = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
+var WG_USAGE = { STORAGE: 128, INDIRECT: 256, COPY_SRC: 4, COPY_DST: 8 };
+async function createDevice(options) {
+  const onError = options.onError;
+  const color = options.clear?.color ?? [0.07, 0.08, 0.11, 1];
+  const clear = {
+    color: [color[0] ?? 0.07, color[1] ?? 0.08, color[2] ?? 0.11, color[3] ?? 1],
+    depth: options.clear?.depth ?? 1
+  };
+  const liveDpr = typeof window !== "undefined" ? window.devicePixelRatio ?? 1 : 1;
+  const dprOverride = options.dprCap !== undefined && liveDpr > options.dprCap ? options.dprCap : undefined;
+  const observeResize = options.observeResize !== false;
+  if (options.backend === "webgpu") {
+    const createWg = options.createWgRenderer ?? createWebGpuRenderer;
+    let renderer2 = null;
+    let lastError = null;
+    for (let attempt = 0;attempt < 4 && renderer2 === null; attempt++) {
+      try {
+        renderer2 = await createWg({
+          canvas: options.canvas,
+          dpr: dprOverride,
+          clear: { color: clear.color, depth: clear.depth },
+          onGpuError: onError,
+          antialias: options.antialias === true,
+          observeResize,
+          multiDraw: false
+        });
+      } catch (error) {
+        lastError = error;
+        await new Promise((r) => setTimeout(r, 900));
+      }
+    }
+    if (renderer2 === null)
+      throw lastError instanceof Error ? lastError : new Error("rune: the WebGPU renderer refused to boot");
+    return createWgDevice(renderer2, options, clear);
+  }
+  const createGl = options.createGlRenderer ?? createWebGL2Renderer;
+  const renderer = createGl({
+    canvas: options.canvas,
+    dpr: dprOverride,
+    clear: { color: clear.color, depth: clear.depth },
+    onGlError: onError,
+    observeResize,
+    multiDraw: false
+  });
+  return createGlDevice(renderer, options, clear);
+}
+function adapterInfoOf(renderer) {
+  try {
+    const info = renderer.gpu?.adapter?.info;
+    if (info === undefined || info === null)
+      return "";
+    return `${info.description ?? ""} ${info.architecture ?? ""} ${info.vendor ?? ""}`;
+  } catch {
+    return "";
+  }
+}
+function createWgDevice(renderer, options, clear) {
+  const gpu = renderer.gpu;
+  const onInfo = options.onInfo;
+  const adapterInfo = adapterInfoOf(renderer);
+  const software = /swiftshader|software|llvmpipe|basic render/i.test(adapterInfo);
+  let arenaCursor = 0;
+  let pipelineSeq = 0;
+  const scenes = new Map;
+  const wgPrograms = new Map;
+  function allocUniforms(bytes) {
+    const offset = arenaCursor;
+    gpu.uploadUniforms(offset, bytes);
+    arenaCursor += Math.max(256, Math.ceil(bytes.byteLength / 256) * 256);
+    return offset;
+  }
+  function scene(layout) {
+    const handle = { total: layout.total, occluders: layout.occluders };
+    const bufferId = gpu.createExternalBuffer(layout.words.byteLength, WG_USAGE.STORAGE | WG_USAGE.COPY_DST | WG_USAGE.COPY_SRC);
+    gpu.writeExternalBuffer(bufferId, layout.words);
+    const argsId = gpu.createExternalBuffer(64, WG_USAGE.STORAGE | WG_USAGE.INDIRECT | WG_USAGE.COPY_SRC);
+    const placeholderId = gpu.createExternalBuffer(16, WG_USAGE.STORAGE);
+    const compactBlock = new Float32Array(4);
+    const compactU32 = new Uint32Array(compactBlock.buffer);
+    compactU32[0] = layout.total;
+    compactU32[1] = layout.occluders;
+    compactU32[3] = layout.flagsWord;
+    const compactId = gpu.createCompute(COMPACT_WGSL, 16, [bufferId, placeholderId, argsId]);
+    scenes.set(handle, { handle, bufferId, argsId, compactId, compactBlock, compactU32 });
+    return handle;
+  }
+  function pyramid(w, h) {
+    const dims = [{ w, h }];
+    let cw = w, ch = h;
+    for (;; ) {
+      cw = Math.max(1, Math.ceil(cw / 2));
+      ch = Math.max(1, Math.ceil(ch / 2));
+      dims.push({ w: cw, h: ch });
+      if (cw === 1 && ch === 1)
+        break;
+    }
+    const offsets = [0];
+    for (let L = 1;L < dims.length; L++)
+      offsets.push(offsets[L - 1] + dims[L - 1].w * dims[L - 1].h);
+    const words = offsets[offsets.length - 1] + dims[dims.length - 1].w * dims[dims.length - 1].h;
+    const zTexId = gpu.createTexture(w, h, "r32float");
+    const zTarget = gpu.createTarget(zTexId, w, h, true, [1, 1, 1, 1]);
+    const storageId = gpu.createExternalBuffer(words * 4, WG_USAGE.STORAGE | WG_USAGE.COPY_DST | WG_USAGE.COPY_SRC);
+    let REDUCE = "";
+    for (let L = 1;L < dims.length; L++) {
+      const wi = dims[L - 1], wo = dims[L];
+      const oi = offsets[L - 1], oo = offsets[L];
+      REDUCE += `
+@compute @workgroup_size(64)
+fn reduceL${L}(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let t = gid.x;
+  if (t >= ${wo.w * wo.h}u) { return; }
+  let x = t % ${wo.w}u;
+  let y = t / ${wo.w}u;
+  let x0 = min(x * 2u, ${wi.w - 1}u);
+  let x1 = min(x * 2u + 1u, ${wi.w - 1}u);
+  let y0 = min(y * 2u, ${wi.h - 1}u);
+  let y1 = min(y * 2u + 1u, ${wi.h - 1}u);
+  let a = pyramid[${oi}u + y0 * ${wi.w}u + x0];
+  let b = pyramid[${oi}u + y0 * ${wi.w}u + x1];
+  let c = pyramid[${oi}u + y1 * ${wi.w}u + x0];
+  let d = pyramid[${oi}u + y1 * ${wi.w}u + x1];
+  pyramid[${oo}u + t] = max(max(a, b), max(c, d));
+}
+`;
+    }
+    const PYR_WGSL = `
+@group(0) @binding(1) var<storage, read_write> pyramid: array<f32>;
+@group(0) @binding(6) var zTex: texture_2d<f32>;
+@compute @workgroup_size(64)
+fn zToMip0(@builtin(global_invocation_id) gid: vec3<u32>) {
+  // THE FLAT 1D GRID: thread t = y * w + x (the family's dispatch is
+  // one-dimensional — a 2D gid here silently covered only the first rows)
+  let t = gid.x;
+  if (t >= ${w * h}u) { return; }
+  let x = t % ${w}u;
+  let y = t / ${w}u;
+  let z = textureLoad(zTex, vec2<i32>(vec2<u32>(x, y)), 0).r;
+  pyramid[t] = z;
+}
+${REDUCE}`;
+    const reduceId = gpu.createCompute(PYR_WGSL, 16, [storageId], [{ kind: "sampled", textureId: zTexId }]);
+    const flat = (w2, h2) => Math.max(1, Math.ceil(w2 * h2 / 64));
+    const block = new Float32Array(4);
+    const levels = dims.length;
+    const build = () => {
+      gpu.endPass();
+      gpu.runCompute(reduceId, "zToMip0", block, flat(w, h));
+      for (let L = 1;L < levels; L++) {
+        gpu.runCompute(reduceId, `reduceL${L}`, block, flat(dims[L].w, dims[L].h));
+      }
+    };
+    return { zTarget, textures: [], storageId, offsets, levels, width: w, height: h, dims, build };
+  }
+  function program(spec) {
+    if (spec.wg === undefined) {
+      throw new Error(`rune: createDevice('webgpu').program — the spec carries no wg leg (the WGSL source is the brick's data; without it there is nothing to build)`);
+    }
+    const pipelineId = ++pipelineSeq;
+    const depth2 = { test: spec.depth?.test ?? "less", write: spec.depth?.write ?? true };
+    gpu.ensurePipeline(pipelineId, spec.wg.code, spec.wg.attrs, spec.wg.hasTextures === true, {
+      depth: { test: depth2.test, write: depth2.write }
+    });
+    const handle = { backend: "webgpu", depth: depth2 };
+    wgPrograms.set(handle, { pipelineId, depth: depth2 });
+    return handle;
+  }
+  function geometry(vertices, indices) {
+    return { vertices, indices };
+  }
+  function bindGeometryFeed(vertices, indices, size = 3) {
+    gpu.bindVertexBuffer(0, vertices, size);
+    if (indices !== undefined) {
+      gpu.bindIndexBuffer(indices);
+    }
+  }
+  function drawInstanced(optionsIn) {
+    const s = scenes.get(optionsIn.records);
+    if (s === undefined)
+      throw new Error("rune: drawInstanced — the records handle is not this device's scene");
+    const prog = wgPrograms.get(optionsIn.program);
+    if (prog === undefined)
+      throw new Error("rune: drawInstanced — the program handle is not this device's own");
+    const offset = allocUniforms(new Uint8Array(optionsIn.uniforms.buffer, optionsIn.uniforms.byteOffset, optionsIn.uniforms.byteLength));
+    gpu.bindTarget(optionsIn.target, optionsIn.clear);
+    gpu.usePipeline(prog.pipelineId);
+    gpu.bindStorageBuffer(s.bufferId);
+    bindGeometryFeed(optionsIn.geometry.vertices, optionsIn.geometry.indices);
+    gpu.bindUniforms(offset);
+    const count = optionsIn.indexCount ?? 36;
+    if (optionsIn.geometry.indices !== undefined)
+      gpu.drawIndexed(count, optionsIn.instances);
+    else
+      gpu.draw(optionsIn.instances * count, 1);
+  }
+  function drawVisible(optionsIn) {
+    const s = scenes.get(optionsIn.records);
+    if (s === undefined)
+      throw new Error("rune: drawVisible — the records handle is not this device's scene");
+    const prog = wgPrograms.get(optionsIn.program);
+    if (prog === undefined)
+      throw new Error("rune: drawVisible — the program handle is not this device's own");
+    s.compactU32[2] = optionsIn.indexCount ?? 36;
+    gpu.runCompute(s.compactId, "compact", s.compactBlock, 1);
+    const offset = allocUniforms(new Uint8Array(optionsIn.uniforms.buffer, optionsIn.uniforms.byteOffset, optionsIn.uniforms.byteLength));
+    gpu.bindTarget(optionsIn.target, optionsIn.clear);
+    gpu.usePipeline(prog.pipelineId);
+    gpu.bindStorageBuffer(s.bufferId);
+    bindGeometryFeed(optionsIn.geometry.vertices, optionsIn.geometry.indices);
+    gpu.bindUniforms(offset);
+    gpu.drawIndexedIndirect(s.argsId, 32);
+  }
+  function drawQuad(optionsIn) {
+    const prog = wgPrograms.get(optionsIn.program);
+    if (prog === undefined)
+      throw new Error("rune: drawQuad — the program handle is not this device's own");
+    if (optionsIn.pyramid.storageId === undefined)
+      throw new Error("rune: drawQuad — the pyramid brick carries no storage (the WG panel reads the pyramid buffer)");
+    const offset = allocUniforms(new Uint8Array(optionsIn.uniforms.buffer, optionsIn.uniforms.byteOffset, optionsIn.uniforms.byteLength));
+    gpu.bindTarget(optionsIn.target, optionsIn.clear);
+    gpu.usePipeline(prog.pipelineId);
+    gpu.bindStorageBuffer(optionsIn.pyramid.storageId);
+    gpu.bindVertexBuffer(0, QUAD_LIST, 2);
+    gpu.bindUniforms(offset);
+    gpu.draw(6, 1);
+  }
+  function occlusionCuller(sceneHandle, pyramidHandle, spec) {
+    const s = scenes.get(sceneHandle);
+    if (s === undefined)
+      throw new Error("rune: occlusionCuller — the scene handle is not this device's own");
+    if (pyramidHandle.storageId === undefined) {
+      throw new Error("rune: occlusionCuller — the pyramid brick carries no storage (the WG kernel reads array<f32> at binding 2 — the Task-196 contract)");
+    }
+    const computeId = gpu.createCompute(spec.wgsl, spec.uniformBytes, [s.bufferId, pyramidHandle.storageId]);
+    const entry = spec.entry ?? "cull";
+    const workgroups = Math.max(1, Math.ceil(sceneHandle.total / 64));
+    return {
+      run(block) {
+        gpu.runCompute(computeId, entry, block, workgroups);
+      }
+    };
+  }
+  async function readCullStats(sceneHandle) {
+    const s = scenes.get(sceneHandle);
+    if (s === undefined)
+      throw new Error("rune: readCullStats — the scene handle is not this device's own");
+    const f = await gpu.readExternalBuffer(s.argsId, 16);
+    const u = new Uint32Array(f.buffer, 0, 4);
+    return { drawn: u[0], frustum: u[1], occluded: u[2], straddle: u[3] };
+  }
+  function surface(width, height, surfaceOptions) {
+    const s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color });
+    return { targetId: s.targetId, width, height, read: () => s.read() };
+  }
+  const device = {
+    backend: "webgpu",
+    canvas: options.canvas,
+    renderer,
+    adapterInfo,
+    software,
+    antialias: options.antialias === true,
+    gpu,
+    gl: null,
+    scene,
+    pyramid,
+    program,
+    geometry,
+    drawInstanced,
+    drawVisible,
+    drawQuad,
+    occlusionCuller,
+    readCullStats,
+    surface,
+    debugSceneWords: (sceneHandle, bytes) => {
+      const s = scenes.get(sceneHandle);
+      if (s === undefined)
+        return Promise.reject(new Error("rune: debugSceneWords — not this device's scene"));
+      return gpu.readExternalBuffer(s.bufferId, bytes);
+    },
+    submit() {
+      gpu.endPass();
+      gpu.submit();
+      arenaCursor = 0;
+    },
+    dispose() {
+      try {
+        renderer.dispose();
+      } catch {}
+    }
+  };
+  if (software && onInfo !== undefined) {
+    onInfo(`software adapter detected (${adapterInfo.trim() || "unknown"}) — the canvas present path degrades (snapshot mode is the demo's call)`);
+  }
+  return device;
+}
+function createGlDevice(renderer, options, clear) {
+  const gl = renderer.gl;
+  const onInfo = options.onInfo;
+  const scenes = new Map;
+  const programs = new Map;
+  let geometryBuf = 0;
+  let quadBuf = 0;
+  let reduceProgramId = 0;
+  function scene(layout) {
+    const handle = { total: layout.total, occluders: layout.occluders };
+    const recBuf = gl.createBuffer(layout.recordsF32, "static");
+    const flagBuf = gl.createBuffer(new Float32Array(layout.total), "dynamic");
+    scenes.set(handle, {
+      handle,
+      recBuf,
+      flagBuf,
+      flagScratch: new Float32Array(layout.total)
+    });
+    return handle;
+  }
+  function pyramid(w, h) {
+    const textures = [gl.createTexture(w, h, { format: "r32f" })];
+    let zTarget = 0;
+    let landed = 0;
+    for (const bits of [32, 24, 16]) {
+      try {
+        zTarget = gl.createTarget(textures[0], w, h, true, [1, 1, 1, 1], bits);
+        landed = bits;
+        break;
+      } catch {}
+    }
+    if (landed === 0) {
+      throw new Error("rune: the r32f z-target could not attach (EXT_color_buffer_float missing? — the Hi-Z pyramid needs float render targets)");
+    }
+    if (landed !== 32 && onInfo !== undefined) {
+      onInfo(`depth32f renderbuffer refused by the driver — the z prepass rides DEPTH_COMPONENT${landed} (the 1e-5 cull slack covers the quantization gap)`);
+    }
+    const dims = [{ w, h }];
+    const targets = [];
+    let cw = w, ch = h;
+    for (;; ) {
+      cw = Math.max(1, Math.ceil(cw / 2));
+      ch = Math.max(1, Math.ceil(ch / 2));
+      const tex = gl.createTexture(cw, ch, { format: "r32f" });
+      textures.push(tex);
+      targets.push(gl.createTarget(tex, cw, ch, false, [0, 0, 0, 1]));
+      dims.push({ w: cw, h: ch });
+      if (cw === 1 && ch === 1)
+        break;
+    }
+    if (reduceProgramId === 0) {
+      reduceProgramId = gl.createProgram(REDUCE_GLSL_VS, REDUCE_GLSL_FS);
+      quadBuf = gl.createBuffer(QUAD_STRIP);
+    }
+    const levels = textures.length;
+    const build = () => {
+      gl.useProgram(reduceProgramId);
+      gl.setUniform1i(reduceProgramId, "u_src", 0);
+      gl.setDepthMode("always", false);
+      gl.setCull("none");
+      gl.bindVertexBuffer(quadBuf, 0, 2);
+      for (let L = 1;L < levels; L++) {
+        gl.bindTarget(targets[L - 1], true);
+        gl.bindTexture(textures[L - 1], 0);
+        gl.drawArrays("triangle-strip", 0, 4, 1);
+      }
+    };
+    return { zTarget, textures, levels, width: w, height: h, dims, build };
+  }
+  function program(spec) {
+    if (spec.gl === undefined) {
+      throw new Error(`rune: createDevice('webgl2').program — the spec carries no gl leg (the GLSL sources are the brick's data; without them there is nothing to build)`);
+    }
+    const programId = gl.createProgram(spec.gl.vs, spec.gl.fs);
+    const depth2 = { test: spec.depth?.test ?? "less", write: spec.depth?.write ?? true };
+    const handle = { backend: "webgl2", depth: depth2 };
+    programs.set(handle, { programId, depth: depth2, lanes: spec.gl.lanes, attrs: spec.gl.attrs });
+    return handle;
+  }
+  function geometry(vertices, indices) {
+    geometryBuf = gl.createBuffer(vertices);
+    if (indices !== undefined)
+      gl.createElementBuffer(indices);
+    return { vertices, indices };
+  }
+  function setUniformLanes(prog, block) {
+    let word = 0;
+    for (const lane of prog.lanes) {
+      const view = block.subarray(word, word + lane.words);
+      if (lane.kind === "mat4")
+        gl.setUniformMatrix4(prog.programId, lane.name, view);
+      else
+        gl.setUniform4fv(prog.programId, lane.name, view);
+      word += lane.words;
+    }
+  }
+  function openPass(target, clearTarget, prog) {
+    if (target === 0) {
+      gl.bindTarget(0, false);
+      if (clearTarget)
+        gl.clear(clear.color, clear.depth);
+    } else {
+      gl.bindTarget(target, clearTarget);
+    }
+    gl.useProgram(prog.programId);
+    gl.setDepthMode(prog.depth.test, prog.depth.write);
+    gl.setCull("none");
+  }
+  function bindAttrs(prog, s, geometryVertices, withFlags) {
+    gl.bindVertexBuffer(geometryBuf, 0, 3);
+    for (const attr of prog.attrs) {
+      if (attr.from === "records") {
+        gl.bindVertexBuffer(s.recBuf, attr.location, attr.size, attr.stride, attr.offset, attr.divisor);
+      } else if (attr.from === "flags" && withFlags) {
+        gl.bindVertexBuffer(s.flagBuf, attr.location, attr.size, attr.stride, attr.offset, attr.divisor);
+      }
+    }
+  }
+  function drawInstanced(optionsIn) {
+    const s = scenes.get(optionsIn.records);
+    if (s === undefined)
+      throw new Error("rune: drawInstanced — the records handle is not this device's scene");
+    const prog = programs.get(optionsIn.program);
+    if (prog === undefined)
+      throw new Error("rune: drawInstanced — the program handle is not this device's own");
+    openPass(optionsIn.target, optionsIn.clear, prog);
+    setUniformLanes(prog, optionsIn.uniforms);
+    bindAttrs(prog, s, optionsIn.geometry.vertices, false);
+    if (optionsIn.geometry.indices !== undefined) {
+      gl.drawElements(elementBufferOf(optionsIn.geometry.indices), optionsIn.indexCount ?? 36, optionsIn.instances, optionsIn.geometry.indices instanceof Uint16Array);
+    }
+  }
+  const elementBuffers = new Map;
+  function elementBufferOf(indices) {
+    let id = elementBuffers.get(indices);
+    if (id === undefined) {
+      id = gl.createElementBuffer(indices);
+      elementBuffers.set(indices, id);
+    }
+    return id;
+  }
+  function drawVisible(optionsIn) {
+    const s = scenes.get(optionsIn.records);
+    if (s === undefined)
+      throw new Error("rune: drawVisible — the records handle is not this device's scene");
+    const prog = programs.get(optionsIn.program);
+    if (prog === undefined)
+      throw new Error("rune: drawVisible — the program handle is not this device's own");
+    openPass(optionsIn.target, optionsIn.clear, prog);
+    setUniformLanes(prog, optionsIn.uniforms);
+    bindAttrs(prog, s, optionsIn.geometry.vertices, true);
+    if (optionsIn.geometry.indices !== undefined) {
+      gl.drawElements(elementBufferOf(optionsIn.geometry.indices), optionsIn.indexCount ?? 36, s.handle.total, true);
+    }
+  }
+  function drawQuad(optionsIn) {
+    const prog = programs.get(optionsIn.program);
+    if (prog === undefined)
+      throw new Error("rune: drawQuad — the program handle is not this device's own");
+    openPass(optionsIn.target, optionsIn.clear, prog);
+    setUniformLanes(prog, optionsIn.uniforms);
+    gl.setDepthMode("always", false);
+    gl.bindTexture(optionsIn.pyramid.textures[optionsIn.level] ?? 0, 0);
+    gl.bindVertexBuffer(quadBuf === 0 ? quadBuf = gl.createBuffer(QUAD_STRIP) : quadBuf, 0, 2);
+    gl.drawArrays("triangle-strip", 0, 4, 1);
+  }
+  function occlusionCuller(sceneHandle, pyramidHandle, spec) {
+    const s = scenes.get(sceneHandle);
+    if (s === undefined)
+      throw new Error("rune: occlusionCuller — the scene handle is not this device's own");
+    const passId = gl.createTransformPass({
+      vertex: spec.glsl,
+      outputs: ["v_flag"],
+      attributes: [
+        { name: "a_c", size: 3, stride: 48, offset: 0 },
+        { name: "a_h", size: 3, stride: 48, offset: 12 }
+      ],
+      textures: pyramidHandle.textures.map((_, L) => `u_pyr[${L}]`),
+      uniforms: spec.lanes.map((lane) => ({ name: lane.name, size: 4 }))
+    });
+    const total = spec.lanes.length * 4;
+    return {
+      run(block) {
+        gl.bindTarget(0, false);
+        const packed2 = block.length === total ? block : block.subarray(0, total);
+        gl.runTransformPass(passId, sceneHandle.total, {
+          bufferId: s.flagBuf,
+          attribBuffers: [s.recBuf, s.recBuf],
+          textures: pyramidHandle.textures,
+          uniformData: packed2
+        });
+      }
+    };
+  }
+  async function readCullStats(sceneHandle) {
+    const s = scenes.get(sceneHandle);
+    if (s === undefined)
+      throw new Error("rune: readCullStats — the scene handle is not this device's own");
+    const ok = gl.readBuffer(s.flagBuf, s.flagScratch);
+    if (!ok)
+      throw new Error("rune: the flag buffer readback was refused");
+    let drawn = 0, frustum = 0, occluded = 0, straddle = 0;
+    for (let i = sceneHandle.occluders;i < sceneHandle.total; i++) {
+      const f = s.flagScratch[i];
+      if (f === 1)
+        drawn++;
+      else if (f === 2)
+        frustum++;
+      else if (f === 3)
+        occluded++;
+      else if (f === 4) {
+        straddle++;
+        drawn++;
+      }
+    }
+    return { drawn, frustum, occluded, straddle };
+  }
+  function surface(width, height, surfaceOptions) {
+    let s = null;
+    for (const bits of [24, 16]) {
+      try {
+        s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color, depthBits: bits });
+        break;
+      } catch {}
+    }
+    if (s === null)
+      throw new Error("rune: the GL validation surface could not attach a depth renderbuffer");
+    const fixed = s;
+    return { targetId: fixed.targetId, width, height, read: () => fixed.read() };
+  }
+  return {
+    backend: "webgl2",
+    canvas: options.canvas,
+    renderer,
+    adapterInfo: "WebGL2 (ANGLE)",
+    software: false,
+    antialias: true,
+    gpu: null,
+    gl,
+    scene,
+    pyramid,
+    program,
+    geometry,
+    drawInstanced,
+    drawVisible,
+    drawQuad,
+    occlusionCuller,
+    readCullStats,
+    surface,
+    submit() {
+      try {
+        renderer.step(Date.now());
+      } catch {}
+    },
+    dispose() {
+      try {
+        renderer.dispose();
+      } catch {}
+    }
+  };
 }
 // packages/gl/src/particlesGpu.ts
 init_src();
@@ -16268,6 +16939,7 @@ export {
   createRenderer,
   createPortability,
   createGpuParticles,
+  createDevice,
   computeMipLevels,
   combineWebgpuScope,
   capsule,

@@ -50,9 +50,15 @@ export function mat4Mul(a, b) {
 export function createScene(occl) {
   const K = 23 // occluders: ground + 20 buildings + 2 towers
   const N = occl + K
-  const LIST_WORDS = occl
-  const FLAGS_OFF = occl // word offset of the per-instance verdict flags
-  const INST_OFF = 2 * occl // word offset of instance 0's record (12 words each)
+  // Task 198 — THE LAYOUT WIDENED: the compact's list AND the kernel's flags
+  // both cover ALL N records now (the unified one-draw shape — the occluders
+  // ride the list/flags lanes too), so each region holds N words:
+  // [list: N][flags: N][records: 12N]. (The Task-196 layout held occl words
+  // per region — the unified kernel's flags ran 23 words past their region
+  // into the ground's record and ZEROED it: the "missing ground" ghost.)
+  const LIST_WORDS = N
+  const FLAGS_OFF = N // word offset of the per-record verdict flags
+  const INST_OFF = 2 * N // word offset of instance 0's record (12 words each)
 
   let seed = 0x9e3779b9
   function rng() {
@@ -60,7 +66,7 @@ export function createScene(occl) {
     return (seed >>> 0) / 4294967296
   }
 
-  const sceneWords = new Uint32Array(LIST_WORDS + occl + N * 12) // [list][flags][instance records]
+  const sceneWords = new Uint32Array(LIST_WORDS + N + N * 12) // [list: N][flags: N][records: 12N]
   const sceneF32 = new Float32Array(sceneWords.buffer)
   const occluderBoxes = [] // for prop rejection
   function putInstance(i, center, half, color) {
@@ -160,12 +166,15 @@ export const VAL_CAMERAS = [
   { yaw: 1.45, pitch: 0.38, dist: 42 },
   { yaw: 2.6, pitch: 0.22, dist: 30 },
 ]
-export function cameraAt(yaw, pitch, dist) {
+/** Task 198 — the aspect-aware camera (mobile-first): the live view passes
+ *  the canvas's real aspect (portrait towers get a widened fov); the parity
+ *  cameras keep the 16:9 default — the validation surface is 480×270. */
+export function cameraAt(yaw, pitch, dist, aspect = 16 / 9, fovY = Math.PI / 3) {
   const eye = [
     Math.cos(pitch) * Math.sin(yaw) * dist,
     5.5 + Math.sin(pitch) * dist,
     Math.cos(pitch) * Math.cos(yaw) * dist,
   ]
-  const mvp = mat4Mul(perspective(Math.PI / 3, 16 / 9, 0.5, 300), lookAt(eye, [0, 5.5, 0], [0, 1, 0]))
+  const mvp = mat4Mul(perspective(fovY, aspect, 0.5, 300), lookAt(eye, [0, 5.5, 0], [0, 1, 0]))
   return { eye, mvp }
 }
