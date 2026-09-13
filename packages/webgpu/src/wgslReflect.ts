@@ -26,10 +26,22 @@ export interface WgslTextureInfo {
   readonly binding: number
 }
 
+export interface WgslStorageInfo {
+  /** Task 193 (theory A — the bit-discard experiment): a read-only storage
+   *  declaration (`@group(2) @binding(0) var<storage, read> name: …`). The
+   *  RENDER-path contract is exactly ONE slot — group 2, binding 0 — bound
+   *  by the executor via spec.storage {bufferId}; the compile validates it
+   *  loudly. The vertex stage may only READ storage (WebGPU rule). */
+  readonly name: string
+  readonly group: number
+  readonly binding: number
+}
+
 export interface WgslReflection {
   readonly uniforms: readonly WgslUniformInfo[]
   readonly attributes: readonly WgslAttributeInfo[]
   readonly textures: readonly WgslTextureInfo[]
+  readonly storages: readonly WgslStorageInfo[]
   readonly uniformBytes: number
 }
 
@@ -93,6 +105,7 @@ export function reflectWgsl(wgsl: string): WgslReflection {
     uniforms,
     attributes: [...scanAttributes(wgsl)].sort(byLocation),
     textures: scanTextures(wgsl),
+    storages: scanStorages(wgsl),
     uniformBytes: uniformBytes(uniforms),
   }
   if (reflectionCache.size < CACHE_LIMIT) reflectionCache.set(wgsl, reflection)
@@ -172,6 +185,26 @@ function scanTextures(wgsl: string): WgslTextureInfo[] {
       kind: match[2] === 'sampler' ? 'sampler' : 'texture_2d',
       binding: bMatch !== null ? Number(bMatch[1]) : -1,
     })
+  }
+  return found
+}
+
+/** Task 193: the read-only storage declarations (the render path's group 2).
+ *  The declaration's attribute prefix is sliced from the previous statement
+ *  boundary — the @group/@binding order inside one var statement is free in
+ *  WGSL (the task126 lesson, honored here unlike the texture scan's
+ *  group-first shape). A declaration without @group is not a render-slot
+ *  candidate (compute-style module-level storage) — skipped. */
+function scanStorages(wgsl: string): WgslStorageInfo[] {
+  const found: WgslStorageInfo[] = []
+  for (const match of wgsl.matchAll(/var<storage,\s*read>\s+(\w+)/g)) {
+    const at = match.index ?? 0
+    const from = Math.max(wgsl.lastIndexOf(';', at), wgsl.lastIndexOf('{', at), wgsl.lastIndexOf('}', at)) + 1
+    const head = wgsl.slice(from, at)
+    const g = /@group\((\d+)\)/.exec(head)
+    if (g === null) continue
+    const b = /@binding\((\d+)\)/.exec(head)
+    found.push({ name: match[1], group: Number(g[1]), binding: b !== null ? Number(b[1]) : -1 })
   }
   return found
 }

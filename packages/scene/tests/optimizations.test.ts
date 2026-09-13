@@ -230,8 +230,11 @@ describe('Task 85: culling plane masks — parity with brute', () => {
           expect(views.bits[base1 + w]).toBe(views.bits[base0 + w])
         }
         expect(hier.visible).toBe(brute.visible)
-        // Masks really save plane tests (on deep trees).
-        expect(hier.planeTests).toBeLessThanOrEqual(brute.planeTests)
+        // Masks really save plane tests (on deep trees). Task 193: the tail
+        // SEGMENT CLASSIFICATION adds up to six group-sphere tests per group
+        // per cull (the straddle fee, ≤ 4 groups in this fixture) — the
+        // documented allowance; the tree masks' savings are unchanged.
+        expect(hier.planeTests).toBeLessThanOrEqual(brute.planeTests + 6 * 4)
       }
     }
   })

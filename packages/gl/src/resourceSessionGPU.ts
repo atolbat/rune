@@ -170,6 +170,9 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
     // M5 (Task 73): feed dual-bind — a frame op (per-frame dirty range), not journaled.
     syncVertexBuffer: (data, byteLength, byteOffset) => raw.syncVertexBuffer(data, byteLength, byteOffset),
     bindExternalVertexBuffer: (slot, bufferId) => raw.bindExternalVertexBuffer(slot, bufferId),
+    // Task 193: the storage bind is a FRAME op — a pure passthrough (the
+    // buffer's bytes live in the external buffer, not journaled).
+    bindStorageBuffer: bufferId => raw.bindStorageBuffer(bufferId),
     createExternalBuffer: (byteLength, usage) => raw.createExternalBuffer(byteLength, usage),
     writeExternalBuffer: (id, data, byteOffset, byteLength) => raw.writeExternalBuffer(id, data, byteOffset, byteLength),
     readExternalBuffer: (id, byteLength) => raw.readExternalBuffer(id, byteLength),

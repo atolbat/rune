@@ -56,6 +56,39 @@ scene.forEachVisible(0, (slot) => {
 })
 ```
 
+## GPU-driven instance filtering (Task 193, the bit-discard experiment)
+
+The tail layout makes a group a CONTIGUOUS rank segment with RANK-MAJOR
+world rows — the exact shape the GPU can consume without the CPU compaction:
+
+```ts
+const src = gpuInstanceSource(views, cameraIndex, bufferIndex, groupId)
+// src.matrices: Float32Array(src.instances * 16) — 4 vec4 columns, stride
+//   64 — a ready instance attribute (bindExternalVertexBuffer or
+//   writeExternalBuffer once per frame; a SAB view is a legal source);
+// src.bits: the camera's visibility words (u32, rank space) — the
+//   read-only storage source (createExternalBuffer + writeExternalBuffer);
+// src.rankBase: the segment's first rank (the uniform: rank = rankBase + ii);
+// src.gHidden: NF_VISIBLE-off members — the filter below is gHidden === 0-ONLY.
+
+// The @rune/webgpu side: the shader declares
+//   @group(2) @binding(0) var<storage, read> sceneBits: array<u32>;
+// and the command opts in with storage: { bufferId } (the compile validates
+// the slot loudly; the pipeline grows the group-2 layout). The vertex
+// shader collapses the invisible instances to clip:
+//   let rank = u_rank0 + ii;
+//   let word = sceneBits[rank >> 5u];
+//   if ((word & (1u << (rank & 31u))) == 0u) { pos = vec4(2, 2, 2, 1); }
+// (INSTANCE_BIT_FILTER_WGSL — the shipped helper.)
+```
+
+The trade (measured, scripts/task193-bitdiscard.mjs, pixel-parity on the
+real stack): the CPU collect leaves the frame (~90µs per 2048 instances,
+scales with n) and the upload shrinks to the dirty rows; the GPU pays n
+vertex invocations instead of k (55% waste at 45% visibility — a
+scene-dependent bet, hence the experiment label; the classic pool path
+stays the default).
+
 ## Worker (T1/T2)
 
 ```ts

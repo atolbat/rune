@@ -343,6 +343,12 @@ export function createGpuExecutor(options: GpuExecutorOptions): GpuTapeExecutor 
     }
     gpu.usePipeline(command.pipelineId)
     gpu.bindUniforms(command.sliceOffset)
+    // Task 193 (theory A): the bit-discard storage bind — after the uniforms,
+    // before the vertex buffers (a deterministic prologue position; the
+    // facade's bind is pass-scoped memoized, a same-command run repeats skip
+    // it by construction — the multi-draw tier's prologue-once discipline).
+    const storageId = command.storageId
+    if (storageId !== undefined) gpu.bindStorageBuffer(storageId)
     // Indexed loop — no closure allocation per draw. Task 131: an
     // attribute with bufferId binds the EXTERNAL GPU buffer (the GPGPU
     // pack's output — the instance records, zero per-frame CPU upload);
@@ -382,6 +388,8 @@ interface RichWgpuCommand extends WgpuCommand {
   readonly attrOrder: readonly { readonly data: Float32Array; readonly size: number; readonly stride?: number; readonly offset?: number; readonly step?: 'vertex' | 'instance'; readonly bufferId?: number }[]
   /** Task 180 — the static index array (undefined = the classic draw). */
   readonly indices?: { readonly data: Uint16Array | Uint32Array }
+  /** Task 193 — the storage external buffer id (undefined = no group 2). */
+  readonly storageId?: number
   readonly pipeline: GpuPipelineDesc
   readonly textureIds: readonly number[]
   readonly sliceOffset: number

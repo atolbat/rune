@@ -65,6 +65,7 @@ export {
   rankNodeVisible,
   setCullMemo,
   cullMemoCounters,
+  setCullTailSpheres,
 } from './culling.ts'
 export type { CullStats, MutableCullStats } from './culling.ts'
 
@@ -78,7 +79,10 @@ export {
   setGroupSphereReject,
   tailCounters,
   groupSphereCounters,
+  gpuInstanceSource,
+  INSTANCE_BIT_FILTER_WGSL,
 } from './instances.ts'
+export type { GpuInstanceSource } from './instances.ts'
 
 export {
   updateWorldViews,

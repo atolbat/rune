@@ -9200,6 +9200,7 @@ function reflectWgsl2(wgsl) {
     uniforms,
     attributes: [...scanAttributes2(wgsl)].sort(byLocation2),
     textures: scanTextures(wgsl),
+    storages: scanStorages(wgsl),
     uniformBytes: uniformBytes(uniforms)
   };
   if (reflectionCache3.size < CACHE_LIMIT3)
@@ -9270,6 +9271,20 @@ function scanTextures(wgsl) {
       kind: match[2] === "sampler" ? "sampler" : "texture_2d",
       binding: bMatch !== null ? Number(bMatch[1]) : -1
     });
+  }
+  return found;
+}
+function scanStorages(wgsl) {
+  const found = [];
+  for (const match of wgsl.matchAll(/var<storage,\s*read>\s+(\w+)/g)) {
+    const at = match.index ?? 0;
+    const from = Math.max(wgsl.lastIndexOf(";", at), wgsl.lastIndexOf("{", at), wgsl.lastIndexOf("}", at)) + 1;
+    const head = wgsl.slice(from, at);
+    const g = /@group\((\d+)\)/.exec(head);
+    if (g === null)
+      continue;
+    const b = /@binding\((\d+)\)/.exec(head);
+    found.push({ name: match[1], group: Number(g[1]), binding: b !== null ? Number(b[1]) : -1 });
   }
   return found;
 }
@@ -9464,6 +9479,21 @@ function compileWgslSpec(spec, ctx) {
   const id = ctx.commands.length;
   const attrOrder = orderedAttributes(reflection, spec);
   const pipelineId = ctx.pipelineOf(spec.pipeline, spec.shader.wgsl, vertexLayoutKey(attrOrder));
+  if (reflection.storages.length > 1) {
+    throw new Error(`rune: a command's WGSL declares ${reflection.storages.length} read-only storage vars — the render path's contract is exactly one, at @group(2) @binding(0)`);
+  }
+  if (reflection.storages.length === 1) {
+    const s = reflection.storages[0];
+    if (s.group !== 2 || s.binding !== 0) {
+      throw new Error(`rune: the storage "${s.name}" must be declared @group(2) @binding(0) (got group ${s.group}, binding ${s.binding}) — the render path's fixed slot`);
+    }
+    if (spec.storage === undefined) {
+      throw new Error(`rune: the WGSL declares the storage "${s.name}" but the spec has no storage: { bufferId } — bind the source (e.g. the scene's visibility bitset) or drop the declaration`);
+    }
+  }
+  if (reflection.storages.length === 0 && spec.storage !== undefined) {
+    throw new Error("rune: spec.storage is set but the WGSL declares no @group(2) @binding(0) var<storage, read> — the binding would be dead");
+  }
   const uniformBytes2 = Math.max(256, reflection.uniformBytes);
   const sliceOffset = ctx.arena.alloc(uniformBytes2);
   const sliceBytes = uniformBytes2;
@@ -9479,6 +9509,7 @@ function compileWgslSpec(spec, ctx) {
     wgsl: spec.shader.wgsl,
     attrOrder,
     indices: spec.indices,
+    storageId: spec.storage?.bufferId,
     pipeline: spec.pipeline ?? {},
     textureIds: boundTextures(reflection, spec),
     fields: reflection.uniforms,
@@ -9850,6 +9881,9 @@ function createGpuExecutor(options) {
     }
     gpu.usePipeline(command.pipelineId);
     gpu.bindUniforms(command.sliceOffset);
+    const storageId = command.storageId;
+    if (storageId !== undefined)
+      gpu.bindStorageBuffer(storageId);
     const attrOrder = command.attrOrder;
     for (let slot = 0;slot < attrOrder.length; slot++) {
       const attribute = attrOrder[slot];
@@ -10201,6 +10235,11 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
   const dynamicOffsetScratch = new Uint32Array(1);
   let boundGroup0Offset = -1;
   let boundGroup1 = null;
+  let boundStorageId = -1;
+  const storageBindGroups = new Map;
+  let storageGroup2Layout = null;
+  let emptyGroup1Layout = null;
+  let emptyGroup1BindGroup = null;
   let timerHandle = null;
   const timerBundle = createGpuGpuTimer(device);
   const gpuTimer = timerBundle === null ? null : timerBundle.timer;
@@ -10349,6 +10388,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
       wgsl,
       attrs,
       hasTextures,
+      hasStorage: /@group\(2\)[^\n;]*var<storage,\s*read>/.test(wgsl),
       textureBindings: hasTextures ? group1TextureBindings(wgsl) : [],
       textureCount: hasTextures ? countGroup1TextureBindings(wgsl) : 0,
       desc: desc ?? {},
@@ -10397,6 +10437,17 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
       if (variant === "unfilterable-float" && /\btextureSample\s*\(/.test(wgsl)) {
         onGpuError?.("rgba32float without feature float32-filterable: WGSL calls textureSample — it requires a filterable texture (sampleType float). For unfilterable-float, textureSampleLevel(t, s, uv, level) is allowed — it is valid for filterable textures too (level 0 = base mip).");
       }
+    } else if (record.hasStorage) {
+      layouts.push(device.createBindGroupLayout({ entries: [] }));
+    }
+    if (record.hasStorage) {
+      layouts.push(device.createBindGroupLayout({
+        entries: [{
+          binding: 0,
+          visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+          buffer: { type: "read-only-storage" }
+        }]
+      }));
     }
     return device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: layouts }),
@@ -10711,6 +10762,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     vertexBindMemo.length = 0;
     boundGroup0Offset = -1;
     boundGroup1 = null;
+    boundStorageId = -1;
     if (pass !== null) {
       if (timerHandle !== null)
         timerHandle.onEndPass(pass);
@@ -10840,6 +10892,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     indexMemo = null;
     boundGroup0Offset = -1;
     boundGroup1 = null;
+    boundStorageId = -1;
   }
   function submit() {
     if (encoder === null)
@@ -10878,6 +10931,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
           vertexBindMemo.length = 0;
           boundGroup0Offset = -1;
           boundGroup1 = null;
+          boundStorageId = -1;
         }
         closeComputePass();
         encoder ??= device.createCommandEncoder();
@@ -11044,6 +11098,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     vertexBindMemo.length = 0;
     boundGroup0Offset = -1;
     boundGroup1 = null;
+    boundStorageId = -1;
     sabStaging.clear();
     device.destroy();
   }
@@ -11130,6 +11185,48 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
       return;
     externalBuffers.delete(id);
     buffer.destroy();
+  }
+  function bindStorageBuffer(bufferId) {
+    if (pass === null)
+      return;
+    const record = currentPipelineId >= 0 ? pipelineRecords[currentPipelineId] : undefined;
+    if (record !== undefined && record.hasStorage && !record.hasTextures) {
+      if (emptyGroup1Layout === null) {
+        emptyGroup1Layout = device.createBindGroupLayout({ entries: [] });
+        emptyGroup1BindGroup = device.createBindGroup({ layout: emptyGroup1Layout, entries: [] });
+      }
+      const empty2 = emptyGroup1BindGroup;
+      if (empty2 !== null && boundGroup1 !== empty2) {
+        pass.setBindGroup(1, empty2);
+        boundGroup1 = empty2;
+      }
+    }
+    if (boundStorageId === bufferId)
+      return;
+    let group = storageBindGroups.get(bufferId);
+    if (group === undefined) {
+      const buffer = externalBuffers.get(bufferId);
+      if (buffer === undefined) {
+        onGpuError?.(`bindStorageBuffer(${bufferId}): no such external buffer`);
+        return;
+      }
+      if (storageGroup2Layout === null) {
+        storageGroup2Layout = device.createBindGroupLayout({
+          entries: [{
+            binding: 0,
+            visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+            buffer: { type: "read-only-storage" }
+          }]
+        });
+      }
+      group = device.createBindGroup({
+        layout: storageGroup2Layout,
+        entries: [{ binding: 0, resource: { buffer } }]
+      });
+      storageBindGroups.set(bufferId, group);
+    }
+    pass.setBindGroup(2, group);
+    boundStorageId = bufferId;
   }
   function bindExternalVertexBuffer(slot, bufferId) {
     const buffer = externalBuffers.get(bufferId);
@@ -11274,6 +11371,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     bindIndexBuffer,
     drawIndexed,
     bindExternalVertexBuffer,
+    bindStorageBuffer,
     bindTexture,
     beginPass,
     draw,
@@ -11584,6 +11682,7 @@ function withJournalGpu(gpu, journal) {
     bindVertexBuffer: (slot, data, size) => gpu.bindVertexBuffer(slot, data, size),
     syncVertexBuffer: (data, byteLength, byteOffset) => gpu.syncVertexBuffer(data, byteLength, byteOffset),
     bindExternalVertexBuffer: (slot, bufferId) => gpu.bindExternalVertexBuffer(slot, bufferId),
+    bindStorageBuffer: (bufferId) => gpu.bindStorageBuffer(bufferId),
     createExternalBuffer: (byteLength, usage) => gpu.createExternalBuffer(byteLength, usage),
     writeExternalBuffer: (id, data, byteOffset, byteLength) => gpu.writeExternalBuffer(id, data, byteOffset, byteLength),
     readExternalBuffer: (id, byteLength) => gpu.readExternalBuffer(id, byteLength),
@@ -11796,6 +11895,7 @@ function createResourceSessionGPU(raw, journal) {
     bindVertexBuffer: (slot, data, size) => raw.bindVertexBuffer(slot, data, size),
     syncVertexBuffer: (data, byteLength, byteOffset) => raw.syncVertexBuffer(data, byteLength, byteOffset),
     bindExternalVertexBuffer: (slot, bufferId) => raw.bindExternalVertexBuffer(slot, bufferId),
+    bindStorageBuffer: (bufferId) => raw.bindStorageBuffer(bufferId),
     createExternalBuffer: (byteLength, usage) => raw.createExternalBuffer(byteLength, usage),
     writeExternalBuffer: (id, data, byteOffset, byteLength) => raw.writeExternalBuffer(id, data, byteOffset, byteLength),
     readExternalBuffer: (id, byteLength) => raw.readExternalBuffer(id, byteLength),

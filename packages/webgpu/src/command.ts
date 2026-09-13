@@ -53,6 +53,20 @@ export interface WgpuDrawSpec {
    *  unchanged). The array's constructor decides the format: 'uint16' |
    *  'uint32'. */
   readonly indices?: { readonly data: Uint16Array | Uint32Array }
+  /** Task 193 (theory A — THE BIT-DISCARD EXPERIMENT): the read-only
+   *  storage binding. The shader MUST declare exactly one —
+   *  `@group(2) @binding(0) var<storage, read> name: array<u32>` (the
+   *  reflection finds it, the compile validates the slot loudly) — and the
+   *  executor binds the external buffer at the draw prologue (memoized per
+   *  pass). The canonical use: the @rune/scene visibility bitset — draw ALL
+   *  n instances of a group segment, the VERTEX shader reads the member's
+   *  bit and collapses the invisible ones to clip (GPU-driven instance
+   *  filtering — the CPU collect pass disappears from the frame; the GPU
+   *  pays n vertex invocations instead of k). The pipeline layout grows a
+   *  group-2 read-only-storage entry (an EMPTY group 1 when the command has
+   *  no textures — the slots must all be bound). Opt-in: absent — the
+   *  command is byte-identical to the pre-193 stream. */
+  readonly storage?: { readonly bufferId: number }
   readonly textures?: Record<string, TextureHandle>
   readonly count: WgpuDynamic<number>
   readonly instances?: WgpuDynamic<number>
@@ -134,6 +148,8 @@ interface RichCommand extends WgpuCommand {
   readonly attrOrder: readonly { readonly data: Float32Array; readonly size: number; readonly stride?: number; readonly offset?: number; readonly step?: 'vertex' | 'instance'; readonly bufferId?: number }[]
   /** Task 180 — the static index array (undefined = the classic draw). */
   readonly indices?: { readonly data: Uint16Array | Uint32Array }
+  /** Task 193 — the storage external buffer id (undefined = no group 2). */
+  readonly storageId?: number
   readonly pipeline: GpuPipelineDesc
   readonly textureIds: readonly number[]
   readonly fields: readonly WgslUniformInfo[]
@@ -150,6 +166,25 @@ export function compileWgslSpec(spec: WgpuDrawSpec, ctx: WgpuCompileContext): Wg
   const id = ctx.commands.length
   const attrOrder = orderedAttributes(reflection, spec)
   const pipelineId = ctx.pipelineOf(spec.pipeline, spec.shader.wgsl, vertexLayoutKey(attrOrder))
+  // Task 193 — the storage contract: exactly ONE read-only declaration, at
+  // group 2 binding 0, matched by an explicit spec.storage. A declaration
+  // without a spec (or vice versa) is a LOUD compile error — a silent
+  // mismatch would draw with an unbound group (a validation storm).
+  if (reflection.storages.length > 1) {
+    throw new Error(`rune: a command's WGSL declares ${reflection.storages.length} read-only storage vars — the render path's contract is exactly one, at @group(2) @binding(0)`)
+  }
+  if (reflection.storages.length === 1) {
+    const s = reflection.storages[0]
+    if (s.group !== 2 || s.binding !== 0) {
+      throw new Error(`rune: the storage "${s.name}" must be declared @group(2) @binding(0) (got group ${s.group}, binding ${s.binding}) — the render path's fixed slot`)
+    }
+    if (spec.storage === undefined) {
+      throw new Error(`rune: the WGSL declares the storage "${s.name}" but the spec has no storage: { bufferId } — bind the source (e.g. the scene's visibility bitset) or drop the declaration`)
+    }
+  }
+  if (reflection.storages.length === 0 && spec.storage !== undefined) {
+    throw new Error('rune: spec.storage is set but the WGSL declares no @group(2) @binding(0) var<storage, read> — the binding would be dead')
+  }
   const uniformBytes = Math.max(256, reflection.uniformBytes)
   const sliceOffset = ctx.arena.alloc(uniformBytes)
   const sliceBytes = uniformBytes
@@ -170,6 +205,7 @@ export function compileWgslSpec(spec: WgpuDrawSpec, ctx: WgpuCompileContext): Wg
     wgsl: spec.shader.wgsl,
     attrOrder,
     indices: spec.indices,
+    storageId: spec.storage?.bufferId,
     pipeline: spec.pipeline ?? {},
     textureIds: boundTextures(reflection, spec),
     fields: reflection.uniforms,

@@ -194,6 +194,19 @@ export interface GPUFacade {
   /** The GPUBuffer of an external id (the orchestrator's diagnostics). */
   externalBufferOf(bufferId: number): unknown
   bindExternalVertexBuffer(slot: number, bufferId: number): void
+  /** Task 193 (theory A — the bit-discard experiment): bind ONE read-only
+   *  storage buffer at @group(2) @binding(0) for the CURRENT render pass.
+   *  The command's shader must declare the slot (`@group(2) @binding(0)
+   *  var<storage, read> …` — compileWgslSpec validates it; ensurePipeline
+   *  detects the declaration and appends the group-2 layout, with an EMPTY
+   *  group 1 when the command has no textures — WebGPU requires every
+   *  layout slot bound). The bind group is cached per bufferId; the bind
+   *  itself is pass-scoped memoized (the Task-165 discipline — an identical
+   *  re-bind within one pass is skipped, a texture flush of group 1 in
+   *  between re-arms it). The canonical use: the @rune/scene visibility
+   *  bitset — the VERTEX shader filters instances on the GPU (draw n,
+   *  collapse the invisible to clip) instead of a CPU collect pass. */
+  bindStorageBuffer(bufferId: number): void
   /** Task 131 — COMPUTE: a pipeline FAMILY over one WGSL module with a
    *  FIXED binding layout (0 uniform, 1 rw storage, 2 ro storage, 3 rw
    *  storage, 4 ro storage, 5 rw storage — Task 179: the last slot is the

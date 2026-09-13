@@ -323,6 +323,15 @@ export async function createRealGPU(
   // EXACT group-object repeat is skipped — a different command's flush
   // re-binds, so a stale group can never survive a texture-set change.
   let boundGroup1: GPUBindGroup | null = null
+  // Task 193 (theory A): the bit-discard storage bind — the per-bufferId bind
+  // group cache + the pass-scoped memo (the boundGroup1 discipline: it dies
+  // at every pass boundary; a texture flush of group 1 re-arms the EMPTY
+  // group-1 twin but NOT this one — group 2 is only ours).
+  let boundStorageId = -1
+  const storageBindGroups = new Map<number, GPUBindGroup>()
+  let storageGroup2Layout: GPUBindGroupLayout | null = null
+  let emptyGroup1Layout: GPUBindGroupLayout | null = null
+  let emptyGroup1BindGroup: GPUBindGroup | null = null
   let timerHandle: GpuTimerHandle | null = null
   // Create the timer IF the device has the 'timestamp-query' feature.
   // createGpuGpuTimer returns {timer, handle} or null (if no feature).
@@ -634,6 +643,10 @@ export async function createRealGPU(
       wgsl,
       attrs,
       hasTextures,
+      // Task 193: the group-2 read-only storage declaration (the reflection's
+      // scanStorages twin — the facade builds layouts from the source itself,
+      // compileWgslSpec has already validated the slot loudly).
+      hasStorage: /@group\(2\)[^\n;]*var<storage,\s*read>/.test(wgsl),
       // Multi-textures: layout group 1 is built from the DECLARED @binding
       // numbers of the texture_2d declarations in WGSL, in declaration
       // order (Task 126: the materials reserve tex@1, nrm@2, mat@3, mr@4,
@@ -672,7 +685,7 @@ export async function createRealGPU(
    *  on the pipeline; a declared format is incompatible with a pass that
    *  carries no depth attachment — a phone field report's storm pause). */
   function buildPipeline(
-    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; textureBindings: readonly number[]; textureCount: number; desc: GpuPipelineDesc },
+    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; hasStorage: boolean; textureBindings: readonly number[]; textureCount: number; desc: GpuPipelineDesc },
     variant: TextureSampleVariant,
     withDepth: boolean,
   ): GPURenderPipeline {
@@ -724,6 +737,26 @@ export async function createRealGPU(
       if (variant === 'unfilterable-float' && /\btextureSample\s*\(/.test(wgsl)) {
         onGpuError?.('rgba32float without feature float32-filterable: WGSL calls textureSample — it requires a filterable texture (sampleType float). For unfilterable-float, textureSampleLevel(t, s, uv, level) is allowed — it is valid for filterable textures too (level 0 = base mip).')
       }
+    } else if (record.hasStorage) {
+      // Task 193 (theory A): a storage command WITHOUT textures still
+      // OCCUPIES group 1 — the pipeline layout's slots are sequential, and
+      // group 2 (the storage) exists — so an EMPTY layout keeps the
+      // numbering; bindStorageBuffer binds the empty bind group for it
+      // (WebGPU: every layout slot must be bound at draw time).
+      layouts.push(device.createBindGroupLayout({ entries: [] }))
+    }
+    if (record.hasStorage) {
+      // Task 193: group 2 — exactly one read-only storage, VERTEX-visible
+      // (the bit-discard filter runs in the vertex stage; the fragment
+      // visibility rides along for generality). Structurally equal to the
+      // bind group's layout in bindStorageBuffer (the uboGroup rule).
+      layouts.push(device.createBindGroupLayout({
+        entries: [{
+          binding: 0,
+          visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+          buffer: { type: 'read-only-storage' },
+        }],
+      }))
     }
     return device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: layouts }),
@@ -833,7 +866,7 @@ export async function createRealGPU(
    *  pipeline WITH depthStencil is a validation error there, see
    *  passHasDepth's declaration). */
   function setPipelineVariant(
-    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; textureBindings: readonly number[]; textureCount: number; desc: GpuPipelineDesc; variantFloat: GPURenderPipeline | null; variantUnfilterable: GPURenderPipeline | null; variantFloatNoDepth: GPURenderPipeline | null; variantUnfilterableNoDepth: GPURenderPipeline | null },
+    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; hasStorage: boolean; textureBindings: readonly number[]; textureCount: number; desc: GpuPipelineDesc; variantFloat: GPURenderPipeline | null; variantUnfilterable: GPURenderPipeline | null; variantFloatNoDepth: GPURenderPipeline | null; variantUnfilterableNoDepth: GPURenderPipeline | null },
     variant: TextureSampleVariant,
   ): void {
     let pipeline: GPURenderPipeline | null
@@ -1195,6 +1228,7 @@ export async function createRealGPU(
     vertexBindMemo.length = 0
     boundGroup0Offset = -1 // Task 165 — the bind-group memos die with the pass
     boundGroup1 = null
+    boundStorageId = -1 // Task 193 — the storage memo dies with the pass too
     if (pass !== null) {
       // END stamp BEFORE pass.end(): writeTimestamp(querySet, END_INDEX)
       if (timerHandle !== null) timerHandle.onEndPass(pass)
@@ -1378,6 +1412,7 @@ export async function createRealGPU(
     // declarations): a fresh pass binds nothing until told.
     boundGroup0Offset = -1
     boundGroup1 = null
+    boundStorageId = -1 // Task 193 — the storage memo dies with the pass too
   }
 
   function submit(): void {
@@ -1433,6 +1468,7 @@ export async function createRealGPU(
           vertexBindMemo.length = 0 // Task 164 — the memo is pass-scoped
           boundGroup0Offset = -1 // Task 165 — the bind-group memos too
           boundGroup1 = null
+          boundStorageId = -1 // Task 193 — the storage memo dies with the pass too
         }
         // Task 164 — encoder-level copies are invalid while a pass is open:
         // the merged compute pass (if one is mid-frame) ends here, landing
@@ -1643,6 +1679,7 @@ export async function createRealGPU(
     vertexBindMemo.length = 0
     boundGroup0Offset = -1 // Task 165 — the bind-group memos too
     boundGroup1 = null
+    boundStorageId = -1 // Task 193 — the storage memo dies with the pass too
     sabStaging.clear()
     // 7. Final: device.destroy() — deterministically frees ALL GPU memory
     //    of the device (textures/buffers/pipelines/samplers/texture-views),
@@ -1770,6 +1807,54 @@ export async function createRealGPU(
     if (buffer === undefined) return
     externalBuffers.delete(id)
     buffer.destroy()
+  }
+
+  /** Task 193 (theory A — the bit-discard experiment): bind the read-only
+   *  storage at @group(2) @binding(0) — see the facade interface docs. The
+   *  bind group is cached per bufferId (the layout is structurally equal to
+   *  buildPipeline's group-2 entry — the uboGroup rule); the bind is
+   *  pass-scoped memoized. For a texture-less storage pipeline the EMPTY
+   *  group 1 is asserted here (boundGroup1's own memo) — the layout slot
+   *  must be bound, and nothing else would bind it. */
+  function bindStorageBuffer(bufferId: number): void {
+    if (pass === null) return
+    const record = currentPipelineId >= 0 ? pipelineRecords[currentPipelineId] : undefined
+    if (record !== undefined && record.hasStorage && !record.hasTextures) {
+      if (emptyGroup1Layout === null) {
+        emptyGroup1Layout = device.createBindGroupLayout({ entries: [] })
+        emptyGroup1BindGroup = device.createBindGroup({ layout: emptyGroup1Layout, entries: [] })
+      }
+      const empty = emptyGroup1BindGroup
+      if (empty !== null && boundGroup1 !== empty) {
+        pass.setBindGroup(1, empty)
+        boundGroup1 = empty
+      }
+    }
+    if (boundStorageId === bufferId) return
+    let group = storageBindGroups.get(bufferId)
+    if (group === undefined) {
+      const buffer = externalBuffers.get(bufferId)
+      if (buffer === undefined) {
+        onGpuError?.(`bindStorageBuffer(${bufferId}): no such external buffer`)
+        return
+      }
+      if (storageGroup2Layout === null) {
+        storageGroup2Layout = device.createBindGroupLayout({
+          entries: [{
+            binding: 0,
+            visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+            buffer: { type: 'read-only-storage' },
+          }],
+        })
+      }
+      group = device.createBindGroup({
+        layout: storageGroup2Layout,
+        entries: [{ binding: 0, resource: { buffer } }],
+      })
+      storageBindGroups.set(bufferId, group)
+    }
+    pass.setBindGroup(2, group)
+    boundStorageId = bufferId
   }
 
   function bindExternalVertexBuffer(slot: number, bufferId: number): void {
@@ -1962,6 +2047,7 @@ export async function createRealGPU(
     bindIndexBuffer,
     drawIndexed,
     bindExternalVertexBuffer,
+    bindStorageBuffer,
     bindTexture,
     beginPass,
     draw,
@@ -2007,6 +2093,10 @@ interface PipelineRecord {
   readonly wgsl: string
   readonly attrs: readonly GpuAttrSlot[]
   readonly hasTextures: boolean
+  /** Task 193 (theory A): the shader declares the group-2 read-only storage
+   *  slot — the layout grows the group-2 entry (and an EMPTY group 1 when
+   *  there are no textures; the slots are sequential). */
+  readonly hasStorage: boolean
   /** Multi-textures: the number of texture_2d declarations in group 1 of WGSL. */
   readonly textureCount: number
   /** Task 126: the DECLARED @binding numbers of the group-1 texture_2d

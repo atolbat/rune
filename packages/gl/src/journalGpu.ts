@@ -116,6 +116,9 @@ export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
     // M5 (Task 73): feed dual-bind — a frame op (per-frame dirty range), not journaled.
     syncVertexBuffer: (data, byteLength, byteOffset) => gpu.syncVertexBuffer(data, byteLength, byteOffset),
     bindExternalVertexBuffer: (slot, bufferId) => gpu.bindExternalVertexBuffer(slot, bufferId),
+    // Task 193: the storage bind is a FRAME op — a pure passthrough (the
+    // buffer's bytes live in the external buffer, not journaled).
+    bindStorageBuffer: bufferId => gpu.bindStorageBuffer(bufferId),
     createExternalBuffer: (byteLength, usage) => gpu.createExternalBuffer(byteLength, usage),
     writeExternalBuffer: (id, data, byteOffset, byteLength) => gpu.writeExternalBuffer(id, data, byteOffset, byteLength),
     readExternalBuffer: (id, byteLength) => gpu.readExternalBuffer(id, byteLength),

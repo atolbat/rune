@@ -71,6 +71,10 @@ export function createRecordingGPU(): RecordingGPU {
     syncVertexBuffer: (data, byteLength, byteOffset) => calls.push(`syncVertexBuffer(${data.length},${byteLength},${byteOffset ?? 0})`),
     // Task 131 — the GPGPU tier (recorded; the recorder has no device)
     bindExternalVertexBuffer: (slot, bufferId) => calls.push(`bindExternalVertexBuffer(${slot},${bufferId})`),
+    // Task 193 (theory A — the bit-discard experiment): the storage bind,
+    // recorded at its prologue position (after bindUniforms, before the
+    // vertex buffers — the executor's determinism).
+    bindStorageBuffer: bufferId => calls.push(`bindStorageBuffer(${bufferId})`),
     createExternalBuffer: (byteLength, usage) => {
       calls.push(`createExternalBuffer(${byteLength},${usage})`)
       return 900_000 + calls.length

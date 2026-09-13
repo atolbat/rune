@@ -36,6 +36,7 @@ import {
   tailLayoutOn,
 } from './layout.ts'
 import { bitsBase } from './culling.ts'
+import { groupSpheresFor, buildGroupSphere, groupSphereBuildCount } from './groupBounds.ts'
 
 // ─── Task 192: the SEGMENT collects (the Task-189 N2+N1 dossier) ──────
 //
@@ -172,7 +173,7 @@ export function collectMemoCounters(): { hits: number; misses: number } {
   return { hits: collectMemoHits, misses: collectMemoMisses }
 }
 
-// ─── Task 191: N4 — the GROUP-SPHERE PRE-REJECT (the Task-189 dossier) ──────
+// ─── Task 191: N4 — the GROUP-SPHERE PRE-REJECT (the Task-189 dossier) ───
 //
 // THE ENCLOSING ARGUMENT: a group's bounding sphere (the minimal sphere
 // enclosing the members' world spheres) that is entirely OUTSIDE one of the
@@ -180,27 +181,14 @@ export function collectMemoCounters(): { hits: number; misses: number } {
 // the frustum cull left every member's bit at 0 — the whole scan below
 // would return 0. Six dot products instead of a word-walk over all ranks.
 //
-// The spheres live per scene (a WeakMap keyed by the views object — the
-// Task-190 lesson: module-level arrays collide across scenes) and are
-// maintained INCREMENTALLY through the Task-85 stamp discipline:
-//   • a member's sphereW changes — updateWorld already stamped groupTouch
-//     of that member's group;
-//   • a composition change — Task 191 makes setGroup stamp the OLD and the
-//     NEW group (it stamped NOTHING before — a hole in the Task-85 upload
-//     skip AND the Task-190 pool memo: a member moving between groups left
-//     both instance buffers stale);
-//   • a grouped INTERNAL node's auto-bound changes — Task 191 makes the
-//     refit stamp that group (the combine rewrites sphereW).
-// A rebuild is one O(n) rank walk over the group's members (AABB pass +
-// radius pass — the Task-189 probe's shape, without the N2 tail segments:
-// the segments make it O(|g|); until N2 lands the walk pays O(n) per dirty
-// group, honestly documented — static groups never rebuild).
-//
-// SOUNDNESS DOMAIN (the documented contract): the pre-reject reasons about
-// bits PRODUCED BY A REAL CULL over the same sphereW/planes — the pipeline
-// contract. Raw `views.bits[i] = …` hacks desynchronize the bits from the
-// spheres and fall outside every stamp family (the Task-186 property
-// fixture writes bits directly — it runs under the kill-switch).
+// The SPHERE CACHE lives in groupBounds.ts (Task 193: extracted — the cull's
+// TAIL SEGMENT CLASSIFICATION shares the exact state and the exact stamps;
+// culling.ts cannot import THIS module — instances imports culling for
+// bitsBase, the cycle had to break one level down). The maintenance story
+// (the Task-85 stamp discipline: updateWorld / setVisible / setGroup /
+// refit-combine) and the soundness domain (bits produced by a real cull
+// over the same sphereW/planes — the pipeline contract) are documented
+// THERE; this section keeps the COLLECT's consumer: the pre-reject check.
 //
 // The kill-switch (setGroupSphereReject(false)) restores the pure
 // word-blocked scan bit-for-bit.
@@ -210,80 +198,7 @@ let groupSphereEnabled = true
 /** Task 191 — honest counters. */
 let prejectRejects = 0
 let prejectChecks = 0
-let sphereBuilds = 0
 
-interface GroupSphereState {
-  /** groupMax × 4: (cx, cy, cz, r); r ≤ 0 — empty/unknown, never reject. */
-  readonly spheres: Float32Array
-  /** Per group: the groupTouch stamp the sphere covers (−1 — never built). */
-  readonly built: Int32Array
-}
-
-const groupSpheres = new WeakMap<SceneViews, GroupSphereState>()
-
-function groupSpheresFor(views: SceneViews): GroupSphereState {
-  let state = groupSpheres.get(views)
-  if (state === undefined) {
-    state = {
-      spheres: new Float32Array(views.groupMax * 4),
-      built: new Int32Array(views.groupMax).fill(-1),
-    }
-    groupSpheres.set(views, state)
-  }
-  return state
-}
-
-/** Builds group g's sphere: the segment's rank range with the tail layout
- * (O(|g|) — the Task-189 dossier's segment-sphere win; the sphere encloses
- * exactly what the SEGMENT scan below can collect, so the pre-reject stays
- * sound in both modes); the full O(n) rank walk otherwise (Task 191). */
-function buildGroupSphere(views: SceneViews, g: number): void {
-  const n = views.headerI[H_NODE_COUNT]
-  const groupCount = Math.min(views.headerI[H_GROUP_COUNT], views.groupMax)
-  const { order, group, sphereW, groupTouch } = views
-  const state = groupSpheresFor(views)
-  const o4g = g * 4
-  let minX = Infinity, minY = Infinity, minZ = Infinity
-  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
-  let count = 0
-  const useSegment = tailLayoutOn() && g >= 0 && g < groupCount
-  const segFrom = useSegment ? views.gStart[g] : 0
-  const segTo = useSegment ? views.gStart[g + 1] : n
-  for (let r = segFrom; r < segTo; r++) {
-    const slot = order[r]
-    if (!useSegment && group[slot] !== g) continue
-    const o4 = slot * 4
-    const cx = sphereW[o4], cy = sphereW[o4 + 1], cz = sphereW[o4 + 2], rad = sphereW[o4 + 3]
-    const x0 = cx - rad, x1 = cx + rad, y0 = cy - rad, y1 = cy + rad, z0 = cz - rad, z1 = cz + rad
-    if (x0 < minX) minX = x0
-    if (x1 > maxX) maxX = x1
-    if (y0 < minY) minY = y0
-    if (y1 > maxY) maxY = y1
-    if (z0 < minZ) minZ = z0
-    if (z1 > maxZ) maxZ = z1
-    count++
-  }
-  if (count === 0) {
-    state.spheres[o4g + 3] = -1 // empty — never reject (the scan is cheap)
-  } else {
-    const cx = (minX + maxX) * 0.5, cy = (minY + maxY) * 0.5, cz = (minZ + maxZ) * 0.5
-    let radius = 0
-    for (let r = segFrom; r < segTo; r++) {
-      const slot = order[r]
-      if (!useSegment && group[slot] !== g) continue
-      const o4 = slot * 4
-      const dx = sphereW[o4] - cx, dy = sphereW[o4 + 1] - cy, dz = sphereW[o4 + 2] - cz
-      const d = Math.sqrt(dx * dx + dy * dy + dz * dz) + sphereW[o4 + 3]
-      if (d > radius) radius = d
-    }
-    state.spheres[o4g] = cx
-    state.spheres[o4g + 1] = cy
-    state.spheres[o4g + 2] = cz
-    state.spheres[o4g + 3] = radius
-  }
-  state.built[g] = groupTouch[g]
-  sphereBuilds++
-}
 
 /** Task 191 — the kill-switch: false restores the pure word-blocked scan. */
 export function setGroupSphereReject(enabled: boolean): void {
@@ -292,7 +207,7 @@ export function setGroupSphereReject(enabled: boolean): void {
 
 /** Task 191 — the pre-reject's honest counters. */
 export function groupSphereCounters(): { rejects: number; checks: number; builds: number } {
-  return { rejects: prejectRejects, checks: prejectChecks, builds: sphereBuilds }
+  return { rejects: prejectRejects, checks: prejectChecks, builds: groupSphereBuildCount() }
 }
 
 /** The pre-reject check: true ⟹ the scan below would return 0 (enclosure). */
@@ -741,3 +656,99 @@ export function collectGroupMatrices(
   }
   return k
 }
+
+// ─── Task 193 (theory A): the GPU INSTANCE SOURCE (the bit-discard contract) ──
+//
+// The Task-189 GPU probe proved the semantics (pixel parity: draw ALL n
+// instances, the VERTEX shader reads the member's visibility bit from a
+// storage buffer and collapses the invisible to clip — the CPU collect pass
+// leaves the frame); Task 193 wires the renderer side (the group-2
+// read-only storage binding, @rune/webgpu's spec.storage) and this — the
+// scene-side SOURCE VIEWS over the exact buffers the shader needs.
+//
+// THE CONTRACT (the tail layout makes it all contiguous — Task 192):
+//   • matrices — the group's rank-major WORLD rows, one 64-byte instance
+//     record each (4 vec4 COLUMNS, stride 64, step 'instance'): the vertex
+//     attribute source (bindExternalVertexBuffer / writeExternalBuffer —
+//     the SAB view is a legal writeBuffer source, the queue snapshots the
+//     bytes at call time);
+//   • instances — the SEGMENT size |g| (draw n; the shader filters);
+//   • bits — the camera's visibility bitset words (rank space — the storage
+//     buffer source, u32 words);
+//   • rankBase — the segment's first rank (the uniform): the shader's
+//     instance_index maps to rank = rankBase + ii, word = rank >> 5,
+//     bit = 1 << (rank & 31);
+//   • gHidden — the NF_VISIBLE-off members of the segment. The snippet
+//     below is gHidden === 0-ONLY (the bits are FRUSTUM-only by design —
+//     the CPU collect folds NF_VISIBLE in; a segment with hidden members
+//     falls back to the CPU collect path, honestly).
+//
+// The kill-switch family does not apply here: the source is a pure view
+// over the live buffers — nothing is computed, nothing can be turned off.
+
+/** The GPU-side draw source of one instance group's segment (Task 193). */
+export interface GpuInstanceSource {
+  /** The segment's world matrices — rank-major rows [gStart*16, gEnd*16):
+   *  one instance record (4 vec4 columns, stride 64). A VIEW — no copy. */
+  readonly matrices: Float32Array
+  /** The segment size: the DRAW's instance count (all of it — the shader
+   *  filters; the CPU compaction is what this replaces). */
+  readonly instances: number
+  /** The camera's bitset words (rank space — the storage source). A VIEW. */
+  readonly bits: Uint32Array
+  /** The segment's first rank — the shader's uniform (rank = rankBase + ii). */
+  readonly rankBase: number
+  /** The segment's NF_VISIBLE-off members. The filter snippet is valid only
+   *  for gHidden === 0 — fall back to the CPU collect otherwise. */
+  readonly gHidden: number
+}
+
+/** The GPU source views of group g's segment for one camera/buffer (Task
+ *  193, theory A). Valid until the next pack (the ranks move — repack
+ *  changes rankBase/matrices; the bits double-buffer per epoch). The
+ *  tail-layout kill-switch (setTailLayout(false)) leaves the segments
+ *  empty — the caller checks `instances === 0` (the legacy layout has no
+ *  contiguous segments; the bit-discard path needs the Task-192 layout). */
+export function gpuInstanceSource(
+  views: SceneViews,
+  cameraIndex: number,
+  bufferIndex: number,
+  groupId: number,
+): GpuInstanceSource {
+  const groupCount = Math.min(views.headerI[H_GROUP_COUNT], views.groupMax)
+  const base = bitsBase(views, bufferIndex, cameraIndex)
+  if (groupId < 0 || groupId >= groupCount || !tailLayoutOn()) {
+    return {
+      matrices: views.world.subarray(0, 0),
+      instances: 0,
+      bits: views.bits.subarray(base, base),
+      rankBase: 0,
+      gHidden: 0,
+    }
+  }
+  const gs = views.gStart[groupId]
+  const ge = views.gStart[groupId + 1]
+  return {
+    matrices: views.world.subarray(gs * 16, ge * 16),
+    instances: ge - gs,
+    bits: views.bits.subarray(base, base + views.bitsWords),
+    rankBase: gs,
+    gHidden: views.gHidden[groupId],
+  }
+}
+
+/** Task 193 — the WGSL bit-filter helper (the documented contract shape).
+ *  The COMMAND's shader declares the storage itself:
+ *    `@group(2) @binding(0) var<storage, read> sceneBits: array<u32>;`
+ *  and passes u_rank0 (the source's rankBase) as a uniform. The contract:
+ *  gHidden === 0 segments only (the bits are frustum-only — a segment with
+ *  hidden members belongs to the CPU collect path). */
+export const INSTANCE_BIT_FILTER_WGSL = `
+/** rune: the visibility bit filter (Task 193 theory A — bit-discard).
+ * ii = @builtin(instance_index); u_rank0 = the segment's first rank.
+ * false -> collapse the instance to clip in the vertex shader. */
+fn runeInstanceVisible(u_rank0: u32, ii: u32) -> bool {
+  let rank = u_rank0 + ii
+  let word = sceneBits[rank >> 5u]
+  return (word & (1u << (rank & 31u))) != 0u
+}`
