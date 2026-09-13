@@ -158,7 +158,12 @@ describe('Task 172: the depth-less pass binds depth-less pipelines (the storm-pa
     const { calls, canvas, cleanup } = installMockGpu()
     cleanups.push(cleanup)
     const gpu = await createRealGPU(canvas as never)
-    const tex = gpu.createTexture(64, 64)
+    // Task 196: the target textures use the CANVAS format (as real targets
+    // and surfaces do) — the pipeline variant space now includes the target
+    // FORMAT axis, and an rgba8unorm target texture on a bgra8unorm canvas
+    // would legitimately build its own variants (the pre-196 code silently
+    // bound the canvas-format pipeline — a latent Dawn validation bug).
+    const tex = gpu.createTexture(64, 64, 'canvas')
     // depth:false — the post chain's scene surface
     const target = gpu.createTarget(tex, 64, 64, false, [0, 0, 0, 1])
     gpu.bindTexture(tex)
@@ -186,7 +191,12 @@ describe('Task 172: the depth-less pass binds depth-less pipelines (the storm-pa
     const { calls, canvas, cleanup } = installMockGpu()
     cleanups.push(cleanup)
     const gpu = await createRealGPU(canvas as never)
-    const tex = gpu.createTexture(64, 64)
+    // Task 196: the target textures use the CANVAS format (as real targets
+    // and surfaces do) — the pipeline variant space now includes the target
+    // FORMAT axis, and an rgba8unorm target texture on a bgra8unorm canvas
+    // would legitimately build its own variants (the pre-196 code silently
+    // bound the canvas-format pipeline — a latent Dawn validation bug).
+    const tex = gpu.createTexture(64, 64, 'canvas')
     gpu.ensurePipeline(1, WGSL, [2, 2], true, { depth: false })
     // pass 1: the depth-less target
     const target = gpu.createTarget(tex, 64, 64, false, [0, 0, 0, 1])
@@ -213,7 +223,12 @@ describe('Task 172: the depth-less pass binds depth-less pipelines (the storm-pa
     const { calls, canvas, cleanup } = installMockGpu()
     cleanups.push(cleanup)
     const gpu = await createRealGPU(canvas as never)
-    const tex = gpu.createTexture(64, 64)
+    // Task 196: the target textures use the CANVAS format (as real targets
+    // and surfaces do) — the pipeline variant space now includes the target
+    // FORMAT axis, and an rgba8unorm target texture on a bgra8unorm canvas
+    // would legitimately build its own variants (the pre-196 code silently
+    // bound the canvas-format pipeline — a latent Dawn validation bug).
+    const tex = gpu.createTexture(64, 64, 'canvas')
     gpu.ensurePipeline(1, WGSL, [2, 2], true, { depth: false })
     const flat = gpu.createTarget(tex, 64, 64, false, [0, 0, 0, 1])
     const deep = gpu.createTarget(tex, 64, 64, true, [0, 0, 0, 1])
@@ -249,7 +264,12 @@ describe('Task 172: the depth-less pass binds depth-less pipelines (the storm-pa
     const { calls, canvas, cleanup } = installMockGpu()
     cleanups.push(cleanup)
     const gpu = await createRealGPU(canvas as never)
-    const tex = gpu.createTexture(64, 64)
+    // Task 196: the target textures use the CANVAS format (as real targets
+    // and surfaces do) — the pipeline variant space now includes the target
+    // FORMAT axis, and an rgba8unorm target texture on a bgra8unorm canvas
+    // would legitimately build its own variants (the pre-196 code silently
+    // bound the canvas-format pipeline — a latent Dawn validation bug).
+    const tex = gpu.createTexture(64, 64, 'canvas')
     // depth: { test: 'lequal', write: true } — an honest depth pipeline
     gpu.ensurePipeline(1, WGSL, [2, 2], true, { depth: { test: 'lequal', write: true } })
     gpu.configure(800, 600)

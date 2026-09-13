@@ -190,6 +190,10 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
     // Task 180 — the index tier (frame ops, not journaled/sessioned).
     bindIndexBuffer: (data) => raw.bindIndexBuffer(data),
     drawIndexed: (indexCount, instances) => raw.drawIndexed(indexCount, instances),
+    // Task 196 — the GPU-driven draws (frame ops; the args live in an
+    // external buffer — the caller's contract, not a sessioned resource).
+    drawIndexedIndirect: (bufferId, byteOffset) => raw.drawIndexedIndirect(bufferId, byteOffset),
+    drawIndirect: (bufferId, byteOffset) => raw.drawIndirect(bufferId, byteOffset),
     ...(rawMultiDraw !== undefined ? { multiDraw: (args: Uint32Array, drawCount: number) => rawMultiDraw(args, drawCount) } : {}),
     ...(rawMultiDrawIndexed !== undefined ? { multiDrawIndexed: (args: Uint32Array, drawCount: number) => rawMultiDrawIndexed(args, drawCount) } : {}),
     endPass: () => raw.endPass(),

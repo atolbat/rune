@@ -133,6 +133,11 @@ export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
     // Task 180 — the index tier (frame ops, not journaled/sessioned).
     bindIndexBuffer: (data) => gpu.bindIndexBuffer(data),
     drawIndexed: (indexCount, instances) => gpu.drawIndexed(indexCount, instances),
+    // Task 196 — the GPU-driven draws (frame ops; the args buffer is an
+    // external buffer — its creation is the caller's, the draw itself rides
+    // the frame, nothing to journal or session).
+    drawIndexedIndirect: (bufferId, byteOffset) => gpu.drawIndexedIndirect(bufferId, byteOffset),
+    drawIndirect: (bufferId, byteOffset) => gpu.drawIndirect(bufferId, byteOffset),
     ...(rawMultiDraw !== undefined ? { multiDraw: (args: Uint32Array, drawCount: number) => rawMultiDraw(args, drawCount) } : {}),
     ...(rawMultiDrawIndexed !== undefined ? { multiDrawIndexed: (args: Uint32Array, drawCount: number) => rawMultiDrawIndexed(args, drawCount) } : {}),
     endPass: () => gpu.endPass(),

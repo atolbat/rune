@@ -10253,6 +10253,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
   let currentPipelineId = -1;
   let currentTarget = 0;
   let passHasDepth = true;
+  let currentTargetFormat = null;
   let computePass = null;
   let computeGroup = null;
   let computePipeline = null;
@@ -10334,7 +10335,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     const texture = device.createTexture({
       size: [w, h],
       format: gpuFormat,
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
+      usage: String(gpuFormat).startsWith("depth") ? GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT : GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
       mipLevelCount: mipLevels
     });
     let appliedAniso = 1;
@@ -10449,15 +10450,12 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
       textureBindings: hasTextures ? group1TextureBindings(wgsl) : [],
       textureCount: hasTextures ? countGroup1TextureBindings(wgsl) : 0,
       desc: desc ?? {},
-      variantFloat: null,
-      variantUnfilterable: null,
-      variantFloatNoDepth: null,
-      variantUnfilterableNoDepth: null
+      variants: new Map
     };
     pipelineRecords[pipelineId] = record;
-    record.variantFloat = buildPipeline(record, "float", true);
+    record.variants.set("float|1|" + format, buildPipeline(record, "float", true, format));
   }
-  function buildPipeline(record, variant, withDepth) {
+  function buildPipeline(record, variant, withDepth, targetFormat) {
     const wgsl = record.wgsl;
     const attrs = record.attrs;
     const desc = record.desc;
@@ -10521,7 +10519,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
         module,
         entryPoint: "fsMain",
         targets: [{
-          format,
+          format: targetFormat,
           blend: desc.blend === undefined || desc.blend === false ? undefined : {
             color: { srcFactor: desc.blend.src, dstFactor: desc.blend.dst, operation: desc.blend.equation ?? "add" },
             alpha: { srcFactor: desc.blend.src, dstFactor: desc.blend.dst, operation: desc.blend.equation ?? "add" }
@@ -10578,25 +10576,12 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     setPipelineVariant(record, "float");
   }
   function setPipelineVariant(record, variant) {
-    let pipeline;
-    if (passHasDepth) {
-      pipeline = variant === "float" ? record.variantFloat : record.variantUnfilterable;
-      if (pipeline === null) {
-        pipeline = buildPipeline(record, variant, true);
-        if (variant === "float")
-          record.variantFloat = pipeline;
-        else
-          record.variantUnfilterable = pipeline;
-      }
-    } else {
-      pipeline = variant === "float" ? record.variantFloatNoDepth : record.variantUnfilterableNoDepth;
-      if (pipeline === null) {
-        pipeline = buildPipeline(record, variant, false);
-        if (variant === "float")
-          record.variantFloatNoDepth = pipeline;
-        else
-          record.variantUnfilterableNoDepth = pipeline;
-      }
+    const targetFormat = currentTargetFormat ?? format;
+    const key = `${variant}|${passHasDepth ? 1 : 0}|${targetFormat}`;
+    let pipeline = record.variants.get(key);
+    if (pipeline === undefined) {
+      pipeline = buildPipeline(record, variant, passHasDepth, targetFormat);
+      record.variants.set(key, pipeline);
     }
     if (pipeline === currentPipeline)
       return;
@@ -10827,6 +10812,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
       pass = null;
     }
     currentTarget = targetId;
+    currentTargetFormat = targetId === 0 ? format : textureRecords[targets.get(targetId)?.textureId ?? -1]?.format ?? format;
     encoder ??= device.createCommandEncoder();
     const loadOp = clear ? "clear" : "load";
     let colorView;
@@ -10889,6 +10875,33 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
   function drawIndexed(indexCount, instances) {
     flushTextureBindGroup();
     pass?.drawIndexed(indexCount, instances);
+  }
+  function externalIndirectBuffer(bufferId, method) {
+    const buffer = externalBuffers.get(bufferId);
+    if (buffer === undefined) {
+      onGpuError?.(`${method}(${bufferId}) — no such external buffer`);
+      return null;
+    }
+    const indirect = typeof GPUBufferUsage !== "undefined" ? GPUBufferUsage.INDIRECT : 256;
+    if ((buffer.usage & indirect) === 0) {
+      onGpuError?.(`${method}(${bufferId}) — the buffer lacks INDIRECT usage (createExternalBuffer needs it in the flags; the args are GPU-written, the draw is GPU-driven)`);
+      return null;
+    }
+    return buffer;
+  }
+  function drawIndexedIndirect(bufferId, byteOffset = 0) {
+    const buffer = externalIndirectBuffer(bufferId, "drawIndexedIndirect");
+    if (buffer === null)
+      return;
+    flushTextureBindGroup();
+    pass?.drawIndexedIndirect(buffer, byteOffset);
+  }
+  function drawIndirect(bufferId, byteOffset = 0) {
+    const buffer = externalIndirectBuffer(bufferId, "drawIndirect");
+    if (buffer === null)
+      return;
+    flushTextureBindGroup();
+    pass?.drawIndirect(buffer, byteOffset);
   }
   let indirectArgsBuffer = null;
   let indirectCountBuffer = null;
@@ -11300,7 +11313,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
   }
   const computeFamilies = new Map;
   let nextComputeId = 1;
-  function createCompute(wgsl, uniformBytes2, bufferIds) {
+  function createCompute(wgsl, uniformBytes2, bufferIds, textures) {
     const module = device.createShaderModule({ code: wgsl });
     module.getCompilationInfo().then((info) => {
       for (const message of info.messages) {
@@ -11316,6 +11329,23 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     for (let b = 0;b < bufferCount; b++) {
       entries.push({ binding: b + 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: STORAGE_TYPES[b] } });
     }
+    const texBindings = textures ?? [];
+    for (let t = 0;t < texBindings.length; t++) {
+      const record = textureRecords[texBindings[t].textureId];
+      if (record === undefined) {
+        onGpuError?.(`createCompute: texture slot ${6 + t} — no texture ${texBindings[t].textureId}`);
+        return -1;
+      }
+      if (texBindings[t].kind === "depth" && !String(record.format).startsWith("depth")) {
+        onGpuError?.(`createCompute: texture slot ${6 + t} — kind 'depth' needs a depth-format texture (got '${record.format}')`);
+        return -1;
+      }
+      entries.push({
+        binding: 6 + t,
+        visibility: GPUShaderStage.COMPUTE,
+        texture: { sampleType: texBindings[t].kind === "depth" ? "depth" : "unfilterable-float" }
+      });
+    }
     const layout = device.createBindGroupLayout({ entries });
     const uniformSize = Math.max(16, Math.ceil(uniformBytes2 / 16) * 16);
     const uniform = device.createBuffer({ size: uniformSize, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -11327,6 +11357,14 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
         return -1;
       }
       groupEntries.push({ binding: b + 1, resource: { buffer } });
+    }
+    for (let t = 0;t < texBindings.length; t++) {
+      const tex = texBindings[t];
+      const record = textureRecords[tex.textureId];
+      if (record === undefined)
+        continue;
+      const view = tex.baseMipLevel !== undefined || tex.mipLevelCount !== undefined ? record.texture.createView({ baseMipLevel: tex.baseMipLevel ?? 0, mipLevelCount: tex.mipLevelCount }) : record.view;
+      groupEntries.push({ binding: 6 + t, resource: view });
     }
     const group = device.createBindGroup({ layout, entries: groupEntries });
     const id = nextComputeId++;
@@ -11427,6 +11465,8 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost) {
     syncVertexBuffer,
     bindIndexBuffer,
     drawIndexed,
+    drawIndexedIndirect,
+    drawIndirect,
     bindExternalVertexBuffer,
     bindStorageBuffer,
     bindTexture,
@@ -11753,6 +11793,8 @@ function withJournalGpu(gpu, journal) {
     draw: (count, instances) => gpu.draw(count, instances),
     bindIndexBuffer: (data) => gpu.bindIndexBuffer(data),
     drawIndexed: (indexCount, instances) => gpu.drawIndexed(indexCount, instances),
+    drawIndexedIndirect: (bufferId, byteOffset) => gpu.drawIndexedIndirect(bufferId, byteOffset),
+    drawIndirect: (bufferId, byteOffset) => gpu.drawIndirect(bufferId, byteOffset),
     ...rawMultiDraw !== undefined ? { multiDraw: (args, drawCount) => rawMultiDraw(args, drawCount) } : {},
     ...rawMultiDrawIndexed !== undefined ? { multiDrawIndexed: (args, drawCount) => rawMultiDrawIndexed(args, drawCount) } : {},
     endPass: () => gpu.endPass(),
@@ -11969,6 +12011,8 @@ function createResourceSessionGPU(raw, journal) {
     draw: (count, instances) => raw.draw(count, instances),
     bindIndexBuffer: (data) => raw.bindIndexBuffer(data),
     drawIndexed: (indexCount, instances) => raw.drawIndexed(indexCount, instances),
+    drawIndexedIndirect: (bufferId, byteOffset) => raw.drawIndexedIndirect(bufferId, byteOffset),
+    drawIndirect: (bufferId, byteOffset) => raw.drawIndirect(bufferId, byteOffset),
     ...rawMultiDraw !== undefined ? { multiDraw: (args, drawCount) => rawMultiDraw(args, drawCount) } : {},
     ...rawMultiDrawIndexed !== undefined ? { multiDrawIndexed: (args, drawCount) => rawMultiDrawIndexed(args, drawCount) } : {},
     endPass: () => raw.endPass(),

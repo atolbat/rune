@@ -53,6 +53,42 @@ export function externalImageSize(source: GPUImageSource): readonly [number, num
 // was replaced with a direct VideoFrame reference from lib.dom; WebCodecs types
 // exist in the environment.)
 
+/** Task 196 (Hi-Z occlusion culling) — a TEXTURE binding of a compute
+ *  family. The pre-196 family is buffer-only (the particles contract);
+ *  the Hi-Z pyramid needs kernels that READ textures: the z-prepass tile
+ *  (an r32float color target holding NDC depth) feeds mip 0, the cull
+ *  kernel samples the pyramid through a texture view. Read-only roles
+ *  only — storage-texture writes stay OUT of the family contract (the
+ *  buffer-side pyramid fits it exactly; a storage-texture contract is a
+ *  separate future step with its own validation).
+ *
+ *  kind:
+ *   • 'sampled' — texture_2d<f32>, sampleType 'unfilterable-float'
+ *     (textureLoad ONLY — legal for every float/unorm format, including
+ *     r32float without 'float32-filterable'; textureSample would be a
+ *     validation error, the facade does not guess);
+ *   • 'depth'   — texture_depth_2d (depth32float / depth24plus; the
+ *     textbook Hi-Z source — textureLoad returns the normalized depth).
+ *
+ *  The binding slots continue AFTER the family's buffer slots: buffers
+ *  own 0..5, textures own 6..6+N-1 in ONE @group(0) bind group. The
+ *  view is the texture's full mip-chain by default (textureLoad's level
+ *  argument is dynamic — the cull kernel picks the mip per instance);
+ *  baseMipLevel/mipLevelCount create a sub-range view instead.
+ *
+ *  Contract: the texture must exist at createCompute time (a loud
+ *  onGpuError otherwise — same as a missing external buffer); a
+ *  depth-kind binding needs a DEPTH-format texture (checked the same
+ *  way). The WGSL must declare the slots itself
+ *  (`@group(0) @binding(6) var z: texture_2d<f32>;`) — the layout is
+ *  built from this descriptor, the shader must match it. */
+export type GpuComputeTexture = {
+  readonly kind: 'sampled' | 'depth'
+  readonly textureId: number
+  readonly baseMipLevel?: number
+  readonly mipLevelCount?: number
+}
+
 /** Handle that GPUFacade invokes at the right moments for writeTimestamp.
  *  Created by createGpuGpuTimer together with GpuTimer (core). Installed
  *  into GPUFacade via installTimer(). realGPU calls handle.onBeginPass /
@@ -217,8 +253,20 @@ export interface GPUFacade {
    *  runCompute(id, entry, uniformData, workgroups) dispatches one entry.
    *  The dispatch is enqueued on the frame's encoder BEFORE the render
    *  pass opens (the step() → record() tape order); a runCompute inside
-   *  an open render pass is a loud onGpuError, never a silent no-op. */
-  createCompute(wgsl: string, uniformBytes: number, bufferIds: readonly number[]): number
+   *  an open render pass is a loud onGpuError, never a silent no-op.
+   *
+   *  Task 196 — TEXTURE SLOTS: the optional fourth argument appends
+   *  read-only texture bindings at slots 6..6+N-1 of the SAME group
+   *  (GpuComputeTexture — 'sampled' texture_2d<f32> / 'depth'
+   *  texture_depth_2d). The pre-196 call shape is untouched (an omitted
+   *  argument = the exact old layout). The family UNIFORM is frame-static
+   *  (one staging writeBuffer per changed frame block — all dispatches of
+   *  a frame read the SAME bytes: the queue orders writeBuffer BEFORE the
+   *  submit that carries the dispatches, so a per-dispatch uniform is
+   *  impossible by design — per-dispatch state rides the storage buffers,
+   *  or becomes an ENTRY POINT with baked constants, the Hi-Z pyramid's
+   *  reduceL1..reduceLmax pattern). */
+  createCompute(wgsl: string, uniformBytes: number, bufferIds: readonly number[], textures?: readonly GpuComputeTexture[]): number
   runCompute(computeId: number, entry: string, uniformData: Float32Array, workgroups: number): void
   /** Task 133 — deletes a compute family: the staging uniform buffer is
    *  destroyed (the family's only explicitly-destroyable resource — the
@@ -278,6 +326,24 @@ export interface GPUFacade {
    *  per-draw drawIndexed path (the prologue already ran; each member is a
    *  bare draw — byte-identical GPU call stream). */
   multiDrawIndexed?(args: Uint32Array, drawCount: number): boolean
+  /** Task 196 — THE GPU-DRIVEN DRAW (the Hi-Z tier's consumer): ONE
+   *  core-WebGPU indirect draw over the bound index buffer. `bufferId` is
+   *  an EXTERNAL buffer whose first 5 uints (at byteOffset) are the
+   *  GPU-written draw args [indexCount, instanceCount, firstIndex,
+   *  baseVertex, firstInstance] — the cull kernel compacts the visible
+   *  set and emits the count ON THE GPU, the CPU never reads it back
+   *  before the draw. The buffer needs INDIRECT usage (loud validation,
+   *  the external-buffer contract is caller-owned flags). The draw
+   *  happens in the CURRENT pass (after the classic prologue: pipeline,
+   *  uniforms, storage, vertex and index buffers — the executor order).
+   *  Core WebGPU: no feature, no probe — unlike the multiDraw tier's
+   *  spec-dropped drawIndirectCount. */
+  drawIndexedIndirect(bufferId: number, byteOffset?: number): void
+  /** Task 196 — the non-indexed twin: [vertexCount, instanceCount,
+   *  firstVertex, firstInstance] × 4 uints at byteOffset. Same contract
+   *  as drawIndexedIndirect (external buffer, INDIRECT usage, current
+   *  pass). */
+  drawIndirect(bufferId: number, byteOffset?: number): void
   endPass(): void
   submit(): void
   /** Task 80 (readback): read the pixels of the TARGET (surface) — Promise<Uint8Array>.

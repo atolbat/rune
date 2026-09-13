@@ -23,7 +23,7 @@ export type { WgpuDrawSpec, WgpuCommand, WgpuCompileContext, TextureHandle } fro
 export { createGpuExecutor } from './executor.ts'
 export type { GpuTapeExecutor, GpuExecutorOptions } from './executor.ts'
 
-export type { GPUFacade, GPUImageSource, GpuAttrSlot } from './facade.ts'
+export type { GPUFacade, GPUImageSource, GpuAttrSlot, GpuComputeTexture } from './facade.ts'
 export { externalImageSize } from './facade.ts'
 
 export { createRealGPU } from './realGPU.ts'

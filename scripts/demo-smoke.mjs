@@ -562,6 +562,52 @@ try {
   const mobileVfxOk = mobileVfx.overflow <= 1 && mobileVfx.touchTarget >= 40
   await page.setViewportSize({ width: 960, height: 720 })
 
+  // ─── occlusion: the Hi-Z GPU-driven tier (Task 196) ────────────────────
+  // Its OWN browser with the WebGPU flags (the task169/174/196-gate set):
+  // enabling navigator.gpu in the MAIN smoke browser would flip every
+  // AUTO demo to the slow SwiftShader-WG stack — the occlusion page is
+  // the only WG-only citizen. The container's SwiftShader stack: the page
+  // auto-degrades to SNAPSHOT mode (no canvas presents — the documented
+  // present-death); the checks ride the page's own gates: the boot
+  // validation (pixel parity ON vs OFF), the live counters, the log health.
+  {
+    const hizBrowser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-gpu-sandbox', '--enable-unsafe-webgpu', '--use-angle=swiftshader', '--enable-features=Vulkan', '--enable-unsafe-swiftshader'],
+    })
+    try {
+      const hizPage = await hizBrowser.newPage({ viewport: { width: 960, height: 720 } })
+      const hizPageErrors = []
+      hizPage.on('pageerror', e => hizPageErrors.push(String(e)))
+      await hizPage.goto(`http://localhost:${port}/demo/occlusion/`, { waitUntil: 'networkidle' })
+      const hizStats = await hizPage.waitForFunction(
+        // the boot validation AND the first live counter readback (the stats
+        // land on the ~3rd frame's async readback — the loop must be running)
+        () => (window.__hizStats && window.__hizStats.validation !== null && window.__hizStats.drawn > 0 ? window.__hizStats : undefined),
+        null,
+        { timeout: 120_000 },
+      ).then(h => h.jsonValue())
+      const hizSnapshot = hizStats?.mode === 'snapshot'
+      const hizValidation = hizStats?.validation?.pass === true
+      const hizDrawn = (hizStats?.drawn ?? 0) > 0
+      const hizCulled = (hizStats?.occlusionCulled ?? 0) > 0
+      console.log(
+        `[smoke] occlusion: mode ${hizStats?.mode}, validation ${hizValidation ? 'PASS' : 'FAIL'}, ` +
+        `drawn ${hizStats?.drawn}/${hizStats?.total}, occluded ${hizStats?.occlusionCulled}, errors ${hizStats?.errors?.length ?? '?'}`,
+      )
+      const hizLogText = await hizPage.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
+      const hizGpuClean = !/rendering stopped|GPU: |failed/i.test(hizLogText) && hizPageErrors.length === 0
+      const hizBadge = await hizPage.textContent('#backend')
+      const mobileHiz = await hizPage.setViewportSize({ width: 390, height: 844 }).then(() =>
+        hizPage.evaluate(() => ({ overflow: Math.max(0, document.documentElement.scrollWidth - innerWidth) })),
+      )
+      const mobileHizOk = mobileHiz.overflow <= 1
+      var hizOk = hizSnapshot && hizValidation && hizDrawn && hizCulled && hizGpuClean && mobileHizOk && (hizBadge ?? '').startsWith('WebGPU')
+    } finally {
+      await hizBrowser.close()
+    }
+  }
+
   if (errors.length) {
     console.error('[smoke] page errors:')
     for (const error of errors) console.error(`  ${error}`)
@@ -594,6 +640,7 @@ try {
     vfxLabels.visible >= 9 &&
     vfxGpuClean &&
     mobileVfxOk &&
+    hizOk &&
     viewerLogEntries > 0 &&
     mobileViewerOk &&
     errors.length === 0

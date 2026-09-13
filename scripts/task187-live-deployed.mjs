@@ -46,7 +46,7 @@ const markers = {
 console.log('Task-187 markers in the served bundle:', JSON.stringify(markers))
 
 const ok = diff > 500 && errors.length === 0 && servedMd5 === localMd5
-  && markers.multiDrawElementsInstanced && markers.multiDrawIndexed && v.includes('v=190')
+  && markers.multiDrawElementsInstanced && markers.multiDrawIndexed && v.includes('v=196')
 console.log(ok ? 'LIVE DEPLOYED GATE: PASS' : 'LIVE DEPLOYED GATE: FAIL')
 await browser.close()
 process.exit(ok ? 0 : 1)

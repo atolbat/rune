@@ -5,7 +5,7 @@
  * the texture bind group (group 1). Silent validation errors go to onGpuError.
  */
 
-import type { GPUFacade, GPUImageSource, GpuTimerHandle, GpuAttrSlot } from './facade.ts'
+import type { GPUFacade, GPUImageSource, GpuTimerHandle, GpuAttrSlot, GpuComputeTexture } from './facade.ts'
 import type { GpuPipelineDesc } from './pipeline/pipelineCache.ts'
 import { createGpuGpuTimer } from './gpuTimer.ts'
 import type { GpuTimer } from '@rune/core'
@@ -214,6 +214,15 @@ export async function createRealGPU(
   // variant (× the Task-69 sampleType variants), chosen at bind time from
   // the CURRENT pass's attachment state — bindTarget owns this flag.
   let passHasDepth = true
+  // Task 196 — THE TARGET-FORMAT AXIS: a render pipeline's fragment target
+  // must match the CURRENT pass's color attachment format. Pre-196 the
+  // facade built every pipeline for the CANVAS format — valid while all
+  // non-canvas targets were surfaces (createTexture('canvas'), the same
+  // format), but an r32float Hi-Z z-prepass target (or any HDR/float
+  // target) made Dawn reject the draw ("Incompatible render targets").
+  // bindTarget owns this flag exactly like passHasDepth; the variant
+  // cache keys by (sampleType × depth-presence × target format).
+  let currentTargetFormat: GPUTextureFormat | null = null // null — unknown yet (treat as the canvas format)
   // Task 164 — THE MERGED COMPUTE PASS: runCompute used to open AND close a
   // GPUComputePassEncoder per call — the bitonic sort loop dispatches ~171
   // times per frame (Task 179 halved the 342: the sortStep twin per pass
@@ -400,7 +409,13 @@ export async function createRealGPU(
       format: gpuFormat,
       // Task 80 (readback): COPY_SRC — copyTextureToBuffer for readTargetPixels
       // (surface.read()); parity with the GL facade (readPixels always reads the FBO).
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
+      // Task 196 (Hi-Z): DEPTH formats drop COPY_DST — the spec forbids it
+      // for the depth24plus/depth32float family (Dawn validation rejects
+      // the whole createTexture otherwise, so a depth source could never
+      // exist through the facade); the r32float z-tile keeps the full set.
+      usage: String(gpuFormat).startsWith('depth')
+        ? GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT
+        : GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC | GPUTextureUsage.RENDER_ATTACHMENT,
       // mipLevelCount: 1 by default. With >1 it creates a mip-chain (imm storage).
       // A sampler with mipmapFilter='linear' picks the mip by distance — the
       // analogue of LINEAR_MIPMAP_LINEAR in WebGL2.
@@ -658,21 +673,21 @@ export async function createRealGPU(
       // texture_2d declarations in group 1.
       textureCount: hasTextures ? countGroup1TextureBindings(wgsl) : 0,
       desc: desc ?? {},
-      // Task 145: the two lazy variant slots as nullable fields (a Map per
-      // record with string keys cost a hash lookup per draw; the variant set
-      // is exactly two — 'float' and 'unfilterable-float'). Task 172 adds the
-      // depth-presence twins (lazy: only pipelines actually bound in a
-      // depth-less pass pay the build).
-      variantFloat: null,
-      variantUnfilterable: null,
-      variantFloatNoDepth: null,
-      variantUnfilterableNoDepth: null,
+      // Task 145/172/196: the lazy variant cache. The pre-145 form was a
+      // Map<TextureSampleVariant, pipeline>; Task 145 shrank the variant
+      // set to two nullable fields (sampleType), Task 172 added the
+      // depth-presence twins, Task 196 added the TARGET-FORMAT axis — a
+      // string key `sampleType|depth|format` over a small Map is the
+      // honest shape now (the set is bounded by the distinct target
+      // formats actually drawn into: canvas format + a few HDR tiles).
+      variants: new Map<string, GPURenderPipeline>(),
     }
     pipelineRecords[pipelineId] = record
     // The default 'float' variant — filterable textures (all except
     // rgba32float on devices without 'float32-filterable'). Eagerly built
-    // WITH depth (the canvas default); the depth-less twins stay lazy.
-    record.variantFloat = buildPipeline(record, 'float', true)
+    // WITH depth (the canvas default); the depth-less and non-canvas-format
+    // twins stay lazy.
+    record.variants.set('float|1|' + format, buildPipeline(record, 'float', true, format))
   }
 
   /** Task 69: build a pipeline for a specific texture binding sampleType.
@@ -688,6 +703,10 @@ export async function createRealGPU(
     record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; hasStorage: boolean; textureBindings: readonly number[]; textureCount: number; desc: GpuPipelineDesc },
     variant: TextureSampleVariant,
     withDepth: boolean,
+    // Task 196 — the fragment target format of the CURRENT pass (the
+    // canvas format pre-196, always; now the pass's own color attachment
+    // format — an r32float z-tile, an HDR surface, the canvas).
+    targetFormat: GPUTextureFormat,
   ): GPURenderPipeline {
     const wgsl = record.wgsl
     const attrs = record.attrs
@@ -786,8 +805,11 @@ export async function createRealGPU(
         // Task 75: blend from GpuPipelineDesc (premultiplied shader
         // output: additive = one/one, alpha = one/one-minus-src-alpha).
         // The facade's BlendFactor dictionary matches GPUBlendFactor one-to-one.
+        // Task 196: the target format of the PASS this pipeline is bound
+        // in (the canvas format for target 0 — the pre-196 behavior; the
+        // target texture's own format otherwise).
         targets: [{
-          format,
+          format: targetFormat,
           // Task 122: the equation follows the desc (absent = 'add'); the
           // facade BlendEquation names ARE the GPUBlendOperation names.
           blend: desc.blend === undefined || desc.blend === false ? undefined : {
@@ -864,26 +886,22 @@ export async function createRealGPU(
    *  variant space is sampleType × DEPTH PRESENCE of the current pass — a
    *  depth-less pass binds the depth-less twin of the same pipeline (a
    *  pipeline WITH depthStencil is a validation error there, see
-   *  passHasDepth's declaration). */
+   *  passHasDepth's declaration). Task 196: × TARGET FORMAT — the pipeline's
+   *  fragment targets must equal the pass's color attachment format (the
+   *  r32float z-prepass tile, the bgra8 canvas, an HDR surface). The lazy
+   *  cache is a small string-keyed Map (see ensurePipeline). */
   function setPipelineVariant(
-    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; hasStorage: boolean; textureBindings: readonly number[]; textureCount: number; desc: GpuPipelineDesc; variantFloat: GPURenderPipeline | null; variantUnfilterable: GPURenderPipeline | null; variantFloatNoDepth: GPURenderPipeline | null; variantUnfilterableNoDepth: GPURenderPipeline | null },
+    record: { wgsl: string; attrs: readonly GpuAttrSlot[]; hasTextures: boolean; hasStorage: boolean; textureBindings: readonly number[]; textureCount: number; desc: GpuPipelineDesc; variants: Map<string, GPURenderPipeline> },
     variant: TextureSampleVariant,
   ): void {
-    let pipeline: GPURenderPipeline | null
-    if (passHasDepth) {
-      pipeline = variant === 'float' ? record.variantFloat : record.variantUnfilterable
-      if (pipeline === null) {
-        pipeline = buildPipeline(record, variant, true)
-        if (variant === 'float') record.variantFloat = pipeline
-        else record.variantUnfilterable = pipeline
-      }
-    } else {
-      pipeline = variant === 'float' ? record.variantFloatNoDepth : record.variantUnfilterableNoDepth
-      if (pipeline === null) {
-        pipeline = buildPipeline(record, variant, false)
-        if (variant === 'float') record.variantFloatNoDepth = pipeline
-        else record.variantUnfilterableNoDepth = pipeline
-      }
+    // Task 196: the pass's own color format; unknown (null) only before
+    // the first bindTarget — the canvas format is the safe default.
+    const targetFormat = currentTargetFormat ?? format
+    const key = `${variant}|${passHasDepth ? 1 : 0}|${targetFormat}`
+    let pipeline = record.variants.get(key)
+    if (pipeline === undefined) {
+      pipeline = buildPipeline(record, variant, passHasDepth, targetFormat)
+      record.variants.set(key, pipeline)
     }
     if (pipeline === currentPipeline) return
     currentPipeline = pipeline
@@ -1236,6 +1254,12 @@ export async function createRealGPU(
       pass = null
     }
     currentTarget = targetId
+    // Task 196 — the pass's color attachment format becomes the pipeline
+    // variant axis (see currentTargetFormat's declaration): the canvas for
+    // target 0, the target texture's own format otherwise.
+    currentTargetFormat = targetId === 0
+      ? format
+      : (textureRecords[targets.get(targetId)?.textureId ?? -1]?.format ?? format)
     encoder ??= device.createCommandEncoder()
     const loadOp: GPULoadOp = clear ? 'clear' : 'load'
     let colorView: GPUTextureView
@@ -1312,6 +1336,42 @@ export async function createRealGPU(
   function drawIndexed(indexCount: number, instances: number): void {
     flushTextureBindGroup()
     pass?.drawIndexed(indexCount, instances)
+  }
+
+  // ─── Task 196 — THE GPU-DRIVEN DRAWS (core WebGPU indirect) ────────────
+  // The Hi-Z tier's consumer: the cull kernel compacted the visible set
+  // and emitted the draw args INTO an external buffer (STORAGE | INDIRECT);
+  // the CPU draws WITHOUT reading the count back. Both methods validate the
+  // INDIRECT usage flag loudly (the external-buffer contract is caller-owned
+  // — a STORAGE-only buffer would fail Dawn validation at draw time, the
+  // loud early error names the fix) and ride the current pass's state (the
+  // classic prologue: pipeline, uniforms, storage, vertex, index).
+  function externalIndirectBuffer(bufferId: number, method: string): GPUBuffer | null {
+    const buffer = externalBuffers.get(bufferId)
+    if (buffer === undefined) {
+      onGpuError?.(`${method}(${bufferId}) — no such external buffer`)
+      return null
+    }
+    const indirect = typeof GPUBufferUsage !== 'undefined' ? GPUBufferUsage.INDIRECT : 0x100
+    if ((buffer.usage & indirect) === 0) {
+      onGpuError?.(`${method}(${bufferId}) — the buffer lacks INDIRECT usage (createExternalBuffer needs it in the flags; the args are GPU-written, the draw is GPU-driven)`)
+      return null
+    }
+    return buffer
+  }
+
+  function drawIndexedIndirect(bufferId: number, byteOffset = 0): void {
+    const buffer = externalIndirectBuffer(bufferId, 'drawIndexedIndirect')
+    if (buffer === null) return
+    flushTextureBindGroup()
+    pass?.drawIndexedIndirect(buffer, byteOffset)
+  }
+
+  function drawIndirect(bufferId: number, byteOffset = 0): void {
+    const buffer = externalIndirectBuffer(bufferId, 'drawIndirect')
+    if (buffer === null) return
+    flushTextureBindGroup()
+    pass?.drawIndirect(buffer, byteOffset)
   }
 
   // ─── Task 174 — THE MULTI-DRAW TIER's indirect ring ────────────────────
@@ -1888,7 +1948,7 @@ export async function createRealGPU(
   const computeFamilies = new Map<number, ComputeFamily>()
   let nextComputeId = 1
 
-  function createCompute(wgsl: string, uniformBytes: number, bufferIds: readonly number[]): number {
+  function createCompute(wgsl: string, uniformBytes: number, bufferIds: readonly number[], textures?: readonly GpuComputeTexture[]): number {
     const module = device.createShaderModule({ code: wgsl })
     void module.getCompilationInfo().then(info => {
       for (const message of info.messages) {
@@ -1911,6 +1971,30 @@ export async function createRealGPU(
     for (let b = 0; b < bufferCount; b++) {
       entries.push({ binding: b + 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: STORAGE_TYPES[b] } })
     }
+    // Task 196 — READ-ONLY TEXTURE SLOTS after the buffer slots (6..6+T-1,
+    // one @group(0) bind group): 'sampled' → texture_2d<f32> with
+    // 'unfilterable-float' (textureLoad-only — legal for every float/unorm
+    // format, no 'float32-filterable' feature needed), 'depth' →
+    // texture_depth_2d. The group entries (views) are resolved below — the
+    // full mip-chain view by default (textureLoad's level argument is
+    // dynamic), a sub-range view when baseMipLevel/mipLevelCount are given.
+    const texBindings = textures ?? []
+    for (let t = 0; t < texBindings.length; t++) {
+      const record = textureRecords[texBindings[t].textureId]
+      if (record === undefined) {
+        onGpuError?.(`createCompute: texture slot ${6 + t} — no texture ${texBindings[t].textureId}`)
+        return -1
+      }
+      if (texBindings[t].kind === 'depth' && !String(record.format).startsWith('depth')) {
+        onGpuError?.(`createCompute: texture slot ${6 + t} — kind 'depth' needs a depth-format texture (got '${record.format}')`)
+        return -1
+      }
+      entries.push({
+        binding: 6 + t,
+        visibility: GPUShaderStage.COMPUTE,
+        texture: { sampleType: texBindings[t].kind === 'depth' ? 'depth' : 'unfilterable-float' },
+      })
+    }
     const layout = device.createBindGroupLayout({ entries })
     const uniformSize = Math.max(16, Math.ceil(uniformBytes / 16) * 16)
     const uniform = device.createBuffer({ size: uniformSize, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
@@ -1922,6 +2006,17 @@ export async function createRealGPU(
         return -1
       }
       groupEntries.push({ binding: b + 1, resource: { buffer } })
+    }
+    // Task 196 — the texture views for the slots above (the layout entries
+    // were validated in the same order).
+    for (let t = 0; t < texBindings.length; t++) {
+      const tex = texBindings[t]
+      const record = textureRecords[tex.textureId]
+      if (record === undefined) continue // already reported loudly above
+      const view = tex.baseMipLevel !== undefined || tex.mipLevelCount !== undefined
+        ? record.texture.createView({ baseMipLevel: tex.baseMipLevel ?? 0, mipLevelCount: tex.mipLevelCount })
+        : record.view
+      groupEntries.push({ binding: 6 + t, resource: view })
     }
     const group = device.createBindGroup({ layout, entries: groupEntries })
     const id = nextComputeId++
@@ -2046,6 +2141,9 @@ export async function createRealGPU(
     syncVertexBuffer,
     bindIndexBuffer,
     drawIndexed,
+    // Task 196 — the GPU-driven draws (core WebGPU indirect)
+    drawIndexedIndirect,
+    drawIndirect,
     bindExternalVertexBuffer,
     bindStorageBuffer,
     bindTexture,
@@ -2104,16 +2202,11 @@ interface PipelineRecord {
    *  mirror the shader's own numbering instead of a sequential 1..N. */
   readonly textureBindings: readonly number[]
   readonly desc: GpuPipelineDesc
-  /** Task 145: the two lazy sampleType variants as nullable fields (was a
-   *  Map<TextureSampleVariant, GPURenderPipeline> — a string-keyed hash
-   *  lookup per draw; the variant set is exactly two). Task 172: the
-   *  depth-presence twins — a pipeline WITH a declared depthStencil format
-   *  is invalid in a depth-less pass, so depth-less binds get their own
-   *  (lazy) twins of the same shader+desc. */
-  variantFloat: GPURenderPipeline | null
-  variantUnfilterable: GPURenderPipeline | null
-  variantFloatNoDepth: GPURenderPipeline | null
-  variantUnfilterableNoDepth: GPURenderPipeline | null
+  /** Task 145/172/196: the lazy variant cache keyed
+   *  `sampleType|depth-presence|target-format` (was: two nullable fields,
+   *  then four — the format axis of Task 196 made the honest shape a small
+   *  Map; the set is bounded by the target formats actually drawn into). */
+  variants: Map<string, GPURenderPipeline>
 }
 
 /** Task 145: texture registry record (the dense textureRecords array). */

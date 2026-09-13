@@ -57,6 +57,10 @@
         <b>vfx</b>
         <span>The game-VFX study on @rune/particles: 24 demos (muzzle flashes, a composed explosion, emitter shapes, trails with collision, the texture sequencer, PBR mesh particles, sub-emitters, noise, alpha-tested petals, a custom behavior, billboard modes, soft particles with a depth prepass, blend equations, a follow object, plus the rune originals — rocket, rainstorm, slash, vortex, fireflies, dust, grass, lightning, a cutting laser, and the GPU compute tier: 160k embers simulated in WebGPU compute shaders) — one carousel page, ◀ ▶ or the sheet.</span>
       </a>
+      <a class="card" href="./occlusion/">
+        <b>occlusion</b>
+        <span>Hi-Z occlusion culling, the GPU-driven tier: a depth prepass, a compute-built max-Z pyramid, a cull kernel that compacts the visible set, one drawIndexedIndirect — 16384 boxes behind a city of occluders, 51–71% of them never drawn, with a pixel-parity gate proving the culling changes nothing. WebGPU only (compute); software adapters get the snapshot mode.</span>
+      </a>
     </div>
     <footer>
       Locally: <code>bun install &amp;&amp; bun run demo</code> → <code>http://localhost:8080/demo/</code> ·

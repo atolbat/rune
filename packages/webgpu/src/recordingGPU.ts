@@ -87,8 +87,11 @@ export function createRecordingGPU(): RecordingGPU {
     },
     deleteExternalBuffer: id => calls.push(`deleteExternalBuffer(${id})`),
     externalBufferOf: () => undefined,
-    createCompute: (wgsl, uniformBytes, bufferIds) => {
-      calls.push(`createCompute(${uniformBytes},${bufferIds.join('+')})`)
+    createCompute: (wgsl, uniformBytes, bufferIds, textures) => {
+      // Task 196: the texture slots appear in the record as +tex:kind@id
+      // suffixes (the buffer ids keep their '+'-joined form).
+      const texSuffix = (textures ?? []).map(t => `+tex:${t.kind}@${t.textureId}${t.baseMipLevel !== undefined || t.mipLevelCount !== undefined ? `m${t.baseMipLevel ?? 0}+${t.mipLevelCount ?? ''}` : ''}`).join('')
+      calls.push(`createCompute(${uniformBytes},${bufferIds.join('+')}${texSuffix})`)
       return 1
     },
     runCompute: (computeId, entry, uniformData, workgroups) =>
@@ -104,6 +107,9 @@ export function createRecordingGPU(): RecordingGPU {
     // Task 180 — the index tier (recorded; the recorder has no device)
     bindIndexBuffer: data => calls.push(`bindIndexBuffer(${data.length},${data instanceof Uint16Array ? 'u16' : 'u32'})`),
     drawIndexed: (indexCount, instances) => calls.push(`drawIndexed(${indexCount},${instances})`),
+    // Task 196 — the GPU-driven draws (recorded with the byte offset)
+    drawIndexedIndirect: (bufferId, byteOffset = 0) => calls.push(`drawIndexedIndirect(${bufferId},${byteOffset})`),
+    drawIndirect: (bufferId, byteOffset = 0) => calls.push(`drawIndirect(${bufferId},${byteOffset})`),
     endPass: () => {
       passOpen = false
       calls.push('endPass')
@@ -208,6 +214,8 @@ export function createCountingGPU(): GPUFacade & { totalCalls: number } {
     createCompute: alloc as never,
     runCompute: bump,
     deleteCompute: bump,
+    drawIndexedIndirect: bump,
+    drawIndirect: bump,
     bindTexture: bump,
     beginPass: bump,
     draw: bump,
