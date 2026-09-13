@@ -124,7 +124,14 @@ export function createScene(occl) {
     }
   }
 
-  return { K, N, occl, LIST_WORDS, FLAGS_OFF, INST_OFF, sceneWords, sceneF32 }
+  // Task 199 — THE DECLARED RECORD LAYOUT: the scenario states its record
+  // shape ONCE here; the shader dictionary bakes the addressing from it and
+  // the device bricks derive their GL attribute feeds from it (the pre-199
+  // form hardcoded 12-word/48-byte strides inside THREE places). A different
+  // scenario — a different declaration, the same bricks and syntax.
+  const STRIDE = 12 // words per record
+  const FIELDS = { center: 0, half: 3, color: 6 } // word offsets inside a record
+  return { K, N, occl, STRIDE, FIELDS, LIST_WORDS, FLAGS_OFF, INST_OFF, sceneWords, sceneF32 }
 }
 
 // ── the box geometry (unit corners [0,1]³, 24 verts, 36 indices) ──────────
@@ -136,9 +143,24 @@ export const BOX_VERTS = new Float32Array([
   0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1,
   1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1,
 ])
+// Task 199 — THE WINDING FIX: every face's two triangles now agree on the
+// OUTWARD CCW order (the pre-199 buffer had each quad's second triangle
+// flipped — and the two x-quads wound wholesale inward — harmless while
+// culling was off, but it made back-face culling impossible, and WITHOUT
+// culling the boxes' bottom faces (y=0, exactly coplanar with the ground
+// slab's top face) z-fought it frame to frame: the per-frame interpolation
+// rounding flips the depth winner per pixel/sample — THE «flickering
+// triangles at the buildings' bases» field report). With the winding
+// consistent, both passes run cull:'back' — the bottom faces never
+// rasterize from above (nor the ground's top from below), the coplanar
+// pair never meets in the depth buffer, and the fragment count halves.
 export const BOX_INDICES = new Uint16Array([
-  0, 2, 1, 2, 3, 1, 4, 5, 6, 5, 7, 6, 8, 9, 10, 9, 11, 10,
-  12, 14, 13, 14, 15, 13, 16, 17, 18, 17, 19, 18, 20, 22, 21, 22, 23, 21,
+  0, 3, 2, 0, 2, 1,   // z=0  (outward −z)
+  4, 5, 6, 4, 6, 7,   // z=1  (outward +z)
+  8, 9, 10, 8, 10, 11, // y=0  (outward −y — the ground contact face)
+  12, 15, 14, 12, 14, 13, // y=1  (outward +y)
+  16, 19, 18, 16, 18, 17, // x=0  (outward −x)
+  20, 21, 22, 20, 22, 23, // x=1  (outward +x)
 ])
 export const QUAD_VERTS = new Float32Array([-1, -1, 1, -1, -1, 1, 1, -1, 1, 1, -1, 1])
 /** The 4-vertex TRIANGLE_STRIP form (the GL tier's reduce/panel quads). */

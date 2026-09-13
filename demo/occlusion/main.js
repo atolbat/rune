@@ -29,11 +29,11 @@
 // the shell's WebGPU/WebGL2 radios only choose the backend string. The
 // live camera takes the canvas's real aspect (portrait widens the fov),
 // the canvas is full-bleed and DPR-aware (the renderers' own observers).
-import { buildTier } from './tier.js?v=198'
+import { buildTier } from './tier.js?v=199'
 import {
   createScene, cameraAt, VAL_CAMERAS,
   HIZ_W, HIZ_H, LEVELS,
-} from './scene.js?v=198'
+} from './scene.js?v=199'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -48,8 +48,8 @@ const democtl = { pause() {}, resume() {} }
 const shell = window.RuneDemoShell.mount({
   layout: 'page',
   title: 'Hi-Z occlusion culling',
-  desc: 'Hierarchical Z-buffer culling, GPU-driven: a depth prepass, a reduced-Z pyramid, a cull pass that decides visibility, then the visible set — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts): ONE demo tier, one syntax — WebGPU (compute + an indirect draw) and WebGL2 (transform feedback + vertex collapse) run the identical frame code.',
-  hint: 'Drag — orbit · wheel/pinch — zoom · the buttons toggle the culling tiers and the pyramid view. The WebGPU / WebGL2 radios boot the same Hi-Z on each backend\u2019s own mechanisms through the common bricks — and the parity gates hold on both.',
+  desc: 'Hierarchical Z-buffer culling, GPU-driven: a depth prepass, a reduced-Z pyramid, a cull pass that decides visibility, then the visible set — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts): ONE demo tier, one syntax — WebGPU (compute + an indirect draw) and WebGL2 (transform feedback + vertex collapse) run the identical frame code. Task 199: back-face culling kills the base-flicker, the occluder count is a per-frame policy (try «City occludes»), and the whole frame is ONE hizFrame() call.',
+  hint: 'Drag — orbit · wheel/pinch — zoom · the buttons toggle the culling tiers, the pyramid view and the occluder policy (the «City occludes» experiment: every colored box writes depth — watch the occluded count). The WebGPU / WebGL2 radios boot the same Hi-Z on each backend\u2019s own mechanisms through the common bricks — and the parity gates hold on both.',
   defaults: { mode: MODE_PARAM === 'webgl2' ? 'webgl2' : 'webgpu' },
   onPause() { democtl.pause() },
   onResume() { democtl.resume() },
@@ -124,6 +124,11 @@ let tier = null
 let tierMode = ''
 let hizOn = true
 let showPyramid = false
+// Task 199 — THE OCCLUDER POLICY (the «does the city occlude itself»
+// experiment): false = the boot default (the 23 big occluders write the z
+// prepass); true = EVERY record writes depth and the whole scene is tested
+// against itself — the per-frame knob, no re-compiles, no re-uploads.
+let cityOccludes = false
 let paused = false
 let rafId = 0
 let frameIndex = 0
@@ -147,9 +152,9 @@ if (typeof window !== 'undefined') window.__hizStats = stats
 let wgProbeHashes = null
 
 function refreshHud() {
-  const pct = (100 * stats.drawn / OCCL).toFixed(1)
+  const pct = (100 * stats.drawn / scene.N).toFixed(1)
   hud.innerHTML =
-    `instances <b>${scene.N}</b> (occluders ${scene.K} · occludees ${OCCL})\n` +
+    `instances <b>${scene.N}</b> (occluders <b>${stats.occluders}</b>${cityOccludes ? ' — the whole city writes depth' : ` · occludees ${OCCL}`})\n` +
     `frustum-culled ${stats.frustumCulled} · <b>occlusion-culled ${stats.occlusionCulled}</b>\n` +
     `drawn <b>${stats.drawn}</b> (${pct}%) · near-straddle ${stats.nearStraddle}\n` +
     `Hi-Z ${HIZ_W}x${HIZ_H} · ${LEVELS} mips · tier <b>${hizOn ? 'ON' : 'OFF'}</b>\n` +
@@ -167,6 +172,7 @@ async function maybeReadStats() {
     stats.drawn = s.drawn
     stats.nearStraddle = s.straddle
     stats.hizOn = hizOn ? 1 : 0
+    stats.occluders = cityOccludes ? scene.N : scene.K
     stats.msAvg = +msAvg.toFixed(2)
     refreshHud()
   } catch { /* a lost device surfaces through the error channels */ }
@@ -188,7 +194,7 @@ function loop(t) {
   const { eye, mvp } = cameraAt(cam.yaw, cam.pitch, cam.dist, aspect, fov)
   try {
     if (tier !== null && tier.drain !== null && tier.drain !== undefined) tier.drain(t)
-    tier.frame(mvp, eye, hizOn ? 1 : 0, showPyramid)
+    tier.frame(mvp, eye, hizOn ? 1 : 0, showPyramid, cityOccludes ? scene.N : scene.K)
   } catch (e) {
     noteError(`frame failed: ${e instanceof Error ? e.message : String(e)}`)
   }
@@ -222,25 +228,34 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     const byteIdentical = hashOn !== null && hashOn === hashOff
       ? true
       : (on.data.length === off.data.length && on.data.every((v, i) => v === off.data[i]))
-    const invariantOn = onStats.frustum + onStats.occluded + onStats.drawn === OCCL
-    const invariantOff = offStats.frustum + offStats.occluded + offStats.drawn === OCCL
-    // THE CROSS-TIER COMPARE — BOUNDED, not hash-exact. The measured
-    // difference class between the backends (the crossdiff dossier):
-    // 0.001..0.65% of pixels off by 1..16 ULP (highp-float rounding in the
-    // fog/lighting band — SwiftShader-WG vs ANGLE-GL), plus isolated
-    // edge-sliver pixels where a different box wins the rasterized depth
-    // battle, plus ≤ ~40 borderline boxes moving between drawn/occluded
-    // (each tier's own attachment precision — depth24plus vs 32f — resolves
-    // sub-slack margins its own way; the TOTALS conserve). An exact
-    // cross-backend hash would gate on rounding luck, not structure — so
-    // MATCH means: structure-level equality within measured bounds ×3.
+    const invariantOn = onStats.frustum + onStats.occluded + onStats.drawn === scene.N
+    const invariantOff = offStats.frustum + offStats.occluded + offStats.drawn === scene.N
+    // THE CROSS-TIER COMPARE — BOUNDED, not hash-exact. Two honest lessons:
+    //  (a) the DESKTOP noise floor (the crossdiff dossier): 0.001..1.6% of
+    //      pixels off by 1..16 ULP (highp rounding in the fog/lighting band
+    //      — SwiftShader-WG vs ANGLE-GL), edge slivers where a different
+    //      box wins the rasterized depth battle, ≤ ~40 borderline boxes
+    //      moving between drawn/occluded (each tier's attachment precision
+    //      resolves sub-slack margins its own way; the totals conserve).
+    //  (b) THE PHONE FIELD REPORT (Task 199, a real GPU): 48–63% of pixels
+    //      differ by exactly 1 — Dawn/Tint→Vulkan and ANGLE→Vulkan are TWO
+    //      INDEPENDENT COMPILER STACKS on the same device; they round the
+    //      fog band differently by a few ULP, and the dither (by design)
+    //      spreads the 8-bit quantization boundary across every fog pixel,
+    //      so sub-LSB differences become visible ±1 noise over the whole
+    //      band. That is NOT structural divergence — it is the physics of
+    //      cross-compiler floating point.
+    // So MATCH = STRUCTURE at 5 bits/channel (both images >>3: the ≤ 1..2
+    // LSB noise collapses; a swapped box or a real sliver survives), plus
+    // the raw bigPx (Δ>8) class, plus the cull-count deltas — the noise
+    // floor rides along in the log (noisePct + the Δ histogram).
     let crossParity = null
     let crossStats = null
     if (cross !== null && cross !== undefined && cross[cameras.length] !== undefined) {
       crossChecked++
       const ref = cross[cameras.length]
       const totalPx = on.data.length / 4
-      let diffPx = 0, bigPx = 0, maxD = 0
+      let diffPx = 0, structPx = 0, lsbPx = 0, midPx = 0, bigPx = 0, maxD = 0
       if (on.data.length === ref.dataOn.length) {
         for (let i = 0; i < on.data.length; i += 4) {
           let d = 0
@@ -248,17 +263,31 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
             const dd = Math.abs(on.data[i + c] - ref.dataOn[i + c])
             if (dd > d) d = dd
           }
-          if (d > 0) { diffPx++; if (d > 8) bigPx++; if (d > maxD) maxD = d }
+          if (d > 0) {
+            diffPx++
+            if (d === 1) lsbPx++
+            else if (d <= 8) midPx++
+            else bigPx++
+            if (d > maxD) maxD = d
+            let q = 0
+            for (let c = 0; c < 4; c++) {
+              const dq = Math.abs((on.data[i + c] >> 3) - (ref.dataOn[i + c] >> 3))
+              if (dq > q) q = dq
+            }
+            if (q > 0) structPx++
+          }
         }
       } else {
         diffPx = totalPx
+        structPx = totalPx
       }
       const drawnDelta = Math.abs(onStats.drawn - ref.drawnOn)
       const occludedDelta = Math.abs(onStats.occluded - ref.occludedOn)
-      const pct = 100 * diffPx / totalPx
-      const match = diffPx <= 0.02 * totalPx && bigPx <= 0.0005 * totalPx && drawnDelta <= 128 && occludedDelta <= 128
+      const pctNoise = 100 * diffPx / totalPx
+      const pct = 100 * structPx / totalPx
+      const match = structPx <= 0.02 * totalPx && bigPx <= 0.0005 * totalPx && drawnDelta <= 128 && occludedDelta <= 128
       crossParity = match ? 'MATCH' : 'DIVERGED'
-      crossStats = { pct: +pct.toFixed(3), diffPx, bigPx, maxD, drawnDelta, occludedDelta, refHash: ref.hashOn }
+      crossStats = { pct: +pct.toFixed(3), noisePct: +pctNoise.toFixed(3), diffPx, structPx, lsbPx, midPx, bigPx, maxD, drawnDelta, occludedDelta, refHash: ref.hashOn }
       if (!match) crossOk = false
     }
     const ok = byteIdentical && invariantOn && invariantOff && onStats.drawn < offStats.drawn && onStats.occluded > 0
@@ -273,11 +302,47 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
       occludedOn: onStats.occluded, occludedOff: offStats.occluded,
       straddleOn: onStats.straddle, invariantOn, invariantOff, ok,
     })
-    shell.log.event(`parity @yaw ${camV.yaw.toFixed(2)}: ${byteIdentical ? 'IDENTICAL' : 'DIFFERS'} (${hashOn?.slice(0, 12) ?? 'n/a'}) · drawn ON ${onStats.drawn} / OFF ${offStats.drawn} · frustum ${onStats.frustum} · occluded ${onStats.occluded}${crossStats !== null ? ` · cross-tier ${crossParity} (${crossStats.pct}% px, Δmax ${crossStats.maxD}, drawn Δ${crossStats.drawnDelta})` : ''}`)
+    shell.log.event(`parity @yaw ${camV.yaw.toFixed(2)}: ${byteIdentical ? 'IDENTICAL' : 'DIFFERS'} (${hashOn?.slice(0, 12) ?? 'n/a'}) · drawn ON ${onStats.drawn} / OFF ${offStats.drawn} · frustum ${onStats.frustum} · occluded ${onStats.occluded}${crossStats !== null ? ` · cross-tier ${crossParity} (structural ${crossStats.pct}% px @5-bit, noise ${crossStats.noisePct}% px, Δmax ${crossStats.maxD}, drawn Δ${crossStats.drawnDelta})` : ''}`)
     if (!byteIdentical) shell.log.error(`pixel parity FAILED @yaw ${camV.yaw} — Hi-Z culled a VISIBLE box (hash ${hashOn} vs ${hashOff})`)
-    if (crossParity === 'DIVERGED') shell.log.error(`cross-tier parity FAILED @yaw ${camV.yaw} — the same scene structurally diverged on ${t.mode} vs the WebGPU tier (${JSON.stringify(crossStats)})`)
-    if (!invariantOn || !invariantOff) shell.log.error(`accounting invariant FAILED @yaw ${camV.yaw} — frustum+occluded+drawn must equal ${OCCL}`)
+    if (crossParity === 'DIVERGED') shell.log.error(`cross-tier parity FAILED @yaw ${camV.yaw} — the scene structurally diverged on ${t.mode} vs the WebGPU tier (structural ${crossStats?.pct}% px @5-bit, bigPx ${crossStats?.bigPx}, drawn Δ${crossStats?.drawnDelta})`)
+    if (!invariantOn || !invariantOff) shell.log.error(`accounting invariant FAILED @yaw ${camV.yaw} — frustum+occluded+drawn must equal ${scene.N} (every record lands in exactly one bucket)`)
     if (onStats.drawn >= offStats.drawn || onStats.occluded === 0) shell.log.error(`the occlusion is not culling @yaw ${camV.yaw} (drawn ON ${onStats.drawn}, OFF ${offStats.drawn}, occluded ${onStats.occluded})`)
+  }
+  // ── Task 199 — THE CITY-OCCLUDERS LEG: the user's «do the small colored
+  // boxes occlude each OTHER too?» question, answered by the same gate. The
+  // policy flips to the WHOLE scene (every record writes the z prepass);
+  // pixel parity ON vs OFF must still hold — a culled record is provably
+  // fully occluded (its nearest AABB corner behind the region's FARTHEST
+  // surface), whatever set built the pyramid. One camera carries the proof
+  // (the same kernel, the same bricks — only the POLICY changed).
+  {
+    const camV = VAL_CAMERAS[0]
+    const { eye, mvp } = cameraAt(camV.yaw, camV.pitch, camV.dist)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.N)
+    const on = await t.surface.read()
+    const onStats = await t.readStats()
+    t.renderTo(t.surface.targetId, mvp, eye, 0, false, scene.N)
+    const off = await t.surface.read()
+    const offStats = await t.readStats()
+    const hashOnC = await sha256hex(on.data)
+    const hashOffC = await sha256hex(off.data)
+    const cityIdentical = hashOnC !== null && hashOnC === hashOffC
+      ? true
+      : (on.data.length === off.data.length && on.data.every((v, i) => v === off.data[i]))
+    const cityInvariant = onStats.frustum + onStats.occluded + onStats.drawn === scene.N
+    const cityInvariantOff = offStats.frustum + offStats.occluded + offStats.drawn === scene.N
+    const cityOk = cityIdentical && cityInvariant && cityInvariantOff && onStats.drawn < offStats.drawn && onStats.occluded > 0
+    allOk = allOk && cityOk
+    shell.log.event(`city-occluders parity @yaw ${camV.yaw.toFixed(2)}: ${cityIdentical ? 'IDENTICAL' : 'DIFFERS'} (${hashOnC?.slice(0, 12) ?? 'n/a'}) · drawn ON ${onStats.drawn} / OFF ${offStats.drawn} · occluded ${onStats.occluded} — every box writes depth, the scene culls itself`)
+    if (!cityIdentical) shell.log.error(`city-occluders pixel parity FAILED @yaw ${camV.yaw} — a self-occlusion culled a VISIBLE box (hash ${hashOnC} vs ${hashOffC})`)
+    if (!cityInvariant || !cityInvariantOff) shell.log.error(`city-occluders accounting invariant FAILED @yaw ${camV.yaw} — frustum+occluded+drawn must equal ${scene.N}`)
+    cameras.push({
+      yaw: camV.yaw, policy: 'city', hashOn: hashOnC, hashOff: hashOffC,
+      parity: cityIdentical ? 'IDENTICAL' : 'DIFFERS',
+      drawnOn: onStats.drawn, drawnOff: offStats.drawn,
+      frustumOn: onStats.frustum, occludedOn: onStats.occluded,
+      straddleOn: onStats.straddle, invariantOn: cityInvariant, invariantOff: cityInvariantOff, ok: cityOk,
+    })
   }
   const verdict = { pass: allOk && crossOk && errors.length === 0, tier: t.mode, cameras, crossChecked, errors: errors.length }
   stats.validation = verdict
@@ -432,6 +497,19 @@ tierButton('Hi-Z culling: ON', true, on => {
 tierButton('Pyramid view: OFF', false, on => {
   showPyramid = on
   shell.log.event(`the Hi-Z pyramid debug strip ${on ? 'ON' : 'OFF'} — ${LEVELS} mip levels, bright = near`)
+})
+// Task 199 — THE OCCLUDER POLICY TOGGLE: the per-frame knob as a button.
+// OFF: the 23 big occluders build the pyramid (the boot policy). ON: EVERY
+// record writes the z prepass — the colored city occludes itself too.
+// Watch the occluded count: the delta is honest physics — the 2×2 MAX
+// reduction keeps only the FARTHEST surface per region, so a small box
+// only occludes what its own texel footprint fully covers; big continuous
+// surfaces (the buildings, the ground) are what make Hi-Z pay.
+tierButton('City occludes: OFF', false, on => {
+  cityOccludes = on
+  stats.occluders = on ? scene.N : scene.K
+  shell.log.event(`the occluder policy: ${on ? `EVERY instance writes depth (${scene.N} records — the city self-occlusion experiment; watch the occluded count)` : `the ${scene.K} big occluders (the boot policy)`}`)
+  refreshHud()
 })
 const valButton = document.createElement('button')
 valButton.type = 'button'

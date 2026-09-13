@@ -13102,25 +13102,26 @@ struct CompactParams { words: vec4<u32> }
 fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (gid.x != 0u) { return; }
   let n = params.words.x;      // the record count
-  let k = params.words.y;      // the occluders (always visible, first)
-  let indexCount = params.words.z;
-  let flagsOff = params.words.w;
+  let indexCount = params.words.y;
+  let flagsOff = params.words.z;
+  // words.w — the boot-time occluder count, carried for diagnostics only
   var out = 0u; var frustum = 0u; var occluded = 0u; var straddle = 0u;
   for (var i = 0u; i < n; i = i + 1u) {
     let f = scene[flagsOff + i];
-    let visible = i < k || f == 1u || f == 4u;
+    let visible = f == 1u || f == 4u;
     if (visible) {
       scene[out] = i;          // the list region (word 0) — ascending, stable
       out = out + 1u;
-      if (i >= k && f == 4u) { straddle = straddle + 1u; }
+      if (f == 4u) { straddle = straddle + 1u; }
     } else if (f == 2u) {
       frustum = frustum + 1u;
     } else if (f == 3u) {
       occluded = occluded + 1u;
     }
   }
-  // the stats block (drawn = OCCLUDEE-visible — the GL CPU-sweep twin)
-  args[0u] = out - k;
+  // the stats block: drawn = ALL visible records — the accounting invariant
+  // frustum + occluded + drawn === n (the GL CPU-sweep twin counts from 0)
+  args[0u] = out;
   args[1u] = frustum;
   args[2u] = occluded;
   args[3u] = straddle;
@@ -13203,7 +13204,12 @@ function createWgDevice(renderer, options, clear) {
     return offset;
   }
   function scene(layout) {
-    const handle = { total: layout.total, occluders: layout.occluders };
+    const handle = {
+      total: layout.total,
+      occluders: layout.occluders,
+      stride: layout.stride ?? 12,
+      fields: { center: layout.fields?.center ?? 0, half: layout.fields?.half ?? 3 }
+    };
     const bufferId = gpu.createExternalBuffer(layout.words.byteLength, WG_USAGE.STORAGE | WG_USAGE.COPY_DST | WG_USAGE.COPY_SRC);
     gpu.writeExternalBuffer(bufferId, layout.words);
     const argsId = gpu.createExternalBuffer(64, WG_USAGE.STORAGE | WG_USAGE.INDIRECT | WG_USAGE.COPY_SRC);
@@ -13211,8 +13217,9 @@ function createWgDevice(renderer, options, clear) {
     const compactBlock = new Float32Array(4);
     const compactU32 = new Uint32Array(compactBlock.buffer);
     compactU32[0] = layout.total;
-    compactU32[1] = layout.occluders;
-    compactU32[3] = layout.flagsWord;
+    compactU32[1] = 36;
+    compactU32[2] = layout.flagsWord;
+    compactU32[3] = layout.occluders;
     const compactId = gpu.createCompute(COMPACT_WGSL, 16, [bufferId, placeholderId, argsId]);
     scenes.set(handle, { handle, bufferId, argsId, compactId, compactBlock, compactU32 });
     return handle;
@@ -13292,7 +13299,8 @@ ${REDUCE}`;
     const pipelineId = ++pipelineSeq;
     const depth2 = { test: spec.depth?.test ?? "less", write: spec.depth?.write ?? true };
     gpu.ensurePipeline(pipelineId, spec.wg.code, spec.wg.attrs, spec.wg.hasTextures === true, {
-      depth: { test: depth2.test, write: depth2.write }
+      depth: { test: depth2.test, write: depth2.write },
+      raster: { cull: spec.cull ?? "none", frontFace: "ccw" }
     });
     const handle = { backend: "webgpu", depth: depth2 };
     wgPrograms.set(handle, { pipelineId, depth: depth2 });
@@ -13333,7 +13341,7 @@ ${REDUCE}`;
     const prog = wgPrograms.get(optionsIn.program);
     if (prog === undefined)
       throw new Error("rune: drawVisible — the program handle is not this device's own");
-    s.compactU32[2] = optionsIn.indexCount ?? 36;
+    s.compactU32[1] = optionsIn.indexCount ?? 36;
     gpu.runCompute(s.compactId, "compact", s.compactBlock, 1);
     const offset = allocUniforms(new Uint8Array(optionsIn.uniforms.buffer, optionsIn.uniforms.byteOffset, optionsIn.uniforms.byteLength));
     gpu.bindTarget(optionsIn.target, optionsIn.clear);
@@ -13373,6 +13381,36 @@ ${REDUCE}`;
       }
     };
   }
+  function hizFrame(spec) {
+    const s = scenes.get(spec.scene);
+    if (s === undefined)
+      throw new Error("rune: hizFrame — the scene handle is not this device's own");
+    return {
+      run(call) {
+        drawInstanced({
+          target: spec.pyramid.zTarget,
+          clear: true,
+          program: spec.zPass,
+          geometry: spec.geometry,
+          records: spec.scene,
+          uniforms: call.zUniforms,
+          instances: call.occluders,
+          indexCount: call.indexCount
+        });
+        spec.pyramid.build();
+        spec.culler.run(call.cullUniforms);
+        drawVisible({
+          target: call.target,
+          clear: call.clear ?? true,
+          program: spec.colorPass,
+          geometry: spec.geometry,
+          records: spec.scene,
+          uniforms: call.colorUniforms,
+          indexCount: call.indexCount
+        });
+      }
+    };
+  }
   async function readCullStats(sceneHandle) {
     const s = scenes.get(sceneHandle);
     if (s === undefined)
@@ -13402,6 +13440,7 @@ ${REDUCE}`;
     drawVisible,
     drawQuad,
     occlusionCuller,
+    hizFrame,
     readCullStats,
     surface,
     debugSceneWords: (sceneHandle, bytes) => {
@@ -13435,7 +13474,12 @@ function createGlDevice(renderer, options, clear) {
   let quadBuf = 0;
   let reduceProgramId = 0;
   function scene(layout) {
-    const handle = { total: layout.total, occluders: layout.occluders };
+    const handle = {
+      total: layout.total,
+      occluders: layout.occluders,
+      stride: layout.stride ?? 12,
+      fields: { center: layout.fields?.center ?? 0, half: layout.fields?.half ?? 3 }
+    };
     const recBuf = gl.createBuffer(layout.recordsF32, "static");
     const flagBuf = gl.createBuffer(new Float32Array(layout.total), "dynamic");
     scenes.set(handle, {
@@ -13502,7 +13546,7 @@ function createGlDevice(renderer, options, clear) {
     const programId = gl.createProgram(spec.gl.vs, spec.gl.fs);
     const depth2 = { test: spec.depth?.test ?? "less", write: spec.depth?.write ?? true };
     const handle = { backend: "webgl2", depth: depth2 };
-    programs.set(handle, { programId, depth: depth2, lanes: spec.gl.lanes, attrs: spec.gl.attrs });
+    programs.set(handle, { programId, depth: depth2, cull: spec.cull ?? "none", lanes: spec.gl.lanes, attrs: spec.gl.attrs });
     return handle;
   }
   function geometry(vertices, indices) {
@@ -13532,7 +13576,7 @@ function createGlDevice(renderer, options, clear) {
     }
     gl.useProgram(prog.programId);
     gl.setDepthMode(prog.depth.test, prog.depth.write);
-    gl.setCull("none");
+    gl.setCull(prog.cull);
   }
   function bindAttrs(prog, s, geometryVertices, withFlags) {
     gl.bindVertexBuffer(geometryBuf, 0, 3);
@@ -13596,12 +13640,13 @@ function createGlDevice(renderer, options, clear) {
     const s = scenes.get(sceneHandle);
     if (s === undefined)
       throw new Error("rune: occlusionCuller — the scene handle is not this device's own");
+    const strideBytes = sceneHandle.stride * 4;
     const passId = gl.createTransformPass({
       vertex: spec.glsl,
       outputs: ["v_flag"],
       attributes: [
-        { name: "a_c", size: 3, stride: 48, offset: 0 },
-        { name: "a_h", size: 3, stride: 48, offset: 12 }
+        { name: "a_c", size: 3, stride: strideBytes, offset: sceneHandle.fields.center * 4 },
+        { name: "a_h", size: 3, stride: strideBytes, offset: sceneHandle.fields.half * 4 }
       ],
       textures: pyramidHandle.textures.map((_, L) => `u_pyr[${L}]`),
       uniforms: spec.lanes.map((lane) => ({ name: lane.name, size: 4 }))
@@ -13628,7 +13673,7 @@ function createGlDevice(renderer, options, clear) {
     if (!ok)
       throw new Error("rune: the flag buffer readback was refused");
     let drawn = 0, frustum = 0, occluded = 0, straddle = 0;
-    for (let i = sceneHandle.occluders;i < sceneHandle.total; i++) {
+    for (let i = 0;i < sceneHandle.total; i++) {
       const f = s.flagScratch[i];
       if (f === 1)
         drawn++;
@@ -13642,6 +13687,36 @@ function createGlDevice(renderer, options, clear) {
       }
     }
     return { drawn, frustum, occluded, straddle };
+  }
+  function hizFrame(spec) {
+    const s = scenes.get(spec.scene);
+    if (s === undefined)
+      throw new Error("rune: hizFrame — the scene handle is not this device's own");
+    return {
+      run(call) {
+        drawInstanced({
+          target: spec.pyramid.zTarget,
+          clear: true,
+          program: spec.zPass,
+          geometry: spec.geometry,
+          records: spec.scene,
+          uniforms: call.zUniforms,
+          instances: call.occluders,
+          indexCount: call.indexCount
+        });
+        spec.pyramid.build();
+        spec.culler.run(call.cullUniforms);
+        drawVisible({
+          target: call.target,
+          clear: call.clear ?? true,
+          program: spec.colorPass,
+          geometry: spec.geometry,
+          records: spec.scene,
+          uniforms: call.colorUniforms,
+          indexCount: call.indexCount
+        });
+      }
+    };
   }
   function surface(width, height, surfaceOptions) {
     let s = null;
@@ -13673,6 +13748,7 @@ function createGlDevice(renderer, options, clear) {
     drawVisible,
     drawQuad,
     occlusionCuller,
+    hizFrame,
     readCullStats,
     surface,
     submit() {

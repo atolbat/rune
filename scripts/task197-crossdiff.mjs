@@ -39,8 +39,8 @@ void diff
 // drive the tiers directly through the page's own module graph is awkward;
 // instead rebuild both tiers here via dynamic import of the tier modules.
 const out = await page.evaluate(async () => {
-  const tierMod = await import('/demo/occlusion/tier.js?v=198')
-  const sceneMod = await import('/demo/occlusion/scene.js?v=198')
+  const tierMod = await import('/demo/occlusion/tier.js?v=199')
+  const sceneMod = await import('/demo/occlusion/scene.js?v=199')
   const scene = sceneMod.createScene(16384)
   const shellStub = { log: { info() {}, event() {}, error() {}, warn() {} }, setBadge() {}, markReady() {}, slot: document.createElement('div') }
   const noteError = () => {}

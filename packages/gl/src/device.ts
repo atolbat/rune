@@ -91,9 +91,15 @@ export interface DeviceOptions {
 }
 
 /** The instance stream: [list | flags | records] words — the shared scene
- *  layout of the occlusion demos (createScene()'s own contract). The WG
- *  backend keeps ONE storage buffer over the words; the GL backend splits
- *  it into the float records buffer (attributes) + its own flag buffer. */
+ *  storage of the occlusion demos. The RECORD LAYOUT is DECLARED, not
+ *  assumed: `stride` (words per record) + `fields` (the word offsets of the
+ *  cull kernel's a_c/a_h feed) default to the historical 12/0/3 shape, and
+ *  the GL attribute feeds + the TF kernel attributes are DERIVED from the
+ *  declaration — a different scenario declares a different shape and rides
+ *  the same bricks. The WG backend keeps ONE storage buffer over the words;
+ *  the GL backend splits it into the float records buffer (attributes) + its
+ *  own flag buffer. Task 199: `occluders` is the BOOT default of the runtime
+ *  POLICY (the per-frame prepass count — see hizFrame's `occluders`). */
 export interface SceneLayout {
   readonly total: number
   readonly occluders: number
@@ -101,11 +107,18 @@ export interface SceneLayout {
   readonly recordsF32: Float32Array
   readonly flagsWord: number
   readonly recordsWord: number
+  /** words per record (default 12: center 3, half 3, color 3, spare 3). */
+  readonly stride?: number
+  /** word offsets of the AABB feed inside a record (defaults: 0 and 3). */
+  readonly fields?: { readonly center?: number; readonly half?: number }
 }
 
 export interface SceneHandle {
   readonly total: number
   readonly occluders: number
+  /** The resolved record layout (the GL feeds + the diagnostics read it). */
+  readonly stride: number
+  readonly fields: { readonly center: number; readonly half: number }
 }
 
 /** One named uniform slice of the packed block. mat4 = 16 words, vec4 = 4.
@@ -133,6 +146,14 @@ export interface GlAttrDecl {
 
 export interface ProgramSpec {
   readonly depth?: { test?: string; write?: boolean }
+  /** Task 199 — back-face culling: 'none' (default) | 'back' | 'front'.
+   *  WG: the pipeline's cullMode — with frontFace 'cw', the y-flip mirror
+   *  of GL's default CCW (NDC y-up vs framebuffer y-down invert the
+   *  apparent winding; without the mirror the two backends would cull
+   *  OPPOSITE faces of the same mesh). GL: glEnable(CULL_FACE) + the
+   *  default CCW front. The occlusion z/color passes run cull:'back' —
+   *  the coplanar bottom-vs-ground z-fight dies at the source. */
+  readonly cull?: 'none' | 'back' | 'front'
   /** The WebGPU leg: the full WGSL + the vertex-slot layout (the facade's
    *  GpuAttrSlot contract) + whether the shader samples a texture (group 1). */
   readonly wg?: {
@@ -217,6 +238,43 @@ export interface DrawOptions {
   readonly indexCount?: number
 }
 
+/** Task 199 — THE FRAME RECIPE as a brick: the Hi-Z pipeline sequence
+ *  (z prepass → pyramid → cull → visible draw) owns ONE canonical order;
+ *  scenarios were hand-rolling it in demo code. The spec wires the
+ *  scenario's own handles (programs, culler, geometry); every call
+ *  carries the per-frame policy + the scenario's packed uniform blocks
+ *  (opaque data — the brick never inspects the lanes).
+ *  `occluders` is THE POLICY KNOB: how many records render into the z
+ *  prepass this frame — the boot default (the big static occluders), the
+ *  whole scene (every instance writes depth — the «does the city occlude
+ *  itself» experiment), or anything between. The cull block's hizOn word
+ *  is the SCENARIO's own lane (the demo's cullBlock[16]) — patch it
+ *  before the call; the brick is policy-agnostic. */
+export interface HizFrameSpec {
+  readonly scene: SceneHandle
+  readonly pyramid: PyramidHandle
+  readonly culler: CullerHandle
+  readonly zPass: ProgramHandle
+  readonly colorPass: ProgramHandle
+  readonly geometry: GeometryHandle
+}
+
+export interface HizFrameCall {
+  readonly target: number
+  /** The prepass instance count — the occlusion POLICY for this frame. */
+  readonly occluders: number
+  readonly zUniforms: Float32Array
+  readonly cullUniforms: Float32Array
+  readonly colorUniforms: Float32Array
+  readonly indexCount?: number
+  /** clear the color target (default true). */
+  readonly clear?: boolean
+}
+
+export interface HizFrameHandle {
+  run(call: HizFrameCall): void
+}
+
 export interface CullStats {
   readonly drawn: number
   readonly frustum: number
@@ -259,6 +317,8 @@ export interface RenderDevice {
     uniforms: Float32Array
   }): void
   occlusionCuller(scene: SceneHandle, pyramid: PyramidHandle, spec: CullerSpec): CullerHandle
+  /** Task 199 — the whole Hi-Z frame in ONE call (the recipe as a brick). */
+  hizFrame(spec: HizFrameSpec): HizFrameHandle
   readCullStats(scene: SceneHandle): Promise<CullStats>
   surface(width: number, height: number, options?: { depth?: boolean }): DeviceSurface
   submit(): void
@@ -292,9 +352,16 @@ void main() {
 
 /** THE COMPACT (WG-only — the drawVisible brick's first half): the flags →
  *  the stable ascending visible list + the drawIndexedIndirect args + the
- *  occludee-only stats block. Single thread, no atomics — the STABLE draw
- *  order the pixel-parity gates demand (an atomic-order flip at an
- *  equal-depth collision would fake a divergence).
+ *  stats block. Single thread, no atomics — the STABLE draw order the
+ *  pixel-parity gates demand (an atomic-order flip at an equal-depth
+ *  collision would fake a divergence).
+ * Task 199 — EVERY RECORD IS TESTED: the pre-196-199 kernel short-circuited
+ *  the first k records to visible (the pyramid builders never tested
+ *  themselves); the occluder boundary is now a POLICY, not a kernel
+ *  constant, and testing the builders is SOUND — the max-reduced pyramid
+ *  makes any contributor's own footprint max ≥ its own front surface ≥ its
+ *  nearest AABB corner, so a contributor never self-culls, and one occluder
+ *  fully behind another is honestly culled (the same pixels, fewer draws).
  * THE SLOT MAP: the compute family's fixed storage types alternate
  * rw/ro/rw — the scene (rw, the list writes) rides binding 1, a 16-byte
  * UNUSED read-only placeholder sits at binding 2 (a layout may declare
@@ -309,25 +376,26 @@ struct CompactParams { words: vec4<u32> }
 fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (gid.x != 0u) { return; }
   let n = params.words.x;      // the record count
-  let k = params.words.y;      // the occluders (always visible, first)
-  let indexCount = params.words.z;
-  let flagsOff = params.words.w;
+  let indexCount = params.words.y;
+  let flagsOff = params.words.z;
+  // words.w — the boot-time occluder count, carried for diagnostics only
   var out = 0u; var frustum = 0u; var occluded = 0u; var straddle = 0u;
   for (var i = 0u; i < n; i = i + 1u) {
     let f = scene[flagsOff + i];
-    let visible = i < k || f == 1u || f == 4u;
+    let visible = f == 1u || f == 4u;
     if (visible) {
       scene[out] = i;          // the list region (word 0) — ascending, stable
       out = out + 1u;
-      if (i >= k && f == 4u) { straddle = straddle + 1u; }
+      if (f == 4u) { straddle = straddle + 1u; }
     } else if (f == 2u) {
       frustum = frustum + 1u;
     } else if (f == 3u) {
       occluded = occluded + 1u;
     }
   }
-  // the stats block (drawn = OCCLUDEE-visible — the GL CPU-sweep twin)
-  args[0u] = out - k;
+  // the stats block: drawn = ALL visible records — the accounting invariant
+  // frustum + occluded + drawn === n (the GL CPU-sweep twin counts from 0)
+  args[0u] = out;
   args[1u] = frustum;
   args[2u] = occluded;
   args[3u] = straddle;
@@ -359,6 +427,7 @@ interface GlScene {
 interface GlProgram {
   programId: number
   depth: { test: string; write: boolean }
+  cull: 'none' | 'back' | 'front'
   lanes: readonly UniformLane[]
   attrs: readonly GlAttrDecl[]
 }
@@ -459,7 +528,12 @@ function createWgDevice(renderer: WebGpuRenderer, options: DeviceOptions, clear:
   }
 
   function scene(layout: SceneLayout): SceneHandle {
-    const handle: SceneHandle = { total: layout.total, occluders: layout.occluders }
+    const handle: SceneHandle = {
+      total: layout.total,
+      occluders: layout.occluders,
+      stride: layout.stride ?? 12,
+      fields: { center: layout.fields?.center ?? 0, half: layout.fields?.half ?? 3 },
+    }
     const bufferId = gpu.createExternalBuffer(layout.words.byteLength, WG_USAGE.STORAGE | WG_USAGE.COPY_DST | WG_USAGE.COPY_SRC)
     gpu.writeExternalBuffer(bufferId, layout.words)
     const argsId = gpu.createExternalBuffer(64, WG_USAGE.STORAGE | WG_USAGE.INDIRECT | WG_USAGE.COPY_SRC)
@@ -470,8 +544,9 @@ function createWgDevice(renderer: WebGpuRenderer, options: DeviceOptions, clear:
     const compactBlock = new Float32Array(4)
     const compactU32 = new Uint32Array(compactBlock.buffer)
     compactU32[0] = layout.total
-    compactU32[1] = layout.occluders
-    compactU32[3] = layout.flagsWord
+    compactU32[1] = 36 // the indexCount — refreshed by every drawVisible
+    compactU32[2] = layout.flagsWord
+    compactU32[3] = layout.occluders // diagnostics only (the Task-199 policy note)
     const compactId = gpu.createCompute(COMPACT_WGSL, 16, [bufferId, placeholderId, argsId])
     scenes.set(handle, { handle, bufferId, argsId, compactId, compactBlock, compactU32 })
     return handle
@@ -567,6 +642,12 @@ ${REDUCE}`
     const depth = { test: spec.depth?.test ?? 'less', write: spec.depth?.write ?? true }
     gpu.ensurePipeline(pipelineId, spec.wg.code, spec.wg.attrs, spec.wg.hasTextures === true, {
       depth: { test: depth.test as 'less', write: depth.write },
+      // Task 199 — the cull axis: frontFace 'ccw' matches GL's default CCW
+      // front FACE-FOR-FACE (the empirical cross-tier gate settled the
+      // convention: the glprobe's 7–47% px / Δmax 144 divergence under the
+      // 'cw' mirror was exactly the opposite-faces artifact — the WG front
+      // is the SAME physical face as GL's, no y-flip compensation needed)
+      raster: { cull: spec.cull ?? 'none', frontFace: 'ccw' },
     })
     const handle: ProgramHandle = { backend: 'webgpu', depth }
     wgPrograms.set(handle, { pipelineId, depth })
@@ -607,7 +688,7 @@ ${REDUCE}`
     if (prog === undefined) throw new Error('rune: drawVisible — the program handle is not this device\'s own')
     // 1. THE COMPACT — must run BEFORE the render pass opens (the facade's
     //    tape contract: compute inside an open render pass is refused)
-    s.compactU32[2] = optionsIn.indexCount ?? 36
+    s.compactU32[1] = optionsIn.indexCount ?? 36
     gpu.runCompute(s.compactId, 'compact', s.compactBlock, 1)
     // 2. THE PASS + ONE GPU-DRIVEN DRAW — the whole visible set, the
     //    instanceCount GPU-written, zero CPU readbacks
@@ -651,6 +732,48 @@ ${REDUCE}`
     }
   }
 
+  function hizFrame(spec: HizFrameSpec): HizFrameHandle {
+    // the handles must all be this device's own — the honest refusals ride
+    // the underlying bricks (drawInstanced/drawVisible/culler each verify)
+    const s = scenes.get(spec.scene)
+    if (s === undefined) throw new Error('rune: hizFrame — the scene handle is not this device\'s own')
+    void s
+    return {
+      run(call: HizFrameCall): void {
+        // 1. THE Z PREPASS — the first `occluders` records write the pyramid's
+        //    level-0 tile (THE POLICY: the boot default, the whole city, or
+        //    anything between — a per-frame decision, no re-compile, no
+        //    re-upload)
+        drawInstanced({
+          target: spec.pyramid.zTarget,
+          clear: true,
+          program: spec.zPass,
+          geometry: spec.geometry,
+          records: spec.scene,
+          uniforms: call.zUniforms,
+          instances: call.occluders,
+          indexCount: call.indexCount,
+        })
+        // 2. THE PYRAMID — the 2×2 MAX reduce chain
+        spec.pyramid.build()
+        // 3. THE CULL — the per-record verdicts (the kernel is POLICY-FREE:
+        //    it tests every record; the cull block's own hizOn word is the
+        //    scenario's parity-gate lane, patched before the call)
+        spec.culler.run(call.cullUniforms)
+        // 4. THE COLOR PASS — the visible set, GPU-driven
+        drawVisible({
+          target: call.target,
+          clear: call.clear ?? true,
+          program: spec.colorPass,
+          geometry: spec.geometry,
+          records: spec.scene,
+          uniforms: call.colorUniforms,
+          indexCount: call.indexCount,
+        })
+      },
+    }
+  }
+
   async function readCullStats(sceneHandle: SceneHandle): Promise<CullStats> {
     const s = scenes.get(sceneHandle)
     if (s === undefined) throw new Error('rune: readCullStats — the scene handle is not this device\'s own')
@@ -681,6 +804,7 @@ ${REDUCE}`
     drawVisible,
     drawQuad,
     occlusionCuller,
+    hizFrame,
     readCullStats,
     surface,
     debugSceneWords: (sceneHandle: SceneHandle, bytes: number) => {
@@ -715,7 +839,12 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
   let reduceProgramId = 0
 
   function scene(layout: SceneLayout): SceneHandle {
-    const handle: SceneHandle = { total: layout.total, occluders: layout.occluders }
+    const handle: SceneHandle = {
+      total: layout.total,
+      occluders: layout.occluders,
+      stride: layout.stride ?? 12,
+      fields: { center: layout.fields?.center ?? 0, half: layout.fields?.half ?? 3 },
+    }
     const recBuf = gl.createBuffer(layout.recordsF32, 'static')
     const flagBuf = gl.createBuffer(new Float32Array(layout.total), 'dynamic')
     scenes.set(handle, {
@@ -785,7 +914,7 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     const programId = gl.createProgram(spec.gl.vs, spec.gl.fs)
     const depth = { test: spec.depth?.test ?? 'less', write: spec.depth?.write ?? true }
     const handle: ProgramHandle = { backend: 'webgl2', depth }
-    programs.set(handle, { programId, depth, lanes: spec.gl.lanes, attrs: spec.gl.attrs })
+    programs.set(handle, { programId, depth, cull: spec.cull ?? 'none', lanes: spec.gl.lanes, attrs: spec.gl.attrs })
     return handle
   }
 
@@ -815,7 +944,10 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     }
     gl.useProgram(prog.programId)
     gl.setDepthMode(prog.depth.test, prog.depth.write)
-    gl.setCull('none')
+    // Task 199 — the program's own cull face (the spec's default 'none'
+    // keeps the historical behavior; the z/color passes run 'back' — the
+    // front stays GL's default CCW, the WG twin mirrors it with 'cw')
+    gl.setCull(prog.cull)
   }
 
   function bindAttrs(prog: GlProgram, s: GlScene, geometryVertices: Float32Array, withFlags: boolean): void {
@@ -884,13 +1016,17 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     const s = scenes.get(sceneHandle) as GlScene | undefined
     if (s === undefined) throw new Error('rune: occlusionCuller — the scene handle is not this device\'s own')
     // the TF pass: N vertices (gl_VertexID = the record), a_c/a_h from the
-    // records buffer, the pyramid's levels as the sampler array, v_flag out
+    // records buffer, the pyramid's levels as the sampler array, v_flag out.
+    // Task 199 — the AABB feed's stride/offsets are DERIVED from the scene's
+    // DECLARED record layout (a different scenario = a different
+    // declaration, the same brick)
+    const strideBytes = sceneHandle.stride * 4
     const passId = gl.createTransformPass({
       vertex: spec.glsl,
       outputs: ['v_flag'],
       attributes: [
-        { name: 'a_c', size: 3, stride: 48, offset: 0 },
-        { name: 'a_h', size: 3, stride: 48, offset: 12 },
+        { name: 'a_c', size: 3, stride: strideBytes, offset: sceneHandle.fields.center * 4 },
+        { name: 'a_h', size: 3, stride: strideBytes, offset: sceneHandle.fields.half * 4 },
       ],
       textures: pyramidHandle.textures.map((_, L) => `u_pyr[${L}]`),
       uniforms: spec.lanes.map(lane => ({ name: lane.name, size: 4 })),
@@ -922,8 +1058,11 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     const ok = gl.readBuffer(s.flagBuf, s.flagScratch)
     if (!ok) throw new Error('rune: the flag buffer readback was refused')
     let drawn = 0, frustum = 0, occluded = 0, straddle = 0
-    // the occluder lane [0, K) is always 1 — the accounting counts OCCLUDEES
-    for (let i = sceneHandle.occluders; i < sceneHandle.total; i++) {
+    // Task 199 — the sweep counts EVERY record (the kernel tests them all —
+    // the WG compact twin): the invariant is frustum + occluded + drawn ===
+    // total. A flag 0 (a record never culled this session) lands in NO
+    // bucket — the honest form of the pre-boot stats.
+    for (let i = 0; i < sceneHandle.total; i++) {
       const f = s.flagScratch[i]
       if (f === 1) drawn++
       else if (f === 2) frustum++
@@ -931,6 +1070,46 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
       else if (f === 4) { straddle++; drawn++ }
     }
     return { drawn, frustum, occluded, straddle }
+  }
+
+  function hizFrame(spec: HizFrameSpec): HizFrameHandle {
+    // the honest refusals ride the underlying bricks (each verifies its own
+    // handles); here only the scene must resolve — the culler's TF pass and
+    // the draws all key off it
+    const s = scenes.get(spec.scene) as GlScene | undefined
+    if (s === undefined) throw new Error('rune: hizFrame — the scene handle is not this device\'s own')
+    void s
+    return {
+      run(call: HizFrameCall): void {
+        // 1. THE Z PREPASS — the first `occluders` records write the tile
+        drawInstanced({
+          target: spec.pyramid.zTarget,
+          clear: true,
+          program: spec.zPass,
+          geometry: spec.geometry,
+          records: spec.scene,
+          uniforms: call.zUniforms,
+          instances: call.occluders,
+          indexCount: call.indexCount,
+        })
+        // 2. THE PYRAMID — the FBO reduce chain (closes the z-pass FBO too)
+        spec.pyramid.build()
+        // 3. THE CULL — the TF pass (the neutral-canvas-first lesson lives
+        // inside the culler brick)
+        spec.culler.run(call.cullUniforms)
+        // 4. THE COLOR PASS — ONE instanced draw, the collapse hides the
+        // occluded records
+        drawVisible({
+          target: call.target,
+          clear: call.clear ?? true,
+          program: spec.colorPass,
+          geometry: spec.geometry,
+          records: spec.scene,
+          uniforms: call.colorUniforms,
+          indexCount: call.indexCount,
+        })
+      },
+    }
   }
 
   function surface(width: number, height: number, surfaceOptions?: { depth?: boolean }): DeviceSurface {
@@ -965,6 +1144,7 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     drawVisible,
     drawQuad,
     occlusionCuller,
+    hizFrame,
     readCullStats,
     surface,
     submit(): void {

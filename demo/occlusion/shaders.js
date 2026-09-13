@@ -11,7 +11,8 @@
 //            (frustum → near-straddle → Hi-Z), writes ONE verdict word
 //            (1 visible / 2 frustum / 3 occluded / 4 straddle). WG: the
 //            scene storage at FLAGS_OFF + i; GL: the v_flag TF output.
-//            The occluders [0, K) short-circuit visible on BOTH.
+//            Task 199: NOBODY short-circuits — every record is tested; the
+//            occluder boundary is the per-frame POLICY (the prepass count).
 //   color  — the lit + fogged image. WG: instance_index dereferences the
 //            compacted LIST in the scene storage (the indirect draw); GL:
 //            the per-instance attributes + the a_flag collapse.
@@ -29,15 +30,26 @@
 //     height; WG reads @builtin(position).xy as-is). This kills the fog
 //     banding — the «flickering gray triangles on the empty spaces» field
 //     report — without adding a single cross-tier ULP.
-import { HIZ_W, HIZ_H, LEVELS, MAX_LEVEL, LEVEL_DIMS, LEVEL_OFF } from './scene.js?v=198'
+import { HIZ_W, HIZ_H, LEVELS, MAX_LEVEL, LEVEL_DIMS, LEVEL_OFF } from './scene.js?v=199'
 
 const SKY = 'vec3<f32>(0.045, 0.055, 0.09)'
 const SKY_GLSL = 'vec3(0.045, 0.055, 0.09)'
 
-/** The dictionary factory — the scene constants bake in (N, K, the record
- *  layout, the pyramid's level dims). ONE call, both backends' columns. */
+/** The dictionary factory — the scenario's layout + constants bake in (N,
+ *  the DECLARED record layout — stride + field offsets, the pyramid's level
+ *  dims). ONE call, both backends' columns. Task 199: the record addressing
+ *  is DERIVED from the declaration (a different scenario — a different
+ *  declaration, the same kernel bodies), and the cull kernels no longer
+ *  short-circuit the occluders — EVERY record is tested (sound with the
+ *  max-reduced pyramid: a contributor's own footprint max ≥ its own front
+ *  surface ≥ its nearest AABB corner — a builder never self-culls, and one
+ *  occluder fully behind another is honestly culled). */
 export function buildShaders(scene) {
-  const { K, N, INST_OFF, FLAGS_OFF } = scene
+  const { N, INST_OFF, FLAGS_OFF } = scene
+  const STRIDE = scene.STRIDE ?? 12
+  const F = scene.FIELDS ?? { center: 0, half: 3, color: 6 }
+  const CENTER = F.center, HALF = F.half, COLOR = F.color
+  const STRIDE_BYTES = STRIDE * 4
 
   // ── z: the depth prepass (records → the r32f tile) ──────────────────────
   const z = {
@@ -48,9 +60,9 @@ struct ZParams { mvp: mat4x4<f32> }
 @group(2) @binding(0) var<storage, read> scene: array<u32>;
 struct VOut { @builtin(position) pos: vec4<f32> }
 @vertex fn vsMain(@location(0) corner: vec3<f32>, @builtin(instance_index) ii: u32) -> VOut {
-  let wo = ${INST_OFF}u + ii * 12u;
-  let c = vec3<f32>(bitcast<f32>(scene[wo]), bitcast<f32>(scene[wo + 1u]), bitcast<f32>(scene[wo + 2u]));
-  let h = vec3<f32>(bitcast<f32>(scene[wo + 3u]), bitcast<f32>(scene[wo + 4u]), bitcast<f32>(scene[wo + 5u]));
+  let wo = ${INST_OFF}u + ii * ${STRIDE}u;
+  let c = vec3<f32>(bitcast<f32>(scene[wo + ${CENTER}u]), bitcast<f32>(scene[wo + ${CENTER + 1}u]), bitcast<f32>(scene[wo + ${CENTER + 2}u]));
+  let h = vec3<f32>(bitcast<f32>(scene[wo + ${HALF}u]), bitcast<f32>(scene[wo + ${HALF + 1}u]), bitcast<f32>(scene[wo + ${HALF + 2}u]));
   let world = c + h * (corner * 2.0 - 1.0);
   var o: VOut;
   o.pos = params.mvp * vec4<f32>(world, 1.0);
@@ -79,15 +91,16 @@ precision highp float;
 out vec4 o;
 void main() { o = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0); }`,
       attrs: [
-        { location: 1, from: 'records', size: 3, stride: 48, offset: 0, divisor: 1 },
-        { location: 2, from: 'records', size: 3, stride: 48, offset: 12, divisor: 1 },
+        { location: 1, from: 'records', size: 3, stride: STRIDE_BYTES, offset: F.center * 4, divisor: 1 },
+        { location: 2, from: 'records', size: 3, stride: STRIDE_BYTES, offset: F.half * 4, divisor: 1 },
       ],
       lanes: [{ name: 'u_mvp', kind: 'mat4', words: 16 }],
     },
   }
 
-  // ── cull: the per-record verdict kernel (WG compute / GL TF) ────────────
-  // WG: the pyramid READS FROM THE STORAGE BUFFER (the Task-196 contract —
+  // ── cull: the per-record verdict kernel (WG compute / GL TF) ────
+  // Task 199 — THE POLICY-FREE KERNEL: nobody short-circuits. The WG leg
+  // reads the pyramid from the STORAGE buffer (the Task-196 contract —
   // binding 2 read-only array<f32>, the levelInfo switch carries the baked
   // flat offsets); GL: the per-level r32f textures through the literal
   // sampler branches (GLSL ES 3.00 constant-index-expressions only).
@@ -103,12 +116,14 @@ void main() { o = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0); }`,
   const CORE_WGSL = `
   let i = gid.x;
   if (i >= ${N}u) { return; }
-  // the occluders [0, K) ride the visible lane — the WG draw (the compact's
-  // list) and the GL draw (the flag short-circuit) agree exactly
-  if (i < ${K}u) { scene[${FLAGS_OFF}u + i] = 1u; return; }
-  let wo = ${INST_OFF}u + i * 12u;
-  let cx = bitcast<f32>(scene[wo]); let cy = bitcast<f32>(scene[wo + 1u]); let cz = bitcast<f32>(scene[wo + 2u]);
-  let hx = bitcast<f32>(scene[wo + 3u]); let hy = bitcast<f32>(scene[wo + 4u]); let hz = bitcast<f32>(scene[wo + 5u]);
+  // Task 199 — NO SHORT-CIRCUIT: every record is tested (the occluder
+  // boundary is the POLICY — the per-frame prepass count — not a kernel
+  // constant; the max-reduced pyramid makes self-test sound: the region
+  // max over a builder's own footprint ≥ its own front surface ≥ its
+  // nearest AABB corner, so a builder never self-culls)
+  let wo = ${INST_OFF}u + i * ${STRIDE}u;
+  let cx = bitcast<f32>(scene[wo + ${CENTER}u]); let cy = bitcast<f32>(scene[wo + ${CENTER + 1}u]); let cz = bitcast<f32>(scene[wo + ${CENTER + 2}u]);
+  let hx = bitcast<f32>(scene[wo + ${HALF}u]); let hy = bitcast<f32>(scene[wo + ${HALF + 1}u]); let hz = bitcast<f32>(scene[wo + ${HALF + 2}u]);
   // the 8 corners: conservative rect + nearest depth + plane-outside counts
   var x0 = 1e30; var x1 = -1e30; var y0 = 1e30; var y1 = -1e30;
   var minZ = 1e30; var minW = 1e30;
@@ -221,9 +236,9 @@ ${GL_PYR_FETCH}  return -1.0;
 
 void main() {
   int i = gl_VertexID;
-  // the occluders [0, K) ride the flag=1 lane — the WG tier's compact list
-  // and this flag short-circuit agree exactly (the same pixel set)
-  if (i < ${K}) { v_flag = 1.0; return; }
+  // Task 199 — NO SHORT-CIRCUIT (the WG twin's comment): every record is
+  // tested; the occluder boundary is the POLICY, and the GL leg's flag
+  // short-circuit is gone with it. The GL draw collapses flag ∉ {1,4}.
 
   float x0 = 1e30, x1 = -1e30, y0 = 1e30, y1 = -1e30;
   float minD = 1e30, minW = 1e30;
@@ -309,10 +324,10 @@ struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec3<f32>, 
   // visible list into the scene's word 0 region; the indirect draw's
   // instanceCount is GPU-written — the whole visible set, zero readbacks.
   let absIdx = scene[ii];
-  let wo = ${INST_OFF}u + absIdx * 12u;
-  let c = vec3<f32>(bitcast<f32>(scene[wo]), bitcast<f32>(scene[wo + 1u]), bitcast<f32>(scene[wo + 2u]));
-  let h = vec3<f32>(bitcast<f32>(scene[wo + 3u]), bitcast<f32>(scene[wo + 4u]), bitcast<f32>(scene[wo + 5u]));
-  let col = vec3<f32>(bitcast<f32>(scene[wo + 6u]), bitcast<f32>(scene[wo + 7u]), bitcast<f32>(scene[wo + 8u]));
+  let wo = ${INST_OFF}u + absIdx * ${STRIDE}u;
+  let c = vec3<f32>(bitcast<f32>(scene[wo + ${CENTER}u]), bitcast<f32>(scene[wo + ${CENTER + 1}u]), bitcast<f32>(scene[wo + ${CENTER + 2}u]));
+  let h = vec3<f32>(bitcast<f32>(scene[wo + ${HALF}u]), bitcast<f32>(scene[wo + ${HALF + 1}u]), bitcast<f32>(scene[wo + ${HALF + 2}u]));
+  let col = vec3<f32>(bitcast<f32>(scene[wo + ${COLOR}u]), bitcast<f32>(scene[wo + ${COLOR + 1}u]), bitcast<f32>(scene[wo + ${COLOR + 2}u]));
   let world = c + h * (corner * 2.0 - 1.0);
   var o: VOut;
   o.pos = params.mvp * vec4<f32>(world, 1.0);
@@ -410,9 +425,9 @@ void main() {
   o = vec4(col, 1.0);
 }`,
       attrs: [
-        { location: 1, from: 'records', size: 3, stride: 48, offset: 0, divisor: 1 },
-        { location: 2, from: 'records', size: 3, stride: 48, offset: 12, divisor: 1 },
-        { location: 3, from: 'records', size: 3, stride: 48, offset: 24, divisor: 1 },
+        { location: 1, from: 'records', size: 3, stride: STRIDE_BYTES, offset: F.center * 4, divisor: 1 },
+        { location: 2, from: 'records', size: 3, stride: STRIDE_BYTES, offset: F.half * 4, divisor: 1 },
+        { location: 3, from: 'records', size: 3, stride: STRIDE_BYTES, offset: F.color * 4, divisor: 1 },
         { location: 4, from: 'flags', size: 1, stride: 4, offset: 0, divisor: 1 },
       ],
       lanes: [

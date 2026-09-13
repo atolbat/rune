@@ -29,10 +29,9 @@
 // CSS size × DPR (capped at 2 — a dpr-3 phone renders 2x, not 3x), the
 // projection takes the canvas's real aspect (portrait widens the fov), and
 // the WG canvas rides the facade's new MSAA 4x resolve (antialias: true).
-import { createDevice } from '../../dist/rune.esm.js?v=198'
-import { buildShaders } from './shaders.js?v=198'
-import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H, LEVELS } from './scene.js?v=198'
-
+import { createDevice } from '../../dist/rune.esm.js?v=199'
+import { buildShaders } from './shaders.js?v=199'
+import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H, LEVELS } from './scene.js?v=199'
 const SKY = [0.045, 0.055, 0.09, 1]
 const LIGHT = [0.5, 0.8, 0.35]
 const SURF_W = 480, SURF_H = 270
@@ -94,14 +93,22 @@ export async function buildTier(deps) {
     recordsF32: sceneF32.subarray(INST_OFF),
     flagsWord: FLAGS_OFF,
     recordsWord: INST_OFF,
+    stride: scene.STRIDE,
+    fields: scene.FIELDS,
   })
   const pyr = device.pyramid(HIZ_W, HIZ_H)
   const box = device.geometry(BOX_VERTS, BOX_INDICES)
   const surface = device.surface(SURF_W, SURF_H, { depth: true })
 
   const S = buildShaders(scene)
-  const zPass = device.program({ depth: { test: 'less', write: true }, wg: S.z.wg, gl: S.z.gl })
-  const colorPass = device.program({ depth: { test: 'less', write: true }, wg: S.color.wg, gl: S.color.gl })
+  // Task 199 — cull:'back' on both depth passes: the consistent outward
+  // winding (see scene.js) lets the back faces drop — the coplanar
+  // box-bottom/ground-top z-fight (the flickering triangles at the
+  // buildings' bases) dies at the source, and the fragment count halves.
+  // (The WG leg mirrors GL's CCW front with frontFace 'cw' inside the
+  // brick — the y-flip convention, see device.ts.)
+  const zPass = device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: S.z.wg, gl: S.z.gl })
+  const colorPass = device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: S.color.wg, gl: S.color.gl })
   const panelPass = device.program({ depth: { test: 'always', write: false }, wg: S.panel.wg, gl: S.panel.gl })
   const culler = device.occlusionCuller(sceneHandle, pyr, {
     wgsl: S.cull.wg.code,
@@ -109,6 +116,18 @@ export async function buildTier(deps) {
     entry: S.cull.wg.entry,
     lanes: S.cull.lanes,
     uniformBytes: S.cull.wg.uniformBytes,
+  })
+  // THE RECIPE AS A BRICK (Task 199): the whole Hi-Z frame in ONE run()
+  // call — z prepass → pyramid → cull → the visible draw; the per-frame
+  // `occluders` is THE POLICY (the prepass instance count: the boot
+  // default 23, the whole city N, anything between — no re-compiles)
+  const hiz = device.hizFrame({
+    scene: sceneHandle,
+    pyramid: pyr,
+    culler,
+    zPass,
+    colorPass,
+    geometry: box,
   })
 
   // ── the packed uniform blocks (one layout per program — the lanes both
@@ -124,39 +143,31 @@ export async function buildTier(deps) {
   }
 
   // ── THE FRAME — ONE code path, both backends ────────────────────────────
-  function renderTo(targetId, mvp, eye, hizOn, debug) {
-    // 1. THE Z PREPASS — the occluders into the pyramid's level-0 tile
+  // `occluders` — THE POLICY (Task 199): how many records write the z
+  // prepass this frame. The boot default: the 23 big occluders. The demo's
+  // «City occludes» toggle passes N — every colored box writes depth and
+  // the whole scene is tested against itself.
+  function renderTo(targetId, mvp, eye, hizOn, debug, occluders = K) {
+    // 0. THE SCENARIO'S LANES — the blocks are OPAQUE data to the bricks;
+    //    the demo patches its own words (the cull block's misc.x = the
+    //    parity gate's hizOn flag; the color block's misc.x = the GL
+    //    dither's y-mirror height — the WG shader ignores the lane)
     zBlock.set(mvp)
-    device.drawInstanced({
-      target: pyr.zTarget,
-      clear: true,
-      program: zPass,
-      geometry: box,
-      records: sceneHandle,
-      instances: K,
-      uniforms: zBlock,
-      indexCount: 36,
-    })
-    // 2. THE PYRAMID — the 2×2 MAX reduce chain (the backend's own
-    //    mechanism inside the brick — WG: compute; GL: FBO quads)
-    pyr.build()
-    // 3. THE CULL — the per-record verdict kernel (compute / TF)
     cullBlock.set(mvp)
     cullBlock[16] = hizOn ? 1 : 0
-    culler.run(cullBlock)
-    // 4. THE COLOR PASS — the whole visible set, GPU-driven (misc.x = the
-    //    GL dither's y-mirror height; the WG shader ignores the lane)
     colorBlock.set(mvp)
     colorBlock[16] = targetHeight(targetId)
     colorBlock[20] = LIGHT[0]; colorBlock[21] = LIGHT[1]; colorBlock[22] = LIGHT[2]; colorBlock[23] = 0
     colorBlock[24] = eye[0]; colorBlock[25] = eye[1]; colorBlock[26] = eye[2]; colorBlock[27] = 1
-    device.drawVisible({
+    // 1..4. THE WHOLE Hi-Z PIPELINE — ONE brick call (the z prepass over
+    //    the first `occluders` records, the 2×2 MAX pyramid, the per-record
+    //    verdicts, the GPU-driven visible draw)
+    hiz.run({
       target: targetId,
-      clear: true,
-      program: colorPass,
-      geometry: box,
-      records: sceneHandle,
-      uniforms: colorBlock,
+      occluders: Math.max(0, Math.min(N, occluders | 0)),
+      zUniforms: zBlock,
+      cullUniforms: cullBlock,
+      colorUniforms: colorBlock,
       indexCount: 36,
     })
     // 5. THE DEBUG STRIP — one panel quad per pyramid level (the info lane
@@ -205,8 +216,8 @@ export async function buildTier(deps) {
     }).catch(() => { blitPending = false })
   }
 
-  function frame(mvp, eye, hizOn, debug) {
-    renderTo(SNAPSHOT ? surface.targetId : 0, mvp, eye, hizOn, debug)
+  function frame(mvp, eye, hizOn, debug, occluders = K) {
+    renderTo(SNAPSHOT ? surface.targetId : 0, mvp, eye, hizOn, debug, occluders)
     if (SNAPSHOT) blitSnapshot()
   }
 

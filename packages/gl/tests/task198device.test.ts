@@ -212,6 +212,31 @@ describe('Task 198: the common bricks — the WebGPU leg', () => {
     expect(calls).toContain('readExternalBuffer(900003)')
   })
 
+  it('hizFrame (Task 199) — ONE run() call: the prepass over the POLICY count, then the compact, then the indirect draw', async () => {
+    const { device, calls } = await wgDevice()
+    const scene = device.scene(LAYOUT)
+    const pyr = device.pyramid(8, 8)
+    const prog = device.program(PROG_SPEC)
+    const geometry = device.geometry(BOX, IB)
+    const culler = device.occlusionCuller(scene, pyr, CULLER_SPEC)
+    const hiz = device.hizFrame({ scene, pyramid: pyr, culler, zPass: prog, colorPass: prog, geometry })
+    const before = calls.length
+    hiz.run({ target: 0, occluders: 2, zUniforms: U16, cullUniforms: new Float32Array(20), colorUniforms: U16, indexCount: 3 })
+    const tail = calls.slice(before)
+    // THE RECIPE ORDER: the z-prepass draw (2 instances — the POLICY), the
+    // pyramid reduce family, the cull kernel, the compact, THEN the indirect
+    const prepassIdx = tail.findIndex(c => c === 'drawIndexed(3,2)')
+    const reduceIdx = tail.findIndex(c => c.startsWith('runCompute(') && c.includes(',zToMip0,'))
+    const cullIdx = tail.findIndex(c => c.startsWith('runCompute(') && c.includes(',cull,'))
+    const compactIdx = tail.findIndex(c => c.startsWith('runCompute(') && c.includes(',compact,'))
+    const indirectIdx = tail.findIndex(c => c === 'drawIndexedIndirect(900003,32)')
+    expect(prepassIdx).toBeGreaterThanOrEqual(0)
+    expect(reduceIdx).toBeGreaterThan(prepassIdx)
+    expect(cullIdx).toBeGreaterThan(reduceIdx)
+    expect(compactIdx).toBeGreaterThan(cullIdx)
+    expect(indirectIdx).toBeGreaterThan(compactIdx)
+  })
+
   it('submit ends the open pass and rolls the arena cursor', async () => {
     const { device, calls } = await wgDevice()
     const scene = device.scene(LAYOUT)
@@ -248,6 +273,28 @@ describe('Task 198: the common bricks — the WebGL2 leg', () => {
     expect(calls).toContain('uniformMatrix4fv(u_mvp)')
     expect(calls).toContain('bindVertexBuffer(1,1,3,48@0,!i)') // the records attr, divisor 1
     expect(calls.some(c => c.startsWith('drawElements(') && c.includes(',3,1,u16'))).toBe(true)
+  })
+
+  it('Task 199 — cull:\'back\' rides the program; the default stays none; the declared layout resolves on the handle', async () => {
+    const { device, calls } = await glDevice()
+    const scene = device.scene(LAYOUT)
+    const progNone = device.program(PROG_SPEC)
+    const progCull = device.program({ ...PROG_SPEC, cull: 'back' })
+    const geometry = device.geometry(BOX, IB)
+    device.drawInstanced({ target: 5, clear: true, program: progNone, geometry, records: scene, uniforms: U16, instances: 1, indexCount: 3 })
+    expect(calls).toContain('setCull(none)')
+    device.drawInstanced({ target: 5, clear: true, program: progCull, geometry, records: scene, uniforms: U16, instances: 1, indexCount: 3 })
+    expect(calls).toContain('setCull(back)')
+    // the DECLARED record layout: a different scenario shape resolves on
+    // the handle (the GL TF attribute feed derives from it — see the culler)
+    const WORDS16 = new Uint32Array(8 + 4 * 16)
+    const RECORDS16 = new Float32Array(WORDS16.buffer).subarray(8) as Float32Array
+    const scene16 = device.scene({ total: 4, occluders: 1, words: WORDS16, recordsF32: RECORDS16, flagsWord: 8, recordsWord: 12, stride: 16, fields: { center: 2, half: 5 } })
+    expect(scene16.stride).toBe(16)
+    expect(scene16.fields).toEqual({ center: 2, half: 5 })
+    // the defaults resolve to the historical 12/0/3 shape
+    expect(scene.stride).toBe(12)
+    expect(scene.fields).toEqual({ center: 0, half: 3 })
   })
 
   it('the canvas pass clears explicitly (the facade canvas bind does not)', async () => {
@@ -297,13 +344,34 @@ describe('Task 198: the common bricks — the WebGL2 leg', () => {
     expect(tail.some(c => c === 'bindTexture(1,0)')).toBe(true)
   })
 
-  it('readCullStats → the flag readback + the occludee-only sweep', async () => {
+  it('readCullStats → the flag readback + the full-record sweep (Task 199)', async () => {
     const { device, calls } = await glDevice()
     const scene = device.scene(LAYOUT)
     const stats = await device.readCullStats(scene)
-    // flags are all 0 (never culled) — the occluder lane is skipped, 0 drawn
+    // flags are all 0 (never culled — flag 0 lands in NO bucket; the kernel
+    // tests every record now, the sweep counts from 0)
     expect(stats).toEqual({ drawn: 0, frustum: 0, occluded: 0, straddle: 0 })
     expect(calls).toContain('readBuffer(2,4)')
+  })
+
+  it('hizFrame (Task 199) — the prepass draws the POLICY count; the visible draw covers ALL records', async () => {
+    const { device, calls } = await glDevice()
+    const scene = device.scene(LAYOUT)
+    const pyr = device.pyramid(8, 8)
+    const prog = device.program(PROG_SPEC)
+    const geometry = device.geometry(BOX, IB)
+    const culler = device.occlusionCuller(scene, pyr, CULLER_SPEC)
+    const hiz = device.hizFrame({ scene, pyramid: pyr, culler, zPass: prog, colorPass: prog, geometry })
+    const before = calls.length
+    hiz.run({ target: 0, occluders: 2, zUniforms: U16, cullUniforms: new Float32Array(20), colorUniforms: U16, indexCount: 3 })
+    const tail = calls.slice(before)
+    // the prepass: 2 instances (the POLICY); the visible draw: ALL 4 records
+    expect(tail.some(c => c.startsWith('drawElements(') && c.includes(',3,2,u16'))).toBe(true)
+    expect(tail.some(c => c.startsWith('drawElements(') && c.includes(',3,4,u16'))).toBe(true)
+    const prepassIdx = tail.findIndex(c => c.startsWith('drawElements(') && c.includes(',3,2,u16'))
+    const visibleIdx = tail.findIndex(c => c.startsWith('drawElements(') && c.includes(',3,4,u16'))
+    expect(prepassIdx).toBeGreaterThanOrEqual(0)
+    expect(visibleIdx).toBeGreaterThan(prepassIdx)
   })
 })
 
