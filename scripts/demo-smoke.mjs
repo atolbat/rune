@@ -601,8 +601,39 @@ try {
       const mobileHiz = await hizPage.setViewportSize({ width: 390, height: 844 }).then(() =>
         hizPage.evaluate(() => ({ overflow: Math.max(0, document.documentElement.scrollWidth - innerWidth) })),
       )
+      await hizPage.setViewportSize({ width: 960, height: 720 })
       const mobileHizOk = mobileHiz.overflow <= 1
       var hizOk = hizSnapshot && hizValidation && hizDrawn && hizCulled && hizGpuClean && mobileHizOk && (hizBadge ?? '').startsWith('WebGPU')
+
+      // Task 197 — THE WEBGL2 TIER LEG: the same page boots the GL Hi-Z
+      // (an FBO pyramid + a TF cull + a vertex-collapse draw). The checks:
+      // the boot validation (intra-tier parity + the bounded cross-tier
+      // compare when the WG anchor is absent on this direct-GL boot), the
+      // live counters, THE CANVAS WIRING (the displayed canvas must BE the
+      // GL renderer's canvas — the 197a lesson), the log health.
+      const glPage = await hizBrowser.newPage({ viewport: { width: 960, height: 720 } })
+      const glPageErrors = []
+      glPage.on('pageerror', e => glPageErrors.push(String(e)))
+      await glPage.goto(`http://localhost:${port}/demo/occlusion/?mode=webgl2`, { waitUntil: 'networkidle' })
+      const glStats = await glPage.waitForFunction(
+        () => (window.__hizStats && window.__hizStats.validation !== null && window.__hizStats.drawn > 0 ? window.__hizStats : undefined),
+        null,
+        { timeout: 120_000 },
+      ).then(h => h.jsonValue())
+      const glValidation = glStats?.validation?.pass === true
+      const glWired = await glPage.evaluate(() => {
+        const el = document.querySelector('#hiz-canvas')
+        return el !== null && el.getContext('webgl2') !== null
+      })
+      const glBadge = await glPage.textContent('#backend')
+      const glLogText = await glPage.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
+      const glClean = !/rendering stopped|frame error|GL error|failed/i.test(glLogText) && glPageErrors.length === 0
+      console.log(
+        `[smoke] occlusion GL: validation ${glValidation ? 'PASS' : 'FAIL'}, ` +
+        `drawn ${glStats?.drawn}/${glStats?.total}, occluded ${glStats?.occlusionCulled}, wiring ${glWired ? 'ok' : 'DEAD'}, log ${glClean ? 'clean' : 'DIRTY'}`,
+      )
+      var hizGlOk = glValidation && glWired && glClean && (glBadge ?? '').startsWith('WebGL2')
+      await glPage.close()
     } finally {
       await hizBrowser.close()
     }
@@ -641,6 +672,7 @@ try {
     vfxGpuClean &&
     mobileVfxOk &&
     hizOk &&
+    hizGlOk &&
     viewerLogEntries > 0 &&
     mobileViewerOk &&
     errors.length === 0

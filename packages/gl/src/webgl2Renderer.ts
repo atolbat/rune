@@ -510,7 +510,9 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     const depth = surfaceOptions.depth ?? false
     const color = surfaceOptions.color ?? (options.clear ?? DEFAULT_CLEAR).color
     const textureId = gl.createTexture(width, height)
-    const targetId = gl.createTarget(textureId, width, height, depth, color)
+    // Task 197: the depth precision axis passes through (16 default / 24 /
+    // 32-float — the Hi-Z parity anchor; see GLFacade.createTarget).
+    const targetId = gl.createTarget(textureId, width, height, depth, color, surfaceOptions.depthBits)
     let surfaceDisposed = false
     const result: Surface<CompiledCommand> = {
       targetId,

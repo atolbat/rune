@@ -46,6 +46,12 @@ export interface SurfaceOptions {
   readonly depth?: boolean
   /** Clear color (default — the renderer background). */
   readonly color?: readonly [number, number, number, number]
+  /** Task 197 — the depth precision axis: WebGL2 consumes it
+  *  (DEPTH_COMPONENT16 default / 24 / 32-float — GLFacade.createTarget);
+  *  WebGPU ignores it (its targets are depth24plus by construction —
+  *  documented asymmetry). The Hi-Z parity anchor: 32 makes the surface's
+  *  depth decisions exact-f32. */
+  readonly depthBits?: 16 | 24 | 32
 }
 
 /** Result of reading a surface (Task 80: readback — the first slice of

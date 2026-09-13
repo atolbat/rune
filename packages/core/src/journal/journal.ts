@@ -59,7 +59,7 @@ export type DeclOp =
   | { readonly kind: 'destroyProgram'; readonly id: number }
   | { readonly kind: 'createBuffer'; readonly id: number; readonly data: Float32Array; readonly usage?: 'static' | 'dynamic' }
   | { readonly kind: 'destroyBuffer'; readonly id: number }
-  | { readonly kind: 'createTarget'; readonly id: number; readonly textureId: number; readonly width: number; readonly height: number; readonly depth: boolean; readonly color: ClearColor }
+  | { readonly kind: 'createTarget'; readonly id: number; readonly textureId: number; readonly width: number; readonly height: number; readonly depth: boolean; readonly color: ClearColor; readonly depthBits?: 16 | 24 | 32 }
   | { readonly kind: 'destroyTarget'; readonly id: number }
   | { readonly kind: 'texImage2DFromSource'; readonly textureId: number; readonly sourceKind: string; readonly flipY: boolean }
   // Sub-mip views (Task 56): createTextureView/destroyTextureView — long-lived

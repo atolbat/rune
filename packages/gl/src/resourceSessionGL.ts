@@ -238,13 +238,14 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
       viewParent.delete(viewId)
       journal.record({ kind: 'view.destroy', id: viewId })
     },
-    createTarget: (textureId, width, height, depth, color) => {
-      const rawId = raw.createTarget(rawTex(textureId), width, height, depth, color)
+    // Task 197: depthBits rides the op (absent = the historical 16).
+    createTarget: (textureId, width, height, depth, color, depthBits) => {
+      const rawId = raw.createTarget(rawTex(textureId), width, height, depth, color, depthBits)
       const id = nextTarget++
       targetMap.set(id, rawId)
       targetParent.set(id, textureId)
       touch(textureId)
-      journal.record({ kind: 'target.create', id, textureId, width, height, depth, color })
+      journal.record({ kind: 'target.create', id, textureId, width, height, depth, color, ...(depthBits !== undefined ? { depthBits } : {}) })
       return id
     },
     bindTarget: (targetId, clear) => {
@@ -391,7 +392,7 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
         break
       }
       case 'target.create': {
-        const rawId = raw.createTarget(rawTex(op.textureId), op.width, op.height, op.depth, op.color)
+        const rawId = raw.createTarget(rawTex(op.textureId), op.width, op.height, op.depth, op.color, op.depthBits)
         targetMap.set(op.id, rawId)
         targetParent.set(op.id, op.textureId)
         touch(op.textureId)
@@ -619,7 +620,7 @@ export function applyResOpGL(op: ResOp, gl: GLFacade, sourceFor: (content: Conte
       gl.createTextureView(op.textureId, { baseMipLevel: op.baseMipLevel, mipLevelCount: op.mipLevelCount })
       break
     case 'target.create':
-      gl.createTarget(op.textureId, op.width, op.height, op.depth, op.color)
+      gl.createTarget(op.textureId, op.width, op.height, op.depth, op.color, op.depthBits)
       break
     default:
       break

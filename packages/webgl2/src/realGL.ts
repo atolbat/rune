@@ -46,6 +46,11 @@ const ENUM = {
   // real browsers, leaving the texture level-less and every texSubImage2D
   // "Level of detail outside of range").
   RGBA32F: 0x8814,
+  // Task 197 — the Hi-Z data plane: GL_R32F (0x822E, the GL registry —
+  // sized internal format table 8.3) with the RED (0x1903) upload channel.
+  // The WebGL2 twin of WebGPU's r32float storage tile: one f32 per texel.
+  R32F: 0x822e,
+  RED: 0x1903,
   RGBA: 0x1908,
   UNSIGNED_BYTE: 0x1401,
   HALF_FLOAT: 0x140b,
@@ -56,13 +61,16 @@ const ENUM = {
   LINEAR_MIPMAP_LINEAR: 0x2703,
 } as const
 
-/** internalFormat + the upload (format, type) by GLTextureFormat (Task 67). */
+/** internalFormat + the upload (format, type) by GLTextureFormat (Task 67;
+ * Task 197: r32f — the Hi-Z data plane). */
 function formatInfo(format: GLTextureFormat): FormatInfo {
   switch (format) {
     case 'rgba16f':
       return { internalFormat: ENUM.RGBA16F, uploadFormat: ENUM.RGBA, uploadType: ENUM.HALF_FLOAT }
     case 'rgba32f':
       return { internalFormat: ENUM.RGBA32F, uploadFormat: ENUM.RGBA, uploadType: ENUM.FLOAT }
+    case 'r32f':
+      return { internalFormat: ENUM.R32F, uploadFormat: ENUM.RED, uploadType: ENUM.FLOAT }
     default:
       return { internalFormat: ENUM.RGBA8, uploadFormat: ENUM.RGBA, uploadType: ENUM.UNSIGNED_BYTE }
   }
@@ -381,12 +389,17 @@ export function createRealGL(
   } catch {
     floatLinearExt = false
   }
-  /** The MAG filter by format: LINEAR if the format is linearly filterable. */
+  /** The MAG filter by format: LINEAR if the format is linearly filterable.
+   *  Task 197: r32f is a DATA format — NEAREST always (linear filtering of
+   *  R32F rides OES_texture_float_linear; a pyramid sampling its own texels
+   *  must not depend on an optional extension). */
   function magFilter(format: GLTextureFormat): number {
+    if (format === 'r32f') return ENUM.NEAREST
     return format === 'rgba32f' && !floatLinearExt ? ENUM.NEAREST : ENUM.LINEAR
   }
   /** The MIN filter by format and presence of a mip chain. */
   function minFilter(format: GLTextureFormat, mipLevels: number): number {
+    if (format === 'r32f') return mipLevels > 1 ? ENUM.NEAREST_MIPMAP_NEAREST : ENUM.NEAREST
     const linear = !(format === 'rgba32f' && !floatLinearExt)
     if (mipLevels > 1) return linear ? ENUM.LINEAR_MIPMAP_LINEAR : ENUM.NEAREST_MIPMAP_NEAREST
     return linear ? ENUM.LINEAR : ENUM.NEAREST
@@ -1078,6 +1091,7 @@ export function createRealGL(
     height: number,
     depth: boolean,
     color: readonly [number, number, number, number],
+    depthBits?: 16 | 24 | 32,
   ): number {
     const fbo = gl.createFramebuffer()
     if (fbo === null) throw new Error('rune: createFramebuffer returned null')
@@ -1085,10 +1099,18 @@ export function createRealGL(
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, textures.get(textureId) ?? null, 0)
     if (depth) {
+      // Task 197 — the depth precision axis (the Hi-Z parity anchor):
+      // 16 (default, the historical DEPTH_COMPONENT16), 24
+      // (DEPTH_COMPONENT24 — WebGPU depth24plus parity), 32
+      // (DEPTH_COMPONENT32F — a FLOAT depth buffer: the attachment stores
+      // the exact f32 z the fragment computes, so a GPU cull pass that
+      // compares f32 tile values against the attachment's decisions has NO
+      // quantization gap to sliver on).
+      const depthFormat = depthBits === 24 ? gl.DEPTH_COMPONENT24 : depthBits === 32 ? gl.DEPTH_COMPONENT32F : gl.DEPTH_COMPONENT16
       depthRenderbuffer = gl.createRenderbuffer()
       if (depthRenderbuffer === null) throw new Error('rune: createRenderbuffer returned null')
       gl.bindRenderbuffer(gl.RENDERBUFFER, depthRenderbuffer)
-      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, width, height)
+      gl.renderbufferStorage(gl.RENDERBUFFER, depthFormat, width, height)
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthRenderbuffer)
     }
     const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER)

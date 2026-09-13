@@ -182,7 +182,7 @@ export interface CountingGLFacade {
   setBlend(src: string | null, dst: string | null, equation?: string): void
   clear(color: readonly number[], depth: number | null): void
   drawArrays(mode: string, first: number, count: number, instances: number): void
-  createTarget(textureId: number, width: number, height: number, depth: boolean, color?: unknown): number
+  createTarget(textureId: number, width: number, height: number, depth: boolean, color?: unknown, depthBits?: 16 | 24 | 32): number
   bindTarget(targetId: number, clear: boolean): void
   deleteTexture(textureId: number): void
   deleteTarget(targetId: number): void

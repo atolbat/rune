@@ -4762,6 +4762,8 @@ var ENUM = {
   RGBA8: 32856,
   RGBA16F: 34842,
   RGBA32F: 34836,
+  R32F: 33326,
+  RED: 6403,
   RGBA: 6408,
   UNSIGNED_BYTE: 5121,
   HALF_FLOAT: 5131,
@@ -4777,6 +4779,8 @@ function formatInfo(format) {
       return { internalFormat: ENUM.RGBA16F, uploadFormat: ENUM.RGBA, uploadType: ENUM.HALF_FLOAT };
     case "rgba32f":
       return { internalFormat: ENUM.RGBA32F, uploadFormat: ENUM.RGBA, uploadType: ENUM.FLOAT };
+    case "r32f":
+      return { internalFormat: ENUM.R32F, uploadFormat: ENUM.RED, uploadType: ENUM.FLOAT };
     default:
       return { internalFormat: ENUM.RGBA8, uploadFormat: ENUM.RGBA, uploadType: ENUM.UNSIGNED_BYTE };
   }
@@ -4861,9 +4865,13 @@ function createRealGL(gl, onViewportHeal) {
     floatLinearExt = false;
   }
   function magFilter(format) {
+    if (format === "r32f")
+      return ENUM.NEAREST;
     return format === "rgba32f" && !floatLinearExt ? ENUM.NEAREST : ENUM.LINEAR;
   }
   function minFilter(format, mipLevels) {
+    if (format === "r32f")
+      return mipLevels > 1 ? ENUM.NEAREST_MIPMAP_NEAREST : ENUM.NEAREST;
     const linear = !(format === "rgba32f" && !floatLinearExt);
     if (mipLevels > 1)
       return linear ? ENUM.LINEAR_MIPMAP_LINEAR : ENUM.NEAREST_MIPMAP_NEAREST;
@@ -5246,7 +5254,7 @@ function createRealGL(gl, onViewportHeal) {
     canvasHeight = height;
     gl.viewport(0, 0, width, height);
   }
-  function createTarget(textureId, width, height, depth2, color) {
+  function createTarget(textureId, width, height, depth2, color, depthBits) {
     const fbo = gl.createFramebuffer();
     if (fbo === null)
       throw new Error("rune: createFramebuffer returned null");
@@ -5254,11 +5262,12 @@ function createRealGL(gl, onViewportHeal) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, textures.get(textureId) ?? null, 0);
     if (depth2) {
+      const depthFormat2 = depthBits === 24 ? gl.DEPTH_COMPONENT24 : depthBits === 32 ? gl.DEPTH_COMPONENT32F : gl.DEPTH_COMPONENT16;
       depthRenderbuffer = gl.createRenderbuffer();
       if (depthRenderbuffer === null)
         throw new Error("rune: createRenderbuffer returned null");
       gl.bindRenderbuffer(gl.RENDERBUFFER, depthRenderbuffer);
-      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, width, height);
+      gl.renderbufferStorage(gl.RENDERBUFFER, depthFormat2, width, height);
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthRenderbuffer);
     }
     const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
@@ -7909,9 +7918,9 @@ function withJournal(gl, journal) {
     ...gl.multiDrawElementsInstanced !== undefined ? {
       multiDrawElementsInstanced: (mode, elementBufferId, counts, instanceCounts, offsets, drawcount, twoByte) => gl.multiDrawElementsInstanced?.(mode, elementBufferId, counts, instanceCounts, offsets, drawcount, twoByte)
     } : {},
-    createTarget: (textureId, width, height, depth2, color) => {
-      const id = gl.createTarget(textureId, width, height, depth2, color);
-      journal.record({ kind: "createTarget", id, textureId, width, height, depth: depth2, color });
+    createTarget: (textureId, width, height, depth2, color, depthBits) => {
+      const id = gl.createTarget(textureId, width, height, depth2, color, depthBits);
+      journal.record({ kind: "createTarget", id, textureId, width, height, depth: depth2, color, ...depthBits !== undefined ? { depthBits } : {} });
       return id;
     },
     bindTarget: (targetId, clear) => gl.bindTarget(targetId, clear),
@@ -7956,7 +7965,7 @@ function applyOp(op, gl, sourceFor) {
       gl.createBuffer(op.data instanceof Float32Array ? op.data : toFloat32Array(op.data), op.usage);
       break;
     case "createTarget":
-      gl.createTarget(op.textureId, op.width, op.height, op.depth, op.color);
+      gl.createTarget(op.textureId, op.width, op.height, op.depth, op.color, op.depthBits);
       break;
     case "texImage2DFromSource": {
       const source = sourceFor?.(op.sourceKind) ?? null;
@@ -8133,13 +8142,13 @@ function createResourceSessionGL(raw, journal) {
       viewParent.delete(viewId);
       journal.record({ kind: "view.destroy", id: viewId });
     },
-    createTarget: (textureId, width, height, depth2, color) => {
-      const rawId = raw.createTarget(rawTex(textureId), width, height, depth2, color);
+    createTarget: (textureId, width, height, depth2, color, depthBits) => {
+      const rawId = raw.createTarget(rawTex(textureId), width, height, depth2, color, depthBits);
       const id = nextTarget++;
       targetMap.set(id, rawId);
       targetParent.set(id, textureId);
       touch(textureId);
-      journal.record({ kind: "target.create", id, textureId, width, height, depth: depth2, color });
+      journal.record({ kind: "target.create", id, textureId, width, height, depth: depth2, color, ...depthBits !== undefined ? { depthBits } : {} });
       return id;
     },
     bindTarget: (targetId, clear) => {
@@ -8251,7 +8260,7 @@ function createResourceSessionGL(raw, journal) {
         break;
       }
       case "target.create": {
-        const rawId = raw.createTarget(rawTex(op.textureId), op.width, op.height, op.depth, op.color);
+        const rawId = raw.createTarget(rawTex(op.textureId), op.width, op.height, op.depth, op.color, op.depthBits);
         targetMap.set(op.id, rawId);
         targetParent.set(op.id, op.textureId);
         touch(op.textureId);
@@ -8454,7 +8463,7 @@ function applyResOpGL(op, gl, sourceFor) {
       gl.createTextureView(op.textureId, { baseMipLevel: op.baseMipLevel, mipLevelCount: op.mipLevelCount });
       break;
     case "target.create":
-      gl.createTarget(op.textureId, op.width, op.height, op.depth, op.color);
+      gl.createTarget(op.textureId, op.width, op.height, op.depth, op.color, op.depthBits);
       break;
     default:
       break;
@@ -8756,7 +8765,7 @@ function createWebGL2Renderer(options) {
     const depth2 = surfaceOptions.depth ?? false;
     const color = surfaceOptions.color ?? (options.clear ?? DEFAULT_CLEAR2).color;
     const textureId = gl.createTexture(width, height);
-    const targetId = gl.createTarget(textureId, width, height, depth2, color);
+    const targetId = gl.createTarget(textureId, width, height, depth2, color, surfaceOptions.depthBits);
     let surfaceDisposed = false;
     const result = {
       targetId,

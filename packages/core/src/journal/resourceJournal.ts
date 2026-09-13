@@ -120,7 +120,7 @@ export type ResOp =
   | { readonly kind: 'texture.destroy'; readonly id: number }
   | { readonly kind: 'view.create'; readonly id: number; readonly textureId: number; readonly baseMipLevel?: number; readonly mipLevelCount?: number }
   | { readonly kind: 'view.destroy'; readonly id: number }
-  | { readonly kind: 'target.create'; readonly id: number; readonly textureId: number; readonly width: number; readonly height: number; readonly depth: boolean; readonly color: ClearColor2 }
+  | { readonly kind: 'target.create'; readonly id: number; readonly textureId: number; readonly width: number; readonly height: number; readonly depth: boolean; readonly color: ClearColor2; readonly depthBits?: 16 | 24 | 32 }
   | { readonly kind: 'target.destroy'; readonly id: number }
 
 /** Content manifest — what must be re-registered on the receiving

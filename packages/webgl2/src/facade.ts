@@ -11,14 +11,21 @@ export type GLImageSource =
   // VideoFrame is only available with WebCodecs, but the TS type knows about it
   | (typeof globalThis extends { VideoFrame: infer V } ? V : never)
 
-/** WebGL2 texture storage format (Task 67: HDR).
+/** WebGL2 texture storage format (Task 67: HDR; Task 197: the Hi-Z data channel).
  *  'rgba8' (default) — internalFormat RGBA8, upload (RGBA, UNSIGNED_BYTE).
  *  'rgba16f' — RGBA16F, upload (RGBA, HALF_FLOAT): 8 bytes/pixel.
  *  'rgba32f' — RGBA32F, upload (RGBA, FLOAT): 16 bytes/pixel.
- *  Storing float textures is core WebGL2; linear filtering of rgba16f is core,
- *  rgba32f — OES_texture_float_linear (without it MIN_FILTER degrades to
- *  NEAREST); rendering TO a float target — EXT_color_buffer_float. */
-export type GLTextureFormat = 'rgba8' | 'rgba16f' | 'rgba32f'
+ *  'r32f' — R32F, upload (RED, FLOAT): 4 bytes/texel, one float per texel —
+ *  the Hi-Z pyramid's data plane (the WebGL2 twin of WebGPU's r32float
+ *  storage tile). A DATA format, not a color: filters pin to NEAREST
+ *  (linear filtering of R32F needs OES_texture_float_linear — the pyramid
+ *  must not depend on it), and rendering TO an r32f target requires
+ *  EXT_color_buffer_float — createTarget's completeness check is the loud
+ *  refusal when the extension is absent. Storing float textures is core
+ *  WebGL2; linear filtering of rgba16f is core, rgba32f —
+ *  OES_texture_float_linear (without it MIN_FILTER degrades to NEAREST);
+ *  rendering TO a float target — EXT_color_buffer_float. */
+export type GLTextureFormat = 'rgba8' | 'rgba16f' | 'rgba32f' | 'r32f'
 
 export interface GLFacade {
   createProgram(vertex: string, fragment: string): number
@@ -272,13 +279,23 @@ export interface GLFacade {
    *  classic per-draw drawElements path verbatim. */
   multiDrawElementsInstanced?(mode: string, elementBufferId: number, counts: Int32Array, instanceCounts: Int32Array, offsets: Int32Array, drawcount: number, twoByte: boolean): void
   /** Render target: an FBO with a color texture (and optional depth).
-   *  targetId 0 — the canvas (a built-in target, not created). */
+   *  targetId 0 — the canvas (a built-in target, not created).
+   *
+   *  Task 197 — depthBits (default 16, the historical DEPTH_COMPONENT16):
+   *  24 → DEPTH_COMPONENT24, 32 → DEPTH_COMPONENT32F (a FLOAT depth buffer —
+   *  the exact f32 z the fragment shader computes, the parity anchor for
+   *  Hi-Z-style GPU cull passes: the cull compares f32 tile values against
+   *  what the attachment decided — a float attachment removes the
+   *  quantization gap between the two). WebGL2 core renderbuffer formats;
+   *  an incomplete FBO still throws loudly (the completeness check is the
+   *  capability probe — e.g. a float depth format a driver rejects). */
   createTarget(
     textureId: number,
     width: number,
     height: number,
     depth: boolean,
     color: readonly [number, number, number, number],
+    depthBits?: 16 | 24 | 32,
   ): number
   /** Switch the target: 0 = the canvas. clear — clear the target with its color
    *  (ignored for the canvas: BeginPass clears the canvas). */
