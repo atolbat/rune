@@ -1,37 +1,42 @@
-// occlusion/tier.js — Task 198: THE ONE TIER. Both backends, ONE code path.
+// occlusion/tier.js — THE ONE TIER. Both backends, ONE code path.
 //
 // Pre-198 the demo carried two tier files in two API dialects — wgTier.js
-// (gpu.*) and glTier.js (gl.*) — ~1200 lines of parallel mechanics. The
-// common bricks (packages/gl device.ts — createDevice) collapsed them:
-// every frame call below executes IDENTICALLY on WebGPU and WebGL2; the
-// per-backend mechanisms hide inside the bricks (compute vs transform
-// feedback, drawIndexedIndirect vs vertex-collapse, the arena vs the named
-// uniforms); the per-language shader SOURCES are data from shaders.js.
+// (gpu.*) and glTier.js (gl.*), ~1200 lines of parallel mechanics. Task
+// 198's common bricks (createDevice) collapsed them; Task 199 made the
+// frame ONE hizFrame() call; Task 200 finishes the sentence — the whole
+// Hi-Z SCENARIO is one hizScene() construction and one frame() call:
 //
-// THE FRAME (the whole pipeline — one syntax):
-//   1. THE Z PREPASS   device.drawInstanced → the pyramid's r32f level-0
-//                      tile (fs writes the exact depth; the target's depth
-//                      attachment keeps the NEAREST occluder per pixel)
-//   2. THE PYRAMID     pyr.build() — the 2×2 MAX chain: WG rides the
-//                      compute family (zToMip0 + reduceL, the Task-196
-//                      storage shape), GL rides FBO quads — the mechanism
-//                      is the backend's own, the CONTRACT is one (level 0
-//                      IS the z tile)
-//   3. THE CULL        culler.run(block) — WG: the compute kernel; GL: the
-//                      transform-feedback pass. Per-record verdicts.
-//   4. THE COLOR PASS  device.drawVisible — WG: the compact kernel + ONE
-//                      drawIndexedIndirect (GPU-driven, zero readbacks);
-//                      GL: ONE instanced draw + vertex collapse
-//   5. THE DEBUG STRIP device.drawQuad per pyramid level (toggled)
+//   const hiz = device.hizScene({ scene, shaders, geometry, pyramid, light })
+//   hiz.frame({ target: 0, camera: { mvp, eye }, occluders, culling: true })
 //
-// MOBILE-FIRST (Task 198): the canvas is full-bleed (CSS 100%×100%), the
-// renderers' own ResizeObservers re-derive the backing store from the live
-// CSS size × DPR (capped at 2 — a dpr-3 phone renders 2x, not 3x), the
-// projection takes the canvas's real aspect (portrait widens the fov), and
-// the WG canvas rides the facade's new MSAA 4x resolve (antialias: true).
-import { createDevice } from '../../dist/rune.esm.js?v=199'
-import { buildShaders } from './shaders.js?v=199'
-import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H, LEVELS } from './scene.js?v=199'
+// The programs (from the shader dictionary), the packed uniform lanes, the
+// GL dither's y-mirror height, the pyramid debug strip and the validation
+// surface all live INSIDE the brick now — the tier below is boot, canvas,
+// stats and gates only. A different scenario = a different dictionary +
+// declaration; this file stays the shape it is.
+//
+// THE FRAME (what hiz.frame() runs — the recipe):
+//   1. THE Z PREPASS   the first `occluders` records render into the
+//                      pyramid's r32f level-0 tile (fs writes the exact
+//                      depth; the tile's depth attachment keeps the NEAREST
+//                      occluder per pixel)
+//   2. THE PYRAMID     the 2×2 MAX chain (WG: the compute family; GL: FBO
+//                      quads — the backend's own mechanism, ONE contract)
+//   3. THE CULL        the per-record verdict kernel (WG: compute; GL: the
+//                      transform-feedback pass)
+//   4. THE COLOR PASS  the visible set (WG: compact + ONE drawIndexedIndirect,
+//                      GPU-driven, zero readbacks; GL: ONE instanced draw +
+//                      vertex collapse)
+//   5. THE DEBUG STRIP one panel quad per pyramid level (toggled)
+//
+// Task 200 — THE GL SUBMIT FIX rides the device: submit() runs the
+// renderer's SERVICE boundary (canvas-state heal + error drain), never the
+// renderer's own recorded tape — the empty BeginPass used to CLEAR THE
+// CANVAS after every frame (the «WebGL2 renders empty» field report: stats
+// alive, canvas the clear color).
+import { createDevice } from '../../dist/rune.esm.js?v=200'
+import { buildShaders } from './shaders.js?v=200'
+import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H } from './scene.js?v=200'
 const SKY = [0.045, 0.055, 0.09, 1]
 const LIGHT = [0.5, 0.8, 0.35]
 const SURF_W = 480, SURF_H = 270
@@ -85,122 +90,48 @@ export async function buildTier(deps) {
     attachControls(displayCanvas)
   }
 
-  // ── THE BRICKS — one construction syntax ───────────────────────────────
-  const sceneHandle = device.scene({
-    total: N,
-    occluders: K,
-    words: sceneWords,
-    recordsF32: sceneF32.subarray(INST_OFF),
-    flagsWord: FLAGS_OFF,
-    recordsWord: INST_OFF,
-    stride: scene.STRIDE,
-    fields: scene.FIELDS,
+  // ── THE SCENARIO — ONE construction (Task 200: the programs, the culler,
+  //    the uniform lanes, the dither mirror and the debug strip all join
+  //    the recipe inside the brick; the dictionary stays the scenario's
+  //    own data — buildShaders(scene) is the whole per-scenario surface) ──
+  const hiz = device.hizScene({
+    scene: device.scene({
+      total: N,
+      occluders: K,
+      words: sceneWords,
+      recordsF32: sceneF32.subarray(INST_OFF),
+      flagsWord: FLAGS_OFF,
+      recordsWord: INST_OFF,
+      stride: scene.STRIDE,
+      fields: scene.FIELDS,
+    }),
+    shaders: buildShaders(scene),
+    geometry: device.geometry(BOX_VERTS, BOX_INDICES),
+    pyramid: { width: HIZ_W, height: HIZ_H },
+    surface: { width: SURF_W, height: SURF_H },
+    light: LIGHT,
   })
-  const pyr = device.pyramid(HIZ_W, HIZ_H)
-  const box = device.geometry(BOX_VERTS, BOX_INDICES)
-  const surface = device.surface(SURF_W, SURF_H, { depth: true })
+  const surface = hiz.surface
+  const sceneHandle = hiz.scene
 
-  const S = buildShaders(scene)
-  // Task 199 — cull:'back' on both depth passes: the consistent outward
-  // winding (see scene.js) lets the back faces drop — the coplanar
-  // box-bottom/ground-top z-fight (the flickering triangles at the
-  // buildings' bases) dies at the source, and the fragment count halves.
-  // (The WG leg mirrors GL's CCW front with frontFace 'cw' inside the
-  // brick — the y-flip convention, see device.ts.)
-  const zPass = device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: S.z.wg, gl: S.z.gl })
-  const colorPass = device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: S.color.wg, gl: S.color.gl })
-  const panelPass = device.program({ depth: { test: 'always', write: false }, wg: S.panel.wg, gl: S.panel.gl })
-  const culler = device.occlusionCuller(sceneHandle, pyr, {
-    wgsl: S.cull.wg.code,
-    glsl: S.cull.gl,
-    entry: S.cull.wg.entry,
-    lanes: S.cull.lanes,
-    uniformBytes: S.cull.wg.uniformBytes,
-  })
-  // THE RECIPE AS A BRICK (Task 199): the whole Hi-Z frame in ONE run()
-  // call — z prepass → pyramid → cull → the visible draw; the per-frame
-  // `occluders` is THE POLICY (the prepass instance count: the boot
-  // default 23, the whole city N, anything between — no re-compiles)
-  const hiz = device.hizFrame({
-    scene: sceneHandle,
-    pyramid: pyr,
-    culler,
-    zPass,
-    colorPass,
-    geometry: box,
-  })
-
-  // ── the packed uniform blocks (one layout per program — the lanes both
-  //    backends' shaders agree on; see shaders.js) ─────────────────────────
-  const zBlock = new Float32Array(16)
-  const cullBlock = new Float32Array(20)
-  const colorBlock = new Float32Array(28)
-  const panelBlock = new Float32Array(8)
-
-  function targetHeight(targetId) {
-    if (targetId === 0 && displayCanvas !== null) return displayCanvas.height
-    return SURF_H
-  }
-
-  // ── THE FRAME — ONE code path, both backends ────────────────────────────
-  // `occluders` — THE POLICY (Task 199): how many records write the z
-  // prepass this frame. The boot default: the 23 big occluders. The demo's
-  // «City occludes» toggle passes N — every colored box writes depth and
-  // the whole scene is tested against itself.
+  // ── THE FRAME — one sentence (the whole Hi-Z pipeline; `occluders` is
+  //    THE POLICY: how many records write the z prepass — the boot default
+  //    K=23, the whole city N, anything between; `culling: false` is the
+  //    parity gate's OFF leg) ──────────────────────────────────────────────
   function renderTo(targetId, mvp, eye, hizOn, debug, occluders = K) {
-    // 0. THE SCENARIO'S LANES — the blocks are OPAQUE data to the bricks;
-    //    the demo patches its own words (the cull block's misc.x = the
-    //    parity gate's hizOn flag; the color block's misc.x = the GL
-    //    dither's y-mirror height — the WG shader ignores the lane)
-    zBlock.set(mvp)
-    cullBlock.set(mvp)
-    cullBlock[16] = hizOn ? 1 : 0
-    colorBlock.set(mvp)
-    colorBlock[16] = targetHeight(targetId)
-    colorBlock[20] = LIGHT[0]; colorBlock[21] = LIGHT[1]; colorBlock[22] = LIGHT[2]; colorBlock[23] = 0
-    colorBlock[24] = eye[0]; colorBlock[25] = eye[1]; colorBlock[26] = eye[2]; colorBlock[27] = 1
-    // 1..4. THE WHOLE Hi-Z PIPELINE — ONE brick call (the z prepass over
-    //    the first `occluders` records, the 2×2 MAX pyramid, the per-record
-    //    verdicts, the GPU-driven visible draw)
-    hiz.run({
+    hiz.frame({
       target: targetId,
-      occluders: Math.max(0, Math.min(N, occluders | 0)),
-      zUniforms: zBlock,
-      cullUniforms: cullBlock,
-      colorUniforms: colorBlock,
-      indexCount: 36,
+      camera: { mvp, eye },
+      culling: hizOn !== 0,
+      pyramidView: debug === true,
+      occluders,
     })
-    // 5. THE DEBUG STRIP — one panel quad per pyramid level (the info lane
-    //    carries the level's flat offset + dims — WG reads the storage, GL
-    //    clamps its texture fetch)
-    if (debug) {
-      const offsets = pyr.offsets ?? []
-      for (let L = 0; L < LEVELS; L++) {
-        const w = 2.0 / LEVELS
-        panelBlock[0] = -1 + L * w + 0.01
-        panelBlock[1] = -0.97
-        panelBlock[2] = -1 + (L + 1) * w - 0.01
-        panelBlock[3] = -0.55
-        panelBlock[4] = offsets[L] ?? 0
-        panelBlock[5] = pyr.dims[L].w
-        panelBlock[6] = pyr.dims[L].h
-        panelBlock[7] = 0
-        device.drawQuad({
-          target: targetId,
-          clear: false,
-          program: panelPass,
-          pyramid: pyr,
-          level: L,
-          uniforms: panelBlock,
-        })
-      }
-    }
     device.submit()
   }
 
   // ── stats (the brick normalizes: WG args-buffer readback / GL flag sweep)
   function readStats() {
-    return device.readCullStats(sceneHandle)
+    return hiz.readStats()
   }
 
   // ── the snapshot blit (software WG — zero presents) ─────────────────────
@@ -234,6 +165,7 @@ export async function buildTier(deps) {
   //    pyramid; the texture-based pyramid reads per level) ─────────────────
   if (typeof window !== 'undefined' && device.gpu !== null) {
     const gpu = device.gpu
+    const pyr = hiz.pyramid
     window.__hizDebug = {
       note: 'the common-bricks tier — pyramidAt/ztile/stats read the storage pyramid',
       async pyramidAt(level) {
@@ -268,17 +200,17 @@ export async function buildTier(deps) {
       ? `WebGL2 — FBO pyramid + TF cull + vertex-collapse draw${device.antialias ? ' · context MSAA' : ''}`
       : `WebGPU — storage pyramid + compute cull + one drawIndexedIndirect${device.antialias ? ' · MSAA 4x resolve' : ''}`,
     drawsLine: backend === 'webgl2'
-      ? `draws: 1 (instanced, vertex-collapse) · TF passes: 1 · ${LEVELS - 1} reduce quads`
-      : `draws: 1 (indirect, GPU-driven) · dispatches: 2 (cull + compact) · ${LEVELS - 1} reduce quads`,
+      ? `draws: 1 (instanced, vertex-collapse) · TF passes: 1 · ${hiz.pyramid.levels - 1} reduce quads`
+      : `draws: 1 (indirect, GPU-driven) · dispatches: 2 (cull + compact) · ${hiz.pyramid.levels - 1} reduce quads`,
     canvas: displayCanvas,
     surface,
     renderTo,
     frame,
     readStats,
     aspect,
-    // the GL error drain rides device.submit() (the renderer's frame
-    // boundary); WG surfaces through the onGpuError channel — nothing to
-    // drain per frame here.
+    // Task 200 — the submit fix lives in the device (the GL service
+    // boundary: the canvas-state heal + the error drain, NO empty pass);
+    // WG surfaces through the onGpuError channel — nothing to drain here.
     drain: null,
     dispose() {
       try { device.dispose() } catch { /* a lost device is already dead */ }

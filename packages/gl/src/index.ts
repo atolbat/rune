@@ -16,13 +16,20 @@ export type { WebGpuRenderer, WebGpuRendererOptions, GpuFrameContext, GpuRecorde
 // demos' two API dialects (gpu.* vs gl*) collapse into one syntax: the
 // scene/pyramid/program/kernel/drawVisible bricks route to the backend's
 // own mechanisms (compute vs transform feedback, indirect vs collapse).
+// Task 200 adds the SCENARIO brick (hizScene) — the dictionary + handles
+// become a one-call frame — and re-exports the clean spatial structures
+// (octree + BVH) so the dist surface carries them for the demos.
 export { createDevice } from './device.ts'
 export type {
   RenderDevice, DeviceOptions, DeviceBackend, DeviceClear,
   SceneLayout, SceneHandle, ProgramSpec, ProgramHandle, GeometryHandle,
   PyramidHandle, CullerSpec, CullerHandle, DrawOptions, CullStats,
   DeviceSurface, UniformLane, GlAttrDecl,
+  HizFrameSpec, HizFrameCall, HizFrameHandle,
+  HizPassSources, HizShaderDict, HizSceneSpec, HizSceneFrame, HizSceneHandle,
 } from './device.ts'
+export { buildOctree, buildBVH, aabbOutsideFrustum, aabbInsideFrustum, frustumPlanes } from '@rune/core'
+export type { SpatialBox, SpatialIndex } from '@rune/core'
 
 // M5 (Task 73): feed dual-bind — renderer.feed() on both backends.
 // Channel: T0/T1/T2 — SAB/local ring (.buffer → to the worker via attachFeed),

@@ -45,8 +45,16 @@ const sums = await page.evaluate(() => {
 console.log('post-draw canvas checksums:', JSON.stringify(sums))
 // the zero rows are the z-PREPASS draws (readPixels then reads the bound
 // r32f FBO, not the canvas); the nonzero rows are the COLOR PASS — the
-// canvas itself, every pixel lit. LIVE = any color row with real content.
+// canvas itself. LIVE = any color row with REAL content — and "content"
+// means ABOVE THE CLEAR FLOOR (Task 200's lesson: the 199 form of this
+// gate accepted a bare clear — sum > 0 and alpha > 0 are vacuously true
+// for the sky color; the phone's empty canvas sailed through it). The
+// floor: the clear color's own sum (r+g+b ≈ 48/px) × 1.2 — a rendered
+// city averages ~90/px; a cleared canvas cannot pass.
+const CLEAR_SUM = 255 * (0.045 + 0.055 + 0.09) // the sky clear, per pixel
 const colorRows = sums.filter(s => s.sum > 0)
+const floorSum = CLEAR_SUM * 1.2 * sums.reduce((acc, s) => acc + (s.sum > 0 ? s.w * s.h : 0), 0)
 const ok = colorRows.length > 0 && colorRows.every(s => s.lit === s.w * s.h) && colorRows.length !== sums.length
-console.log(ok ? 'GL CANVAS CONTENT: LIVE (the color pass fills every canvas pixel; the zero rows are the prepass FBO reads)' : 'GL CANVAS CONTENT: EMPTY/BROKEN')
+  && colorRows.reduce((acc, s) => acc + s.sum, 0) > floorSum
+console.log(ok ? 'GL CANVAS CONTENT: LIVE (the color pass fills the canvas ABOVE the clear floor)' : 'GL CANVAS CONTENT: EMPTY/BROKEN (at or below the clear floor — a wiped canvas)')
 await browser.close()

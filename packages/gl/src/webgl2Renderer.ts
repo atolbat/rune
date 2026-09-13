@@ -123,6 +123,17 @@ export interface WebGL2Renderer {
   frame(callback: (ctx: FrameContext, record: Recorder) => void): FrameHandle
   resize(cssWidth: number, cssHeight: number): void
   step(nowMs: number): void
+  /** Task 200 — THE MANUAL-FRAME SERVICE BOUNDARY: run the frame-boundary
+   *  services WITHOUT the renderer's own recorded tape. A raw-facade driver
+   *  (the common-bricks device) draws its own passes and closes the frame
+   *  with this instead of step(): step() always runs one BeginPass/EndPass
+   *  pair — an EMPTY tape for a raw driver — and the executor's BeginPass
+   *  BINDS THE CANVAS AND CLEARS IT, wiping everything the driver just drew
+   *  (the «WebGL2 renders empty» field report: stats alive, canvas the clear
+   *  color). service() keeps what the boundary is FOR: the frame-context
+   *  tick, the canvas-state self-heal (Task 129), and the GL error drain
+   *  (Task 167's probe cadence) — nothing that touches a pixel. */
+  service(nowMs: number): void
   start(): void
   stop(): void
   /** Full teardown: stop rAF + disconnect the ResizeObserver + delete all
@@ -796,6 +807,18 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     drainGlErrors()
   }
 
+  /** Task 200 — the manual-frame service boundary (see the interface doc):
+   *  the frame-boundary services WITHOUT the recorded tape — the canvas is
+   *  NEVER re-bound or cleared here. The raw-facade drivers' close call. */
+  function service(nowMs: number): void {
+    updateFrameContext(nowMs)
+    statsCollector?.beginFrame()
+    transients.beginFrame()
+    syncCanvasState() // Task 129: the buffer/viewport self-heal, every frame
+    statsCollector?.endFrame()
+    drainGlErrors() // Task 167: the probe cadence + the hunting-mode snap
+  }
+
   /** Consecutive frame-exception count (a clean frame resets it). */
   let frameErrorCount = 0
 
@@ -1072,6 +1095,7 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     frame,
     resize,
     step,
+    service,
     start,
     stop,
     dispose,

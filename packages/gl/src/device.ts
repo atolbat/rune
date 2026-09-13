@@ -275,6 +275,96 @@ export interface HizFrameHandle {
   run(call: HizFrameCall): void
 }
 
+// ─── Task 200 — THE SCENARIO BRICK: hizScene ──────────────────────────────
+// The recipe brick (hizFrame) took the SEQUENCE off the scenario's hands;
+// hizScene takes the MECHANICS off them too: the programs (from the shader
+// DICTIONARY — the per-language sources as data), the culler, the packed
+// uniform blocks (a plain `camera` object in, the lanes packed inside),
+// the dither's y-mirror height (the brick KNOWS the target's height — the
+// scenario can no longer forget the lane), the pyramid debug strip, and
+// the validation surface. The tier code collapses to:
+//
+//     const hiz = device.hizScene({ scene, shaders, geometry, pyramid, light })
+//     hiz.frame({ target: 0, camera: { mvp, eye }, occluders, culling: true })
+//     await hiz.readStats()
+//
+// A different scenario = a different dictionary + declaration; the frame
+// call stays a sentence. The uniform LANE CONTRACT the brick packs:
+//   z:     u_mvp (mat4)
+//   cull:  u_mvp (mat4) + u_misc (vec4: x = the culling gate)
+//   color: u_mvp (mat4) + u_misc (vec4: x = the GL dither's y-mirror height)
+//         + u_light (vec4) + u_cam (vec4)
+//   panel: u_rect (vec4) + u_info (vec4)
+
+type PyramidSpec = PyramidHandle | { readonly width: number; readonly height: number }
+
+/** One draw-pass column of the scenario's shader dictionary (z / color /
+ *  panel) — the exact ProgramSpec shape the device bricks take. */
+export interface HizPassSources {
+  readonly wg: { readonly code: string; readonly attrs: readonly (number | GpuAttrSlot)[]; readonly hasTextures?: boolean }
+  readonly gl: { readonly vs: string; readonly fs: string; readonly attrs: readonly GlAttrDecl[]; readonly lanes: readonly UniformLane[] }
+}
+
+/** The scenario's whole shader dictionary (the demo's buildShaders()
+ *  product): z / color / panel pass columns + the cull kernel pair. */
+export interface HizShaderDict {
+  readonly z: HizPassSources
+  readonly color: HizPassSources
+  readonly panel: HizPassSources
+  readonly cull: {
+    readonly wg: { readonly code: string; readonly entry?: string; readonly uniformBytes: number }
+    readonly gl: string
+    readonly lanes: readonly { readonly name: string }[]
+  }
+}
+
+export interface HizSceneSpec {
+  /** the scene (the instance stream) — device.scene()'s handle. */
+  readonly scene: SceneHandle
+  /** the shader dictionary — the per-language sources as data. */
+  readonly shaders: HizShaderDict
+  /** the instanced geometry (the boxes, the walls — whatever the records
+   *  place). Its index count feeds the prepass/color draws. */
+  readonly geometry: GeometryHandle
+  /** an existing pyramid handle, or the tile size to build one. */
+  readonly pyramid: PyramidSpec
+  /** the validation/readback surface ({w, h} — the parity gates' channel). */
+  readonly surface?: { readonly width: number; readonly height: number }
+  /** the scenario's light direction (xyz; the color pass lane). */
+  readonly light?: ArrayLike<number>
+}
+
+export interface HizSceneFrame {
+  /** 0 = the canvas; otherwise a target id (the brick's own surface, or
+   *  any target the device knows). */
+  readonly target: number
+  /** the camera: the view-projection (column-major mat4) + the eye (xyz). */
+  readonly camera: { readonly mvp: ArrayLike<number>; readonly eye: ArrayLike<number> }
+  /** THE OCCLUDER POLICY: how many records write the z prepass (default:
+   *  the scene's boot occluders). */
+  readonly occluders?: number
+  /** the culling gate (false = the Hi-Z OFF parity leg). Default true. */
+  readonly culling?: boolean
+  /** the pyramid debug strip. Default false. */
+  readonly pyramidView?: boolean
+  /** clear the color target (default true). */
+  readonly clear?: boolean
+  /** per-frame light override (xyz). */
+  readonly light?: ArrayLike<number>
+}
+
+export interface HizSceneHandle {
+  /** THE WHOLE Hi-Z FRAME as one sentence (prepass → pyramid → cull →
+   *  draw → the debug strip if asked). */
+  frame(call: HizSceneFrame): void
+  /** the per-record verdict counters (drawn / frustum / occluded / straddle). */
+  readStats(): Promise<CullStats>
+  readonly pyramid: PyramidHandle
+  /** the validation surface (null when the spec carried none). */
+  readonly surface: DeviceSurface | null
+  readonly scene: SceneHandle
+}
+
 export interface CullStats {
   readonly drawn: number
   readonly frustum: number
@@ -319,6 +409,10 @@ export interface RenderDevice {
   occlusionCuller(scene: SceneHandle, pyramid: PyramidHandle, spec: CullerSpec): CullerHandle
   /** Task 199 — the whole Hi-Z frame in ONE call (the recipe as a brick). */
   hizFrame(spec: HizFrameSpec): HizFrameHandle
+  /** Task 200 — THE SCENARIO BRICK: the dictionary + the handles become a
+   *  one-call frame — the programs, the culler, the packed uniform blocks,
+   *  the dither mirror and the debug strip all live here. */
+  hizScene(spec: HizSceneSpec): HizSceneHandle
   readCullStats(scene: SceneHandle): Promise<CullStats>
   surface(width: number, height: number, options?: { depth?: boolean }): DeviceSurface
   submit(): void
@@ -440,6 +534,99 @@ const QUAD_STRIP = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1])
 const WG_USAGE = { STORAGE: 0x80, INDIRECT: 0x100, COPY_SRC: 0x4, COPY_DST: 0x8 }
 
 // ─── the device boot ──────────────────────────────────────────────────────
+
+/** Task 200 — the scenario brick's shared body: backend-agnostic by
+ *  construction (it drives ONLY the RenderDevice surface — every call
+ *  routes to the backend's own mechanisms inside the bricks below). */
+function attachHizScene(device: RenderDevice, spec: HizSceneSpec): HizSceneHandle {
+  const pyr = (spec.pyramid as PyramidHandle).build !== undefined
+    ? spec.pyramid as PyramidHandle
+    : device.pyramid((spec.pyramid as { width: number; height: number }).width, (spec.pyramid as { width: number; height: number }).height)
+  // the programs — the Hi-Z-intrinsic pass states (the recipe's own):
+  // both depth passes test 'less' and write; both cull the back faces (the
+  // consistent-winding contract); the debug panels ride over the scene.
+  const zPass = device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: spec.shaders.z.wg, gl: spec.shaders.z.gl })
+  const colorPass = device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: spec.shaders.color.wg, gl: spec.shaders.color.gl })
+  const panelPass = device.program({ depth: { test: 'always', write: false }, wg: spec.shaders.panel.wg, gl: spec.shaders.panel.gl })
+  const culler = device.occlusionCuller(spec.scene, pyr, {
+    wgsl: spec.shaders.cull.wg.code,
+    glsl: spec.shaders.cull.gl,
+    entry: spec.shaders.cull.wg.entry,
+    lanes: spec.shaders.cull.lanes,
+    uniformBytes: spec.shaders.cull.wg.uniformBytes,
+  })
+  const hiz = device.hizFrame({ scene: spec.scene, pyramid: pyr, culler, zPass, colorPass, geometry: spec.geometry })
+  const surf = spec.surface !== undefined
+    ? device.surface(spec.surface.width, spec.surface.height, { depth: true })
+    : null
+  // the scenario's light (the per-frame call may override)
+  const baseLight = spec.light !== undefined ? [spec.light[0] ?? 0.5, spec.light[1] ?? 0.8, spec.light[2] ?? 0.35] : [0.5, 0.8, 0.35]
+  // the packed blocks — the scenario never touches a lane again
+  const zBlock = new Float32Array(16)
+  const cullBlock = new Float32Array(20)
+  const colorBlock = new Float32Array(28)
+  const panelBlock = new Float32Array(8)
+  const indexCount = spec.geometry.indices !== undefined ? spec.geometry.indices.length : 36
+
+  /** The dither's y-mirror height for a target: the canvas's own backing
+   *  store (target 0), the brick's surface, or the surface-height fallback
+   *  (the GL lane only matters where parity is read — the surface). */
+  function targetHeight(targetId: number): number {
+    if (targetId === 0) return device.canvas.height
+    if (surf !== null && targetId === surf.targetId) return surf.height
+    return surf !== null ? surf.height : device.canvas.height
+  }
+
+  function frame(call: HizSceneFrame): void {
+    const occluders = call.occluders !== undefined
+      ? Math.max(0, Math.min(spec.scene.total, call.occluders | 0))
+      : spec.scene.occluders
+    const light = call.light !== undefined ? call.light : baseLight
+    // the lane packing (the contract above): mvp, the gates, the mirror
+    zBlock.set(call.camera.mvp, 0)
+    cullBlock.set(call.camera.mvp, 0)
+    cullBlock[16] = call.culling === false ? 0 : 1
+    colorBlock.set(call.camera.mvp, 0)
+    colorBlock[16] = targetHeight(call.target)
+    colorBlock[20] = light[0]; colorBlock[21] = light[1]; colorBlock[22] = light[2]; colorBlock[23] = 0
+    colorBlock[24] = call.camera.eye[0]; colorBlock[25] = call.camera.eye[1]; colorBlock[26] = call.camera.eye[2]; colorBlock[27] = 1
+    // 1..4 — the recipe brick (z prepass over the first `occluders` records
+    // → the 2×2 MAX pyramid → the per-record verdicts → the visible draw)
+    hiz.run({
+      target: call.target,
+      occluders,
+      zUniforms: zBlock,
+      cullUniforms: cullBlock,
+      colorUniforms: colorBlock,
+      indexCount,
+      clear: call.clear,
+    })
+    // 5. the debug strip — one panel quad per pyramid level
+    if (call.pyramidView === true) {
+      const w = 2.0 / pyr.levels
+      const offsets = pyr.offsets ?? []
+      for (let L = 0; L < pyr.levels; L++) {
+        panelBlock[0] = -1 + L * w + 0.01
+        panelBlock[1] = -0.97
+        panelBlock[2] = -1 + (L + 1) * w - 0.01
+        panelBlock[3] = -0.55
+        panelBlock[4] = offsets[L] ?? 0
+        panelBlock[5] = pyr.dims[L].w
+        panelBlock[6] = pyr.dims[L].h
+        panelBlock[7] = 0
+        device.drawQuad({ target: call.target, clear: false, program: panelPass, pyramid: pyr, level: L, uniforms: panelBlock })
+      }
+    }
+  }
+
+  return {
+    frame,
+    readStats: () => device.readCullStats(spec.scene),
+    pyramid: pyr,
+    surface: surf,
+    scene: spec.scene,
+  }
+}
 
 /** Task 198 — createDevice: ONE boot syntax for both backends. The renderers
  *  own the canvas lifecycle (DPR-aware backing store, ResizeObservers); the
@@ -805,6 +992,9 @@ ${REDUCE}`
     drawQuad,
     occlusionCuller,
     hizFrame,
+    // Task 200 — the scenario brick: the same attachHizScene body drives
+    // BOTH device closures (it calls only the interface's own bricks)
+    hizScene: (spec: HizSceneSpec) => attachHizScene(device, spec),
     readCullStats,
     surface,
     debugSceneWords: (sceneHandle: SceneHandle, bytes: number) => {
@@ -997,7 +1187,9 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     // flag ∉ {1,4} to a degenerate position — GPU-side visibility
     bindAttrs(prog, s, optionsIn.geometry.vertices, true)
     if (optionsIn.geometry.indices !== undefined) {
-      gl.drawElements(elementBufferOf(optionsIn.geometry.indices), optionsIn.indexCount ?? 36, s.handle.total, true)
+      // Task 200 — the index-width honesty (the drawInstanced twin always
+      // derived it; the hardcode silently misdraws any u32-indexed scene)
+      gl.drawElements(elementBufferOf(optionsIn.geometry.indices), optionsIn.indexCount ?? 36, s.handle.total, optionsIn.geometry.indices instanceof Uint16Array)
     }
   }
 
@@ -1127,7 +1319,7 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     return { targetId: fixed.targetId, width, height, read: () => fixed.read() }
   }
 
-  return {
+  const device: RenderDevice = {
     backend: 'webgl2',
     canvas: options.canvas,
     renderer,
@@ -1145,15 +1337,27 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     drawQuad,
     occlusionCuller,
     hizFrame,
+    // Task 200 — the scenario brick: the same attachHizScene body drives
+    // BOTH device closures (it calls only the interface's own bricks)
+    hizScene: (spec: HizSceneSpec) => attachHizScene(device, spec),
     readCullStats,
     surface,
     submit(): void {
-      // the GL tier's drain: the renderer's frame boundary reads the GL
-      // error queue (the honest cadence — one drain per submitted frame)
-      try { renderer.step(Date.now()) } catch { /* the frame-error path already went through onGlError */ }
+      // Task 200 — THE GL SUBMIT ROOT FIX: the renderer's frame boundary is
+      // the SERVICE pass, not step(). step() runs the renderer's own
+      // recorded tape — an EMPTY BeginPass/EndPass for a raw-facade driver —
+      // and the executor's BeginPass BINDS THE CANVAS AND CLEARS IT. Every
+      // submitted frame ended with the demo's finished color pass being
+      // wiped to the clear color: stats alive, gates alive (they read the
+      // SURFACE), the visible canvas empty — the phone field report, and
+      // the headless "stale composite" the probe180 dossier had misread as
+      // a screenshot quirk. service() keeps the boundary's real jobs —
+      // the canvas-state heal + the GL error drain — and touches no pixel.
+      try { renderer.service(Date.now()) } catch { /* the error drain already went through onGlError */ }
     },
     dispose(): void {
       try { renderer.dispose() } catch { /* already dead */ }
     },
   }
+  return device
 }

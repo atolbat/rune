@@ -30,7 +30,7 @@
 //     height; WG reads @builtin(position).xy as-is). This kills the fog
 //     banding — the «flickering gray triangles on the empty spaces» field
 //     report — without adding a single cross-tier ULP.
-import { HIZ_W, HIZ_H, LEVELS, MAX_LEVEL, LEVEL_DIMS, LEVEL_OFF } from './scene.js?v=199'
+import { HIZ_W, HIZ_H, LEVELS, MAX_LEVEL, LEVEL_DIMS, LEVEL_OFF } from './scene.js?v=200'
 
 const SKY = 'vec3<f32>(0.045, 0.055, 0.09)'
 const SKY_GLSL = 'vec3(0.045, 0.055, 0.09)'
@@ -168,10 +168,34 @@ void main() { o = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0); }`,
     var py0 = i32(floor(y0)); var py1 = i32(ceil(y1));
     px0 = max(px0, 0); py0 = max(py0, 0);
     px1 = min(px1, ${HIZ_W}); py1 = min(py1, ${HIZ_H});
+    // Task 200 — THE ONE-TEXEL GUARD (the cross-compiler ULP whetstone): the
+    // projected rect rides fp32 mul/add chains the two compiler stacks may
+    // contract differently (fma-vs-separate rounding); a ULP flip at an
+    // integer boundary moves floor/ceil by one texel INWARD — the tile set
+    // would lose the box's own edge texels, zmax under-reports, and a
+    // VISIBLE box over-culls (the phone's city-parity FAIL). Widening by
+    // one texel per side can only GROW the sampled max — conservative on
+    // every backend, knife-edge-proof.
+    px0 = max(px0 - 1, 0); py0 = max(py0 - 1, 0);
+    px1 = min(px1 + 1, ${HIZ_W}); py1 = min(py1 + 1, ${HIZ_H});
     if (px1 > px0 && py1 > py0) {
       let rw = px1 - px0; let rh = py1 - py0;
-      var L = i32(ceil(log2(f32(max(rw, rh)))));
-      L = clamp(L, 0, ${MAX_LEVEL});
+      // Task 200 — THE INTEGER MIP (the log2 knife-edge): ceil(log2(s)) on an
+      // exact power of two sits ONE rounding from ±1 mip on independent
+      // compilers — a finer mip under-reports zmax (the over-cull), a
+      // coarser one blurs the test. The COUNT FORM — the smallest L with
+      // 2^L ≥ s — is ceil(log2(s)) exactly, in pure integer ops, and the
+      // while-shift loop is the 100%-portable spelling (countLeadingZeros
+      // is fine on Tint but ANGLE's ESSL3 table rejects findMSB — the
+      // field-proven lesson: one loop shape, bit-identical on every
+      // backend, ≤ 9 iterations for a half-res tile).
+      let s = max(rw, rh);
+      var L = 0;
+      loop {
+        if ((1u << u32(L)) >= u32(s)) { break; }
+        L = L + 1;
+      }
+      L = min(L, ${MAX_LEVEL});
       let info = levelInfo(u32(L));
       let lw = i32(info.y); let lh = i32(info.z);
       let tx0 = u32(px0) >> u32(L); let tx1 = min(u32(px1 - 1) >> u32(L), u32(lw) - 1u);
@@ -282,10 +306,22 @@ void main() {
   if (u_misc.x > 0.5) {
     int px0 = max(int(floor(x0)), 0), px1 = min(int(ceil(x1)), ${HIZ_W});
     int py0 = max(int(floor(y0)), 0), py1 = min(int(ceil(y1)), ${HIZ_H});
+    // Task 200 — THE ONE-TEXEL GUARD (the WG twin's comment): one texel per
+    // side, floor-and-ceil outward — the sampled max only grows, the
+    // fma-contraction ULP knife-edge at the rect edges is absorbed.
+    px0 = max(px0 - 1, 0); py0 = max(py0 - 1, 0);
+    px1 = min(px1 + 1, ${HIZ_W}); py1 = min(py1 + 1, ${HIZ_H});
     if (px1 > px0 && py1 > py0) {
       int rw = px1 - px0, rh = py1 - py0;
-      int L = int(ceil(log2(float(max(rw, rh)))));
-      L = clamp(L, 0, ${MAX_LEVEL});
+      // Task 200 — THE INTEGER MIP: the COUNT FORM — the smallest L with
+      // 2^L ≥ s — is ceil(log2(s)) exactly, pure integer ops, no builtins
+      // (ANGLE's ESSL3 table rejects findMSB — the compile error the GL
+      // tier's fallback field report carried). The while-shift is the WG
+      // twin's exact loop shape — bit-identical verdicts everywhere.
+      int s = max(rw, rh);
+      int L = 0;
+      while ((1 << L) < s) { L++; }
+      L = min(L, ${MAX_LEVEL});
       int lw = LD[L].x, lh = LD[L].y;
       int tx0 = px0 >> L, tx1 = min((px1 - 1) >> L, lw - 1);
       int ty0 = py0 >> L, ty1 = min((py1 - 1) >> L, lh - 1);

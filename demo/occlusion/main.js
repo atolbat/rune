@@ -29,11 +29,23 @@
 // the shell's WebGPU/WebGL2 radios only choose the backend string. The
 // live camera takes the canvas's real aspect (portrait widens the fov),
 // the canvas is full-bleed and DPR-aware (the renderers' own observers).
-import { buildTier } from './tier.js?v=199'
+//
+// Task 200 — THE FIELD-REPORT FIXES: (a) the GL submit now runs the
+// renderer's SERVICE boundary (the empty recorder pass used to CLEAR the
+// canvas after every frame — «На вебгл вообще пусто» while the stats
+// counted); (b) the cull kernels pick the Hi-Z mip in PURE INTEGER ops
+// (bitLength === ceil(log2)) — two compiler stacks can no longer disagree
+// on the level and over-cull a visible box; (c) the cross-tier gate's
+// structural diff is NOISE-AWARE (a ≥2-quanta 5-bit difference — the
+// phone's 48–65% Δ1 fog/dither noise floor can never cross it); (d) the
+// CPU spatial gate: the octree + the BVH (clean, in @rune/core) answer
+// the same frustum question the GPU kernel does.
+import { buildTier } from './tier.js?v=200'
 import {
   createScene, cameraAt, VAL_CAMERAS,
   HIZ_W, HIZ_H, LEVELS,
-} from './scene.js?v=199'
+} from './scene.js?v=200'
+import { buildOctree, buildBVH, frustumPlanes } from '../../dist/rune.esm.js?v=200'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -48,7 +60,7 @@ const democtl = { pause() {}, resume() {} }
 const shell = window.RuneDemoShell.mount({
   layout: 'page',
   title: 'Hi-Z occlusion culling',
-  desc: 'Hierarchical Z-buffer culling, GPU-driven: a depth prepass, a reduced-Z pyramid, a cull pass that decides visibility, then the visible set — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts): ONE demo tier, one syntax — WebGPU (compute + an indirect draw) and WebGL2 (transform feedback + vertex collapse) run the identical frame code. Task 199: back-face culling kills the base-flicker, the occluder count is a per-frame policy (try «City occludes»), and the whole frame is ONE hizFrame() call.',
+  desc: 'Hierarchical Z-buffer culling, GPU-driven: a depth prepass, a reduced-Z pyramid, a cull pass that decides visibility, then the visible set — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts): ONE demo tier, one syntax — WebGPU (compute + an indirect draw) and WebGL2 (transform feedback + vertex collapse) run the identical frame code. Task 200: the whole scenario is one hizScene() call, the Hi-Z mip is picked in pure integer math, and the octree + BVH (in @rune/core) gate the GPU\u2019s frustum verdicts CPU-side.',
   hint: 'Drag — orbit · wheel/pinch — zoom · the buttons toggle the culling tiers, the pyramid view and the occluder policy (the «City occludes» experiment: every colored box writes depth — watch the occluded count). The WebGPU / WebGL2 radios boot the same Hi-Z on each backend\u2019s own mechanisms through the common bricks — and the parity gates hold on both.',
   defaults: { mode: MODE_PARAM === 'webgl2' ? 'webgl2' : 'webgpu' },
   onPause() { democtl.pause() },
@@ -83,6 +95,28 @@ if (typeof window !== 'undefined') {
 // ── the shared scene (identical boxes on both tiers — the cross-tier
 //    pixel-parity gate depends on it) ──────────────────────────────────────
 const scene = createScene(OCCL)
+
+// ── Task 200 — THE CPU SPATIAL INDEX (the octree + the BVH, clean in
+//    @rune/core/spatial): two hierarchy shapes over the same AABB list,
+//    one predicate (the kernel's «all 8 corners outside the same plane»
+//    in its AABB p-vertex form). The validation gate runs both walks and
+//    requires identical survivor sets — and sandwiches the GPU kernel's
+//    frustum bucket against the CPU's verdicts. This is the structure a
+//    scenario reaches for when the cull question must be answered
+//    CPU-side (a worker before it ships a draw, an occluder ranking, a
+//    marquee) — the GPU kernel stays the hot path here, honestly.
+const spatialBoxes = []
+for (let i = 0; i < scene.N; i++) {
+  const wo = scene.INST_OFF + i * scene.STRIDE + scene.FIELDS.center
+  spatialBoxes.push({
+    id: i,
+    cx: scene.sceneF32[wo], cy: scene.sceneF32[wo + 1], cz: scene.sceneF32[wo + 2],
+    hx: scene.sceneF32[wo + 3], hy: scene.sceneF32[wo + 4], hz: scene.sceneF32[wo + 5],
+  })
+}
+const octree = buildOctree(spatialBoxes)
+const bvh = buildBVH(spatialBoxes)
+const spatialStats = `octree ${octree.stats.nodes} nodes / ${octree.stats.leaves} leaves / depth ${octree.stats.depth} · bvh ${bvh.stats.nodes} nodes / ${bvh.stats.leaves} leaves / depth ${bvh.stats.depth}`
 
 // ── the page chrome: the stage + the HUD ─────────────────────────────────
 const stage = shell.slot
@@ -245,10 +279,16 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     //      so sub-LSB differences become visible ±1 noise over the whole
     //      band. That is NOT structural divergence — it is the physics of
     //      cross-compiler floating point.
-    // So MATCH = STRUCTURE at 5 bits/channel (both images >>3: the ≤ 1..2
-    // LSB noise collapses; a swapped box or a real sliver survives), plus
-    // the raw bigPx (Δ>8) class, plus the cull-count deltas — the noise
-    // floor rides along in the log (noisePct + the Δ histogram).
+    // So MATCH = STRUCTURE, NOISE-AWARE (the Task-200 fix — the 199 gate's
+    // plain >>3 truncation contradicted its own noise claim: a Δ1 pair
+    // straddling a truncation boundary counts as a 5-bit difference, so
+    // the phone's 11% "structural" was noise floor, not structure):
+    // quantize with ROUNDING ((v+4)>>3) and count a pixel structural only
+    // at a ≥2-QUANTA difference — a ≤1-LSB (8-bit) pair can never span
+    // two quanta, while a real change (a swapped box, a sliver) spans
+    // many. The raw bigPx (Δ>8) class corroborates; the cull-count deltas
+    // bound the verdict flips; the noise floor rides in the log
+    // (noisePct + the Δ histogram).
     let crossParity = null
     let crossStats = null
     if (cross !== null && cross !== undefined && cross[cameras.length] !== undefined) {
@@ -271,10 +311,12 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
             if (d > maxD) maxD = d
             let q = 0
             for (let c = 0; c < 4; c++) {
-              const dq = Math.abs((on.data[i + c] >> 3) - (ref.dataOn[i + c] >> 3))
+              // Task 200 — the noise-aware quantum: ROUND to 5 bits,
+              // require ≥2 quanta (a Δ1 pair spans at most one)
+              const dq = Math.abs(((on.data[i + c] + 4) >> 3) - ((ref.dataOn[i + c] + 4) >> 3))
               if (dq > q) q = dq
             }
-            if (q > 0) structPx++
+            if (q > 1) structPx++
           }
         }
       } else {
@@ -302,11 +344,67 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
       occludedOn: onStats.occluded, occludedOff: offStats.occluded,
       straddleOn: onStats.straddle, invariantOn, invariantOff, ok,
     })
-    shell.log.event(`parity @yaw ${camV.yaw.toFixed(2)}: ${byteIdentical ? 'IDENTICAL' : 'DIFFERS'} (${hashOn?.slice(0, 12) ?? 'n/a'}) · drawn ON ${onStats.drawn} / OFF ${offStats.drawn} · frustum ${onStats.frustum} · occluded ${onStats.occluded}${crossStats !== null ? ` · cross-tier ${crossParity} (structural ${crossStats.pct}% px @5-bit, noise ${crossStats.noisePct}% px, Δmax ${crossStats.maxD}, drawn Δ${crossStats.drawnDelta})` : ''}`)
+    shell.log.event(`parity @yaw ${camV.yaw.toFixed(2)}: ${byteIdentical ? 'IDENTICAL' : 'DIFFERS'} (${hashOn?.slice(0, 12) ?? 'n/a'}) · drawn ON ${onStats.drawn} / OFF ${offStats.drawn} · frustum ${onStats.frustum} · occluded ${onStats.occluded}${crossStats !== null ? ` · cross-tier ${crossParity} (structural ${crossStats.pct}% px @5-bit≥2q, noise ${crossStats.noisePct}% px, Δmax ${crossStats.maxD}, drawn Δ${crossStats.drawnDelta})` : ''}`)
     if (!byteIdentical) shell.log.error(`pixel parity FAILED @yaw ${camV.yaw} — Hi-Z culled a VISIBLE box (hash ${hashOn} vs ${hashOff})`)
-    if (crossParity === 'DIVERGED') shell.log.error(`cross-tier parity FAILED @yaw ${camV.yaw} — the scene structurally diverged on ${t.mode} vs the WebGPU tier (structural ${crossStats?.pct}% px @5-bit, bigPx ${crossStats?.bigPx}, drawn Δ${crossStats?.drawnDelta})`)
+    if (crossParity === 'DIVERGED') shell.log.error(`cross-tier parity FAILED @yaw ${camV.yaw} — the scene structurally diverged on ${t.mode} vs the WebGPU tier (structural ${crossStats?.pct}% px @5-bit≥2q, bigPx ${crossStats?.bigPx}, drawn Δ${crossStats?.drawnDelta})`)
     if (!invariantOn || !invariantOff) shell.log.error(`accounting invariant FAILED @yaw ${camV.yaw} — frustum+occluded+drawn must equal ${scene.N} (every record lands in exactly one bucket)`)
     if (onStats.drawn >= offStats.drawn || onStats.occluded === 0) shell.log.error(`the occlusion is not culling @yaw ${camV.yaw} (drawn ON ${onStats.drawn}, OFF ${offStats.drawn}, occluded ${onStats.occluded})`)
+    // ── Task 200 — THE SPATIAL GATE, two honest layers:
+    //  (1) THE STRUCTURES: the octree and the BVH (two hierarchy shapes,
+    //      one predicate) must answer the frustum question IDENTICALLY —
+    //      set equality, no tolerance (their own brute-force truth is
+    //      pinned in the library's tests);
+    //  (2) THE KERNEL MODEL: the GPU's frustum bucket vs the kernel's own
+    //      predicate modeled in fp64 — the 8-corner walk with the kernel's
+    //      w > 1e-4 guard (corners at/behind the eye never count toward a
+    //      plane's outside total; such boxes land in the kernel's STRADDLE
+    //      bucket, drawn — the canonical spatial test has no w-guard and
+    //      counts them as far-outside, which is why a naive CPU-vs-GPU
+    //      compare drifts by the whole behind-the-camera population). The
+    //      ±2 tolerance is the fp32-vs-fp64 borderline class only.
+    {
+      const planes = frustumPlanes(mvp)
+      const octIds = octree.queryFrustum(planes)
+      const bvhIds = bvh.queryFrustum(planes)
+      const octSet = new Set(Array.from(octIds))
+      let setsEqual = octSet.size === bvhIds.length
+      if (setsEqual) {
+        for (const id of bvhIds) if (!octSet.has(id)) { setsEqual = false; break }
+      }
+      // the kernel's near threshold rides the tier's own z convention
+      // (WGSL tests nz < 0 on the [0,1] matrix; the GLSL twin's [-1,1]
+      // reading of the same matrix makes its near nz < -1)
+      const nearZ = t.mode === 'webgl2' ? -1 : 0
+      let modelFrustum = 0, behindEye = 0
+      for (const b of spatialBoxes) {
+        const out = [0, 0, 0, 0, 0, 0]
+        let wAllBehind = true
+        for (let k = 0; k < 8; k++) {
+          const sx = (k & 1) * 2 - 1, sy = ((k >> 1) & 1) * 2 - 1, sz = ((k >> 2) & 1) * 2 - 1
+          const x = b.cx + sx * b.hx, y = b.cy + sy * b.hy, z = b.cz + sz * b.hz
+          const cw = mvp[3] * x + mvp[7] * y + mvp[11] * z + mvp[15]
+          if (cw > 1e-4) {
+            wAllBehind = false
+            const nx = (mvp[0] * x + mvp[4] * y + mvp[8] * z + mvp[12]) / cw
+            const ny = (mvp[1] * x + mvp[5] * y + mvp[9] * z + mvp[13]) / cw
+            const nz = (mvp[2] * x + mvp[6] * y + mvp[10] * z + mvp[14]) / cw
+            if (nx < -1) out[0]++
+            if (nx > 1) out[1]++
+            if (ny < -1) out[2]++
+            if (ny > 1) out[3]++
+            if (nz < nearZ) out[4]++
+            if (nz > 1) out[5]++
+          }
+        }
+        if (out[0] === 8 || out[1] === 8 || out[2] === 8 || out[3] === 8 || out[4] === 8 || out[5] === 8) modelFrustum++
+        else if (wAllBehind) behindEye++
+      }
+      const kernelDelta = onStats.frustum - modelFrustum
+      const spatialOk = setsEqual && Math.abs(kernelDelta) <= 2
+      allOk = allOk && spatialOk
+      shell.log.event(`spatial @yaw ${camV.yaw.toFixed(2)}: ${setsEqual ? 'octree ≡ bvh' : 'octree ≠ bvh'} · survivors ${octSet.size} · kernel model ${modelFrustum} (+${behindEye} fully behind the eye — the straddle class) · gpu frustum ${onStats.frustum} (Δ${kernelDelta}) — ${spatialStats}`)
+      if (!spatialOk) shell.log.error(`spatial gate FAILED @yaw ${camV.yaw} — ${setsEqual ? `the GPU frustum bucket drifted from the kernel model (Δ${kernelDelta})` : 'the octree and the bvh disagree — the structures must answer identically'}`)
+    }
   }
   // ── Task 199 — THE CITY-OCCLUDERS LEG: the user's «do the small colored
   // boxes occlude each OTHER too?» question, answered by the same gate. The
@@ -354,7 +452,7 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
   if (t.drain !== null && t.drain !== undefined) {
     try { t.drain(performance.now()) } catch { /* the drain itself is best-effort */ }
   }
-  shell.log.event(`validation: ${verdict.pass ? 'PASS' : 'FAIL'} — pixel parity over ${cameras.length} cameras, the accounting invariant, the culling effect${crossChecked > 0 ? `, the cross-tier bounded parity ×${crossChecked}` : ''}${errors.length > 0 ? `, ${errors.length} GPU errors` : ''}`)
+  shell.log.event(`validation: ${verdict.pass ? 'PASS' : 'FAIL'} — pixel parity over ${cameras.length} cameras, the accounting invariant, the culling effect, the CPU spatial gate${crossChecked > 0 ? `, the cross-tier bounded parity ×${crossChecked}` : ''}${errors.length > 0 ? `, ${errors.length} GPU errors` : ''}`)
   return verdict
 }
 

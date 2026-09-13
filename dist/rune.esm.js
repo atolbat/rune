@@ -4010,6 +4010,295 @@ function sphereOutsideFrustum(planes, cx, cy, cz, radius) {
 }
 var SPHERE_OUTSIDE = 0, SPHERE_INTERSECT = 1, SPHERE_INSIDE = 2, FRUSTUM_PLANE_COUNT = 6;
 
+// packages/core/src/spatial.ts
+function aabbOutsideFrustum(planes, cx, cy, cz, hx, hy, hz) {
+  for (let i = 0;i < FRUSTUM_PLANE_COUNT; i++) {
+    const o = i * 4;
+    const reach = Math.abs(planes[o]) * hx + Math.abs(planes[o + 1]) * hy + Math.abs(planes[o + 2]) * hz;
+    if (planes[o] * cx + planes[o + 1] * cy + planes[o + 2] * cz + planes[o + 3] < -reach) {
+      return true;
+    }
+  }
+  return false;
+}
+function aabbInsideFrustum(planes, cx, cy, cz, hx, hy, hz) {
+  for (let i = 0;i < FRUSTUM_PLANE_COUNT; i++) {
+    const o = i * 4;
+    const reach = Math.abs(planes[o]) * hx + Math.abs(planes[o + 1]) * hy + Math.abs(planes[o + 2]) * hz;
+    if (planes[o] * cx + planes[o + 1] * cy + planes[o + 2] * cz + planes[o + 3] < reach) {
+      return false;
+    }
+  }
+  return true;
+}
+function unionOf(items) {
+  let minx = Infinity, miny = Infinity, minz = Infinity;
+  let maxx = -Infinity, maxy = -Infinity, maxz = -Infinity;
+  for (const b of items) {
+    if (b.cx - b.hx < minx)
+      minx = b.cx - b.hx;
+    if (b.cy - b.hy < miny)
+      miny = b.cy - b.hy;
+    if (b.cz - b.hz < minz)
+      minz = b.cz - b.hz;
+    if (b.cx + b.hx > maxx)
+      maxx = b.cx + b.hx;
+    if (b.cy + b.hy > maxy)
+      maxy = b.cy + b.hy;
+    if (b.cz + b.hz > maxz)
+      maxz = b.cz + b.hz;
+  }
+  return { minx, miny, minz, maxx, maxy, maxz };
+}
+function boundsOverlap(b, min, max) {
+  return b.minx < max[0] && b.maxx > min[0] && b.miny < max[1] && b.maxy > min[1] && b.minz < max[2] && b.maxz > min[2];
+}
+function buildOctree(items, options) {
+  const capacity = Math.max(1, options?.capacity ?? 8);
+  const maxDepth = Math.max(1, options?.maxDepth ?? 12);
+  let nodes = 0;
+  let leaves = 0;
+  let depth2 = 0;
+  function buildNode(itemsAt, cell, level) {
+    nodes++;
+    if (level > depth2)
+      depth2 = level;
+    const degenerate = cell.maxx - cell.minx <= 0.000000001 || cell.maxy - cell.miny <= 0.000000001 || cell.maxz - cell.minz <= 0.000000001;
+    if (itemsAt.length <= capacity || level >= maxDepth || degenerate) {
+      leaves++;
+      return { b: cell, items: itemsAt, kids: null };
+    }
+    const mx = (cell.minx + cell.maxx) * 0.5;
+    const my = (cell.miny + cell.maxy) * 0.5;
+    const mz = (cell.minz + cell.maxz) * 0.5;
+    const octants = Array.from({ length: 8 }, () => []);
+    for (const it of itemsAt) {
+      const lox = it.cx - it.hx, hix = it.cx + it.hx;
+      const loy = it.cy - it.hy, hiy = it.cy + it.hy;
+      const loz = it.cz - it.hz, hiz = it.cz + it.hz;
+      for (let x = 0;x < 2; x++) {
+        const xOK = x === 0 ? lox < mx : hix > mx;
+        if (!xOK)
+          continue;
+        for (let y = 0;y < 2; y++) {
+          const yOK = y === 0 ? loy < my : hiy > my;
+          if (!yOK)
+            continue;
+          for (let z = 0;z < 2; z++) {
+            const zOK = z === 0 ? loz < mz : hiz > mz;
+            if (zOK)
+              octants[y * 4 + z * 2 + x].push(it);
+          }
+        }
+      }
+    }
+    let progress = false;
+    for (const o of octants) {
+      if (o.length > 0 && o.length < itemsAt.length) {
+        progress = true;
+        break;
+      }
+    }
+    if (!progress) {
+      leaves++;
+      return { b: cell, items: itemsAt, kids: null };
+    }
+    const kids = octants.map((o, k) => {
+      if (o.length === 0)
+        return null;
+      const x = k & 1, z = k >> 1 & 1, y = k >> 2;
+      const childCell = {
+        minx: x === 0 ? cell.minx : mx,
+        maxx: x === 0 ? mx : cell.maxx,
+        miny: y === 0 ? cell.miny : my,
+        maxy: y === 0 ? my : cell.maxy,
+        minz: z === 0 ? cell.minz : mz,
+        maxz: z === 0 ? mz : cell.maxz
+      };
+      return buildNode(o, childCell, level + 1);
+    });
+    return { b: cell, items: null, kids };
+  }
+  const root = buildNode(items, unionOf(items), 1);
+  const maxId = items.length === 0 ? 0 : Math.max(...items.map((b) => b.id));
+  const seen = new Uint8Array(maxId + 1);
+  let stamp = 0;
+  const out = [];
+  function beginQuery() {
+    out.length = 0;
+    stamp++;
+    if (stamp >= 255) {
+      seen.fill(0);
+      stamp = 1;
+    }
+  }
+  function walkFrustum(n, planes, fullyInside) {
+    if (!fullyInside) {
+      const cx = (n.b.minx + n.b.maxx) * 0.5;
+      const cy = (n.b.miny + n.b.maxy) * 0.5;
+      const cz = (n.b.minz + n.b.maxz) * 0.5;
+      const hx = (n.b.maxx - n.b.minx) * 0.5;
+      const hy = (n.b.maxy - n.b.miny) * 0.5;
+      const hz = (n.b.maxz - n.b.minz) * 0.5;
+      if (aabbOutsideFrustum(planes, cx, cy, cz, hx, hy, hz))
+        return;
+      fullyInside = aabbInsideFrustum(planes, cx, cy, cz, hx, hy, hz);
+    }
+    if (n.items !== null) {
+      if (fullyInside) {
+        for (const it of n.items) {
+          if (seen[it.id] !== stamp) {
+            seen[it.id] = stamp;
+            out.push(it.id);
+          }
+        }
+      } else {
+        for (const it of n.items) {
+          if (seen[it.id] === stamp)
+            continue;
+          seen[it.id] = stamp;
+          if (!aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz))
+            out.push(it.id);
+        }
+      }
+      return;
+    }
+    const kids = n.kids;
+    if (kids !== null) {
+      for (const k of kids) {
+        if (k !== null)
+          walkFrustum(k, planes, fullyInside);
+      }
+    }
+  }
+  function walkBox(n, min, max) {
+    if (!boundsOverlap(n.b, min, max))
+      return;
+    if (n.items !== null) {
+      for (const it of n.items) {
+        if (seen[it.id] === stamp)
+          continue;
+        seen[it.id] = stamp;
+        if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0] && it.cy + it.hy > min[1] && it.cy - it.hy < max[1] && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) {
+          out.push(it.id);
+        }
+      }
+      return;
+    }
+    const kids = n.kids;
+    if (kids !== null) {
+      for (const k of kids) {
+        if (k !== null)
+          walkBox(k, min, max);
+      }
+    }
+  }
+  return {
+    kind: "octree",
+    count: items.length,
+    stats: { nodes, leaves, depth: depth2, items: items.length },
+    queryFrustum(planes) {
+      beginQuery();
+      walkFrustum(root, planes, false);
+      return Uint32Array.from(out);
+    },
+    queryBox(min, max) {
+      beginQuery();
+      walkBox(root, min, max);
+      return Uint32Array.from(out);
+    }
+  };
+}
+function buildBVH(items, options) {
+  const capacity = Math.max(1, options?.capacity ?? 8);
+  const layout = items.slice();
+  let nodes = 0;
+  let leaves = 0;
+  let depth2 = 0;
+  function centerAlong(b, axis) {
+    return axis === 0 ? b.cx : axis === 1 ? b.cy : b.cz;
+  }
+  function buildNode(from, to, level) {
+    nodes++;
+    if (level > depth2)
+      depth2 = level;
+    const slice = layout.slice(from, to);
+    const b = unionOf(slice);
+    if (to - from <= capacity) {
+      leaves++;
+      return { b, from, to, left: null, right: null };
+    }
+    const ex = b.maxx - b.minx, ey = b.maxy - b.miny, ez = b.maxz - b.minz;
+    const axis = ex >= ey && ex >= ez ? 0 : ey >= ez ? 1 : 2;
+    slice.sort((p, q) => centerAlong(p, axis) - centerAlong(q, axis));
+    for (let k = 0;k < slice.length; k++)
+      layout[from + k] = slice[k];
+    const mid = from + (to - from >> 1);
+    return { b, from, to, left: buildNode(from, mid, level + 1), right: buildNode(mid, to, level + 1) };
+  }
+  const root = buildNode(0, layout.length, 1);
+  const out = [];
+  function walkFrustum(n, planes, fullyInside) {
+    if (!fullyInside) {
+      const cx = (n.b.minx + n.b.maxx) * 0.5;
+      const cy = (n.b.miny + n.b.maxy) * 0.5;
+      const cz = (n.b.minz + n.b.maxz) * 0.5;
+      const hx = (n.b.maxx - n.b.minx) * 0.5;
+      const hy = (n.b.maxy - n.b.miny) * 0.5;
+      const hz = (n.b.maxz - n.b.minz) * 0.5;
+      if (aabbOutsideFrustum(planes, cx, cy, cz, hx, hy, hz))
+        return;
+      fullyInside = aabbInsideFrustum(planes, cx, cy, cz, hx, hy, hz);
+    }
+    const l = n.left;
+    const r = n.right;
+    if (l === null || r === null) {
+      for (let i = n.from;i < n.to; i++) {
+        const it = layout[i];
+        if (fullyInside || !aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz)) {
+          out.push(it.id);
+        }
+      }
+      return;
+    }
+    walkFrustum(l, planes, fullyInside);
+    walkFrustum(r, planes, fullyInside);
+  }
+  function walkBox(n, min, max) {
+    if (!boundsOverlap(n.b, min, max))
+      return;
+    const l = n.left;
+    const r = n.right;
+    if (l === null || r === null) {
+      for (let i = n.from;i < n.to; i++) {
+        const it = layout[i];
+        if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0] && it.cy + it.hy > min[1] && it.cy - it.hy < max[1] && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) {
+          out.push(it.id);
+        }
+      }
+      return;
+    }
+    walkBox(l, min, max);
+    walkBox(r, min, max);
+  }
+  return {
+    kind: "bvh",
+    count: layout.length,
+    stats: { nodes, leaves, depth: depth2, items: layout.length },
+    queryFrustum(planes) {
+      out.length = 0;
+      walkFrustum(root, planes, false);
+      return Uint32Array.from(out);
+    },
+    queryBox(min, max) {
+      out.length = 0;
+      walkBox(root, min, max);
+      return Uint32Array.from(out);
+    }
+  };
+}
+var init_spatial = () => {};
+
 // packages/core/src/gpu/bitonic.ts
 function bitonicPadCount(count) {
   if (!Number.isFinite(count) || count < 0) {
@@ -4200,14 +4489,18 @@ __export(exports_src, {
   classifyGpuError: () => classifyGpuError,
   classifyDeviceLost: () => classifyDeviceLost,
   chunkRect: () => chunkRect,
+  buildOctree: () => buildOctree,
   buildFrameReRecording: () => buildFrameReRecording,
   buildFrame: () => buildFrame,
+  buildBVH: () => buildBVH,
   bitonicPassSequence: () => bitonicPassSequence,
   bitonicPadCount: () => bitonicPadCount,
   batch: () => batch,
   attachTransport: () => attachTransport,
   attachSharedRegistry: () => attachSharedRegistry,
   attachFeed: () => attachFeed,
+  aabbOutsideFrustum: () => aabbOutsideFrustum,
+  aabbInsideFrustum: () => aabbInsideFrustum,
   TEXTURE_FORMATS: () => TEXTURE_FORMATS,
   SPHERE_OUTSIDE: () => SPHERE_OUTSIDE,
   SPHERE_INTERSECT: () => SPHERE_INTERSECT,
@@ -4246,6 +4539,7 @@ var init_src = __esm(() => {
   init_formats();
   init_gpgpu();
   init_noise();
+  init_spatial();
   init_sort();
 });
 
@@ -8958,6 +9252,14 @@ function createWebGL2Renderer(options) {
     statsCollector?.endFrame();
     drainGlErrors();
   }
+  function service(nowMs) {
+    updateFrameContext(nowMs);
+    statsCollector?.beginFrame();
+    transients.beginFrame();
+    syncCanvasState();
+    statsCollector?.endFrame();
+    drainGlErrors();
+  }
   let frameErrorCount = 0;
   function stepFrame() {
     epoch.frame(() => {
@@ -9142,6 +9444,7 @@ function createWebGL2Renderer(options) {
     frame,
     resize,
     step,
+    service,
     start,
     stop,
     dispose
@@ -13133,6 +13436,82 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
 var QUAD_LIST = new Float32Array([-1, -1, 1, -1, -1, 1, 1, -1, 1, 1, -1, 1]);
 var QUAD_STRIP = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
 var WG_USAGE = { STORAGE: 128, INDIRECT: 256, COPY_SRC: 4, COPY_DST: 8 };
+function attachHizScene(device, spec) {
+  const pyr = spec.pyramid.build !== undefined ? spec.pyramid : device.pyramid(spec.pyramid.width, spec.pyramid.height);
+  const zPass = device.program({ depth: { test: "less", write: true }, cull: "back", wg: spec.shaders.z.wg, gl: spec.shaders.z.gl });
+  const colorPass = device.program({ depth: { test: "less", write: true }, cull: "back", wg: spec.shaders.color.wg, gl: spec.shaders.color.gl });
+  const panelPass = device.program({ depth: { test: "always", write: false }, wg: spec.shaders.panel.wg, gl: spec.shaders.panel.gl });
+  const culler = device.occlusionCuller(spec.scene, pyr, {
+    wgsl: spec.shaders.cull.wg.code,
+    glsl: spec.shaders.cull.gl,
+    entry: spec.shaders.cull.wg.entry,
+    lanes: spec.shaders.cull.lanes,
+    uniformBytes: spec.shaders.cull.wg.uniformBytes
+  });
+  const hiz = device.hizFrame({ scene: spec.scene, pyramid: pyr, culler, zPass, colorPass, geometry: spec.geometry });
+  const surf = spec.surface !== undefined ? device.surface(spec.surface.width, spec.surface.height, { depth: true }) : null;
+  const baseLight = spec.light !== undefined ? [spec.light[0] ?? 0.5, spec.light[1] ?? 0.8, spec.light[2] ?? 0.35] : [0.5, 0.8, 0.35];
+  const zBlock = new Float32Array(16);
+  const cullBlock = new Float32Array(20);
+  const colorBlock = new Float32Array(28);
+  const panelBlock = new Float32Array(8);
+  const indexCount = spec.geometry.indices !== undefined ? spec.geometry.indices.length : 36;
+  function targetHeight(targetId) {
+    if (targetId === 0)
+      return device.canvas.height;
+    if (surf !== null && targetId === surf.targetId)
+      return surf.height;
+    return surf !== null ? surf.height : device.canvas.height;
+  }
+  function frame(call) {
+    const occluders = call.occluders !== undefined ? Math.max(0, Math.min(spec.scene.total, call.occluders | 0)) : spec.scene.occluders;
+    const light = call.light !== undefined ? call.light : baseLight;
+    zBlock.set(call.camera.mvp, 0);
+    cullBlock.set(call.camera.mvp, 0);
+    cullBlock[16] = call.culling === false ? 0 : 1;
+    colorBlock.set(call.camera.mvp, 0);
+    colorBlock[16] = targetHeight(call.target);
+    colorBlock[20] = light[0];
+    colorBlock[21] = light[1];
+    colorBlock[22] = light[2];
+    colorBlock[23] = 0;
+    colorBlock[24] = call.camera.eye[0];
+    colorBlock[25] = call.camera.eye[1];
+    colorBlock[26] = call.camera.eye[2];
+    colorBlock[27] = 1;
+    hiz.run({
+      target: call.target,
+      occluders,
+      zUniforms: zBlock,
+      cullUniforms: cullBlock,
+      colorUniforms: colorBlock,
+      indexCount,
+      clear: call.clear
+    });
+    if (call.pyramidView === true) {
+      const w = 2 / pyr.levels;
+      const offsets = pyr.offsets ?? [];
+      for (let L = 0;L < pyr.levels; L++) {
+        panelBlock[0] = -1 + L * w + 0.01;
+        panelBlock[1] = -0.97;
+        panelBlock[2] = -1 + (L + 1) * w - 0.01;
+        panelBlock[3] = -0.55;
+        panelBlock[4] = offsets[L] ?? 0;
+        panelBlock[5] = pyr.dims[L].w;
+        panelBlock[6] = pyr.dims[L].h;
+        panelBlock[7] = 0;
+        device.drawQuad({ target: call.target, clear: false, program: panelPass, pyramid: pyr, level: L, uniforms: panelBlock });
+      }
+    }
+  }
+  return {
+    frame,
+    readStats: () => device.readCullStats(spec.scene),
+    pyramid: pyr,
+    surface: surf,
+    scene: spec.scene
+  };
+}
 async function createDevice(options) {
   const onError = options.onError;
   const color = options.clear?.color ?? [0.07, 0.08, 0.11, 1];
@@ -13441,6 +13820,7 @@ ${REDUCE}`;
     drawQuad,
     occlusionCuller,
     hizFrame,
+    hizScene: (spec) => attachHizScene(device, spec),
     readCullStats,
     surface,
     debugSceneWords: (sceneHandle, bytes) => {
@@ -13622,7 +14002,7 @@ function createGlDevice(renderer, options, clear) {
     setUniformLanes(prog, optionsIn.uniforms);
     bindAttrs(prog, s, optionsIn.geometry.vertices, true);
     if (optionsIn.geometry.indices !== undefined) {
-      gl.drawElements(elementBufferOf(optionsIn.geometry.indices), optionsIn.indexCount ?? 36, s.handle.total, true);
+      gl.drawElements(elementBufferOf(optionsIn.geometry.indices), optionsIn.indexCount ?? 36, s.handle.total, optionsIn.geometry.indices instanceof Uint16Array);
     }
   }
   function drawQuad(optionsIn) {
@@ -13731,7 +14111,7 @@ function createGlDevice(renderer, options, clear) {
     const fixed = s;
     return { targetId: fixed.targetId, width, height, read: () => fixed.read() };
   }
-  return {
+  const device = {
     backend: "webgl2",
     canvas: options.canvas,
     renderer,
@@ -13749,11 +14129,12 @@ function createGlDevice(renderer, options, clear) {
     drawQuad,
     occlusionCuller,
     hizFrame,
+    hizScene: (spec) => attachHizScene(device, spec),
     readCullStats,
     surface,
     submit() {
       try {
-        renderer.step(Date.now());
+        renderer.service(Date.now());
       } catch {}
     },
     dispose() {
@@ -13762,7 +14143,12 @@ function createGlDevice(renderer, options, clear) {
       } catch {}
     }
   };
+  return device;
 }
+
+// packages/gl/src/index.ts
+init_src();
+
 // packages/gl/src/particlesGpu.ts
 init_src();
 
@@ -17003,6 +17389,7 @@ export {
   plane,
   isOffscreenCanvas,
   getCanvasCssSize,
+  frustumPlanes,
   describeWebgpuScope,
   cube,
   createWebGpuRenderer,
@@ -17020,8 +17407,12 @@ export {
   combineWebgpuScope,
   capsule,
   canvasDpr,
+  buildOctree,
+  buildBVH,
   box,
   applyResOpGL,
+  aabbOutsideFrustum,
+  aabbInsideFrustum,
   WEBUGPU_PROBE_SRC,
   WEBUGPU_PROBE_MARKER,
   BackendResolutionError

@@ -175,6 +175,15 @@ export {
   frustumPlanes, classifySphere, sphereOutsideFrustum,
   SPHERE_OUTSIDE, SPHERE_INTERSECT, SPHERE_INSIDE, FRUSTUM_PLANE_COUNT,
 } from './frustum.ts'
+
+// ─── Task 200: the clean hierarchical cull structures ──────────────────────
+// The octree (uniform subdivision, region queries) and the BVH (longest-axis
+// median splits, tight bounds) — both pure, both over the same SpatialBox
+// contract, both driving the SAME AABB–plane predicate the Hi-Z kernel
+// mirrors on the GPU. The CPU-side spatial index the GPU-driven demos
+// lacked: a worker's pre-shipping cull, an occluder ranking, a marquee.
+export { buildOctree, buildBVH, aabbOutsideFrustum, aabbInsideFrustum } from './spatial.ts'
+export type { SpatialBox, SpatialIndex } from './spatial.ts'
 export {
   bitonicPadCount, bitonicPassSequence, BITONIC_PAD_KEY, BITONIC_SENTINEL,
 } from './gpu/bitonic.ts'
