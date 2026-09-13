@@ -78,8 +78,17 @@ try {
         console.log(`  camera ${camIdx} (yaw ${cam.yaw.toFixed(2)}): parity ${cam.parity} (${String(cam.hashOn).slice(0, 12)}) · cross-tier ${cam.crossParity ?? 'skipped'}${cs !== null && cs !== undefined ? ` ${cs.pct}% px, dmax ${cs.maxD}, drawn d${cs.drawnDelta}, occl d${cs.occludedDelta}` : ''} · drawn ON ${cam.drawnOn} / OFF ${cam.drawnOff} (${(100 * (1 - cam.drawnOn / cam.drawnOff)).toFixed(1)}% culled) · occluded ${cam.occludedOn}`)
         if (cam.parity !== 'IDENTICAL') { console.log(`  FAIL — the GL intra-tier pixel parity diverged (${cam.hashOn} vs ${cam.hashOff})`); failed = true }
         if (cam.crossParity === 'DIVERGED') { console.log('  FAIL — the cross-tier (GL vs WG) bounded parity diverged'); failed = true }
-        if (!cam.invariantOn || !cam.invariantOff) { console.log('  FAIL — the accounting invariant broke'); failed = true }
-        if (!(cam.drawnOn < cam.drawnOff) || cam.occludedOn <= 0) { console.log('  FAIL — the occlusion tier is not culling'); failed = true }
+        // Task 201 — the new camera shapes: the 'hysteresis' leg's whole
+        // point is drawnOn === drawnOff at saturation (the streaks
+        // reproduce the raw buckets — the decay number rides drawnDecay);
+        // the plain/city legs keep the strict invariant + culling checks
+        if (cam.policy === 'hysteresis') {
+          if (cam.drawnOn !== cam.drawnOff) { console.log(`  FAIL — the saturated hysteresis must reproduce the raw buckets (${cam.drawnOn} vs ${cam.drawnOff})`); failed = true }
+          if (!(cam.drawnDecay > cam.drawnOff)) { console.log(`  FAIL — the hysteresis decay did not show (${cam.drawnDecay} vs ${cam.drawnOff})`); failed = true }
+        } else {
+          if (!cam.invariantOn || !cam.invariantOff) { console.log('  FAIL — the accounting invariant broke'); failed = true }
+          if (!(cam.drawnOn < cam.drawnOff) || cam.occludedOn <= 0) { console.log('  FAIL — the occlusion tier is not culling'); failed = true }
+        }
       }
       if ((verdict.crossChecked ?? 0) !== 3) { console.log(`  FAIL — the cross-tier gate did not run all 3 cameras (checked ${verdict.crossChecked})`); failed = true }
       console.log(`[task197] probe verdict: ${verdict.pass ? 'PASS' : 'FAIL'}`)

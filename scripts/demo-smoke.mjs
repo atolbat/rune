@@ -604,6 +604,7 @@ try {
       await hizPage.setViewportSize({ width: 960, height: 720 })
       const mobileHizOk = mobileHiz.overflow <= 1
       var hizOk = hizSnapshot && hizValidation && hizDrawn && hizCulled && hizGpuClean && mobileHizOk && (hizBadge ?? '').startsWith('WebGPU')
+      if (!hizOk) console.log(`[smoke] hiz sub-flags: snapshot ${hizSnapshot} validation ${hizValidation} drawn ${hizDrawn} culled ${hizCulled} gpuClean ${hizGpuClean} (pageErrors ${hizPageErrors.length}) mobile ${JSON.stringify(mobileHiz)} badge '${hizBadge}'`)
 
       // Task 197 — THE WEBGL2 TIER LEG: the same page boots the GL Hi-Z
       // (an FBO pyramid + a TF cull + a vertex-collapse draw). The checks:
@@ -677,6 +678,12 @@ try {
     mobileViewerOk &&
     errors.length === 0
 
+  if (errors.length > 0) console.log(`[smoke] page errors (${errors.length}): ${errors.slice(0, 4).join(' | ').slice(0, 600)}`)
+  if (!ok) {
+    const flags = { alive, pausedStill, aliveAgain, canvasCount, logEntries, mobileOk, viewerAlive, pbrGpuClean, loadText, sambaStatsOk, sambaAlive, gpuHealthy, pinchZoomed, matcapOk, matcapAlive, matcapGpuClean, particlesOk, particlesAlive, particlesGpuClean, mobileParticlesOk, vfxFirst, vfxAllLive, vfxLabels: vfxLabels.visible, vfxGpuClean, mobileVfxOk, hizOk, hizGlOk, viewerLogEntries, mobileViewerOk, errorsN: errors.length }
+    const failing = Object.fromEntries(Object.entries(flags).filter(([, v]) => !v || v === 0))
+    console.log('[smoke] failing flags:', JSON.stringify(failing))
+  }
   console.log(ok ? '[smoke] OK' : '[smoke] FAIL')
   failed = !ok
   await context.close()

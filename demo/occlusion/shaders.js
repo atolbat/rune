@@ -30,7 +30,7 @@
 //     height; WG reads @builtin(position).xy as-is). This kills the fog
 //     banding — the «flickering gray triangles on the empty spaces» field
 //     report — without adding a single cross-tier ULP.
-import { HIZ_W, HIZ_H, LEVELS, MAX_LEVEL, LEVEL_DIMS, LEVEL_OFF } from './scene.js?v=200'
+import { HIZ_W, HIZ_H, LEVELS, MAX_LEVEL, LEVEL_DIMS, LEVEL_OFF } from './scene.js?v=201'
 
 const SKY = 'vec3<f32>(0.045, 0.055, 0.09)'
 const SKY_GLSL = 'vec3(0.045, 0.055, 0.09)'
@@ -411,7 +411,11 @@ uniform mat4 u_mvp;
 out vec3 v_world;
 out vec3 v_color;
 void main() {
-  if (a_flag != 1.0 && a_flag != 4.0) {
+  // Task 201 — THE FLOOR DECODE: the flags feed carries the RAW verdict
+  // (1..4) or the hist-encoded word (verdict + streak/32 — the temporal
+  // policy's encoding); floor() answers both identically (the raw values
+  // are exact integers, the encoded ones carry the streak in the fraction)
+  if (floor(a_flag) != 1.0 && floor(a_flag) != 4.0) {
     // THE COLLAPSE: degenerate clip position — the instance's triangles
     // cover zero pixels; the submission cost stays fixed (no readback,
     // no per-frame CPU compaction).

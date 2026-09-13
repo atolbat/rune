@@ -229,3 +229,158 @@ describe('Task 200: the octree + BVH — identical survivor sets, the brute-forc
     expect(asSet(bvh2.queryFrustum(planes))).toEqual(bruteSurvivors(tiny, planes))
   })
 })
+
+// ── Task 201: the grown surface — rays, hit tests, dynamics ────────────────
+describe('Task 201: the spatial surface — rays, points, spheres, dynamics', () => {
+  test('queryRay/raycast: octree === BVH === the brute-force slab sweep', () => {
+    for (let seed = 1; seed <= 5; seed++) {
+      const items = makeBoxes(300, seed * 8191)
+      const oct = buildOctree(items)
+      const bvh = buildBVH(items)
+      const r = rng(seed * 7)
+      for (let q = 0; q < 12; q++) {
+        const ox = (r() * 2 - 1) * 50, oy = r() * 25, oz = (r() * 2 - 1) * 60
+        let dx = (r() * 2 - 1), dy = (r() * 2 - 1) * 0.5, dz = (r() * 2 - 1)
+        const l = Math.hypot(dx, dy, dz) || 1
+        dx /= l; dy /= l; dz /= l
+        // the brute-force truth: the slab interval of every box
+        const want: { id: number; t: number }[] = []
+        for (const it of items) {
+          const ix = 1 / dx, iy = 1 / dy, iz = 1 / dz
+          let t0 = 0, t1 = Infinity, miss = false
+          const axes: [number, number, number, number, number][] = [
+            [it.cx - it.hx, it.cx + it.hx, ox, ix, dx],
+            [it.cy - it.hy, it.cy + it.hy, oy, iy, dy],
+            [it.cz - it.hz, it.cz + it.hz, oz, iz, dz],
+          ]
+          for (const [lo, hi, o, i, d] of axes) {
+            if (d === 0) {
+              if (o < lo || o > hi) { miss = true; break }
+              continue
+            }
+            let ta = (lo - o) * i, tb = (hi - o) * i
+            if (ta > tb) { const s = ta; ta = tb; tb = s }
+            if (ta > t0) t0 = ta
+            if (tb < t1) t1 = tb
+            if (t0 > t1) { miss = true; break }
+          }
+          if (!miss) want.push({ id: it.id, t: t0 })
+        }
+        want.sort((a, b) => a.t - b.t)
+        const byOct = oct.queryRay(ox, oy, oz, dx, dy, dz)
+        const byBvh = bvh.queryRay(ox, oy, oz, dx, dy, dz)
+        expect(byOct.length).toBe(want.length)
+        expect(byBvh.length).toBe(want.length)
+        for (let h = 0; h < want.length; h++) {
+          expect(byOct[h].id).toBe(want[h].id)
+          expect(byOct[h].t).toBeCloseTo(want[h].t, 9)
+          expect(byBvh[h].id).toBe(want[h].id)
+          expect(byBvh[h].t).toBeCloseTo(want[h].t, 9)
+        }
+        const first = oct.raycast(ox, oy, oz, dx, dy, dz)
+        const firstBvh = bvh.raycast(ox, oy, oz, dx, dy, dz)
+        if (want.length === 0) {
+          expect(first).toBe(null)
+          expect(firstBvh).toBe(null)
+        } else {
+          expect(first?.id).toBe(want[0].id)
+          expect(first?.t).toBeCloseTo(want[0].t, 9)
+          expect(firstBvh?.id).toBe(want[0].id)
+          expect(firstBvh?.t).toBeCloseTo(want[0].t, 9)
+        }
+      }
+    }
+  })
+
+  test('queryPoint + querySphere: both structures agree with the brute force', () => {
+    const items = makeBoxes(250, 5150)
+    const oct = buildOctree(items)
+    const bvh = buildBVH(items)
+    const r = rng(77)
+    for (let q = 0; q < 20; q++) {
+      const x = (r() * 2 - 1) * 60, y = r() * 22, z = (r() * 2 - 1) * 66
+      const rad = 2 + r() * 25
+      const brutePoint = new Set<number>()
+      const bruteSphere = new Set<number>()
+      for (const it of items) {
+        if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
+          brutePoint.add(it.id)
+        }
+        const dx = Math.max(it.cx - it.hx - x, 0, x - (it.cx + it.hx))
+        const dy = Math.max(it.cy - it.hy - y, 0, y - (it.cy + it.hy))
+        const dz = Math.max(it.cz - it.hz - z, 0, z - (it.cz + it.hz))
+        if (dx * dx + dy * dy + dz * dz <= rad * rad) bruteSphere.add(it.id)
+      }
+      expect(asSet(oct.queryPoint(x, y, z))).toEqual(brutePoint)
+      expect(asSet(bvh.queryPoint(x, y, z))).toEqual(brutePoint)
+      expect(asSet(oct.querySphere(x, y, z, rad))).toEqual(bruteSphere)
+      expect(asSet(bvh.querySphere(x, y, z, rad))).toEqual(bruteSphere)
+    }
+  })
+
+  test('the dynamic octree: insert/remove/update keep every query honest', () => {
+    const items = makeBoxes(150, 911)
+    const oct = buildOctree(items)
+    const r = rng(191)
+    // remove a third, insert fresh boxes at new spots, move a few
+    const removed = new Set<number>()
+    for (let k = 0; k < 50; k++) removed.add((r() * 150) | 0)
+    for (const id of removed) oct.remove(id)
+    const fresh: SpatialBox[] = []
+    for (let k = 0; k < 60; k++) {
+      fresh.push({
+        id: 1000 + k,
+        cx: (r() * 2 - 1) * 55, cy: r() * 20, cz: (r() * 2 - 1) * 60,
+        hx: 0.5 + r() * 3, hy: 0.5 + r() * 3, hz: 0.5 + r() * 3,
+      })
+      oct.insert(fresh[k])
+    }
+    // the live truth
+    const live = items.filter(it => !removed.has(it.id)).concat(fresh)
+    expect(oct.live).toBe(live.length)
+    for (let q = 0; q < 6; q++) {
+      const planes = frustumPlanes(mvpFor([(r() * 2 - 1) * 50, 8 + r() * 20, (r() * 2 - 1) * 50], [0, 5, 0]))
+      expect(asSet(oct.queryFrustum(planes))).toEqual(bruteSurvivors(live, planes))
+    }
+    // points and rays over the live set
+    const x = (r() * 2 - 1) * 40, y = r() * 18, z = (r() * 2 - 1) * 50
+    const brutePoint = new Set<number>()
+    for (const it of live) {
+      if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) brutePoint.add(it.id)
+    }
+    expect(asSet(oct.queryPoint(x, y, z))).toEqual(brutePoint)
+    let dx = (r() * 2 - 1), dy = (r() * 2 - 1) * 0.4, dz = (r() * 2 - 1)
+    const l = Math.hypot(dx, dy, dz) || 1
+    dx /= l; dy /= l; dz /= l
+    const hits = oct.queryRay(x, y, z, dx, dy, dz)
+    for (const h of hits) {
+      const it = live.find(b => b.id === h.id)
+      expect(it).toBeDefined()
+    }
+    expect(hits.length).toBe(new Set(hits.map(h => h.id)).size) // no duplicates
+  })
+
+  test('the BVH overflow + rebuild: inserts answer, rebuild folds them back', () => {
+    const items = makeBoxes(120, 6161)
+    const bvh = buildBVH(items)
+    const r = rng(616)
+    const fresh: SpatialBox[] = []
+    for (let k = 0; k < 30; k++) {
+      fresh.push({
+        id: 500 + k,
+        cx: (r() * 2 - 1) * 50, cy: r() * 20, cz: (r() * 2 - 1) * 55,
+        hx: 0.5 + r() * 2, hy: 0.5 + r() * 2, hz: 0.5 + r() * 2,
+      })
+      bvh.insert(fresh[k])
+    }
+    const planes = frustumPlanes(mvpFor([30, 20, 30], [0, 5, 0]))
+    const all = items.concat(fresh)
+    expect(asSet(bvh.queryFrustum(planes))).toEqual(bruteSurvivors(all, planes))
+    bvh.rebuild?.()
+    expect(bvh.live).toBe(all.length)
+    expect(asSet(bvh.queryFrustum(planes))).toEqual(bruteSurvivors(all, planes))
+    // removal tombstones ride both the tree and the overflow
+    bvh.remove(500)
+    expect(asSet(bvh.queryFrustum(planes))).toEqual(bruteSurvivors(all.filter(it => it.id !== 500), planes))
+  })
+})

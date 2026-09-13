@@ -1,5 +1,7 @@
 /**
- * spatial.ts — the clean hierarchical cull structures (Task 200).
+ * spatial.ts — the clean hierarchical cull structures (Task 200), grown into
+ * the SCENE-GRADE spatial surface (Task 201: the user's «октодеревья и bvh
+ * должны быть удобными — хиттесты, лучи, интеграция» ask).
  *
  * ══════════════════════════════════════════════════════════════════════════
  * WHY HERE: the Hi-Z demo's GPU kernel tests every record's AABB against
@@ -16,15 +18,29 @@
  *
  *   · OCTREE — the uniform spatial subdivision: the split point is the
  *     cell's center, items straddling a split go to EVERY child they
- *     touch, queries deduplicate. The classic region query (queryBox)
- *     and a predictable, rebuild-free shape for static data.
+ *     touch, queries deduplicate. THE DYNAMIC TWIN: insert/remove/update
+ *     walk the same center rule (a full leaf splits on the spot, the
+ *     progress guard keeps co-located data from recursing forever).
  *   · BVH — the binary hierarchy: the split axis follows the node's
  *     LONGEST bound (the SAH-lite heuristic), the split point is the
  *     count median of that axis's centers — balanced, tight bounds,
- *     items REORDERED into the tree's own contiguous layout.
+ *     items REORDERED into the tree's own contiguous layout. THE
+ *     RAY-CASTER'S FAVORITE: the ordered descent (near child first,
+ *     pruned by the running best t) makes raycast() a near-log walk.
  *
- * Both structures are built ONCE over the same SpatialBox list and answer
- * the same queries; the demo's validation gate runs both and requires
+ * THE QUERY SURFACE (both structures, one vocabulary — the «intuitive
+ * syntax» ask made literal):
+ *
+ *   tree.queryFrustum(planes)          — the cull walk (survivor ids)
+ *   tree.queryBox(min, max)            — the region/marquee overlap
+ *   tree.querySphere(x, y, z, r)       — the radius query (LOD rings)
+ *   tree.queryPoint(x, y, z)           — THE HIT TEST (boxes containing p)
+ *   tree.queryRay(ox, oy, oz, dx, dy, dz) — ALL hits, sorted by t
+ *   tree.raycast(ox, oy, oz, dx, dy, dz)  — THE FIRST HIT ({id, t} | null)
+ *   tree.insert(box) / remove(id) / update(box)   — dynamics
+ *
+ * Both structures are built over the same SpatialBox list and answer the
+ * same queries; the demo's validation gate runs both and requires
  * identical survivor SETS — two independent traversals of two different
  * hierarchy shapes agreeing is the strongest cheap proof of «clean».
  *
@@ -47,10 +63,20 @@ export interface SpatialBox {
   readonly hz: number
 }
 
+/** One ray hit: the box's id and the ENTRY distance along the ray (world
+ *  units — the direction is assumed normalized, the Frostbite picking
+ *  convention; t is the slab interval's low end, so t ≥ 0 always). */
+export interface RayHit {
+  readonly id: number
+  readonly t: number
+}
+
 /** The shared query surface: both hierarchies answer the same questions. */
 export interface SpatialIndex {
   readonly kind: 'octree' | 'bvh'
   readonly count: number
+  /** The LIVE item count (build count + inserts − removes). */
+  readonly live: number
   readonly stats: { readonly nodes: number; readonly leaves: number; readonly depth: number; readonly items: number }
   /** The frustum walk: `planes` is frustumPlanes()'s 24-float layout.
    *  Returns the SURVIVOR ids — every box NOT fully outside any single
@@ -58,6 +84,25 @@ export interface SpatialIndex {
   queryFrustum(planes: ArrayLike<number>): Uint32Array
   /** The axis-aligned overlap query: every box overlapping [min, max]. */
   queryBox(min: readonly [number, number, number], max: readonly [number, number, number]): Uint32Array
+  /** The sphere overlap query: every box whose AABB reaches the sphere. */
+  querySphere(cx: number, cy: number, cz: number, radius: number): Uint32Array
+  /** THE HIT TEST: every box whose AABB contains the point. */
+  queryPoint(x: number, y: number, z: number): Uint32Array
+  /** The ray walk: EVERY hit along the ray, sorted by entry t. */
+  queryRay(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number): RayHit[]
+  /** The picking query: the NEAREST hit, or null when the ray misses. */
+  raycast(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number): RayHit | null
+  /** Adds a box (the octree splits a full leaf on the spot; the BVH
+   *  appends to a linear overflow list until rebuild() — both honest,
+   *  both documented). Re-inserting a removed id clears the tombstone. */
+  insert(box: SpatialBox): void
+  /** Tombstones the id (queries skip it; the tree shape stays). */
+  remove(id: number): void
+  /** Moves a box: remove(id) + insert(new bounds) — the dynamic twin. */
+  update(box: SpatialBox): void
+  /** The BVH's own: rebuilds the whole tree over the live set (the
+   *  octree needs none — its splits are incremental). */
+  rebuild?(): void
 }
 
 // ─── the shared AABB–plane predicate (the GPU kernel's mirror) ────────────
@@ -129,14 +174,76 @@ function boundsOverlap(b: NodeBounds, min: readonly number[], max: readonly numb
     && b.minz < max[2] && b.maxz > min[2]
 }
 
+/** The box–sphere overlap: the clamped-center distance (the classic
+ *  closest-point form — no sqrt until the final compare). */
+function boxReachesSphere(
+  b: NodeBounds,
+  cx: number, cy: number, cz: number, radius: number,
+): boolean {
+  const dx = Math.max(b.minx - cx, 0, cx - b.maxx)
+  const dy = Math.max(b.miny - cy, 0, cy - b.maxy)
+  const dz = Math.max(b.minz - cz, 0, cz - b.maxz)
+  return dx * dx + dy * dy + dz * dz <= radius * radius
+}
+
+// ─── the shared ray machinery (the slab test) ─────────────────────────────
+
+/** Clips the running interval [t0, t1] against the bounds — the slab
+ *  form: per axis, (lo−o)·inv .. (hi−o)·inv, swapped when the ray runs
+ *  backwards. inv may be ±Infinity (a parallel axis) — that axis only
+ *  rejects when the origin is outside the slab (0·Infinity is NaN, so
+ *  the parallel axis is SPECIAL-CASED, never multiplied). Returns the
+ *  clipped [enter, exit] or null on a miss. */
+function clipRay(
+  ox: number, oy: number, oz: number,
+  ix: number, iy: number, iz: number,
+  b: NodeBounds, t0: number, t1: number,
+): [number, number] | null {
+  // x axis
+  if (ix === Infinity || ix === -Infinity) {
+    if (ox < b.minx || ox > b.maxx) return null
+  } else {
+    let ta = (b.minx - ox) * ix
+    let tb = (b.maxx - ox) * ix
+    if (ta > tb) { const s = ta; ta = tb; tb = s }
+    if (ta > t0) t0 = ta
+    if (tb < t1) t1 = tb
+    if (t0 > t1) return null
+  }
+  // y axis
+  if (iy === Infinity || iy === -Infinity) {
+    if (oy < b.miny || oy > b.maxy) return null
+  } else {
+    let ta = (b.miny - oy) * iy
+    let tb = (b.maxy - oy) * iy
+    if (ta > tb) { const s = ta; ta = tb; tb = s }
+    if (ta > t0) t0 = ta
+    if (tb < t1) t1 = tb
+    if (t0 > t1) return null
+  }
+  // z axis
+  if (iz === Infinity || iz === -Infinity) {
+    if (oz < b.minz || oz > b.maxz) return null
+  } else {
+    let ta = (b.minz - oz) * iz
+    let tb = (b.maxz - oz) * iz
+    if (ta > tb) { const s = ta; ta = tb; tb = s }
+    if (ta > t0) t0 = ta
+    if (tb < t1) t1 = tb
+    if (t0 > t1) return null
+  }
+  return [t0, t1]
+}
+
 // ─── THE OCTREE ───────────────────────────────────────────────────────────
 
 interface OctNode {
-  readonly b: NodeBounds
-  /** the leaf's items (null on an internal node) */
-  readonly items: readonly SpatialBox[] | null
+  b: NodeBounds
+  /** the leaf's items (null on an internal node) — MUTABLE: insert() pushes */
+  items: SpatialBox[] | null
   /** the 8 children, index = y*4 + z*2 + x (null when an octant is empty) */
-  readonly kids: readonly (OctNode | null)[] | null
+  kids: (OctNode | null)[] | null
+  level: number
 }
 
 /** Builds the octree over the boxes. `capacity` (items per leaf before a
@@ -144,7 +251,12 @@ interface OctNode {
  *  co-located items cannot split forever). The split point is the cell's
  *  CENTER; an item joins EVERY child its AABB touches (the conservative
  *  route — a straddling box lives in several leaves); the query walk
- *  deduplicates through a per-query stamp mask. */
+ *  deduplicates through a per-query stamp mask.
+ *
+ *  Task 201 — THE DYNAMIC OCTREE: insert() walks the same center rule and
+ *  splits a leaf the moment it crosses the capacity (the split machinery
+ *  is shared with the build); remove() tombstones (the tree shape is
+ *  never torn down mid-query); update() = remove + insert. */
 export function buildOctree(items: readonly SpatialBox[], options?: { capacity?: number; maxDepth?: number }): SpatialIndex {
   const capacity = Math.max(1, options?.capacity ?? 8)
   const maxDepth = Math.max(1, options?.maxDepth ?? 12)
@@ -152,67 +264,118 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
   let leaves = 0
   let depth = 0
 
-  function buildNode(itemsAt: readonly SpatialBox[], cell: NodeBounds, level: number): OctNode {
-    nodes++
-    if (level > depth) depth = level
-    const degenerate = cell.maxx - cell.minx <= 1e-9 || cell.maxy - cell.miny <= 1e-9 || cell.maxz - cell.minz <= 1e-9
-    if (itemsAt.length <= capacity || level >= maxDepth || degenerate) {
-      leaves++
-      return { b: cell, items: itemsAt, kids: null }
-    }
-    // the uniform split: eight cells around the center point
+  function cellDegenerate(cell: NodeBounds): boolean {
+    return cell.maxx - cell.minx <= 1e-9 || cell.maxy - cell.miny <= 1e-9 || cell.maxz - cell.minz <= 1e-9
+  }
+
+  /** The octant test — which of the 8 children an AABB touches (the
+   *  build and insert() share the exact same rule). */
+  function octantsOf(it: SpatialBox, cell: NodeBounds): boolean[] {
     const mx = (cell.minx + cell.maxx) * 0.5
     const my = (cell.miny + cell.maxy) * 0.5
     const mz = (cell.minz + cell.maxz) * 0.5
-    const octants: SpatialBox[][] = Array.from({ length: 8 }, () => [])
-    for (const it of itemsAt) {
-      const lox = it.cx - it.hx, hix = it.cx + it.hx
-      const loy = it.cy - it.hy, hiy = it.cy + it.hy
-      const loz = it.cz - it.hz, hiz = it.cz + it.hz
-      for (let x = 0; x < 2; x++) {
-        const xOK = x === 0 ? lox < mx : hix > mx
-        if (!xOK) continue
-        for (let y = 0; y < 2; y++) {
-          const yOK = y === 0 ? loy < my : hiy > my
-          if (!yOK) continue
-          for (let z = 0; z < 2; z++) {
-            const zOK = z === 0 ? loz < mz : hiz > mz
-            if (zOK) octants[y * 4 + z * 2 + x].push(it)
-          }
+    const lox = it.cx - it.hx, hix = it.cx + it.hx
+    const loy = it.cy - it.hy, hiy = it.cy + it.hy
+    const loz = it.cz - it.hz, hiz = it.cz + it.hz
+    const hit: boolean[] = new Array(8).fill(false)
+    for (let x = 0; x < 2; x++) {
+      if (x === 0 ? lox >= mx : hix <= mx) continue
+      for (let y = 0; y < 2; y++) {
+        if (y === 0 ? loy >= my : hiy <= my) continue
+        for (let z = 0; z < 2; z++) {
+          if (z === 0 ? loz >= mz : hiz <= mz) continue
+          hit[y * 4 + z * 2 + x] = true
         }
       }
     }
-    // the progress guard: a split that moved nothing (all items in all
-    // octants — co-located centers) must not recurse forever
+    return hit
+  }
+
+  function childCell(cell: NodeBounds, k: number): NodeBounds {
+    const mx = (cell.minx + cell.maxx) * 0.5
+    const my = (cell.miny + cell.maxy) * 0.5
+    const mz = (cell.minz + cell.maxz) * 0.5
+    const x = k & 1, z = (k >> 1) & 1, y = k >> 2
+    return {
+      minx: x === 0 ? cell.minx : mx, maxx: x === 0 ? mx : cell.maxx,
+      miny: y === 0 ? cell.miny : my, maxy: y === 0 ? my : cell.maxy,
+      minz: z === 0 ? cell.minz : mz, maxz: z === 0 ? mz : cell.maxz,
+    }
+  }
+
+  function makeLeaf(itemsAt: SpatialBox[], cell: NodeBounds, level: number): OctNode {
+    nodes++
+    if (level > depth) depth = level
+    leaves++
+    return { b: cell, items: itemsAt, kids: null, level }
+  }
+
+  function buildNode(itemsAt: SpatialBox[], cell: NodeBounds, level: number): OctNode {
+    if (itemsAt.length <= capacity || level >= maxDepth || cellDegenerate(cell)) {
+      return makeLeaf(itemsAt, cell, level)
+    }
+    return splitOrLeaf(itemsAt, cell, level)
+  }
+
+  /** The split: distribute the items over the octants (an item joins
+   *  EVERY child it touches); the PROGRESS GUARD keeps co-located data
+   *  from recursing forever (a split that moved nothing makes a leaf). */
+  function splitOrLeaf(itemsAt: SpatialBox[], cell: NodeBounds, level: number): OctNode {
+    nodes++
+    if (level > depth) depth = level
+    const octants: SpatialBox[][] = Array.from({ length: 8 }, () => [])
+    for (const it of itemsAt) {
+      const hit = octantsOf(it, cell)
+      for (let k = 0; k < 8; k++) if (hit[k]) octants[k].push(it)
+    }
     let progress = false
     for (const o of octants) {
       if (o.length > 0 && o.length < itemsAt.length) { progress = true; break }
     }
     if (!progress) {
-      leaves++
-      return { b: cell, items: itemsAt, kids: null }
+      return makeLeaf(itemsAt, cell, level)
     }
-    const kids = octants.map((o, k) => {
-      if (o.length === 0) return null
-      // the child's own cell — the octant of this node's cell
-      const x = k & 1, z = (k >> 1) & 1, y = k >> 2
-      const childCell: NodeBounds = {
-        minx: x === 0 ? cell.minx : mx, maxx: x === 0 ? mx : cell.maxx,
-        miny: y === 0 ? cell.miny : my, maxy: y === 0 ? my : cell.maxy,
-        minz: z === 0 ? cell.minz : mz, maxz: z === 0 ? mz : cell.maxz,
-      }
-      return buildNode(o, childCell, level + 1)
-    })
-    return { b: cell, items: null, kids }
+    const kids: (OctNode | null)[] = octants.map((o, k) =>
+      o.length === 0 ? null : buildNode(o, childCell(cell, k), level + 1))
+    return { b: cell, items: null, kids, level }
   }
 
-  const root = buildNode(items, unionOf(items), 1)
+  /** insert()'s split: an IN-PLACE leaf → internal conversion (the leaf
+   *  grew past the capacity; its items redistribute over its own cell). */
+  function growLeaf(n: OctNode): void {
+    if (n.items === null) return
+    const itemsAt = n.items
+    if (n.level >= maxDepth || cellDegenerate(n.b)) return // the honest stop: a deep/degenerate leaf may exceed the capacity
+    const octants: SpatialBox[][] = Array.from({ length: 8 }, () => [])
+    for (const it of itemsAt) {
+      const hit = octantsOf(it, n.b)
+      for (let k = 0; k < 8; k++) if (hit[k]) octants[k].push(it)
+    }
+    let progress = false
+    for (const o of octants) {
+      if (o.length > 0 && o.length < itemsAt.length) { progress = true; break }
+    }
+    if (!progress) return
+    // the counters follow the mutation (stats stay honest after inserts)
+    leaves--
+    const kids: (OctNode | null)[] = octants.map((o, k) =>
+      o.length === 0 ? null : buildNode(o, childCell(n.b, k), n.level + 1))
+    n.items = null
+    n.kids = kids
+  }
 
-  // ── the query machinery: the stamp mask deduplicates the straddlers ──
-  const maxId = items.length === 0 ? 0 : Math.max(...items.map(b => b.id))
-  const seen = new Uint8Array(maxId + 1)
+  const root = buildNode(items.slice() as SpatialBox[], unionOf(items), 1)
+
+  // ── the live-set bookkeeping (the dynamic twin) + the query machinery:
+  //    the stamp mask deduplicates the straddlers (`seen` re-grows when an
+  //    inserted id outruns the build's maxId) ──
+  const removed = new Set<number>()
+  let live = items.length
+  let maxId = items.length === 0 ? 0 : Math.max(...items.map(b => b.id))
+  let seen = new Uint8Array(maxId + 1)
   let stamp = 0
   const out: number[] = []
+  const hits: RayHit[] = []
 
   function beginQuery(): void {
     out.length = 0
@@ -221,6 +384,17 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
       seen.fill(0)
       stamp = 1
     }
+  }
+
+  function ensureCapacity(id: number): void {
+    if (id < seen.length) return
+    const grown = new Uint8Array(Math.max(seen.length * 2, id + 1))
+    grown.set(seen)
+    seen = grown
+  }
+
+  function alive(it: SpatialBox): boolean {
+    return !removed.has(it.id)
   }
 
   function walkFrustum(n: OctNode, planes: ArrayLike<number>, fullyInside: boolean): void {
@@ -237,10 +411,12 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
     if (n.items !== null) {
       if (fullyInside) {
         for (const it of n.items) {
+          if (!alive(it)) continue
           if (seen[it.id] !== stamp) { seen[it.id] = stamp; out.push(it.id) }
         }
       } else {
         for (const it of n.items) {
+          if (!alive(it)) continue
           if (seen[it.id] === stamp) continue
           seen[it.id] = stamp // (mark either way: one verdict per box per query)
           if (!aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz)) out.push(it.id)
@@ -260,6 +436,7 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
     if (!boundsOverlap(n.b, min, max)) return
     if (n.items !== null) {
       for (const it of n.items) {
+        if (!alive(it)) continue
         if (seen[it.id] === stamp) continue
         seen[it.id] = stamp
         if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0]
@@ -278,10 +455,154 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
     }
   }
 
-  return {
+  function walkSphere(n: OctNode, cx: number, cy: number, cz: number, radius: number): void {
+    if (!boxReachesSphere(n.b, cx, cy, cz, radius)) return
+    if (n.items !== null) {
+      for (const it of n.items) {
+        if (!alive(it)) continue
+        if (seen[it.id] === stamp) continue
+        seen[it.id] = stamp
+        const b: NodeBounds = {
+          minx: it.cx - it.hx, maxx: it.cx + it.hx,
+          miny: it.cy - it.hy, maxy: it.cy + it.hy,
+          minz: it.cz - it.hz, maxz: it.cz + it.hz,
+        }
+        if (boxReachesSphere(b, cx, cy, cz, radius)) out.push(it.id)
+      }
+      return
+    }
+    const kids = n.kids
+    if (kids !== null) {
+      for (const k of kids) {
+        if (k !== null) walkSphere(k, cx, cy, cz, radius)
+      }
+    }
+  }
+
+  function walkPoint(n: OctNode, x: number, y: number, z: number): void {
+    if (x < n.b.minx || x > n.b.maxx || y < n.b.miny || y > n.b.maxy || z < n.b.minz || z > n.b.maxz) return
+    if (n.items !== null) {
+      for (const it of n.items) {
+        if (!alive(it)) continue
+        if (seen[it.id] === stamp) continue
+        seen[it.id] = stamp
+        if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
+          out.push(it.id)
+        }
+      }
+      return
+    }
+    const kids = n.kids
+    if (kids !== null) {
+      for (const k of kids) {
+        if (k !== null) walkPoint(k, x, y, z)
+      }
+    }
+  }
+
+  // the ray walks: the entry-t interval prunes whole subtrees; the stamp
+  // mask deduplicates the straddlers (a box in several leaves reports ONE
+  // hit — its own slab interval, the same numbers from any leaf)
+  function walkRay(n: OctNode, ox: number, oy: number, oz: number, ix: number, iy: number, iz: number, t0: number, t1: number): void {
+    const clip = clipRay(ox, oy, oz, ix, iy, iz, n.b, t0, t1)
+    if (clip === null) return
+    if (n.items !== null) {
+      for (const it of n.items) {
+        if (!alive(it)) continue
+        if (seen[it.id] === stamp) continue
+        seen[it.id] = stamp
+        const b: NodeBounds = {
+          minx: it.cx - it.hx, maxx: it.cx + it.hx,
+          miny: it.cy - it.hy, maxy: it.cy + it.hy,
+          minz: it.cz - it.hz, maxz: it.cz + it.hz,
+        }
+        // THE GLOBAL INTERVAL — not the leaf's clip: a straddler box lives
+        // in several leaves, and the ray may cross the cell's EMPTY part
+        // before reaching the box (the leaf-local test would fail there,
+        // but the stamp suppresses the later leaf's TRUE hit — the dedup
+        // must carry the box's own interval, the same numbers from any
+        // leaf it belongs to)
+        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, Infinity)
+        if (hit !== null) hits.push({ id: it.id, t: hit[0] })
+      }
+      return
+    }
+    const kids = n.kids
+    if (kids !== null) {
+      for (const k of kids) {
+        if (k !== null) walkRay(k, ox, oy, oz, ix, iy, iz, clip[0], clip[1])
+      }
+    }
+  }
+
+  // raycast's walk: the running best t prunes every node whose ENTRY is
+  // already beyond it (the octree has no child ordering — the pruning is
+  // purely the interval; the BVH twin below adds the near-first order)
+  function walkRayFirst(n: OctNode, ox: number, oy: number, oz: number, ix: number, iy: number, iz: number, t0: number, t1: number, best: { t: number; id: number }): void {
+    if (t0 > best.t) return
+    const clip = clipRay(ox, oy, oz, ix, iy, iz, n.b, t0, t1)
+    if (clip === null || clip[0] > best.t) return
+    if (n.items !== null) {
+      for (const it of n.items) {
+        if (!alive(it)) continue
+        const b: NodeBounds = {
+          minx: it.cx - it.hx, maxx: it.cx + it.hx,
+          miny: it.cy - it.hy, maxy: it.cy + it.hy,
+          minz: it.cz - it.hz, maxz: it.cz + it.hz,
+        }
+        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, best.t)
+        if (hit !== null && hit[0] < best.t) {
+          best.t = hit[0]
+          best.id = it.id
+        }
+      }
+      return
+    }
+    const kids = n.kids
+    if (kids !== null) {
+      for (const k of kids) {
+        if (k !== null) walkRayFirst(k, ox, oy, oz, ix, iy, iz, clip[0], clip[1], best)
+      }
+    }
+  }
+
+  function insertAt(n: OctNode, it: SpatialBox): void {
+    // THE PATH REFIT: every node on the descent grows to contain the item.
+    // A box beyond the root's original extent still lands honestly — the
+    // queries prune by NODE bounds, so the bounds must cover the contents
+    // (the classic loose-insert trade: bounds only ever grow; a tight tree
+    // is a fresh buildOctree away).
+    if (it.cx - it.hx < n.b.minx) n.b.minx = it.cx - it.hx
+    if (it.cy - it.hy < n.b.miny) n.b.miny = it.cy - it.hy
+    if (it.cz - it.hz < n.b.minz) n.b.minz = it.cz - it.hz
+    if (it.cx + it.hx > n.b.maxx) n.b.maxx = it.cx + it.hx
+    if (it.cy + it.hy > n.b.maxy) n.b.maxy = it.cy + it.hy
+    if (it.cz + it.hz > n.b.maxz) n.b.maxz = it.cz + it.hz
+    if (n.items !== null) {
+      n.items.push(it)
+      if (n.items.length > capacity) growLeaf(n)
+      return
+    }
+    const kids = n.kids
+    if (kids === null) return
+    const hit = octantsOf(it, n.b)
+    for (let k = 0; k < 8; k++) {
+      if (hit[k] && kids[k] !== null) insertAt(kids[k] as OctNode, it)
+    }
+  }
+
+  const index: SpatialIndex = {
     kind: 'octree',
     count: items.length,
-    stats: { nodes, leaves, depth, items: items.length },
+    get live(): number {
+      return live
+    },
+    stats: {
+      get nodes() { return nodes },
+      get leaves() { return leaves },
+      get depth() { return depth },
+      items: items.length,
+    },
     queryFrustum(planes: ArrayLike<number>): Uint32Array {
       beginQuery()
       walkFrustum(root, planes, false)
@@ -292,7 +613,55 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
       walkBox(root, min as readonly number[], max as readonly number[])
       return Uint32Array.from(out)
     },
+    querySphere(cx: number, cy: number, cz: number, radius: number) {
+      beginQuery()
+      walkSphere(root, cx, cy, cz, radius)
+      return Uint32Array.from(out)
+    },
+    queryPoint(x: number, y: number, z: number) {
+      beginQuery()
+      walkPoint(root, x, y, z)
+      return Uint32Array.from(out)
+    },
+    queryRay(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number) {
+      beginQuery()
+      hits.length = 0
+      const ix = dx !== 0 ? 1 / dx : Infinity
+      const iy = dy !== 0 ? 1 / dy : Infinity
+      const iz = dz !== 0 ? 1 / dz : Infinity
+      walkRay(root, ox, oy, oz, ix, iy, iz, 0, Infinity)
+      hits.sort((a, b) => a.t - b.t)
+      return hits.slice()
+    },
+    raycast(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number) {
+      const ix = dx !== 0 ? 1 / dx : Infinity
+      const iy = dy !== 0 ? 1 / dy : Infinity
+      const iz = dz !== 0 ? 1 / dz : Infinity
+      const best = { t: Infinity, id: -1 }
+      walkRayFirst(root, ox, oy, oz, ix, iy, iz, 0, Infinity, best)
+      return best.id >= 0 ? { id: best.id, t: best.t } : null
+    },
+    insert(box: SpatialBox): void {
+      maxId = Math.max(maxId, box.id)
+      ensureCapacity(box.id)
+      if (removed.delete(box.id)) {
+        // a re-insert of a tombstoned id: the live count is unchanged
+      } else {
+        live++
+      }
+      insertAt(root, box)
+    },
+    remove(id: number): void {
+      if (removed.has(id)) return
+      removed.add(id)
+      live--
+    },
+    update(box: SpatialBox): void {
+      this.remove(box.id)
+      this.insert(box)
+    },
   }
+  return index
 }
 
 // ─── THE BVH ──────────────────────────────────────────────────────────────
@@ -303,21 +672,32 @@ interface BvhNode {
    *  the tree's contiguous memory (leaves are ranges, not lists) */
   readonly from: number
   readonly to: number
-  readonly left: BvhNode | null
-  readonly right: BvhNode | null
+  left: BvhNode | null
+  right: BvhNode | null
 }
 
 /** Builds the BVH over the boxes. The split axis is the node's LONGEST
  *  bound (the SAH-lite shape heuristic), the split point the count median
  *  of that axis's centers (balanced by construction); leaf capacity 8.
  *  The items array is COPIED and REORDERED into the tree's own layout —
- *  the caller's order is never touched, the query answers ride the ids. */
+ *  the caller's order is never touched, the query answers ride the ids.
+ *
+ *  Task 201 — THE HONEST DYNAMICS: remove() tombstones (the contiguous
+ *  layout cannot be spliced cheaply); insert() appends to an OVERFLOW
+ *  list the queries scan linearly (the amortized-rebuild pattern — the
+ *  fresh minority costs a sweep, the settled majority keeps its
+ *  near-log walk); rebuild() folds the overflow back into a fresh tree. */
 export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: number }): SpatialIndex {
   const capacity = Math.max(1, options?.capacity ?? 8)
-  const layout = items.slice() // the tree's contiguous item memory
+  // the mutable build state — rebuild() re-runs the builder over the live set
+  let layout: SpatialBox[] = []
+  let overflow: SpatialBox[] = []
+  const removed = new Set<number>()
   let nodes = 0
   let leaves = 0
   let depth = 0
+  let root: BvhNode | null = null
+  let buildCount = items.length
 
   function centerAlong(b: SpatialBox, axis: number): number {
     return axis === 0 ? b.cx : axis === 1 ? b.cy : b.cz
@@ -326,8 +706,18 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
   function buildNode(from: number, to: number, level: number): BvhNode {
     nodes++
     if (level > depth) depth = level
-    const slice = layout.slice(from, to)
-    const b = unionOf(slice)
+    let minx = Infinity, miny = Infinity, minz = Infinity
+    let maxx = -Infinity, maxy = -Infinity, maxz = -Infinity
+    for (let i = from; i < to; i++) {
+      const b = layout[i]
+      if (b.cx - b.hx < minx) minx = b.cx - b.hx
+      if (b.cy - b.hy < miny) miny = b.cy - b.hy
+      if (b.cz - b.hz < minz) minz = b.cz - b.hz
+      if (b.cx + b.hx > maxx) maxx = b.cx + b.hx
+      if (b.cy + b.hy > maxy) maxy = b.cy + b.hy
+      if (b.cz + b.hz > maxz) maxz = b.cz + b.hz
+    }
+    const b: NodeBounds = { minx, miny, minz, maxx, maxy, maxz }
     if (to - from <= capacity) {
       leaves++
       return { b, from, to, left: null, right: null }
@@ -335,15 +725,34 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
     const ex = b.maxx - b.minx, ey = b.maxy - b.miny, ez = b.maxz - b.minz
     const axis = ex >= ey && ex >= ez ? 0 : ey >= ez ? 1 : 2
     // the median split: sort the slice by the axis's centers, write back
+    const slice = layout.slice(from, to)
     slice.sort((p, q) => centerAlong(p, axis) - centerAlong(q, axis))
     for (let k = 0; k < slice.length; k++) layout[from + k] = slice[k]
     const mid = from + ((to - from) >> 1)
     return { b, from, to, left: buildNode(from, mid, level + 1), right: buildNode(mid, to, level + 1) }
   }
 
-  const root = buildNode(0, layout.length, 1)
+  function rebuild(): void {
+    const liveItems = items
+      .filter(it => !removed.has(it.id))
+      .concat(overflow.filter(it => !removed.has(it.id)))
+    layout = liveItems.slice()
+    overflow = []
+    nodes = 0
+    leaves = 0
+    depth = 0
+    buildCount = layout.length
+    root = layout.length === 0 ? null : buildNode(0, layout.length, 1)
+  }
+
+  rebuild()
 
   const out: number[] = []
+  const hits: RayHit[] = []
+
+  function alive(it: SpatialBox): boolean {
+    return !removed.has(it.id)
+  }
 
   function walkFrustum(n: BvhNode, planes: ArrayLike<number>, fullyInside: boolean): void {
     if (!fullyInside) {
@@ -361,6 +770,7 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
     if (l === null || r === null) {
       for (let i = n.from; i < n.to; i++) {
         const it = layout[i]
+        if (!alive(it)) continue
         if (fullyInside || !aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz)) {
           out.push(it.id)
         }
@@ -378,6 +788,7 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
     if (l === null || r === null) {
       for (let i = n.from; i < n.to; i++) {
         const it = layout[i]
+        if (!alive(it)) continue
         if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0]
           && it.cy + it.hy > min[1] && it.cy - it.hy < max[1]
           && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) {
@@ -390,21 +801,235 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
     walkBox(r, min, max)
   }
 
-  return {
+  function walkSphere(n: BvhNode, cx: number, cy: number, cz: number, radius: number): void {
+    if (!boxReachesSphere(n.b, cx, cy, cz, radius)) return
+    const l = n.left
+    const r = n.right
+    if (l === null || r === null) {
+      for (let i = n.from; i < n.to; i++) {
+        const it = layout[i]
+        if (!alive(it)) continue
+        const b: NodeBounds = {
+          minx: it.cx - it.hx, maxx: it.cx + it.hx,
+          miny: it.cy - it.hy, maxy: it.cy + it.hy,
+          minz: it.cz - it.hz, maxz: it.cz + it.hz,
+        }
+        if (boxReachesSphere(b, cx, cy, cz, radius)) out.push(it.id)
+      }
+      return
+    }
+    walkSphere(l, cx, cy, cz, radius)
+    walkSphere(r, cx, cy, cz, radius)
+  }
+
+  function walkPoint(n: BvhNode, x: number, y: number, z: number): void {
+    if (x < n.b.minx || x > n.b.maxx || y < n.b.miny || y > n.b.maxy || z < n.b.minz || z > n.b.maxz) return
+    const l = n.left
+    const r = n.right
+    if (l === null || r === null) {
+      for (let i = n.from; i < n.to; i++) {
+        const it = layout[i]
+        if (!alive(it)) continue
+        if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
+          out.push(it.id)
+        }
+      }
+      return
+    }
+    walkPoint(l, x, y, z)
+    walkPoint(r, x, y, z)
+  }
+
+  function walkRay(n: BvhNode, ox: number, oy: number, oz: number, ix: number, iy: number, iz: number, t0: number, t1: number): void {
+    const clip = clipRay(ox, oy, oz, ix, iy, iz, n.b, t0, t1)
+    if (clip === null) return
+    const l = n.left
+    const r = n.right
+    if (l === null || r === null) {
+      for (let i = n.from; i < n.to; i++) {
+        const it = layout[i]
+        if (!alive(it)) continue
+        const b: NodeBounds = {
+          minx: it.cx - it.hx, maxx: it.cx + it.hx,
+          miny: it.cy - it.hy, maxy: it.cy + it.hy,
+          minz: it.cz - it.hz, maxz: it.cz + it.hz,
+        }
+        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, t1)
+        if (hit !== null) hits.push({ id: it.id, t: hit[0] })
+      }
+      return
+    }
+    // THE ORDERED DESCENT: the near child first — its hits land before the
+    // far child's walk can prune anything (raycast()'s best-t twin below)
+    const cl = clipRay(ox, oy, oz, ix, iy, iz, l.b, clip[0], clip[1])
+    const cr = clipRay(ox, oy, oz, ix, iy, iz, r.b, clip[0], clip[1])
+    if (cl !== null && (cr === null || cl[0] <= cr[0])) {
+      walkRay(l, ox, oy, oz, ix, iy, iz, cl[0], cl[1])
+      if (cr !== null) walkRay(r, ox, oy, oz, ix, iy, iz, cr[0], cr[1])
+    } else if (cr !== null) {
+      walkRay(r, ox, oy, oz, ix, iy, iz, cr[0], cr[1])
+      if (cl !== null) walkRay(l, ox, oy, oz, ix, iy, iz, cl[0], cl[1])
+    }
+  }
+
+  function walkRayFirst(n: BvhNode, ox: number, oy: number, oz: number, ix: number, iy: number, iz: number, t0: number, t1: number, best: { t: number; id: number }): void {
+    if (t0 > best.t) return
+    const clip = clipRay(ox, oy, oz, ix, iy, iz, n.b, t0, t1)
+    if (clip === null || clip[0] > best.t) return
+    const l = n.left
+    const r = n.right
+    if (l === null || r === null) {
+      for (let i = n.from; i < n.to; i++) {
+        const it = layout[i]
+        if (!alive(it)) continue
+        const b: NodeBounds = {
+          minx: it.cx - it.hx, maxx: it.cx + it.hx,
+          miny: it.cy - it.hy, maxy: it.cy + it.hy,
+          minz: it.cz - it.hz, maxz: it.cz + it.hz,
+        }
+        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, best.t)
+        if (hit !== null && hit[0] < best.t) {
+          best.t = hit[0]
+          best.id = it.id
+        }
+      }
+      return
+    }
+    // near child first, the far child pruned by whatever the near walk found
+    const cl = clipRay(ox, oy, oz, ix, iy, iz, l.b, clip[0], clip[1])
+    const cr = clipRay(ox, oy, oz, ix, iy, iz, r.b, clip[0], clip[1])
+    const nearIsLeft = cl !== null && (cr === null || cl[0] <= cr[0])
+    const near = nearIsLeft ? l : r
+    const far = nearIsLeft ? r : l
+    const cn = nearIsLeft ? cl : cr
+    const cf = nearIsLeft ? cr : cl
+    if (cn !== null) walkRayFirst(near, ox, oy, oz, ix, iy, iz, cn[0], cn[1], best)
+    if (cf !== null && cf[0] < best.t) walkRayFirst(far, ox, oy, oz, ix, iy, iz, cf[0], cf[1], best)
+  }
+
+  const index: SpatialIndex = {
     kind: 'bvh',
-    count: layout.length,
-    stats: { nodes, leaves, depth, items: layout.length },
+    count: items.length,
+    get live(): number {
+      return buildCount + overflow.length - removed.size - removedOverflowCount()
+    },
+    stats: { get nodes() { return nodes }, get leaves() { return leaves }, get depth() { return depth }, items: items.length },
     queryFrustum(planes: ArrayLike<number>): Uint32Array {
       out.length = 0
-      walkFrustum(root, planes, false)
+      if (root !== null) walkFrustum(root, planes, false)
+      scanOverflowFrustum(planes)
       return Uint32Array.from(out)
     },
     queryBox(min, max) {
       out.length = 0
-      walkBox(root, min as readonly number[], max as readonly number[])
+      if (root !== null) walkBox(root, min as readonly number[], max as readonly number[])
+      for (const it of overflow) {
+        if (!alive(it)) continue
+        if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0]
+          && it.cy + it.hy > min[1] && it.cy - it.hy < max[1]
+          && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) {
+          out.push(it.id)
+        }
+      }
       return Uint32Array.from(out)
     },
+    querySphere(cx: number, cy: number, cz: number, radius: number) {
+      out.length = 0
+      if (root !== null) walkSphere(root, cx, cy, cz, radius)
+      for (const it of overflow) {
+        if (!alive(it)) continue
+        const b: NodeBounds = {
+          minx: it.cx - it.hx, maxx: it.cx + it.hx,
+          miny: it.cy - it.hy, maxy: it.cy + it.hy,
+          minz: it.cz - it.hz, maxz: it.cz + it.hz,
+        }
+        if (boxReachesSphere(b, cx, cy, cz, radius)) out.push(it.id)
+      }
+      return Uint32Array.from(out)
+    },
+    queryPoint(x: number, y: number, z: number) {
+      out.length = 0
+      if (root !== null) walkPoint(root, x, y, z)
+      for (const it of overflow) {
+        if (!alive(it)) continue
+        if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
+          out.push(it.id)
+        }
+      }
+      return Uint32Array.from(out)
+    },
+    queryRay(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number) {
+      out.length = 0
+      hits.length = 0
+      const ix = dx !== 0 ? 1 / dx : Infinity
+      const iy = dy !== 0 ? 1 / dy : Infinity
+      const iz = dz !== 0 ? 1 / dz : Infinity
+      if (root !== null) walkRay(root, ox, oy, oz, ix, iy, iz, 0, Infinity)
+      for (const it of overflow) {
+        if (!alive(it)) continue
+        const b: NodeBounds = {
+          minx: it.cx - it.hx, maxx: it.cx + it.hx,
+          miny: it.cy - it.hy, maxy: it.cy + it.hy,
+          minz: it.cz - it.hz, maxz: it.cz + it.hz,
+        }
+        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, Infinity)
+        if (hit !== null) hits.push({ id: it.id, t: hit[0] })
+      }
+      hits.sort((a, b) => a.t - b.t)
+      return hits.slice()
+    },
+    raycast(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number) {
+      const ix = dx !== 0 ? 1 / dx : Infinity
+      const iy = dy !== 0 ? 1 / dy : Infinity
+      const iz = dz !== 0 ? 1 / dz : Infinity
+      const best = { t: Infinity, id: -1 }
+      if (root !== null) walkRayFirst(root, ox, oy, oz, ix, iy, iz, 0, Infinity, best)
+      for (const it of overflow) {
+        if (!alive(it)) continue
+        const b: NodeBounds = {
+          minx: it.cx - it.hx, maxx: it.cx + it.hx,
+          miny: it.cy - it.hy, maxy: it.cy + it.hy,
+          minz: it.cz - it.hz, maxz: it.cz + it.hz,
+        }
+        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, best.t)
+        if (hit !== null && hit[0] < best.t) {
+          best.t = hit[0]
+          best.id = it.id
+        }
+      }
+      return best.id >= 0 ? { id: best.id, t: best.t } : null
+    },
+    insert(box: SpatialBox): void {
+      if (removed.delete(box.id)) {
+        // re-insert of a tombstoned id — rides the overflow list like any
+        // fresh item (the next rebuild() folds it into the tree)
+      }
+      overflow.push(box)
+    },
+    remove(id: number): void {
+      removed.add(id)
+    },
+    update(box: SpatialBox): void {
+      this.remove(box.id)
+      this.insert(box)
+    },
+    rebuild,
   }
+
+  function removedOverflowCount(): number {
+    let n = 0
+    for (const it of overflow) if (removed.has(it.id)) n++
+    return n
+  }
+
+  function scanOverflowFrustum(planes: ArrayLike<number>): void {
+    for (const it of overflow) {
+      if (!alive(it)) continue
+      if (!aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz)) out.push(it.id)
+    }
+  }
+
+  return index
 }
 
 export { frustumPlanes }

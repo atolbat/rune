@@ -3,50 +3,61 @@
 // Pre-198 the demo carried two tier files in two API dialects — wgTier.js
 // (gpu.*) and glTier.js (gl.*), ~1200 lines of parallel mechanics. Task
 // 198's common bricks (createDevice) collapsed them; Task 199 made the
-// frame ONE hizFrame() call; Task 200 finishes the sentence — the whole
-// Hi-Z SCENARIO is one hizScene() construction and one frame() call:
+// frame ONE hizFrame() call; Task 200 wrapped the whole scenario into one
+// hizScene() construction. Task 201 answers the user's final shape —
+// «именно КИРПИЧИ, из которых я мог бы создать данный куллинг. Не одной
+// строкой, а комбинацией фич. Регл/вебгпу философия синтаксиса»:
 //
-//   const hiz = device.hizScene({ scene, shaders, geometry, pyramid, light })
-//   hiz.frame({ target: 0, camera: { mvp, eye }, occluders, culling: true })
+//   ── THE RESOURCES (built once) ─────────────────────────────────────
+//   const scene   = device.scene({ ... })              // the records + hist
+//   const pyramid = device.pyramid(HIZ_W, HIZ_H)       // the Hi-Z tile
+//   const mesh    = device.geometry(BOX_VERTS, BOX_INDICES)
 //
-// The programs (from the shader dictionary), the packed uniform lanes, the
-// GL dither's y-mirror height, the pyramid debug strip and the validation
-// surface all live INSIDE the brick now — the tier below is boot, canvas,
-// stats and gates only. A different scenario = a different dictionary +
-// declaration; this file stays the shape it is.
+//   ── THE PASS BRICKS (built once, run per frame — each one packs its
+//      own uniform lanes, owns its own program states) ────────────────
+//   const depth  = device.depthPass({ scene, mesh, shaders: dict.z, pyramid })
+//   const occl   = device.occlusionPass({ scene, pyramid, kernel: dict.cull })
+//   const smooth = device.hysteresisPass({ scene, frames: 3 })   // Frostbite
+//   const color  = device.visiblePass({ scene, mesh, shaders: dict.color, surface })
+//   const strip  = device.debugStrip({ pyramid, shaders: dict.panel })
 //
-// THE FRAME (what hiz.frame() runs — the recipe):
-//   1. THE Z PREPASS   the first `occluders` records render into the
-//                      pyramid's r32f level-0 tile (fs writes the exact
-//                      depth; the tile's depth attachment keeps the NEAREST
-//                      occluder per pixel)
-//   2. THE PYRAMID     the 2×2 MAX chain (WG: the compute family; GL: FBO
-//                      quads — the backend's own mechanism, ONE contract)
-//   3. THE CULL        the per-record verdict kernel (WG: compute; GL: the
-//                      transform-feedback pass)
-//   4. THE COLOR PASS  the visible set (WG: compact + ONE drawIndexedIndirect,
-//                      GPU-driven, zero readbacks; GL: ONE instanced draw +
-//                      vertex collapse)
-//   5. THE DEBUG STRIP one panel quad per pyramid level (toggled)
+//   ── THE FRAME — the scenario's OWN recipe (the order is ours to keep,
+//      change, or extend: a CPU software-occlusion brick would slot in the
+//      same shape) ─────────────────────────────────────────────────────
+//   depth.run({ camera, occluders })        // 1. the z prepass (the policy)
+//   pyramid.build()                         // 2. the 2×2 MAX reduce
+//   occl.run({ camera, gate })              // 3. frustum + Hi-Z verdicts
+//   smooth.run({ gate })                    // 4. the temporal policy
+//   color.run({ target, camera, light })    // 5. the visible set
+//   if (debug) strip.run({ target })        // 6. the pyramid view (opt-in)
+//
+// THE FRAME CONTRACT (what the bricks run — the recipe stays legible in
+// the calls themselves): the prepass renders the first `occluders` records
+// into the pyramid's r32f level-0 tile; the reduce builds the max chain;
+// the verdict kernel tests EVERY record (frustum → near-straddle → Hi-Z);
+// the temporal pass folds the streaks (identity when the gate is off —
+// byte-identical to the no-hysteresis frame); the visible draw runs the
+// compacted set (WG: one drawIndexedIndirect; GL: one instanced draw +
+// the vertex collapse).
 //
 // Task 200 — THE GL SUBMIT FIX rides the device: submit() runs the
 // renderer's SERVICE boundary (canvas-state heal + error drain), never the
 // renderer's own recorded tape — the empty BeginPass used to CLEAR THE
-// CANVAS after every frame (the «WebGL2 renders empty» field report: stats
-// alive, canvas the clear color).
-import { createDevice } from '../../dist/rune.esm.js?v=200'
-import { buildShaders } from './shaders.js?v=200'
-import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H } from './scene.js?v=200'
+// CANVAS after every frame (the «WebGL2 renders empty» field report).
+import { createDevice } from '../../dist/rune.esm.js?v=201'
+import { buildShaders } from './shaders.js?v=201'
+import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H } from './scene.js?v=201'
 const SKY = [0.045, 0.055, 0.09, 1]
 const LIGHT = [0.5, 0.8, 0.35]
 const SURF_W = 480, SURF_H = 270
+const HYST_FRAMES = 3 // the Frostbite K: consecutive occluded frames before the cull lands
 
-/** Builds the Hi-Z tier on EITHER backend — the same builder, the same
+/** Builds the Hi-Z tier on EITHER backend — the same bricks, the same
  *  frame, the same stats. Throws the honest refusal when the backend
  *  cannot carry it (the caller falls back). */
 export async function buildTier(deps) {
   const { backend, scene, shell, noteError, stage, PROBE, FORCE_SNAPSHOT, attachControls, pauseLoop, resumeLoop } = deps
-  const { K, N, INST_OFF, FLAGS_OFF, sceneWords, sceneF32 } = scene
+  const { K, N, INST_OFF, FLAGS_OFF, HIST_OFF, sceneWords, sceneF32 } = scene
   void pauseLoop; void resumeLoop // (the diagnostics channel's pause hooks — kept for the contract)
 
   // ── the device boot (one syntax; the GPU-process storm retries live in
@@ -90,48 +101,58 @@ export async function buildTier(deps) {
     attachControls(displayCanvas)
   }
 
-  // ── THE SCENARIO — ONE construction (Task 200: the programs, the culler,
-  //    the uniform lanes, the dither mirror and the debug strip all join
-  //    the recipe inside the brick; the dictionary stays the scenario's
-  //    own data — buildShaders(scene) is the whole per-scenario surface) ──
-  const hiz = device.hizScene({
-    scene: device.scene({
-      total: N,
-      occluders: K,
-      words: sceneWords,
-      recordsF32: sceneF32.subarray(INST_OFF),
-      flagsWord: FLAGS_OFF,
-      recordsWord: INST_OFF,
-      stride: scene.STRIDE,
-      fields: scene.FIELDS,
-    }),
-    shaders: buildShaders(scene),
-    geometry: device.geometry(BOX_VERTS, BOX_INDICES),
-    pyramid: { width: HIZ_W, height: HIZ_H },
-    surface: { width: SURF_W, height: SURF_H },
-    light: LIGHT,
+  // ═══ THE BRICKS ══════════════════════════════════════════════════════
+  // Task 201 — the scenario composes its culling from parts: the resources
+  // first, then one handle per pass. The dictionary (buildShaders) stays
+  // the scenario's own data — the per-language sources as columns; the
+  // bricks build their programs and pack their lanes from it.
+  const sceneHandle = device.scene({
+    total: N,
+    occluders: K,
+    words: sceneWords,
+    recordsF32: sceneF32.subarray(INST_OFF),
+    flagsWord: FLAGS_OFF,
+    histWord: HIST_OFF, // Task 201 — the temporal policy's home
+    recordsWord: INST_OFF,
+    stride: scene.STRIDE,
+    fields: scene.FIELDS,
   })
-  const surface = hiz.surface
-  const sceneHandle = hiz.scene
+  const dict = buildShaders(scene)
+  const pyramid = device.pyramid(HIZ_W, HIZ_H)
+  const mesh = device.geometry(BOX_VERTS, BOX_INDICES)
+  const surface = device.surface(SURF_W, SURF_H, { depth: true })
 
-  // ── THE FRAME — one sentence (the whole Hi-Z pipeline; `occluders` is
-  //    THE POLICY: how many records write the z prepass — the boot default
-  //    K=23, the whole city N, anything between; `culling: false` is the
-  //    parity gate's OFF leg) ──────────────────────────────────────────────
-  function renderTo(targetId, mvp, eye, hizOn, debug, occluders = K) {
-    hiz.frame({
-      target: targetId,
-      camera: { mvp, eye },
-      culling: hizOn !== 0,
-      pyramidView: debug === true,
-      occluders,
-    })
+  const depth = device.depthPass({ scene: sceneHandle, mesh, shaders: dict.z, pyramid })
+  const occl = device.occlusionPass({ scene: sceneHandle, pyramid, kernel: dict.cull })
+  const smooth = device.hysteresisPass({ scene: sceneHandle, frames: HYST_FRAMES })
+  const color = device.visiblePass({ scene: sceneHandle, mesh, shaders: dict.color, surface })
+  const strip = device.debugStrip({ pyramid, shaders: dict.panel })
+
+  // ── THE FRAME — the recipe is THE COMPOSITION (see the file header):
+  //    each brick runs with semantic props; the uniform lanes are the
+  //    bricks' own business. `occluders` is THE POLICY knob (how many
+  //    records write the z prepass — the boot default K=23, the whole
+  //    city N, anything between); `hizOn` gates the Hi-Z leg (the parity
+  //    gates' OFF leg); `hysteresis` gates the temporal fold (the identity
+  //    pass keeps every frame byte-identical when it is off).
+  function renderTo(targetId, mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false) {
+    const camera = { mvp, eye }
+    depth.run({ camera, occluders })
+    pyramid.build()
+    occl.run({ camera, gate: hizOn !== 0 })
+    smooth.run({ gate: hysteresisOn })
+    color.run({ target: targetId, camera, light: LIGHT })
+    if (debug === true) strip.run({ target: targetId })
     device.submit()
   }
 
-  // ── stats (the brick normalizes: WG args-buffer readback / GL flag sweep)
+  // ── stats (the device normalizes: WG args readback / GL hist sweep)
   function readStats() {
-    return hiz.readStats()
+    return device.readCullStats(sceneHandle)
+  }
+  // ── the RAW per-record verdicts (the CPU-model gates' channel)
+  function readVerdicts() {
+    return device.readVerdicts(sceneHandle)
   }
 
   // ── the snapshot blit (software WG — zero presents) ─────────────────────
@@ -147,8 +168,8 @@ export async function buildTier(deps) {
     }).catch(() => { blitPending = false })
   }
 
-  function frame(mvp, eye, hizOn, debug, occluders = K) {
-    renderTo(SNAPSHOT ? surface.targetId : 0, mvp, eye, hizOn, debug, occluders)
+  function frame(mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false) {
+    renderTo(SNAPSHOT ? surface.targetId : 0, mvp, eye, hizOn, debug, occluders, hysteresisOn)
     if (SNAPSHOT) blitSnapshot()
   }
 
@@ -165,13 +186,12 @@ export async function buildTier(deps) {
   //    pyramid; the texture-based pyramid reads per level) ─────────────────
   if (typeof window !== 'undefined' && device.gpu !== null) {
     const gpu = device.gpu
-    const pyr = hiz.pyramid
     window.__hizDebug = {
-      note: 'the common-bricks tier — pyramidAt/ztile/stats read the storage pyramid',
+      note: 'the brick-composition tier — pyramidAt/ztile/stats/verdicts read the storage pyramid',
       async pyramidAt(level) {
         try {
-          const off = (pyr.offsets ?? [0])[level] ?? 0
-          const f = await gpu.readExternalBuffer(pyr.storageId ?? 0, off * 4 + 64)
+          const off = (pyramid.offsets ?? [0])[level] ?? 0
+          const f = await gpu.readExternalBuffer(pyramid.storageId ?? 0, off * 4 + 64)
           return Array.from(new Float32Array(f.buffer, off * 4, 16), v => +v.toFixed(4))
         } catch (e) {
           return `readback refused: ${e instanceof Error ? e.message : String(e)}`
@@ -179,13 +199,14 @@ export async function buildTier(deps) {
       },
       async ztile() {
         try {
-          const px = new Uint8Array(await gpu.readTargetPixels(pyr.zTarget))
+          const px = new Uint8Array(await gpu.readTargetPixels(pyramid.zTarget))
           return Array.from(new Float32Array(px.buffer, 0, 16), v => +v.toFixed(4))
         } catch (e) {
           return `readback refused: ${e instanceof Error ? e.message : String(e)}`
         }
       },
       stats: () => readStats(),
+      verdicts: () => readVerdicts(),
     }
   } else if (typeof window !== 'undefined') {
     window.__hizDebug = { note: 'the WebGL2 tier is active — the WG diagnostics channel is WebGPU-only; reload without ?mode=webgl2' }
@@ -200,13 +221,14 @@ export async function buildTier(deps) {
       ? `WebGL2 — FBO pyramid + TF cull + vertex-collapse draw${device.antialias ? ' · context MSAA' : ''}`
       : `WebGPU — storage pyramid + compute cull + one drawIndexedIndirect${device.antialias ? ' · MSAA 4x resolve' : ''}`,
     drawsLine: backend === 'webgl2'
-      ? `draws: 1 (instanced, vertex-collapse) · TF passes: 1 · ${hiz.pyramid.levels - 1} reduce quads`
-      : `draws: 1 (indirect, GPU-driven) · dispatches: 2 (cull + compact) · ${hiz.pyramid.levels - 1} reduce quads`,
+      ? `draws: 1 (instanced, vertex-collapse) · TF passes: 2 (cull + hysteresis) · ${pyramid.levels - 1} reduce quads`
+      : `draws: 1 (indirect, GPU-driven) · dispatches: 3 (cull + hysteresis + compact) · ${pyramid.levels - 1} reduce quads`,
     canvas: displayCanvas,
     surface,
     renderTo,
     frame,
     readStats,
+    readVerdicts,
     aspect,
     // Task 200 — the submit fix lives in the device (the GL service
     // boundary: the canvas-state heal + the error drain, NO empty pass);

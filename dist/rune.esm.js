@@ -4053,44 +4053,138 @@ function unionOf(items) {
 function boundsOverlap(b, min, max) {
   return b.minx < max[0] && b.maxx > min[0] && b.miny < max[1] && b.maxy > min[1] && b.minz < max[2] && b.maxz > min[2];
 }
+function boxReachesSphere(b, cx, cy, cz, radius) {
+  const dx = Math.max(b.minx - cx, 0, cx - b.maxx);
+  const dy = Math.max(b.miny - cy, 0, cy - b.maxy);
+  const dz = Math.max(b.minz - cz, 0, cz - b.maxz);
+  return dx * dx + dy * dy + dz * dz <= radius * radius;
+}
+function clipRay(ox, oy, oz, ix, iy, iz, b, t0, t1) {
+  if (ix === Infinity || ix === -Infinity) {
+    if (ox < b.minx || ox > b.maxx)
+      return null;
+  } else {
+    let ta = (b.minx - ox) * ix;
+    let tb = (b.maxx - ox) * ix;
+    if (ta > tb) {
+      const s = ta;
+      ta = tb;
+      tb = s;
+    }
+    if (ta > t0)
+      t0 = ta;
+    if (tb < t1)
+      t1 = tb;
+    if (t0 > t1)
+      return null;
+  }
+  if (iy === Infinity || iy === -Infinity) {
+    if (oy < b.miny || oy > b.maxy)
+      return null;
+  } else {
+    let ta = (b.miny - oy) * iy;
+    let tb = (b.maxy - oy) * iy;
+    if (ta > tb) {
+      const s = ta;
+      ta = tb;
+      tb = s;
+    }
+    if (ta > t0)
+      t0 = ta;
+    if (tb < t1)
+      t1 = tb;
+    if (t0 > t1)
+      return null;
+  }
+  if (iz === Infinity || iz === -Infinity) {
+    if (oz < b.minz || oz > b.maxz)
+      return null;
+  } else {
+    let ta = (b.minz - oz) * iz;
+    let tb = (b.maxz - oz) * iz;
+    if (ta > tb) {
+      const s = ta;
+      ta = tb;
+      tb = s;
+    }
+    if (ta > t0)
+      t0 = ta;
+    if (tb < t1)
+      t1 = tb;
+    if (t0 > t1)
+      return null;
+  }
+  return [t0, t1];
+}
 function buildOctree(items, options) {
   const capacity = Math.max(1, options?.capacity ?? 8);
   const maxDepth = Math.max(1, options?.maxDepth ?? 12);
   let nodes = 0;
   let leaves = 0;
   let depth2 = 0;
-  function buildNode(itemsAt, cell, level) {
-    nodes++;
-    if (level > depth2)
-      depth2 = level;
-    const degenerate = cell.maxx - cell.minx <= 0.000000001 || cell.maxy - cell.miny <= 0.000000001 || cell.maxz - cell.minz <= 0.000000001;
-    if (itemsAt.length <= capacity || level >= maxDepth || degenerate) {
-      leaves++;
-      return { b: cell, items: itemsAt, kids: null };
-    }
+  function cellDegenerate(cell) {
+    return cell.maxx - cell.minx <= 0.000000001 || cell.maxy - cell.miny <= 0.000000001 || cell.maxz - cell.minz <= 0.000000001;
+  }
+  function octantsOf(it, cell) {
     const mx = (cell.minx + cell.maxx) * 0.5;
     const my = (cell.miny + cell.maxy) * 0.5;
     const mz = (cell.minz + cell.maxz) * 0.5;
-    const octants = Array.from({ length: 8 }, () => []);
-    for (const it of itemsAt) {
-      const lox = it.cx - it.hx, hix = it.cx + it.hx;
-      const loy = it.cy - it.hy, hiy = it.cy + it.hy;
-      const loz = it.cz - it.hz, hiz = it.cz + it.hz;
-      for (let x = 0;x < 2; x++) {
-        const xOK = x === 0 ? lox < mx : hix > mx;
-        if (!xOK)
+    const lox = it.cx - it.hx, hix = it.cx + it.hx;
+    const loy = it.cy - it.hy, hiy = it.cy + it.hy;
+    const loz = it.cz - it.hz, hiz = it.cz + it.hz;
+    const hit = new Array(8).fill(false);
+    for (let x = 0;x < 2; x++) {
+      if (x === 0 ? lox >= mx : hix <= mx)
+        continue;
+      for (let y = 0;y < 2; y++) {
+        if (y === 0 ? loy >= my : hiy <= my)
           continue;
-        for (let y = 0;y < 2; y++) {
-          const yOK = y === 0 ? loy < my : hiy > my;
-          if (!yOK)
+        for (let z = 0;z < 2; z++) {
+          if (z === 0 ? loz >= mz : hiz <= mz)
             continue;
-          for (let z = 0;z < 2; z++) {
-            const zOK = z === 0 ? loz < mz : hiz > mz;
-            if (zOK)
-              octants[y * 4 + z * 2 + x].push(it);
-          }
+          hit[y * 4 + z * 2 + x] = true;
         }
       }
+    }
+    return hit;
+  }
+  function childCell(cell, k) {
+    const mx = (cell.minx + cell.maxx) * 0.5;
+    const my = (cell.miny + cell.maxy) * 0.5;
+    const mz = (cell.minz + cell.maxz) * 0.5;
+    const x = k & 1, z = k >> 1 & 1, y = k >> 2;
+    return {
+      minx: x === 0 ? cell.minx : mx,
+      maxx: x === 0 ? mx : cell.maxx,
+      miny: y === 0 ? cell.miny : my,
+      maxy: y === 0 ? my : cell.maxy,
+      minz: z === 0 ? cell.minz : mz,
+      maxz: z === 0 ? mz : cell.maxz
+    };
+  }
+  function makeLeaf(itemsAt, cell, level) {
+    nodes++;
+    if (level > depth2)
+      depth2 = level;
+    leaves++;
+    return { b: cell, items: itemsAt, kids: null, level };
+  }
+  function buildNode(itemsAt, cell, level) {
+    if (itemsAt.length <= capacity || level >= maxDepth || cellDegenerate(cell)) {
+      return makeLeaf(itemsAt, cell, level);
+    }
+    return splitOrLeaf(itemsAt, cell, level);
+  }
+  function splitOrLeaf(itemsAt, cell, level) {
+    nodes++;
+    if (level > depth2)
+      depth2 = level;
+    const octants = Array.from({ length: 8 }, () => []);
+    for (const it of itemsAt) {
+      const hit = octantsOf(it, cell);
+      for (let k = 0;k < 8; k++)
+        if (hit[k])
+          octants[k].push(it);
     }
     let progress = false;
     for (const o of octants) {
@@ -4100,30 +4194,46 @@ function buildOctree(items, options) {
       }
     }
     if (!progress) {
-      leaves++;
-      return { b: cell, items: itemsAt, kids: null };
+      return makeLeaf(itemsAt, cell, level);
     }
-    const kids = octants.map((o, k) => {
-      if (o.length === 0)
-        return null;
-      const x = k & 1, z = k >> 1 & 1, y = k >> 2;
-      const childCell = {
-        minx: x === 0 ? cell.minx : mx,
-        maxx: x === 0 ? mx : cell.maxx,
-        miny: y === 0 ? cell.miny : my,
-        maxy: y === 0 ? my : cell.maxy,
-        minz: z === 0 ? cell.minz : mz,
-        maxz: z === 0 ? mz : cell.maxz
-      };
-      return buildNode(o, childCell, level + 1);
-    });
-    return { b: cell, items: null, kids };
+    const kids = octants.map((o, k) => o.length === 0 ? null : buildNode(o, childCell(cell, k), level + 1));
+    return { b: cell, items: null, kids, level };
   }
-  const root = buildNode(items, unionOf(items), 1);
-  const maxId = items.length === 0 ? 0 : Math.max(...items.map((b) => b.id));
-  const seen = new Uint8Array(maxId + 1);
+  function growLeaf(n) {
+    if (n.items === null)
+      return;
+    const itemsAt = n.items;
+    if (n.level >= maxDepth || cellDegenerate(n.b))
+      return;
+    const octants = Array.from({ length: 8 }, () => []);
+    for (const it of itemsAt) {
+      const hit = octantsOf(it, n.b);
+      for (let k = 0;k < 8; k++)
+        if (hit[k])
+          octants[k].push(it);
+    }
+    let progress = false;
+    for (const o of octants) {
+      if (o.length > 0 && o.length < itemsAt.length) {
+        progress = true;
+        break;
+      }
+    }
+    if (!progress)
+      return;
+    leaves--;
+    const kids = octants.map((o, k) => o.length === 0 ? null : buildNode(o, childCell(n.b, k), n.level + 1));
+    n.items = null;
+    n.kids = kids;
+  }
+  const root = buildNode(items.slice(), unionOf(items), 1);
+  const removed = new Set;
+  let live = items.length;
+  let maxId = items.length === 0 ? 0 : Math.max(...items.map((b) => b.id));
+  let seen = new Uint8Array(maxId + 1);
   let stamp = 0;
   const out = [];
+  const hits = [];
   function beginQuery() {
     out.length = 0;
     stamp++;
@@ -4131,6 +4241,16 @@ function buildOctree(items, options) {
       seen.fill(0);
       stamp = 1;
     }
+  }
+  function ensureCapacity(id) {
+    if (id < seen.length)
+      return;
+    const grown = new Uint8Array(Math.max(seen.length * 2, id + 1));
+    grown.set(seen);
+    seen = grown;
+  }
+  function alive(it) {
+    return !removed.has(it.id);
   }
   function walkFrustum(n, planes, fullyInside) {
     if (!fullyInside) {
@@ -4147,6 +4267,8 @@ function buildOctree(items, options) {
     if (n.items !== null) {
       if (fullyInside) {
         for (const it of n.items) {
+          if (!alive(it))
+            continue;
           if (seen[it.id] !== stamp) {
             seen[it.id] = stamp;
             out.push(it.id);
@@ -4154,6 +4276,8 @@ function buildOctree(items, options) {
         }
       } else {
         for (const it of n.items) {
+          if (!alive(it))
+            continue;
           if (seen[it.id] === stamp)
             continue;
           seen[it.id] = stamp;
@@ -4176,6 +4300,8 @@ function buildOctree(items, options) {
       return;
     if (n.items !== null) {
       for (const it of n.items) {
+        if (!alive(it))
+          continue;
         if (seen[it.id] === stamp)
           continue;
         seen[it.id] = stamp;
@@ -4193,10 +4319,174 @@ function buildOctree(items, options) {
       }
     }
   }
-  return {
+  function walkSphere(n, cx, cy, cz, radius) {
+    if (!boxReachesSphere(n.b, cx, cy, cz, radius))
+      return;
+    if (n.items !== null) {
+      for (const it of n.items) {
+        if (!alive(it))
+          continue;
+        if (seen[it.id] === stamp)
+          continue;
+        seen[it.id] = stamp;
+        const b = {
+          minx: it.cx - it.hx,
+          maxx: it.cx + it.hx,
+          miny: it.cy - it.hy,
+          maxy: it.cy + it.hy,
+          minz: it.cz - it.hz,
+          maxz: it.cz + it.hz
+        };
+        if (boxReachesSphere(b, cx, cy, cz, radius))
+          out.push(it.id);
+      }
+      return;
+    }
+    const kids = n.kids;
+    if (kids !== null) {
+      for (const k of kids) {
+        if (k !== null)
+          walkSphere(k, cx, cy, cz, radius);
+      }
+    }
+  }
+  function walkPoint(n, x, y, z) {
+    if (x < n.b.minx || x > n.b.maxx || y < n.b.miny || y > n.b.maxy || z < n.b.minz || z > n.b.maxz)
+      return;
+    if (n.items !== null) {
+      for (const it of n.items) {
+        if (!alive(it))
+          continue;
+        if (seen[it.id] === stamp)
+          continue;
+        seen[it.id] = stamp;
+        if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
+          out.push(it.id);
+        }
+      }
+      return;
+    }
+    const kids = n.kids;
+    if (kids !== null) {
+      for (const k of kids) {
+        if (k !== null)
+          walkPoint(k, x, y, z);
+      }
+    }
+  }
+  function walkRay(n, ox, oy, oz, ix, iy, iz, t0, t1) {
+    const clip = clipRay(ox, oy, oz, ix, iy, iz, n.b, t0, t1);
+    if (clip === null)
+      return;
+    if (n.items !== null) {
+      for (const it of n.items) {
+        if (!alive(it))
+          continue;
+        if (seen[it.id] === stamp)
+          continue;
+        seen[it.id] = stamp;
+        const b = {
+          minx: it.cx - it.hx,
+          maxx: it.cx + it.hx,
+          miny: it.cy - it.hy,
+          maxy: it.cy + it.hy,
+          minz: it.cz - it.hz,
+          maxz: it.cz + it.hz
+        };
+        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, Infinity);
+        if (hit !== null)
+          hits.push({ id: it.id, t: hit[0] });
+      }
+      return;
+    }
+    const kids = n.kids;
+    if (kids !== null) {
+      for (const k of kids) {
+        if (k !== null)
+          walkRay(k, ox, oy, oz, ix, iy, iz, clip[0], clip[1]);
+      }
+    }
+  }
+  function walkRayFirst(n, ox, oy, oz, ix, iy, iz, t0, t1, best) {
+    if (t0 > best.t)
+      return;
+    const clip = clipRay(ox, oy, oz, ix, iy, iz, n.b, t0, t1);
+    if (clip === null || clip[0] > best.t)
+      return;
+    if (n.items !== null) {
+      for (const it of n.items) {
+        if (!alive(it))
+          continue;
+        const b = {
+          minx: it.cx - it.hx,
+          maxx: it.cx + it.hx,
+          miny: it.cy - it.hy,
+          maxy: it.cy + it.hy,
+          minz: it.cz - it.hz,
+          maxz: it.cz + it.hz
+        };
+        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, best.t);
+        if (hit !== null && hit[0] < best.t) {
+          best.t = hit[0];
+          best.id = it.id;
+        }
+      }
+      return;
+    }
+    const kids = n.kids;
+    if (kids !== null) {
+      for (const k of kids) {
+        if (k !== null)
+          walkRayFirst(k, ox, oy, oz, ix, iy, iz, clip[0], clip[1], best);
+      }
+    }
+  }
+  function insertAt(n, it) {
+    if (it.cx - it.hx < n.b.minx)
+      n.b.minx = it.cx - it.hx;
+    if (it.cy - it.hy < n.b.miny)
+      n.b.miny = it.cy - it.hy;
+    if (it.cz - it.hz < n.b.minz)
+      n.b.minz = it.cz - it.hz;
+    if (it.cx + it.hx > n.b.maxx)
+      n.b.maxx = it.cx + it.hx;
+    if (it.cy + it.hy > n.b.maxy)
+      n.b.maxy = it.cy + it.hy;
+    if (it.cz + it.hz > n.b.maxz)
+      n.b.maxz = it.cz + it.hz;
+    if (n.items !== null) {
+      n.items.push(it);
+      if (n.items.length > capacity)
+        growLeaf(n);
+      return;
+    }
+    const kids = n.kids;
+    if (kids === null)
+      return;
+    const hit = octantsOf(it, n.b);
+    for (let k = 0;k < 8; k++) {
+      if (hit[k] && kids[k] !== null)
+        insertAt(kids[k], it);
+    }
+  }
+  const index = {
     kind: "octree",
     count: items.length,
-    stats: { nodes, leaves, depth: depth2, items: items.length },
+    get live() {
+      return live;
+    },
+    stats: {
+      get nodes() {
+        return nodes;
+      },
+      get leaves() {
+        return leaves;
+      },
+      get depth() {
+        return depth2;
+      },
+      items: items.length
+    },
     queryFrustum(planes) {
       beginQuery();
       walkFrustum(root, planes, false);
@@ -4206,15 +4496,66 @@ function buildOctree(items, options) {
       beginQuery();
       walkBox(root, min, max);
       return Uint32Array.from(out);
+    },
+    querySphere(cx, cy, cz, radius) {
+      beginQuery();
+      walkSphere(root, cx, cy, cz, radius);
+      return Uint32Array.from(out);
+    },
+    queryPoint(x, y, z) {
+      beginQuery();
+      walkPoint(root, x, y, z);
+      return Uint32Array.from(out);
+    },
+    queryRay(ox, oy, oz, dx, dy, dz) {
+      beginQuery();
+      hits.length = 0;
+      const ix = dx !== 0 ? 1 / dx : Infinity;
+      const iy = dy !== 0 ? 1 / dy : Infinity;
+      const iz = dz !== 0 ? 1 / dz : Infinity;
+      walkRay(root, ox, oy, oz, ix, iy, iz, 0, Infinity);
+      hits.sort((a, b) => a.t - b.t);
+      return hits.slice();
+    },
+    raycast(ox, oy, oz, dx, dy, dz) {
+      const ix = dx !== 0 ? 1 / dx : Infinity;
+      const iy = dy !== 0 ? 1 / dy : Infinity;
+      const iz = dz !== 0 ? 1 / dz : Infinity;
+      const best = { t: Infinity, id: -1 };
+      walkRayFirst(root, ox, oy, oz, ix, iy, iz, 0, Infinity, best);
+      return best.id >= 0 ? { id: best.id, t: best.t } : null;
+    },
+    insert(box) {
+      maxId = Math.max(maxId, box.id);
+      ensureCapacity(box.id);
+      if (removed.delete(box.id)) {} else {
+        live++;
+      }
+      insertAt(root, box);
+    },
+    remove(id) {
+      if (removed.has(id))
+        return;
+      removed.add(id);
+      live--;
+    },
+    update(box) {
+      this.remove(box.id);
+      this.insert(box);
     }
   };
+  return index;
 }
 function buildBVH(items, options) {
   const capacity = Math.max(1, options?.capacity ?? 8);
-  const layout = items.slice();
+  let layout = [];
+  let overflow = [];
+  const removed = new Set;
   let nodes = 0;
   let leaves = 0;
   let depth2 = 0;
+  let root = null;
+  let buildCount = items.length;
   function centerAlong(b, axis) {
     return axis === 0 ? b.cx : axis === 1 ? b.cy : b.cz;
   }
@@ -4222,22 +4563,53 @@ function buildBVH(items, options) {
     nodes++;
     if (level > depth2)
       depth2 = level;
-    const slice = layout.slice(from, to);
-    const b = unionOf(slice);
+    let minx = Infinity, miny = Infinity, minz = Infinity;
+    let maxx = -Infinity, maxy = -Infinity, maxz = -Infinity;
+    for (let i = from;i < to; i++) {
+      const b2 = layout[i];
+      if (b2.cx - b2.hx < minx)
+        minx = b2.cx - b2.hx;
+      if (b2.cy - b2.hy < miny)
+        miny = b2.cy - b2.hy;
+      if (b2.cz - b2.hz < minz)
+        minz = b2.cz - b2.hz;
+      if (b2.cx + b2.hx > maxx)
+        maxx = b2.cx + b2.hx;
+      if (b2.cy + b2.hy > maxy)
+        maxy = b2.cy + b2.hy;
+      if (b2.cz + b2.hz > maxz)
+        maxz = b2.cz + b2.hz;
+    }
+    const b = { minx, miny, minz, maxx, maxy, maxz };
     if (to - from <= capacity) {
       leaves++;
       return { b, from, to, left: null, right: null };
     }
     const ex = b.maxx - b.minx, ey = b.maxy - b.miny, ez = b.maxz - b.minz;
     const axis = ex >= ey && ex >= ez ? 0 : ey >= ez ? 1 : 2;
+    const slice = layout.slice(from, to);
     slice.sort((p, q) => centerAlong(p, axis) - centerAlong(q, axis));
     for (let k = 0;k < slice.length; k++)
       layout[from + k] = slice[k];
     const mid = from + (to - from >> 1);
     return { b, from, to, left: buildNode(from, mid, level + 1), right: buildNode(mid, to, level + 1) };
   }
-  const root = buildNode(0, layout.length, 1);
+  function rebuild() {
+    const liveItems = items.filter((it) => !removed.has(it.id)).concat(overflow.filter((it) => !removed.has(it.id)));
+    layout = liveItems.slice();
+    overflow = [];
+    nodes = 0;
+    leaves = 0;
+    depth2 = 0;
+    buildCount = layout.length;
+    root = layout.length === 0 ? null : buildNode(0, layout.length, 1);
+  }
+  rebuild();
   const out = [];
+  const hits = [];
+  function alive(it) {
+    return !removed.has(it.id);
+  }
   function walkFrustum(n, planes, fullyInside) {
     if (!fullyInside) {
       const cx = (n.b.minx + n.b.maxx) * 0.5;
@@ -4255,6 +4627,8 @@ function buildBVH(items, options) {
     if (l === null || r === null) {
       for (let i = n.from;i < n.to; i++) {
         const it = layout[i];
+        if (!alive(it))
+          continue;
         if (fullyInside || !aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz)) {
           out.push(it.id);
         }
@@ -4272,6 +4646,8 @@ function buildBVH(items, options) {
     if (l === null || r === null) {
       for (let i = n.from;i < n.to; i++) {
         const it = layout[i];
+        if (!alive(it))
+          continue;
         if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0] && it.cy + it.hy > min[1] && it.cy - it.hy < max[1] && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) {
           out.push(it.id);
         }
@@ -4281,23 +4657,750 @@ function buildBVH(items, options) {
     walkBox(l, min, max);
     walkBox(r, min, max);
   }
-  return {
+  function walkSphere(n, cx, cy, cz, radius) {
+    if (!boxReachesSphere(n.b, cx, cy, cz, radius))
+      return;
+    const l = n.left;
+    const r = n.right;
+    if (l === null || r === null) {
+      for (let i = n.from;i < n.to; i++) {
+        const it = layout[i];
+        if (!alive(it))
+          continue;
+        const b = {
+          minx: it.cx - it.hx,
+          maxx: it.cx + it.hx,
+          miny: it.cy - it.hy,
+          maxy: it.cy + it.hy,
+          minz: it.cz - it.hz,
+          maxz: it.cz + it.hz
+        };
+        if (boxReachesSphere(b, cx, cy, cz, radius))
+          out.push(it.id);
+      }
+      return;
+    }
+    walkSphere(l, cx, cy, cz, radius);
+    walkSphere(r, cx, cy, cz, radius);
+  }
+  function walkPoint(n, x, y, z) {
+    if (x < n.b.minx || x > n.b.maxx || y < n.b.miny || y > n.b.maxy || z < n.b.minz || z > n.b.maxz)
+      return;
+    const l = n.left;
+    const r = n.right;
+    if (l === null || r === null) {
+      for (let i = n.from;i < n.to; i++) {
+        const it = layout[i];
+        if (!alive(it))
+          continue;
+        if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
+          out.push(it.id);
+        }
+      }
+      return;
+    }
+    walkPoint(l, x, y, z);
+    walkPoint(r, x, y, z);
+  }
+  function walkRay(n, ox, oy, oz, ix, iy, iz, t0, t1) {
+    const clip = clipRay(ox, oy, oz, ix, iy, iz, n.b, t0, t1);
+    if (clip === null)
+      return;
+    const l = n.left;
+    const r = n.right;
+    if (l === null || r === null) {
+      for (let i = n.from;i < n.to; i++) {
+        const it = layout[i];
+        if (!alive(it))
+          continue;
+        const b = {
+          minx: it.cx - it.hx,
+          maxx: it.cx + it.hx,
+          miny: it.cy - it.hy,
+          maxy: it.cy + it.hy,
+          minz: it.cz - it.hz,
+          maxz: it.cz + it.hz
+        };
+        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, t1);
+        if (hit !== null)
+          hits.push({ id: it.id, t: hit[0] });
+      }
+      return;
+    }
+    const cl = clipRay(ox, oy, oz, ix, iy, iz, l.b, clip[0], clip[1]);
+    const cr = clipRay(ox, oy, oz, ix, iy, iz, r.b, clip[0], clip[1]);
+    if (cl !== null && (cr === null || cl[0] <= cr[0])) {
+      walkRay(l, ox, oy, oz, ix, iy, iz, cl[0], cl[1]);
+      if (cr !== null)
+        walkRay(r, ox, oy, oz, ix, iy, iz, cr[0], cr[1]);
+    } else if (cr !== null) {
+      walkRay(r, ox, oy, oz, ix, iy, iz, cr[0], cr[1]);
+      if (cl !== null)
+        walkRay(l, ox, oy, oz, ix, iy, iz, cl[0], cl[1]);
+    }
+  }
+  function walkRayFirst(n, ox, oy, oz, ix, iy, iz, t0, t1, best) {
+    if (t0 > best.t)
+      return;
+    const clip = clipRay(ox, oy, oz, ix, iy, iz, n.b, t0, t1);
+    if (clip === null || clip[0] > best.t)
+      return;
+    const l = n.left;
+    const r = n.right;
+    if (l === null || r === null) {
+      for (let i = n.from;i < n.to; i++) {
+        const it = layout[i];
+        if (!alive(it))
+          continue;
+        const b = {
+          minx: it.cx - it.hx,
+          maxx: it.cx + it.hx,
+          miny: it.cy - it.hy,
+          maxy: it.cy + it.hy,
+          minz: it.cz - it.hz,
+          maxz: it.cz + it.hz
+        };
+        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, best.t);
+        if (hit !== null && hit[0] < best.t) {
+          best.t = hit[0];
+          best.id = it.id;
+        }
+      }
+      return;
+    }
+    const cl = clipRay(ox, oy, oz, ix, iy, iz, l.b, clip[0], clip[1]);
+    const cr = clipRay(ox, oy, oz, ix, iy, iz, r.b, clip[0], clip[1]);
+    const nearIsLeft = cl !== null && (cr === null || cl[0] <= cr[0]);
+    const near = nearIsLeft ? l : r;
+    const far = nearIsLeft ? r : l;
+    const cn = nearIsLeft ? cl : cr;
+    const cf = nearIsLeft ? cr : cl;
+    if (cn !== null)
+      walkRayFirst(near, ox, oy, oz, ix, iy, iz, cn[0], cn[1], best);
+    if (cf !== null && cf[0] < best.t)
+      walkRayFirst(far, ox, oy, oz, ix, iy, iz, cf[0], cf[1], best);
+  }
+  const index = {
     kind: "bvh",
-    count: layout.length,
-    stats: { nodes, leaves, depth: depth2, items: layout.length },
+    count: items.length,
+    get live() {
+      return buildCount + overflow.length - removed.size - removedOverflowCount();
+    },
+    stats: { get nodes() {
+      return nodes;
+    }, get leaves() {
+      return leaves;
+    }, get depth() {
+      return depth2;
+    }, items: items.length },
     queryFrustum(planes) {
       out.length = 0;
-      walkFrustum(root, planes, false);
+      if (root !== null)
+        walkFrustum(root, planes, false);
+      scanOverflowFrustum(planes);
       return Uint32Array.from(out);
     },
     queryBox(min, max) {
       out.length = 0;
-      walkBox(root, min, max);
+      if (root !== null)
+        walkBox(root, min, max);
+      for (const it of overflow) {
+        if (!alive(it))
+          continue;
+        if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0] && it.cy + it.hy > min[1] && it.cy - it.hy < max[1] && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) {
+          out.push(it.id);
+        }
+      }
       return Uint32Array.from(out);
+    },
+    querySphere(cx, cy, cz, radius) {
+      out.length = 0;
+      if (root !== null)
+        walkSphere(root, cx, cy, cz, radius);
+      for (const it of overflow) {
+        if (!alive(it))
+          continue;
+        const b = {
+          minx: it.cx - it.hx,
+          maxx: it.cx + it.hx,
+          miny: it.cy - it.hy,
+          maxy: it.cy + it.hy,
+          minz: it.cz - it.hz,
+          maxz: it.cz + it.hz
+        };
+        if (boxReachesSphere(b, cx, cy, cz, radius))
+          out.push(it.id);
+      }
+      return Uint32Array.from(out);
+    },
+    queryPoint(x, y, z) {
+      out.length = 0;
+      if (root !== null)
+        walkPoint(root, x, y, z);
+      for (const it of overflow) {
+        if (!alive(it))
+          continue;
+        if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
+          out.push(it.id);
+        }
+      }
+      return Uint32Array.from(out);
+    },
+    queryRay(ox, oy, oz, dx, dy, dz) {
+      out.length = 0;
+      hits.length = 0;
+      const ix = dx !== 0 ? 1 / dx : Infinity;
+      const iy = dy !== 0 ? 1 / dy : Infinity;
+      const iz = dz !== 0 ? 1 / dz : Infinity;
+      if (root !== null)
+        walkRay(root, ox, oy, oz, ix, iy, iz, 0, Infinity);
+      for (const it of overflow) {
+        if (!alive(it))
+          continue;
+        const b = {
+          minx: it.cx - it.hx,
+          maxx: it.cx + it.hx,
+          miny: it.cy - it.hy,
+          maxy: it.cy + it.hy,
+          minz: it.cz - it.hz,
+          maxz: it.cz + it.hz
+        };
+        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, Infinity);
+        if (hit !== null)
+          hits.push({ id: it.id, t: hit[0] });
+      }
+      hits.sort((a, b) => a.t - b.t);
+      return hits.slice();
+    },
+    raycast(ox, oy, oz, dx, dy, dz) {
+      const ix = dx !== 0 ? 1 / dx : Infinity;
+      const iy = dy !== 0 ? 1 / dy : Infinity;
+      const iz = dz !== 0 ? 1 / dz : Infinity;
+      const best = { t: Infinity, id: -1 };
+      if (root !== null)
+        walkRayFirst(root, ox, oy, oz, ix, iy, iz, 0, Infinity, best);
+      for (const it of overflow) {
+        if (!alive(it))
+          continue;
+        const b = {
+          minx: it.cx - it.hx,
+          maxx: it.cx + it.hx,
+          miny: it.cy - it.hy,
+          maxy: it.cy + it.hy,
+          minz: it.cz - it.hz,
+          maxz: it.cz + it.hz
+        };
+        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, best.t);
+        if (hit !== null && hit[0] < best.t) {
+          best.t = hit[0];
+          best.id = it.id;
+        }
+      }
+      return best.id >= 0 ? { id: best.id, t: best.t } : null;
+    },
+    insert(box) {
+      if (removed.delete(box.id)) {}
+      overflow.push(box);
+    },
+    remove(id) {
+      removed.add(id);
+    },
+    update(box) {
+      this.remove(box.id);
+      this.insert(box);
+    },
+    rebuild
+  };
+  function removedOverflowCount() {
+    let n = 0;
+    for (const it of overflow)
+      if (removed.has(it.id))
+        n++;
+    return n;
+  }
+  function scanOverflowFrustum(planes) {
+    for (const it of overflow) {
+      if (!alive(it))
+        continue;
+      if (!aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz))
+        out.push(it.id);
+    }
+  }
+  return index;
+}
+var init_spatial = () => {};
+
+// packages/core/src/culling.ts
+function recordView(words, base, count, stride, fields) {
+  const cOff = base + fields.center;
+  const hOff = base + fields.half;
+  return {
+    count,
+    stride,
+    words,
+    base,
+    center: fields.center,
+    half: fields.half,
+    cx: (i) => words[cOff + i * stride],
+    cy: (i) => words[cOff + i * stride + 1],
+    cz: (i) => words[cOff + i * stride + 2],
+    hx: (i) => words[hOff + i * stride],
+    hy: (i) => words[hOff + i * stride + 1],
+    hz: (i) => words[hOff + i * stride + 2]
+  };
+}
+function projectBox(mvp, cx, cy, cz, hx, hy, hz, out, tileW, tileH, zMap = 0) {
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  let minZ = Infinity, minW = Infinity, anyFinite = 0;
+  for (let k = 0;k < 8; k++) {
+    const sx = (k & 1) * 2 - 1;
+    const sy = (k >> 1 & 1) * 2 - 1;
+    const sz = (k >> 2 & 1) * 2 - 1;
+    const x = cx + sx * hx, y = cy + sy * hy, z = cz + sz * hz;
+    const w = mvp[3] * x + mvp[7] * y + mvp[11] * z + mvp[15];
+    if (w < minW)
+      minW = w;
+    if (w > 0.0001) {
+      anyFinite = 1;
+      const nx = (mvp[0] * x + mvp[4] * y + mvp[8] * z + mvp[12]) / w;
+      const ny = (mvp[1] * x + mvp[5] * y + mvp[9] * z + mvp[13]) / w;
+      const nz = (mvp[2] * x + mvp[6] * y + mvp[10] * z + mvp[14]) / w;
+      const px = (nx * 0.5 + 0.5) * tileW;
+      const py = (ny * 0.5 + 0.5) * tileH;
+      const d = zMap === 1 ? (nz + 1) * 0.5 : nz;
+      if (px < x0)
+        x0 = px;
+      if (px > x1)
+        x1 = px;
+      if (py < y0)
+        y0 = py;
+      if (py > y1)
+        y1 = py;
+      if (d < minZ)
+        minZ = d;
+    }
+  }
+  out[0] = x0;
+  out[1] = x1;
+  out[2] = y0;
+  out[3] = y1;
+  out[4] = minZ;
+  out[5] = minW;
+  out[6] = anyFinite;
+  return out;
+}
+function frustumVerdicts(view, planes, out) {
+  const v = out ?? new Uint8Array(view.count);
+  for (let i = 0;i < view.count; i++) {
+    let outside = false;
+    for (let p = 0;p < 6 && !outside; p++) {
+      const o = p * 4;
+      const reach = Math.abs(planes[o]) * view.hx(i) + Math.abs(planes[o + 1]) * view.hy(i) + Math.abs(planes[o + 2]) * view.hz(i);
+      if (planes[o] * view.cx(i) + planes[o + 1] * view.cy(i) + planes[o + 2] * view.cz(i) + planes[o + 3] < -reach)
+        outside = true;
+    }
+    v[i] = outside ? 2 : 1;
+  }
+  return v;
+}
+function decodeVerdict(word) {
+  return Math.floor(word);
+}
+function decodeStreak(word) {
+  return (word - Math.floor(word)) * HYST_STREAK_SCALE;
+}
+function hysteresisPolicy(options) {
+  const frames = Math.max(1, Math.min(15, options?.frames ?? 3));
+  return {
+    frames,
+    apply(raw, state) {
+      for (let i = 0;i < state.length; i++) {
+        const r = Math.floor(raw[i]);
+        const prev = state[i];
+        const streak = (prev - Math.floor(prev)) * HYST_STREAK_SCALE;
+        if (r === 3) {
+          const s = Math.min(streak + 1, 15);
+          state[i] = (s >= frames ? 3 : 1) + s / HYST_STREAK_SCALE;
+        } else {
+          state[i] = r;
+        }
+      }
+      return state;
+    },
+    verdict(state, i) {
+      return Math.floor(state[i]);
     }
   };
 }
-var init_spatial = () => {};
+function flatCull(options) {
+  const minTexels = Math.max(1, options.minTexels ?? 2);
+  const tileW = options.tileW;
+  const tileH = options.tileH;
+  const scratch = new Float64Array(7);
+  return {
+    minTexels,
+    test(view, mvp, out) {
+      const v = out ?? new Uint8Array(view.count);
+      for (let i = 0;i < view.count; i++) {
+        const p = projectBox(mvp, view.cx(i), view.cy(i), view.cz(i), view.hx(i), view.hy(i), view.hz(i), scratch, tileW, tileH, 0);
+        if (p[6] < 1 || p[5] <= 0.0001) {
+          v[i] = 1;
+          continue;
+        }
+        const w = p[1] - p[0];
+        const h = p[3] - p[2];
+        v[i] = w < minTexels || h < minTexels ? 5 : 1;
+      }
+      return v;
+    }
+  };
+}
+function layerPolicy(spec) {
+  const table = new Map;
+  for (const [name, v] of Object.entries(spec)) {
+    table.set(name, { occluder: v.occluder ?? true, occludee: v.occludee ?? true });
+  }
+  const fallback = { occluder: true, occludee: true };
+  return {
+    of(name) {
+      return table.get(name) ?? fallback;
+    },
+    masks(count, assign) {
+      const occluder = new Uint8Array(count);
+      const occludee = new Uint8Array(count);
+      for (let i = 0;i < count; i++) {
+        const v = table.get(assign(i)) ?? fallback;
+        occluder[i] = v.occluder ? 1 : 0;
+        occludee[i] = v.occludee ? 1 : 0;
+      }
+      return { occluder, occludee };
+    }
+  };
+}
+function clusterize(view, options) {
+  const cell = Math.max(0.001, options?.cell ?? 8);
+  const buckets = new Map;
+  for (let i = 0;i < view.count; i++) {
+    const gx = Math.floor(view.cx(i) / cell);
+    const gz = Math.floor(view.cz(i) / cell);
+    const key = (gx + 4096) * 8192 + (gz + 4096);
+    let list = buckets.get(key);
+    if (list === undefined) {
+      list = [];
+      buckets.set(key, list);
+    }
+    list.push(i);
+  }
+  const clusters = [];
+  let maxSize = 0;
+  for (const ids of buckets.values()) {
+    let minx = Infinity, miny = Infinity, minz = Infinity;
+    let maxx = -Infinity, maxy = -Infinity, maxz = -Infinity;
+    for (const i of ids) {
+      if (view.cx(i) - view.hx(i) < minx)
+        minx = view.cx(i) - view.hx(i);
+      if (view.cy(i) - view.hy(i) < miny)
+        miny = view.cy(i) - view.hy(i);
+      if (view.cz(i) - view.hz(i) < minz)
+        minz = view.cz(i) - view.hz(i);
+      if (view.cx(i) + view.hx(i) > maxx)
+        maxx = view.cx(i) + view.hx(i);
+      if (view.cy(i) + view.hy(i) > maxy)
+        maxy = view.cy(i) + view.hy(i);
+      if (view.cz(i) + view.hz(i) > maxz)
+        maxz = view.cz(i) + view.hz(i);
+    }
+    if (ids.length > maxSize)
+      maxSize = ids.length;
+    clusters.push({ minx, miny, minz, maxx, maxy, maxz, ids: Uint32Array.from(ids) });
+  }
+  return {
+    clusters,
+    cell,
+    stats: {
+      clusters: clusters.length,
+      avg: clusters.length === 0 ? 0 : view.count / clusters.length,
+      max: maxSize
+    }
+  };
+}
+function softwareOccluder(options) {
+  const width = Math.max(2, options?.width ?? 256);
+  const height = Math.max(2, options?.height ?? 144);
+  const zMap = options?.zMap ?? 0;
+  const dims = [{ w: width, h: height }];
+  for (;; ) {
+    const prev = dims[dims.length - 1];
+    const w = Math.max(1, Math.ceil(prev.w / 2));
+    const h = Math.max(1, Math.ceil(prev.h / 2));
+    dims.push({ w, h });
+    if (w === 1 && h === 1)
+      break;
+  }
+  const levels = dims.length;
+  const zbuf = new Float64Array(width * height);
+  const mips = [zbuf];
+  for (let L = 1;L < levels; L++) {
+    mips.push(new Float64Array(dims[L].w * dims[L].h));
+  }
+  const proj = new Float64Array(7);
+  let mvp = null;
+  let reduced = false;
+  const cornerPx = new Float64Array(8);
+  const cornerPy = new Float64Array(8);
+  const cornerZ = new Float64Array(8);
+  function rasterTri(i0, i1, i2) {
+    const x0 = cornerPx[i0], y0 = cornerPy[i0], z0 = cornerZ[i0];
+    const x1 = cornerPx[i1], y1 = cornerPy[i1], z1 = cornerZ[i1];
+    const x2 = cornerPx[i2], y2 = cornerPy[i2], z2 = cornerZ[i2];
+    const area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+    if (Math.abs(area) < 0.000000000001)
+      return;
+    const sign = area > 0 ? 1 : -1;
+    let minx = Math.floor(Math.min(x0, x1, x2)) - 1;
+    let maxx = Math.ceil(Math.max(x0, x1, x2)) + 1;
+    let miny = Math.floor(Math.min(y0, y1, y2)) - 1;
+    let maxy = Math.ceil(Math.max(y0, y1, y2)) + 1;
+    minx = Math.max(0, minx);
+    miny = Math.max(0, miny);
+    maxx = Math.min(width, maxx);
+    maxy = Math.min(height, maxy);
+    const inv = 1 / area;
+    for (let py = miny;py < maxy; py++) {
+      const row = py * width;
+      for (let px = minx;px < maxx; px++) {
+        const e0 = ((x2 - x1) * (py + 0.5 - y1) - (y2 - y1) * (px + 0.5 - x1)) * sign;
+        const e1 = ((x0 - x2) * (py + 0.5 - y2) - (y0 - y2) * (px + 0.5 - x2)) * sign;
+        const e2 = ((x1 - x0) * (py + 0.5 - y0) - (y1 - y0) * (px + 0.5 - x0)) * sign;
+        if (e0 < 0 || e1 < 0 || e2 < 0)
+          continue;
+        const b0 = e0 * inv * sign;
+        const b1 = e1 * inv * sign;
+        const b2 = e2 * inv * sign;
+        const z = b0 * z0 + b1 * z1 + b2 * z2;
+        const idx = row + px;
+        if (z < zbuf[idx])
+          zbuf[idx] = z;
+      }
+    }
+  }
+  function rasterQuad(a, b, c, d) {
+    rasterTri(a, b, c);
+    rasterTri(a, c, d);
+  }
+  function mipOf(size) {
+    let L = 0;
+    while (1 << L < size)
+      L++;
+    return Math.min(L, mips.length - 1);
+  }
+  return {
+    width,
+    height,
+    get levels() {
+      return levels;
+    },
+    begin(nextMvp) {
+      mvp = nextMvp;
+      reduced = false;
+      zbuf.fill(1);
+      for (let L = 1;L < mips.length; L++)
+        mips[L].fill(-1);
+    },
+    writeBox(cx, cy, cz, hx, hy, hz) {
+      if (mvp === null)
+        throw new Error("rune/core: softwareOccluder.writeBox — begin(mvp) first (the tile is per-camera)");
+      for (let k = 0;k < 8; k++) {
+        const sx = (k & 1) * 2 - 1;
+        const sy = (k >> 1 & 1) * 2 - 1;
+        const sz = (k >> 2 & 1) * 2 - 1;
+        const x = cx + sx * hx, y = cy + sy * hy, z = cz + sz * hz;
+        const w = mvp[3] * x + mvp[7] * y + mvp[11] * z + mvp[15];
+        if (w <= 0.0001)
+          return;
+        const nx = (mvp[0] * x + mvp[4] * y + mvp[8] * z + mvp[12]) / w;
+        const ny = (mvp[1] * x + mvp[5] * y + mvp[9] * z + mvp[13]) / w;
+        let nz = (mvp[2] * x + mvp[6] * y + mvp[10] * z + mvp[14]) / w;
+        if (zMap === 1)
+          nz = (nz + 1) * 0.5;
+        cornerPx[k] = (nx * 0.5 + 0.5) * width;
+        cornerPy[k] = (ny * 0.5 + 0.5) * height;
+        cornerZ[k] = nz;
+      }
+      const faceAlong = (axis, front) => {
+        const ids = [];
+        for (let k = 0;k < 8; k++) {
+          const bit = k >> axis & 1;
+          if (front ? bit === 0 : bit === 1)
+            ids.push(k);
+        }
+        return [ids[0], ids[1], ids[3], ids[2]];
+      };
+      const m = mvp;
+      const faceNear = (axis) => {
+        const half = axis === 0 ? hx : axis === 1 ? hy : hz;
+        const c = axis === 0 ? cx : axis === 1 ? cy : cz;
+        let dFront = 0, dBack = 0;
+        for (const sign of [-1, 1]) {
+          const x = axis === 0 ? c + sign * half : cx;
+          const y = axis === 1 ? c + sign * half : cy;
+          const z = axis === 2 ? c + sign * half : cz;
+          const w = m[3] * x + m[7] * y + m[11] * z + m[15];
+          const d = (m[2] * x + m[6] * y + m[10] * z + m[14]) / (w !== 0 ? w : 1);
+          if (sign < 0)
+            dFront = d;
+          else
+            dBack = d;
+        }
+        return dFront <= dBack;
+      };
+      for (const axis of [0, 1, 2]) {
+        const quad = faceAlong(axis, faceNear(axis));
+        rasterQuad(quad[0], quad[1], quad[2], quad[3]);
+      }
+    },
+    writeView(view, i) {
+      this.writeBox(view.cx(i), view.cy(i), view.cz(i), view.hx(i), view.hy(i), view.hz(i));
+    },
+    reduce() {
+      reduced = true;
+      for (let L = 1;L < mips.length; L++) {
+        const src = mips[L - 1];
+        const dst = mips[L];
+        const wi = dims[L - 1], wo = dims[L];
+        for (let t = 0;t < wo.w * wo.h; t++) {
+          const x = t % wo.w, y = t / wo.w | 0;
+          const x0 = Math.min(x * 2, wi.w - 1), x1 = Math.min(x * 2 + 1, wi.w - 1);
+          const y0 = Math.min(y * 2, wi.h - 1), y1 = Math.min(y * 2 + 1, wi.h - 1);
+          const a = src[y0 * wi.w + x0], b = src[y0 * wi.w + x1];
+          const c = src[y1 * wi.w + x0], d = src[y1 * wi.w + x1];
+          dst[t] = Math.max(a, b, c, d);
+        }
+      }
+    },
+    hidden(cx, cy, cz, hx, hy, hz) {
+      if (mvp === null)
+        throw new Error("rune/core: softwareOccluder.hidden — begin(mvp) first");
+      if (!reduced)
+        throw new Error("rune/core: softwareOccluder.hidden — reduce() first (the mips are the test)");
+      const p = projectBox(mvp, cx, cy, cz, hx, hy, hz, proj, width, height, zMap);
+      if (p[6] < 1)
+        return false;
+      if (p[5] <= 0.0001)
+        return false;
+      let x0 = Math.max(0, Math.floor(p[0]));
+      let x1 = Math.min(width, Math.ceil(p[1]));
+      let y0 = Math.max(0, Math.floor(p[2]));
+      let y1 = Math.min(height, Math.ceil(p[3]));
+      x0 = Math.max(0, x0 - 2);
+      y0 = Math.max(0, y0 - 2);
+      x1 = Math.min(width, x1 + 2);
+      y1 = Math.min(height, y1 + 2);
+      if (x1 <= x0 || y1 <= y0)
+        return false;
+      const L = mipOf(Math.max(x1 - x0, y1 - y0));
+      const lw = dims[L].w, lh = dims[L].h;
+      const mip = mips[L];
+      const tx0 = x0 >> L, tx1 = Math.min(x1 - 1 >> L, lw - 1);
+      const ty0 = y0 >> L, ty1 = Math.min(y1 - 1 >> L, lh - 1);
+      let zmax = -Infinity;
+      for (let ty = ty0;ty <= ty1; ty++) {
+        for (let tx = tx0;tx <= tx1; tx++) {
+          const z = mip[ty * lw + tx];
+          if (z > zmax)
+            zmax = z;
+        }
+      }
+      return p[4] > zmax + 0.00001;
+    },
+    hiddenView(view, i) {
+      return this.hidden(view.cx(i), view.cy(i), view.cz(i), view.hx(i), view.hy(i), view.hz(i));
+    }
+  };
+}
+function cameraRay(eye, fwd, right, up, fovY, aspect, nx, ny) {
+  const tf = Math.tan(fovY / 2);
+  let dx = fwd[0] + right[0] * nx * aspect * tf + up[0] * ny * tf;
+  let dy = fwd[1] + right[1] * nx * aspect * tf + up[1] * ny * tf;
+  let dz = fwd[2] + right[2] * nx * aspect * tf + up[2] * ny * tf;
+  const l = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+  dx /= l;
+  dy /= l;
+  dz /= l;
+  return { ox: eye[0], oy: eye[1], oz: eye[2], dx, dy, dz };
+}
+function rayBoxes(view, ox, oy, oz, dx, dy, dz) {
+  const ix = dx !== 0 ? 1 / dx : Infinity;
+  const iy = dy !== 0 ? 1 / dy : Infinity;
+  const iz = dz !== 0 ? 1 / dz : Infinity;
+  const hits = [];
+  for (let i = 0;i < view.count; i++) {
+    const bx0 = view.cx(i) - view.hx(i), bx1 = view.cx(i) + view.hx(i);
+    const by0 = view.cy(i) - view.hy(i), by1 = view.cy(i) + view.hy(i);
+    const bz0 = view.cz(i) - view.hz(i), bz1 = view.cz(i) + view.hz(i);
+    let t0 = 0, t1 = Infinity, miss = false;
+    if (ix === Infinity || ix === -Infinity) {
+      if (ox < bx0 || ox > bx1)
+        miss = true;
+    } else {
+      let ta = (bx0 - ox) * ix, tb = (bx1 - ox) * ix;
+      if (ta > tb) {
+        const s = ta;
+        ta = tb;
+        tb = s;
+      }
+      if (ta > t0)
+        t0 = ta;
+      if (tb < t1)
+        t1 = tb;
+      if (t0 > t1)
+        miss = true;
+    }
+    if (!miss) {
+      if (iy === Infinity || iy === -Infinity) {
+        if (oy < by0 || oy > by1)
+          miss = true;
+      } else {
+        let ta = (by0 - oy) * iy, tb = (by1 - oy) * iy;
+        if (ta > tb) {
+          const s = ta;
+          ta = tb;
+          tb = s;
+        }
+        if (ta > t0)
+          t0 = ta;
+        if (tb < t1)
+          t1 = tb;
+        if (t0 > t1)
+          miss = true;
+      }
+    }
+    if (!miss) {
+      if (iz === Infinity || iz === -Infinity) {
+        if (oz < bz0 || oz > bz1)
+          miss = true;
+      } else {
+        let ta = (bz0 - oz) * iz, tb = (bz1 - oz) * iz;
+        if (ta > tb) {
+          const s = ta;
+          ta = tb;
+          tb = s;
+        }
+        if (ta > t0)
+          t0 = ta;
+        if (tb < t1)
+          t1 = tb;
+        if (t0 > t1)
+          miss = true;
+      }
+    }
+    if (!miss)
+      hits.push({ id: i, t: t0 });
+  }
+  hits.sort((a, b) => a.t - b.t);
+  return hits;
+}
+var HYST_STREAK_SCALE = 32;
 
 // packages/core/src/gpu/bitonic.ts
 function bitonicPadCount(count) {
@@ -4436,6 +5539,7 @@ __export(exports_src, {
   streamTexture: () => streamTexture,
   sphereOutsideFrustum: () => sphereOutsideFrustum,
   sortBackToFront: () => sortBackToFront,
+  softwareOccluder: () => softwareOccluder,
   simplex3: () => simplex3,
   signal: () => signal,
   serializeTape: () => serializeTape,
@@ -4445,18 +5549,27 @@ __export(exports_src, {
   schedule: () => schedule,
   reflectWgsl: () => reflectWgsl,
   reflectGlsl: () => reflectGlsl,
+  recordView: () => recordView,
+  rayBoxes: () => rayBoxes,
+  projectBox: () => projectBox,
   parseTape: () => parseTape,
   normalizeTextureFormat: () => normalizeTextureFormat,
   nameHash: () => nameHash,
+  layerPolicy: () => layerPolicy,
+  hysteresisPolicy: () => hysteresisPolicy,
   hash01: () => hash01,
   hasSharedArrayBuffer: () => hasSharedArrayBuffer,
+  frustumVerdicts: () => frustumVerdicts,
   frustumPlanes: () => frustumPlanes,
+  flatCull: () => flatCull,
   feedStride: () => feedStride,
   feedFieldSize: () => feedFieldSize,
   estimateTextureBytes: () => estimateTextureBytes,
   effect: () => effect,
   detectTransport: () => detectTransport,
   derive: () => derive,
+  decodeVerdict: () => decodeVerdict,
+  decodeStreak: () => decodeStreak,
   decideRecovery: () => decideRecovery,
   createUploadScheduler: () => createUploadScheduler,
   createUploadQueue: () => createUploadQueue,
@@ -4485,10 +5598,12 @@ __export(exports_src, {
   createEpoch: () => createEpoch,
   createCaps: () => createCaps,
   countTiles: () => countTiles,
+  clusterize: () => clusterize,
   classifySphere: () => classifySphere,
   classifyGpuError: () => classifyGpuError,
   classifyDeviceLost: () => classifyDeviceLost,
   chunkRect: () => chunkRect,
+  cameraRay: () => cameraRay,
   buildOctree: () => buildOctree,
   buildFrameReRecording: () => buildFrameReRecording,
   buildFrame: () => buildFrame,
@@ -4511,6 +5626,7 @@ __export(exports_src, {
   OpCode: () => OpCode,
   LOSS_STORM_WINDOW_MS: () => LOSS_STORM_WINDOW_MS,
   LOSS_STORM_MAX: () => LOSS_STORM_MAX,
+  HYST_STREAK_SCALE: () => HYST_STREAK_SCALE,
   GRAD3: () => GRAD3,
   GPU_BUFFER_USAGE: () => GPU_BUFFER_USAGE,
   FRUSTUM_PLANE_COUNT: () => FRUSTUM_PLANE_COUNT,
@@ -13410,7 +14526,10 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
   // words.w — the boot-time occluder count, carried for diagnostics only
   var out = 0u; var frustum = 0u; var occluded = 0u; var straddle = 0u;
   for (var i = 0u; i < n; i = i + 1u) {
-    let f = scene[flagsOff + i];
+    // Task 201 — THE HIST DECODE: the read region may carry the hysteresis
+    // encoding (verdict | streak<<8); the raw flags carry streak 0, so ONE
+    // mask answers both — byte-identical for the raw vocabulary (1..4)
+    let f = scene[flagsOff + i] & 0xFFu;
     let visible = f == 1u || f == 4u;
     if (visible) {
       scene[out] = i;          // the list region (word 0) — ascending, stable
@@ -13433,29 +14552,105 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
   args[8u] = indexCount;
   args[9u] = out;
 }`;
+var HYST_WGSL = `
+struct HystParams { words: vec4<u32> }
+@group(0) @binding(0) var<uniform> params: HystParams;
+@group(0) @binding(1) var<storage, read_write> scene: array<u32>;
+@compute @workgroup_size(64)
+fn hysteresis(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= params.words.x) { return; }
+  let raw = scene[params.words.y + i];
+  if (params.words.w == 0u) {
+    // the identity gate: hist = raw (streak 0) — the no-hysteresis frame
+    scene[params.words.z + i] = raw;
+    return;
+  }
+  let prev = scene[params.words.z + i];
+  let streak = min((prev >> 8u) & 0xFFu, 15u);
+  if (raw == 3u) {
+    let s = min(streak + 1u, 15u);
+    let K = (params.words.w >> 8u) & 0xFFu;
+    let verdict = select(1u, 3u, s >= K);
+    scene[params.words.z + i] = verdict | (s << 8u);
+  } else {
+    // visible/frustum/straddle show immediately; the streak resets
+    scene[params.words.z + i] = raw;
+  }
+}
+`;
+var HYST_GLSL = `#version 300 es
+layout(location=0) in float a_flag;  // the culler's RAW verdict (1..4)
+layout(location=1) in float a_prev;  // the previous ENCODED history word
+uniform vec4 u_misc;                 // x: the gate, y: K frames
+out float v_flag;
+void main() {
+  float raw = a_flag;
+  if (u_misc.x < 0.5) {
+    v_flag = raw; // the identity gate — byte-identical to the raw verdict
+  } else {
+    // decode: verdict = floor(word); streak = fract(word) * 32 (the 1/32
+    // steps are EXACT binary fractions — lossless in f32, the CPU kit's
+    // own encoding contract)
+    float verdict = floor(a_prev);
+    float streak = (a_prev - verdict) * 32.0;
+    if (raw == 3.0) {
+      streak = min(streak + 1.0, 15.0);
+      verdict = streak >= u_misc.y ? 3.0 : 1.0;
+    } else {
+      streak = 0.0;
+      verdict = raw;
+    }
+    v_flag = verdict + streak / 32.0;
+  }
+  gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
+}`;
 var QUAD_LIST = new Float32Array([-1, -1, 1, -1, -1, 1, 1, -1, 1, 1, -1, 1]);
 var QUAD_STRIP = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
 var WG_USAGE = { STORAGE: 128, INDIRECT: 256, COPY_SRC: 4, COPY_DST: 8 };
-function attachHizScene(device, spec) {
-  const pyr = spec.pyramid.build !== undefined ? spec.pyramid : device.pyramid(spec.pyramid.width, spec.pyramid.height);
-  const zPass = device.program({ depth: { test: "less", write: true }, cull: "back", wg: spec.shaders.z.wg, gl: spec.shaders.z.gl });
-  const colorPass = device.program({ depth: { test: "less", write: true }, cull: "back", wg: spec.shaders.color.wg, gl: spec.shaders.color.gl });
-  const panelPass = device.program({ depth: { test: "always", write: false }, wg: spec.shaders.panel.wg, gl: spec.shaders.panel.gl });
-  const culler = device.occlusionCuller(spec.scene, pyr, {
-    wgsl: spec.shaders.cull.wg.code,
-    glsl: spec.shaders.cull.gl,
-    entry: spec.shaders.cull.wg.entry,
-    lanes: spec.shaders.cull.lanes,
-    uniformBytes: spec.shaders.cull.wg.uniformBytes
+function attachDepthPass(device, spec) {
+  const program = device.program({ depth: { test: "less", write: true }, cull: "back", wg: spec.shaders.wg, gl: spec.shaders.gl });
+  const block = new Float32Array(16);
+  const indexCount = spec.mesh.indices !== undefined ? spec.mesh.indices.length : 36;
+  return {
+    run(call) {
+      const occluders = call.occluders !== undefined ? Math.max(0, Math.min(spec.scene.total, call.occluders | 0)) : spec.scene.occluders;
+      block.set(call.camera.mvp, 0);
+      device.drawInstanced({
+        target: spec.pyramid.zTarget,
+        clear: true,
+        program,
+        geometry: spec.mesh,
+        records: spec.scene,
+        uniforms: block,
+        instances: occluders,
+        indexCount: call.indexCount ?? indexCount
+      });
+    }
+  };
+}
+function attachOcclusionPass(device, spec) {
+  const culler = device.occlusionCuller(spec.scene, spec.pyramid, {
+    wgsl: spec.kernel.wg.code,
+    glsl: spec.kernel.gl,
+    entry: spec.kernel.wg.entry,
+    lanes: spec.kernel.lanes,
+    uniformBytes: spec.kernel.wg.uniformBytes
   });
-  const hiz = device.hizFrame({ scene: spec.scene, pyramid: pyr, culler, zPass, colorPass, geometry: spec.geometry });
-  const surf = spec.surface !== undefined ? device.surface(spec.surface.width, spec.surface.height, { depth: true }) : null;
-  const baseLight = spec.light !== undefined ? [spec.light[0] ?? 0.5, spec.light[1] ?? 0.8, spec.light[2] ?? 0.35] : [0.5, 0.8, 0.35];
-  const zBlock = new Float32Array(16);
-  const cullBlock = new Float32Array(20);
-  const colorBlock = new Float32Array(28);
-  const panelBlock = new Float32Array(8);
-  const indexCount = spec.geometry.indices !== undefined ? spec.geometry.indices.length : 36;
+  const block = new Float32Array(20);
+  return {
+    run(call) {
+      block.set(call.camera.mvp, 0);
+      block[16] = call.gate === false ? 0 : 1;
+      culler.run(block);
+    }
+  };
+}
+function attachVisiblePass(device, spec) {
+  const program = device.program({ depth: { test: "less", write: true }, cull: "back", wg: spec.shaders.wg, gl: spec.shaders.gl });
+  const block = new Float32Array(28);
+  const indexCount = spec.mesh.indices !== undefined ? spec.mesh.indices.length : 36;
+  const surf = spec.surface ?? null;
   function targetHeight(targetId) {
     if (targetId === 0)
       return device.canvas.height;
@@ -13463,50 +14658,78 @@ function attachHizScene(device, spec) {
       return surf.height;
     return surf !== null ? surf.height : device.canvas.height;
   }
-  function frame(call) {
-    const occluders = call.occluders !== undefined ? Math.max(0, Math.min(spec.scene.total, call.occluders | 0)) : spec.scene.occluders;
-    const light = call.light !== undefined ? call.light : baseLight;
-    zBlock.set(call.camera.mvp, 0);
-    cullBlock.set(call.camera.mvp, 0);
-    cullBlock[16] = call.culling === false ? 0 : 1;
-    colorBlock.set(call.camera.mvp, 0);
-    colorBlock[16] = targetHeight(call.target);
-    colorBlock[20] = light[0];
-    colorBlock[21] = light[1];
-    colorBlock[22] = light[2];
-    colorBlock[23] = 0;
-    colorBlock[24] = call.camera.eye[0];
-    colorBlock[25] = call.camera.eye[1];
-    colorBlock[26] = call.camera.eye[2];
-    colorBlock[27] = 1;
-    hiz.run({
-      target: call.target,
-      occluders,
-      zUniforms: zBlock,
-      cullUniforms: cullBlock,
-      colorUniforms: colorBlock,
-      indexCount,
-      clear: call.clear
-    });
-    if (call.pyramidView === true) {
+  return {
+    run(call) {
+      const light = call.light !== undefined ? call.light : [0.5, 0.8, 0.35];
+      block.set(call.camera.mvp, 0);
+      block[16] = targetHeight(call.target);
+      block[20] = light[0];
+      block[21] = light[1];
+      block[22] = light[2];
+      block[23] = 0;
+      block[24] = call.camera.eye[0];
+      block[25] = call.camera.eye[1];
+      block[26] = call.camera.eye[2];
+      block[27] = 1;
+      device.drawVisible({
+        target: call.target,
+        clear: call.clear ?? true,
+        program,
+        geometry: spec.mesh,
+        records: spec.scene,
+        uniforms: block,
+        indexCount: call.indexCount ?? indexCount
+      });
+    }
+  };
+}
+function attachDebugStrip(device, spec) {
+  const program = device.program({ depth: { test: "always", write: false }, wg: spec.shaders.wg, gl: spec.shaders.gl });
+  const block = new Float32Array(8);
+  const pyr = spec.pyramid;
+  return {
+    run(call) {
       const w = 2 / pyr.levels;
       const offsets = pyr.offsets ?? [];
       for (let L = 0;L < pyr.levels; L++) {
-        panelBlock[0] = -1 + L * w + 0.01;
-        panelBlock[1] = -0.97;
-        panelBlock[2] = -1 + (L + 1) * w - 0.01;
-        panelBlock[3] = -0.55;
-        panelBlock[4] = offsets[L] ?? 0;
-        panelBlock[5] = pyr.dims[L].w;
-        panelBlock[6] = pyr.dims[L].h;
-        panelBlock[7] = 0;
-        device.drawQuad({ target: call.target, clear: false, program: panelPass, pyramid: pyr, level: L, uniforms: panelBlock });
+        block[0] = -1 + L * w + 0.01;
+        block[1] = -0.97;
+        block[2] = -1 + (L + 1) * w - 0.01;
+        block[3] = -0.55;
+        block[4] = offsets[L] ?? 0;
+        block[5] = pyr.dims[L].w;
+        block[6] = pyr.dims[L].h;
+        block[7] = 0;
+        device.drawQuad({ target: call.target, clear: false, program, pyramid: pyr, level: L, uniforms: block });
       }
     }
+  };
+}
+function attachHizScene(device, spec) {
+  const pyr = spec.pyramid.build !== undefined ? spec.pyramid : device.pyramid(spec.pyramid.width, spec.pyramid.height);
+  const surf = spec.surface !== undefined ? device.surface(spec.surface.width, spec.surface.height, { depth: true }) : null;
+  const depth2 = device.depthPass({ scene: spec.scene, mesh: spec.geometry, shaders: spec.shaders.z, pyramid: pyr });
+  const occl = device.occlusionPass({ scene: spec.scene, pyramid: pyr, kernel: spec.shaders.cull });
+  const smooth = spec.scene.histWord !== null ? device.hysteresisPass({ scene: spec.scene, frames: spec.hysteresisFrames ?? 3 }) : null;
+  const color = device.visiblePass({ scene: spec.scene, mesh: spec.geometry, shaders: spec.shaders.color, surface: surf ?? undefined });
+  const strip = device.debugStrip({ pyramid: pyr, shaders: spec.shaders.panel });
+  const baseLight = spec.light !== undefined ? [spec.light[0] ?? 0.5, spec.light[1] ?? 0.8, spec.light[2] ?? 0.35] : [0.5, 0.8, 0.35];
+  function frame(call) {
+    const occluders = call.occluders !== undefined ? Math.max(0, Math.min(spec.scene.total, call.occluders | 0)) : spec.scene.occluders;
+    const light = call.light !== undefined ? call.light : baseLight;
+    depth2.run({ camera: call.camera, occluders });
+    pyr.build();
+    occl.run({ camera: call.camera, gate: call.culling !== false });
+    if (smooth !== null)
+      smooth.run({ gate: call.hysteresis === true });
+    color.run({ target: call.target, camera: call.camera, light, clear: call.clear });
+    if (call.pyramidView === true)
+      strip.run({ target: call.target });
   }
   return {
     frame,
     readStats: () => device.readCullStats(spec.scene),
+    readVerdicts: () => device.readVerdicts(spec.scene),
     pyramid: pyr,
     surface: surf,
     scene: spec.scene
@@ -13583,11 +14806,16 @@ function createWgDevice(renderer, options, clear) {
     return offset;
   }
   function scene(layout) {
+    const histWord = layout.histWord ?? null;
+    if (histWord !== null && histWord + layout.total > layout.words.length) {
+      throw new Error(`rune: the scene's hist region [${histWord}..${histWord + layout.total}) outruns the words array (${layout.words.length} words) — declare the [list | flags | hist | records] layout`);
+    }
     const handle = {
       total: layout.total,
       occluders: layout.occluders,
       stride: layout.stride ?? 12,
-      fields: { center: layout.fields?.center ?? 0, half: layout.fields?.half ?? 3 }
+      fields: { center: layout.fields?.center ?? 0, half: layout.fields?.half ?? 3 },
+      histWord
     };
     const bufferId = gpu.createExternalBuffer(layout.words.byteLength, WG_USAGE.STORAGE | WG_USAGE.COPY_DST | WG_USAGE.COPY_SRC);
     gpu.writeExternalBuffer(bufferId, layout.words);
@@ -13597,10 +14825,10 @@ function createWgDevice(renderer, options, clear) {
     const compactU32 = new Uint32Array(compactBlock.buffer);
     compactU32[0] = layout.total;
     compactU32[1] = 36;
-    compactU32[2] = layout.flagsWord;
+    compactU32[2] = histWord ?? layout.flagsWord;
     compactU32[3] = layout.occluders;
     const compactId = gpu.createCompute(COMPACT_WGSL, 16, [bufferId, placeholderId, argsId]);
-    scenes.set(handle, { handle, bufferId, argsId, compactId, compactBlock, compactU32 });
+    scenes.set(handle, { handle, bufferId, argsId, compactId, compactBlock, compactU32, flagsWord: layout.flagsWord });
     return handle;
   }
   function pyramid(w, h) {
@@ -13764,6 +14992,7 @@ ${REDUCE}`;
     const s = scenes.get(spec.scene);
     if (s === undefined)
       throw new Error("rune: hizFrame — the scene handle is not this device's own");
+    const smooth = spec.scene.histWord !== null ? hysteresisPass({ scene: spec.scene, frames: spec.hysteresisFrames ?? 3 }) : null;
     return {
       run(call) {
         drawInstanced({
@@ -13778,6 +15007,8 @@ ${REDUCE}`;
         });
         spec.pyramid.build();
         spec.culler.run(call.cullUniforms);
+        if (smooth !== null)
+          smooth.run({ gate: call.hysteresis === true });
         drawVisible({
           target: call.target,
           clear: call.clear ?? true,
@@ -13789,6 +15020,40 @@ ${REDUCE}`;
         });
       }
     };
+  }
+  function hysteresisPass(spec) {
+    const s = scenes.get(spec.scene);
+    if (s === undefined)
+      throw new Error("rune: hysteresisPass — the scene handle is not this device's own");
+    const histWord = spec.scene.histWord;
+    if (histWord === null) {
+      throw new Error("rune: hysteresisPass — the scene carries no hist region (declare histWord in device.scene()'s layout: [list | flags | hist | records])");
+    }
+    const computeId = gpu.createCompute(HYST_WGSL, 16, [s.bufferId]);
+    const workgroups = Math.max(1, Math.ceil(spec.scene.total / 64));
+    const K = Math.max(1, Math.min(15, spec.frames ?? 3));
+    const block = new Float32Array(4);
+    const u32 = new Uint32Array(block.buffer);
+    u32[0] = spec.scene.total;
+    u32[1] = s.flagsWord;
+    u32[2] = histWord;
+    return {
+      run(call) {
+        u32[3] = call.gate === true ? 1 | K << 8 : 0;
+        gpu.runCompute(computeId, "hysteresis", block, workgroups);
+      }
+    };
+  }
+  async function readVerdicts(sceneHandle) {
+    const s = scenes.get(sceneHandle);
+    if (s === undefined)
+      throw new Error("rune: readVerdicts — the scene handle is not this device's own");
+    const f = await gpu.readExternalBuffer(s.bufferId, (s.flagsWord + sceneHandle.total) * 4);
+    const u = new Uint32Array(f.buffer, s.flagsWord * 4, sceneHandle.total);
+    const out = new Uint8Array(sceneHandle.total);
+    for (let i = 0;i < sceneHandle.total; i++)
+      out[i] = u[i] & 255;
+    return out;
   }
   async function readCullStats(sceneHandle) {
     const s = scenes.get(sceneHandle);
@@ -13819,6 +15084,12 @@ ${REDUCE}`;
     drawVisible,
     drawQuad,
     occlusionCuller,
+    depthPass: (spec) => attachDepthPass(device, spec),
+    occlusionPass: (spec) => attachOcclusionPass(device, spec),
+    hysteresisPass,
+    visiblePass: (spec) => attachVisiblePass(device, spec),
+    debugStrip: (spec) => attachDebugStrip(device, spec),
+    readVerdicts,
     hizFrame,
     hizScene: (spec) => attachHizScene(device, spec),
     readCullStats,
@@ -13854,19 +15125,29 @@ function createGlDevice(renderer, options, clear) {
   let quadBuf = 0;
   let reduceProgramId = 0;
   function scene(layout) {
+    const histWord = layout.histWord ?? null;
     const handle = {
       total: layout.total,
       occluders: layout.occluders,
       stride: layout.stride ?? 12,
-      fields: { center: layout.fields?.center ?? 0, half: layout.fields?.half ?? 3 }
+      fields: { center: layout.fields?.center ?? 0, half: layout.fields?.half ?? 3 },
+      histWord
     };
     const recBuf = gl.createBuffer(layout.recordsF32, "static");
     const flagBuf = gl.createBuffer(new Float32Array(layout.total), "dynamic");
+    let histA = 0, histB = 0;
+    if (histWord !== null) {
+      histA = gl.createBuffer(new Float32Array(layout.total), "dynamic");
+      histB = gl.createBuffer(new Float32Array(layout.total), "dynamic");
+    }
     scenes.set(handle, {
       handle,
       recBuf,
       flagBuf,
-      flagScratch: new Float32Array(layout.total)
+      flagScratch: new Float32Array(layout.total),
+      histA,
+      histB,
+      histCur: histA
     });
     return handle;
   }
@@ -13964,7 +15245,8 @@ function createGlDevice(renderer, options, clear) {
       if (attr.from === "records") {
         gl.bindVertexBuffer(s.recBuf, attr.location, attr.size, attr.stride, attr.offset, attr.divisor);
       } else if (attr.from === "flags" && withFlags) {
-        gl.bindVertexBuffer(s.flagBuf, attr.location, attr.size, attr.stride, attr.offset, attr.divisor);
+        const feed = s.histA !== 0 ? s.histCur : s.flagBuf;
+        gl.bindVertexBuffer(feed, attr.location, attr.size, attr.stride, attr.offset, attr.divisor);
       }
     }
   }
@@ -14049,12 +15331,13 @@ function createGlDevice(renderer, options, clear) {
     const s = scenes.get(sceneHandle);
     if (s === undefined)
       throw new Error("rune: readCullStats — the scene handle is not this device's own");
-    const ok = gl.readBuffer(s.flagBuf, s.flagScratch);
+    const feed = s.histA !== 0 ? s.histCur : s.flagBuf;
+    const ok = gl.readBuffer(feed, s.flagScratch);
     if (!ok)
       throw new Error("rune: the flag buffer readback was refused");
     let drawn = 0, frustum = 0, occluded = 0, straddle = 0;
     for (let i = 0;i < sceneHandle.total; i++) {
-      const f = s.flagScratch[i];
+      const f = Math.floor(s.flagScratch[i]);
       if (f === 1)
         drawn++;
       else if (f === 2)
@@ -14068,10 +15351,59 @@ function createGlDevice(renderer, options, clear) {
     }
     return { drawn, frustum, occluded, straddle };
   }
+  function hysteresisPass(spec) {
+    const s = scenes.get(spec.scene);
+    if (s === undefined)
+      throw new Error("rune: hysteresisPass — the scene handle is not this device's own");
+    if (s.histA === 0) {
+      throw new Error("rune: hysteresisPass — the scene carries no hist region (declare histWord in device.scene()'s layout: [list | flags | hist | records])");
+    }
+    const passId = gl.createTransformPass({
+      vertex: HYST_GLSL,
+      outputs: ["v_flag"],
+      attributes: [
+        { name: "a_flag", size: 1, stride: 4, offset: 0 },
+        { name: "a_prev", size: 1, stride: 4, offset: 0 }
+      ],
+      uniforms: [{ name: "u_misc", size: 4 }]
+    });
+    const K = Math.max(1, Math.min(15, spec.frames ?? 3));
+    const block = new Float32Array(4);
+    return {
+      run(call) {
+        block[0] = call.gate === true ? 1 : 0;
+        block[1] = K;
+        block[2] = 0;
+        block[3] = 0;
+        const next = s.histCur === s.histA ? s.histB : s.histA;
+        gl.runTransformPass(passId, spec.scene.total, {
+          bufferId: next,
+          attribBuffers: [s.flagBuf, s.histCur],
+          uniformData: block
+        });
+        s.histCur = next;
+      }
+    };
+  }
+  async function readVerdicts(sceneHandle) {
+    const s = scenes.get(sceneHandle);
+    if (s === undefined)
+      throw new Error("rune: readVerdicts — the scene handle is not this device's own");
+    const ok = gl.readBuffer(s.flagBuf, s.flagScratch);
+    if (!ok)
+      throw new Error("rune: the flag buffer readback was refused");
+    const out = new Uint8Array(sceneHandle.total);
+    for (let i = 0;i < sceneHandle.total; i++) {
+      const f = Math.floor(s.flagScratch[i]);
+      out[i] = f >= 1 && f <= 4 ? f : 0;
+    }
+    return out;
+  }
   function hizFrame(spec) {
     const s = scenes.get(spec.scene);
     if (s === undefined)
       throw new Error("rune: hizFrame — the scene handle is not this device's own");
+    const smooth = spec.scene.histWord !== null ? hysteresisPass({ scene: spec.scene, frames: spec.hysteresisFrames ?? 3 }) : null;
     return {
       run(call) {
         drawInstanced({
@@ -14086,6 +15418,8 @@ function createGlDevice(renderer, options, clear) {
         });
         spec.pyramid.build();
         spec.culler.run(call.cullUniforms);
+        if (smooth !== null)
+          smooth.run({ gate: call.hysteresis === true });
         drawVisible({
           target: call.target,
           clear: call.clear ?? true,
@@ -14128,6 +15462,12 @@ function createGlDevice(renderer, options, clear) {
     drawVisible,
     drawQuad,
     occlusionCuller,
+    depthPass: (spec) => attachDepthPass(device, spec),
+    occlusionPass: (spec) => attachOcclusionPass(device, spec),
+    hysteresisPass,
+    visiblePass: (spec) => attachVisiblePass(device, spec),
+    debugStrip: (spec) => attachDebugStrip(device, spec),
+    readVerdicts,
     hizFrame,
     hizScene: (spec) => attachHizScene(device, spec),
     readCullStats,
@@ -17372,6 +18712,7 @@ export {
   torusKnot,
   torus,
   sphere,
+  softwareOccluder,
   showOnWebGpu,
   showOn,
   showAny,
@@ -17383,14 +18724,23 @@ export {
   reportWebgpuMainFact,
   replayJournalOnGpu,
   replayJournalOn,
+  recordView,
+  rayBoxes,
   quad,
+  projectBox,
   probeWebgpuScope,
   probeWebGpu,
   plane,
+  layerPolicy,
   isOffscreenCanvas,
+  hysteresisPolicy,
   getCanvasCssSize,
+  frustumVerdicts,
   frustumPlanes,
+  flatCull,
   describeWebgpuScope,
+  decodeVerdict,
+  decodeStreak,
   cube,
   createWebGpuRenderer,
   createWebGL2Renderer,
@@ -17405,8 +18755,10 @@ export {
   createDevice,
   computeMipLevels,
   combineWebgpuScope,
+  clusterize,
   capsule,
   canvasDpr,
+  cameraRay,
   buildOctree,
   buildBVH,
   box,
@@ -17415,5 +18767,6 @@ export {
   aabbInsideFrustum,
   WEBUGPU_PROBE_SRC,
   WEBUGPU_PROBE_MARKER,
+  HYST_STREAK_SCALE,
   BackendResolutionError
 };

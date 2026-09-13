@@ -27,9 +27,27 @@ export type {
   DeviceSurface, UniformLane, GlAttrDecl,
   HizFrameSpec, HizFrameCall, HizFrameHandle,
   HizPassSources, HizShaderDict, HizSceneSpec, HizSceneFrame, HizSceneHandle,
+  PassShaders, KernelShaders,
+  DepthPassCall, DepthPassHandle, OcclusionPassCall, OcclusionPassHandle,
+  HysteresisPassCall, HysteresisPassHandle,
+  VisiblePassCall, VisiblePassHandle, DebugStripHandle,
 } from './device.ts'
-export { buildOctree, buildBVH, aabbOutsideFrustum, aabbInsideFrustum, frustumPlanes } from '@rune/core'
-export type { SpatialBox, SpatialIndex } from '@rune/core'
+// Task 200/201 — the clean spatial structures (octree + BVH, now with the
+// rays, hit tests, spheres, and the dynamic octree) and THE COMPOSABLE
+// CULLING KIT (the pure policies + CPU bricks the frame recipes compose
+// from): the dist surface carries them for the demos.
+export {
+  buildOctree, buildBVH, aabbOutsideFrustum, aabbInsideFrustum, frustumPlanes,
+  recordView, projectBox, frustumVerdicts,
+  hysteresisPolicy, decodeVerdict, decodeStreak, HYST_STREAK_SCALE,
+  flatCull, layerPolicy, clusterize, softwareOccluder,
+  cameraRay, rayBoxes,
+} from '@rune/core'
+export type { SpatialBox, SpatialIndex, RayHit } from '@rune/core'
+export type {
+  RecordView, ProjectedBox, HysteresisPolicy, FlatCull,
+  LayerVerdict, SpatialCluster,
+} from '@rune/core'
 
 // M5 (Task 73): feed dual-bind — renderer.feed() on both backends.
 // Channel: T0/T1/T2 — SAB/local ring (.buffer → to the worker via attachFeed),

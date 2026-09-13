@@ -182,8 +182,24 @@ export {
 // contract, both driving the SAME AABB–plane predicate the Hi-Z kernel
 // mirrors on the GPU. The CPU-side spatial index the GPU-driven demos
 // lacked: a worker's pre-shipping cull, an occluder ranking, a marquee.
+// Task 201: rays (queryRay/raycast), spheres, points (hit tests), and the
+// dynamic octree (insert/remove/update) grew the same surface.
 export { buildOctree, buildBVH, aabbOutsideFrustum, aabbInsideFrustum } from './spatial.ts'
-export type { SpatialBox, SpatialIndex } from './spatial.ts'
+export type { SpatialBox, SpatialIndex, RayHit } from './spatial.ts'
+// Task 201 — THE COMPOSABLE CULLING KIT: the policies (hysteresis, flat
+// billboards, layers) and the CPU bricks (the software occluder, the
+// vegetation clustering, the picking ray) the frame recipes compose from.
+// Pure, device-free, SoA over the scenario's own Float32Array.
+export {
+  recordView, projectBox, frustumVerdicts,
+  hysteresisPolicy, decodeVerdict, decodeStreak, HYST_STREAK_SCALE,
+  flatCull, layerPolicy, clusterize, softwareOccluder,
+  cameraRay, rayBoxes,
+} from './culling.ts'
+export type {
+  RecordView, ProjectedBox, HysteresisPolicy, FlatCull,
+  LayerVerdict, SpatialCluster,
+} from './culling.ts'
 export {
   bitonicPadCount, bitonicPassSequence, BITONIC_PAD_KEY, BITONIC_SENTINEL,
 } from './gpu/bitonic.ts'

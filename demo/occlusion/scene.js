@@ -56,9 +56,14 @@ export function createScene(occl) {
   // [list: N][flags: N][records: 12N]. (The Task-196 layout held occl words
   // per region — the unified kernel's flags ran 23 words past their region
   // into the ground's record and ZEROED it: the "missing ground" ghost.)
+  // Task 201 — THE HIST REGION: [list: N][flags: N][hist: N][records: 12N] —
+  // the hysteresis' home (the smoothed verdicts the draw/stats read; WG
+  // keeps it in the storage buffer, GL in its own ping-pong pair). The
+  // stride/fields stay 12/{0,3,6} — the records' own shape never moved.
   const LIST_WORDS = N
   const FLAGS_OFF = N // word offset of the per-record verdict flags
-  const INST_OFF = 2 * N // word offset of instance 0's record (12 words each)
+  const HIST_OFF = 2 * N // word offset of the hysteresis' encoded verdicts
+  const INST_OFF = 3 * N // word offset of instance 0's record (12 words each)
 
   let seed = 0x9e3779b9
   function rng() {
@@ -66,7 +71,7 @@ export function createScene(occl) {
     return (seed >>> 0) / 4294967296
   }
 
-  const sceneWords = new Uint32Array(LIST_WORDS + N + N * 12) // [list: N][flags: N][records: 12N]
+  const sceneWords = new Uint32Array(LIST_WORDS + N + N + N * 12) // [list: N][flags: N][hist: N][records: 12N]
   const sceneF32 = new Float32Array(sceneWords.buffer)
   const occluderBoxes = [] // for prop rejection
   function putInstance(i, center, half, color) {
@@ -131,7 +136,7 @@ export function createScene(occl) {
   // scenario — a different declaration, the same bricks and syntax.
   const STRIDE = 12 // words per record
   const FIELDS = { center: 0, half: 3, color: 6 } // word offsets inside a record
-  return { K, N, occl, STRIDE, FIELDS, LIST_WORDS, FLAGS_OFF, INST_OFF, sceneWords, sceneF32 }
+  return { K, N, occl, STRIDE, FIELDS, LIST_WORDS, FLAGS_OFF, HIST_OFF, INST_OFF, sceneWords, sceneF32 }
 }
 
 // ── the box geometry (unit corners [0,1]³, 24 verts, 36 indices) ──────────
@@ -190,13 +195,24 @@ export const VAL_CAMERAS = [
 ]
 /** Task 198 — the aspect-aware camera (mobile-first): the live view passes
  *  the canvas's real aspect (portrait towers get a widened fov); the parity
- *  cameras keep the 16:9 default — the validation surface is 480×270. */
+ *  cameras keep the 16:9 default — the validation surface is 480×270.
+ *  Task 201 — THE BASIS: the lookAt's own fwd/right/up ride the return (the
+ *  kit's cameraRay unprojects a click through them — no matrix inversion). */
 export function cameraAt(yaw, pitch, dist, aspect = 16 / 9, fovY = Math.PI / 3) {
   const eye = [
     Math.cos(pitch) * Math.sin(yaw) * dist,
     5.5 + Math.sin(pitch) * dist,
     Math.cos(pitch) * Math.cos(yaw) * dist,
   ]
-  const mvp = mat4Mul(perspective(fovY, aspect, 0.5, 300), lookAt(eye, [0, 5.5, 0], [0, 1, 0]))
-  return { eye, mvp }
+  const center = [0, 5.5, 0]
+  let fx = center[0] - eye[0], fy = center[1] - eye[1], fz = center[2] - eye[2]
+  let l = Math.hypot(fx, fy, fz); fx /= l; fy /= l; fz /= l
+  const fwd = [fx, fy, fz]
+  // right = fwd × up (up = +y) — the same cross the lookAt builds
+  let rx = fy * 0 - fz * 1, ry = fz * 0 - fx * 0, rz = fx * 1 - fy * 0
+  l = Math.hypot(rx, ry, rz); rx /= l; ry /= l; rz /= l
+  const right = [rx, ry, rz]
+  const up = [ry * fz - rz * fy, rz * fx - rx * fz, rx * fy - ry * fx]
+  const mvp = mat4Mul(perspective(fovY, aspect, 0.5, 300), lookAt(eye, center, [0, 1, 0]))
+  return { eye, mvp, fwd, right, up, fovY, aspect }
 }

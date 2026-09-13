@@ -90,8 +90,8 @@ export interface DeviceOptions {
   readonly createGlRenderer?: typeof createWebGL2Renderer
 }
 
-/** The instance stream: [list | flags | records] words — the shared scene
- *  storage of the occlusion demos. The RECORD LAYOUT is DECLARED, not
+/** The instance stream: [list | flags | hist | records] words — the shared
+ *  scene storage of the occlusion demos. The RECORD LAYOUT is DECLARED, not
  *  assumed: `stride` (words per record) + `fields` (the word offsets of the
  *  cull kernel's a_c/a_h feed) default to the historical 12/0/3 shape, and
  *  the GL attribute feeds + the TF kernel attributes are DERIVED from the
@@ -99,7 +99,13 @@ export interface DeviceOptions {
  *  the same bricks. The WG backend keeps ONE storage buffer over the words;
  *  the GL backend splits it into the float records buffer (attributes) + its
  *  own flag buffer. Task 199: `occluders` is the BOOT default of the runtime
- *  POLICY (the per-frame prepass count — see hizFrame's `occluders`). */
+ *  POLICY (the per-frame prepass count — see depthPass's `occluders`).
+ *  Task 201: `histWord` — the OPTIONAL hysteresis region ([list: N][flags:
+ *  N][hist: N][records: ...], one word per record). Declared = the temporal
+ *  policy has a home: the WG leg keeps it in the storage buffer, the GL leg
+ *  keeps its own ping-pong pair; the draw/stats read the SMOOTHED verdicts.
+ *  Absent = the frame is byte-identical to the pre-201 shape (no hist
+ *  machinery, the honest refusal from hysteresisPass). */
 export interface SceneLayout {
   readonly total: number
   readonly occluders: number
@@ -107,6 +113,10 @@ export interface SceneLayout {
   readonly recordsF32: Float32Array
   readonly flagsWord: number
   readonly recordsWord: number
+  /** Task 201 — the hysteresis region's word offset (see the interface doc).
+   *  WG: must fit inside `words` ([histWord, histWord+total) checked);
+   *  GL: a marker (the buffers are the device's own). */
+  readonly histWord?: number
   /** words per record (default 12: center 3, half 3, color 3, spare 3). */
   readonly stride?: number
   /** word offsets of the AABB feed inside a record (defaults: 0 and 3). */
@@ -119,6 +129,9 @@ export interface SceneHandle {
   /** The resolved record layout (the GL feeds + the diagnostics read it). */
   readonly stride: number
   readonly fields: { readonly center: number; readonly half: number }
+  /** Task 201 — the declared hist region's word offset, or null (the
+   *  scene carries no hysteresis home; hysteresisPass refuses honestly). */
+  readonly histWord: number | null
 }
 
 /** One named uniform slice of the packed block. mat4 = 16 words, vec4 = 4.
@@ -257,6 +270,10 @@ export interface HizFrameSpec {
   readonly zPass: ProgramHandle
   readonly colorPass: ProgramHandle
   readonly geometry: GeometryHandle
+  /** Task 201 — the hysteresis K (default 3; meaningful only when the
+   *  scene declared a hist region — the raw recipe then inserts the
+   *  temporal pass between the cull and the draw). */
+  readonly hysteresisFrames?: number
 }
 
 export interface HizFrameCall {
@@ -269,32 +286,133 @@ export interface HizFrameCall {
   readonly indexCount?: number
   /** clear the color target (default true). */
   readonly clear?: boolean
+  /** Task 201 — the temporal policy's gate (the scene needs a hist
+   *  region; the identity gate keeps the frame byte-identical). */
+  readonly hysteresis?: boolean
 }
 
 export interface HizFrameHandle {
   run(call: HizFrameCall): void
 }
 
-// ─── Task 200 — THE SCENARIO BRICK: hizScene ──────────────────────────────
-// The recipe brick (hizFrame) took the SEQUENCE off the scenario's hands;
-// hizScene takes the MECHANICS off them too: the programs (from the shader
-// DICTIONARY — the per-language sources as data), the culler, the packed
-// uniform blocks (a plain `camera` object in, the lanes packed inside),
-// the dither's y-mirror height (the brick KNOWS the target's height — the
-// scenario can no longer forget the lane), the pyramid debug strip, and
-// the validation surface. The tier code collapses to:
+// ─── Task 201 — THE COMPOSABLE PASS BRICKS (the regl/WebGPU syntax) ───────
+// The user's ask made literal: «кирпичи, из которых я мог бы создать данный
+// куллинг — не одной строкой, а комбинацией фич». The scenario OWNS the
+// recipe now — each PASS is a brick built once (its program, its lane
+// packing, its intrinsic states), RUN per frame with semantic props:
 //
-//     const hiz = device.hizScene({ scene, shaders, geometry, pyramid, light })
-//     hiz.frame({ target: 0, camera: { mvp, eye }, occluders, culling: true })
-//     await hiz.readStats()
+//   const depth  = device.depthPass({ scene, mesh, shaders: dict.z, pyramid })
+//   const occl   = device.occlusionPass({ scene, pyramid, kernel: dict.cull })
+//   const smooth = device.hysteresisPass({ scene, frames: 3 })
+//   const color  = device.visiblePass({ scene, mesh, shaders: dict.color })
+//   const strip  = device.debugStrip({ pyramid, shaders: dict.panel })
 //
-// A different scenario = a different dictionary + declaration; the frame
-// call stays a sentence. The uniform LANE CONTRACT the brick packs:
+//   depth.run({ camera, occluders })        // 1. the z prepass
+//   pyramid.build()                         // 2. the 2x2 max reduce
+//   occl.run({ camera, gate: true })        // 3. the frustum + Hi-Z verdicts
+//   smooth.run({ gate: true })              // 4. the temporal policy
+//   color.run({ target, camera, light })    // 5. the visible set
+//
+// Each brick packs its OWN uniform lanes (the Task-200 footguns — the
+// dither's y-mirror, the cull gate — stay dead: the scenario passes
+// semantics, never lane offsets). Hi-Z is NOT hardcoded in the composition
+// — it is what the occlusionPass brick + the pyramid resource implement; a
+// CPU software-occlusion brick (the @rune/core kit's softwareOccluder)
+// composes into the same frame shape. The uniform LANE CONTRACT the bricks
+// pack (the dictionary's own):
 //   z:     u_mvp (mat4)
 //   cull:  u_mvp (mat4) + u_misc (vec4: x = the culling gate)
 //   color: u_mvp (mat4) + u_misc (vec4: x = the GL dither's y-mirror height)
 //         + u_light (vec4) + u_cam (vec4)
 //   panel: u_rect (vec4) + u_info (vec4)
+//
+// ─── Task 200 — THE SCENARIO BRICK: hizScene (the composition sugar) ───────
+// The recipe brick (hizFrame) took the SEQUENCE off the scenario's hands;
+// hizScene takes the MECHANICS off them too — and Task 201 reframed it:
+// hizScene is now THE COMPOSITION SUGAR over the pass bricks above (the
+// same five handles, one frame() call). The scenario that wants the bricks
+// in its own hands composes them directly (the demo's tier.js does exactly
+// that); the scenario that wants one sentence keeps this.
+
+/** One pass's shader column — the dictionary's z / color / panel shape
+ *  (the exact HizPassSources contract): the brick builds its own program
+ *  with the pass's intrinsic states (the depth passes test 'less' + write
+ *  + cull 'back' — the consistent-winding contract; the panels ride
+ *  'always' + no write). */
+export type PassShaders = HizPassSources
+
+/** The occlusion kernel column — the dictionary's `cull` shape (the raw
+ *  sources as data; the occlusionPass brick wires the scene + the pyramid
+ *  around them). */
+export interface KernelShaders {
+  readonly wg: { readonly code: string; readonly entry?: string; readonly uniformBytes: number }
+  readonly gl: string
+  readonly lanes: readonly { readonly name: string }[]
+}
+
+export interface DepthPassCall {
+  /** the camera's view-projection (column-major mat4). */
+  readonly camera: { readonly mvp: ArrayLike<number> }
+  /** THE OCCLUDER POLICY: how many records write the z prepass this frame
+   *  (default: the scene's boot occluders). */
+  readonly occluders?: number
+  readonly indexCount?: number
+}
+export interface DepthPassHandle {
+  /** THE Z PREPASS — the first `occluders` records into the pyramid's
+   *  level-0 tile (the POLICY: the boot default, the whole city, anything
+   *  between — a per-frame decision, no re-compile, no re-upload). */
+  run(call: DepthPassCall): void
+}
+
+export interface OcclusionPassCall {
+  readonly camera: { readonly mvp: ArrayLike<number> }
+  /** the Hi-Z gate (false = the OFF leg of the parity gates). */
+  readonly gate?: boolean
+}
+export interface OcclusionPassHandle {
+  /** THE VERDICT PASS — every record's frustum + Hi-Z test (the kernel is
+   *  POLICY-FREE: it tests every record; the gate rides the block's own
+   *  misc lane, packed here). */
+  run(call: OcclusionPassCall): void
+}
+
+export interface HysteresisPassCall {
+  /** false (default) = the IDENTITY gate — the pass still RUNS (a scene
+   *  with a hist region must keep it coherent every frame: the draw and
+   *  the stats read the SMOOTHED verdicts) and copies the raw verdicts
+   *  verbatim: byte-identical to the no-hysteresis frame. */
+  readonly gate?: boolean
+}
+export interface HysteresisPassHandle {
+  /** THE TEMPORAL POLICY (the Frostbite hysteresis, the BF3 shape): an
+   *  occluded verdict must hold `frames` consecutive frames before the
+   *  cull lands; a visible verdict shows IMMEDIATELY. Pixel-safe by
+   *  construction — a box kept visible one extra frame is a box the kernel
+   *  already proved occluded; the depth test buries it behind the very wall
+   *  that occludes it. The image never changes; the draw count decays. */
+  run(call: HysteresisPassCall): void
+}
+
+export interface VisiblePassCall {
+  readonly target: number
+  readonly camera: { readonly mvp: ArrayLike<number>; readonly eye: ArrayLike<number> }
+  readonly light?: ArrayLike<number>
+  readonly clear?: boolean
+  readonly indexCount?: number
+}
+export interface VisiblePassHandle {
+  /** THE VISIBLE SET — the compacted indirect draw (WG) / the collapse
+   *  draw (GL). The packed color lanes (mvp + the dither's y-mirror height
+   *  + the light + the eye) ride the brick — the scenario passes
+   *  SEMANTICS, never lane offsets. */
+  run(call: VisiblePassCall): void
+}
+
+export interface DebugStripHandle {
+  /** THE PYRAMID DEBUG STRIP — one panel quad per mip level. */
+  run(call: { readonly target: number }): void
+}
 
 type PyramidSpec = PyramidHandle | { readonly width: number; readonly height: number }
 
@@ -332,6 +450,10 @@ export interface HizSceneSpec {
   readonly surface?: { readonly width: number; readonly height: number }
   /** the scenario's light direction (xyz; the color pass lane). */
   readonly light?: ArrayLike<number>
+  /** Task 201 — the hysteresis K (consecutive occluded frames before the
+   *  cull lands; default 3). Only meaningful when the scene declared a
+   *  hist region — otherwise the sugar composes no hysteresisPass at all. */
+  readonly hysteresisFrames?: number
 }
 
 export interface HizSceneFrame {
@@ -351,6 +473,10 @@ export interface HizSceneFrame {
   readonly clear?: boolean
   /** per-frame light override (xyz). */
   readonly light?: ArrayLike<number>
+  /** Task 201 — the temporal policy's gate (the hysteresis needs a scene
+   *  with a hist region; the identity gate keeps the frame byte-identical
+   *  otherwise — this knob only decides WHEN the streak starts counting). */
+  readonly hysteresis?: boolean
 }
 
 export interface HizSceneHandle {
@@ -359,6 +485,9 @@ export interface HizSceneHandle {
   frame(call: HizSceneFrame): void
   /** the per-record verdict counters (drawn / frustum / occluded / straddle). */
   readStats(): Promise<CullStats>
+  /** Task 201 — the RAW per-record verdicts (1..4, pre-hysteresis — the
+   *  soft-Hi-Z gate's channel: the CPU model vs the kernel's own words). */
+  readVerdicts(): Promise<Uint8Array>
   readonly pyramid: PyramidHandle
   /** the validation surface (null when the spec carried none). */
   readonly surface: DeviceSurface | null
@@ -407,6 +536,17 @@ export interface RenderDevice {
     uniforms: Float32Array
   }): void
   occlusionCuller(scene: SceneHandle, pyramid: PyramidHandle, spec: CullerSpec): CullerHandle
+  /** Task 201 — THE PASS BRICKS: the composable frame. Each handle is
+   *  built once from the scene + the shader columns, run per frame with
+   *  semantic props; the lane packing lives INSIDE each brick. */
+  depthPass(spec: { scene: SceneHandle; mesh: GeometryHandle; shaders: PassShaders; pyramid: PyramidHandle }): DepthPassHandle
+  occlusionPass(spec: { scene: SceneHandle; pyramid: PyramidHandle; kernel: KernelShaders }): OcclusionPassHandle
+  hysteresisPass(spec: { scene: SceneHandle; frames?: number }): HysteresisPassHandle
+  visiblePass(spec: { scene: SceneHandle; mesh: GeometryHandle; shaders: PassShaders; surface?: DeviceSurface }): VisiblePassHandle
+  debugStrip(spec: { pyramid: PyramidHandle; shaders: PassShaders }): DebugStripHandle
+  /** Task 201 — the RAW per-record verdicts (1..4, pre-hysteresis): the
+   *  CPU-model gates' channel (the soft-Hi-Z soundness compare). */
+  readVerdicts(scene: SceneHandle): Promise<Uint8Array>
   /** Task 199 — the whole Hi-Z frame in ONE call (the recipe as a brick). */
   hizFrame(spec: HizFrameSpec): HizFrameHandle
   /** Task 200 — THE SCENARIO BRICK: the dictionary + the handles become a
@@ -475,7 +615,10 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
   // words.w — the boot-time occluder count, carried for diagnostics only
   var out = 0u; var frustum = 0u; var occluded = 0u; var straddle = 0u;
   for (var i = 0u; i < n; i = i + 1u) {
-    let f = scene[flagsOff + i];
+    // Task 201 — THE HIST DECODE: the read region may carry the hysteresis
+    // encoding (verdict | streak<<8); the raw flags carry streak 0, so ONE
+    // mask answers both — byte-identical for the raw vocabulary (1..4)
+    let f = scene[flagsOff + i] & 0xFFu;
     let visible = f == 1u || f == 4u;
     if (visible) {
       scene[out] = i;          // the list region (word 0) — ascending, stable
@@ -499,6 +642,71 @@ fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
   args[9u] = out;
 }`
 
+// ─── Task 201 — THE HYSTERESIS KERNEL (the WG leg of the temporal policy) ──
+// The Frostbite decay law, GPU-side: the cull kernel's RAW verdict lands in
+// the flags region; this pass folds it into the HIST region — an occluded
+// verdict must repeat `frames` times before it culls (the streak rides the
+// word's high byte), a visible verdict shows immediately. The identity gate
+// (words.w == 0) copies the raw verdict verbatim — byte-identical frames.
+// The GL twin is a TRANSFORM-FEEDBACK pass (a_flag = the raw verdict,
+// a_prev = the previous encoded word, v_flag = the new encoded word, the
+// ping-pong pair keeping the TF-output/attribute-feedback law honest).
+const HYST_WGSL = `
+struct HystParams { words: vec4<u32> }
+@group(0) @binding(0) var<uniform> params: HystParams;
+@group(0) @binding(1) var<storage, read_write> scene: array<u32>;
+@compute @workgroup_size(64)
+fn hysteresis(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= params.words.x) { return; }
+  let raw = scene[params.words.y + i];
+  if (params.words.w == 0u) {
+    // the identity gate: hist = raw (streak 0) — the no-hysteresis frame
+    scene[params.words.z + i] = raw;
+    return;
+  }
+  let prev = scene[params.words.z + i];
+  let streak = min((prev >> 8u) & 0xFFu, 15u);
+  if (raw == 3u) {
+    let s = min(streak + 1u, 15u);
+    let K = (params.words.w >> 8u) & 0xFFu;
+    let verdict = select(1u, 3u, s >= K);
+    scene[params.words.z + i] = verdict | (s << 8u);
+  } else {
+    // visible/frustum/straddle show immediately; the streak resets
+    scene[params.words.z + i] = raw;
+  }
+}
+`
+
+// ─── the GL twin (the TF pass over the same law) ───────────────────────────
+const HYST_GLSL = `#version 300 es
+layout(location=0) in float a_flag;  // the culler's RAW verdict (1..4)
+layout(location=1) in float a_prev;  // the previous ENCODED history word
+uniform vec4 u_misc;                 // x: the gate, y: K frames
+out float v_flag;
+void main() {
+  float raw = a_flag;
+  if (u_misc.x < 0.5) {
+    v_flag = raw; // the identity gate — byte-identical to the raw verdict
+  } else {
+    // decode: verdict = floor(word); streak = fract(word) * 32 (the 1/32
+    // steps are EXACT binary fractions — lossless in f32, the CPU kit's
+    // own encoding contract)
+    float verdict = floor(a_prev);
+    float streak = (a_prev - verdict) * 32.0;
+    if (raw == 3.0) {
+      streak = min(streak + 1.0, 15.0);
+      verdict = streak >= u_misc.y ? 3.0 : 1.0;
+    } else {
+      streak = 0.0;
+      verdict = raw;
+    }
+    v_flag = verdict + streak / 32.0;
+  }
+  gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
+}`
+
 // ─── the internal scene bookkeeping (per backend) ─────────────────────────
 
 interface WgScene {
@@ -508,6 +716,8 @@ interface WgScene {
   compactId: number
   compactBlock: Float32Array
   compactU32: Uint32Array
+  /** Task 201 — the raw-verdict region's word offset (readVerdicts' slice). */
+  flagsWord: number
 }
 
 interface GlScene {
@@ -515,6 +725,14 @@ interface GlScene {
   recBuf: number
   flagBuf: number
   flagScratch: Float32Array
+  /** Task 201 — the hysteresis ping-pong pair (0 = the scene carries no
+   *  hist region; the draw/stats then read the RAW flag buffer, exactly
+   *  the pre-201 shape). */
+  histA: number
+  histB: number
+  /** the buffer the LAST hysteresis pass wrote (starts at histA — zeros,
+   *  the honest pre-boot verdict: floor(0) lands in no bucket). */
+  histCur: number
 }
 
 /** The GL program record (keyed by the public handle). */
@@ -535,93 +753,162 @@ const WG_USAGE = { STORAGE: 0x80, INDIRECT: 0x100, COPY_SRC: 0x4, COPY_DST: 0x8 
 
 // ─── the device boot ──────────────────────────────────────────────────────
 
-/** Task 200 — the scenario brick's shared body: backend-agnostic by
- *  construction (it drives ONLY the RenderDevice surface — every call
- *  routes to the backend's own mechanisms inside the bricks below). */
-function attachHizScene(device: RenderDevice, spec: HizSceneSpec): HizSceneHandle {
-  const pyr = (spec.pyramid as PyramidHandle).build !== undefined
-    ? spec.pyramid as PyramidHandle
-    : device.pyramid((spec.pyramid as { width: number; height: number }).width, (spec.pyramid as { width: number; height: number }).height)
-  // the programs — the Hi-Z-intrinsic pass states (the recipe's own):
-  // both depth passes test 'less' and write; both cull the back faces (the
-  // consistent-winding contract); the debug panels ride over the scene.
-  const zPass = device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: spec.shaders.z.wg, gl: spec.shaders.z.gl })
-  const colorPass = device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: spec.shaders.color.wg, gl: spec.shaders.color.gl })
-  const panelPass = device.program({ depth: { test: 'always', write: false }, wg: spec.shaders.panel.wg, gl: spec.shaders.panel.gl })
-  const culler = device.occlusionCuller(spec.scene, pyr, {
-    wgsl: spec.shaders.cull.wg.code,
-    glsl: spec.shaders.cull.gl,
-    entry: spec.shaders.cull.wg.entry,
-    lanes: spec.shaders.cull.lanes,
-    uniformBytes: spec.shaders.cull.wg.uniformBytes,
-  })
-  const hiz = device.hizFrame({ scene: spec.scene, pyramid: pyr, culler, zPass, colorPass, geometry: spec.geometry })
-  const surf = spec.surface !== undefined
-    ? device.surface(spec.surface.width, spec.surface.height, { depth: true })
-    : null
-  // the scenario's light (the per-frame call may override)
-  const baseLight = spec.light !== undefined ? [spec.light[0] ?? 0.5, spec.light[1] ?? 0.8, spec.light[2] ?? 0.35] : [0.5, 0.8, 0.35]
-  // the packed blocks — the scenario never touches a lane again
-  const zBlock = new Float32Array(16)
-  const cullBlock = new Float32Array(20)
-  const colorBlock = new Float32Array(28)
-  const panelBlock = new Float32Array(8)
-  const indexCount = spec.geometry.indices !== undefined ? spec.geometry.indices.length : 36
+// ─── the shared pass-brick attach bodies (backend-agnostic by
+// construction — every call routes to the RenderDevice surface's own
+// bricks; only hysteresisPass lives inside each backend closure, its
+// compute/TF mechanics being the backend's own) ──────────────────────────
 
-  /** The dither's y-mirror height for a target: the canvas's own backing
-   *  store (target 0), the brick's surface, or the surface-height fallback
-   *  (the GL lane only matters where parity is read — the surface). */
+/** THE DEPTH PASS brick: the program from the z column (depth 'less' +
+ * write + cull 'back' — the Hi-Z intrinsic states), the 16-word mvp block
+ * packed here, the prepass draw into the pyramid's level-0 tile. */
+function attachDepthPass(device: RenderDevice, spec: { scene: SceneHandle; mesh: GeometryHandle; shaders: PassShaders; pyramid: PyramidHandle }): DepthPassHandle {
+  const program = device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: spec.shaders.wg, gl: spec.shaders.gl })
+  const block = new Float32Array(16)
+  const indexCount = spec.mesh.indices !== undefined ? spec.mesh.indices.length : 36
+  return {
+    run(call: DepthPassCall): void {
+      const occluders = call.occluders !== undefined
+        ? Math.max(0, Math.min(spec.scene.total, call.occluders | 0))
+        : spec.scene.occluders
+      block.set(call.camera.mvp, 0)
+      device.drawInstanced({
+        target: spec.pyramid.zTarget,
+        clear: true,
+        program,
+        geometry: spec.mesh,
+        records: spec.scene,
+        uniforms: block,
+        instances: occluders,
+        indexCount: call.indexCount ?? indexCount,
+      })
+    },
+  }
+}
+
+/** THE OCCLUSION PASS brick: the culler from the kernel column (the scene
+ * + the pyramid wired around it), the 20-word block (mvp + the gate lane)
+ * packed here — the scenario passes semantics, never lane offsets. */
+function attachOcclusionPass(device: RenderDevice, spec: { scene: SceneHandle; pyramid: PyramidHandle; kernel: KernelShaders }): OcclusionPassHandle {
+  const culler = device.occlusionCuller(spec.scene, spec.pyramid, {
+    wgsl: spec.kernel.wg.code,
+    glsl: spec.kernel.gl,
+    entry: spec.kernel.wg.entry,
+    lanes: spec.kernel.lanes,
+    uniformBytes: spec.kernel.wg.uniformBytes,
+  })
+  const block = new Float32Array(20)
+  return {
+    run(call: OcclusionPassCall): void {
+      block.set(call.camera.mvp, 0)
+      block[16] = call.gate === false ? 0 : 1
+      culler.run(block)
+    },
+  }
+}
+
+/** THE VISIBLE PASS brick: the program from the color column, the 28-word
+ * block (mvp + the dither's y-mirror height + the light + the eye) packed
+ * here. THE MIRROR HEIGHT RESOLUTION: target 0 = the canvas's own backing
+ * store; the spec's surface (or the surface fallback — the lane only
+ * matters where parity is read). */
+function attachVisiblePass(device: RenderDevice, spec: { scene: SceneHandle; mesh: GeometryHandle; shaders: PassShaders; surface?: DeviceSurface }): VisiblePassHandle {
+  const program = device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: spec.shaders.wg, gl: spec.shaders.gl })
+  const block = new Float32Array(28)
+  const indexCount = spec.mesh.indices !== undefined ? spec.mesh.indices.length : 36
+  const surf = spec.surface ?? null
   function targetHeight(targetId: number): number {
     if (targetId === 0) return device.canvas.height
     if (surf !== null && targetId === surf.targetId) return surf.height
     return surf !== null ? surf.height : device.canvas.height
   }
+  return {
+    run(call: VisiblePassCall): void {
+      const light = call.light !== undefined ? call.light : [0.5, 0.8, 0.35]
+      block.set(call.camera.mvp, 0)
+      block[16] = targetHeight(call.target)
+      block[20] = light[0]; block[21] = light[1]; block[22] = light[2]; block[23] = 0
+      block[24] = call.camera.eye[0]; block[25] = call.camera.eye[1]; block[26] = call.camera.eye[2]; block[27] = 1
+      device.drawVisible({
+        target: call.target,
+        clear: call.clear ?? true,
+        program,
+        geometry: spec.mesh,
+        records: spec.scene,
+        uniforms: block,
+        indexCount: call.indexCount ?? indexCount,
+      })
+    },
+  }
+}
+
+/** THE DEBUG STRIP brick: the panels program (depth 'always', no write) +
+ * one quad per pyramid level, the 8-word (rect + info) block packed here. */
+function attachDebugStrip(device: RenderDevice, spec: { pyramid: PyramidHandle; shaders: PassShaders }): DebugStripHandle {
+  const program = device.program({ depth: { test: 'always', write: false }, wg: spec.shaders.wg, gl: spec.shaders.gl })
+  const block = new Float32Array(8)
+  const pyr = spec.pyramid
+  return {
+    run(call: { target: number }): void {
+      const w = 2.0 / pyr.levels
+      const offsets = pyr.offsets ?? []
+      for (let L = 0; L < pyr.levels; L++) {
+        block[0] = -1 + L * w + 0.01
+        block[1] = -0.97
+        block[2] = -1 + (L + 1) * w - 0.01
+        block[3] = -0.55
+        block[4] = offsets[L] ?? 0
+        block[5] = pyr.dims[L].w
+        block[6] = pyr.dims[L].h
+        block[7] = 0
+        device.drawQuad({ target: call.target, clear: false, program, pyramid: pyr, level: L, uniforms: block })
+      }
+    },
+  }
+}
+
+/** Task 200 (Task 201 body) — the scenario brick's shared composition: the
+ *  five pass bricks above, ONE frame() sentence. Backend-agnostic by
+ *  construction (it drives ONLY the RenderDevice surface — every call
+ *  routes to the backend's own mechanisms inside the bricks). */
+function attachHizScene(device: RenderDevice, spec: HizSceneSpec): HizSceneHandle {
+  const pyr = (spec.pyramid as PyramidHandle).build !== undefined
+    ? spec.pyramid as PyramidHandle
+    : device.pyramid((spec.pyramid as { width: number; height: number }).width, (spec.pyramid as { width: number; height: number }).height)
+  const surf = spec.surface !== undefined
+    ? device.surface(spec.surface.width, spec.surface.height, { depth: true })
+    : null
+  // THE BRICKS — the scenario's recipe is the composition's own:
+  const depth = device.depthPass({ scene: spec.scene, mesh: spec.geometry, shaders: spec.shaders.z, pyramid: pyr })
+  const occl = device.occlusionPass({ scene: spec.scene, pyramid: pyr, kernel: spec.shaders.cull })
+  // the temporal policy joins the frame ONLY when the scene carries a hist
+  // region (honest: a hist-less scene composes no smoothing at all — the
+  // frame stays byte-identical to the pre-201 shape)
+  const smooth = spec.scene.histWord !== null
+    ? device.hysteresisPass({ scene: spec.scene, frames: spec.hysteresisFrames ?? 3 })
+    : null
+  const color = device.visiblePass({ scene: spec.scene, mesh: spec.geometry, shaders: spec.shaders.color, surface: surf ?? undefined })
+  const strip = device.debugStrip({ pyramid: pyr, shaders: spec.shaders.panel })
+  // the scenario's light (the per-frame call may override)
+  const baseLight = spec.light !== undefined ? [spec.light[0] ?? 0.5, spec.light[1] ?? 0.8, spec.light[2] ?? 0.35] : [0.5, 0.8, 0.35]
 
   function frame(call: HizSceneFrame): void {
     const occluders = call.occluders !== undefined
       ? Math.max(0, Math.min(spec.scene.total, call.occluders | 0))
       : spec.scene.occluders
     const light = call.light !== undefined ? call.light : baseLight
-    // the lane packing (the contract above): mvp, the gates, the mirror
-    zBlock.set(call.camera.mvp, 0)
-    cullBlock.set(call.camera.mvp, 0)
-    cullBlock[16] = call.culling === false ? 0 : 1
-    colorBlock.set(call.camera.mvp, 0)
-    colorBlock[16] = targetHeight(call.target)
-    colorBlock[20] = light[0]; colorBlock[21] = light[1]; colorBlock[22] = light[2]; colorBlock[23] = 0
-    colorBlock[24] = call.camera.eye[0]; colorBlock[25] = call.camera.eye[1]; colorBlock[26] = call.camera.eye[2]; colorBlock[27] = 1
-    // 1..4 — the recipe brick (z prepass over the first `occluders` records
-    // → the 2×2 MAX pyramid → the per-record verdicts → the visible draw)
-    hiz.run({
-      target: call.target,
-      occluders,
-      zUniforms: zBlock,
-      cullUniforms: cullBlock,
-      colorUniforms: colorBlock,
-      indexCount,
-      clear: call.clear,
-    })
-    // 5. the debug strip — one panel quad per pyramid level
-    if (call.pyramidView === true) {
-      const w = 2.0 / pyr.levels
-      const offsets = pyr.offsets ?? []
-      for (let L = 0; L < pyr.levels; L++) {
-        panelBlock[0] = -1 + L * w + 0.01
-        panelBlock[1] = -0.97
-        panelBlock[2] = -1 + (L + 1) * w - 0.01
-        panelBlock[3] = -0.55
-        panelBlock[4] = offsets[L] ?? 0
-        panelBlock[5] = pyr.dims[L].w
-        panelBlock[6] = pyr.dims[L].h
-        panelBlock[7] = 0
-        device.drawQuad({ target: call.target, clear: false, program: panelPass, pyramid: pyr, level: L, uniforms: panelBlock })
-      }
-    }
+    // 1..5 — THE COMPOSITION (the bricks, in the recipe's order):
+    depth.run({ camera: call.camera, occluders })
+    pyr.build()
+    occl.run({ camera: call.camera, gate: call.culling !== false })
+    if (smooth !== null) smooth.run({ gate: call.hysteresis === true })
+    color.run({ target: call.target, camera: call.camera, light, clear: call.clear })
+    if (call.pyramidView === true) strip.run({ target: call.target })
   }
 
   return {
     frame,
     readStats: () => device.readCullStats(spec.scene),
+    readVerdicts: () => device.readVerdicts(spec.scene),
     pyramid: pyr,
     surface: surf,
     scene: spec.scene,
@@ -715,11 +1002,16 @@ function createWgDevice(renderer: WebGpuRenderer, options: DeviceOptions, clear:
   }
 
   function scene(layout: SceneLayout): SceneHandle {
+    const histWord = layout.histWord ?? null
+    if (histWord !== null && histWord + layout.total > layout.words.length) {
+      throw new Error(`rune: the scene's hist region [${histWord}..${histWord + layout.total}) outruns the words array (${layout.words.length} words) — declare the [list | flags | hist | records] layout`)
+    }
     const handle: SceneHandle = {
       total: layout.total,
       occluders: layout.occluders,
       stride: layout.stride ?? 12,
       fields: { center: layout.fields?.center ?? 0, half: layout.fields?.half ?? 3 },
+      histWord,
     }
     const bufferId = gpu.createExternalBuffer(layout.words.byteLength, WG_USAGE.STORAGE | WG_USAGE.COPY_DST | WG_USAGE.COPY_SRC)
     gpu.writeExternalBuffer(bufferId, layout.words)
@@ -732,10 +1024,13 @@ function createWgDevice(renderer: WebGpuRenderer, options: DeviceOptions, clear:
     const compactU32 = new Uint32Array(compactBlock.buffer)
     compactU32[0] = layout.total
     compactU32[1] = 36 // the indexCount — refreshed by every drawVisible
-    compactU32[2] = layout.flagsWord
+    // Task 201 — the compact reads the SMOOTHED verdicts when the scene
+    // carries a hist region (the hysteresis kernel keeps it coherent every
+    // frame; the & 0xFF decode answers the raw vocabulary identically)
+    compactU32[2] = histWord ?? layout.flagsWord
     compactU32[3] = layout.occluders // diagnostics only (the Task-199 policy note)
     const compactId = gpu.createCompute(COMPACT_WGSL, 16, [bufferId, placeholderId, argsId])
-    scenes.set(handle, { handle, bufferId, argsId, compactId, compactBlock, compactU32 })
+    scenes.set(handle, { handle, bufferId, argsId, compactId, compactBlock, compactU32, flagsWord: layout.flagsWord })
     return handle
   }
 
@@ -925,6 +1220,12 @@ ${REDUCE}`
     const s = scenes.get(spec.scene)
     if (s === undefined) throw new Error('rune: hizFrame — the scene handle is not this device\'s own')
     void s
+    // Task 201 — the temporal policy joins the raw recipe ONLY when the
+    // scene carries a hist region (the identity gate keeps the
+    // no-hysteresis frame byte-identical)
+    const smooth = spec.scene.histWord !== null
+      ? hysteresisPass({ scene: spec.scene, frames: spec.hysteresisFrames ?? 3 })
+      : null
     return {
       run(call: HizFrameCall): void {
         // 1. THE Z PREPASS — the first `occluders` records write the pyramid's
@@ -947,6 +1248,9 @@ ${REDUCE}`
         //    it tests every record; the cull block's own hizOn word is the
         //    scenario's parity-gate lane, patched before the call)
         spec.culler.run(call.cullUniforms)
+        // 3½. THE TEMPORAL POLICY — the streak fold (identity when the call
+        //     carries no hysteresis; the compact reads the hist region)
+        if (smooth !== null) smooth.run({ gate: call.hysteresis === true })
         // 4. THE COLOR PASS — the visible set, GPU-driven
         drawVisible({
           target: call.target,
@@ -959,6 +1263,49 @@ ${REDUCE}`
         })
       },
     }
+  }
+
+  /** Task 201 — THE HYSTERESIS PASS (the WG leg): ONE compute kernel over
+   *  the scene storage — the raw verdicts (flags region) fold into the
+   *  hist region, the streak riding the word's high byte. The identity
+   *  gate copies verbatim (byte-identical frames). */
+  function hysteresisPass(spec: { scene: SceneHandle; frames?: number }): HysteresisPassHandle {
+    const s = scenes.get(spec.scene)
+    if (s === undefined) throw new Error('rune: hysteresisPass — the scene handle is not this device\'s own')
+    const histWord = spec.scene.histWord
+    if (histWord === null) {
+      throw new Error('rune: hysteresisPass — the scene carries no hist region (declare histWord in device.scene()\'s layout: [list | flags | hist | records])')
+    }
+    const computeId = gpu.createCompute(HYST_WGSL, 16, [s.bufferId])
+    const workgroups = Math.max(1, Math.ceil(spec.scene.total / 64))
+    const K = Math.max(1, Math.min(15, spec.frames ?? 3))
+    const block = new Float32Array(4)
+    const u32 = new Uint32Array(block.buffer)
+    u32[0] = spec.scene.total
+    u32[1] = s.flagsWord
+    u32[2] = histWord
+    return {
+      run(call: HysteresisPassCall): void {
+        // w = the identity gate: EXACTLY 0 when off (the kernel's
+        // `w == 0u` test), else 1 | K << 8 (the gate byte + the K byte)
+        u32[3] = call.gate === true ? (1 | (K << 8)) : 0
+        gpu.runCompute(computeId, 'hysteresis', block, workgroups)
+      },
+    }
+  }
+
+  /** Task 201 — the RAW per-record verdicts (1..4, the flags region). */
+  async function readVerdicts(sceneHandle: SceneHandle): Promise<Uint8Array> {
+    const s = scenes.get(sceneHandle)
+    if (s === undefined) throw new Error('rune: readVerdicts — the scene handle is not this device\'s own')
+    // the readback hands back the FIRST bytes of the storage — the flags
+    // region rides at the word offset s.flagsWord (the [list] region in
+    // front of it): slice the view at its BYTE offset, not at word 0
+    const f = await gpu.readExternalBuffer(s.bufferId, (s.flagsWord + sceneHandle.total) * 4)
+    const u = new Uint32Array(f.buffer, s.flagsWord * 4, sceneHandle.total)
+    const out = new Uint8Array(sceneHandle.total)
+    for (let i = 0; i < sceneHandle.total; i++) out[i] = u[i] & 0xFF
+    return out
   }
 
   async function readCullStats(sceneHandle: SceneHandle): Promise<CullStats> {
@@ -991,6 +1338,15 @@ ${REDUCE}`
     drawVisible,
     drawQuad,
     occlusionCuller,
+    // Task 201 — THE PASS BRICKS: the shared attach bodies drive BOTH
+    // device closures (they call only the interface's surface); the
+    // hysteresis pass is THIS closure's own (compute is the WG mechanism)
+    depthPass: (spec) => attachDepthPass(device, spec),
+    occlusionPass: (spec) => attachOcclusionPass(device, spec),
+    hysteresisPass,
+    visiblePass: (spec) => attachVisiblePass(device, spec),
+    debugStrip: (spec) => attachDebugStrip(device, spec),
+    readVerdicts,
     hizFrame,
     // Task 200 — the scenario brick: the same attachHizScene body drives
     // BOTH device closures (it calls only the interface's own bricks)
@@ -1029,19 +1385,32 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
   let reduceProgramId = 0
 
   function scene(layout: SceneLayout): SceneHandle {
+    const histWord = layout.histWord ?? null
     const handle: SceneHandle = {
       total: layout.total,
       occluders: layout.occluders,
       stride: layout.stride ?? 12,
       fields: { center: layout.fields?.center ?? 0, half: layout.fields?.half ?? 3 },
+      histWord,
     }
     const recBuf = gl.createBuffer(layout.recordsF32, 'static')
     const flagBuf = gl.createBuffer(new Float32Array(layout.total), 'dynamic')
+    // Task 201 — the hist pair (the GL leg's own home for the temporal
+    // policy's state; the layout's histWord is the MARKER, the buffers are
+    // ours — the WG twin keeps the region inside the scene storage)
+    let histA = 0, histB = 0
+    if (histWord !== null) {
+      histA = gl.createBuffer(new Float32Array(layout.total), 'dynamic')
+      histB = gl.createBuffer(new Float32Array(layout.total), 'dynamic')
+    }
     scenes.set(handle, {
       handle,
       recBuf,
       flagBuf,
       flagScratch: new Float32Array(layout.total),
+      histA,
+      histB,
+      histCur: histA,
     })
     return handle
   }
@@ -1146,7 +1515,12 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
       if (attr.from === 'records') {
         gl.bindVertexBuffer(s.recBuf, attr.location, attr.size, attr.stride, attr.offset, attr.divisor)
       } else if (attr.from === 'flags' && withFlags) {
-        gl.bindVertexBuffer(s.flagBuf, attr.location, attr.size, attr.stride, attr.offset, attr.divisor)
+        // Task 201 — the collapse feed reads the SMOOTHED verdicts when the
+        // scene carries a hist region (the VS decodes floor(a_flag) — the
+        // raw vocabulary answers identically); the hysteresis pass keeps
+        // histCur coherent every frame, identity included
+        const feed = s.histA !== 0 ? s.histCur : s.flagBuf
+        gl.bindVertexBuffer(feed, attr.location, attr.size, attr.stride, attr.offset, attr.divisor)
       }
     }
   }
@@ -1247,7 +1621,11 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
   async function readCullStats(sceneHandle: SceneHandle): Promise<CullStats> {
     const s = scenes.get(sceneHandle) as GlScene | undefined
     if (s === undefined) throw new Error('rune: readCullStats — the scene handle is not this device\'s own')
-    const ok = gl.readBuffer(s.flagBuf, s.flagScratch)
+    // Task 201 — the stats sweep reads the SMOOTHED verdicts when the scene
+    // carries a hist region (the hysteresis pass keeps it coherent); the
+    // floor decode answers the raw vocabulary (1..4) identically
+    const feed = s.histA !== 0 ? s.histCur : s.flagBuf
+    const ok = gl.readBuffer(feed, s.flagScratch)
     if (!ok) throw new Error('rune: the flag buffer readback was refused')
     let drawn = 0, frustum = 0, occluded = 0, straddle = 0
     // Task 199 — the sweep counts EVERY record (the kernel tests them all —
@@ -1255,13 +1633,68 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     // total. A flag 0 (a record never culled this session) lands in NO
     // bucket — the honest form of the pre-boot stats.
     for (let i = 0; i < sceneHandle.total; i++) {
-      const f = s.flagScratch[i]
+      const f = Math.floor(s.flagScratch[i])
       if (f === 1) drawn++
       else if (f === 2) frustum++
       else if (f === 3) occluded++
       else if (f === 4) { straddle++; drawn++ }
     }
     return { drawn, frustum, occluded, straddle }
+  }
+
+  /** Task 201 — THE HYSTERESIS PASS (the GL leg): a TRANSFORM-FEEDBACK pass
+   *  — a_flag (the culler's raw verdict) + a_prev (the previous encoded
+   *  word) fold into the NEXT hist buffer (the ping-pong keeps the
+   *  TF-output/attribute feedback law honest: the output never overlaps a
+   *  live vertex binding), then histCur flips. The identity gate copies
+   *  the raw verdict verbatim — byte-identical frames. */
+  function hysteresisPass(spec: { scene: SceneHandle; frames?: number }): HysteresisPassHandle {
+    const s = scenes.get(spec.scene) as GlScene | undefined
+    if (s === undefined) throw new Error('rune: hysteresisPass — the scene handle is not this device\'s own')
+    if (s.histA === 0) {
+      throw new Error('rune: hysteresisPass — the scene carries no hist region (declare histWord in device.scene()\'s layout: [list | flags | hist | records])')
+    }
+    const passId = gl.createTransformPass({
+      vertex: HYST_GLSL,
+      outputs: ['v_flag'],
+      attributes: [
+        { name: 'a_flag', size: 1, stride: 4, offset: 0 },
+        { name: 'a_prev', size: 1, stride: 4, offset: 0 },
+      ],
+      uniforms: [{ name: 'u_misc', size: 4 }],
+    })
+    const K = Math.max(1, Math.min(15, spec.frames ?? 3))
+    const block = new Float32Array(4)
+    return {
+      run(call: HysteresisPassCall): void {
+        block[0] = call.gate === true ? 1 : 0
+        block[1] = K
+        block[2] = 0
+        block[3] = 0
+        const next = s.histCur === s.histA ? s.histB : s.histA
+        gl.runTransformPass(passId, spec.scene.total, {
+          bufferId: next,
+          attribBuffers: [s.flagBuf, s.histCur],
+          uniformData: block,
+        })
+        s.histCur = next
+      },
+    }
+  }
+
+  /** Task 201 — the RAW per-record verdicts (1..4, the culler's own flag
+   *  buffer — pre-hysteresis; the CPU-model gates' channel). */
+  async function readVerdicts(sceneHandle: SceneHandle): Promise<Uint8Array> {
+    const s = scenes.get(sceneHandle) as GlScene | undefined
+    if (s === undefined) throw new Error('rune: readVerdicts — the scene handle is not this device\'s own')
+    const ok = gl.readBuffer(s.flagBuf, s.flagScratch)
+    if (!ok) throw new Error('rune: the flag buffer readback was refused')
+    const out = new Uint8Array(sceneHandle.total)
+    for (let i = 0; i < sceneHandle.total; i++) {
+      const f = Math.floor(s.flagScratch[i])
+      out[i] = f >= 1 && f <= 4 ? f : 0
+    }
+    return out
   }
 
   function hizFrame(spec: HizFrameSpec): HizFrameHandle {
@@ -1271,6 +1704,12 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     const s = scenes.get(spec.scene) as GlScene | undefined
     if (s === undefined) throw new Error('rune: hizFrame — the scene handle is not this device\'s own')
     void s
+    // Task 201 — the temporal policy joins the raw recipe ONLY when the
+    // scene carries a hist region (the identity gate keeps the
+    // no-hysteresis frame byte-identical)
+    const smooth = spec.scene.histWord !== null
+      ? hysteresisPass({ scene: spec.scene, frames: spec.hysteresisFrames ?? 3 })
+      : null
     return {
       run(call: HizFrameCall): void {
         // 1. THE Z PREPASS — the first `occluders` records write the tile
@@ -1289,6 +1728,9 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
         // 3. THE CULL — the TF pass (the neutral-canvas-first lesson lives
         // inside the culler brick)
         spec.culler.run(call.cullUniforms)
+        // 3½. THE TEMPORAL POLICY — the streak fold (identity when the call
+        // carries no hysteresis; the collapse feed reads histCur)
+        if (smooth !== null) smooth.run({ gate: call.hysteresis === true })
         // 4. THE COLOR PASS — ONE instanced draw, the collapse hides the
         // occluded records
         drawVisible({
@@ -1336,6 +1778,16 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     drawVisible,
     drawQuad,
     occlusionCuller,
+    // Task 201 — THE PASS BRICKS: the shared attach bodies drive BOTH
+    // device closures (they call only the interface's surface); the
+    // hysteresis pass is THIS closure's own (transform feedback is the GL
+    // mechanism)
+    depthPass: (spec) => attachDepthPass(device, spec),
+    occlusionPass: (spec) => attachOcclusionPass(device, spec),
+    hysteresisPass,
+    visiblePass: (spec) => attachVisiblePass(device, spec),
+    debugStrip: (spec) => attachDebugStrip(device, spec),
+    readVerdicts,
     hizFrame,
     // Task 200 — the scenario brick: the same attachHizScene body drives
     // BOTH device closures (it calls only the interface's own bricks)

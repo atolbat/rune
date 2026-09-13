@@ -73,13 +73,28 @@ try {
         console.log(`  FAIL — the pixel parity diverged (${cam.hashOn} vs ${cam.hashOff}): Hi-Z culled a visible box`)
         failed = true
       }
-      if (!cam.invariantOn || !cam.invariantOff) {
-        console.log(`  FAIL — the accounting invariant broke (frustum + occluded + drawn must equal ${stats.occludees})`)
-        failed = true
-      }
-      if (!(cam.drawnOn < cam.drawnOff) || cam.occludedOn <= 0) {
-        console.log('  FAIL — the occlusion tier is not culling anything')
-        failed = true
+      // Task 201 — the 'hysteresis' leg: drawnOn === drawnOff at saturation
+      // is the POINT (the saturated streaks reproduce the raw buckets; the
+      // decay observation rides drawnDecay). The plain/city legs keep the
+      // strict invariant + culling checks.
+      if (cam.policy === 'hysteresis') {
+        if (cam.drawnOn !== cam.drawnOff) {
+          console.log(`  FAIL — the saturated hysteresis must reproduce the raw buckets (${cam.drawnOn} vs ${cam.drawnOff})`)
+          failed = true
+        }
+        if (!(cam.drawnDecay > cam.drawnOff)) {
+          console.log(`  FAIL — the hysteresis decay did not show (${cam.drawnDecay} vs ${cam.drawnOff})`)
+          failed = true
+        }
+      } else {
+        if (!cam.invariantOn || !cam.invariantOff) {
+          console.log(`  FAIL — the accounting invariant broke (frustum + occluded + drawn must equal ${stats.occludees})`)
+          failed = true
+        }
+        if (!(cam.drawnOn < cam.drawnOff) || cam.occludedOn <= 0) {
+          console.log('  FAIL — the occlusion tier is not culling anything')
+          failed = true
+        }
       }
     }
     console.log(`[task196] verdict: ${gate.pass ? 'PASS' : 'FAIL'} — the Hi-Z pipeline (z prepass → pyramid → cull+compact → drawIndexedIndirect) on the real facade`)
