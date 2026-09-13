@@ -66,8 +66,10 @@ export function webgpuAdapter(): BackendAdapter {
 function toWebgl2Spec(spec: PortableSpec): DrawSpec {
   return {
     shader: { glsl: spec.shader.glsl },
-    // depth/raster are structurally compatible; blend/frontFace belong to
-    // the WebGL2 state program (the tape compiler reads only depth/raster).
+    // depth/raster are structurally compatible; blend strings flow through
+    // the same vocabulary. Task 195: frontFace IS read by the tape compiler
+    // now (readState bakes it; the executor asserts it) — the pre-195 drop
+    // was the cross-backend winding hole.
     pipeline: spec.pipeline as DrawSpec['pipeline'],
     uniforms: spec.uniforms,
     count: spec.count as DrawSpec['count'],

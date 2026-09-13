@@ -1234,6 +1234,13 @@ export function createRealGL(
     }
   }
 
+  // Task 195 — the winding wire (the GL twin of WebGPU's frontFace, which
+  // the WG side has honored since its birth; the parity bench
+  // scripts/task195-parity.mjs pins the default === 'ccw' contract).
+  function setFrontFace(order: string): void {
+    gl.frontFace(order === 'cw' ? gl.CW : gl.CCW)
+  }
+
   /** Task 75: facade BlendFactor string → GLenum. Task 122: the
    *  dst-alpha family + src-alpha-saturated (the custom
    *  blending demos use them). */
@@ -1871,6 +1878,7 @@ export function createRealGL(
     setViewport,
     setDepthMode,
     setCull,
+    setFrontFace,
     setBlend,
     clear,
     drawArrays,

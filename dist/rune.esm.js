@@ -4481,7 +4481,8 @@ function readState(spec) {
   return {
     depthTest: depthOff ? "always" : depth2?.test ?? "less",
     depthWrite: depthOff ? false : depth2?.write ?? true,
-    cull: raster?.cull ?? "back",
+    cull: raster?.cull ?? "none",
+    frontFace: raster?.frontFace === "cw" ? "cw" : "ccw",
     blend: b === null ? null : { src: b.src, dst: b.dst, equation: b.equation ?? "add" },
     depthKey: `${depthOff ? "always" : depth2?.test ?? "less"}/${depthOff ? false : depth2?.write ?? true}`,
     blendKey: b === null ? "off" : `${b.src}/${b.dst}/${b.equation ?? "add"}`
@@ -4523,6 +4524,7 @@ function createExecutor(options) {
   let lastProgram = -1;
   let lastDepthTest = "";
   let lastCull = "";
+  let lastFrontFace = "";
   let lastBlend = "";
   const multiDrawFn = typeof gl.multiDrawArraysInstanced === "function" ? gl.multiDrawArraysInstanced.bind(gl) : undefined;
   const multiDraw = (options.multiDraw ?? true) && multiDrawFn !== undefined;
@@ -4595,6 +4597,7 @@ function createExecutor(options) {
     lastProgram = -1;
     lastDepthTest = "";
     lastCull = "";
+    lastFrontFace = "";
     lastBlend = "";
   }
   function drawCommand(command, count, instances) {
@@ -4701,6 +4704,10 @@ function createExecutor(options) {
     if (state.cull !== lastCull) {
       gl.setCull(state.cull);
       lastCull = state.cull;
+    }
+    if (state.frontFace !== lastFrontFace) {
+      gl.setFrontFace(state.frontFace);
+      lastFrontFace = state.frontFace;
     }
     if (state.blendKey !== lastBlend) {
       gl.setBlend(state.blend === null ? null : state.blend.src, state.blend === null ? null : state.blend.dst, state.blend === null ? undefined : state.blend.equation);
@@ -5359,6 +5366,9 @@ function createRealGL(gl, onViewportHeal) {
       gl.cullFace(mode === "front" ? gl.FRONT : gl.BACK);
     }
   }
+  function setFrontFace(order) {
+    gl.frontFace(order === "cw" ? gl.CW : gl.CCW);
+  }
   const BLEND_FACTORS = {
     zero: 0,
     one: 1,
@@ -5748,6 +5758,7 @@ void main() {}
     setViewport,
     setDepthMode,
     setCull,
+    setFrontFace,
     setBlend,
     clear,
     drawArrays,
@@ -7886,6 +7897,7 @@ function withJournal(gl, journal) {
     setViewport: (width, height) => gl.setViewport(width, height),
     setDepthMode: (test, write) => gl.setDepthMode(test, write),
     setCull: (mode) => gl.setCull(mode),
+    setFrontFace: (order) => gl.setFrontFace(order),
     setBlend: (src, dst, equation) => gl.setBlend(src, dst, equation),
     clear: (color, depth2) => gl.clear(color, depth2),
     drawArrays: (mode, first, count, instances) => gl.drawArrays(mode, first, count, instances),
@@ -8159,6 +8171,7 @@ function createResourceSessionGL(raw, journal) {
     setViewport: (width, height) => raw.setViewport(width, height),
     setDepthMode: (test, write) => raw.setDepthMode(test, write),
     setCull: (mode) => raw.setCull(mode),
+    setFrontFace: (order) => raw.setFrontFace(order),
     setBlend: (src, dst, equation) => raw.setBlend(src, dst, equation),
     clear: (color, depth2) => raw.clear(color, depth2),
     drawArrays: (mode, first, count, instances) => raw.drawArrays(mode, first, count, instances),

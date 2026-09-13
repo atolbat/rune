@@ -54,12 +54,13 @@ describe('task 143: precompiled state keys (the executor cache compare)', () => 
     // Steady state: 5 draws, 1 pass start (bindTarget+clear+state re-asserts),
     // 1 useProgram, and the state switches ONLY where the key actually changes:
     // [less→less skip] [less→lequal setDepth] [lequal→less setDepth + cull front]
-    // [cull front→none... command 4 has cull front; command 5 default back]
+    // [cull front→none... command 4 has cull front; command 5 default none
+    //  (Task 195: the WG-parity default — the pre-195 GL compiled 'back')]
     const stateCalls = calls.filter(c => c.startsWith('setDepthMode') || c.startsWith('setCull') || c.startsWith('setBlend'))
     expect(stateCalls.join('\n')).toBe([
-      // BeginPass re-assert: command 1 (less/true, cull back, blend off)
+      // BeginPass re-assert: command 1 (less/true, cull none, blend off)
       'setDepthMode(less,true)',
-      'setCull(back)',
+      'setCull(none)',
       'setBlend(off,off,add)',
       // command 2: identical key → all three skipped
       // command 3: depth key changes
@@ -67,9 +68,9 @@ describe('task 143: precompiled state keys (the executor cache compare)', () => 
       // command 4: depth back + cull front
       'setDepthMode(less,false)',
       'setCull(front)',
-      // command 5: depth back + cull back
+      // command 5: depth back + cull none (the Task-195 default)
       'setDepthMode(less,true)',
-      'setCull(back)',
+      'setCull(none)',
     ].join('\n'))
     expect(calls.filter(c => c === 'drawArrays(triangles,0,6,1)').length).toBe(5)
     expect(calls.filter(c => c === 'useProgram(1)').length).toBe(1)

@@ -60,7 +60,15 @@ export interface DrawSpec {
      *  shader output: additive = {src:'one', dst:'one'}, transparency =
      *  {src:'one', dst:'one-minus-src-alpha'}. */
     readonly blend?: { readonly src: string; readonly dst: string; readonly equation?: string } | false
-    readonly raster?: { readonly cull?: 'none' | 'back' | 'front' }
+    /** Task 195 — THE RASTERIZATION-PARITY CONTRACT: an absent cull means
+     *  'none' — IDENTICAL to WebGPU (realGPU maps an absent raster.cull to
+     *  cullMode 'none', the spec default). The pre-195 GL side compiled
+     *  `?? 'back'`: a spec without a pipeline silently back-culled on GL
+     *  while rendering fine on WG — a CW-wound scene blanked on one backend
+     *  and painted on the other (pinned by scripts/task195-parity.mjs leg A).
+     *  frontFace ('ccw' default, the WG twin): the winding order — GL drops
+     *  the field NO MORE, it rides the executor's state assertions. */
+    readonly raster?: { readonly cull?: 'none' | 'back' | 'front'; readonly frontFace?: 'cw' | 'ccw' }
   }
   readonly attributes?: Record<string, DrawAttribute>
   /** Task 180 — THE INDEX TIER: the static index pattern (Uint16Array |
@@ -116,7 +124,11 @@ interface SamplerField {
 interface CompiledState {
   readonly depthTest: 'less' | 'lequal' | 'always'
   readonly depthWrite: boolean
+  /** Task 195: 'none' default (the WG-parity contract — see DrawSpec.raster). */
   readonly cull: 'none' | 'back' | 'front'
+  /** Task 195: the winding order ('ccw' default, the WG twin) — the
+   *  executor asserts it with its own per-pass cache. */
+  readonly frontFace: 'cw' | 'ccw'
   /** Task 75: pipeline blending (null — off). Task 122: the equation
    *  (absent = 'add' — the classic behavior). */
   readonly blend: { readonly src: string; readonly dst: string; readonly equation: string } | null
@@ -217,7 +229,10 @@ function readState(spec: DrawSpec): CompiledState {
   return {
     depthTest: depthOff ? 'always' : (depth?.test ?? 'less'),
     depthWrite: depthOff ? false : (depth?.write ?? true),
-    cull: raster?.cull ?? 'back',
+    // Task 195: 'none' (the WG-parity default; the pre-195 'back' made an
+    // unspecified pipeline back-cull on GL only — the cross-backend blank).
+    cull: raster?.cull ?? 'none',
+    frontFace: raster?.frontFace === 'cw' ? 'cw' : 'ccw',
     blend: b === null ? null : { src: b.src, dst: b.dst, equation: b.equation ?? 'add' },
     // Task 143: the executor's per-draw cache keys, built ONCE here (they
     // are compile-time constants of the command).

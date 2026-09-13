@@ -161,6 +161,7 @@ function khrMock(options?: { completeAfter?: number; linkOk?: boolean; withExt?:
     disable: () => {},
     depthFunc: () => {},
     cullFace: () => {},
+    frontFace: () => {},
     drawArrays: (mode: number, _first: number, count: number) =>
       calls.push(`drawArrays(${mode === 0 ? 'POINTS' : mode},${count})`),
     getError: () => 0,

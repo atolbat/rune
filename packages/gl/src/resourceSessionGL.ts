@@ -283,6 +283,8 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
     setViewport: (width, height) => raw.setViewport(width, height),
     setDepthMode: (test, write) => raw.setDepthMode(test, write),
     setCull: mode => raw.setCull(mode),
+    // Task 195 — the winding wire: a frame op, passthrough (like setCull).
+    setFrontFace: order => raw.setFrontFace(order),
     setBlend: (src, dst, equation) => raw.setBlend(src, dst, equation),
     clear: (color, depth) => raw.clear(color, depth),
     drawArrays: (mode, first, count, instances) => raw.drawArrays(mode, first, count, instances),

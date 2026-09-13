@@ -127,6 +127,8 @@ export function createCountingGL(): CountingGLFacade {
     setViewport: bump,
     setDepthMode: bump,
     setCull: bump,
+    // Task 195 — the winding wire (the executor asserts it per pass).
+    setFrontFace: bump,
     // Task 75: pipeline blending — the executor's state cache calls it even
     // for blend-less pipelines (first command initializes `off`).
     setBlend: bump,
@@ -176,6 +178,7 @@ export interface CountingGLFacade {
   setViewport(width: number, height: number): void
   setDepthMode(test: string, write: boolean): void
   setCull(mode: string): void
+  setFrontFace(order: string): void
   setBlend(src: string | null, dst: string | null, equation?: string): void
   clear(color: readonly number[], depth: number | null): void
   drawArrays(mode: string, first: number, count: number, instances: number): void

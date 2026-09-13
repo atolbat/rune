@@ -70,6 +70,8 @@ function mockGL(): CallLog {
     disable: (cap: number) => calls.push(`disable(${cap})`),
     depthFunc: () => {},
     cullFace: () => {},
+    // Task 195 — the winding wire (setFrontFace → gl.frontFace).
+    frontFace: () => calls.push('frontFace'),
   } as unknown as WebGL2RenderingContext
   return { calls, gl }
 }

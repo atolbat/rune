@@ -209,6 +209,14 @@ export interface GLFacade {
   setViewport(width: number, height: number): void
   setDepthMode(test: string, write: boolean): void
   setCull(mode: string): void
+  /** Task 195 — the rasterization-state parity wire: the winding order
+   *  (gl.frontFace under the hood). 'ccw' is the default on BOTH backends
+   *  (WebGPU's GPURenderPipelineDescriptor.frontFace default; the GL side
+   *  previously had NO frontFace at all — a `raster: { frontFace: 'cw' }`
+   *  spec was silently dropped and CW-wound geometry back-culled to a blank
+   *  canvas while rendering fine on WebGPU). The executor asserts it with
+   *  the same per-pass cache discipline as setCull. */
+  setFrontFace(order: 'cw' | 'ccw'): void
   /** Task 75: pipeline blending. src/dst — facade BlendFactor strings
    *  ('one', 'one-minus-src-alpha', ...); null/null — turn it off.
    *  Premultiplied shader output: additive = ('one','one'),

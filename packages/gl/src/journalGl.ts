@@ -13,7 +13,7 @@
  *
  * What is NOT in the journal (deliberately):
  *   - Frame ops (useProgram, setUniform*, bindTexture, bindTarget, drawArrays,
- *     setViewport, clear, setDepthMode, setCull, texSubImage2D streaming) —
+ *     setViewport, clear, setDepthMode, setCull, setFrontFace, texSubImage2D streaming) —
  *     these are per-frame, they go to the Tape, not the Journal.
  *   - The texImage2DFromSource source is not serialized (an ImageBitmap may be
  *     closed, HTMLCanvasElement is DOM-dependent). The journal stores only kind+flipY;
@@ -109,6 +109,8 @@ export function withJournal(gl: GLFacade, journal: Journal): GLFacade {
     setViewport: (width, height) => gl.setViewport(width, height),
     setDepthMode: (test, write) => gl.setDepthMode(test, write),
     setCull: mode => gl.setCull(mode),
+    // Task 195 — the winding wire: a frame op, passthrough (like setCull).
+    setFrontFace: order => gl.setFrontFace(order),
     setBlend: (src, dst, equation) => gl.setBlend(src, dst, equation),
     clear: (color, depth) => gl.clear(color, depth),
     drawArrays: (mode, first, count, instances) => gl.drawArrays(mode, first, count, instances),

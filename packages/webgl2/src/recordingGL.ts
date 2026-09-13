@@ -125,6 +125,8 @@ export function createRecordingGL(): RecordingGL {
     setViewport: (width, height) => calls.push(`setViewport(${width},${height})`),
     setDepthMode: (test, write) => calls.push(`setDepthMode(${test},${write})`),
     setCull: mode => calls.push(`setCull(${mode})`),
+    // Task 195 — the winding wire (the GL twin of WebGPU's frontFace).
+    setFrontFace: order => calls.push(`setFrontFace(${order})`),
     // Task 75: pipeline blending (null/null = off).
     setBlend: (src, dst, equation) => calls.push(`setBlend(${src ?? 'off'},${dst ?? 'off'},${equation ?? 'add'})`),
     // Raw state surface (state programs, M2 legacy + real scenarios).

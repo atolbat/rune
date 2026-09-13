@@ -132,6 +132,9 @@ function glMock(): { calls: string[]; gl: WebGL2RenderingContext } {
     disable: () => {},
     depthFunc: () => {},
     cullFace: () => {},
+    // Task 195 — the winding wire: the executor's applyState asserts
+    // frontFace once per pass on realGL-driven executors.
+    frontFace: () => {},
     drawArrays: (mode: number, _first: number, count: number) =>
       calls.push(`drawArrays(${mode === 0 ? 'POINTS' : mode},${count})`),
     drawArraysInstanced: (mode: number, _first: number, count: number, instances: number) =>

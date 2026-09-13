@@ -36,7 +36,12 @@ export interface AutoDrawSpec {
      *  Task 122: the equation — 'add' (default) | 'subtract' |
      *  'reverse-subtract' | 'min' | 'max' (the custom blend equations). */
     readonly blend?: { readonly src: string; readonly dst: string; readonly equation?: string } | false
-    readonly raster?: { readonly cull?: 'none' | 'back' | 'front' }
+    /** Task 195 — the rasterization-parity contract (identical on both
+     *  backends): cull defaults to 'none' (the WebGPU spec default — the
+     *  pre-195 GL 'back' default made a spec without a pipeline back-cull
+     *  on GL only); frontFace ('ccw' default) is honored on BOTH backends
+     *  (the GL side dropped it before Task 195). */
+    readonly raster?: { readonly cull?: 'none' | 'back' | 'front'; readonly frontFace?: 'cw' | 'ccw' }
   }
   readonly count: number
   /** Task 75: instances (signal/number/function) — draw(count, instances):

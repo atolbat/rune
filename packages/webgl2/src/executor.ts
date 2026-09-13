@@ -57,6 +57,7 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
   let lastProgram = -1
   let lastDepthTest = ''
   let lastCull = ''
+  let lastFrontFace = ''
   let lastBlend = ''
 
   // ── Task 169 — THE MULTI-DRAW TIER ──
@@ -194,13 +195,14 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
     lastProgram = -1
     lastDepthTest = ''
     lastCull = ''
+    lastFrontFace = ''
     lastBlend = ''
   }
 
   function drawCommand(command: CompiledCommand | undefined, count: number, instances: number): void {
     if (command === undefined) return
     const rich = command as CompiledCommand & {
-      state: { depthTest: string; depthWrite: boolean; depthKey: string; cull: string; blend: { src: string; dst: string; equation: string } | null; blendKey: string }
+      state: { depthTest: string; depthWrite: boolean; depthKey: string; cull: string; frontFace: 'cw' | 'ccw'; blend: { src: string; dst: string; equation: string } | null; blendKey: string }
       fields: Array<{ name: string; type: string; slot: { base: number; size: number; dirty: boolean } }>
       samplers: Array<{ name: string; unit: number; textureId: number }>
       attributes: Array<{ location: number; size: number; data: Float32Array; stride?: number; offset?: number; bufferId?: number; instance?: boolean }>
@@ -361,7 +363,7 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
     }
   }
 
-  function applyState(command: CompiledCommand & { state: { depthTest: string; depthWrite: boolean; depthKey: string; cull: string; blend: { src: string; dst: string; equation: string } | null; blendKey: string } }): void {
+  function applyState(command: CompiledCommand & { state: { depthTest: string; depthWrite: boolean; depthKey: string; cull: string; frontFace: 'cw' | 'ccw'; blend: { src: string; dst: string; equation: string } | null; blendKey: string } }): void {
     const state = command.state
     // Task 143: the keys come PRECOMPILED from compileDrawSpec — the
     // template literals are compile-time constants of the command, not
@@ -373,6 +375,13 @@ export function createExecutor(options: GLExecutorOptions): GLExecutor {
     if (state.cull !== lastCull) {
       gl.setCull(state.cull)
       lastCull = state.cull
+    }
+    // Task 195 — the winding assert: same cache discipline as cull (the
+    // compile bakes frontFace into the command; the executor re-asserts it
+    // once per pass and skips it while the command set agrees).
+    if (state.frontFace !== lastFrontFace) {
+      gl.setFrontFace(state.frontFace)
+      lastFrontFace = state.frontFace
     }
     // Task 75: pipeline blending (additive/transparency for star quads).
     // Task 122: the equation joins the state key — a MAX pipeline next to
