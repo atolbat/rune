@@ -1,5 +1,5 @@
 // task187-live-deployed — the deployed-site gate for Task 187: the vfx page
-// on https://atolbat.github.io/rune/ must boot on ?v=187, animate, stay
+// on https://atolbat.github.io/rune/ must boot on ?v=188, animate, stay
 // error-free; the served rune.esm.js must be md5-IDENTICAL to the local dist
 // (Task 187 CHANGED the renderer bundles — the indexed multi-draw tier rode
 // the executor/facade code — so the md5 is expected to differ from pre-187
@@ -33,7 +33,7 @@ const v = await page.evaluate(() => [...document.querySelectorAll('script[type=m
 console.log('module srcs:', v)
 
 const served = await page.evaluate(async () => {
-  const text = await (await fetch('https://atolbat.github.io/rune/dist/rune.esm.js?v=187')).text()
+  const text = await (await fetch('https://atolbat.github.io/rune/dist/rune.esm.js?v=188')).text()
   return text
 })
 const servedMd5 = createHash('md5').update(served).digest('hex')
@@ -46,7 +46,7 @@ const markers = {
 console.log('Task-187 markers in the served bundle:', JSON.stringify(markers))
 
 const ok = diff > 500 && errors.length === 0 && servedMd5 === localMd5
-  && markers.multiDrawElementsInstanced && markers.multiDrawIndexed && v.includes('v=187')
+  && markers.multiDrawElementsInstanced && markers.multiDrawIndexed && v.includes('v=188')
 console.log(ok ? 'LIVE DEPLOYED GATE: PASS' : 'LIVE DEPLOYED GATE: FAIL')
 await browser.close()
 process.exit(ok ? 0 : 1)
