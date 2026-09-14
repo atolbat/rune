@@ -82,6 +82,35 @@
 // same bricks with the same props in the same order — the compiled
 // timeline IS the Task-202 recipe; the parity gates prove the graph
 // changed the SCHEDULING, never a pixel.
+//
+// Task 208 — THE CROSS-FRAME SEED (the bevy two-phase delta, research
+// round 207's ranked candidate #1: bevy PR #17413's «phase 1 seeded by
+// the previous frame's HZB», adapted to our no-reprojection law). The
+// boot two-pass frame pays phase 1 in FULL every frame: the K-wall
+// z-fill + the first reduce chain rebuild a WEAK pyramid (23 walls),
+// cull#1 passes almost everything, and the feedback fill then renders
+// that whole candidate crowd depth-only. The seed replaces the warm-up
+// with a VERSIONED CARRY: the pyramid object already survives the frame
+// boundary, so `pyramid-reduce-2` — the LATE downsample, after the
+// phase-1 depth writers, bevy PR #18711's own position — doubles as the
+// writer of a PERSISTENT `hiz-seed` resource, and the next frame's FIRST
+// cull reads it as the imported version (the framegraph's own staleness
+// channel counts the lag). Phase 1 goes from the 23-wall pyramid to the
+// converged FULL-SCENE tile for zero extra passes — and the feedback
+// fill collapses with it: the tile only depends on its FRONT LAYER (an
+// occluded contributor's nearest corner is farther than the region max,
+// so it wins no texel — tile(P(X)) ≡ tile(X), the fixed-point law the
+// Task-207 brute-match already evidenced), so the seeded cull#1 passes
+// exactly the final set (V1: 2767 → 428 at the report's camera, a 6.5×
+// cut in depth-only raster) while the final verdicts land BIT-IDENTICAL
+// to the fresh warm-up's (the same predicate over the same tile bytes).
+// SOUNDNESS UNDER STALENESS (the load-bearing law, unchanged): a stale
+// seed can only err in phase 1 — over-claiming wrongly culls a box there
+// — but cull#2 re-tests EVERY record against the SAME-FRAME pyramid
+// built from the drawn V1, and that pyramid never wrongly culls a
+// visible box (its own rect holds either background 1.0 or surfaces
+// behind it), so the final verdicts stay pixel-exact at any camera,
+// however old the seed. The one-frame lag costs fill, never a pixel.
 import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=207'
 import { buildShaders } from './shaders.js?v=207'
 import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H } from './scene.js?v=203'
@@ -183,8 +212,29 @@ export async function buildTier(deps) {
     scene: fg.resource({ name: 'scene', kind: 'buffer', bytes: sceneWords.length * 4, transient: false, external: sceneHandle, exported: true }),
     mesh: fg.resource({ name: 'mesh', kind: 'buffer', bytes: BOX_VERTS.length * 4, transient: false, external: mesh }),
     hiz: fg.resource({ name: 'hi-z', kind: 'texture', width: HIZ_W, height: HIZ_H, format: 'r32f', external: pyramid }),
+    // Task 208 — THE CROSS-FRAME SEED: the pyramid's carry across the
+    // frame boundary, as its OWN persistent resource. Physically the
+    // SAME object as hi-z (bytes: 0 — counting it would double the
+    // frame's memory math); logically the version that survives: every
+    // pyramid build (the boot reduce or the feedback reduce-2) writes
+    // it, the next frame's first cull reads the imported version, and
+    // the staleness channel counts the lag. This is the bevy two-phase
+    // delta expressed in the graph's own vocabulary — a research
+    // technique as ZERO new mechanisms, pure scheduling.
+    seed: fg.resource({ name: 'hiz-seed', kind: 'texture', bytes: 0, transient: false, external: pyramid }),
     target: fg.resource({ name: 'target', kind: 'texture', width: SURF_W, height: SURF_H, transient: false, external: surface }),
   }
+
+  // Task 208 — when the seed OWNS phase 1: the policy asks for it, the
+  // pyramid carries a written version (frame 1 boots the honest way — an
+  // unwritten seed is uninitialized memory, and a zero-filled pyramid
+  // would cull the world), the two-pass frame is on (a single-cull frame
+  // has NO phase 2 to correct a stale seed — the plain leg keeps its
+  // fresh z-fill), the culling gate is up, the frame is fresh (a frozen
+  // frame must keep the strip's classic shape), and the history policy
+  // hasn't claimed phase 1 for itself (the prev-visible re-render is the
+  // fresher seed — the seed idles when history runs).
+  const seedActive = p => p.seed === true && p.feedback === true && p.culling === true && p.fresh === true && p.history !== true
 
   let pendingStats = null // the read-stats copy pass's in-flight readback
   fg.pass({
@@ -194,13 +244,19 @@ export async function buildTier(deps) {
     // the FIRST scene reader, so it binds the version BEFORE this frame's
     // cull write — the previous frame's verdicts, exactly what phase 1
     // consumes (no reprojection, the set re-renders at the current camera).
+    // Task 208 — THE SEED GATE: when the cross-frame seed owns phase 1
+    // this whole warm-up (the fill + the reduce below) leaves the frame —
+    // the first cull reads the carried pyramid instead, and the feedback
+    // branch rebuilds everything it needs from its own fill.
     name: 'z-fill', kind: 'render', cost: 3,
     reads: [R.scene, R.mesh], writes: [R.hiz],
+    when: p => !seedActive(p),
     execute: ({ props }) => hist.run({ camera: props.camera, occluders: props.occluders, gate: props.history === true }),
   })
   fg.pass({
     name: 'pyramid-reduce', kind: KERNEL, cost: 2,
-    reads: [R.hiz], writes: [R.hiz], // read-modify-write: level L reads L−1
+    reads: [R.hiz], writes: [R.hiz, R.seed], // read-modify-write: level L reads L−1; the build IS the seed's writer
+    when: p => !seedActive(p),
     execute: () => pyramid.build(),
   })
   fg.pass({
@@ -210,8 +266,12 @@ export async function buildTier(deps) {
     // `fresh` is THE AMORTIZED-CULL gate: a bit-still camera+policy frame
     // skips BOTH this pass and the fold — the streaks must not advance on
     // stale raw verdicts.
+    // Task 208 — THE SEEDED READ: with the seed active, phase 1 reads the
+    // PERSISTENT carry (the imported version — the edge the graph now
+    // carries as `import→cull-verdicts hiz-seed@v`), not the within-frame
+    // hi-z: the same physical pyramid, the CROSS-FRAME version contract.
     name: 'cull-verdicts', kind: KERNEL, cost: 1,
-    reads: props => [R.scene, ...(props.culling === true ? [R.hiz] : [])],
+    reads: props => [R.scene, ...(props.culling === true ? [seedActive(props) ? R.seed : R.hiz] : [])],
     writes: [R.scene],
     when: props => props.fresh === true,
     execute: ({ props }) => occl.run({ camera: props.camera, gate: props.culling === true }),
@@ -236,7 +296,11 @@ export async function buildTier(deps) {
   })
   fg.pass({
     name: 'pyramid-reduce-2', kind: KERNEL, cost: 2,
-    reads: [R.hiz], writes: [R.hiz], // read-modify-write over the feedback fill's tile
+    // read-modify-write over the feedback fill's tile — AND THE SEED'S
+    // WRITER (Task 208): the late downsample, after the phase-1 depth
+    // writers, in bevy PR #18711's own position — the built pyramid IS
+    // the next frame's carry
+    reads: [R.hiz], writes: [R.hiz, R.seed],
     when: props => props.feedback === true && props.culling === true && props.fresh === true,
     execute: () => pyramid.build(),
   })
@@ -289,22 +353,30 @@ export async function buildTier(deps) {
   //    are GATED out of the compiled frame, and every scene reader binds
   //    the LAST EXECUTED version (the staleness counts on the HUD). The
   //    cache keys on the mvp WORDS + the full policy tuple (hiz/occluders/
-  //    hysteresis/history): a leg that flips any of them at the same
-  //    camera is a NEW policy and re-culls honestly.
+  //    hysteresis/history/feedback/seed): a leg that flips any of them at
+  //    the same camera is a NEW policy and re-culls honestly.
   let lastCulled = null // { key: string, mvp: Float32Array } — the last CULLED frame's cache key
   let cullSkips = 0
   let lastFrame = null // the last compiled frame (the graph stats' source)
   let lastReport = null // the last run report (executed + staleness)
-  function renderTo(targetId, mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false, feedbackOn = true) {
+  let seedLive = false // Task 208 — did the seed own the last frame's phase 1
+  function renderTo(targetId, mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false, feedbackOn = true, seedOn = true) {
     const camera = { mvp, eye }
     // NOTE the boolean hygiene (the Task-202 lesson): `historyOn !== 0`
     // with historyOn === false is TRUE — every gate answers `=== true` /
     // `props.x === true` from here on, both spellings (1/0 and booleans)
     // ride the same law. Task 207: `feedbackOn` defaults TRUE — the
     // same-frame feedback is the BOOT POLICY now (the field report's ask);
-    // the plain single-cull frame is the explicit `false` leg.
+    // the plain single-cull frame is the explicit `false` leg. Task 208:
+    // `seedOn` defaults TRUE — the cross-frame seed rides ON TOP of the
+    // feedback frame (it needs phase 2); the resolved prop ALSO requires
+    // the pyramid to carry a WRITTEN version (lastReport's staleness
+    // channel: −1 = never built — frame 1 boots the honest K-wall way,
+    // a zero-filled pyramid would cull the world).
     const feedback = feedbackOn === true || feedbackOn === 1
-    const key = `${hizOn ? 1 : 0}|${occluders}|${hysteresisOn ? 1 : 0}|${historyOn ? 1 : 0}|${feedback ? 1 : 0}`
+    const seedWanted = seedOn === true || seedOn === 1
+    const seed = seedWanted && lastReport !== null && (lastReport.stale['hiz-seed'] ?? -1) >= 0
+    const key = `${hizOn ? 1 : 0}|${occluders}|${hysteresisOn ? 1 : 0}|${historyOn ? 1 : 0}|${feedback ? 1 : 0}|${seed ? 1 : 0}`
     let cached = cacheOn && lastCulled !== null && lastCulled.key === key
     if (cached) {
       for (let i = 0; i < 16; i++) {
@@ -322,11 +394,13 @@ export async function buildTier(deps) {
       hysteresis: hysteresisOn === true,
       history: historyOn === true,
       feedback,
+      seed,
       fresh: !cached,
       wantStats: wantStats === true,
     }
     lastFrame = fg.compile(props) // cached by policy — the declarations never see the camera
     lastReport = lastFrame.run(props)
+    seedLive = seed && !cached // the seed owned THIS frame's phase 1 (the frozen frame reuses verdicts)
   }
 
   // ── stats (the device normalizes: WG args readback / GL hist sweep).
@@ -375,7 +449,12 @@ export async function buildTier(deps) {
     const c = lastFrame.culled.length > 0 ? ` · culled ${lastFrame.culled.join('+')}` : ''
     const par = lastFrame.overlap.parallel.map(p => `${p.pass}∥`).join(' ') || '—'
     const staleScene = lastReport?.stale?.scene ?? -1
-    return `frame graph: ${s.live}/${s.declared} live${g}${c} · ${s.barriers} barriers · ${s.slots} slot${s.slots === 1 ? '' : 's'} · peak ${(s.peakBytes / 1024).toFixed(0)} KB (alias −${s.savedPct.toFixed(0)}%) · plan ∥ ${par} · verdicts ${staleScene < 0 ? 'imported' : `${staleScene}f stale`} · ${s.compiles} compile${s.compiles === 1 ? '' : 's'}`
+    // Task 208 — the seed's own staleness: how many frames ago the carried
+    // pyramid was built (0 = this frame's late downsample; −1 = never —
+    // the boot frame's honest K-wall warm-up still owns phase 1)
+    const staleSeed = lastReport?.stale?.['hiz-seed'] ?? -1
+    const seedTxt = seedLive ? ` · seed ${staleSeed < 0 ? 'cold' : `${staleSeed}f stale`}` : ''
+    return `frame graph: ${s.live}/${s.declared} live${g}${c} · ${s.barriers} barriers · ${s.slots} slot${s.slots === 1 ? '' : 's'} · peak ${(s.peakBytes / 1024).toFixed(0)} KB (alias −${s.savedPct.toFixed(0)}%) · plan ∥ ${par} · verdicts ${staleScene < 0 ? 'imported' : `${staleScene}f stale`}${seedTxt} · ${s.compiles} compile${s.compiles === 1 ? '' : 's'}`
   }
 
   // ── the snapshot blit (software WG — zero presents) ─────────────────────
@@ -391,8 +470,8 @@ export async function buildTier(deps) {
     }).catch(() => { blitPending = false })
   }
 
-  function frame(mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false, feedbackOn = true) {
-    renderTo(SNAPSHOT ? surface.targetId : 0, mvp, eye, hizOn, debug, occluders, hysteresisOn, historyOn, cacheOn, wantStats, feedbackOn)
+  function frame(mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false, feedbackOn = true, seedOn = true) {
+    renderTo(SNAPSHOT ? surface.targetId : 0, mvp, eye, hizOn, debug, occluders, hysteresisOn, historyOn, cacheOn, wantStats, feedbackOn, seedOn)
     if (SNAPSHOT) blitSnapshot()
   }
 
@@ -454,8 +533,8 @@ export async function buildTier(deps) {
       ? `WebGL2 — FBO pyramid + TF cull + vertex-collapse draw${device.antialias ? ' · context MSAA' : ''}`
       : `WebGPU — storage pyramid + compute cull + one drawIndexedIndirect${device.antialias ? ' · MSAA 4x resolve' : ''}`,
     drawsLine: backend === 'webgl2'
-      ? `draws: 2 (fill + collapse color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion) · TF passes: 2 (cull + hysteresis; +1 cull ON the feedback) · ${pyramid.levels - 1} reduce quads (×2 the feedback frame)`
-      : `draws: 2 (fill + indirect color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion) · dispatches: 3 (cull + hysteresis + compact; +1 cull ON the feedback) · ${pyramid.levels - 1} reduce quads (×2 the feedback frame)`,
+      ? `draws: 2 (fill + collapse color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid) · TF passes: 2 (cull + hysteresis; +1 cull ON the feedback) · ${pyramid.levels - 1} reduce quads (×2 the feedback frame; ×1 the seed frame)`
+      : `draws: 2 (fill + indirect color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid) · dispatches: 3 (cull + hysteresis + compact; +1 cull ON the feedback) · ${pyramid.levels - 1} reduce quads (×2 the feedback frame; ×1 the seed frame)`,
     canvas: displayCanvas,
     surface,
     renderTo,
@@ -465,6 +544,12 @@ export async function buildTier(deps) {
     aspect,
     graphStats,
     graphLine,
+    /** Task 208 — the seed's live channel (the HUD/probe readout): `on`
+     *  = the cross-frame carry owned the LAST frame's phase 1 (z-fill +
+     *  the first reduce left the frame), `stale` = the carry's own age in
+     *  frames (the graph's persistent-version staleness, −1 = never
+     *  written — the honest cold boot). */
+    seedState: () => ({ on: seedLive, stale: lastReport?.stale?.['hiz-seed'] ?? -1 }),
     /** Task 202 — the amortized-cull counter (the freeze leg's channel:
      *  how many frames reused the verdicts instead of re-culling). */
     cullSkips: () => cullSkips,
