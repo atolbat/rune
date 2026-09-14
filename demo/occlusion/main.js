@@ -24,7 +24,7 @@
 // window.__hizStats — the live counters (the smoke/gates read it);
 // window.__hizGate — the probe verdict (?probe=1: WG-only, the Task-196
 // contract; ?probe=1&mode=webgl2: both tiers + the cross-tier parity).
-import { buildTier } from './tier.js?v=210'
+import { buildTier } from './tier.js?v=211'
 import {
   createScene, cameraAt, VAL_CAMERAS,
   HIZ_W, HIZ_H, LEVELS,
@@ -32,8 +32,8 @@ import {
 import {
   buildOctree, buildBVH, frustumPlanes, aabbOutsideFrustum,
   recordView, flatCull, clusterize, softwareOccluder, cameraRay, rayBoxes,
-  layerPolicy,
-} from '../../dist/rune.esm.js?v=210'
+  layerPolicy, adoptStore,
+} from '../../dist/rune.esm.js?v=211'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -52,7 +52,7 @@ const democtl = { pause() {}, resume() {} }
 const shell = window.RuneDemoShell.mount({
   layout: 'page',
   title: 'Hi-Z occlusion culling',
-  desc: 'Hierarchical Z-buffer culling, GPU-driven — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts). Task 201: the scenario composes its frame from PASS BRICKS (depthPass → pyramid → occlusionPass → hysteresisPass → visiblePass — the regl/WebGPU syntax the scenario owns), the Frostbite temporal policy runs device-side (an occluded verdict needs 3 consecutive frames — no popping, pixel-parity-safe), and the pure CPU kit (octree/BVH rays + hit tests + picking, the flat/billboard edge-on test, vegetation clustering, the layer policy for transparency, and the software occluder — the boxes\u2019 front faces rasterized CPU-side into a tiny depth pyramid) gates the GPU\u2019s own verdicts. Task 202: the web-searched research techniques, implemented and pushed further — the HISTORY FEEDBACK brick (the two-pass HZB: Nanite\u2019s «first pass uses the HZB from last frame», Aaltonen\u2019s two-phase, the CryEngine coverage buffer — but WITHOUT reprojection: the prev-visible set re-renders at the current camera, so the lag never costs a pixel) and the AMORTIZED-CULL policy (the verdicts reuse while the camera stands bit-still). Task 203: THE FRAME GRAPH — the recipe is now a DECLARATION (versioned resource handles, conditional reads, per-pass gates) that the engine compiles into a frame DAG: dead branches leave the frame (Hi-Z off → the whole prepass branch disappears), transient lifetimes schedule into aliasing slots, barriers are emitted at every cross-lane hazard, and the amortized cull becomes a first-class graph concept — the staleness of the reused verdicts is counted, not hidden. Task 205: THE RESEARCH HARVEST — the niche papers, measured in the engine: Greene\u2019s hierarchical tile tiers + the rawrunprotected coarse edge tests + the ryg/Dyrkorn incremental edge walk with a depth gradient power the occluder raster (1.9× on this city), ryg\u2019s CSE corner transform cuts the query projection 96 mults → 24 (the hidden() sweep 1.3×), Sýkora–Jelínek plane-mask inheritance walks the octree/BVH with 4× fewer plane evaluations, and the picking ray is allocation-free — every technique benched against its legacy twin (packages/core/bench/research205.bench.ts), every parity gate held (tiled ≡ legacy verdicts, mask ≡ legacy sets, the tie law). Task 206: THE CLOSE-CAMERA ROUND — the field report («the near boxes cover the screen, thousands still drawn») reproduced headless and fixed twice: the frustum plane counts moved to CLIP SPACE (a box fully behind the camera was landing in the straddle bucket, DRAWN — 6802 of 16407 at dist 12; now frustum-culled, the honest straddle ring is 1–3), and the cull kernel gained the budgeted Greene descent (the coarse tap\u2019s grid-rounding slop poisoned the region max on gappy small-box screens; the fine pass scans only the box\u2019s own texels — drawn 8134 → 428 at the guilty camera, 4388 → 2391 on the default view, pixel parity identical). Task 207: THE SAME-FRAME FEEDBACK — the second field report («the colored boxes still don\u2019t occlude the rear colored boxes; behind the gray parallelepipeds they already don\u2019t draw») answered with the CURRENT-FRAME two-pass HZB: after the first cull\u2019s verdicts, the fresh visible set re-renders depth-only into the pyramid, the pyramid rebuilds, and a SECOND cull lands — the colored city occludes ITSELF within the frame (the survivors\u2019 depth V1, never the whole scene\u2019s fill), declared as three new frame-graph passes (feedback-fill / pyramid-reduce-2 / cull-verdicts-2) that die with the culling gate exactly like the shadows-off law. Task 208: THE CROSS-FRAME SEED — the bevy two-phase delta (research round 207\u2019s ranked candidate #1): the pyramid CARRIES across the frame boundary as a persistent frame-graph resource (hiz-seed — reduce-2, the late downsample after the phase-1 depth writers, is its author; the next frame\u2019s first cull reads the imported version and the staleness channel counts the lag), so the K-wall warm-up + the first reduce chain LEAVE the seeded frame entirely and the feedback fill\u2019s pass set collapses from the whole K-wall-visible crowd to exactly the final set (2767 → 428 at the report\u2019s camera — the tile only depends on its front layer, the fixed-point law) while the final buckets land bit-identical on both backends; sound under motion by cull#2\u2019s own law — the same-frame re-cull never wrongly culls a visible box, so the one-frame-old carry costs fill, never a pixel. Task 209: THE PARALLEL COMPACT + THE NEAR-FIRST ORDER — the research round\u2019s A1+A2 pair: the last serial N-loop in the frame is gone (the flags-to-list compact now runs as ONE workgroup of 64 lanes walking 64-wide tiles — a Hillis-Steele scan per tile + a running base produce the BYTE-IDENTICAL ascending list, by construction), and the visible list sorts NEAR-FIRST (the cull packs a byte-quantized NDC-z bucket into the verdict word\u2019s spare bits; a bitonic network in workgroup shared memory orders the list by (bucket, index) — unique keys, a strict total order, deterministic on every backend) so the color pass\u2019s early-Z rejects the rear layers; the hysteresis fold CARRIES the bucket through, every decode masks with & 0xFF, and the GL leg\u2019s collapse draw keeps its index order (the order is a WG-leg harvest — a documented no-op there). Task 210: THE ARRAY ROUND — the CPU-side array work measured to the metal (105 variants × 13 groups × 3 runtimes: node V8, bun JSC, headless Chromium — checksum-gated, a hand-emitted wasm module racing memory.copy/memory.fill against the JS lanes): the software occluder’s pyramid reduce drops its per-texel div/mod for nested row-pointer loops (1.4–1.5×, bit-identical mips), writeBox’s face quads become a constant table (zero allocations per box), and the bench confirms the engine’s own laws — a pre-packed bitset walk beats the plain-array push 15–22× on sparse survivor sets, SoA reads beat object arrays 2–8×, typed sort() without a comparator keeps its crown, a resizable ArrayBuffer’s growth ladder is a 43× in-place win on V8 (and a loss on JSC — the honest cross-engine split), and DataView is 18× poison under JSC',
+  desc: 'Hierarchical Z-buffer culling, GPU-driven — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts). Task 201: the scenario composes its frame from PASS BRICKS (depthPass → pyramid → occlusionPass → hysteresisPass → visiblePass — the regl/WebGPU syntax the scenario owns), the Frostbite temporal policy runs device-side (an occluded verdict needs 3 consecutive frames — no popping, pixel-parity-safe), and the pure CPU kit (octree/BVH rays + hit tests + picking, the flat/billboard edge-on test, vegetation clustering, the layer policy for transparency, and the software occluder — the boxes\u2019 front faces rasterized CPU-side into a tiny depth pyramid) gates the GPU\u2019s own verdicts. Task 202: the web-searched research techniques, implemented and pushed further — the HISTORY FEEDBACK brick (the two-pass HZB: Nanite\u2019s «first pass uses the HZB from last frame», Aaltonen\u2019s two-phase, the CryEngine coverage buffer — but WITHOUT reprojection: the prev-visible set re-renders at the current camera, so the lag never costs a pixel) and the AMORTIZED-CULL policy (the verdicts reuse while the camera stands bit-still). Task 203: THE FRAME GRAPH — the recipe is now a DECLARATION (versioned resource handles, conditional reads, per-pass gates) that the engine compiles into a frame DAG: dead branches leave the frame (Hi-Z off → the whole prepass branch disappears), transient lifetimes schedule into aliasing slots, barriers are emitted at every cross-lane hazard, and the amortized cull becomes a first-class graph concept — the staleness of the reused verdicts is counted, not hidden. Task 205: THE RESEARCH HARVEST — the niche papers, measured in the engine: Greene\u2019s hierarchical tile tiers + the rawrunprotected coarse edge tests + the ryg/Dyrkorn incremental edge walk with a depth gradient power the occluder raster (1.9× on this city), ryg\u2019s CSE corner transform cuts the query projection 96 mults → 24 (the hidden() sweep 1.3×), Sýkora–Jelínek plane-mask inheritance walks the octree/BVH with 4× fewer plane evaluations, and the picking ray is allocation-free — every technique benched against its legacy twin (packages/core/bench/research205.bench.ts), every parity gate held (tiled ≡ legacy verdicts, mask ≡ legacy sets, the tie law). Task 206: THE CLOSE-CAMERA ROUND — the field report («the near boxes cover the screen, thousands still drawn») reproduced headless and fixed twice: the frustum plane counts moved to CLIP SPACE (a box fully behind the camera was landing in the straddle bucket, DRAWN — 6802 of 16407 at dist 12; now frustum-culled, the honest straddle ring is 1–3), and the cull kernel gained the budgeted Greene descent (the coarse tap\u2019s grid-rounding slop poisoned the region max on gappy small-box screens; the fine pass scans only the box\u2019s own texels — drawn 8134 → 428 at the guilty camera, 4388 → 2391 on the default view, pixel parity identical). Task 207: THE SAME-FRAME FEEDBACK — the second field report («the colored boxes still don\u2019t occlude the rear colored boxes; behind the gray parallelepipeds they already don\u2019t draw») answered with the CURRENT-FRAME two-pass HZB: after the first cull\u2019s verdicts, the fresh visible set re-renders depth-only into the pyramid, the pyramid rebuilds, and a SECOND cull lands — the colored city occludes ITSELF within the frame (the survivors\u2019 depth V1, never the whole scene\u2019s fill), declared as three new frame-graph passes (feedback-fill / pyramid-reduce-2 / cull-verdicts-2) that die with the culling gate exactly like the shadows-off law. Task 208: THE CROSS-FRAME SEED — the bevy two-phase delta (research round 207\u2019s ranked candidate #1): the pyramid CARRIES across the frame boundary as a persistent frame-graph resource (hiz-seed — reduce-2, the late downsample after the phase-1 depth writers, is its author; the next frame\u2019s first cull reads the imported version and the staleness channel counts the lag), so the K-wall warm-up + the first reduce chain LEAVE the seeded frame entirely and the feedback fill\u2019s pass set collapses from the whole K-wall-visible crowd to exactly the final set (2767 → 428 at the report\u2019s camera — the tile only depends on its front layer, the fixed-point law) while the final buckets land bit-identical on both backends; sound under motion by cull#2\u2019s own law — the same-frame re-cull never wrongly culls a visible box, so the one-frame-old carry costs fill, never a pixel. Task 209: THE PARALLEL COMPACT + THE NEAR-FIRST ORDER — the research round\u2019s A1+A2 pair: the last serial N-loop in the frame is gone (the flags-to-list compact now runs as ONE workgroup of 64 lanes walking 64-wide tiles — a Hillis-Steele scan per tile + a running base produce the BYTE-IDENTICAL ascending list, by construction), and the visible list sorts NEAR-FIRST (the cull packs a byte-quantized NDC-z bucket into the verdict word\u2019s spare bits; a bitonic network in workgroup shared memory orders the list by (bucket, index) — unique keys, a strict total order, deterministic on every backend) so the color pass\u2019s early-Z rejects the rear layers; the hysteresis fold CARRIES the bucket through, every decode masks with & 0xFF, and the GL leg\u2019s collapse draw keeps its index order (the order is a WG-leg harvest — a documented no-op there). Task 210: THE ARRAY ROUND — the CPU-side array work measured to the metal (105 variants × 13 groups × 3 runtimes: node V8, bun JSC, headless Chromium — checksum-gated, a hand-emitted wasm module racing memory.copy/memory.fill against the JS lanes): the software occluder’s pyramid reduce drops its per-texel div/mod for nested row-pointer loops (1.4–1.5×, bit-identical mips), writeBox’s face quads become a constant table (zero allocations per box), and the bench confirms the engine’s own laws — a pre-packed bitset walk beats the plain-array push 15–22× on sparse survivor sets, SoA reads beat object arrays 2–8×, typed sort() without a comparator keeps its crown, a resizable ArrayBuffer’s growth ladder is a 43× in-place win on V8 (and a loss on JSC — the honest cross-engine split), and DataView is 18× poison under JSC. Task 211: THE UNIFIED DATA SURFACE — the array laws applied as a SYSTEM, not patches: @rune/core’s store.ts (schema-driven SoA columns over ONE backing buffer; the measured growth ladder — a resizable ArrayBuffer’s in-place remap where the runtime wins, the copy twin elsewhere, the pick MEASURED once per process; the MarkSet bitset with BOTH iteration lanes and the documented crossover; packed u32 keys for the comparator-free order) + the scene’s own records region ADOPTED as a store (zero copies — the views ride the sceneWords bytes) + the device’s PARTIAL RECORD UPLOAD brick (coalesced 4-aligned dirty ranges → one writeBuffer/bufferSubData per range on BOTH backends) + this page’s Scene edit mode: 48 drones rewrite their centers through the column view every frame and the GPU mirror receives ~2 KB of dirty ranges instead of the ~1 MB whole-buffer write — while the octree/BVH update on the same ids keeps the CPU pick honest',
   hint: 'Drag — orbit · wheel/pinch — zoom · CLICK — pick a box (the octree/BVH ray) · the buttons toggle the culling tiers, the pyramid view, the occluder policy (the «City occludes» experiment), the temporal policy (hysteresis: watch the drawn count decay over 3 frames), the history feedback (the two-pass HZB: the city occludes itself — watch the occluded count climb), the same-frame self-occlusion (ON by default — the colored boxes occlude the boxes behind them within THIS frame; put the camera close among the boxes and watch the drawn count), the cross-frame seed (ON by default — the carried pyramid owns phase 1: the warm-up passes leave the frame, watch the frame-graph line drop two passes and the seed\u2019s staleness counter), and the near-first order (ON by default — the visible list sorts nearest-first so early-Z eats the overdraw; the drawn count and the pixels stay exactly the same). The WebGPU / WebGL2 radios boot the same bricks on each backend\u2019s own mechanisms — and the parity gates hold on both.',
   defaults: { mode: MODE_PARAM === 'webgl2' ? 'webgl2' : 'webgpu' },
   onPause() { democtl.pause() },
@@ -110,6 +110,80 @@ for (let i = 0; i < scene.N; i++) {
 }
 const octree = buildOctree(spatialBoxes)
 const bvh = buildBVH(spatialBoxes)
+
+// ── Task 211 — THE UNIFIED DATA SURFACE, LIVE ──────────────────────
+// The scene's records region ADOPTED as a SoA store: zero copies (the
+// column view rides the very sceneWords bytes the GPU mirror already
+// uploaded at boot — buildSceneViews' own pattern, generalized). A drone
+// squad edits it every frame: CPU writes through the column view → the
+// dirty bits → coalesced 4-aligned ranges → tier.applyEdits (the
+// device's partial upload — KBs, not the ~1 MB whole-buffer write) →
+// the GPU cull/draw see the moved boxes SAME-FRAME. The octree/BVH
+// update on the same ids keeps the CPU indexes honest (the pick ray
+// hits a MOVED box); the BVH's overflow list folds back every ~3 s
+// (its own documented amortization — the octree is the dynamic twin).
+const DRONES = 48
+const sceneStore = adoptStore(scene.sceneWords.buffer, [{ name: 'rec', kind: 'f32', width: 12 }], scene.N, scene.INST_OFF * 4)
+const recCol = sceneStore.column('rec')
+const droneAnchor = []
+for (let d = 0; d < DRONES; d++) {
+  // the colored boxes only (the K occluders stay the city's own walls);
+  // anchors = the boxes' boot positions, read through the store view
+  const id = scene.K + Math.floor(((d + 0.5) / DRONES) * (scene.N - scene.K))
+  const w = id * 12
+  droneAnchor.push({
+    id,
+    ax: recCol[w], ay: recCol[w + 1], az: recCol[w + 2],
+    rx: 2.5 + (d % 5) * 0.4, ry: 1.2 + (d % 3) * 0.5, rz: 2.5 + (d % 7) * 0.3,
+    w1: 0.35 + (d % 4) * 0.06, w2: 0.22 + (d % 5) * 0.05, w3: 0.3 + (d % 6) * 0.04,
+    p: d * 0.6180339887498949,
+  })
+}
+let editsOn = false
+// validation (and the probe legs) freeze the drones: the parity legs
+// must compare the SAME bytes — a moving box between the ON/OFF legs
+// would break the hash for no culling reason
+let editHold = false
+let lastUpload = { bytes: 0, ranges: 0 }
+let bvhRebuildAt = 180
+function tickEdits(t) {
+  if (!editsOn || editHold || tier === null) return
+  for (let d = 0; d < DRONES; d++) {
+    const a = droneAnchor[d]
+    const w = a.id * 12
+    recCol[w] = a.ax + a.rx * Math.sin(t * a.w1 + a.p)
+    recCol[w + 1] = a.ay + a.ry * Math.sin(t * a.w2 + a.p * 2)
+    recCol[w + 2] = a.az + a.rz * Math.cos(t * a.w3 + a.p)
+    sceneStore.markRecordDirty(a.id)
+  }
+  const ranges = sceneStore.takeUploadRanges()
+  let bytes = 0
+  for (let r = 0; r < ranges.length; r++) bytes += ranges[r].end - ranges[r].start
+  try {
+    tier.applyEdits(ranges)
+  } catch (e) {
+    noteError(`scene edit upload failed: ${e instanceof Error ? e.message : String(e)} — the edit mode stops`)
+    editsOn = false
+    sceneStore.clearDirty()
+    return
+  }
+  sceneStore.clearDirty()
+  lastUpload = { bytes, ranges: ranges.length }
+  // the CPU indexes ride the same edits — one small object per drone
+  // (the trees' own item contract; the STORE owns the record bytes)
+  for (let d = 0; d < DRONES; d++) {
+    const a = droneAnchor[d]
+    const w = a.id * 12
+    const box = { id: a.id, cx: recCol[w], cy: recCol[w + 1], cz: recCol[w + 2], hx: recCol[w + 3], hy: recCol[w + 4], hz: recCol[w + 5] }
+    octree.update(box)
+    bvh.update(box)
+    spatialBoxes[a.id] = box
+  }
+  if (frameIndex >= bvhRebuildAt) {
+    bvh.rebuild()
+    bvhRebuildAt = frameIndex + 180
+  }
+}
 const view = recordView(scene.sceneF32, scene.INST_OFF, scene.N, scene.STRIDE, scene.FIELDS)
 const flat = flatCull({ minTexels: 2, tileW: HIZ_W, tileH: HIZ_H })
 const clusters = clusterize(view, { cell: 8 })
@@ -259,11 +333,29 @@ const stats = {
   frustumCulled: 0, occlusionCulled: 0, drawn: 0, nearStraddle: 0,
   drawCalls: 1, dispatches: 2, msAvg: 0,
   hysteresis: 0, history: 0, feedback: 1, seed: 1, seedStale: -1, flatCulled: 0, clusters: clusters.stats.clusters, clusterCulled: 0, softOccluded: 0,
+  edits: 0, drones: DRONES, uploadBytes: 0, uploadRanges: 0, uploadFull: scene.sceneWords.byteLength,
   tierLine: '', drawsLine: '', validation: null, errors,
 }
 if (typeof window !== 'undefined') {
   window.__hizStats = stats
   window.__hizCtl = democtl // Task 206 — the probe's pause/resume channel
+  // Task 211 — the edit-mode probe channel (the live gate's window):
+  // set/on toggle the drones; last() reports the upload math.
+  window.__hizEdits = {
+    set: v => { editsOn = v === true || v === 1 },
+    on: () => editsOn,
+    last: () => ({ ...lastUpload, drones: DRONES, full: scene.sceneWords.byteLength, held: editHold }),
+    // the CPU side of the record-mirror gate: the store's own 12 floats
+    record: id => Array.from(recCol.subarray(id * 12, id * 12 + 12), v => +v.toFixed(4)),
+    droneId: d => droneAnchor[d % DRONES].id,
+    // the decisive probe hook: teleport a record through the store (the
+    // next tick uploads it) — the gate watches the verdict flip
+    teleport: (id, x, y, z) => {
+      const w = id * 12
+      recCol[w] = x; recCol[w + 1] = y; recCol[w + 2] = z
+      sceneStore.markRecordDirty(id)
+    },
+  }
 }
 
 /** The cross-tier parity anchor: the WG tier's boot-validation hashes —
@@ -279,6 +371,7 @@ function refreshHud() {
     `drawn <b>${stats.drawn}</b> (${pct}%) · near-straddle ${stats.nearStraddle} · hysteresis <b>${stats.hysteresis ? `ON (K=3${hysteresisOn ? '' : '·idle'}` : 'OFF'}</b> · history <b>${historyOn ? 'ON (prev-visible occluders)' : 'OFF'}</b> · feedback <b>${feedbackOn ? 'ON (same-frame — the city occludes itself)' : 'OFF'}</b> · x-seed <b>${stats.seed ? `ON (phase 1 = the carried pyramid${stats.seedStale >= 0 ? `, ${stats.seedStale}f stale` : ''})` : 'OFF (the K-wall warm-up)'}</b> · near-first <b>${orderOn ? 'ON (early-Z harvest)' : 'OFF (index order)'}</b>\n` +
     `Hi-Z ${HIZ_W}x${HIZ_H} · ${LEVELS} mips · tier <b>${hizOn ? 'ON' : 'OFF'}</b>\n` +
     `kit: clusters <b>${stats.clusters}</b> (cell 8) · cluster-cull ${stats.clusterCulled} · flat-culled ${stats.flatCulled} · soft-HiZ ${stats.softOccluded}\n` +
+    `edits <b>${editsOn ? 'ON' : 'OFF'}</b> · ${DRONES} drones · upload <b>${(lastUpload.bytes / 1024).toFixed(1)} KB</b> (${lastUpload.ranges} ranges) vs full ${(scene.sceneWords.byteLength / 1024).toFixed(0)} KB — the store's dirty ranges\n` +
     `${tier !== null && tier.graphLine !== undefined ? tier.graphLine() + '\n' : ''}` +
     `${tier !== null ? tier.drawsLine : ''}\n` +
     `${tier !== null ? tier.tierLine : ''}\n` +
@@ -304,6 +397,10 @@ async function maybeReadStats() {
     stats.seed = seedState.on ? 1 : 0
     stats.seedStale = seedState.stale
     stats.msAvg = +msAvg.toFixed(2)
+    // Task 211 — the edit-mode counters (the HUD's upload math line)
+    stats.edits = editsOn ? 1 : 0
+    stats.uploadBytes = lastUpload.bytes
+    stats.uploadRanges = lastUpload.ranges
     // the kit's per-camera stats: the flat-cull count (the edge-on slivers)
     // + the cluster-cull count (the two-tier vegetation math) — one sweep
     if (lastMvp !== null) {
@@ -343,6 +440,14 @@ function loop(t) {
   camEyeCache = eye
   try {
     if (tier !== null && tier.drain !== null && tier.drain !== undefined) tier.drain(t)
+    // Task 211 — the drone tick FIRST: the partial upload must land
+    // before the frame's passes read the scene (the queue's write order).
+    // WALL-CLOCK phase (t/1000, the rAF timestamp — real seconds): the
+    // drones fly at REAL speed on ANY frame rate — a 2.6 fps headless
+    // SwiftShader or a 120 fps phone sees the same animation (the local
+    // gate's lesson: a frame-index phase crawls 23× slow on the slow
+    // stack and the pixels never visibly move).
+    tickEdits(t / 1000)
     // Task 203 — the stats cadence rides the graph: the 12th frame arms the
     // read-stats COPY PASS (the copy-lane root — the overlap plan's one
     // web-real parallelism: the async readback beside the color render)
@@ -363,6 +468,12 @@ async function sha256hex(bytes) {
 }
 
 async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHashes) {
+  // Task 211 — the parity legs freeze the drones: the ON/OFF hash pair
+  // must compare the SAME scene bytes (a moving box between the legs
+  // would break the hash for no culling reason — the hold is honest,
+  // the drones resume at their frame phase afterwards)
+  editHold = true
+  try {
   const cameras = []
   const anchor = t.mode === 'webgpu' ? [] : null
   let allOk = true
@@ -1144,6 +1255,9 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
   }
   shell.log.event(`validation: ${verdict.pass ? 'PASS' : 'FAIL'} — pixel parity over ${cameras.length} cameras, the accounting invariant, the culling effect, the CPU spatial + ray + cluster + soft-Hi-Z gates, the temporal policy${crossChecked > 0 ? `, the cross-tier bounded parity ×${crossChecked}` : ''}${errors.length > 0 ? `, ${errors.length} GPU errors` : ''}`)
   return verdict
+  } finally {
+    editHold = false
+  }
 }
 
 // ── the tier lifecycle ────────────────────────────────────────────────────
@@ -1369,6 +1483,14 @@ tierButton('X-seed: ON', true, on => {
 tierButton('Near-first: ON', true, on => {
   orderOn = on
   shell.log.event(`the near-first order ${on ? 'ON (the early-Z harvest — the visible list sorts by depth bucket, nearest first: the fixed-function depth test rejects the rear layers before they rasterize; the pixels are order-invariant, the overdraw is not)' : 'OFF (the index order — the Task-199 stable spelling)'}`)
+  refreshHud()
+})
+// Task 211 — THE UNIFIED DATA SURFACE, LIVE: the scene's records region
+// is an adopted SoA store; the drones edit it per frame and the GPU gets
+// the COALESCED DIRTY RANGES (KBs against the ~1 MB whole-buffer write).
+tierButton('Scene edit: OFF', false, on => {
+  editsOn = on
+  shell.log.event(`the scene edit mode ${on ? `ON (${DRONES} drones fly the canyon — the CPU writes their centers through the store's column view, the dirty bits coalesce into ${'`'}takeUploadRanges()${'`'}, and the tier pushes ONLY those bytes to the GPU mirror (watch the HUD: ~2 KB/frame against the ${(scene.sceneWords.byteLength / 1024).toFixed(0)} KB full write — a ${Math.round(scene.sceneWords.byteLength / 2048)}× cut); the octree/BVH update on the same ids, so the pick ray hits a MOVED box; the parity legs freeze the drones for their duration)` : 'OFF (the static city — the boot scene, bit for bit)'}`)
   refreshHud()
 })
 const valButton = document.createElement('button')

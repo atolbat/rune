@@ -53,6 +53,15 @@ export {
   // executes are the caller's own brick calls. The dist surface carries
   // it for the demos.
   createFrameGraph,
+  // Task 211 — THE UNIFIED DATA SURFACE (store.ts): schema-driven SoA
+  // columns over ONE backing buffer, the measured growth ladder (RAB's
+  // in-place remap where the runtime wins — the pick MEASURED once per
+  // process), the MarkSet bitset with both iteration lanes, packed u32
+  // keys (the comparator-free order), and the dirty-range surface the
+  // device's partial record upload reads — the dist surface carries it
+  // for the demos.
+  createStore, adoptStore, createMarkSet, createMarkSetFrom,
+  packKey, unpackKeyHi, unpackKeyLo,
 } from '@rune/core'
 export type { SpatialBox, SpatialIndex, RayHit } from '@rune/core'
 export type {
@@ -62,6 +71,7 @@ export type {
   FgEdge, FgBarrier, FgLifetime, FgSlot, FgOverlap, FgStats, FgRunReport,
   CompiledFrame, FrameGraph, FgResolveHooks,
   FgResourceKind, FgPassKind, FgLane,
+  SoAStore, StoreColumn, StoreKind, StoreOptions, GrowthPolicy, UploadRange, MarkSet,
 } from '@rune/core'
 
 // M5 (Task 73): feed dual-bind — renderer.feed() on both backends.

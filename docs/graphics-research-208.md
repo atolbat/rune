@@ -436,3 +436,94 @@ calibration explodes to its iteration cap (our "3ms" samples became
 15–75 SECONDS of wall time). Measure-MANY calibration (run the op until
 the clock moves, then divide) is the only robust shape — the Task-193
 clock lesson, one level deeper.
+
+---
+
+## Task 211 — THE UNIFIED DATA SURFACE (the array laws, applied as a system)
+
+Task 210 measured the laws; 211 is «применяй» — the laws as ONE reusable
+system, not one-off patches. `packages/core/src/store.ts`:
+
+- **The SoA store** — schema-driven columns over ONE backing buffer
+  (`createStore`), or the ADOPTION of an existing buffer
+  (`adoptStore` — `buildSceneViews` generalized: the occlusion demo's
+  `[list|flags|hist|records]` scene words become a store over the
+  records region without moving a byte; fixed-capacity by contract,
+  the buffer's layout belongs to its owner).
+- **The measured growth ladder** — RAB's in-place VA remap where the
+  runtime wins, the copy twin elsewhere; `'auto'` MEASURES once per
+  process (a 4KB→4MB ×2 ladder, both lanes, measure-many timed —
+  RAB needs a 1.5× margin or the copy lane keeps the crown). The
+  Task-210 split (V8 remaps, JSC copies) became a runtime probe, not
+  an assumption. Shared stores grow in place (growable SAB) or refuse
+  — a reallocated SAB strands every other thread's views.
+- **MarkSet** — the bitset companion with BOTH iteration lanes public
+  (the ctz word-walk and the dense rank scan) and the density-picked
+  `forEach` at the 12.5% crossover: the lane changes, the ANSWER never
+  does (the equivalence gate runs at eight densities).
+- **Packed u32 keys** — `packKey(hi, lo, loBits)`: Task-209's verdict
+  words and 210's group-F sort keys generalized; `keys.sort()` with no
+  comparator is the crown (a comparator costs 4.4×).
+- **The dirty-range surface** — record bits → coalesced, 4-aligned,
+  buffer-relative byte ranges (`takeUploadRanges`, MERGE_GAP=8): the
+  GPU contract both backends eat directly — WG
+  `queue.writeBuffer(dst, start, buffer, start, size)` (the 5-arg
+  ArrayBuffer form), GL `gl.bufferSubData(target, start, view)`. The
+  dirty bits SURVIVE growth (the pending upload is never lost).
+
+**The device brick** — `SceneHandle.updateRecords(ranges)` on BOTH
+backends (packages/gl device.ts): WG one `writeExternalBuffer` per
+range over the words' own bytes; GL one `bufferSubData` per range into
+the records buffer (translated from words-coords; a contents-only
+upload leaves the vertex-bind memo valid by its own contract). Plus
+`readRecords` — the record mirror's readback (the edit-mode gate's
+channel: the GPU's own copy, compared against the store's bytes).
+
+**The demo, live** — the Scene edit mode: 48 drones rewrite their
+centers through the adopted store's column view every frame; the
+octree/BVH update on the same ids (the pick ray hits a MOVED box); the
+tier pushes ONLY the dirty ranges — **2304 B over 48 ranges against
+the 961 KB whole-buffer write, a 427× cut** (the HUD's upload line).
+
+**The store's own bench** (`packages/core/bench/store211.bench.ts`,
+bun + node, checksum-gated):
+
+| lane | bun (JSC) | node (V8) |
+|---|---|---|
+| read sweep: store view vs object array | 1.02–1.14× | **2.74×** |
+| edit sweep: write+markDirty vs object write | 1.1× (wins) | 1.33× |
+| takeUploadRanges (64 scattered) | 3.1 µs | 3.8 µs |
+| growth ladder: rab vs copy | 1.4× | 1.66× |
+| sparse walk: MarkSet vs filter+push (2%) | **18.9×** | 1.3–3.3× |
+| dense delete: swapRemove vs splice | **11.4×** | **15.3×** |
+| bulk copy: copyRecords vs element loop | **8.7×** | **33.5×** |
+
+The honest footnotes: the object-array read gap is a V8 law (JSC
+optimizes monomorphic shapes to parity — the 210 H-group split,
+reproduced on the store's own surface); the store's column view rides
+the raw-flat control lane exactly (the adoption costs nothing); the
+sparse-walk ratio follows the baseline's speed (the walk itself is
+2–10 µs everywhere — the array-filter twin is what the runtime decides
+to cost).
+
+**The gate's own lessons (the debugging hours, paid again)**:
+
+- **The rAF wall-clock law**: a headless SwiftShader stack runs the
+  loop at 2.6–9.7 fps — a frame-index animation phase crawls ~23×
+  slower than wall-clock and the drones never visibly move. The tick
+  takes the rAF timestamp (`t/1000`): the drones fly REAL seconds on
+  ANY frame rate.
+- **The readback pause discipline (one layer past Task-209's)**: every
+  GPU readback — records, verdicts, stats, the surface — races the
+  live submits and kills the SwiftShader renderer. Pause → read →
+  resume, on every probe.
+- **The GL live canvas vs the surface FBO**: the GL leg's color pass
+  draws the CANVAS; the surface's FBO is the validation target —
+  nothing live writes it. A "pixels move" probe must read the canvas
+  (screenshot) on GL, the surface on WG (snapshot mode) — and the WG
+  snapshot's 2D-canvas stretch is raster-nondeterministic between
+  screenshots, so WG hashes the SURFACE (the parity gates' own probe).
+- **The verdict flip is the decisive proof**: the record-mirror compare
+  says the bytes landed; the TELEPORT probe (a visible record moved
+  through the store, behind the frustum, verdict 1 → 2) proves the
+  CULL reads them — end to end, on both backends.

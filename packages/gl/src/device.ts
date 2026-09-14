@@ -132,6 +132,14 @@ export interface SceneHandle {
   /** Task 201 — the declared hist region's word offset, or null (the
    *  scene carries no hysteresis home; hysteresisPass refuses honestly). */
   readonly histWord: number | null
+  /** Task 211 — THE PARTIAL RECORD UPLOAD: pushes coalesced, 4-aligned
+   *  byte ranges (the unified data surface's takeUploadRanges() output —
+   *  buffer-relative to the layout's `words`) into the GPU mirror.
+   *  Call it BEFORE the frame's passes read the scene (the queue order
+   *  is the write order); RECORDS only by contract — the flags/hist
+   *  regions are the GPU's own verdict homes, never edited CPU-side.
+   *  Returns the uploaded byte count (the HUD's honest number). */
+  updateRecords(ranges: readonly { readonly start: number; readonly end: number }[]): number
 }
 
 /** One named uniform slice of the packed block. mat4 = 16 words, vec4 = 4.
@@ -661,6 +669,11 @@ export interface RenderDevice {
    *  rides bits 16..23 on the WG leg) + the drawn count. WG only: the
    *  GL collapse draw keeps no list — null there. */
   readList(scene: SceneHandle): Promise<VisibleListReadout | null>
+  /** Task 211 — the RECORD MIRROR'S READBACK: `count` records from
+   *  `first` straight from the GPU's own copy (a diagnostic one-shot —
+   *  the edit-mode gate compares them against the store's bytes; never
+   *  per-frame). */
+  readRecords(scene: SceneHandle, first: number, count: number): Promise<Float32Array>
   /** Task 199 — the whole Hi-Z frame in ONE call (the recipe as a brick). */
   hizFrame(spec: HizFrameSpec): HizFrameHandle
   /** Task 200 — THE SCENARIO BRICK: the dictionary + the handles become a
@@ -978,6 +991,12 @@ interface WgScene {
   compactU32: Uint32Array
   /** Task 201 — the raw-verdict region's word offset (readVerdicts' slice). */
   flagsWord: number
+  /** Task 211 — the layout's own words array: the partial-upload SOURCE
+   *  (a dirty range's bytes are read straight from the caller's buffer —
+   *  the unified data surface's zero-staging contract). */
+  words: Uint32Array
+  /** Task 211 — the records region's word base (readRecords' slice). */
+  recordsWord: number
 }
 
 interface GlScene {
@@ -993,6 +1012,10 @@ interface GlScene {
   /** the buffer the LAST hysteresis pass wrote (starts at histA — zeros,
    *  the honest pre-boot verdict: floor(0) lands in no bucket). */
   histCur: number
+  /** Task 211 — the records' own float view + word base: the partial
+   *  upload's source and the recBuf-relative offset math. */
+  recordsF32: Float32Array
+  recordsWord: number
 }
 
 /** The GL program record (keyed by the public handle). */
@@ -1391,6 +1414,25 @@ function createWgDevice(renderer: WebGpuRenderer, options: DeviceOptions, clear:
       stride: layout.stride ?? 12,
       fields: { center: layout.fields?.center ?? 0, half: layout.fields?.half ?? 3 },
       histWord,
+      // Task 211 — THE PARTIAL RECORD UPLOAD (the WG leg): one
+      // writeExternalBuffer per coalesced range, the 5-arg form riding
+      // the words array's OWN bytes (no staging, no subarray copies —
+      // the queue's write order is the frame's read order when the
+      // caller lands this BEFORE the passes).
+      updateRecords(ranges) {
+        let uploaded = 0
+        for (const r of ranges) {
+          if (r.end <= r.start) continue
+          // 4-aligned by contract; the defensive clamp keeps a bad range
+          // from throwing mid-frame (the write reports its own clamp).
+          const start = Math.max(0, r.start - (r.start & 3))
+          const end = Math.min(r.end, layout.words.byteLength)
+          if (end - start <= 0) continue
+          gpu.writeExternalBuffer(bufferId, layout.words.subarray(start >> 2, end >> 2), start, end - start)
+          uploaded += end - start
+        }
+        return uploaded
+      },
     }
     const bufferId = gpu.createExternalBuffer(layout.words.byteLength, WG_USAGE.STORAGE | WG_USAGE.COPY_DST | WG_USAGE.COPY_SRC)
     gpu.writeExternalBuffer(bufferId, layout.words)
@@ -1409,7 +1451,7 @@ function createWgDevice(renderer: WebGpuRenderer, options: DeviceOptions, clear:
     compactU32[2] = histWord ?? layout.flagsWord
     compactU32[3] = layout.occluders // diagnostics only (the Task-199 policy note)
     const compactId = gpu.createCompute(COMPACT_WGSL, 16, [bufferId, placeholderId, argsId])
-    scenes.set(handle, { handle, bufferId, argsId, compactId, compactBlock, compactU32, flagsWord: layout.flagsWord })
+    scenes.set(handle, { handle, bufferId, argsId, compactId, compactBlock, compactU32, flagsWord: layout.flagsWord, words: layout.words, recordsWord: layout.recordsWord })
     return handle
   }
 
@@ -1726,6 +1768,20 @@ ${REDUCE}`
     }
   }
 
+  /** Task 211 — the RECORD MIRROR'S READBACK (the edit-mode gate's
+   *  channel): `count` records from `first`, straight from the GPU's own
+   *  storage copy (the words array's records region, sliced at the word
+   *  base — the readback reads from byte 0, the prefix is the diagnostic
+   *  one-shot's honest price). */
+  async function readRecords(sceneHandle: SceneHandle, first: number, count: number): Promise<Float32Array> {
+    const s = scenes.get(sceneHandle)
+    if (s === undefined) throw new Error('rune: readRecords — the scene handle is not this device\'s own')
+    const stride = sceneHandle.stride
+    const span = s.recordsWord + (first + count) * stride
+    const f = await gpu.readExternalBuffer(s.bufferId, span * 4)
+    return new Float32Array(f.buffer, f.byteOffset + (s.recordsWord + first * stride) * 4, count * stride)
+  }
+
   function surface(width: number, height: number, surfaceOptions?: { depth?: boolean }): DeviceSurface {
     const s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color })
     return { targetId: s.targetId, width, height, read: () => s.read() }
@@ -1760,6 +1816,7 @@ ${REDUCE}`
     debugStrip: (spec) => attachDebugStrip(device, spec),
     readVerdicts,
     readList,
+    readRecords,
     hizFrame,
     // Task 200 — the scenario brick: the same attachHizScene body drives
     // BOTH device closures (it calls only the interface's own bricks)
@@ -1805,6 +1862,27 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
       stride: layout.stride ?? 12,
       fields: { center: layout.fields?.center ?? 0, half: layout.fields?.half ?? 3 },
       histWord,
+      // Task 211 — THE PARTIAL RECORD UPLOAD (the GL leg): one
+      // bufferSubData (the facade's updateBuffer) per coalesced range,
+      // translated from the words-buffer coordinates into the records
+      // buffer's own (recBuf byte 0 = recordsWord). A contents-only
+      // upload leaves the vertex-bind memo VALID by its own contract —
+      // the record feeds rebind nothing.
+      updateRecords(ranges) {
+        let uploaded = 0
+        const recBase = layout.recordsWord * 4
+        const recEnd = layout.words.byteLength
+        for (const r of ranges) {
+          if (r.end <= r.start) continue
+          const start = Math.max(recBase, r.start - (r.start & 3))
+          const end = Math.min(r.end, recEnd)
+          if (end - start <= 0) continue
+          // recordsF32's element coords = words elements − recordsWord
+          gl.updateBuffer(recBuf, layout.recordsF32.subarray((start >> 2) - layout.recordsWord, (end >> 2) - layout.recordsWord), start - recBase)
+          uploaded += end - start
+        }
+        return uploaded
+      },
     }
     const recBuf = gl.createBuffer(layout.recordsF32, 'static')
     const flagBuf = gl.createBuffer(new Float32Array(layout.total), 'dynamic')
@@ -1824,6 +1902,8 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
       histA,
       histB,
       histCur: histA,
+      recordsF32: layout.recordsF32,
+      recordsWord: layout.recordsWord,
     })
     return handle
   }
@@ -2121,6 +2201,23 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     return out
   }
 
+  /** Task 211 — the RECORD MIRROR'S READBACK (the edit-mode gate's
+   *  channel): `count` records from `first`, straight from the GPU's own
+   *  copy — the probe compares them against the store's bytes and knows
+   *  whether the partial upload LANDED. The GL facade's readBuffer reads
+   *  from byte 0, so the span is the prefix up to the last wanted record
+   *  (a diagnostic one-shot, never per-frame). */
+  async function readRecords(sceneHandle: SceneHandle, first: number, count: number): Promise<Float32Array> {
+    const s = scenes.get(sceneHandle) as GlScene | undefined
+    if (s === undefined) throw new Error('rune: readRecords — the scene handle is not this device\'s own')
+    const stride = sceneHandle.stride
+    const span = (first + count) * stride
+    const dst = new Float32Array(span)
+    const ok = gl.readBuffer(s.recBuf, dst)
+    if (!ok) throw new Error('rune: the records buffer readback was refused')
+    return dst.slice(first * stride, span)
+  }
+
   function hizFrame(spec: HizFrameSpec): HizFrameHandle {
     // the honest refusals ride the underlying bricks (each verifies its own
     // handles); here only the scene must resolve — the culler's TF pass and
@@ -2217,6 +2314,8 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     // Task 209 — the WG leg's list readback has NO GL twin: the collapse draw
     // keeps no list (order is a WG-leg harvest — null answers the contract)
     readList: () => Promise.resolve(null),
+    // Task 211 — the record mirror's readback (the edit-mode gate's channel)
+    readRecords,
     hizFrame,
     // Task 200 — the scenario brick: the same attachHizScene body drives
     // BOTH device closures (it calls only the interface's own bricks)

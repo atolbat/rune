@@ -111,7 +111,7 @@
 // visible box (its own rect holds either background 1.0 or surfaces
 // behind it), so the final verdicts stay pixel-exact at any camera,
 // however old the seed. The one-frame lag costs fill, never a pixel.
-import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=210'
+import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=211'
 import { buildShaders } from './shaders.js?v=210'
 import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H } from './scene.js?v=203'
 const SKY = [0.045, 0.055, 0.09, 1]
@@ -500,6 +500,18 @@ export async function buildTier(deps) {
     return w / h
   }
 
+  // ── Task 211 — THE PARTIAL UPLOAD CHANNEL (the unified data surface's
+  //    GPU leg): the demo's store (adopted over the scene words, zero
+  //    copies) hands COALESCED, 4-aligned dirty byte ranges; the device
+  //    brick pushes them into the mirror BEFORE the frame's passes read
+  //    it — WG: one writeExternalBuffer per range (the 5-arg form over
+  //    the words' own bytes); GL: one bufferSubData per range into the
+  //    records buffer. Returns the uploaded bytes (the HUD's honest
+  //    number — KBs against the whole-buffer write's ~1 MB).
+  function applyEdits(ranges) {
+    return sceneHandle.updateRecords(ranges)
+  }
+
   // ── the WG diagnostics channel (the probe scripts' window into the
   //    pyramid; the texture-based pyramid reads per level) ─────────────────
   if (typeof window !== 'undefined' && device.gpu !== null) {
@@ -525,9 +537,17 @@ export async function buildTier(deps) {
       },
       stats: () => readStats(),
       verdicts: () => readVerdicts(),
+      // Task 211 — the record mirror's readback (the edit-mode gate's
+      // channel): the GPU's own copy of record `id`, vs __hizEdits.record
+      records: id => device.readRecords(sceneHandle, id, 1),
     }
   } else if (typeof window !== 'undefined') {
-    window.__hizDebug = { note: 'the WebGL2 tier is active — the WG diagnostics channel is WebGPU-only; reload without ?mode=webgl2' }
+    window.__hizDebug = {
+      note: 'the WebGL2 tier is active — pyramidAt/ztile are WG-only (the texture pyramid), but records() reads the mirror',
+      // Task 211 — the same channel on the GL leg: the records buffer's
+      // own copy, read back through the facade's COPY_READ path
+      records: id => device.readRecords(sceneHandle, id, 1),
+    }
   }
   // ── Task 203 — the frame-graph diagnostics channel (the probe/gate
   //    scripts' window into the compiled frame: passes, slots, barriers,
@@ -555,6 +575,7 @@ export async function buildTier(deps) {
     surface,
     renderTo,
     frame,
+    applyEdits,
     readStats,
     readVerdicts,
     readList,

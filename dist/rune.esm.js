@@ -5016,6 +5016,518 @@ function buildBVH(items, options) {
 var slabExit = 0, FRUSTUM_PRUNED = -1;
 var init_spatial = () => {};
 
+// packages/core/src/store.ts
+function nowMs() {
+  if (typeof performance !== "undefined" && typeof performance.now === "function")
+    return performance.now();
+  return Date.now();
+}
+function ladderMs(make, grow) {
+  for (let w = 0;w < 2; w++) {
+    make();
+    let bytes = 4096;
+    for (let s = 0;s < 10; s++) {
+      bytes *= 2;
+      grow(bytes);
+    }
+  }
+  const t0 = nowMs();
+  let runs = 0;
+  for (;; ) {
+    make();
+    let bytes = 4096;
+    for (let s = 0;s < 10; s++) {
+      bytes *= 2;
+      grow(bytes);
+    }
+    runs++;
+    if (nowMs() - t0 >= 1.5 || runs >= 500)
+      break;
+  }
+  return (nowMs() - t0) / Math.max(1, runs);
+}
+function growableSab() {
+  try {
+    const probe = new SharedArrayBuffer(16, { maxByteLength: 64 });
+    probe.grow(32);
+    return probe.byteLength === 32;
+  } catch {
+    return false;
+  }
+}
+function detectAutoPolicy(shared) {
+  if (shared)
+    return growableSab() ? "rab" : "none";
+  if (typeof ArrayBuffer.prototype.resize !== "function")
+    return "copy";
+  if (autoPolicy !== null)
+    return autoPolicy;
+  let rab = null;
+  const rabMs = ladderMs(() => {
+    rab = new ArrayBuffer(4096, { maxByteLength: 1 << 26 });
+  }, (bytes) => {
+    rab.resize(bytes);
+  });
+  let view = null;
+  const copyMs = ladderMs(() => {
+    view = new Uint8Array(new ArrayBuffer(4096));
+  }, (bytes) => {
+    const next = new Uint8Array(new ArrayBuffer(bytes));
+    next.set(view);
+    view = next;
+  });
+  autoPolicy = rabMs * 1.5 <= copyMs ? "rab" : "copy";
+  return autoPolicy;
+}
+function rabMaxBytes(bytes) {
+  return Math.min(1 << 30, Math.max(1 << 26, bytes * 16));
+}
+function makeView(buffer, kind, byteOffset, length) {
+  if (kind === "f32")
+    return new Float32Array(buffer, byteOffset, length);
+  if (kind === "i32")
+    return new Int32Array(buffer, byteOffset, length);
+  return new Uint32Array(buffer, byteOffset, length);
+}
+function strideOf(columns) {
+  let s = 0;
+  for (const c of columns)
+    s += c.width;
+  return s;
+}
+function rebuildViews(st) {
+  st.views = new Map;
+  st.offsets = new Map;
+  let byte = 0;
+  for (const c of st.columns) {
+    st.offsets.set(c.name, byte);
+    st.views.set(c.name, makeView(st.buffer, c.kind, byte, c.width * st.capacity));
+    byte += c.width * st.capacity * KIND_BYTES;
+  }
+  st.epoch++;
+}
+function tryGrowInPlace(st, targetBytes) {
+  if (st.shared) {
+    const sab = st.buffer;
+    if (targetBytes > (sab.growable ? sab.maxByteLength : sab.byteLength))
+      return false;
+    sab.grow(targetBytes);
+    return true;
+  }
+  const ab = st.buffer;
+  if (!ab.resizable || targetBytes > ab.maxByteLength)
+    return false;
+  ab.resize(targetBytes);
+  return true;
+}
+function reallocate(st, nextCapacity, maxBytes) {
+  const bytes = strideOf(st.columns) * nextCapacity * KIND_BYTES;
+  const next = st.shared ? maxBytes !== null ? new SharedArrayBuffer(bytes, { maxByteLength: maxBytes }) : new SharedArrayBuffer(bytes) : maxBytes !== null ? new ArrayBuffer(bytes, { maxByteLength: maxBytes }) : new ArrayBuffer(bytes);
+  let byte = 0;
+  for (const c of st.columns) {
+    const src = st.views.get(c.name);
+    const len = c.width * st.capacity;
+    const dst = makeView(next, c.kind, byte, c.width * nextCapacity);
+    dst.set(src.subarray(0, len), 0);
+    byte += c.width * nextCapacity * KIND_BYTES;
+  }
+  st.buffer = next;
+  st.capacity = nextCapacity;
+  rebuildViews(st);
+}
+function reserveImpl(st, n) {
+  const next = Math.max(n, st.capacity * 2, 16);
+  const targetBytes = strideOf(st.columns) * next * KIND_BYTES;
+  if (st.growth === "none") {
+    throw new Error(`store: the fixed-capacity contract (${st.capacity} records) refuses ${n} — adopt a bigger buffer or declare a growth policy`);
+  }
+  if (st.growth === "rab" && tryGrowInPlace(st, targetBytes)) {
+    st.capacity = next;
+    st.dirty = createMarkSetFrom(st.dirty.words(), next);
+    rebuildViews(st);
+    return;
+  }
+  const curBytes = strideOf(st.columns) * st.capacity * KIND_BYTES;
+  reallocate(st, next, st.growth === "rab" ? Math.max(rabMaxBytes(curBytes), targetBytes) : null);
+  st.dirty = createMarkSetFrom(st.dirty.words(), next);
+}
+function makeStore(st) {
+  return {
+    get buffer() {
+      return st.buffer;
+    },
+    get capacity() {
+      return st.capacity;
+    },
+    get count() {
+      return st.count;
+    },
+    get growth() {
+      return st.growth;
+    },
+    get epoch() {
+      return st.epoch;
+    },
+    get clock() {
+      return st.clock;
+    },
+    get stride() {
+      return strideOf(st.columns);
+    },
+    get dirtyBytes() {
+      return st.dirtyBytes;
+    },
+    get dirtyCount() {
+      return st.dirty.count();
+    },
+    column(name) {
+      const v = st.views.get(name);
+      if (v === undefined) {
+        throw new Error(`store: no column '${name}' (declared: ${st.columns.map((c) => c.name).join(", ")})`);
+      }
+      return v;
+    },
+    columnBytes(name) {
+      const off = st.offsets.get(name);
+      if (off === undefined)
+        throw new Error(`store: no column '${name}'`);
+      const c = st.columns.find((x) => x.name === name);
+      return { start: off, end: off + c.width * st.capacity * KIND_BYTES };
+    },
+    recordBytes(name, i0, i1) {
+      const off = st.offsets.get(name);
+      if (off === undefined)
+        throw new Error(`store: no column '${name}'`);
+      const c = st.columns.find((x) => x.name === name);
+      const hi = Math.max(i0, i1);
+      return { start: off + i0 * c.width * KIND_BYTES, end: off + hi * c.width * KIND_BYTES };
+    },
+    reserve(n) {
+      if (n > st.capacity) {
+        reserveImpl(st, n);
+        st.clock++;
+      }
+    },
+    resize(n) {
+      if (n > st.capacity)
+        reserveImpl(st, n);
+      if (n !== st.count)
+        st.clock++;
+      st.count = n;
+    },
+    append() {
+      if (st.count >= st.capacity)
+        reserveImpl(st, st.count + 1);
+      const i = st.count;
+      st.count = i + 1;
+      st.clock++;
+      return i;
+    },
+    copyRecords(dst, src, n) {
+      if (n <= 0 || dst === src)
+        return;
+      if (dst < 0 || src < 0 || Math.max(dst, src) + n > st.count) {
+        throw new Error(`store: copyRecords(dst=${dst}, src=${src}, n=${n}) outruns the live count ${st.count}`);
+      }
+      for (const c of st.columns) {
+        const v = st.views.get(c.name);
+        const w = c.width;
+        v.set(v.subarray(src * w, (src + n) * w), dst * w);
+      }
+      st.clock++;
+    },
+    swapRemove(i) {
+      if (i < 0 || i >= st.count)
+        throw new Error(`store: swapRemove(${i}) — not a live record (${st.count} live)`);
+      const last = st.count - 1;
+      if (i !== last) {
+        for (const c of st.columns) {
+          const v = st.views.get(c.name);
+          const w = c.width;
+          v.set(v.subarray(last * w, (last + 1) * w), i * w);
+        }
+      }
+      st.count = last;
+      st.clock++;
+    },
+    markRecordDirty(i) {
+      if (i < 0 || i >= st.count)
+        return;
+      if (st.dirty.add(i))
+        st.dirtyBytes += strideOf(st.columns) * KIND_BYTES;
+    },
+    markRecordsDirty(i0, i1) {
+      const lo = Math.max(0, i0);
+      const hi = Math.min(st.count, i1);
+      const per = strideOf(st.columns) * KIND_BYTES;
+      for (let i = lo;i < hi; i++) {
+        if (st.dirty.add(i))
+          st.dirtyBytes += per;
+      }
+    },
+    touchAll() {
+      st.dirtyBytes = 0;
+      st.dirty.clearAll();
+      const per = strideOf(st.columns) * KIND_BYTES;
+      for (let i = 0;i < st.count; i++) {
+        if (st.dirty.add(i))
+          st.dirtyBytes += per;
+      }
+    },
+    takeUploadRanges() {
+      return takeRangesImpl(st);
+    },
+    clearDirty() {
+      st.dirty.clearAll();
+      st.dirtyBytes = 0;
+    },
+    bump() {
+      st.clock++;
+    }
+  };
+}
+function takeRangesImpl(st) {
+  const out = [];
+  if (strideOf(st.columns) === 0 || st.dirty.count() === 0)
+    return out;
+  const emit = (i0, i1) => {
+    for (const c of st.columns) {
+      const off = st.offsets.get(c.name);
+      out.push({ start: off + i0 * c.width * KIND_BYTES, end: off + i1 * c.width * KIND_BYTES });
+    }
+  };
+  let runStart = -1;
+  let runEnd = -1;
+  st.dirty.forEachSparse((i) => {
+    if (runStart < 0) {
+      runStart = i;
+      runEnd = i + 1;
+      return;
+    }
+    if (i - runEnd <= MERGE_GAP) {
+      runEnd = i + 1;
+      return;
+    }
+    emit(runStart, runEnd);
+    runStart = i;
+    runEnd = i + 1;
+  });
+  if (runStart >= 0)
+    emit(runStart, runEnd);
+  return out;
+}
+function validateColumns(columns) {
+  if (columns.length === 0)
+    throw new Error("store: no columns declared");
+  const seen = new Set;
+  for (const c of columns) {
+    if (c.width < 1)
+      throw new Error(`store: column '${c.name}' — width must be ≥ 1`);
+    if (seen.has(c.name))
+      throw new Error(`store: duplicate column '${c.name}'`);
+    seen.add(c.name);
+  }
+}
+function createStore(columns, options = {}) {
+  validateColumns(columns);
+  const shared = options.shared === true;
+  let growth;
+  if (options.growth === undefined || options.growth === "auto") {
+    growth = detectAutoPolicy(shared);
+  } else {
+    growth = options.growth;
+  }
+  if (shared && growth === "copy") {
+    throw new Error("store: a shared store refuses the copy lane — a reallocated SAB strands every other thread's views (grow in place or stay fixed)");
+  }
+  if (shared && growth === "rab" && !growableSab()) {
+    growth = "none";
+  }
+  const capacity = Math.max(1, options.capacity ?? 1024);
+  const bytes = strideOf(columns) * capacity * KIND_BYTES;
+  const st = {
+    columns,
+    capacity,
+    count: 0,
+    growth,
+    epoch: 0,
+    clock: 0,
+    buffer: shared ? new SharedArrayBuffer(bytes) : new ArrayBuffer(bytes),
+    views: new Map,
+    offsets: new Map,
+    dirty: createMarkSet(capacity),
+    dirtyBytes: 0,
+    shared
+  };
+  if (growth === "rab") {
+    const max = rabMaxBytes(bytes);
+    try {
+      st.buffer = shared ? new SharedArrayBuffer(bytes, { maxByteLength: max }) : new ArrayBuffer(bytes, { maxByteLength: max });
+    } catch {
+      st.growth = "copy";
+      st.buffer = shared ? new SharedArrayBuffer(bytes) : new ArrayBuffer(bytes);
+    }
+  }
+  rebuildViews(st);
+  return makeStore(st);
+}
+function adoptStore(buffer, columns, count, byteOffset = 0) {
+  validateColumns(columns);
+  const stride = strideOf(columns);
+  const capacity = (buffer.byteLength - byteOffset) / (stride * KIND_BYTES) | 0;
+  if (capacity < 1 || byteOffset + capacity * stride * KIND_BYTES > buffer.byteLength) {
+    throw new Error(`store: the buffer (${buffer.byteLength}B @${byteOffset}) cannot hold one ${stride}-element record`);
+  }
+  if (count < 0 || count > capacity) {
+    throw new Error(`store: count ${count} outruns the adopted capacity ${capacity}`);
+  }
+  const st = {
+    columns,
+    capacity,
+    count,
+    growth: "none",
+    epoch: 0,
+    clock: 0,
+    buffer,
+    views: new Map,
+    offsets: new Map,
+    dirty: createMarkSet(capacity),
+    dirtyBytes: 0,
+    shared: typeof SharedArrayBuffer !== "undefined" && buffer instanceof SharedArrayBuffer
+  };
+  let byte = byteOffset;
+  for (const c of columns) {
+    st.offsets.set(c.name, byte);
+    st.views.set(c.name, makeView(buffer, c.kind, byte, c.width * capacity));
+    byte += c.width * capacity * KIND_BYTES;
+  }
+  st.epoch++;
+  return makeStore(st);
+}
+function createMarkSet(capacity) {
+  const cap = Math.max(1, capacity | 0);
+  const bits = new Uint32Array(cap + 31 >> 5);
+  return makeMarkSet(cap, bits);
+}
+function createMarkSetFrom(words, capacity) {
+  const cap = Math.max(1, capacity | 0);
+  const need = cap + 31 >> 5;
+  const bits = new Uint32Array(need);
+  bits.set(words.subarray(0, Math.min(need, words.length)));
+  return makeMarkSet(cap, bits);
+}
+function makeMarkSet(cap, bits) {
+  let live = 0;
+  for (let w = 0;w < bits.length; w++) {
+    let v = bits[w];
+    if (v === 0)
+      continue;
+    v = v - (v >>> 1 & 1431655765);
+    v = (v & 858993459) + (v >>> 2 & 858993459);
+    v = v + (v >>> 4) & 252645135;
+    live += v * 16843009 >>> 24;
+  }
+  return {
+    get capacity() {
+      return cap;
+    },
+    add(i) {
+      if (i < 0 || i >= cap)
+        return false;
+      const w = i >>> 5;
+      const m = 1 << (i & 31);
+      if ((bits[w] & m) !== 0)
+        return false;
+      bits[w] |= m;
+      live++;
+      return true;
+    },
+    remove(i) {
+      if (i < 0 || i >= cap)
+        return false;
+      const w = i >>> 5;
+      const m = 1 << (i & 31);
+      if ((bits[w] & m) === 0)
+        return false;
+      bits[w] &= ~m;
+      live--;
+      return true;
+    },
+    has(i) {
+      if (i < 0 || i >= cap)
+        return false;
+      return (bits[i >>> 5] & 1 << (i & 31)) !== 0;
+    },
+    clearAll() {
+      bits.fill(0);
+      live = 0;
+    },
+    count() {
+      return live;
+    },
+    density() {
+      return live / cap;
+    },
+    forEachSparse(cb) {
+      const words = bits.length;
+      for (let w = 0;w < words; w++) {
+        let word = bits[w];
+        if (word === 0)
+          continue;
+        const base = w << 5;
+        while (word !== 0) {
+          const lb = word & -word;
+          word ^= lb;
+          const i = base + 31 - Math.clz32(lb);
+          if (i < cap)
+            cb(i);
+        }
+      }
+    },
+    forEachDense(cb) {
+      for (let i = 0;i < cap; i++) {
+        if ((bits[i >>> 5] & 1 << (i & 31)) !== 0)
+          cb(i);
+      }
+    },
+    forEach(cb) {
+      if (live * 8 < cap)
+        this.forEachSparse(cb);
+      else
+        this.forEachDense(cb);
+    },
+    words() {
+      return bits;
+    }
+  };
+}
+function packKey(hi, lo, loBits) {
+  if (!Number.isInteger(loBits) || loBits < 0 || loBits > 32) {
+    throw new Error(`store: packKey — loBits must be an integer 0..32, got ${loBits}`);
+  }
+  if (!Number.isInteger(lo) || !Number.isInteger(hi)) {
+    throw new Error(`store: packKey — hi and lo must be integers (${hi}, ${lo})`);
+  }
+  if (loBits === 0)
+    return hi >>> 0;
+  const loMask = loBits === 32 ? -1 : (1 << loBits) - 1;
+  if ((lo & ~loMask) !== 0)
+    throw new Error(`store: packKey — lo ${lo} does not fit ${loBits} bits`);
+  if (loBits < 32 && (hi < 0 || hi > -1 >>> loBits)) {
+    throw new Error(`store: packKey — hi ${hi} does not fit ${32 - loBits} bits`);
+  }
+  return (hi << loBits | lo & loMask) >>> 0;
+}
+function unpackKeyHi(key, loBits) {
+  return loBits === 0 ? key >>> 0 : key >>> loBits;
+}
+function unpackKeyLo(key, loBits) {
+  if (loBits === 0)
+    return 0;
+  return loBits === 32 ? key >>> 0 : key & (1 << loBits) - 1;
+}
+var autoPolicy = null, KIND_BYTES = 4, MERGE_GAP = 8;
+
 // packages/core/src/culling.ts
 function recordView(words, base, count, stride, fields) {
   const cOff = base + fields.center;
@@ -6406,6 +6918,8 @@ var init_sort = __esm(() => {
 var exports_src = {};
 __export(exports_src, {
   writerView: () => writerView,
+  unpackKeyLo: () => unpackKeyLo,
+  unpackKeyHi: () => unpackKeyHi,
   toFloat32Array: () => toFloat32Array,
   tileForBudget: () => tileForBudget,
   tileBytes: () => tileBytes,
@@ -6428,6 +6942,7 @@ __export(exports_src, {
   rayBoxes: () => rayBoxes,
   projectBox: () => projectBox,
   parseTape: () => parseTape,
+  packKey: () => packKey,
   normalizeTextureFormat: () => normalizeTextureFormat,
   nameHash: () => nameHash,
   layerPolicy: () => layerPolicy,
@@ -6455,6 +6970,7 @@ __export(exports_src, {
   createTransientPool: () => createTransientPool,
   createTfTier: () => createTfTier,
   createTapeWriter: () => createTapeWriter,
+  createStore: () => createStore,
   createStatsCollector: () => createStatsCollector,
   createSsboTier: () => createSsboTier,
   createSharedRegistry: () => createSharedRegistry,
@@ -6462,6 +6978,8 @@ __export(exports_src, {
   createResourceJournal: () => createResourceJournal,
   createMsgFeedWriter: () => createMsgFeedWriter,
   createMsgFeedReader: () => createMsgFeedReader,
+  createMarkSetFrom: () => createMarkSetFrom,
+  createMarkSet: () => createMarkSet,
   createLossBudget: () => createLossBudget,
   createLiveCommand: () => createLiveCommand,
   createLayoutGuard: () => createLayoutGuard,
@@ -6490,6 +7008,7 @@ __export(exports_src, {
   attachTransport: () => attachTransport,
   attachSharedRegistry: () => attachSharedRegistry,
   attachFeed: () => attachFeed,
+  adoptStore: () => adoptStore,
   aabbOutsideFrustum: () => aabbOutsideFrustum,
   aabbInsideFrustum: () => aabbInsideFrustum,
   TEXTURE_FORMATS: () => TEXTURE_FORMATS,
@@ -11225,8 +11744,8 @@ function createWebGL2Renderer(options) {
       }
     }
   }
-  function step(nowMs) {
-    updateFrameContext(nowMs);
+  function step(nowMs2) {
+    updateFrameContext(nowMs2);
     statsCollector?.beginFrame();
     transients.beginFrame();
     syncCanvasState();
@@ -11245,8 +11764,8 @@ function createWebGL2Renderer(options) {
     statsCollector?.endFrame();
     drainGlErrors();
   }
-  function service(nowMs) {
-    updateFrameContext(nowMs);
+  function service(nowMs2) {
+    updateFrameContext(nowMs2);
     statsCollector?.beginFrame();
     transients.beginFrame();
     syncCanvasState();
@@ -11297,12 +11816,12 @@ function createWebGL2Renderer(options) {
     const described = codes.map((c) => `${glErrorName(c)} (0x${c.toString(16)})`).join(", ");
     options.onGlError?.(`GL error: ${described} — an error accumulated in the last frame (texture creation/uploads/draw)`);
   }
-  function updateFrameContext(nowMs) {
-    frameCtx.time = (nowMs - startedAt) / 1000;
-    frameCtx.dt = (nowMs - lastNow) / 1000;
+  function updateFrameContext(nowMs2) {
+    frameCtx.time = (nowMs2 - startedAt) / 1000;
+    frameCtx.dt = (nowMs2 - lastNow) / 1000;
     frameCtx.aspect = aspect.peek();
     frameCtx.size = size.peek();
-    lastNow = nowMs;
+    lastNow = nowMs2;
   }
   function emitFrameCallbacks() {
     for (const callback of [...frameCallbacks])
@@ -14825,10 +15344,10 @@ async function createWebGpuRenderer(options) {
     size.value = [cssWidth, cssHeight];
     gpu.resize(bufferWidth, bufferHeight);
   }
-  function step(nowMs) {
+  function step(nowMs2) {
     if (storm.paused)
       return;
-    updateFrameContext(nowMs);
+    updateFrameContext(nowMs2);
     transients.beginFrame();
     try {
       epoch.frame(() => {
@@ -14852,12 +15371,12 @@ async function createWebGpuRenderer(options) {
       storm.handle(`frame error: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  function updateFrameContext(nowMs) {
-    frameCtx.time = (nowMs - startedAt) / 1000;
-    frameCtx.dt = (nowMs - lastNow) / 1000;
+  function updateFrameContext(nowMs2) {
+    frameCtx.time = (nowMs2 - startedAt) / 1000;
+    frameCtx.dt = (nowMs2 - lastNow) / 1000;
     frameCtx.aspect = aspect.peek();
     frameCtx.size = size.peek();
-    lastNow = nowMs;
+    lastNow = nowMs2;
   }
   function start() {
     if (running)
@@ -15875,7 +16394,21 @@ function createWgDevice(renderer, options, clear) {
       occluders: layout.occluders,
       stride: layout.stride ?? 12,
       fields: { center: layout.fields?.center ?? 0, half: layout.fields?.half ?? 3 },
-      histWord
+      histWord,
+      updateRecords(ranges) {
+        let uploaded = 0;
+        for (const r of ranges) {
+          if (r.end <= r.start)
+            continue;
+          const start = Math.max(0, r.start - (r.start & 3));
+          const end = Math.min(r.end, layout.words.byteLength);
+          if (end - start <= 0)
+            continue;
+          gpu.writeExternalBuffer(bufferId, layout.words.subarray(start >> 2, end >> 2), start, end - start);
+          uploaded += end - start;
+        }
+        return uploaded;
+      }
     };
     const bufferId = gpu.createExternalBuffer(layout.words.byteLength, WG_USAGE.STORAGE | WG_USAGE.COPY_DST | WG_USAGE.COPY_SRC);
     gpu.writeExternalBuffer(bufferId, layout.words);
@@ -15888,7 +16421,7 @@ function createWgDevice(renderer, options, clear) {
     compactU32[2] = histWord ?? layout.flagsWord;
     compactU32[3] = layout.occluders;
     const compactId = gpu.createCompute(COMPACT_WGSL, 16, [bufferId, placeholderId, argsId]);
-    scenes.set(handle, { handle, bufferId, argsId, compactId, compactBlock, compactU32, flagsWord: layout.flagsWord });
+    scenes.set(handle, { handle, bufferId, argsId, compactId, compactBlock, compactU32, flagsWord: layout.flagsWord, words: layout.words, recordsWord: layout.recordsWord });
     return handle;
   }
   function pyramid(w, h) {
@@ -16142,6 +16675,15 @@ ${REDUCE}`;
       drawn: stats.drawn
     };
   }
+  async function readRecords(sceneHandle, first, count) {
+    const s = scenes.get(sceneHandle);
+    if (s === undefined)
+      throw new Error("rune: readRecords — the scene handle is not this device's own");
+    const stride = sceneHandle.stride;
+    const span = s.recordsWord + (first + count) * stride;
+    const f = await gpu.readExternalBuffer(s.bufferId, span * 4);
+    return new Float32Array(f.buffer, f.byteOffset + (s.recordsWord + first * stride) * 4, count * stride);
+  }
   function surface(width, height, surfaceOptions) {
     const s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color });
     return { targetId: s.targetId, width, height, read: () => s.read() };
@@ -16172,6 +16714,7 @@ ${REDUCE}`;
     debugStrip: (spec) => attachDebugStrip(device, spec),
     readVerdicts,
     readList,
+    readRecords,
     hizFrame,
     hizScene: (spec) => attachHizScene(device, spec),
     readCullStats,
@@ -16213,7 +16756,23 @@ function createGlDevice(renderer, options, clear) {
       occluders: layout.occluders,
       stride: layout.stride ?? 12,
       fields: { center: layout.fields?.center ?? 0, half: layout.fields?.half ?? 3 },
-      histWord
+      histWord,
+      updateRecords(ranges) {
+        let uploaded = 0;
+        const recBase = layout.recordsWord * 4;
+        const recEnd = layout.words.byteLength;
+        for (const r of ranges) {
+          if (r.end <= r.start)
+            continue;
+          const start = Math.max(recBase, r.start - (r.start & 3));
+          const end = Math.min(r.end, recEnd);
+          if (end - start <= 0)
+            continue;
+          gl.updateBuffer(recBuf, layout.recordsF32.subarray((start >> 2) - layout.recordsWord, (end >> 2) - layout.recordsWord), start - recBase);
+          uploaded += end - start;
+        }
+        return uploaded;
+      }
     };
     const recBuf = gl.createBuffer(layout.recordsF32, "static");
     const flagBuf = gl.createBuffer(new Float32Array(layout.total), "dynamic");
@@ -16229,7 +16788,9 @@ function createGlDevice(renderer, options, clear) {
       flagScratch: new Float32Array(layout.total),
       histA,
       histB,
-      histCur: histA
+      histCur: histA,
+      recordsF32: layout.recordsF32,
+      recordsWord: layout.recordsWord
     });
     return handle;
   }
@@ -16484,6 +17045,18 @@ function createGlDevice(renderer, options, clear) {
     }
     return out;
   }
+  async function readRecords(sceneHandle, first, count) {
+    const s = scenes.get(sceneHandle);
+    if (s === undefined)
+      throw new Error("rune: readRecords — the scene handle is not this device's own");
+    const stride = sceneHandle.stride;
+    const span = (first + count) * stride;
+    const dst = new Float32Array(span);
+    const ok = gl.readBuffer(s.recBuf, dst);
+    if (!ok)
+      throw new Error("rune: the records buffer readback was refused");
+    return dst.slice(first * stride, span);
+  }
   function hizFrame(spec) {
     const s = scenes.get(spec.scene);
     if (s === undefined)
@@ -16556,6 +17129,7 @@ function createGlDevice(renderer, options, clear) {
     debugStrip: (spec) => attachDebugStrip(device, spec),
     readVerdicts,
     readList: () => Promise.resolve(null),
+    readRecords,
     hizFrame,
     hizScene: (spec) => attachHizScene(device, spec),
     readCullStats,
@@ -19797,6 +20371,8 @@ export {
   webgpuAvailability,
   webgpuAdapter,
   webgl2Adapter,
+  unpackKeyLo,
+  unpackKeyHi,
   torusKnot,
   torus,
   sphere,
@@ -19819,6 +20395,7 @@ export {
   probeWebgpuScope,
   probeWebGpu,
   plane,
+  packKey,
   layerPolicy,
   isOffscreenCanvas,
   hysteresisPolicy,
@@ -19832,6 +20409,7 @@ export {
   cube,
   createWebGpuRenderer,
   createWebGL2Renderer,
+  createStore,
   createResourceSessionGPU,
   createResourceSessionGL,
   createResourceJournal,
@@ -19839,6 +20417,8 @@ export {
   createRendererFeedGL,
   createRenderer,
   createPortability,
+  createMarkSetFrom,
+  createMarkSet,
   createGpuParticles,
   createFrameGraph,
   createDevice,
@@ -19852,6 +20432,7 @@ export {
   buildBVH,
   box,
   applyResOpGL,
+  adoptStore,
   aabbOutsideFrustum,
   aabbInsideFrustum,
   WEBUGPU_PROBE_SRC,

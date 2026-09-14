@@ -186,6 +186,23 @@ export {
 // dynamic octree (insert/remove/update) grew the same surface.
 export { buildOctree, buildBVH, aabbOutsideFrustum, aabbInsideFrustum } from './spatial.ts'
 export type { SpatialBox, SpatialIndex, RayHit } from './spatial.ts'
+// ─── Task 211: THE UNIFIED DATA SURFACE ────────────────────────────────────
+// The Task-210 array laws applied as a SYSTEM: schema-driven SoA columns
+// over ONE backing buffer (createStore — fresh; adoptStore — the scene
+// buffer's own pattern, zero copies), the measured growth ladder (RAB's
+// in-place remap where the runtime wins, the copy twin elsewhere — 'auto'
+// MEASURES once per process), the MarkSet bitset companion (both iteration
+// modes — the sparse word-walk and the dense rank scan, the crossover
+// documented), packed u32 keys (the comparator-free order), and the
+// dirty-range surface the GPU mirrors read (coalesced, 4-aligned —
+// writeBuffer / bufferSubData over the same bytes, no staging).
+export {
+  createStore, adoptStore, createMarkSet, createMarkSetFrom,
+  packKey, unpackKeyHi, unpackKeyLo,
+} from './store.ts'
+export type {
+  StoreColumn, StoreKind, StoreOptions, GrowthPolicy, UploadRange, SoAStore, MarkSet,
+} from './store.ts'
 // Task 201 — THE COMPOSABLE CULLING KIT: the policies (hysteresis, flat
 // billboards, layers) and the CPU bricks (the software occluder, the
 // vegetation clustering, the picking ray) the frame recipes compose from.
