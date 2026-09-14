@@ -280,8 +280,13 @@ try {
   if (!gpuHealthy) console.log(`[smoke] log tail: ${viewerLogText.slice(-600)}`)
 
   // 8d. Pinch zoom (two synthetic touch pointers spreading apart) — the
-  // camera distance shrinks, the figure visibly grows (canvas screenshots:
-  // readPixels outside rAF reads a cleared buffer without preserveDrawingBuffer)
+  // camera distance shrinks. THE HONEST CHANNEL (Task 206): the old
+  // pixel-count proxy rode the DANCING silhouette's phase — the samba pose
+  // oscillates the figure's area ±30% between the before/after shots, and
+  // a zoomed-but-thin pose reads as "NO ZOOM" (the Task-204 flake, twice
+  // in a row now). The orbit state IS the gesture's contract: read
+  // camDist before/after through __mvDebug.camera() — deterministic; the
+  // pixel counts stay as the log's corroborating color.
   const countFigurePixels = async () => {
     const shot = await page.locator('#canvas').screenshot()
     const png = PNG.sync.read(shot)
@@ -291,6 +296,7 @@ try {
     }
     return nonBg
   }
+  const camBefore = await page.evaluate(() => window.__mvDebug?.camera?.()?.dist ?? null)
   const figureBefore = await countFigurePixels()
   await page.evaluate(() => {
     const canvas = document.querySelector('#canvas')
@@ -310,10 +316,14 @@ try {
     fire('pointerup', 2, cx + 170, cy)
   })
   await page.waitForTimeout(500)
+  const camAfter = await page.evaluate(() => window.__mvDebug?.camera?.()?.dist ?? null)
   const figureAfter = await countFigurePixels()
-  const pinchZoomed = figureAfter > figureBefore * 1.2
+  // the pinch spreads 160 → 340 px: camDist 3.2 → 1.5 → the 1.7 clamp; the
+  // 0.8·before threshold leaves margin for any start distance while still
+  // catching a dead gesture (dist unchanged)
+  const pinchZoomed = camBefore !== null && camAfter !== null && camAfter < Math.min(camBefore * 0.8, 2.5)
   console.log(
-    `[smoke] pinch zoom: figure pixels ${figureBefore} → ${figureAfter} (${pinchZoomed ? 'zoomed in' : 'NO ZOOM'})`,
+    `[smoke] pinch zoom: camDist ${camBefore} → ${camAfter} (${pinchZoomed ? 'zoomed in' : 'NO ZOOM'}) · figure pixels ${figureBefore} → ${figureAfter} (the dance-phase color, not the verdict)`,
   )
 
   // 8e. Matcap Cube — the procedural model on the MATCAP pipeline feature

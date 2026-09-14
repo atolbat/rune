@@ -83,7 +83,7 @@
 // timeline IS the Task-202 recipe; the parity gates prove the graph
 // changed the SCHEDULING, never a pixel.
 import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=205'
-import { buildShaders } from './shaders.js?v=203'
+import { buildShaders } from './shaders.js?v=206'
 import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H } from './scene.js?v=203'
 const SKY = [0.045, 0.055, 0.09, 1]
 const LIGHT = [0.5, 0.8, 0.35]

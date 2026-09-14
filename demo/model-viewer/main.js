@@ -1348,10 +1348,11 @@ function runPickProbe(count = 40) {
 
 if (typeof window !== 'undefined') {
   window.__mvDebug = {
-    note: 'the picking channel — pickAt(px, py) taps; probe(n) runs the BVH-vs-brute parity; selfTest(n) projects real vertices and picks them back',
+    note: 'the picking channel — pickAt(px, py) taps; probe(n) runs the BVH-vs-brute parity; selfTest(n) projects real vertices and picks them back; camera() reads the orbit state (the smoke\u2019s pinch gate — the pixel-count proxy was dance-phase noise)',
     pickAt: (px, py) => pickAt(px, py),
     probe: (count = 40) => runPickProbe(count),
     selfTest: (count = 30) => runPickSelfTest(count),
+    camera: () => ({ dist: camDist, yaw, pitch }),
   }
 }
 

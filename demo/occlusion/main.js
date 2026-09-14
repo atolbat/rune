@@ -37,6 +37,10 @@ import {
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
+// Task 206 — the headless reproduction channel: skip the boot validation
+// (the SwiftShader surface reads are minutes) — the probe drives renderTo
+// itself through window.__hizTier once the loop pauses.
+const BARE = PARAMS.has('bare')
 const FORCE_SNAPSHOT = PARAMS.has('snapshot')
 const OCCL = Math.max(256, Math.min(65536, Number(PARAMS.get('n')) || 16384))
 const MODE_PARAM = PARAMS.get('mode')
@@ -48,7 +52,7 @@ const democtl = { pause() {}, resume() {} }
 const shell = window.RuneDemoShell.mount({
   layout: 'page',
   title: 'Hi-Z occlusion culling',
-  desc: 'Hierarchical Z-buffer culling, GPU-driven — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts). Task 201: the scenario composes its frame from PASS BRICKS (depthPass → pyramid → occlusionPass → hysteresisPass → visiblePass — the regl/WebGPU syntax the scenario owns), the Frostbite temporal policy runs device-side (an occluded verdict needs 3 consecutive frames — no popping, pixel-parity-safe), and the pure CPU kit (octree/BVH rays + hit tests + picking, the flat/billboard edge-on test, vegetation clustering, the layer policy for transparency, and the software occluder — the boxes\u2019 front faces rasterized CPU-side into a tiny depth pyramid) gates the GPU\u2019s own verdicts. Task 202: the web-searched research techniques, implemented and pushed further — the HISTORY FEEDBACK brick (the two-pass HZB: Nanite\u2019s «first pass uses the HZB from last frame», Aaltonen\u2019s two-phase, the CryEngine coverage buffer — but WITHOUT reprojection: the prev-visible set re-renders at the current camera, so the lag never costs a pixel) and the AMORTIZED-CULL policy (the verdicts reuse while the camera stands bit-still). Task 203: THE FRAME GRAPH — the recipe is now a DECLARATION (versioned resource handles, conditional reads, per-pass gates) that the engine compiles into a frame DAG: dead branches leave the frame (Hi-Z off → the whole prepass branch disappears), transient lifetimes schedule into aliasing slots, barriers are emitted at every cross-lane hazard, and the amortized cull becomes a first-class graph concept — the staleness of the reused verdicts is counted, not hidden. Task 205: THE RESEARCH HARVEST — the niche papers, measured in the engine: Greene\u2019s hierarchical tile tiers + the rawrunprotected coarse edge tests + the ryg/Dyrkorn incremental edge walk with a depth gradient power the occluder raster (1.9× on this city), ryg\u2019s CSE corner transform cuts the query projection 96 mults → 24 (the hidden() sweep 1.3×), Sýkora–Jelínek plane-mask inheritance walks the octree/BVH with 4× fewer plane evaluations, and the picking ray is allocation-free — every technique benched against its legacy twin (packages/core/bench/research205.bench.ts), every parity gate held (tiled ≡ legacy verdicts, mask ≡ legacy sets, the tie law).',
+  desc: 'Hierarchical Z-buffer culling, GPU-driven — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts). Task 201: the scenario composes its frame from PASS BRICKS (depthPass → pyramid → occlusionPass → hysteresisPass → visiblePass — the regl/WebGPU syntax the scenario owns), the Frostbite temporal policy runs device-side (an occluded verdict needs 3 consecutive frames — no popping, pixel-parity-safe), and the pure CPU kit (octree/BVH rays + hit tests + picking, the flat/billboard edge-on test, vegetation clustering, the layer policy for transparency, and the software occluder — the boxes\u2019 front faces rasterized CPU-side into a tiny depth pyramid) gates the GPU\u2019s own verdicts. Task 202: the web-searched research techniques, implemented and pushed further — the HISTORY FEEDBACK brick (the two-pass HZB: Nanite\u2019s «first pass uses the HZB from last frame», Aaltonen\u2019s two-phase, the CryEngine coverage buffer — but WITHOUT reprojection: the prev-visible set re-renders at the current camera, so the lag never costs a pixel) and the AMORTIZED-CULL policy (the verdicts reuse while the camera stands bit-still). Task 203: THE FRAME GRAPH — the recipe is now a DECLARATION (versioned resource handles, conditional reads, per-pass gates) that the engine compiles into a frame DAG: dead branches leave the frame (Hi-Z off → the whole prepass branch disappears), transient lifetimes schedule into aliasing slots, barriers are emitted at every cross-lane hazard, and the amortized cull becomes a first-class graph concept — the staleness of the reused verdicts is counted, not hidden. Task 205: THE RESEARCH HARVEST — the niche papers, measured in the engine: Greene\u2019s hierarchical tile tiers + the rawrunprotected coarse edge tests + the ryg/Dyrkorn incremental edge walk with a depth gradient power the occluder raster (1.9× on this city), ryg\u2019s CSE corner transform cuts the query projection 96 mults → 24 (the hidden() sweep 1.3×), Sýkora–Jelínek plane-mask inheritance walks the octree/BVH with 4× fewer plane evaluations, and the picking ray is allocation-free — every technique benched against its legacy twin (packages/core/bench/research205.bench.ts), every parity gate held (tiled ≡ legacy verdicts, mask ≡ legacy sets, the tie law). Task 206: THE CLOSE-CAMERA ROUND — the field report («the near boxes cover the screen, thousands still drawn») reproduced headless and fixed twice: the frustum plane counts moved to CLIP SPACE (a box fully behind the camera was landing in the straddle bucket, DRAWN — 6802 of 16407 at dist 12; now frustum-culled, the honest straddle ring is 1–3), and the cull kernel gained the budgeted Greene descent (the coarse tap\u2019s grid-rounding slop poisoned the region max on gappy small-box screens; the fine pass scans only the box\u2019s own texels — drawn 8134 → 428 at the guilty camera, 4388 → 2391 on the default view, pixel parity identical).',
   hint: 'Drag — orbit · wheel/pinch — zoom · CLICK — pick a box (the octree/BVH ray) · the buttons toggle the culling tiers, the pyramid view, the occluder policy (the «City occludes» experiment), the temporal policy (hysteresis: watch the drawn count decay over 3 frames), and the history feedback (the two-pass HZB: the city occludes itself — watch the occluded count climb). The WebGPU / WebGL2 radios boot the same bricks on each backend\u2019s own mechanisms — and the parity gates hold on both.',
   defaults: { mode: MODE_PARAM === 'webgl2' ? 'webgl2' : 'webgpu' },
   onPause() { democtl.pause() },
@@ -137,6 +141,10 @@ hud.className = 'hiz-hud'
 
 // ── the camera + interaction (shared; each tier's canvas wires it) ───────
 const cam = { yaw: 0.9, pitch: 0.3, dist: 38, auto: 0.1 }
+// Task 206 — the probe channel (the __hizStats pattern): the headless gates
+// drive the orbit directly — the close-camera reproduction needs exact
+// yaw/pitch/dist, not synthesized drags.
+if (typeof window !== 'undefined') window.__hizCam = cam
 let lastMvp = null // the loop's freshest camera (the kit's per-frame stats)
 let lastBasis = null // {fwd, right, up, fovY, aspect} (the pick ray)
 function attachControls(canvas) {
@@ -227,7 +235,10 @@ const stats = {
   hysteresis: 0, history: 0, flatCulled: 0, clusters: clusters.stats.clusters, clusterCulled: 0, softOccluded: 0,
   tierLine: '', drawsLine: '', validation: null, errors,
 }
-if (typeof window !== 'undefined') window.__hizStats = stats
+if (typeof window !== 'undefined') {
+  window.__hizStats = stats
+  window.__hizCtl = democtl // Task 206 — the probe's pause/resume channel
+}
 
 /** The cross-tier parity anchor: the WG tier's boot-validation hashes —
  *  the GL tier's validation compares against them (the same scene, the
@@ -431,13 +442,14 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     //      set equality, no tolerance (their own brute-force truth is
     //      pinned in the library's tests);
     //  (2) THE KERNEL MODEL: the GPU's frustum bucket vs the kernel's own
-    //      predicate modeled in fp64 — the 8-corner walk with the kernel's
-    //      w > 1e-4 guard (corners at/behind the eye never count toward a
-    //      plane's outside total; such boxes land in the kernel's STRADDLE
-    //      bucket, drawn — the canonical spatial test has no w-guard and
-    //      counts them as far-outside, which is why a naive CPU-vs-GPU
-    //      compare drifts by the whole behind-the-camera population). The
-    //      ±2 tolerance is the fp32-vs-fp64 borderline class only.
+    //      predicate modeled in fp64 — the Task-206 CLIP-SPACE form: the six
+    //      plane tests are half-spaces of eye space (x ± w, y ± w, and the
+    //      backend's own near spelling — WG z < 0, GL z + w < 0 on the same
+    //      matrix), valid for EVERY corner whatever the sign of w. The old
+    //      NDC-with-w-guard form counted behind-the-eye corners as nothing
+    //      — fully-behind boxes landed in the STRADDLE bucket, DRAWN (the
+    //      close-camera field report: 6802 of 16407 at dist 12). The ±2
+    //      tolerance is the fp32-vs-fp64 borderline class only.
     {
       const planes = frustumPlanes(mvp)
       const octIds = octree.queryFrustum(planes)
@@ -447,10 +459,10 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
       if (setsEqual) {
         for (const id of bvhIds) if (!octSet.has(id)) { setsEqual = false; break }
       }
-      // the kernel's near threshold rides the tier's own z convention
-      // (WGSL tests nz < 0 on the [0,1] matrix; the GLSL twin's [-1,1]
-      // reading of the same matrix makes its near nz < -1)
-      const nearZ = t.mode === 'webgl2' ? -1 : 0
+      // the kernel's near plane rides the tier's own z convention
+      // (WGSL tests clip.z < 0 on the [0,1] matrix; the GLSL twin reads the
+      // same matrix as [-1,1] — its near spelling is clip.z + w < 0)
+      const glLeg = t.mode === 'webgl2'
       let modelFrustum = 0, behindEye = 0
       for (const b of spatialBoxes) {
         const out = [0, 0, 0, 0, 0, 0]
@@ -458,19 +470,17 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
         for (let k = 0; k < 8; k++) {
           const sx = (k & 1) * 2 - 1, sy = ((k >> 1) & 1) * 2 - 1, sz = ((k >> 2) & 1) * 2 - 1
           const x = b.cx + sx * b.hx, y = b.cy + sy * b.hy, z = b.cz + sz * b.hz
+          const cx = mvp[0] * x + mvp[4] * y + mvp[8] * z + mvp[12]
+          const cy = mvp[1] * x + mvp[5] * y + mvp[9] * z + mvp[13]
+          const cz = mvp[2] * x + mvp[6] * y + mvp[10] * z + mvp[14]
           const cw = mvp[3] * x + mvp[7] * y + mvp[11] * z + mvp[15]
-          if (cw > 1e-4) {
-            wAllBehind = false
-            const nx = (mvp[0] * x + mvp[4] * y + mvp[8] * z + mvp[12]) / cw
-            const ny = (mvp[1] * x + mvp[5] * y + mvp[9] * z + mvp[13]) / cw
-            const nz = (mvp[2] * x + mvp[6] * y + mvp[10] * z + mvp[14]) / cw
-            if (nx < -1) out[0]++
-            if (nx > 1) out[1]++
-            if (ny < -1) out[2]++
-            if (ny > 1) out[3]++
-            if (nz < nearZ) out[4]++
-            if (nz > 1) out[5]++
-          }
+          if (cw > 1e-4) wAllBehind = false
+          if (cx + cw < 0) out[0]++
+          if (cx - cw > 0) out[1]++
+          if (cy + cw < 0) out[2]++
+          if (cy - cw > 0) out[3]++
+          if (glLeg ? cz + cw < 0 : cz < 0) out[4]++
+          if (cz - cw > 0) out[5]++
         }
         if (out[0] === 8 || out[1] === 8 || out[2] === 8 || out[3] === 8 || out[4] === 8 || out[5] === 8) modelFrustum++
         else if (wAllBehind) behindEye++
@@ -519,7 +529,7 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
         if (!firstOk) { rayOk = false; break }
       }
       allOk = allOk && rayOk
-      shell.log.event(`spatial @yaw ${camV.yaw.toFixed(2)}: ${setsEqual ? 'octree ≡ bvh' : 'octree ≠ bvh'} · survivors ${octSet.size} · kernel model ${modelFrustum} (+${behindEye} fully behind the eye — the straddle class) · gpu frustum ${onStats.frustum} (Δ${kernelDelta}) — ${spatialStats}`)
+      shell.log.event(`spatial @yaw ${camV.yaw.toFixed(2)}: ${setsEqual ? 'octree ≡ bvh' : 'octree ≠ bvh'} · survivors ${octSet.size} · kernel model ${modelFrustum} (of them ${behindEye} fully behind the eye — the Task-206 clip-space counts, frustum not straddle) · gpu frustum ${onStats.frustum} (Δ${kernelDelta}) — ${spatialStats}`)
       shell.log.event(`kit @yaw ${camV.yaw.toFixed(2)}: rays octree ≡ bvh ≡ brute ${rayOk ? 'PASS' : 'FAIL'} · clusters ${clusters.stats.clusters} (culled ${culledClusters}, violations ${clusterViolations}) · layers glass ${glassCount}/ghost ${ghostCount} (never write depth)`)
       if (!spatialOk) shell.log.error(`spatial gate FAILED @yaw ${camV.yaw} — ${setsEqual ? `the GPU frustum bucket drifted from the kernel model (Δ${kernelDelta})` : 'the octree and the bvh disagree — the structures must answer identically'}`)
       if (!clusterOk) shell.log.error(`cluster gate FAILED @yaw ${camV.yaw} — a frustum-culled cluster carries a surviving member (the cluster bound must ⊇ its members)`)
@@ -824,6 +834,7 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
 async function teardownTier() {
   if (rafId !== 0) { cancelAnimationFrame(rafId); rafId = 0 }
   paused = false
+  if (typeof window !== 'undefined' && window.__hizTier !== undefined) window.__hizTier = null
   if (tier !== null) {
     try { tier.dispose() } catch { /* already dead */ }
     tier = null
@@ -848,6 +859,7 @@ async function bootTier(mode) {
       resumeLoop: () => { if (paused && !PROBE && tier !== null) { paused = false; rafId = requestAnimationFrame(loop) } },
     })
     stats.mode = tier.kind === 'snapshot' ? 'snapshot' : tier.kind === 'probe' ? 'probe' : tier.mode === 'webgl2' ? 'webgl2-live' : 'live'
+    if (typeof window !== 'undefined') window.__hizTier = tier // Task 206 — the direct-drive channel
     stats.tierLine = tier.tierLine
     stats.drawsLine = tier.drawsLine
     stats.drawCalls = 1
@@ -869,16 +881,20 @@ async function bootTier(mode) {
     if (PROBE) {
       await runProbe()
     } else {
-      // Task 197a — the boot validation is GUARDED: a validation crash
-      // must not silently kill the module (the field report's silent
-      // death class) — the failure lands in the log, the loop still runs.
-      try {
-        const v = await validate()
-        void v
-        // the anchor (the WG tier's hashes + bytes) is captured inside
-        // validate() itself — the GL tier's validation compares against it
-      } catch (e) {
-        noteError(`boot validation crashed: ${e instanceof Error ? e.message : String(e)} — the live loop continues`)
+      // Task 206 — BARE skips the boot validation (the headless reproduction
+      // channel); the live page never rides it.
+      if (!BARE) {
+        // Task 197a — the boot validation is GUARDED: a validation crash
+        // must not silently kill the module (the field report's silent
+        // death class) — the failure lands in the log, the loop still runs.
+        try {
+          const v = await validate()
+          void v
+          // the anchor (the WG tier's hashes + bytes) is captured inside
+          // validate() itself — the GL tier's validation compares against it
+        } catch (e) {
+          noteError(`boot validation crashed: ${e instanceof Error ? e.message : String(e)} — the live loop continues`)
+        }
       }
       rafId = requestAnimationFrame(loop)
     }

@@ -141,6 +141,26 @@ void main() { o = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0); }`,
     let clip = params.mvp * vec4<f32>(cx + sx * hx, cy + sy * hy, cz + sz * hz, 1.0);
     let w = clip.w;
     minW = min(minW, w);
+    // Task 206 — THE CLIP-SPACE PLANE COUNTS (the close-camera field
+    // report): the out* counters used to live INSIDE the w > 1e-4 guard,
+    // so a corner at/behind the eye contributed NOTHING — and a box FULLY
+    // behind the eye (never all-outside by the counted corners) fell
+    // through to the straddle class: DRAWN. At dist 12 that was 6802 of
+    // 16407 records — boxes behind the camera, submitted, rasterizing
+    // nothing, inflating the HUD's «drawn thousands». The fix is the
+    // standard clip-space form (Ericson's plane tests — half-spaces of EYE
+    // space, exact for EVERY corner whatever the sign of w): the frustum
+    // planes are x = ±w, y = ±w, z = 0 (the [0,1]-NDC near plane — z_clip
+    // = 0 IS z_eye = −near, w never divides), z = w (far). For w > 0 these
+    // are algebraically the old NDC compares; for w ≤ 0 they finally
+    // SPEAK: a fully-behind box has z_clip < 0 at every corner → outN = 8
+    // → frustum-culled, exactly what the CPU plane model already answers.
+    if (clip.x + clip.w < 0.0) { outL = outL + 1u; }
+    if (clip.x - clip.w > 0.0) { outR = outR + 1u; }
+    if (clip.y + clip.w < 0.0) { outB = outB + 1u; }
+    if (clip.y - clip.w > 0.0) { outT = outT + 1u; }
+    if (clip.z < 0.0) { outN = outN + 1u; }
+    if (clip.z - clip.w > 0.0) { outF = outF + 1u; }
     if (w > 1e-4) {
       let nx = clip.x / w; let ny = clip.y / w; let nz = clip.z / w;
       let px = (nx * 0.5 + 0.5) * f32(${HIZ_W});
@@ -150,12 +170,6 @@ void main() { o = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0); }`,
       x0 = min(x0, px); x1 = max(x1, px);
       y0 = min(y0, py); y1 = max(y1, py);
       minZ = min(minZ, nz);
-      if (nx < -1.0) { outL = outL + 1u; }
-      if (nx > 1.0) { outR = outR + 1u; }
-      if (ny < -1.0) { outB = outB + 1u; }
-      if (ny > 1.0) { outT = outT + 1u; }
-      if (nz < 0.0) { outN = outN + 1u; }
-      if (nz > 1.0) { outF = outF + 1u; }
     }
   }
   // frustum: ALL corners outside the SAME plane → outside the frustum
@@ -224,6 +238,44 @@ void main() { o = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0); }`,
         scene[${FLAGS_OFF}u + i] = 3u;
         return;
       }
+      // Task 206 — THE FINE PASS (Greene's hierarchical-z descent, flat
+      // spelling): the coarse tap's region includes the grid-rounding SLOP
+      // — at level L the box's rect rounds OUT to whole 2^L blocks, and a
+      // background gap inside that slop poisons the max to 1.0: a far box
+      // fully behind a dense cluster of small near boxes stays DRAWN just
+      // because the NEIGHBORHOOD of its footprint has holes. The descent's
+      // answer, budgeted: scan ONLY the rect's own texels at the FINEST
+      // level whose read count stays within 64 (a mip-L texel proving
+      // "farther" never helps — only the box's own footprint matters), with
+      // the monotone early exit — the first texel at/above the box's
+      // nearest corner settles VISIBLE (the same one-sided law the soft
+      // leg's hidden() runs). Sound by the same proof as the coarse tap:
+      // every F-level texel is the max of its 2^F×2^F mip-0 block, and the
+      // F-texel set still covers the (guarded) rect ⊇ the box's footprint.
+      var F = 0;
+      var pw = 1; // 2^F, doubled per step — no shift-count typing traps (Tint wants u32 shifters)
+      loop {
+        let stepsX = (rw + pw - 1) / pw;
+        let stepsY = (rh + pw - 1) / pw;
+        if (stepsX * stepsY <= 64) { break; }
+        F = F + 1;
+        pw = pw + pw;
+      }
+      if (F < L) {
+        let fi = levelInfo(u32(F));
+        let fx0 = u32(px0) >> u32(F); let fx1 = min(u32(px1 - 1) >> u32(F), u32(fi.y) - 1u);
+        let fy0 = u32(py0) >> u32(F); let fy1 = min(u32(py1 - 1) >> u32(F), u32(fi.z) - 1u);
+        for (var ty = fy0; ty <= fy1; ty = ty + 1u) {
+          for (var tx = fx0; tx <= fx1; tx = tx + 1u) {
+            if (pyramid[fi.x + ty * fi.y + tx] >= minZ - 1e-5) {
+              scene[${FLAGS_OFF}u + i] = 1u;
+              return;
+            }
+          }
+        }
+        scene[${FLAGS_OFF}u + i] = 3u;
+        return;
+      }
     }
   }
   scene[${FLAGS_OFF}u + i] = 1u;
@@ -282,6 +334,17 @@ void main() {
     clip = clip.x * u_mvp[0] + clip.y * u_mvp[1] + clip.z * u_mvp[2] + u_mvp[3];
     float w = clip.w;
     minW = min(minW, w);
+    // Task 206 — THE CLIP-SPACE PLANE COUNTS (the WG twin's comment): the
+    // half-spaces of EYE space, exact for every corner whatever the sign
+    // of w — a fully-behind-eye box is outN = 8 and frustum-culled, not a
+    // drawn «straddle». GL NDC z spans [−1,1] → the near plane is
+    // z_clip = −w (z + w < 0), the far plane z_clip = w (z − w > 0).
+    if (clip.x + clip.w < 0.0) { outL++; }
+    if (clip.x - clip.w > 0.0) { outR++; }
+    if (clip.y + clip.w < 0.0) { outB++; }
+    if (clip.y - clip.w > 0.0) { outT++; }
+    if (clip.z + clip.w < 0.0) { outN++; }
+    if (clip.z - clip.w > 0.0) { outF++; }
     if (w > 1e-4) {
       float nx = clip.x / w, ny = clip.y / w, nz = clip.z / w;
       // GL: FBO texel row 0 = the BOTTOM row — the WG tier's Y-flip lesson,
@@ -292,12 +355,6 @@ void main() {
       x0 = min(x0, px); x1 = max(x1, px);
       y0 = min(y0, py); y1 = max(y1, py);
       minD = min(minD, d);
-      if (nx < -1.0) { outL++; }
-      if (nx > 1.0) { outR++; }
-      if (ny < -1.0) { outB++; }
-      if (ny > 1.0) { outT++; }
-      if (nz < -1.0) { outN++; }
-      if (nz > 1.0) { outF++; }
     }
   }
   // frustum: ALL corners outside the SAME plane
@@ -340,6 +397,30 @@ void main() {
       }
       // the 1e-5 conservative slack
       if (minD > zmax + 1e-5) {
+        v_flag = 3.0; return;
+      }
+      // Task 206 — THE FINE PASS (the WG twin's comment): the budgeted
+      // Greene descent — scan ONLY the rect's own texels at the finest
+      // level within 64 reads, early-out VISIBLE on the first texel at or
+      // above the box's nearest corner; completing the scan = HIDDEN.
+      int F = 0;
+      while (true) {
+        int stepsX = (rw + ((1 << F) - 1)) >> F;
+        int stepsY = (rh + ((1 << F) - 1)) >> F;
+        if (stepsX * stepsY <= 64) { break; }
+        F++;
+      }
+      if (F < L) {
+        int fw = LD[F].x, fh = LD[F].y;
+        int fx0 = px0 >> F, fx1 = min((px1 - 1) >> F, fw - 1);
+        int fy0 = py0 >> F, fy1 = min((py1 - 1) >> F, fh - 1);
+        for (int ty = fy0; ty <= fy1; ty++) {
+          for (int tx = fx0; tx <= fx1; tx++) {
+            if (pyrAt(F, ivec2(tx, ty)) >= minD - 1e-5) {
+              v_flag = 1.0; return;
+            }
+          }
+        }
         v_flag = 3.0; return;
       }
     }
