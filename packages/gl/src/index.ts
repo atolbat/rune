@@ -30,6 +30,8 @@ export type {
   PassShaders, KernelShaders,
   DepthPassCall, DepthPassHandle, OcclusionPassCall, OcclusionPassHandle,
   HysteresisPassCall, HysteresisPassHandle,
+  HistoryPassCall, HistoryPassHandle,
+  FeedbackPassCall, FeedbackPassHandle,
   VisiblePassCall, VisiblePassHandle, DebugStripHandle,
 } from './device.ts'
 // Task 200/201 — the clean spatial structures (octree + BVH, now with the

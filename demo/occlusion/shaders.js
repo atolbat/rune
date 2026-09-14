@@ -16,13 +16,20 @@
 //   color  — the lit + fogged image. WG: instance_index dereferences the
 //            compacted LIST in the scene storage (the indirect draw); GL:
 //            the per-instance attributes + the a_flag collapse.
-//   panel  — one pyramid level as a tinted quad (the debug strip).
 //   hist   — Task 202 — THE PREV-VISIBLE DEPTH PASS: the previous frame's
 //            visible set, drawn DEPTH-ONLY into the pyramid tile at the
 //            CURRENT camera (the two-pass HZB's phase 1). WG: the indirect
 //            draw over the compacted list (whatever the last frame's
 //            compact wrote is exactly what the last frame DREW); GL: the
 //            collapse draw over all records reading the verdict feed.
+//   fbfill — Task 207 — THE SAME-FRAME FEEDBACK FILL: THIS frame's first
+//            cull's fresh RAW verdicts (flags ∈ {1,4}) drawn depth-only
+//            into the tile — the current-frame phase 2 the colored city
+//            needs to occlude ITSELF (the survivors' depth V1 ⊆ N, never
+//            the whole scene's). WG: the storage flags read directly in the
+//            vertex shader; GL: the same collapse shape on the RAW verdict
+//            buffer (the rawFlags feed).
+//   panel  — one pyramid level as a tinted quad (the debug strip).
 //
 // THE CONVENTIONS each language keeps its own (documented where they bite):
 //   · WG framebuffer rows grow DOWN from NDC +y — GL FBO rows grow UP:
@@ -641,6 +648,94 @@ void main() { o = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0); }`,
     },
   }
 
+  // ── fbfill: Task 207 — THE SAME-FRAME FEEDBACK FILL (the two-pass HZB's
+  // CURRENT-FRAME phase 2). The real literature anchors (Task 207's research
+  // round, verified): Aaltonen's two-phase HZB and Nanite's «the first pass
+  // uses the HZB from last frame» — but those ride the PREVIOUS frame's set
+  // (a one-frame lag, the disocclusion catch-up the history brick documents
+  // above); bevy's GPU-driven two-phase occlusion culling (pcwalton, PR
+  // #17413: early prepass from the last frame's HZB, then the late prepass
+  // re-culls the untested remainder against the fresh one); Kitware's VTK
+  // WebGPU compute culler (2024, the same shape, publicly benched); Momber's
+  // D3D12 two-pass HZB (2025). THE ANSWER TO THE FIELD REPORT («the colored
+  // boxes still don't occlude the rear colored boxes»): after this frame's
+  // FIRST cull writes its raw verdicts, the visible set V1 (flags ∈ {1,4})
+  // re-renders DEPTH-ONLY into the pyramid tile, the pyramid rebuilds, and a
+  // SECOND cull lands — the colored city occludes ITSELF within the frame,
+  // for the price of the SURVIVORS' depth (V1 ⊆ N), never the whole
+  // scene's. The practitioners' converged law (devsh's polemic, the bevy
+  // thread): NEVER reproject last frame's depth — re-render the survivors.
+  // SOUND BY THE SAME LAW the city-occluders experiment proved (Task 199):
+  // a builder never self-culls (its own footprint max ≥ its own front
+  // surface ≥ its nearest AABB corner), and a box the feedback culls is
+  // behind a surface drawn THIS frame at THIS camera — the pixel-parity
+  // gate's own proof, one cull deeper.
+  // WG: the RAW flags live in the scene storage (the first cull wrote them
+  // this frame — the vertex shader reads them directly, no compact, no
+  // hysteresis involvement: the temporal fold still runs ONCE per frame, on
+  // the FINAL verdicts). GL: the a_flag twin reading the TF-written RAW
+  // verdict buffer (the `rawFlags` feed — the no-hist law, field-proven).
+  const fbfill = {
+    wg: {
+      code: `
+struct ZParams { mvp: mat4x4<f32> }
+@group(0) @binding(0) var<uniform> params: ZParams;
+@group(2) @binding(0) var<storage, read> scene: array<u32>;
+struct VOut { @builtin(position) pos: vec4<f32> }
+@vertex fn vsMain(@location(0) corner: vec3<f32>, @builtin(instance_index) ii: u32) -> VOut {
+  // THE RAW VERDICT the first cull wrote THIS frame: flag ∈ {1 visible,
+  // 4 near-straddle} draws depth, everything else collapses to nothing.
+  let flag = scene[${FLAGS_OFF}u + ii];
+  var o: VOut;
+  if (flag != 1u && flag != 4u) {
+    o.pos = vec4<f32>(0.0, 0.0, 2.0, 1.0); // z=2 sits outside every [0,1] clip — zero pixels
+    return o;
+  }
+  let wo = ${INST_OFF}u + ii * ${STRIDE}u;
+  let c = vec3<f32>(bitcast<f32>(scene[wo + ${CENTER}u]), bitcast<f32>(scene[wo + ${CENTER + 1}u]), bitcast<f32>(scene[wo + ${CENTER + 2}u]));
+  let h = vec3<f32>(bitcast<f32>(scene[wo + ${HALF}u]), bitcast<f32>(scene[wo + ${HALF + 1}u]), bitcast<f32>(scene[wo + ${HALF + 2}u]));
+  let world = c + h * (corner * 2.0 - 1.0);
+  o.pos = params.mvp * vec4<f32>(world, 1.0);
+  return o;
+}
+@fragment fn fsMain(i: VOut) -> @location(0) vec4<f32> {
+  // the EXACT depth — the z pass's own fragment (@builtin(position).z)
+  return vec4<f32>(i.pos.z, 0.0, 0.0, 1.0);
+}`,
+      attrs: [3],
+      hasTextures: false,
+    },
+    gl: {
+      vs: `#version 300 es
+layout(location=0) in vec3 a_corner;
+layout(location=1) in vec3 a_c;
+layout(location=2) in vec3 a_h;
+layout(location=4) in float a_flag; // the RAW verdict this frame's first cull TF-wrote
+uniform mat4 u_mvp;
+void main() {
+  // the color pass's own collapse, reading the RAW feed (not the smoothed
+  // hist): the first cull's fresh visible set — floor() answers the raw
+  // vocabulary (1..4); a record not in V1 collapses to nothing
+  if (floor(a_flag) != 1.0 && floor(a_flag) != 4.0) {
+    gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+    return;
+  }
+  vec3 world = a_c + a_h * (a_corner * 2.0 - 1.0);
+  gl_Position = u_mvp * vec4(world, 1.0);
+}`,
+      fs: `#version 300 es
+precision highp float;
+out vec4 o;
+void main() { o = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0); }`,
+      attrs: [
+        { location: 1, from: 'records', size: 3, stride: STRIDE_BYTES, offset: F.center * 4, divisor: 1 },
+        { location: 2, from: 'records', size: 3, stride: STRIDE_BYTES, offset: F.half * 4, divisor: 1 },
+        { location: 4, from: 'rawFlags', size: 1, stride: 4, offset: 0, divisor: 1 },
+      ],
+      lanes: [{ name: 'u_mvp', kind: 'mat4', words: 16 }],
+    },
+  }
+
   // ── panel: the pyramid debug strip (one quad per level) ─────────────────
   // ONE info lane both backends: (offset, w, h, 0) — the WG reads the flat
   // offset into the storage pyramid; the GL clamps with (w, h) = .yz.
@@ -703,5 +798,5 @@ void main() {
     },
   }
 
-  return { z, cull, color, hist, panel }
+  return { z, cull, color, hist, fbfill, panel }
 }

@@ -24,7 +24,7 @@
 // window.__hizStats — the live counters (the smoke/gates read it);
 // window.__hizGate — the probe verdict (?probe=1: WG-only, the Task-196
 // contract; ?probe=1&mode=webgl2: both tiers + the cross-tier parity).
-import { buildTier } from './tier.js?v=203'
+import { buildTier } from './tier.js?v=207'
 import {
   createScene, cameraAt, VAL_CAMERAS,
   HIZ_W, HIZ_H, LEVELS,
@@ -33,7 +33,7 @@ import {
   buildOctree, buildBVH, frustumPlanes, aabbOutsideFrustum,
   recordView, flatCull, clusterize, softwareOccluder, cameraRay, rayBoxes,
   layerPolicy,
-} from '../../dist/rune.esm.js?v=205'
+} from '../../dist/rune.esm.js?v=207'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -52,8 +52,8 @@ const democtl = { pause() {}, resume() {} }
 const shell = window.RuneDemoShell.mount({
   layout: 'page',
   title: 'Hi-Z occlusion culling',
-  desc: 'Hierarchical Z-buffer culling, GPU-driven — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts). Task 201: the scenario composes its frame from PASS BRICKS (depthPass → pyramid → occlusionPass → hysteresisPass → visiblePass — the regl/WebGPU syntax the scenario owns), the Frostbite temporal policy runs device-side (an occluded verdict needs 3 consecutive frames — no popping, pixel-parity-safe), and the pure CPU kit (octree/BVH rays + hit tests + picking, the flat/billboard edge-on test, vegetation clustering, the layer policy for transparency, and the software occluder — the boxes\u2019 front faces rasterized CPU-side into a tiny depth pyramid) gates the GPU\u2019s own verdicts. Task 202: the web-searched research techniques, implemented and pushed further — the HISTORY FEEDBACK brick (the two-pass HZB: Nanite\u2019s «first pass uses the HZB from last frame», Aaltonen\u2019s two-phase, the CryEngine coverage buffer — but WITHOUT reprojection: the prev-visible set re-renders at the current camera, so the lag never costs a pixel) and the AMORTIZED-CULL policy (the verdicts reuse while the camera stands bit-still). Task 203: THE FRAME GRAPH — the recipe is now a DECLARATION (versioned resource handles, conditional reads, per-pass gates) that the engine compiles into a frame DAG: dead branches leave the frame (Hi-Z off → the whole prepass branch disappears), transient lifetimes schedule into aliasing slots, barriers are emitted at every cross-lane hazard, and the amortized cull becomes a first-class graph concept — the staleness of the reused verdicts is counted, not hidden. Task 205: THE RESEARCH HARVEST — the niche papers, measured in the engine: Greene\u2019s hierarchical tile tiers + the rawrunprotected coarse edge tests + the ryg/Dyrkorn incremental edge walk with a depth gradient power the occluder raster (1.9× on this city), ryg\u2019s CSE corner transform cuts the query projection 96 mults → 24 (the hidden() sweep 1.3×), Sýkora–Jelínek plane-mask inheritance walks the octree/BVH with 4× fewer plane evaluations, and the picking ray is allocation-free — every technique benched against its legacy twin (packages/core/bench/research205.bench.ts), every parity gate held (tiled ≡ legacy verdicts, mask ≡ legacy sets, the tie law). Task 206: THE CLOSE-CAMERA ROUND — the field report («the near boxes cover the screen, thousands still drawn») reproduced headless and fixed twice: the frustum plane counts moved to CLIP SPACE (a box fully behind the camera was landing in the straddle bucket, DRAWN — 6802 of 16407 at dist 12; now frustum-culled, the honest straddle ring is 1–3), and the cull kernel gained the budgeted Greene descent (the coarse tap\u2019s grid-rounding slop poisoned the region max on gappy small-box screens; the fine pass scans only the box\u2019s own texels — drawn 8134 → 428 at the guilty camera, 4388 → 2391 on the default view, pixel parity identical).',
-  hint: 'Drag — orbit · wheel/pinch — zoom · CLICK — pick a box (the octree/BVH ray) · the buttons toggle the culling tiers, the pyramid view, the occluder policy (the «City occludes» experiment), the temporal policy (hysteresis: watch the drawn count decay over 3 frames), and the history feedback (the two-pass HZB: the city occludes itself — watch the occluded count climb). The WebGPU / WebGL2 radios boot the same bricks on each backend\u2019s own mechanisms — and the parity gates hold on both.',
+  desc: 'Hierarchical Z-buffer culling, GPU-driven — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts). Task 201: the scenario composes its frame from PASS BRICKS (depthPass → pyramid → occlusionPass → hysteresisPass → visiblePass — the regl/WebGPU syntax the scenario owns), the Frostbite temporal policy runs device-side (an occluded verdict needs 3 consecutive frames — no popping, pixel-parity-safe), and the pure CPU kit (octree/BVH rays + hit tests + picking, the flat/billboard edge-on test, vegetation clustering, the layer policy for transparency, and the software occluder — the boxes\u2019 front faces rasterized CPU-side into a tiny depth pyramid) gates the GPU\u2019s own verdicts. Task 202: the web-searched research techniques, implemented and pushed further — the HISTORY FEEDBACK brick (the two-pass HZB: Nanite\u2019s «first pass uses the HZB from last frame», Aaltonen\u2019s two-phase, the CryEngine coverage buffer — but WITHOUT reprojection: the prev-visible set re-renders at the current camera, so the lag never costs a pixel) and the AMORTIZED-CULL policy (the verdicts reuse while the camera stands bit-still). Task 203: THE FRAME GRAPH — the recipe is now a DECLARATION (versioned resource handles, conditional reads, per-pass gates) that the engine compiles into a frame DAG: dead branches leave the frame (Hi-Z off → the whole prepass branch disappears), transient lifetimes schedule into aliasing slots, barriers are emitted at every cross-lane hazard, and the amortized cull becomes a first-class graph concept — the staleness of the reused verdicts is counted, not hidden. Task 205: THE RESEARCH HARVEST — the niche papers, measured in the engine: Greene\u2019s hierarchical tile tiers + the rawrunprotected coarse edge tests + the ryg/Dyrkorn incremental edge walk with a depth gradient power the occluder raster (1.9× on this city), ryg\u2019s CSE corner transform cuts the query projection 96 mults → 24 (the hidden() sweep 1.3×), Sýkora–Jelínek plane-mask inheritance walks the octree/BVH with 4× fewer plane evaluations, and the picking ray is allocation-free — every technique benched against its legacy twin (packages/core/bench/research205.bench.ts), every parity gate held (tiled ≡ legacy verdicts, mask ≡ legacy sets, the tie law). Task 206: THE CLOSE-CAMERA ROUND — the field report («the near boxes cover the screen, thousands still drawn») reproduced headless and fixed twice: the frustum plane counts moved to CLIP SPACE (a box fully behind the camera was landing in the straddle bucket, DRAWN — 6802 of 16407 at dist 12; now frustum-culled, the honest straddle ring is 1–3), and the cull kernel gained the budgeted Greene descent (the coarse tap\u2019s grid-rounding slop poisoned the region max on gappy small-box screens; the fine pass scans only the box\u2019s own texels — drawn 8134 → 428 at the guilty camera, 4388 → 2391 on the default view, pixel parity identical). Task 207: THE SAME-FRAME FEEDBACK — the second field report («the colored boxes still don\u2019t occlude the rear colored boxes; behind the gray parallelepipeds they already don\u2019t draw») answered with the CURRENT-FRAME two-pass HZB: after the first cull\u2019s verdicts, the fresh visible set re-renders depth-only into the pyramid, the pyramid rebuilds, and a SECOND cull lands — the colored city occludes ITSELF within the frame (the survivors\u2019 depth V1, never the whole scene\u2019s fill), declared as three new frame-graph passes (feedback-fill / pyramid-reduce-2 / cull-verdicts-2) that die with the culling gate exactly like the shadows-off law.',
+  hint: 'Drag — orbit · wheel/pinch — zoom · CLICK — pick a box (the octree/BVH ray) · the buttons toggle the culling tiers, the pyramid view, the occluder policy (the «City occludes» experiment), the temporal policy (hysteresis: watch the drawn count decay over 3 frames), the history feedback (the two-pass HZB: the city occludes itself — watch the occluded count climb), and the same-frame self-occlusion (ON by default — the colored boxes occlude the boxes behind them within THIS frame; put the camera close among the boxes and watch the drawn count). The WebGPU / WebGL2 radios boot the same bricks on each backend\u2019s own mechanisms — and the parity gates hold on both.',
   defaults: { mode: MODE_PARAM === 'webgl2' ? 'webgl2' : 'webgpu' },
   onPause() { democtl.pause() },
   onResume() { democtl.resume() },
@@ -219,6 +219,14 @@ let hysteresisOn = false
 // previous frame's visible set re-rendered at the current camera + the
 // fill — the city occludes ITSELF.
 let historyOn = false
+// Task 207 — THE SAME-FRAME FEEDBACK toggle (the two-pass HZB, CURRENT-frame
+// phase 2 — THE FIELD REPORT'S OWN ASK: «the colored boxes still don't
+// occlude the rear colored boxes»). ON (the boot default now): the first
+// cull's fresh visible set re-renders depth-only into the pyramid, the
+// pyramid rebuilds, a SECOND cull lands — the colored city occludes ITSELF
+// within the frame, at the CURRENT camera, zero temporal lag, for the
+// survivors' depth price (V1 ⊆ N — the brute «City occludes» fill pays N).
+let feedbackOn = true
 let paused = false
 let rafId = 0
 let frameIndex = 0
@@ -232,7 +240,7 @@ const stats = {
   hizW: HIZ_W, hizH: HIZ_H, levels: LEVELS, hizOn: 1,
   frustumCulled: 0, occlusionCulled: 0, drawn: 0, nearStraddle: 0,
   drawCalls: 1, dispatches: 2, msAvg: 0,
-  hysteresis: 0, history: 0, flatCulled: 0, clusters: clusters.stats.clusters, clusterCulled: 0, softOccluded: 0,
+  hysteresis: 0, history: 0, feedback: 1, flatCulled: 0, clusters: clusters.stats.clusters, clusterCulled: 0, softOccluded: 0,
   tierLine: '', drawsLine: '', validation: null, errors,
 }
 if (typeof window !== 'undefined') {
@@ -250,7 +258,7 @@ function refreshHud() {
   hud.innerHTML =
     `instances <b>${scene.N}</b> (occluders <b>${stats.occluders}</b>${cityOccludes ? ' — the whole city writes depth' : ` · occludees ${OCCL}`})\n` +
     `frustum-culled ${stats.frustumCulled} · <b>occlusion-culled ${stats.occlusionCulled}</b>\n` +
-    `drawn <b>${stats.drawn}</b> (${pct}%) · near-straddle ${stats.nearStraddle} · hysteresis <b>${stats.hysteresis ? `ON (K=3${hysteresisOn ? '' : '·idle'}` : 'OFF'}</b> · history <b>${historyOn ? 'ON (prev-visible occluders)' : 'OFF'}</b>\n` +
+    `drawn <b>${stats.drawn}</b> (${pct}%) · near-straddle ${stats.nearStraddle} · hysteresis <b>${stats.hysteresis ? `ON (K=3${hysteresisOn ? '' : '·idle'}` : 'OFF'}</b> · history <b>${historyOn ? 'ON (prev-visible occluders)' : 'OFF'}</b> · feedback <b>${feedbackOn ? 'ON (same-frame — the city occludes itself)' : 'OFF'}</b>\n` +
     `Hi-Z ${HIZ_W}x${HIZ_H} · ${LEVELS} mips · tier <b>${hizOn ? 'ON' : 'OFF'}</b>\n` +
     `kit: clusters <b>${stats.clusters}</b> (cell 8) · cluster-cull ${stats.clusterCulled} · flat-culled ${stats.flatCulled} · soft-HiZ ${stats.softOccluded}\n` +
     `${tier !== null && tier.graphLine !== undefined ? tier.graphLine() + '\n' : ''}` +
@@ -271,6 +279,7 @@ async function maybeReadStats() {
     stats.occluders = cityOccludes ? scene.N : scene.K
     stats.hysteresis = hysteresisOn ? 1 : 0
     stats.history = historyOn ? 1 : 0
+    stats.feedback = feedbackOn ? 1 : 0
     stats.msAvg = +msAvg.toFixed(2)
     // the kit's per-camera stats: the flat-cull count (the edge-on slivers)
     // + the cluster-cull count (the two-tier vegetation math) — one sweep
@@ -315,7 +324,7 @@ function loop(t) {
     // read-stats COPY PASS (the copy-lane root — the overlap plan's one
     // web-real parallelism: the async readback beside the color render)
     const wantStats = frameIndex % 12 === 0 && frameIndex > 2
-    tier.frame(mvp, eye, hizOn ? 1 : 0, showPyramid, cityOccludes ? scene.N : scene.K, hysteresisOn, historyOn, false, wantStats)
+    tier.frame(mvp, eye, hizOn ? 1 : 0, showPyramid, cityOccludes ? scene.N : scene.K, hysteresisOn, historyOn, false, wantStats, feedbackOn)
   } catch (e) {
     noteError(`frame failed: ${e instanceof Error ? e.message : String(e)}`)
   }
@@ -716,6 +725,59 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     if (!movedRicher) shell.log.error(`history motion coverage FAILED @yaw ${camV.yaw + 0.04} — occluded(history) must stay ≥ occluded(plain) after the camera step`)
     cameras.push({ yaw: camV.yaw, policy: 'history', parity: fixedIdentical ? 'IDENTICAL' : 'DIFFERS', drawnOn: histStats.drawn, drawnOff: plainStats.drawn, occludedOn: histStats.occluded, occludedOff: plainStats.occluded, movedIdentical, invariantOn: histInvariant, invariantOff: plainInvariant, ok: histOk })
   }
+  // ── Task 207 — THE SAME-FRAME FEEDBACK GATE (the current-frame two-pass
+  //    HZB — the field report's own ask: «the colored boxes still don't
+  //    occlude the rear colored boxes»; behind the gray parallelepipeds they
+  //    already didn't draw, because only the K occluders wrote depth). At a
+  //    CLOSE camera — the report's geometry: the camera down in the box
+  //    layer, looking along the plane, near boxes covering the screen — the
+  //    feedback must prove four honest properties:
+  //    (a) PIXEL PARITY vs the plain single-cull ON frame — a feedback-
+  //        culled box is behind a surface drawn THIS frame at THIS camera
+  //        (the same soundness law the city-occluders leg proved, one cull
+  //        deeper);
+  //    (b) STRICTLY RICHER: occluded(feedback) ≥ occluded(plain) and
+  //        drawn(feedback) ≤ drawn(plain) — V1's depth can only add
+  //        occlusion power on top of the K walls';
+  //    (c) THE ACCOUNTING INVARIANT (the second cull re-buckets every
+  //        record — frustum + occluded + drawn = N must still hold);
+  //    (d) THE CITY BAND: the feedback's drawn must land in the honest
+  //        neighborhood of the brute city-occluders policy (the survivors'
+  //        fill carries the same occlusion power as the whole-scene fill —
+  //        the cover-transfer law), with the slack for the borderline class.
+  {
+    // the Task-206 guilty camera — the report's own reproduction point
+    const camV = { yaw: 0, pitch: 0.1, dist: 12 }
+    const { eye, mvp } = cameraAt(camV.yaw, camV.pitch, camV.dist)
+    // the plain ON frame (feedback OFF — the Task-206 shape)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, false, false, false)
+    const plainStats = await t.readStats()
+    const plain = await t.surface.read()
+    // the feedback frame (same camera, same K policy — only V1's depth added)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, false, false, true)
+    const fbStats = await t.readStats()
+    const fb = await t.surface.read()
+    // the brute reference (every record writes the fill — the Task-199 experiment)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.N, false, false, false, false, false)
+    const cityStats = await t.readStats()
+    const fbIdentical = fb.data.length === plain.data.length && fb.data.every((v, i) => v === plain.data[i])
+    const fbRicher = fbStats.occluded >= plainStats.occluded && fbStats.drawn <= plainStats.drawn
+    const fbInvariant = fbStats.frustum + fbStats.occluded + fbStats.drawn === scene.N
+    // (d) the city band: the feedback is ALLOWED to cull slightly MORE than
+    // the brute fill (the fine Greene descent over V1's exact footprint can
+    // beat the all-N coarse tap's grid slop) — the honest bound is one-
+    // sided: never cull LESS by any meaningful margin (the borderline class
+    // alone is ≤ ~40 boxes at the bucket rims)
+    const cityBand = fbStats.drawn <= cityStats.drawn + 40
+    const fbOk = fbIdentical && fbRicher && fbInvariant && cityBand
+    allOk = allOk && fbOk
+    shell.log.event(`same-frame feedback @dist ${camV.dist} pitch ${camV.pitch}: drawn plain ${plainStats.drawn} → feedback ${fbStats.drawn} (the brute city fill ${cityStats.drawn}) · occluded ${plainStats.occluded} → ${fbStats.occluded} · pixel parity ${fbIdentical ? 'IDENTICAL' : 'DIFFERS'} — the colored city occludes ITSELF within the frame, for the survivors' depth (V1 ⊆ N), never the whole scene's fill`)
+    if (!fbIdentical) shell.log.error(`same-frame feedback pixel parity FAILED @dist ${camV.dist} — the feedback culled a VISIBLE box (its occluder must be a surface drawn this frame at this camera)`)
+    if (!fbRicher) shell.log.error(`same-frame feedback coverage FAILED @dist ${camV.dist} — V1's depth must occlude at least what the K walls do (occluded ${fbStats.occluded} vs ${plainStats.occluded}, drawn ${fbStats.drawn} vs ${plainStats.drawn})`)
+    if (!fbInvariant) shell.log.error(`same-frame feedback accounting invariant FAILED @dist ${camV.dist} — the second cull re-buckets every record: frustum+occluded+drawn must equal ${scene.N}`)
+    if (!cityBand) shell.log.error(`same-frame feedback city band FAILED @dist ${camV.dist} — the survivors' fill must carry the brute city fill's power (drawn ${fbStats.drawn} vs ${cityStats.drawn} + 40 borderline)`)
+    cameras.push({ yaw: camV.yaw, policy: 'feedback', parity: fbIdentical ? 'IDENTICAL' : 'DIFFERS', drawnOn: fbStats.drawn, drawnOff: plainStats.drawn, occludedOn: fbStats.occluded, occludedOff: plainStats.occluded, cityDrawn: cityStats.drawn, invariantOn: fbInvariant, invariantOff: true, ok: fbOk })
+  }
   // ── Task 202 — THE AMORTIZED-CULL GATE (the temporal-coherence
   //    practice): a frame whose camera AND policy are bit-identical to the
   //    last culled frame reuses its verdicts — BOTH the cull kernel and
@@ -768,7 +830,15 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
   //        lifetimes (aliasing soundness), the barrier set matches the
   //        backend's lanes (WG: the cross-lane hazards exist; GL: one
   //        lane, honestly zero), and the compile count stays bounded (the
-  //        policy cache — one compile per distinct policy, not per frame).
+  //        policy cache — one compile per distinct policy, not per frame);
+  //    (f) Task 207 — THE SAME-FRAME CHAIN: the feedback branch (fill +
+  //        reduce + cull²) lives on the ON frame and dies with the culling
+  //        gate on the OFF frame; the fill binds the scene version AFTER
+  //        the first cull's write (the edge cull-verdicts→feedback-fill —
+  //        the version law's first SAME-FRAME consumer, where the z-fill
+  //        binds the imported one), and hysteresis binds the SECOND cull's
+  //        write (cull-verdicts-2→hysteresis — the fold runs on the final
+  //        verdicts, exactly once per frame).
   {
     const camV = VAL_CAMERAS[0]
     const { eye, mvp } = cameraAt(camV.yaw, camV.pitch, camV.dist)
@@ -778,12 +848,20 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     const branchDead = off.culled.includes('z-fill') && off.culled.includes('pyramid-reduce')
       && !off.live.includes('z-fill') && !off.live.includes('pyramid-reduce')
     const cullStillRuns = off.live.includes('cull-verdicts')
+    // (f) the feedback branch rides the culling gate — OFF kills it whole
+    const fbBranchDead = off.gated.includes('feedback-fill') && off.gated.includes('pyramid-reduce-2')
+      && off.gated.includes('cull-verdicts-2') && !off.live.includes('feedback-fill')
     // (b)+(c) the ON frame, view off then on
     t.renderTo(t.surface.targetId, mvp, eye, 1, false)
     const on = t.graphStats()
     const prepassBindsPrev = on.edges.some(e => e.startsWith('import→z-fill scene@'))
     const stripGated = on.gated.includes('pyramid-view') && !on.live.includes('pyramid-view')
     const colorLive = on.live.includes('color')
+    // (f) the same-frame chain: the fill reads the FIRST cull's write, the
+    // fold reads the SECOND's — the DAG's own two-phase proof
+    const fbLive = on.live.includes('feedback-fill') && on.live.includes('pyramid-reduce-2') && on.live.includes('cull-verdicts-2')
+    const fbBindsCull1 = on.edges.some(e => e.startsWith('cull-verdicts→feedback-fill scene@'))
+    const foldBindsCull2 = on.edges.some(e => e.startsWith('cull-verdicts-2→hysteresis scene@'))
     t.renderTo(t.surface.targetId, mvp, eye, 1, true)
     const view = t.graphStats()
     const overlayOk = view.live.includes('pyramid-view') && view.live.includes('color') && view.live.includes('z-fill')
@@ -792,6 +870,7 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, true)
     const frozen = t.graphStats()
     const amortGated = frozen.gated.includes('cull-verdicts') && frozen.gated.includes('hysteresis')
+      && frozen.gated.includes('feedback-fill') && frozen.gated.includes('cull-verdicts-2')
       && !frozen.live.includes('cull-verdicts')
     const staleScene = frozen.stale.scene ?? 0
     // (e) the machine's own axioms on the view frame (the richest one)
@@ -804,9 +883,14 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     const compilesOk = view.stats.compiles >= 3 && view.stats.compiles <= 12
     const graphOk = branchDead && cullStillRuns && prepassBindsPrev && stripGated && colorLive
       && overlayOk && amortGated && staleScene >= 1 && slotsOk && barrierOk && compilesOk
+      && fbBranchDead && fbLive && fbBindsCull1 && foldBindsCull2
     allOk = allOk && graphOk
-    shell.log.event(`frame graph @yaw ${camV.yaw.toFixed(2)}: ${off.live.length}-pass frame · Hi-Z OFF kills [${off.culled.join(', ')}] (the kernel keeps running) · the prepass binds the PREV scene version (${prepassBindsPrev ? 'the two-pass HZB law' : 'MISSING'}) · view ON keeps the color pass alive under the strip · frozen frame gates [${frozen.gated.join(', ')}], verdicts ${staleScene}f stale · ${view.stats.slots} slot${view.stats.slots === 1 ? '' : 's'} sound · ${view.stats.barriers} barriers (${t.mode === 'webgl2' ? 'the GL frame is one lane — none needed' : 'the WG cross-lane set'}) · ${view.stats.compiles} compiles — ${graphOk ? 'PASS' : 'FAIL'}`)
+    shell.log.event(`frame graph @yaw ${camV.yaw.toFixed(2)}: ${off.live.length}-pass frame · Hi-Z OFF kills [${off.culled.join(', ')}] + gates the feedback branch (the kernel keeps running) · the prepass binds the PREV scene version (${prepassBindsPrev ? 'the two-pass HZB law' : 'MISSING'}) · the feedback chain: fill@scene-post-cull¹ ${fbBindsCull1 ? 'LIVE' : 'MISSING'} → cull² → fold@scene-post-cull² ${foldBindsCull2 ? 'LIVE' : 'MISSING'} (the version law's first same-frame consumer) · view ON keeps the color pass alive under the strip · frozen frame gates [${frozen.gated.join(', ')}], verdicts ${staleScene}f stale · ${view.stats.slots} slot${view.stats.slots === 1 ? '' : 's'} sound · ${view.stats.barriers} barriers (${t.mode === 'webgl2' ? 'the GL frame is one lane — none needed' : 'the WG cross-lane set'}) · ${view.stats.compiles} compiles — ${graphOk ? 'PASS' : 'FAIL'}`)
     if (!branchDead) shell.log.error(`frame-graph branch culling FAILED — the Hi-Z-off frame must drop z-fill + pyramid-reduce (got culled [${off.culled.join(', ')}])`)
+    if (!fbBranchDead) shell.log.error(`frame-graph feedback branch FAILED — the Hi-Z-off frame must gate the whole feedback branch (gated [${off.gated.join(', ')}])`)
+    if (!fbLive) shell.log.error(`frame-graph feedback chain FAILED — the ON frame must run feedback-fill + pyramid-reduce-2 + cull-verdicts-2 (live [${on.live.join(', ')}])`)
+    if (!fbBindsCull1) shell.log.error(`frame-graph feedback version law FAILED — the fill must read the scene version AFTER the first cull's write (the same-frame chain's own edge)`) 
+    if (!foldBindsCull2) shell.log.error(`frame-graph fold version law FAILED — the hysteresis must read the SECOND cull's write (the fold runs once, on the final verdicts)`) 
     if (!cullStillRuns) shell.log.error(`frame-graph cull FAILED — the OFF legs need the kernel running with the gate off (frustum verdicts)`)
     if (!prepassBindsPrev) shell.log.error(`frame-graph version law FAILED — the prepass must bind the scene version before this frame's cull write (the two-pass HZB's no-reprojection contract)`)
     if (!overlayOk) shell.log.error(`frame-graph overlay FAILED — the strip must stay a read-modify-write (the color pass live under it): live [${view.live.join(', ')}]`)
@@ -1017,6 +1101,20 @@ tierButton('History: OFF', false, on => {
   historyOn = on
   stats.history = on ? 1 : 0
   shell.log.event(`the history feedback ${on ? 'ON (the two-pass HZB — the prev-visible set becomes this frame\'s occluder set; watch the occluded count climb, the city occludes itself)' : 'OFF (the K-wall fill alone — the Task-201 prepass)'}`)
+  refreshHud()
+})
+// Task 207 — THE SAME-FRAME FEEDBACK TOGGLE (the current-frame two-pass
+// HZB — the boot default): the first cull's fresh visible set re-renders
+// depth-only into the pyramid, the pyramid rebuilds, a SECOND cull lands.
+// The colored city occludes ITSELF within the frame — put the camera down
+// among the boxes (looking along the plane, a near box covering the
+// screen) and watch the drawn count drop to the honest front layer, with
+// the pixel-parity gate proving nothing visible changed. OFF = the plain
+// single-cull frame (the Task-206 shape) — the comparison leg.
+tierButton('Self-occlusion: ON', true, on => {
+  feedbackOn = on
+  stats.feedback = on ? 1 : 0
+  shell.log.event(`the same-frame feedback ${on ? 'ON (the two-pass HZB, current-frame phase 2 — the first cull\'s survivors write depth, a second cull lands; the colored boxes occlude the boxes behind them, within THIS frame — put the camera close among the boxes and watch the drawn count)' : 'OFF (the plain single-cull frame — only the K gray occluders write depth; the colored boxes never occlude each other)'}`)
   refreshHud()
 })
 const valButton = document.createElement('button')

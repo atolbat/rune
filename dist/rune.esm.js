@@ -15617,6 +15617,26 @@ function attachHistoryPass(device, spec) {
     }
   };
 }
+function attachFeedbackPass(device, spec) {
+  const program = device.program({ depth: { test: "less", write: true }, cull: "back", wg: spec.shaders.wg, gl: spec.shaders.gl });
+  const block = new Float32Array(16);
+  const indexCount = spec.mesh.indices !== undefined ? spec.mesh.indices.length : 36;
+  return {
+    run(call) {
+      block.set(call.camera.mvp, 0);
+      device.drawInstanced({
+        target: spec.pyramid.zTarget,
+        clear: true,
+        program,
+        geometry: spec.mesh,
+        records: spec.scene,
+        uniforms: block,
+        instances: spec.scene.total,
+        indexCount: call.indexCount ?? indexCount
+      });
+    }
+  };
+}
 function attachHizScene(device, spec) {
   const pyr = spec.pyramid.build !== undefined ? spec.pyramid : device.pyramid(spec.pyramid.width, spec.pyramid.height);
   const surf = spec.surface !== undefined ? device.surface(spec.surface.width, spec.surface.height, { depth: true }) : null;
@@ -16005,6 +16025,7 @@ ${REDUCE}`;
     occlusionPass: (spec) => attachOcclusionPass(device, spec),
     hysteresisPass,
     historyPass: (spec) => attachHistoryPass(device, spec),
+    feedbackPass: (spec) => attachFeedbackPass(device, spec),
     visiblePass: (spec) => attachVisiblePass(device, spec),
     debugStrip: (spec) => attachDebugStrip(device, spec),
     readVerdicts,
@@ -16162,6 +16183,8 @@ function createGlDevice(renderer, options, clear) {
     for (const attr of prog.attrs) {
       if (attr.from === "records") {
         gl.bindVertexBuffer(s.recBuf, attr.location, attr.size, attr.stride, attr.offset, attr.divisor);
+      } else if (attr.from === "rawFlags") {
+        gl.bindVertexBuffer(s.flagBuf, attr.location, attr.size, attr.stride, attr.offset, attr.divisor);
       } else if (attr.from === "flags" && withFlags) {
         const feed = s.histA !== 0 ? s.histCur : s.flagBuf;
         gl.bindVertexBuffer(feed, attr.location, attr.size, attr.stride, attr.offset, attr.divisor);
@@ -16384,6 +16407,7 @@ function createGlDevice(renderer, options, clear) {
     occlusionPass: (spec) => attachOcclusionPass(device, spec),
     hysteresisPass,
     historyPass: (spec) => attachHistoryPass(device, spec),
+    feedbackPass: (spec) => attachFeedbackPass(device, spec),
     visiblePass: (spec) => attachVisiblePass(device, spec),
     debugStrip: (spec) => attachDebugStrip(device, spec),
     readVerdicts,

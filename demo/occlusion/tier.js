@@ -82,8 +82,8 @@
 // same bricks with the same props in the same order — the compiled
 // timeline IS the Task-202 recipe; the parity gates prove the graph
 // changed the SCHEDULING, never a pixel.
-import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=205'
-import { buildShaders } from './shaders.js?v=206'
+import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=207'
+import { buildShaders } from './shaders.js?v=207'
 import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H } from './scene.js?v=203'
 const SKY = [0.045, 0.055, 0.09, 1]
 const LIGHT = [0.5, 0.8, 0.35]
@@ -160,6 +160,11 @@ export async function buildTier(deps) {
   const surface = device.surface(SURF_W, SURF_H, { depth: true })
 
   const hist = device.historyPass({ scene: sceneHandle, mesh, pyramid, shaders: dict.hist, fill: dict.z })
+  // Task 207 — THE SAME-FRAME FEEDBACK BRICK: the first cull's fresh RAW
+  // visible set, depth-only into the tile (the second cull's seed — the
+  // colored city occludes ITSELF within the frame; the field report's own
+  // ask, answered with the survivors' depth instead of the whole scene's)
+  const fbfill = device.feedbackPass({ scene: sceneHandle, mesh, pyramid, shaders: dict.fbfill })
   const occl = device.occlusionPass({ scene: sceneHandle, pyramid, kernel: dict.cull })
   const smooth = device.hysteresisPass({ scene: sceneHandle, frames: HYST_FRAMES })
   const color = device.visiblePass({ scene: sceneHandle, mesh, shaders: dict.color, surface })
@@ -211,6 +216,36 @@ export async function buildTier(deps) {
     when: props => props.fresh === true,
     execute: ({ props }) => occl.run({ camera: props.camera, gate: props.culling === true }),
   })
+  // ══ Task 207 — THE SAME-FRAME FEEDBACK BRANCH (the two-pass HZB's
+  // CURRENT-FRAME phase 2: the user's «the colored boxes still don't occlude
+  // the rear colored boxes» answered in-graph) ════════════════════════════
+  // The first cull's fresh visible set V1 writes depth, the pyramid rebuilds,
+  // a SECOND cull lands — the city occludes ITSELF at the current camera for
+  // the survivors' depth price. THE VERSION LAW'S OWN SHOWCASE: this is the
+  // FIRST same-frame reader that binds the scene version AFTER a cull write
+  // (the edge cull-verdicts→feedback-fill scene@v1), where the z-fill above
+  // binds the imported one — the DAG now carries a real two-phase chain.
+  // Gating: the branch needs the cull's fresh verdicts (fresh), the pyramid
+  // (culling) and the policy bit itself — with any of them off the whole
+  // branch leaves the frame exactly like the shadows-off law.
+  fg.pass({
+    name: 'feedback-fill', kind: 'render', cost: 3,
+    reads: [R.scene, R.mesh], writes: [R.hiz],
+    when: props => props.feedback === true && props.culling === true && props.fresh === true,
+    execute: ({ props }) => fbfill.run({ camera: props.camera }),
+  })
+  fg.pass({
+    name: 'pyramid-reduce-2', kind: KERNEL, cost: 2,
+    reads: [R.hiz], writes: [R.hiz], // read-modify-write over the feedback fill's tile
+    when: props => props.feedback === true && props.culling === true && props.fresh === true,
+    execute: () => pyramid.build(),
+  })
+  fg.pass({
+    name: 'cull-verdicts-2', kind: KERNEL, cost: 1,
+    reads: [R.scene, R.hiz], writes: [R.scene],
+    when: props => props.feedback === true && props.culling === true && props.fresh === true,
+    execute: ({ props }) => occl.run({ camera: props.camera, gate: true }),
+  })
   fg.pass({
     name: 'hysteresis', kind: KERNEL, cost: 1,
     reads: [R.scene], writes: [R.scene],
@@ -260,13 +295,16 @@ export async function buildTier(deps) {
   let cullSkips = 0
   let lastFrame = null // the last compiled frame (the graph stats' source)
   let lastReport = null // the last run report (executed + staleness)
-  function renderTo(targetId, mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false) {
+  function renderTo(targetId, mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false, feedbackOn = true) {
     const camera = { mvp, eye }
     // NOTE the boolean hygiene (the Task-202 lesson): `historyOn !== 0`
     // with historyOn === false is TRUE — every gate answers `=== true` /
     // `props.x === true` from here on, both spellings (1/0 and booleans)
-    // ride the same law.
-    const key = `${hizOn ? 1 : 0}|${occluders}|${hysteresisOn ? 1 : 0}|${historyOn ? 1 : 0}`
+    // ride the same law. Task 207: `feedbackOn` defaults TRUE — the
+    // same-frame feedback is the BOOT POLICY now (the field report's ask);
+    // the plain single-cull frame is the explicit `false` leg.
+    const feedback = feedbackOn === true || feedbackOn === 1
+    const key = `${hizOn ? 1 : 0}|${occluders}|${hysteresisOn ? 1 : 0}|${historyOn ? 1 : 0}|${feedback ? 1 : 0}`
     let cached = cacheOn && lastCulled !== null && lastCulled.key === key
     if (cached) {
       for (let i = 0; i < 16; i++) {
@@ -283,6 +321,7 @@ export async function buildTier(deps) {
       pyramidView: debug === true,
       hysteresis: hysteresisOn === true,
       history: historyOn === true,
+      feedback,
       fresh: !cached,
       wantStats: wantStats === true,
     }
@@ -352,8 +391,8 @@ export async function buildTier(deps) {
     }).catch(() => { blitPending = false })
   }
 
-  function frame(mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false) {
-    renderTo(SNAPSHOT ? surface.targetId : 0, mvp, eye, hizOn, debug, occluders, hysteresisOn, historyOn, cacheOn, wantStats)
+  function frame(mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false, feedbackOn = true) {
+    renderTo(SNAPSHOT ? surface.targetId : 0, mvp, eye, hizOn, debug, occluders, hysteresisOn, historyOn, cacheOn, wantStats, feedbackOn)
     if (SNAPSHOT) blitSnapshot()
   }
 
@@ -415,8 +454,8 @@ export async function buildTier(deps) {
       ? `WebGL2 — FBO pyramid + TF cull + vertex-collapse draw${device.antialias ? ' · context MSAA' : ''}`
       : `WebGPU — storage pyramid + compute cull + one drawIndexedIndirect${device.antialias ? ' · MSAA 4x resolve' : ''}`,
     drawsLine: backend === 'webgl2'
-      ? `draws: 2 (fill + collapse color; +1 history set draw ON) · TF passes: 2 (cull + hysteresis) · ${pyramid.levels - 1} reduce quads`
-      : `draws: 2 (fill + indirect color; +1 history set draw ON) · dispatches: 3 (cull + hysteresis + compact) · ${pyramid.levels - 1} reduce quads`,
+      ? `draws: 2 (fill + collapse color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion) · TF passes: 2 (cull + hysteresis; +1 cull ON the feedback) · ${pyramid.levels - 1} reduce quads (×2 the feedback frame)`
+      : `draws: 2 (fill + indirect color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion) · dispatches: 3 (cull + hysteresis + compact; +1 cull ON the feedback) · ${pyramid.levels - 1} reduce quads (×2 the feedback frame)`,
     canvas: displayCanvas,
     surface,
     renderTo,

@@ -147,10 +147,13 @@ export interface UniformLane {
 
 /** A GL attribute declaration — the per-instance record feed. `from` names
  *  the buffer the DEVICE binds: 'geometry' (corner/quad), 'records' (the
- *  scene's float records), 'flags' (the culler's verdict buffer). */
+ *  scene's float records), 'flags' (the culler's verdict buffer), 'rawFlags'
+ *  (Task 207 — the RAW verdict buffer specifically, bypassing the smoothed
+ *  hist feed: the same-frame feedback fill reads what THIS frame's first
+ *  cull just TF-wrote, never the hysteresis fold's output). */
 export interface GlAttrDecl {
   readonly location: number
-  readonly from: 'geometry' | 'records' | 'flags'
+  readonly from: 'geometry' | 'records' | 'flags' | 'rawFlags'
   readonly size: number
   readonly stride: number
   readonly offset: number
@@ -433,6 +436,34 @@ export interface HistoryPassHandle {
   run(call: HistoryPassCall): void
 }
 
+// ─── Task 207 — THE SAME-FRAME FEEDBACK BRICK (the two-pass HZB's
+// CURRENT-FRAME phase 2 — the field report's own ask: «the colored boxes
+// still don't occlude the rear colored boxes»). Where the history brick
+// seeds phase 1 with the PREVIOUS frame's visible set (a one-frame lag),
+// this brick re-culls within the frame: the FIRST cull's fresh RAW
+// verdicts (flags ∈ {1,4}) re-render DEPTH-ONLY into the pyramid tile,
+// the pyramid rebuilds, and a SECOND cull lands — the colored city
+// occludes ITSELF at the CURRENT camera, zero temporal lag, for the price
+// of the SURVIVORS' depth (V1 ⊆ N — never the whole scene's fill the
+// brute «city occludes» policy pays). Sound by the same law the
+// city-occluders experiment proved: a builder never self-culls, and a box
+// the second cull removes is behind a surface drawn THIS frame at THIS
+// camera (the cover-transfer induction carries any culled occluder's
+// contribution to the present surface in front of it). WG: the storage
+// flags read directly in the vertex shader (no compact, no hist — the
+// temporal fold still runs ONCE per frame, on the FINAL verdicts); GL:
+// the collapse draw on the RAW verdict buffer (the rawFlags feed — the
+// TF-output→attribute law the no-hist configuration field-proved).
+export interface FeedbackPassCall {
+  readonly camera: { readonly mvp: ArrayLike<number> }
+  readonly indexCount?: number
+}
+export interface FeedbackPassHandle {
+  /** THE SAME-FRAME FEEDBACK FILL — the first cull's fresh visible set,
+   *  depth-only into the pyramid's level-0 tile (the second cull's seed). */
+  run(call: FeedbackPassCall): void
+}
+
 export interface VisiblePassCall {
   readonly target: number
   readonly camera: { readonly mvp: ArrayLike<number>; readonly eye: ArrayLike<number> }
@@ -594,6 +625,12 @@ export interface RenderDevice {
    *  phase 1) + the occluder fill on top. `shaders` = the prev-set
    *  column (the dictionary's `hist`), `fill` = the plain z column. */
   historyPass(spec: { scene: SceneHandle; mesh: GeometryHandle; pyramid: PyramidHandle; shaders: PassShaders; fill: PassShaders }): HistoryPassHandle
+  /** Task 207 — THE SAME-FRAME FEEDBACK PASS: the FIRST cull's fresh RAW
+   *  visible set (not the smoothed hist), drawn depth-only into the
+   *  pyramid's level-0 tile — the current-frame phase 2 (the second cull's
+   *  seed; the colored city occludes itself within the frame). `shaders` =
+   *  the dictionary's `fbfill` column. */
+  feedbackPass(spec: { scene: SceneHandle; mesh: GeometryHandle; pyramid: PyramidHandle; shaders: PassShaders }): FeedbackPassHandle
   visiblePass(spec: { scene: SceneHandle; mesh: GeometryHandle; shaders: PassShaders; surface?: DeviceSurface }): VisiblePassHandle
   debugStrip(spec: { pyramid: PyramidHandle; shaders: PassShaders }): DebugStripHandle
   /** Task 201 — the RAW per-record verdicts (1..4, pre-hysteresis): the
@@ -987,6 +1024,35 @@ function attachHistoryPass(device: RenderDevice, spec: { scene: SceneHandle; mes
           indexCount: count,
         })
       }
+    },
+  }
+}
+
+/** Task 207 — THE SAME-FRAME FEEDBACK PASS brick: the first cull's fresh
+ *  RAW visible set (flags ∈ {1,4} — NOT the smoothed hist feed: the temporal
+ *  fold must run exactly once per frame, on the FINAL verdicts), drawn
+ *  depth-only into the pyramid tile. Backend-agnostic by construction: the
+ *  WG column reads the storage flags in the vertex shader (one plain
+ *  instanced draw, instance = record); the GL column collapses on the
+ *  TF-written RAW verdict buffer (the rawFlags feed — the same shape the
+ *  no-hist configuration has always run). */
+function attachFeedbackPass(device: RenderDevice, spec: { scene: SceneHandle; mesh: GeometryHandle; pyramid: PyramidHandle; shaders: PassShaders }): FeedbackPassHandle {
+  const program = device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: spec.shaders.wg, gl: spec.shaders.gl })
+  const block = new Float32Array(16)
+  const indexCount = spec.mesh.indices !== undefined ? spec.mesh.indices.length : 36
+  return {
+    run(call: FeedbackPassCall): void {
+      block.set(call.camera.mvp, 0)
+      device.drawInstanced({
+        target: spec.pyramid.zTarget,
+        clear: true, // the fresh pyramid: the survivors replace the K walls entirely (V1 ⊇ every visible occluder — the cover-transfer law)
+        program,
+        geometry: spec.mesh,
+        records: spec.scene,
+        uniforms: block,
+        instances: spec.scene.total,
+        indexCount: call.indexCount ?? indexCount,
+      })
     },
   }
 }
@@ -1484,6 +1550,7 @@ ${REDUCE}`
     occlusionPass: (spec) => attachOcclusionPass(device, spec),
     hysteresisPass,
     historyPass: (spec) => attachHistoryPass(device, spec),
+    feedbackPass: (spec) => attachFeedbackPass(device, spec),
     visiblePass: (spec) => attachVisiblePass(device, spec),
     debugStrip: (spec) => attachDebugStrip(device, spec),
     readVerdicts,
@@ -1654,6 +1721,12 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     for (const attr of prog.attrs) {
       if (attr.from === 'records') {
         gl.bindVertexBuffer(s.recBuf, attr.location, attr.size, attr.stride, attr.offset, attr.divisor)
+      } else if (attr.from === 'rawFlags') {
+        // Task 207 — THE SAME-FRAME FEEDBACK FEED: the RAW verdicts the first
+        // cull TF-wrote THIS frame (never the smoothed hist — the temporal
+        // fold runs once, on the final verdicts). The TF-output→attribute
+        // readback is the no-hist configuration's own field-proven law.
+        gl.bindVertexBuffer(s.flagBuf, attr.location, attr.size, attr.stride, attr.offset, attr.divisor)
       } else if (attr.from === 'flags' && withFlags) {
         // Task 201 — the collapse feed reads the SMOOTHED verdicts when the
         // scene carries a hist region (the VS decodes floor(a_flag) — the
@@ -1926,6 +1999,7 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     occlusionPass: (spec) => attachOcclusionPass(device, spec),
     hysteresisPass,
     historyPass: (spec) => attachHistoryPass(device, spec),
+    feedbackPass: (spec) => attachFeedbackPass(device, spec),
     visiblePass: (spec) => attachVisiblePass(device, spec),
     debugStrip: (spec) => attachDebugStrip(device, spec),
     readVerdicts,
