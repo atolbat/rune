@@ -8,15 +8,64 @@ Task 208's research round answers the user's two standing asks:
 - **(B)** «как эффективно использовать окклюжен с произвольной неквадратной
   геометрией» — occlusion culling with arbitrary non-box geometry.
 
-**The honest status of the web sweep**: the fresh 2025–2026 search round was
-rate-limited out (the search service answered 429 to every paced query —
-`scripts/research208-search.mjs` keeps retrying in the background and
-re-runs when the quota recovers). Every anchor cited below with a ⚓ mark is
-one the 205–207 rounds VERIFIED by direct page reads (bevy PRs, Granite's
-hiz.comp, GPUPrefixSums, Chrome's subgroup ship, Pettineo's post); the
-analysis mapped onto our architecture is first-principles and marked ✎.
-Nothing below is a hallucinated citation — the 207 audit killed two phantoms
-and this doc keeps that law.
+**The fresh sweep re-ran on 2026-09-14 — and landed, by a second road.**
+The z-ai function quota is still exhausted (web_search 429'd all 13 paced
+queries — the limit is quota-based, not pace-based; page_reader shares the
+same pool), so the harvest went **direct-HTTP against the known URLs of the
+verified corpus**: the bevy PR/issue pages themselves, the occlusion-PR
+search listing, Pettineo's RSS. Every claim in the fresh-harvest section
+below was read from its own page TODAY (raw HTML archived locally under
+`scripts/out/research208/`, gitignored — the doc records the dates, states
+and titles the pages carried); the 205–207 anchors keep their ⚓ marks, the
+first-principles analysis keeps ✎, and `scripts/research208-search.mjs`
+stays in the tree for the day the search quota recovers and blind discovery
+of non-GitHub material becomes possible again. Nothing below is a
+hallucinated citation — the 207 audit killed two phantoms and this doc
+keeps that law.
+
+---
+
+## the fresh harvest (2026-09-14): the bevy line moved
+
+Our Task-207/208 architecture's upstream twin evolved past where the 207
+round left it — the full page-verified timeline:
+
+| when | # | what | state |
+|------|---|------|-------|
+| 2025-01-27 | PR #17413 | pcwalton's experimental GPU two-phase occlusion culling | **MERGED** (by alice-i-cecile, 32 commits) |
+| 2025-02-21 | PR #17951 | occlusion culling for directional light shadow maps | MERGED |
+| 2025-04-04 | Issue #18711 | «Swap to a hi-Z buffer approach … make it non-experimental» (alice-i-cecile): the merged form is experimental «because of known precision issues with the downsampling approach when applied to non-power-of-two framebuffer sizes»; the stated follow-up is «the SPD-based hi-Z buffer shader from the Granite engine» | CLOSED as duplicate of #14062 |
+| 2025-12-31 | PR #22286 | a mechanism for applications to invoke the single-pass downsampler (the Granite SPD, landed) | MERGED |
+| 2026-01-20 | PR #22603 | make hierarchical Z buffer generation properly conservative | MERGED |
+| 2026-01-21 | PR #22631 | **move occlusion culling out of the `experimental` namespace** | MERGED |
+| 2026-01-25 | PR #22699 | fix occlusion culling | MERGED |
+| 2026-03-23 | PR #23483 | storage-buffer limit check for gpu occlusion | MERGED |
+| 2026-03-29 | PR #23555 | fix stale occlusion culling components | MERGED |
+| — | Issue #14062 | «Occlusion culling is bugged at non-power-of-2 window sizes» | **OPEN** |
+
+Four consequences for us:
+
+1. **The graduation (#22631, 2026-01-21) is the strongest external
+   validation our direction could get**: the two-phase HZB architecture
+   Task 207 built and Task 208 seeded is now non-experimental bevy
+   mainline, surviving the conservative-pyramid fix (#22603) and the
+   stale-hygiene fix (#23555) that graduation demanded.
+2. **#22603 names a bug class we were born without**: our reduce takes
+   the max at every level unconditionally and sizes every level by
+   ceil-div (no power-of-two assumption anywhere) — upstream needed a PR
+   to become «properly conservative»; our pyramid never had another
+   spelling.
+3. **The open bug #14062 lives on OUR home turf**: non-power-of-two
+   buffers are the upstream failure surface, and our HZB tile is
+   480×270 — non-Po2 in both dimensions, the daily operating point since
+   Task 205. #18711's body names small meshes + non-Po2 as the precision
+   trap; our verdict-4 near-straddle guard and the fp32 reduce chain have
+   held pixel-parity on exactly that geometry.
+4. **#23555 (stale components) is the upstream twin of our seed
+   staleness metering**: they fixed stale per-entity culling state
+   crossing frames; our frame graph's staleness channel + the `seedActive`
+   gate are the same hygiene, expressed as scheduling policy instead of
+   component cleanup — convergent design under the same problem.
 
 ---
 
@@ -93,15 +142,21 @@ This IS the round's answer to «как оптимизировать сложны
 warm-up died, and the machinery that remains is the survivors' depth and
 the re-cull.
 
-### A4 — ⚓ THE SINGLE-PASS PYRAMID (subgroup / shared-mem SPD) — BACKLOG
+### A4 — ⚓ THE SINGLE-PASS PYRAMID (subgroup / shared-mem SPD) — BACKLOG, strengthened
 
 ⚓ Granite's `hiz.comp` (page-read in 207-rb) builds the whole max-pyramid
 in one dispatch via workgroup shared memory; the Chrome-134 subgroup
-feature makes the cross-warp reduce expressible. Kills 8 of 9 reduce
-dispatches = 8 fewer frame-graph sync points on the WG leg. **Verdict**:
-BACKLOG with the subgroup feature-gate + the shared-mem fallback (the
-207-rb conclusion stands); our tile is 480×270 — the 9 dispatches are
-tiny, the win is sync-point hygiene more than milliseconds.
+feature makes the cross-warp reduce expressible. **⚓ FRESH (2026-09-14):
+bevy shipped this exact thing** — PR #22286 (merged 2025-12-31) lands the
+invokable single-pass downsampler, and issue #18711's body names the
+motivation outright («switch to the SPD-based hi-Z buffer shader from the
+Granite engine» over the non-Po2 precision issues). The port now has a
+**WGSL/wgpu reference implementation in the bevy tree** — no GLSL→WGSL
+translation guesswork left. Kills 8 of 9 reduce dispatches = 8 fewer
+frame-graph sync points on the WG leg. **Verdict**: BACKLOG with the
+subgroup feature-gate + the shared-mem fallback (the 207-rb conclusion
+stands, now with a stronger port source); our tile is 480×270 — the 9
+dispatches are tiny, the win is sync-point hygiene more than milliseconds.
 
 ### A5 — ✎ DIRTY-REGION HZB REDUCE — REJECT (at this tile size)
 
@@ -133,6 +188,25 @@ day a backend gives queues — no action available now.
 
 Absent from both WebGPU and WebGL2 core. The HZB software form is the
 portable answer (and the reason this demo exists).
+
+### A9 — ⚓ PER-VIEW CULLING (the light's frustum) — BACKLOG (new this harvest)
+
+⚓ FRESH (2026-09-14): bevy PR #17951 (pcwalton, merged 2025-02-21)
+implements occlusion culling **for directional light shadow maps** — the
+same two-phase machinery run against the light's view-projection, culling
+the shadow pass itself.
+
+✎ Our demo's «shadows-off law» currently inverts the problem: when the
+shadow pass runs, culling is gated out of it entirely. The frame graph
+already runs verdict passes per phase-set and already owns the pyramid
+bricks — a second `cull-verdicts` against a light-frustum pyramid is the
+same brick with a different view-projection, and the frame graph would
+carry it as a parallel branch (the version-law showcase extends, not
+changes). The catch is honest: the light's «screen» is the shadow map,
+so the HZB tile, the near-straddle guard, and the feedback fill all need
+per-view instances — a real round, not a patch. **Verdict**: BACKLOG with
+a named trigger (a shadow-mapping demo whose shadow pass shows up in the
+frame budget).
 
 ---
 
@@ -242,11 +316,12 @@ geometry trap on the occluder side.
 | A1 | parallel compact (ballot / TileScan, stable) | **IMPLEMENT** (Task 209 candidate) |
 | A2 | front-to-back color order (early-Z harvest) | **IMPLEMENT** (Task 209 candidate, pairs with A1) |
 | A3 | cross-frame seed (bevy delta) | **IMPLEMENTED — Task 208, this round** |
-| A4 | single-pass pyramid (subgroup SPD) | BACKLOG (feature-gated) |
+| A4 | single-pass pyramid (subgroup SPD) | BACKLOG, strengthened (bevy #22286 shipped it; WGSL port source now exists) |
 | A5 | dirty-rect HZB reduce | REJECT at 480×270 (revisit at 4K tiles) |
 | A6 | depth reuse from the presented frame | BACKLOG |
 | A7 | async compute overlap | BACKLOG (backend-gated; the plan exists) |
 | A8 | hardware occlusion queries | REJECT (absent on the web) |
+| A9 | per-view culling (the light's frustum) | BACKLOG (⚓ bevy #17951; trigger: a shadow pass in the frame budget) |
 | B1 | convex-hull / OBB queries in the kernel | **IMPLEMENT** (Task 209 candidate — the layout + loop) |
 | B2 | arbitrary meshes as occluders | already supported (document; demo variant) |
 | B3 | meshlet normal-cone pretest | BACKLOG (needs meshlet content) |
@@ -255,10 +330,18 @@ geometry trap on the occluder side.
 | B6 | alpha-tested cards as occluders | BACKLOG (recipe in this doc) |
 | B7 | skinned conservative bounds | BACKLOG (recipe in this doc) |
 
-**The fresh-sweep caveat**: the 2025–2026 web pass was rate-limited out
-this round (429s throughout, `scripts/research208-search.mjs` keeps
-retrying in the background); the ⚓ anchors are the 205–207 rounds'
-page-verified set, the ✎ entries are first-principles analysis against
-our own measured numbers. When the quota recovers the sweep re-runs and
-this doc gains its fresh-harvest section — the do-not-re-report list at
-the top of the script keeps it honest.
+**The fresh-sweep postscript**: the harvest landed on 2026-09-14 by the
+direct-HTTP road (the section above tells the how); the ⚓ anchors are
+page-verified — 205–207 for the old set, TODAY for the bevy timeline — and
+the ✎ entries are first-principles analysis against our own measured
+numbers. One attribution correction the harvest surfaced:
+`demo/occlusion/tier.js` calls #18711 a «PR» in two comment lines — it is
+an ISSUE (the hi-Z/SPD graduation tracker, closed as a duplicate of
+#14062); the late-downsample position itself is #17413's implementation,
+which #18711's thread tracks for the downsampler swap. The two comment
+lines ride the next code-touching round's version bump (a comment-only
+edit would leave `?v=208`-cached copies stale for nothing).
+
+**Pettineo check (RSS, 2026-09-14)**: the newest post remains «Ten Years
+of D3D12» (Sep 7, 2025); «To Early-Z, or Not To Early-Z» (Apr 2025) is
+still his latest occlusion-relevant word — A2's anchor is current.

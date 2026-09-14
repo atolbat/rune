@@ -8,3 +8,5 @@ coverage/
 # heavy binary fixtures (Mixamo etc.) are not part of the library
 packages/*/demo/assets/
 .shots/
+# research harvest archives (raw HTML/JSON page reads — local evidence, not source)
+scripts/out/
