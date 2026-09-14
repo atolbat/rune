@@ -36,6 +36,28 @@
     .pt-pill[hidden] { display: none; }
     .pt-pill .pt-live { color: #6b7691; }
 
+    /* Task 204 — the frame-graph HUD line: the compiled frame's own numbers
+       (live/gated/culled passes, barriers, aliasing slots, the overlap plan,
+       the state's staleness), updated at the stats cadence. */
+    .pt-graph {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: calc(env(safe-area-inset-bottom, 0px) + 58px);
+      z-index: 14;
+      max-width: calc(100% - 24px);
+      padding: 5px 12px;
+      border-radius: 8px;
+      background: rgb(11 13 19 / 0.62);
+      color: #8a94ad;
+      font: 10.5px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      pointer-events: none;
+    }
+    .pt-graph[hidden] { display: none; }
+
     /* Bottom sheet: preset list + the note. */
     .pt-sheet {
       position: absolute;
@@ -120,6 +142,6 @@
 <body>
   <div id="app"></div>
   <script src="../shared/demo-shell.js"></script>
-  <script type="module" src="./main.js?v=199"></script>
+  <script type="module" src="./main.js?v=204"></script>
 </body>
 </html>

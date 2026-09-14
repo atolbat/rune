@@ -20,7 +20,7 @@
 // restore wire — the context-loss recovery — rides the Task-167
 // sync-point pass; the dist changed, the mark moves), the untouched bundles
 // keep their Task 149 marks.
-import { createRenderer, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=199'
+import { createRenderer, createFrameGraph, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=204'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER, BILLBOARD,
@@ -759,17 +759,28 @@ const shell = window.RuneDemoShell.mount({
   defaults: { mode: 'auto' },
   onMode: (mode) => void boot(mode),
   onPause: () => {
-    activeRenderer?.stop()
-    shell.log.event('Paused')
+    // Task 204 — THE GRAPH'S PAUSE: the sim pass is GATED OUT of the frame
+    // (the renderer keeps presenting). The state goes stale — the graph's
+    // own metric counts the frames; the auto-orbit keeps moving so the
+    // frozen state stays inspectable from every side.
+    running = false
+    shell.log.event('Paused — the sim pass gated out of the frame; the layers keep drawing the frozen state (watch the staleness counter in the graph line)')
   },
   onResume: () => {
-    activeRenderer?.start()
-    shell.log.event('Resumed')
+    running = true
+    shell.log.event('Resumed — the sim pass rejoins the frame')
   },
 })
 
 const bar = document.createElement('div')
 bar.className = 'pt-bar'
+
+// Task 204 — the frame-graph HUD line (the compiled frame's own numbers:
+// live/gated/culled passes, barriers, the soup aliasing, the overlap plan,
+// the state's staleness) — updated at the stats cadence, sits above the bar.
+const graphEl = document.createElement('div')
+graphEl.className = 'pt-graph'
+graphEl.hidden = true
 const prevBtn = document.createElement('button')
 prevBtn.type = 'button'
 prevBtn.className = 'pt-arrow'
@@ -1156,12 +1167,283 @@ function attachLayers() {
     else buildLayerCommand(layer)
     layer.commandBuilt = true
   }
+  // Task 204 — the layer set is complete (and the renderer is live): the
+  // frame's DECLARATION is (re)built here, per activation/boot
+  buildFrameGraph()
 }
 
-/* ─── The frame ───────────────────────────────────────────────────────── */
+/* ─── The declared frame (Task 204 — the recipe as DATA, at carousel scale)
+ * The same @rune/core brick, a THIRD recipe: every demo switch RE-DECLARES
+ * its own graph from the layer set it registered — the declaration is
+ * cheap, the compile is cached, and the DAG is the demo's own shape:
+ *
+ *   sim        compute*  reads [state]  writes [state]  · gated `running`
+ *              (the demo's tick — state.frame; Pause gates it, the layers
+ *              keep baking + drawing the frozen state, the staleness
+ *              counts. The manual-mesh demos — the follow box — record
+ *              their draw INSIDE the tick: the demo owns that record, the
+ *              graph counts it in the sim's cost)
+ *   prepass:L  render   writes [depth:L]  · keep (a RAW layer — the soft
+ *              demo's depth prepass; its consumer — the SOFT_PARTICLES
+ *              depth sample — lives inside the demo's own closure, so the
+ *              graph keeps the pass by the side-effect law)
+ *   bake:L     copy     reads [state]    writes [soup:L (transient)]
+ *              (the facade view + the live-prefix upload; a GPU-tier
+ *              layer's bake is the count view — its records are packed
+ *              GPU-side, the packing rode the sim pass)
+ *   draw:L     render   reads [soup:L, target]  writes [target]
+ *              (THE OVERLAY LAW, generalized — see below)
+ *   draw:M     render   reads [mesh:M, target]  writes [target]  (static)
+ *   labels     copy     keep — the DOM label projection (the camera's own
+ *              mvp; no GPU resource)
+ *   stats      copy     reads [state]    · gated `wantStats` (~4 Hz)
+ *   present    present  reads [target]  (the renderer submits at the
+ *              callback's return — the boundary node; its execute carries
+ *              the frame tick the shots gate samples)
+ *
+ *   THE OVERLAY LAW, GENERALIZED (the probe caught the WAW-dead-branch on
+ *   the first cut): EVERY draw reads the target it draws onto — not just
+ *   the blended ones. The honest reason: every pipeline here depth-TESTS
+ *   ('less') — the depth attachment is part of the target's state, so an
+ *   opaque draw is still a read-modify-write. A pure-write declaration
+ *   would make an overwritten version reader-less — the graph would
+ *   lawfully CULL the earlier opaque draws (the floor under the particles
+ *   vanished from the frame: dead branches, exactly the Task-203 «strip
+ *   would cull the color pass» class). The read chains draw→draw→present,
+ *   and the WAW hazards between same-lane writers ride the queue's own
+ *   order — the barrier model's documented law.
+ *
+ *   (*) the sim KIND is the tier's own truth, decided at declaration: a
+ *       GPU-tier demo on WebGPU is COMPUTE (the orchestrator's dispatches
+ *       run in state.frame), on WebGL2 it is RENDER (the transform-
+ *       feedback mechanism is render-pass shaped — the occlusion tier's
+ *       KERNEL law); the CPU tier's JS rides the frame's own timeline as
+ *       the compute concept lane. THE ALIASING STORY at scale: the per-
+ *       layer soup transients have DISJOINT lifetimes ([bake:L..draw:L]
+ *       chains, strictly sequenced) — the planner folds them into ONE
+ *       slot: N soups, one buffer's worth of planned memory. */
+
+let fg = null
+let fgLastFrame = null
+let fgLastReport = null
+let running = true // the sim pass's gate (shell Pause/Resume)
+let currentFrameCtx = null
+let currentRecord = null
+let liveVerts = 0
+const layerSoup = new Map() // layer → this frame's soup view
+
+function buildFrameGraph() {
+  fg = createFrameGraph()
+  layerSoup.clear()
+  // the demo files may reuse an id (the soft demo's THREE torus knots all
+  // ride 'soft-knot') — one handle is one identity: unique-ify the declared
+  // names (mesh:soft-knot, mesh:soft-knot~2, mesh:soft-knot~3 …)
+  const usedNames = new Set()
+  const uniq = (name) => {
+    if (!usedNames.has(name)) { usedNames.add(name); return name }
+    let n = 2
+    while (usedNames.has(`${name}~${n}`)) n++
+    const unique = `${name}~${n}`
+    usedNames.add(unique)
+    return unique
+  }
+  const gpuTier = layers.some(l => l.gpuBackend != null)
+  const simKind = gpuTier ? (activeRenderer !== null && activeRenderer.backend === 'webgl2' ? 'render' : 'compute') : 'compute'
+  let stateBytes = 0
+  for (const l of layers) stateBytes += (l.facade?.capacity ?? 0) * 80
+  const R = {
+    state: fg.resource({ name: 'state', kind: 'buffer', bytes: Math.max(stateBytes, 4), transient: false, exported: true }),
+    target: fg.resource({ name: 'target', kind: 'texture', transient: false }),
+  }
+  fg.pass({
+    name: 'sim', kind: simKind, cost: 5,
+    reads: [R.state], writes: [R.state],
+    when: (p) => p.running === true,
+    execute: () => { if (state !== null && state.frame !== undefined) state.frame(currentFrameCtx, rhythm) },
+  })
+  layers.forEach((layer, index) => {
+    const id = layer.id ?? `L${index}`
+    if (layer.record !== undefined) {
+      // a RAW layer (the soft demo's depth prepass; the grass field) —
+      // kept: its consumer is the demo's own closure
+      const depth = fg.resource({ name: uniq(`depth:${id}`), kind: 'texture', transient: false })
+      fg.pass({
+        name: uniq(`prepass:${id}`), kind: 'render', cost: 2,
+        writes: [depth], keep: true,
+        execute: () => layer.record(currentFrameCtx),
+      })
+      return
+    }
+    if (layer.staticMesh === true) {
+      if (layer.manual === true) return // records itself inside the demo's tick (the sim pass)
+      const mesh = fg.resource({ name: uniq(`mesh:${id}`), kind: 'buffer', bytes: (layer.geometry?.positions?.length ?? 8) * 4, transient: false })
+      fg.pass({
+        name: uniq(`draw:${id}`), kind: 'render', cost: 2,
+        // the overlay law, generalized: the depth test READS the target
+        reads: [mesh, R.target],
+        writes: [R.target],
+        execute: () => {
+          mat4Multiply(MODEL_MVP, mvp, layer.model ?? MODEL)
+          currentRecord(layer.command, { mvp: MODEL_MVP, model: layer.model ?? MODEL, camPos: camEye })
+        },
+      })
+      return
+    }
+    // a dynamic facade layer: bake (view + upload) then draw (record)
+    const soup = fg.resource({ name: uniq(`soup:${id}`), kind: 'buffer', bytes: (layer.facade?.capacity ?? 64) * 144 })
+    fg.pass({
+      name: uniq(`bake:${id}`), kind: 'copy', cost: 2,
+      reads: [R.state], writes: [soup],
+      execute: () => bakeLayer(layer),
+    })
+    fg.pass({
+      name: uniq(`draw:${id}`), kind: 'render', cost: 3,
+      // the overlay law, generalized (see the declaration comment): every
+      // draw depth-tests → reads the target, blended or opaque
+      reads: [soup, R.target],
+      writes: [R.target],
+      execute: () => drawLayer(layer),
+    })
+  })
+  if (labels.length > 0) {
+    fg.pass({
+      name: 'labels', kind: 'copy', cost: 1, keep: true,
+      execute: placeLabels,
+    })
+  }
+  fg.pass({
+    name: 'stats', kind: 'copy', cost: 1,
+    reads: [R.state],
+    when: (p) => p.wantStats === true,
+    execute: () => updatePill(liveVerts),
+  })
+  fg.pass({
+    name: 'present', kind: 'present', cost: 1,
+    reads: [R.target],
+    execute: () => {
+      // the frame tick (the shots gate samples it — a new tick means a
+      // new PRESENTED frame)
+      if (typeof window !== 'undefined') window.__vfxFrame = (window.__vfxFrame ?? 0) + 1
+    },
+  })
+}
+
+/** One dynamic layer's bake: the facade view + the live-prefix upload
+ *  (the loop's own body, extracted verbatim — the pass boundary rides the
+ *  same sequence). */
+function bakeLayer(layer) {
+  const soup = layer.facade.view(BASIS)
+  layerSoup.set(layer, soup)
+  if (soup.draw === 'instance') {
+    // Task 131/132 — the instanced path: upload the LIVE RECORD PREFIX
+    // (16 floats × instanceCount); the GPU tier (BOTH backends) binds the
+    // EXTERNAL records buffer through the command's bufferIds — the CPU
+    // array is zeros in gpuMode and syncing it pours dead megabytes.
+    const instanceCount = soup.instanceCount
+    if (instanceCount > 0 && layer.gpuBackend == null) {
+      const liveFloats = instanceCount * soup.stride
+      if (layer.glDyn !== undefined) layer.glDyn.gl.updateBuffer(layer.glDyn.bufferId, soup.vertices.subarray(0, liveFloats))
+      else if (layer.gpuDyn !== undefined) layer.gpuDyn.syncVertexBuffer(soup.vertices, liveFloats * 4)
+    }
+    return
+  }
+  const vertexCount = soup.vertexCount
+  if (vertexCount > 0) {
+    // Task 180 — the LIVE PREFIX on the soup path too
+    const liveBytes = vertexCount * soup.stride * 4
+    if (layer.glDyn !== undefined) layer.glDyn.gl.updateBuffer(layer.glDyn.bufferId, soup.vertices.subarray(0, vertexCount * soup.stride))
+    else if (layer.gpuDyn !== undefined) layer.gpuDyn.syncVertexBuffer(soup.vertices, liveBytes)
+  }
+}
+
+/** One dynamic layer's draw: the record call (the counts and the props —
+ *  the same resolvers the loop fed). */
+function drawLayer(layer) {
+  const soup = layerSoup.get(layer)
+  if (soup === undefined) return
+  if (soup.draw === 'instance') {
+    const instanceCount = soup.instanceCount
+    if (instanceCount > 0) {
+      currentRecord(layer.command, { mvp, model: MODEL, camPos: camEye, instanceCount, ...(layer.props?.(currentFrameCtx) ?? {}) })
+      // Task 181 — the soup's counting discipline (4 unique corners per
+      // instance, the shared two are vertex-cache hits)
+      liveVerts += instanceCount * 4
+    }
+    return
+  }
+  const vertexCount = soup.vertexCount
+  if (vertexCount > 0) {
+    // Task 180 — indexCount rides the props ONLY for the indexed quad soup
+    const indexed = soup.indices != null
+    currentRecord(layer.command, {
+      mvp, model: MODEL, camPos: camEye, vertexCount,
+      ...(indexed ? { indexCount: soup.indexCount } : {}),
+      ...(layer.props?.(currentFrameCtx) ?? {}),
+    })
+    liveVerts += vertexCount
+  }
+}
+
+/** The DOM labels' projection (the loop's own body). */
+function placeLabels() {
+  if (labels.length === 0) return
+  const out = [0, 0, 0]
+  for (const l of labels) {
+    if (env.project(l.x, l.y, l.z, out)) {
+      l.el.style.transform = `translate(${out[0].toFixed(1)}px, ${out[1].toFixed(1)}px) translate(-50%, -140%)`
+      l.el.style.opacity = '1'
+    } else {
+      l.el.style.opacity = '0'
+    }
+  }
+}
+
+function graphStats() {
+  if (fgLastFrame === null) return null
+  return {
+    key: fgLastFrame.key,
+    live: fgLastFrame.passes.map(p => p.name),
+    gated: [...fgLastFrame.gated],
+    culled: [...fgLastFrame.culled],
+    barriers: fgLastFrame.barriers.map(b => `${b.after}→${b.before} ${b.resource} ${b.class} ${b.lanes}`),
+    edges: fgLastFrame.edges.map(e => `${e.from ?? 'import'}→${e.to} ${e.resource}@${e.version}`),
+    slots: fgLastFrame.slots.map(s => ({ external: s.external, peakBytes: s.peakBytes, intervals: s.intervals.map(i => `${i.resource}@${i.version}[${i.from}..${i.to}]`) })),
+    overlap: {
+      units: fgLastFrame.overlap.overlapUnits,
+      parallel: fgLastFrame.overlap.parallel.map(p => p.pass),
+      busy: { ...fgLastFrame.overlap.busy },
+      criticalPath: fgLastFrame.overlap.criticalPath,
+    },
+    stats: { ...fgLastFrame.stats },
+    stale: { ...(fgLastReport?.stale ?? {}) },
+    executed: [...(fgLastReport?.executed ?? [])],
+  }
+}
+
+function graphLine() {
+  if (fgLastFrame === null) return ''
+  const s = fgLastFrame.stats
+  const g = fgLastFrame.gated.length > 0 ? ` · gated ${fgLastFrame.gated.join('+')}` : ''
+  const c = fgLastFrame.culled.length > 0 ? ` · culled ${fgLastFrame.culled.join('+')}` : ''
+  const par = fgLastFrame.overlap.parallel.map(p => `${p.pass}∥`).join(' ') || '—'
+  const staleState = fgLastReport?.stale?.state ?? -1
+  return `frame graph: ${s.live}/${s.declared} live${g}${c} · ${s.barriers} barrier${s.barriers === 1 ? '' : 's'} · ${s.slots} slot${s.slots === 1 ? '' : 's'} · peak ${(s.peakBytes / 1024).toFixed(0)} KB (alias −${s.savedPct.toFixed(0)}%) · plan ∥ ${par} · state ${staleState < 0 ? 'imported' : `${staleState}f stale`} · ${s.compiles} compile${s.compiles === 1 ? '' : 's'}`
+}
+
+if (typeof window !== 'undefined') {
+  window.__fgDebug = {
+    note: 'the frame-graph channel — last() dumps the compiled frame (passes, slots, barriers, overlap, staleness)',
+    last: () => graphStats(),
+  }
+}
+
+/* ─── The frame = compile(policy) + run(props) ───────────────────────── */
 
 function frameCallback(ctx, record) {
-  // auto-orbit: paused while dragging and for 1.5 s after
+  currentRecord = record
+  // auto-orbit: paused while dragging and for 1.5 s after. NOTE — the
+  // shell Pause gates the SIM pass, not the camera: the frozen state stays
+  // inspectable from every side (the staleness counter is the metric)
   if (!dragging && performance.now() - lastInteraction > 1500) camYaw += ctx.dt * presetOrbit
 
   if (ctx.aspect !== cachedAspect) {
@@ -1187,11 +1469,7 @@ function frameCallback(ctx, record) {
   env.width = ctx.size[0]
   env.height = ctx.size[1]
   frameTime += ctx.dt
-  // the frame tick (the shots gate samples it): a slow rasterizer can
-  // take > 300 ms per frame — the gate waits for a NEW tick between its
-  // screenshot pair instead of a fixed window (which would sample the
-  // same frame twice and read a live canvas as FROZEN)
-  if (typeof window !== 'undefined') window.__vfxFrame = (window.__vfxFrame ?? 0) + 1
+  liveVerts = 0
 
   // ── the demo's own logic (advance, camera overrides, prepasses) ──
   const frameCtx = {
@@ -1203,91 +1481,17 @@ function frameCallback(ctx, record) {
     // box): gl_Position wants the model folded INTO the mvp.
     modelMvp: (model) => { mat4Multiply(MODEL_MVP, mvp, model); return MODEL_MVP },
   }
-  if (state.frame !== undefined) state.frame(frameCtx, rhythm)
+  currentFrameCtx = frameCtx
 
-  // ── bake + upload + draw every layer, in registration order ──
-  let liveVerts = 0
-  for (const layer of layers) {
-    // a RAW layer (the soft demo's depth prepass): the demo owns the record
-    if (layer.record !== undefined) {
-      layer.record(frameCtx)
-      continue
-    }
-    if (layer.staticMesh === true) {
-      // a manual layer (the follow demo's moving box) records itself with
-      // its own dynamic model matrix
-      if (layer.manual !== true) {
-        mat4Multiply(MODEL_MVP, mvp, layer.model ?? MODEL)
-        record(layer.command, { mvp: MODEL_MVP, model: layer.model ?? MODEL, camPos: camEye })
-      }
-      continue
-    }
-    const soup = layer.facade.view(BASIS)
-    if (soup.draw === 'instance') {
-      // Task 131 — the instanced path: upload the LIVE RECORD PREFIX (16
-      // floats × instanceCount — a subarray, the rendererFeed pattern),
-      // draw the shared quad pattern × the instance count through the
-      // Task-181 indexed BB command (4 unique corners per instance).
-      const instanceCount = soup.instanceCount
-      if (instanceCount > 0) {
-        // Task 132 — the GPU tier (BOTH backends: the WebGPU compute records
-        // OR the WebGL2 transform-feedback records) binds the EXTERNAL
-        // records buffer through the command's bufferIds — the CPU array is
-        // zeros in gpuMode and syncing it pours dead megabytes per frame.
-        if (layer.gpuBackend == null) {
-          const liveFloats = instanceCount * soup.stride
-          if (layer.glDyn !== undefined) layer.glDyn.gl.updateBuffer(layer.glDyn.bufferId, soup.vertices.subarray(0, liveFloats))
-          else if (layer.gpuDyn !== undefined) layer.gpuDyn.syncVertexBuffer(soup.vertices, liveFloats * 4)
-        }
-        record(layer.command, { mvp, model: MODEL, camPos: camEye, instanceCount, ...(layer.props?.(frameCtx) ?? {}) })
-        // Task 181 — the soup's counting discipline (the pill's verts =
-        // UNIQUE corner records): 4 unique corners per instance, the two
-        // shared ones are vertex-cache hits, not records.
-        liveVerts += instanceCount * 4
-      }
-      continue
-    }
-    const vertexCount = soup.vertexCount
-    const liveBytes = vertexCount * soup.stride * 4
-    // Task 180 — both legs ship the LIVE PREFIX (the GL leg used to pour
-    // the whole capacity array every frame regardless of the live count —
-    // the WG leg's own liveBytes discipline, now shared).
-    if (layer.glDyn !== undefined && vertexCount > 0) layer.glDyn.gl.updateBuffer(layer.glDyn.bufferId, soup.vertices.subarray(0, vertexCount * soup.stride))
-    else if (layer.gpuDyn !== undefined && vertexCount > 0) layer.gpuDyn.syncVertexBuffer(soup.vertices, liveBytes)
-    if (vertexCount > 0) {
-      // Task 180 — indexCount rides the props ONLY for the indexed quad
-      // soup (mesh/trail soups leave it out: their count stays the plain
-      // vertex count — a literal 0 would win the resolver's ?? and kill
-      // the layer).
-      const indexed = soup.indices != null
-      record(layer.command, {
-        mvp, model: MODEL, camPos: camEye, vertexCount,
-        ...(indexed ? { indexCount: soup.indexCount } : {}),
-        ...(layer.props?.(frameCtx) ?? {}),
-      })
-      liveVerts += vertexCount
-    }
-  }
-
-  // ── the world labels (project + place) ──
-  if (labels.length > 0) {
-    const out = [0, 0, 0]
-    for (const l of labels) {
-      if (env.project(l.x, l.y, l.z, out)) {
-        l.el.style.transform = `translate(${out[0].toFixed(1)}px, ${out[1].toFixed(1)}px) translate(-50%, -140%)`
-        l.el.style.opacity = '1'
-      } else {
-        l.el.style.opacity = '0'
-      }
-    }
-  }
-
-  // the stats pill (~4 Hz)
+  // the stats cadence (~4 Hz) — the POLICY prop the stats pass keys on
   statsAccum += ctx.dt
-  if (statsAccum > 0.25) {
-    statsAccum = 0
-    updatePill(liveVerts)
-  }
+  const wantStats = statsAccum > 0.25
+  if (wantStats) statsAccum = 0
+
+  if (fg === null) return // (pre-boot: the frame only runs after attachLayers built the graph)
+  const props = { running, wantStats }
+  fgLastFrame = fg.compile(props) // cached by policy — the bit-still frames reuse the compiled object
+  fgLastReport = fgLastFrame.run(props)
 }
 
 function updatePill(vertexCount) {
@@ -1299,6 +1503,7 @@ function updatePill(vertexCount) {
   span.textContent = `${live.toLocaleString('en-US')} particles · ${vertexCount.toLocaleString('en-US')} verts`
   pill.textContent = `${demo.title} · `
   pill.append(span)
+  graphEl.textContent = graphLine()
 }
 
 /* ─── Input: orbit + zoom (the particles demo's machinery) ───────────── */
@@ -1513,7 +1718,7 @@ async function boot(mode) {
     // the canvas is ALREADY in the slot (parked in place — it never moved);
     // unhide it and re-append only the chrome around it
     try { canvas.style.display = '' } catch { /* best-effort */ }
-    shell.slot.append(labelLayer, bar, sheet, dragHint)
+    shell.slot.append(labelLayer, graphEl, bar, sheet, dragHint)
     liveCanvas = canvas
     env.canvas = canvas
     shell.log.event(`Booting: “${MODE_NAMES[mode] ?? mode}”`)
@@ -1530,6 +1735,7 @@ async function boot(mode) {
     attachLayers()
     renderer.start()
     bar.hidden = false
+    graphEl.hidden = false
     shell.setBadge('WebGL2', 'gl')
     shell.log.info('Backend: WebGL2')
     // Task 152 — the context line counts REAL contexts: a resurrect does
@@ -1540,7 +1746,7 @@ async function boot(mode) {
   } else {
     const canvas = document.createElement('canvas')
     canvas.id = 'canvas'
-    shell.slot.append(labelLayer, canvas, bar, sheet, dragHint)
+    shell.slot.append(labelLayer, graphEl, canvas, bar, sheet, dragHint)
     liveCanvas = canvas
     env.canvas = canvas
     bindInput(canvas)
@@ -1580,6 +1786,7 @@ async function boot(mode) {
       renderer.frame(frameCallback)
       if (seq !== bootSeq) return
       bar.hidden = false
+      graphEl.hidden = false
       const backendName = renderer.backend === 'webgpu' ? 'WebGPU' : 'WebGL2'
       if (renderer.backend === 'webgl2') {
         glContexts++

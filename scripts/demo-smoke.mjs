@@ -235,6 +235,16 @@ try {
 
   // 8. Switching to a not-yet-loaded model brings the load button back
   await page.click('.mv-pill') // open the model sheet
+  // Task 204 — THE PICKING BRICKS (on the loaded HOUSE — 12 meshes, 11k
+  // triangles): the forward consistency (real vertices projected through
+  // the frame's own matrices must be picked back) + the BVH-vs-brute
+  // parity on both tiers (the mesh walk + the triangle walk)
+  const viewerPick = await page.evaluate(() => ({
+    self: window.__mvDebug?.selfTest?.(40) ?? null,
+    probe: window.__mvDebug?.probe?.(40) ?? null,
+  }))
+  const viewerPickOk = viewerPick.self?.pass === true && viewerPick.probe?.pass === true
+  console.log(`[smoke] model-viewer picking: self ${viewerPick.self?.picked}/${viewerPick.self?.trials} projected-back · parity ${viewerPick.probe?.checks} checks, ${viewerPick.probe?.mismatches} mismatches (${viewerPickOk ? 'PASS' : 'FAIL'})`)
   await page.click('.mv-rows .mv-row:nth-child(2)')
   await page.waitForFunction(
     () => (document.querySelector('.mv-load')?.textContent ?? '').includes('Load'),
@@ -390,6 +400,23 @@ try {
   const particlesPill = await page.textContent('.pt-pill')
   console.log(`[smoke] particles pill: ${particlesPill}`)
   const particlesOk = particlesPill.includes('Fountain') && particlesPill.includes('verts')
+  // Task 204 — the declared frame: the graph channel + the HUD line + the
+  // cull accounting (the pill carries the culled count)
+  await page.waitForFunction(
+    () => (document.querySelector('.pt-graph')?.textContent ?? '').includes('frame graph:'),
+    null,
+    { timeout: 10_000 },
+  )
+  const particlesGraph = await page.textContent('.pt-graph')
+  console.log(`[smoke] particles graph line: ${particlesGraph}`)
+  const particlesFg = await page.evaluate(() => window.__fgDebug?.last?.() ?? null)
+  const particlesFgOk = particlesFg !== null
+    && particlesFg.live.includes('sim') && particlesFg.live.includes('present')
+    && particlesFg.live.includes('bake') && particlesFg.live.includes('draw')
+  const particlesCull = await page.evaluate(() => window.__ptCull?.() ?? null)
+  const particlesCullOk = particlesCull !== null
+    && Math.abs(particlesCull.alive - particlesCull.baked - particlesCull.culled) <= 2
+  console.log(`[smoke] particles frame graph: ${particlesFgOk ? 'live (sim→bake→upload→draw→present)' : 'MISSING'} · cull accounting ${particlesCullOk ? 'exact' : 'BROKEN'}`)
   const particlesAlive = await framesDiffer(page)
   console.log(`[smoke] particles animation: ${particlesAlive ? 'alive (the soup re-bakes per frame)' : 'STATIC'}`)
   // preset switch: the galaxy (spiral arms + tangential orbits)
@@ -541,6 +568,15 @@ try {
   const vfxGpuClean = !/too small|Invalid CommandBuffer|rendering stopped|GL: GL_|GPU: |failed/i.test(vfxLogText)
   console.log(`[smoke] vfx GPU health: ${vfxGpuClean ? 'clean' : 'GPU ERRORS in the log'}`)
   if (!vfxGpuClean) console.log(`[smoke] log tail: ${vfxLogText.slice(-600)}`)
+  // Task 204 — the per-boot declared frame: the graph channel + the HUD line
+  const vfxGraph = await page.textContent('.pt-graph')
+  console.log(`[smoke] vfx graph line: ${vfxGraph}`)
+  const vfxFg = await page.evaluate(() => window.__fgDebug?.last?.() ?? null)
+  const vfxFgOk = vfxFg !== null
+    && vfxFg.live.includes('sim') && vfxFg.live.includes('present')
+    && vfxFg.live.some(n => n.startsWith('bake:')) && vfxFg.live.some(n => n.startsWith('draw:'))
+    && (vfxFg.culled ?? ['x']).length === 0
+  console.log(`[smoke] vfx frame graph: ${vfxFgOk ? 'live (the overlay law holds — no dead branches)' : 'MISSING/BROKEN'}`)
   // mobile: the arrows/pill stay in the viewport
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(`http://localhost:${port}/demo/vfx/`, { waitUntil: 'networkidle' })
@@ -663,15 +699,19 @@ try {
     matcapOk &&
     matcapAlive &&
     matcapGpuClean &&
+    viewerPickOk &&
     particlesOk &&
     particlesAlive &&
     particlesGpuClean &&
     mobileParticlesOk &&
+    particlesFgOk &&
+    particlesCullOk &&
     vfxFirst &&
     vfxAllLive &&
     vfxLabels.visible >= 9 &&
     vfxGpuClean &&
     mobileVfxOk &&
+    vfxFgOk &&
     hizOk &&
     hizGlOk &&
     viewerLogEntries > 0 &&
@@ -680,7 +720,7 @@ try {
 
   if (errors.length > 0) console.log(`[smoke] page errors (${errors.length}): ${errors.slice(0, 4).join(' | ').slice(0, 600)}`)
   if (!ok) {
-    const flags = { alive, pausedStill, aliveAgain, canvasCount, logEntries, mobileOk, viewerAlive, pbrGpuClean, loadText, sambaStatsOk, sambaAlive, gpuHealthy, pinchZoomed, matcapOk, matcapAlive, matcapGpuClean, particlesOk, particlesAlive, particlesGpuClean, mobileParticlesOk, vfxFirst, vfxAllLive, vfxLabels: vfxLabels.visible, vfxGpuClean, mobileVfxOk, hizOk, hizGlOk, viewerLogEntries, mobileViewerOk, errorsN: errors.length }
+    const flags = { alive, pausedStill, aliveAgain, canvasCount, logEntries, mobileOk, viewerAlive, pbrGpuClean, loadText, sambaStatsOk, sambaAlive, gpuHealthy, pinchZoomed, matcapOk, matcapAlive, matcapGpuClean, viewerPickOk, particlesOk, particlesAlive, particlesGpuClean, mobileParticlesOk, particlesFgOk, particlesCullOk, vfxFirst, vfxAllLive, vfxLabels: vfxLabels.visible, vfxGpuClean, mobileVfxOk, vfxFgOk, hizOk, hizGlOk, viewerLogEntries, mobileViewerOk, errorsN: errors.length }
     const failing = Object.fromEntries(Object.entries(flags).filter(([, v]) => !v || v === 0))
     console.log('[smoke] failing flags:', JSON.stringify(failing))
   }

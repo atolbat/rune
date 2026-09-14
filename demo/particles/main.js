@@ -29,7 +29,12 @@
 //   Pages serves with max-age=600, and a browser that keeps an OLD bundle
 //   for those 10 minutes shows an OLD bug even after a deploy — a changed
 //   query string forces a fresh fetch. Bump the suffix on every release.
-import { createRenderer } from '../../dist/rune.esm.js?v=199'
+// Task 204 — this demo composes THE SAME BRICKS the occlusion demo was
+//   built from, a different recipe: the frame is a DECLARED GRAPH
+//   (createFrameGraph from @rune/core — the recipe as data, the engine
+//   compiles the DAG) and the CPU-tier frustum cull (the facade's
+//   render.cull, Task 136) runs on every preset.
+import { createRenderer, createFrameGraph } from '../../dist/rune.esm.js?v=204'
 import { materialOf, TEXTURE, VERTEX_COLOR } from '../../dist/rune-materials.esm.js?v=150'
 import { createParticles, createRamp } from '../../dist/rune-particles.esm.js?v=199'
 
@@ -157,6 +162,10 @@ const PRESETS = {
     make: () => createParticles({
       capacity: CAPACITY,
       rate: 1700,
+      // Task 204 — the frustum gate on every preset (the fireworks/meteor
+      // law, now the demo's default): the CPU bakers skip the off-screen
+      // particles — the soup upload shrinks with the view.
+      render: { kind: 'billboard', cull: true },
       ramp: createRamp([
         { t: 0, size: 1.4, r: 0.85, g: 0.95, b: 1, a: 0 },
         { t: 0.12, size: 1, r: 1, g: 1, b: 1, a: 1 },
@@ -208,6 +217,7 @@ const PRESETS = {
     make: () => createParticles({
       capacity: CAPACITY,
       rate: 660,
+      render: { kind: 'billboard', cull: true },
       // a white ramp (size/alpha only): colorByRadius owns the color story
       ramp: createRamp([
         { t: 0, size: 0.5, r: 1, g: 1, b: 1, a: 0 },
@@ -251,6 +261,7 @@ const PRESETS = {
     make: () => createParticles({
       capacity: CAPACITY,
       rate: 240,
+      render: { kind: 'billboard', cull: true },
       ramp: createRamp([
         { t: 0, size: 0.5, r: 1, g: 0.92, b: 0.7, a: 0 },
         { t: 0.14, size: 0.8, r: 1, g: 0.87, b: 0.55, a: 1 },
@@ -284,6 +295,7 @@ const PRESETS = {
     make: () => createParticles({
       capacity: CAPACITY,
       rate: 380,
+      render: { kind: 'billboard', cull: true },
       ramp: createRamp([
         { t: 0, size: 0.9, r: 1, g: 1, b: 1, a: 0 },
         { t: 0.2, size: 1, r: 1, g: 1, b: 1, a: 0.65 },
@@ -323,6 +335,7 @@ const PRESETS = {
     make: () => createParticles({
       capacity: CAPACITY,
       rate: 380,
+      render: { kind: 'billboard', cull: true },
       ramp: createRamp([
         { t: 0, size: 0.8, r: 0.95, g: 0.97, b: 1, a: 0 },
         { t: 0.15, size: 1, r: 0.95, g: 0.97, b: 1, a: 0.9 },
@@ -356,6 +369,7 @@ const PRESETS = {
     make: () => createParticles({
       capacity: CAPACITY,
       rate: 480,
+      render: { kind: 'billboard', cull: true },
       ramp: createRamp([
         { t: 0, size: 0.6, r: 1, g: 1, b: 1, a: 0 },
         { t: 0.2, size: 1, r: 0.7, g: 0.9, b: 1, a: 0.85 },
@@ -537,12 +551,17 @@ const shell = window.RuneDemoShell.mount({
   defaults: { mode: 'auto' },
   onMode: (mode) => void boot(mode),
   onPause: () => {
-    activeRenderer?.stop()
-    shell.log.event('Paused')
+    // Task 204 — THE GRAPH'S PAUSE: the sim pass is GATED OUT of the frame
+    // (the renderer keeps presenting). The state goes stale — the graph's
+    // own metric counts the frames (the graph line's «state Nf stale»);
+    // the auto-orbit keeps moving, so the frozen soup can be inspected
+    // from every side and the cull counts keep re-baking.
+    running = false
+    shell.log.event('Paused — the sim pass gated out of the frame; the draw keeps presenting the frozen state (watch the staleness counter in the graph line)')
   },
   onResume: () => {
-    activeRenderer?.start()
-    shell.log.event('Resumed')
+    running = true
+    shell.log.event('Resumed — the sim pass rejoins the frame')
   },
 })
 
@@ -551,6 +570,14 @@ pill.type = 'button'
 pill.className = 'pt-pill'
 pill.hidden = true
 pill.addEventListener('click', () => setSheetOpen(true))
+
+// Task 204 — the frame-graph HUD line (the compiled frame's own numbers:
+// live/gated/culled passes, barriers, aliasing slots, the overlap plan,
+// the state's staleness) — updated at the stats cadence, sits just above
+// the pill.
+const graphEl = document.createElement('div')
+graphEl.className = 'pt-graph'
+graphEl.hidden = true
 
 const sheet = document.createElement('div')
 sheet.className = 'pt-sheet'
@@ -605,10 +632,181 @@ function setSheetOpen(open) {
   sheet[open ? 'removeAttribute' : 'setAttribute']('hidden', '')
 }
 
-/* ─── The frame ────────────────────────────────────────────────────────── */
+/* ─── The declared frame (Task 204 — the recipe as DATA) ─────────────────
+ * The same @rune/core brick the occlusion demo's tier declares — a
+ * different recipe, the same composition law: passes announce reads/writes
+ * through VERSIONED resource handles, the engine compiles the frame DAG.
+ *
+ *   state     — PERSISTENT (the facade's SoA store; exported: the pill's
+ *               stats read it — the graph reports its staleness, never
+ *               force-roots its writers)
+ *   soup      — TRANSIENT (the baked billboard vertices, CPU side)
+ *   soup-gpu  — TRANSIENT (the live prefix inside the vertex buffer)
+ *   target    — PERSISTENT (the presented canvas)
+ *
+ *   sim        compute*  reads [state]   writes [state]  · gated `running`
+ *              (Pause = the sim pass LEAVES the frame: the state goes
+ *              STALE and the draw keeps presenting it — temporal reuse as
+ *              a first-class, MEASURED concept. The auto-orbit keeps
+ *              moving, so the frozen soup stays inspectable from every
+ *              side and the cull counts keep re-baking against the
+ *              moving frustum — watch the staleness counter climb)
+ *   bake       copy      reads [state]   writes [soup]
+ *              (the frustum gate rides here: the facade's six-plane
+ *              extraction + the conservative per-particle sphere test —
+ *              fully-outside spheres are provably off-screen, so the
+ *              culling cannot change a pixel)
+ *   upload     copy      reads [soup]    writes [soup-gpu]
+ *              (the LIVE PREFIX — Task 180's discipline; the two soup
+ *              versions share the upload pass, so the planner keeps both
+ *              alive — the read happens while the write lands)
+ *   draw       render    reads [soup-gpu, target]  writes [target]
+ *              (THE OVERLAY LAW: blended quads READ the target they draw
+ *              onto — read-modify-write, never a pure write)
+ *   stats      copy      reads [state]   · gated `wantStats` (~4 Hz)
+ *              (a write-less copy is a ROOT — the pill's readback rides
+ *              the frame's own graph)
+ *   present    present   reads [target]  (the renderer submits at this
+ *              callback's return — the boundary node the DAG models)
+ *
+ *   (*) 'compute' is the CONCEPT lane: on this CPU-sim tier the work is JS
+ *       on the frame's own timeline; the barrier/overlap model treats it
+ *       as the frame's compute producer (the honest note — the same law
+ *       the occlusion tier's KERNEL comment carries for its GL/TF legs). */
+
+let currentCtx = null
+let currentRecord = null
+let soupView = null
+let vertexCount = 0
+let liveBytes = 0
+let running = true // the sim pass's gate (shell Pause/Resume)
+
+const fg = createFrameGraph()
+
+const R = {
+  state: fg.resource({ name: 'state', kind: 'buffer', bytes: CAPACITY * 80, transient: false, exported: true }),
+  soup: fg.resource({ name: 'soup', kind: 'buffer', bytes: CAPACITY * 144 }),
+  soupGpu: fg.resource({ name: 'soup-gpu', kind: 'buffer', bytes: CAPACITY * 144 }),
+  target: fg.resource({ name: 'target', kind: 'texture', transient: false }),
+}
+
+fg.pass({
+  name: 'sim', kind: 'compute', cost: 4,
+  reads: [R.state], writes: [R.state],
+  when: (p) => p.running === true,
+  execute: () => {
+    // the preset's rhythm (burst timers) — or the plain advance; the tick
+    // owns EVERYTHING per-frame: pacing, bursts, dt scaling
+    const preset = PRESETS[currentPresetId]
+    if (preset.tick !== undefined) preset.tick(currentCtx, particles, rhythm)
+    else particles.advance(currentCtx.dt)
+  },
+})
+fg.pass({
+  name: 'bake', kind: 'copy', cost: 3,
+  reads: [R.state], writes: [R.soup],
+  execute: () => {
+    soupView = particles.billboards(BASIS)
+    vertexCount = soupView.vertexCount
+    liveBytes = vertexCount * 36
+  },
+})
+fg.pass({
+  name: 'upload', kind: 'copy', cost: 2,
+  reads: [R.soup], writes: [R.soupGpu],
+  execute: () => {
+    // Task 180 — both legs ship the LIVE PREFIX (the GL leg used to pour
+    // the whole capacity array every frame — 1.77 MiB at 8192 regardless
+    // of how few particles were alive; the WG leg's own liveBytes
+    // discipline, now shared). The quad soup is 36 B × live vertices.
+    if (glDyn !== null && vertexCount > 0) {
+      glDyn.gl.updateBuffer(glDyn.bufferId, soupView.vertices.subarray(0, vertexCount * 9))
+    }
+    if (gpuDyn !== null && vertexCount > 0) gpuDyn.syncVertexBuffer(soupView.vertices, liveBytes)
+  },
+})
+fg.pass({
+  name: 'draw', kind: 'render', cost: 6,
+  // THE OVERLAY LAW: the blended quads read the target they draw onto
+  reads: [R.soupGpu, R.target], writes: [R.target],
+  execute: () => {
+    // Task 180: the props carry the INDEX count (the command's count
+    // resolver reads p.indexCount — the indexed draw's own count)
+    if (drawCommand !== null && vertexCount > 0) {
+      currentRecord(drawCommand, { mvp, model: MODEL, vertexCount, indexCount: soupView.indexCount })
+    }
+  },
+})
+fg.pass({
+  name: 'stats', kind: 'copy', cost: 1,
+  reads: [R.state],
+  when: (p) => p.wantStats === true,
+  execute: () => updatePill(vertexCount),
+})
+fg.pass({
+  name: 'present', kind: 'present', cost: 1,
+  reads: [R.target],
+  execute: () => { /* the renderer submits at this callback's return — the
+    boundary node the DAG models: everything above already ran in order */ },
+})
+
+let fgLastFrame = null
+let fgLastReport = null
+
+function graphStats() {
+  if (fgLastFrame === null) return null
+  return {
+    key: fgLastFrame.key,
+    live: fgLastFrame.passes.map(p => p.name),
+    gated: [...fgLastFrame.gated],
+    culled: [...fgLastFrame.culled],
+    barriers: fgLastFrame.barriers.map(b => `${b.after}→${b.before} ${b.resource} ${b.class} ${b.lanes}`),
+    edges: fgLastFrame.edges.map(e => `${e.from ?? 'import'}→${e.to} ${e.resource}@${e.version}`),
+    slots: fgLastFrame.slots.map(s => ({ external: s.external, peakBytes: s.peakBytes, intervals: s.intervals.map(i => `${i.resource}@${i.version}[${i.from}..${i.to}]`) })),
+    overlap: {
+      units: fgLastFrame.overlap.overlapUnits,
+      parallel: fgLastFrame.overlap.parallel.map(p => p.pass),
+      busy: { ...fgLastFrame.overlap.busy },
+      criticalPath: fgLastFrame.overlap.criticalPath,
+    },
+    stats: { ...fgLastFrame.stats },
+    stale: { ...(fgLastReport?.stale ?? {}) },
+    executed: [...(fgLastReport?.executed ?? [])],
+  }
+}
+
+function graphLine() {
+  if (fgLastFrame === null) return ''
+  const s = fgLastFrame.stats
+  const g = fgLastFrame.gated.length > 0 ? ` · gated ${fgLastFrame.gated.join('+')}` : ''
+  const c = fgLastFrame.culled.length > 0 ? ` · culled ${fgLastFrame.culled.join('+')}` : ''
+  const par = fgLastFrame.overlap.parallel.map(p => `${p.pass}∥`).join(' ') || '—'
+  const staleState = fgLastReport?.stale?.state ?? -1
+  return `frame graph: ${s.live}/${s.declared} live${g}${c} · ${s.barriers} barrier${s.barriers === 1 ? '' : 's'} · ${s.slots} slot${s.slots === 1 ? '' : 's'} · peak ${(s.peakBytes / 1024).toFixed(0)} KB (alias −${s.savedPct.toFixed(0)}%) · plan ∥ ${par} · state ${staleState < 0 ? 'imported' : `${staleState}f stale`} · ${s.compiles} compile${s.compiles === 1 ? '' : 's'}`
+}
+
+// the diagnostics channels (the smoke/graph gates' window into the frame)
+if (typeof window !== 'undefined') {
+  window.__fgDebug = {
+    note: 'the frame-graph channel — last() dumps the compiled frame (passes, slots, barriers, overlap, staleness)',
+    last: () => graphStats(),
+  }
+  window.__ptCull = () => {
+    const alive = particles !== null ? particles.stats().count : 0
+    const baked = vertexCount / 4
+    return { alive, baked, culled: Math.max(0, alive - baked), vertexCount, running, stale: fgLastReport?.stale?.state ?? -1 }
+  }
+}
+
+/* ─── The frame = compile(policy) + run(props) ────────────────────────── */
 
 function frameCallback(ctx, record) {
-  // auto-orbit: paused while dragging and for 1.5 s after
+  currentCtx = ctx
+  currentRecord = record
+  // auto-orbit: paused while dragging and for 1.5 s after. NOTE — the shell
+  // Pause gates the SIM pass, not the camera: the frozen soup stays
+  // inspectable from every side and the cull counts keep re-baking against
+  // the moving frustum (the graph line's staleness counter is the metric)
   if (!dragging && performance.now() - lastInteraction > 1500) camYaw += ctx.dt * presetOrbit
 
   if (ctx.aspect !== cachedAspect) {
@@ -626,51 +824,32 @@ function frameCallback(ctx, record) {
   BASIS.right[0] = view[0]; BASIS.right[1] = view[4]; BASIS.right[2] = view[8]
   BASIS.up[0] = view[1]; BASIS.up[1] = view[5]; BASIS.up[2] = view[9]
 
-  // ── simulate ──
-  // The preset's rhythm (burst timers) — or the plain
-  // advance. The tick owns EVERYTHING per-frame: pacing, bursts, dt scaling.
-  const preset = PRESETS[currentPresetId]
-  if (preset.tick !== undefined) preset.tick(ctx, particles, rhythm)
-  else particles.advance(ctx.dt)
-
-  // ── bake the billboard soup ──
-  const soupView = particles.billboards(BASIS)
-  const vertexCount = soupView.vertexCount
-  const liveBytes = vertexCount * 36
-
-  // ── upload the soup (the feed dual-bind path, per backend) ──
-  // Task 180 — both legs ship the LIVE PREFIX (the GL leg used to pour the
-  // whole capacity array every frame — 1.77 MiB at 8192 regardless of how
-  // few particles were alive; the WG leg's own liveBytes discipline, now
-  // shared). The quad soup is 36 B × live vertices.
-  if (glDyn !== null && vertexCount > 0) {
-    glDyn.gl.updateBuffer(glDyn.bufferId, soupView.vertices.subarray(0, vertexCount * 9))
-  }
-  if (gpuDyn !== null && vertexCount > 0) gpuDyn.syncVertexBuffer(soupView.vertices, liveBytes)
-
-  // ── one draw ──
-  // Task 180: the props carry the INDEX count (the command's count resolver
-  // reads p.indexCount — the indexed draw's own count).
-  if (drawCommand !== null && vertexCount > 0) {
-    record(drawCommand, { mvp, model: MODEL, vertexCount, indexCount: soupView.indexCount })
-  }
-
-  // the stats pill (~4 Hz)
+  // the stats cadence (~4 Hz) — the POLICY prop the stats pass keys on
+  // (the camera and dt ride the executes, never the declaration)
   statsAccum += ctx.dt
-  if (statsAccum > 0.25) {
-    statsAccum = 0
-    updatePill(vertexCount)
-  }
+  const wantStats = statsAccum > 0.25
+  if (wantStats) statsAccum = 0
+
+  const props = { running, wantStats }
+  fgLastFrame = fg.compile(props) // cached by policy — bit-still frames reuse the compiled object
+  fgLastReport = fgLastFrame.run(props)
 }
 
-function updatePill(vertexCount) {
+function updatePill(vc) {
+  const vertexCount = vc
   const preset = PRESETS[currentPresetId]
   const stats = particles.stats()
+  // the frustum gate's accounting: baked = the soup's live quads (4 unique
+  // corners each); culled = alive − baked — the conservative sphere test
+  // only skips provably-off-screen particles
+  const baked = vertexCount / 4
+  const culled = Math.max(0, Math.round(stats.count - baked))
   const live = document.createElement('span')
   live.className = 'pt-live'
-  live.textContent = `${stats.count.toLocaleString('en-US')} / ${stats.capacity.toLocaleString('en-US')} · ${vertexCount.toLocaleString('en-US')} verts`
+  live.textContent = `${stats.count.toLocaleString('en-US')} / ${stats.capacity.toLocaleString('en-US')} · ${vertexCount.toLocaleString('en-US')} verts · cull ${culled.toLocaleString('en-US')}`
   pill.textContent = `${preset.title} · `
   pill.append(live)
+  graphEl.textContent = graphLine()
 }
 
 /* ─── Input: orbit + zoom ──────────────────────────────────────────────── */
@@ -919,7 +1098,7 @@ async function boot(mode) {
   shell.slot.replaceChildren()
   const canvas = document.createElement('canvas')
   canvas.id = 'canvas'
-  shell.slot.append(canvas, pill, sheet, dragHint)
+  shell.slot.append(canvas, pill, graphEl, sheet, dragHint)
   bindInput(canvas)
   canvas.addEventListener('pointerdown', () => dragHint.classList.add('pt-gone'), { once: true })
   setTimeout(() => dragHint.classList.add('pt-gone'), 8000)
@@ -943,6 +1122,7 @@ async function boot(mode) {
     if (renderer.backend === 'webgl2') void runBlendSelfTest(renderer, canvas)
     else shell.log.info('Blend self-test: skipped — the WebGPU path (the reported regression is WebGL2; switch the toggle to compare)')
     pill.hidden = false
+    graphEl.hidden = false
     const backendName = renderer.backend === 'webgpu' ? 'WebGPU' : 'WebGL2'
     shell.setBadge(backendName, renderer.backend === 'webgpu' ? 'gpu' : 'gl')
     shell.log.info(`Backend: ${backendName}${renderer.backend === 'webgl2' && mode === 'auto' ? ' (fallback)' : ''}`)

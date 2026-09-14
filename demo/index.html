@@ -47,15 +47,15 @@
       </a>
       <a class="card" href="./model-viewer/">
         <b>model-viewer</b>
-        <span>Three three.js example models (glTF·AVIF·Draco, FBX, normal map): a fullscreen viewer with a load button and progress bar, model switching, drag rotation.</span>
+        <span>Three three.js example models (glTF·AVIF·Draco, FBX, normal map): a fullscreen viewer with a load button and progress bar, model switching, drag rotation — and tap-to-pick: a two-level BVH walk (the mesh tier, then the picked mesh's lazy per-triangle BVH) identifies the mesh, the triangle and the distance through the @rune/core picking bricks.</span>
       </a>
       <a class="card" href="./particles/">
         <b>particles</b>
-        <span>@rune/particles live: eight presets (fountain, fireworks, galaxy, embers, drift, snow, orbit, meteor) — a CPU-simulated SoA system baked into a billboard soup, one blended draw call, zero allocations per frame.</span>
+        <span>@rune/particles live: eight presets (fountain, fireworks, galaxy, embers, drift, snow, orbit, meteor) — a CPU-simulated SoA system baked into a billboard soup, one blended draw call, zero allocations per frame — with the CPU-tier frustum cull on every preset (the soup upload shrinks with the view) and the frame as a DECLARED GRAPH (createFrameGraph: passes with versioned resources, Pause gates the sim and the staleness counts, the HUD carries the compiled frame's own numbers).</span>
       </a>
       <a class="card" href="./vfx/">
         <b>vfx</b>
-        <span>The game-VFX study on @rune/particles: 24 demos (muzzle flashes, a composed explosion, emitter shapes, trails with collision, the texture sequencer, PBR mesh particles, sub-emitters, noise, alpha-tested petals, a custom behavior, billboard modes, soft particles with a depth prepass, blend equations, a follow object, plus the rune originals — rocket, rainstorm, slash, vortex, fireflies, dust, grass, lightning, a cutting laser, and the GPU compute tier: 160k embers simulated in WebGPU compute shaders) — one carousel page, ◀ ▶ or the sheet.</span>
+        <span>The game-VFX study on @rune/particles: 24 demos (muzzle flashes, a composed explosion, emitter shapes, trails with collision, the texture sequencer, PBR mesh particles, sub-emitters, noise, alpha-tested petals, a custom behavior, billboard modes, soft particles with a depth prepass, blend equations, a follow object, plus the rune originals — rocket, rainstorm, slash, vortex, fireflies, dust, grass, lightning, a cutting laser, and the GPU compute tier: 160k embers simulated in WebGPU compute shaders) — one carousel page, ◀ ▶ or the sheet — every demo's frame is its own declared graph (re-declared per switch: the layer soups alias into one slot, the sim's lane follows the tier, the overlay law keeps every draw live).</span>
       </a>
       <a class="card" href="./occlusion/">
         <b>occlusion</b>

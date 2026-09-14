@@ -15,7 +15,7 @@
 // drag (touch/mouse) + auto-spin; zoom via pinch (two fingers) and wheel.
 // The demo imports the BUILT bundles: dist/rune.esm.js + dist/rune-loaders.esm.js
 // + dist/rune-animation.esm.js + dist/rune-materials.esm.js.
-import { createRenderer } from '../../dist/rune.esm.js?v=199'
+import { createRenderer, buildBVH, cameraRay, rayBoxes, recordView } from '../../dist/rune.esm.js?v=204'
 import { AssetLoader } from '../../dist/rune-loaders.esm.js?v=123'
 import { createAnimator } from '../../dist/rune-animation.esm.js?v=123'
 import {
@@ -584,7 +584,51 @@ function finishPrepared(meshes, stats) {
     vertices += mesh.positions.length / 3
     triangles += mesh.positions.length / 9
   }
-  return { meshes, bounds, stats: { ...stats, vertices, triangles } }
+  // Task 204 — THE MESH-LEVEL BVH (the picking brick's coarse tier): one
+  // AABB per prepared mesh, over the baked (pre-fit, pre-spin) positions —
+  // the tap's first walk narrows the whole scene to one mesh; the FINE
+  // tier (the per-triangle BVH) is built lazily on the first pick of that
+  // mesh (see meshTriangleBvh). The flat cx/hx words feed the probe's
+  // brute-force sweep through the same recordView shape the culling kit
+  // speaks.
+  const meshWords = new Float32Array(meshes.length * 6)
+  const meshBoxes = []
+  // THE FLAT-GEOMETRY HYGIENE: a perfectly planar mesh (the ground plane)
+  // makes a DEGENERATE AABB — and a ray grazing the box's exact CORNER
+  // (a vertex on two min-faces at once) degenerates the slab window
+  // [t0,t1] to a single point that the float rounding can flip to a miss.
+  // The picking boxes are ADDITIVELY inflated on EVERY axis — the boxes
+  // stay conservative (a pick may enter a box whose triangles miss — the
+  // two-level walk simply continues), never blind at a corner.
+  const EPS = 1e-2
+  for (let i = 0; i < meshes.length; i++) {
+    const p = meshes[i].positions
+    let minx = Infinity, miny = Infinity, minz = Infinity
+    let maxx = -Infinity, maxy = -Infinity, maxz = -Infinity
+    for (let v = 0; v < p.length; v += 3) {
+      const x = p[v], y = p[v + 1], z = p[v + 2]
+      if (x < minx) minx = x
+      if (x > maxx) maxx = x
+      if (y < miny) miny = y
+      if (y > maxy) maxy = y
+      if (z < minz) minz = z
+      if (z > maxz) maxz = z
+    }
+    const o = i * 6
+    meshWords[o] = (minx + maxx) / 2; meshWords[o + 1] = (miny + maxy) / 2; meshWords[o + 2] = (minz + maxz) / 2
+    meshWords[o + 3] = (maxx - minx) / 2 + EPS; meshWords[o + 4] = (maxy - miny) / 2 + EPS; meshWords[o + 5] = (maxz - minz) / 2 + EPS
+    meshBoxes.push({
+      id: i,
+      cx: meshWords[o], cy: meshWords[o + 1], cz: meshWords[o + 2],
+      hx: meshWords[o + 3], hy: meshWords[o + 4], hz: meshWords[o + 5],
+    })
+  }
+  return {
+    meshes, bounds,
+    bvh: buildBVH(meshBoxes),
+    meshView: recordView(meshWords, 0, meshes.length, 6, { center: 0, half: 3 }),
+    stats: { ...stats, vertices, triangles },
+  }
 }
 
 /* ─── Shell and the model picker ───────────────────────────────────────────────── */
@@ -1099,7 +1143,287 @@ function bindInput(canvas) {
     camDist = clampDist(camDist * (1 + event.deltaY * 0.0012))
     lastInteraction = performance.now()
   }, { passive: false })
+
+  // Task 204 — THE PICK: a tap (a press-release pair with < 6 px of
+  // movement inside 500 ms) is not a drag — it is a QUERY. The pick walks
+  // the same bricks the culling tier walks: cameraRay (the primary-ray
+  // unprojection — no matrix inversion) → the mesh-level BVH → the picked
+  // mesh's lazy per-triangle BVH → the hit.
+  let downX = 0, downY = 0, downT = 0
+  canvas.addEventListener('pointerdown', (event) => {
+    downX = event.clientX
+    downY = event.clientY
+    downT = performance.now()
+  })
+  canvas.addEventListener('pointerup', (event) => {
+    const moved = Math.hypot(event.clientX - downX, event.clientY - downY)
+    const held = performance.now() - downT
+    if (moved < 6 && held < 500) {
+      const rect = canvas.getBoundingClientRect()
+      const hit = pickAt(event.clientX - rect.left, event.clientY - rect.top)
+      if (hit === null) {
+        shell.log.event(`Pick (${(downX - rect.left) | 0}, ${(downY - rect.top) | 0}): missed — the ray cleared the model`)
+      } else {
+        shell.log.event(`Pick: “${hit.mesh}” · triangle #${hit.triangle.toLocaleString('en-US')} of ${(hit.triangles).toLocaleString('en-US')} · distance ${hit.distance.toFixed(2)} · mesh BVH ${hit.meshBvh.nodes} nodes/${hit.meshBvh.leaves} leaves · tri BVH ${hit.triBvh.nodes} nodes/${hit.triBvh.leaves} leaves (built in ${hit.triBuildMs.toFixed(1)} ms)`)
+      }
+    }
+  })
 }
+
+/* ─── The picking ray (Task 204 — the culling kit's hit-test surface) ──────
+ * The prepared meshes' positions are baked in the MODEL's own coordinates
+ * (glTF node matrices applied, before the viewer's fit+spin). The render
+ * folds them: mvp = viewProj · spin · fit, with fit = scale s at translation
+ * t = −center·s and spin = rotX(pitch)·rotY(yaw). The inverse mapping for a
+ * WORLD ray is analytic — no general 4×4 inverse:  local = (Rᵀ·world − t)/s,
+ * and since R is a rotation, |Rᵀ·d| = |d| = 1 — the slab t the BVH returns
+ * is in LOCAL normalized units, and the WORLD distance is t·s. */
+
+const FOV_Y = Math.PI / 3.4
+let liveCanvas = null
+
+/** The FINE tier: the picked mesh's per-triangle BVH — built lazily on the
+ *  first pick that lands on the mesh (a 50k-triangle mesh builds in a few
+ *  ms; the flat cx/hx words stay for the brute-force probe). */
+function meshTriangleBvh(mesh) {
+  if (mesh.triBvh !== undefined) return mesh
+  const p = mesh.positions
+  const triCount = (p.length / 9) | 0
+  const boxes = new Array(triCount)
+  const words = new Float32Array(triCount * 6)
+  // the same FLAT-GEOMETRY HYGIENE as the mesh boxes: every triangle box
+  // additively inflated — the corner-grazing ray survives the rounding
+  const EPS = 1e-2
+  for (let t = 0; t < triCount; t++) {
+    const o = t * 9
+    const ax = p[o], ay = p[o + 1], az = p[o + 2]
+    const bx = p[o + 3], by = p[o + 4], bz = p[o + 5]
+    const cx = p[o + 6], cy = p[o + 7], cz = p[o + 8]
+    const minx = Math.min(ax, bx, cx), maxx = Math.max(ax, bx, cx)
+    const miny = Math.min(ay, by, cy), maxy = Math.max(ay, by, cy)
+    const minz = Math.min(az, bz, cz), maxz = Math.max(az, bz, cz)
+    const w = t * 6
+    words[w] = (minx + maxx) / 2; words[w + 1] = (miny + maxy) / 2; words[w + 2] = (minz + maxz) / 2
+    words[w + 3] = (maxx - minx) / 2 + EPS; words[w + 4] = (maxy - miny) / 2 + EPS; words[w + 5] = (maxz - minz) / 2 + EPS
+    boxes[t] = {
+      id: t,
+      cx: words[w], cy: words[w + 1], cz: words[w + 2],
+      hx: words[w + 3], hy: words[w + 4], hz: words[w + 5],
+    }
+  }
+  const t0 = performance.now()
+  mesh.triBvh = buildBVH(boxes)
+  mesh.triView = recordView(words, 0, triCount, 6, { center: 0, half: 3 })
+  mesh.triBuildMs = performance.now() - t0
+  return mesh
+}
+
+/** The screen point → local-space ray → the two-tier walk. Returns null on
+ *  a miss. */
+function pickAt(px, py) {
+  const current = prepared.get(currentModelId)
+  if (current === undefined || liveCanvas === null) return null
+  const w = liveCanvas.clientWidth
+  const h = liveCanvas.clientHeight
+  if (w <= 0 || h <= 0) return null
+  // the NDC point + the world ray (the basis rows of THIS camera's view)
+  const nx = (px / w) * 2 - 1
+  const ny = 1 - (py / h) * 2
+  mat4LookAt(view, 0, 0.55, camDist, 0, 0, 0)
+  const eye = [0, 0.55, camDist]
+  // the view's ROWS (column-major storage): right = row 0, up = row 1,
+  // backward = row 2 — the forward is its negation
+  const fwd = [-view[2], -view[6], -view[10]]
+  const right = [view[0], view[4], view[8]]
+  const up = [view[1], view[5], view[9]]
+  const ray = cameraRay(eye, fwd, right, up, FOV_Y, w / h, nx, ny)
+  // world → local (see the section comment): local = (Rᵀ·world − t)/s.
+  // COLUMN-MAJOR LAW: R·v uses the ROWS (spin[0,4,8]·v …) — Rᵀ·v uses
+  // the COLUMNS (spin[0,1,2]·v …). The model's own translation proves the
+  // convention: (spin·fit)[12] = spin[0]·tx + spin[4]·ty + spin[8]·tz.
+  const bounds = current.bounds
+  const s = 1.5 / bounds.radius
+  mat4RotationX(rotX, pitch)
+  mat4RotationY(rotY, yaw)
+  mat4Multiply(spin, rotX, rotY)
+  const tx = -bounds.center[0] * s, ty = -bounds.center[1] * s, tz = -bounds.center[2] * s
+  const ox = (spin[0] * ray.ox + spin[1] * ray.oy + spin[2] * ray.oz - tx) / s
+  const oy = (spin[4] * ray.ox + spin[5] * ray.oy + spin[6] * ray.oz - ty) / s
+  const oz = (spin[8] * ray.ox + spin[9] * ray.oy + spin[10] * ray.oz - tz) / s
+  const dx = spin[0] * ray.dx + spin[1] * ray.dy + spin[2] * ray.dz
+  const dy = spin[4] * ray.dx + spin[5] * ray.dy + spin[6] * ray.dz
+  const dz = spin[8] * ray.dx + spin[9] * ray.dy + spin[10] * ray.dz
+  // tier 1 — the mesh-level BVH: EVERY box hit, sorted by entry t. A box
+  // hit is CONSERVATIVE (the AABB ⊇ the triangles): a ray can clip a box
+  // corner where no triangle lives — the walk CONTINUES to the next mesh
+  // until a real triangle hit lands (the classic two-level traversal)
+  const meshHits = current.bvh.queryRay(ox, oy, oz, dx, dy, dz)
+  if (meshHits.length === 0) return null
+  // tier 2 — each candidate mesh's per-triangle BVH (lazy): the first
+  // triangle hit along the ray wins
+  for (const meshHit of meshHits) {
+    const mesh = current.meshes[meshHit.id]
+    meshTriangleBvh(mesh)
+    const triHit = mesh.triBvh.raycast(ox, oy, oz, dx, dy, dz)
+    if (triHit === null) continue // the box clipped empty space — next mesh
+    return {
+      mesh: mesh.name ?? `mesh ${meshHit.id}`,
+      meshIndex: meshHit.id,
+      triangle: triHit.id,
+      triangles: (mesh.positions.length / 9) | 0,
+      distance: triHit.t * s,
+      local: [ox + dx * triHit.t, oy + dy * triHit.t, oz + dz * triHit.t],
+      meshBvh: { nodes: current.bvh.stats.nodes, leaves: current.bvh.stats.leaves, depth: current.bvh.stats.depth },
+      triBvh: { nodes: mesh.triBvh.stats.nodes, leaves: mesh.triBvh.stats.leaves, depth: mesh.triBvh.stats.depth },
+      triBuildMs: mesh.triBuildMs,
+      ray: { ox, oy, oz, dx, dy, dz },
+    }
+  }
+  return null
+}
+
+/** The probe: the BVH's answers vs the brute-force sweep over the SAME
+ *  boxes — the parity gate the smoke runs. A deterministic LCG (fixed
+ *  seed) picks the rays; every ray must agree on the NEAREST ENTRY t on
+ *  BOTH tiers. THE TIE LAW: a ray through a shared edge/vertex hits two
+ *  boxes at the IDENTICAL t — the BVH's traversal order and the linear
+ *  sweep's order may return different MEMBERS of the tie (both correct
+ *  nearest hits) — the parity compares the t (the physics), not the
+ *  member (the tie-break). */
+function runPickProbe(count = 40) {
+  const current = prepared.get(currentModelId)
+  if (current === undefined) return { pass: false, reason: 'no model loaded' }
+  const w = liveCanvas !== null ? Math.max(liveCanvas.clientWidth, 1) : 800
+  const h = liveCanvas !== null ? Math.max(liveCanvas.clientHeight, 1) : 600
+  let seed = 204
+  const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296
+  mat4LookAt(view, 0, 0.55, camDist, 0, 0, 0)
+  const bounds = current.bounds
+  const s = 1.5 / bounds.radius
+  mat4RotationX(rotX, pitch)
+  mat4RotationY(rotY, yaw)
+  mat4Multiply(spin, rotX, rotY)
+  let checks = 0, mismatches = 0, hits = 0, mismatch = null
+  for (let i = 0; i < count; i++) {
+    const px = rnd() * w, py = rnd() * h
+    const nx = (px / w) * 2 - 1
+    const ny = 1 - (py / h) * 2
+    const r = cameraRay([0, 0.55, camDist], [-view[2], -view[6], -view[10]], [view[0], view[4], view[8]], [view[1], view[5], view[9]], FOV_Y, w / h, nx, ny)
+    const tx = -bounds.center[0] * s, ty = -bounds.center[1] * s, tz = -bounds.center[2] * s
+    // the COLUMN form of Rᵀ (the pick's own law — see pickAt)
+    const ox = (spin[0] * r.ox + spin[1] * r.oy + spin[2] * r.oz - tx) / s
+    const oy = (spin[4] * r.ox + spin[5] * r.oy + spin[6] * r.oz - ty) / s
+    const oz = (spin[8] * r.ox + spin[9] * r.oy + spin[10] * r.oz - tz) / s
+    const dx = spin[0] * r.dx + spin[1] * r.dy + spin[2] * r.dz
+    const dy = spin[4] * r.dx + spin[5] * r.dy + spin[6] * r.dz
+    const dz = spin[8] * r.dx + spin[9] * r.dy + spin[10] * r.dz
+    // tier 1: the mesh BVH vs the flat sweep
+    const bvhMesh = current.bvh.raycast(ox, oy, oz, dx, dy, dz)
+    const bruteMesh = rayBoxes(current.meshView, ox, oy, oz, dx, dy, dz)[0] ?? null
+    checks += 2
+    if (Math.abs((bvhMesh?.t ?? -1) - (bruteMesh?.t ?? -1)) > 1e-6) {
+      mismatches++
+      if (mismatch === null) mismatch = { ray: { ox, oy, oz, dx, dy, dz }, bvhMesh, bruteMesh, allBrute: rayBoxes(current.meshView, ox, oy, oz, dx, dy, dz).map(h => ({ id: h.id, t: h.t })) }
+      continue
+    }
+    if (bvhMesh === null) continue
+    // tier 2: the picked mesh's triangle BVH vs its sweep (builds lazily)
+    const mesh = current.meshes[bvhMesh.id]
+    meshTriangleBvh(mesh)
+    const bvhTri = mesh.triBvh.raycast(ox, oy, oz, dx, dy, dz)
+    const bruteTri = rayBoxes(mesh.triView, ox, oy, oz, dx, dy, dz)[0] ?? null
+    checks += 2
+    if (Math.abs((bvhTri?.t ?? -1) - (bruteTri?.t ?? -1)) > 1e-6) {
+      mismatches++
+      if (mismatch === null) mismatch = { tier: 2, mesh: mesh.name, ray: { ox, oy, oz, dx, dy, dz }, bvhTri, bruteTri }
+    }
+    if (bvhTri !== null) hits++
+  }
+  return {
+    pass: mismatches === 0,
+    checks, mismatches, hits, rays: count, mismatch,
+    meshBvh: { nodes: current.bvh.stats.nodes, leaves: current.bvh.stats.leaves, depth: current.bvh.stats.depth, items: current.bvh.stats.items },
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.__mvDebug = {
+    note: 'the picking channel — pickAt(px, py) taps; probe(n) runs the BVH-vs-brute parity; selfTest(n) projects real vertices and picks them back',
+    pickAt: (px, py) => pickAt(px, py),
+    probe: (count = 40) => runPickProbe(count),
+    selfTest: (count = 30) => runPickSelfTest(count),
+  }
+}
+
+/** The forward-consistency test: project REAL mesh vertices through the
+ *  frame's own math (viewProj · spin · fit — the exact matrices
+ *  frameCallback builds) and pick at the projected pixel. A vertex ON the
+ *  model must be hit by the ray through its own pixel — the pick and the
+ *  render agreeing on the same geometry. */
+function runPickSelfTest(count = 30) {
+  const current = prepared.get(currentModelId)
+  if (current === undefined || liveCanvas === null) return { pass: false, reason: 'no model' }
+  const w = liveCanvas.clientWidth, h = liveCanvas.clientHeight
+  if (w <= 0 || h <= 0) return { pass: false, reason: 'no canvas size' }
+  // the frame's own matrices, rebuilt here (same formulas, same state)
+  mat4Perspective(projection, FOV_Y, w / h, 0.1, 100)
+  mat4LookAt(view, 0, 0.55, camDist, 0, 0, 0)
+  mat4Multiply(viewProj, projection, view)
+  mat4RotationX(rotX, pitch)
+  mat4RotationY(rotY, yaw)
+  mat4Multiply(spin, rotX, rotY)
+  const bounds = current.bounds
+  const s = 1.5 / bounds.radius
+  mat4Scale(fit, s)
+  fit[12] = -bounds.center[0] * s
+  fit[13] = -bounds.center[1] * s
+  fit[14] = -bounds.center[2] * s
+  mat4Multiply(model, spin, fit)
+  let seed = 2040
+  const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296
+  let trials = 0, picked = 0, sameMesh = 0, diag = null
+  for (let i = 0; i < count; i++) {
+    const mesh = current.meshes[(rnd() * current.meshes.length) | 0]
+    const p = mesh.positions
+    const v = ((rnd() * (p.length / 3)) | 0) * 3
+    // world = model · local
+    const lx = p[v], ly = p[v + 1], lz = p[v + 2]
+    const wx = model[0] * lx + model[4] * ly + model[8] * lz + model[12]
+    const wy = model[1] * lx + model[5] * ly + model[9] * lz + model[13]
+    const wz = model[2] * lx + model[6] * ly + model[10] * lz + model[14]
+    const cw = model[3] * lx + model[7] * ly + model[11] * lz + model[15]
+    // clip = viewProj · world
+    const cxp = viewProj[0] * wx + viewProj[4] * wy + viewProj[8] * wz + viewProj[12] * cw
+    const cyp = viewProj[1] * wx + viewProj[5] * wy + viewProj[9] * wz + viewProj[13] * cw
+    const czp = viewProj[2] * wx + viewProj[6] * wy + viewProj[10] * wz + viewProj[14] * cw
+    const cwp = viewProj[3] * wx + viewProj[7] * wy + viewProj[11] * wz + viewProj[15] * cw
+    if (cwp <= 0) continue // behind the camera
+    const px = ((cxp / cwp + 1) / 2) * w
+    const py = ((1 - cyp / cwp) / 2) * h
+    trials++
+    const hit = pickAt(px, py)
+    if (hit !== null) {
+      picked++
+      if (hit.meshIndex === current.meshes.indexOf(mesh)) sameMesh++
+    } else if (diag === null) {
+      // the first failure's numbers: the pick's ray vs the expected ray
+      // (the local eye + the direction toward the projected vertex)
+      diag = {
+        mesh: mesh.name ?? meshIndexName(current.meshes.indexOf(mesh)),
+        vertex: [lx, ly, lz],
+        world: [wx, wy, wz],
+        clip: [cxp, cyp, czp, cwp],
+        viewProj: [...viewProj],
+        model: [...model],
+        wh: [w, h],
+        pixel: [px, py],
+      }
+    }
+  }
+  return { pass: trials > 0 && picked === trials, trials, picked, sameMesh, diag }
+}
+
+function meshIndexName(i) { return `mesh ${i}` }
 
 /** Frame: an orbit camera (drag/pinch/wheel), the model rotates (turntable)
  *  and animated models advance their clips. */
@@ -1152,6 +1476,7 @@ async function boot(mode) {
   shell.slot.replaceChildren()
   const canvas = document.createElement('canvas')
   canvas.id = 'canvas'
+  liveCanvas = canvas
   shell.slot.append(canvas, pill, sheet, dragHint)
   bindInput(canvas)
   // the drag hint disappears at the first touch of the scene
