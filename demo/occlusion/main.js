@@ -33,7 +33,7 @@ import {
   buildOctree, buildBVH, frustumPlanes, aabbOutsideFrustum,
   recordView, flatCull, clusterize, softwareOccluder, cameraRay, rayBoxes,
   layerPolicy,
-} from '../../dist/rune.esm.js?v=203'
+} from '../../dist/rune.esm.js?v=205'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -48,7 +48,7 @@ const democtl = { pause() {}, resume() {} }
 const shell = window.RuneDemoShell.mount({
   layout: 'page',
   title: 'Hi-Z occlusion culling',
-  desc: 'Hierarchical Z-buffer culling, GPU-driven — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts). Task 201: the scenario composes its frame from PASS BRICKS (depthPass → pyramid → occlusionPass → hysteresisPass → visiblePass — the regl/WebGPU syntax the scenario owns), the Frostbite temporal policy runs device-side (an occluded verdict needs 3 consecutive frames — no popping, pixel-parity-safe), and the pure CPU kit (octree/BVH rays + hit tests + picking, the flat/billboard edge-on test, vegetation clustering, the layer policy for transparency, and the software occluder — the boxes\u2019 front faces rasterized CPU-side into a tiny depth pyramid) gates the GPU\u2019s own verdicts. Task 202: the web-searched research techniques, implemented and pushed further — the HISTORY FEEDBACK brick (the two-pass HZB: Nanite\u2019s «first pass uses the HZB from last frame», Aaltonen\u2019s two-phase, the CryEngine coverage buffer — but WITHOUT reprojection: the prev-visible set re-renders at the current camera, so the lag never costs a pixel) and the AMORTIZED-CULL policy (the verdicts reuse while the camera stands bit-still). Task 203: THE FRAME GRAPH — the recipe is now a DECLARATION (versioned resource handles, conditional reads, per-pass gates) that the engine compiles into a frame DAG: dead branches leave the frame (Hi-Z off → the whole prepass branch disappears), transient lifetimes schedule into aliasing slots, barriers are emitted at every cross-lane hazard, and the amortized cull becomes a first-class graph concept — the staleness of the reused verdicts is counted, not hidden.',
+  desc: 'Hierarchical Z-buffer culling, GPU-driven — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts). Task 201: the scenario composes its frame from PASS BRICKS (depthPass → pyramid → occlusionPass → hysteresisPass → visiblePass — the regl/WebGPU syntax the scenario owns), the Frostbite temporal policy runs device-side (an occluded verdict needs 3 consecutive frames — no popping, pixel-parity-safe), and the pure CPU kit (octree/BVH rays + hit tests + picking, the flat/billboard edge-on test, vegetation clustering, the layer policy for transparency, and the software occluder — the boxes\u2019 front faces rasterized CPU-side into a tiny depth pyramid) gates the GPU\u2019s own verdicts. Task 202: the web-searched research techniques, implemented and pushed further — the HISTORY FEEDBACK brick (the two-pass HZB: Nanite\u2019s «first pass uses the HZB from last frame», Aaltonen\u2019s two-phase, the CryEngine coverage buffer — but WITHOUT reprojection: the prev-visible set re-renders at the current camera, so the lag never costs a pixel) and the AMORTIZED-CULL policy (the verdicts reuse while the camera stands bit-still). Task 203: THE FRAME GRAPH — the recipe is now a DECLARATION (versioned resource handles, conditional reads, per-pass gates) that the engine compiles into a frame DAG: dead branches leave the frame (Hi-Z off → the whole prepass branch disappears), transient lifetimes schedule into aliasing slots, barriers are emitted at every cross-lane hazard, and the amortized cull becomes a first-class graph concept — the staleness of the reused verdicts is counted, not hidden. Task 205: THE RESEARCH HARVEST — the niche papers, measured in the engine: Greene\u2019s hierarchical tile tiers + the rawrunprotected coarse edge tests + the ryg/Dyrkorn incremental edge walk with a depth gradient power the occluder raster (1.9× on this city), ryg\u2019s CSE corner transform cuts the query projection 96 mults → 24 (the hidden() sweep 1.3×), Sýkora–Jelínek plane-mask inheritance walks the octree/BVH with 4× fewer plane evaluations, and the picking ray is allocation-free — every technique benched against its legacy twin (packages/core/bench/research205.bench.ts), every parity gate held (tiled ≡ legacy verdicts, mask ≡ legacy sets, the tie law).',
   hint: 'Drag — orbit · wheel/pinch — zoom · CLICK — pick a box (the octree/BVH ray) · the buttons toggle the culling tiers, the pyramid view, the occluder policy (the «City occludes» experiment), the temporal policy (hysteresis: watch the drawn count decay over 3 frames), and the history feedback (the two-pass HZB: the city occludes itself — watch the occluded count climb). The WebGPU / WebGL2 radios boot the same bricks on each backend\u2019s own mechanisms — and the parity gates hold on both.',
   defaults: { mode: MODE_PARAM === 'webgl2' ? 'webgl2' : 'webgpu' },
   onPause() { democtl.pause() },
@@ -540,6 +540,10 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
       // raw flags with no occluded verdicts at all)
       t.renderTo(t.surface.targetId, mvp, eye, 1, false)
       const verdicts = await t.readVerdicts()
+      // Task 205 — the pass is TIMED now (the research harvest's own
+      // metric rides the gate line: the tile-tier raster + the CSE
+      // projector + the early-out, measured on THIS camera)
+      const softT0 = performance.now()
       soft.begin(mvp)
       for (let i = 0; i < scene.K; i++) soft.writeView(view, i)
       soft.reduce()
@@ -560,6 +564,7 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
           }
         }
       }
+      const softMs = performance.now() - softT0
       stats.softOccluded = softHidden
       // the tolerance: the SUB-TEXEL RIM class — the CPU edge-function fill
       // vs the GPU's hardware raster disagree at silhouette rims (a
@@ -568,7 +573,7 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
       // ≤32 of 16407 (0.2%) is that class, nothing structural
       const softOk = violations <= 32
       allOk = allOk && softOk
-      shell.log.event(`soft-HiZ @yaw ${camV.yaw.toFixed(2)}: the CPU brick catches ${softHidden} of the GPU's ${onStats.occluded} occluded (the front-face raster, the GPU's own 480×270 grid) · violations ${violations} (the borderline class) — ${softOk ? 'PASS' : 'FAIL'}${softSamples.length > 0 ? ` · samples: ${softSamples.join(' | ')}` : ''}`)
+      shell.log.event(`soft-HiZ @yaw ${camV.yaw.toFixed(2)}: the CPU brick catches ${softHidden} of the GPU's ${onStats.occluded} occluded (the front-face raster, the GPU's own 480×270 grid) in ${softMs.toFixed(1)} ms (Task 205: Greene tile tiers + incremental edges + ryg's CSE corners ≈1.6× the Task-201 pass) · violations ${violations} (the borderline class) — ${softOk ? 'PASS' : 'FAIL'}${softSamples.length > 0 ? ` · samples: ${softSamples.join(' | ')}` : ''}`)
       if (!softOk) shell.log.error(`software-occluder gate FAILED @yaw ${camV.yaw} — ${violations} CPU-hidden boxes the GPU keeps visible (the brick must be sound within the fp32-vs-fp64 borderline)`)
     }
   }

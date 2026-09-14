@@ -4116,9 +4116,70 @@ function clipRay(ox, oy, oz, ix, iy, iz, b, t0, t1) {
   }
   return [t0, t1];
 }
+function slabEnter(ox, oy, oz, ix, iy, iz, minx, miny, minz, maxx, maxy, maxz, t0, t1) {
+  let en = t0;
+  let ex = t1;
+  if (ix === Infinity || ix === -Infinity) {
+    if (ox < minx || ox > maxx)
+      return -1;
+  } else {
+    let ta = (minx - ox) * ix;
+    let tb = (maxx - ox) * ix;
+    if (ta > tb) {
+      const s = ta;
+      ta = tb;
+      tb = s;
+    }
+    if (ta > en)
+      en = ta;
+    if (tb < ex)
+      ex = tb;
+    if (en > ex)
+      return -1;
+  }
+  if (iy === Infinity || iy === -Infinity) {
+    if (oy < miny || oy > maxy)
+      return -1;
+  } else {
+    let ta = (miny - oy) * iy;
+    let tb = (maxy - oy) * iy;
+    if (ta > tb) {
+      const s = ta;
+      ta = tb;
+      tb = s;
+    }
+    if (ta > en)
+      en = ta;
+    if (tb < ex)
+      ex = tb;
+    if (en > ex)
+      return -1;
+  }
+  if (iz === Infinity || iz === -Infinity) {
+    if (oz < minz || oz > maxz)
+      return -1;
+  } else {
+    let ta = (minz - oz) * iz;
+    let tb = (maxz - oz) * iz;
+    if (ta > tb) {
+      const s = ta;
+      ta = tb;
+      tb = s;
+    }
+    if (ta > en)
+      en = ta;
+    if (tb < ex)
+      ex = tb;
+    if (en > ex)
+      return -1;
+  }
+  slabExit = ex;
+  return en;
+}
 function buildOctree(items, options) {
   const capacity = Math.max(1, options?.capacity ?? 8);
   const maxDepth = Math.max(1, options?.maxDepth ?? 12);
+  const planeMask = options?.planeMask ?? true;
   let nodes = 0;
   let leaves = 0;
   let depth2 = 0;
@@ -4252,20 +4313,40 @@ function buildOctree(items, options) {
   function alive(it) {
     return !removed.has(it.id);
   }
-  function walkFrustum(n, planes, fullyInside) {
-    if (!fullyInside) {
+  let planeTests = 0;
+  function maskedPlanes(planes, cx, cy, cz, hx, hy, hz, mask, full) {
+    let m = full ? 63 : mask;
+    for (let i = 0;i < 6; i++) {
+      const bit = 1 << i;
+      if ((m & bit) === 0)
+        continue;
+      planeTests++;
+      const o = i * 4;
+      const ax = planes[o], ay = planes[o + 1], az = planes[o + 2];
+      const reach = Math.abs(ax) * hx + Math.abs(ay) * hy + Math.abs(az) * hz;
+      const d = ax * cx + ay * cy + az * cz + planes[o + 3];
+      if (d < -reach)
+        return FRUSTUM_PRUNED;
+      if (d >= reach)
+        m &= ~bit;
+    }
+    return m;
+  }
+  function walkFrustum(n, planes, mask) {
+    if (mask !== 0) {
       const cx = (n.b.minx + n.b.maxx) * 0.5;
       const cy = (n.b.miny + n.b.maxy) * 0.5;
       const cz = (n.b.minz + n.b.maxz) * 0.5;
       const hx = (n.b.maxx - n.b.minx) * 0.5;
       const hy = (n.b.maxy - n.b.miny) * 0.5;
       const hz = (n.b.maxz - n.b.minz) * 0.5;
-      if (aabbOutsideFrustum(planes, cx, cy, cz, hx, hy, hz))
+      const r = maskedPlanes(planes, cx, cy, cz, hx, hy, hz, mask, !planeMask);
+      if (r === FRUSTUM_PRUNED)
         return;
-      fullyInside = aabbInsideFrustum(planes, cx, cy, cz, hx, hy, hz);
+      mask = r;
     }
     if (n.items !== null) {
-      if (fullyInside) {
+      if (mask === 0) {
         for (const it of n.items) {
           if (!alive(it))
             continue;
@@ -4291,7 +4372,7 @@ function buildOctree(items, options) {
     if (kids !== null) {
       for (const k of kids) {
         if (k !== null)
-          walkFrustum(k, planes, fullyInside);
+          walkFrustum(k, planes, mask);
       }
     }
   }
@@ -4385,17 +4466,9 @@ function buildOctree(items, options) {
         if (seen[it.id] === stamp)
           continue;
         seen[it.id] = stamp;
-        const b = {
-          minx: it.cx - it.hx,
-          maxx: it.cx + it.hx,
-          miny: it.cy - it.hy,
-          maxy: it.cy + it.hy,
-          minz: it.cz - it.hz,
-          maxz: it.cz + it.hz
-        };
-        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, Infinity);
-        if (hit !== null)
-          hits.push({ id: it.id, t: hit[0] });
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, Infinity);
+        if (hit >= 0)
+          hits.push({ id: it.id, t: hit });
       }
       return;
     }
@@ -4410,24 +4483,17 @@ function buildOctree(items, options) {
   function walkRayFirst(n, ox, oy, oz, ix, iy, iz, t0, t1, best) {
     if (t0 > best.t)
       return;
-    const clip = clipRay(ox, oy, oz, ix, iy, iz, n.b, t0, t1);
-    if (clip === null || clip[0] > best.t)
+    const en = slabEnter(ox, oy, oz, ix, iy, iz, n.b.minx, n.b.miny, n.b.minz, n.b.maxx, n.b.maxy, n.b.maxz, t0, t1);
+    if (en < 0 || en > best.t)
       return;
+    const ex = slabExit;
     if (n.items !== null) {
       for (const it of n.items) {
         if (!alive(it))
           continue;
-        const b = {
-          minx: it.cx - it.hx,
-          maxx: it.cx + it.hx,
-          miny: it.cy - it.hy,
-          maxy: it.cy + it.hy,
-          minz: it.cz - it.hz,
-          maxz: it.cz + it.hz
-        };
-        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, best.t);
-        if (hit !== null && hit[0] < best.t) {
-          best.t = hit[0];
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t);
+        if (hit >= 0 && hit < best.t) {
+          best.t = hit;
           best.id = it.id;
         }
       }
@@ -4437,7 +4503,7 @@ function buildOctree(items, options) {
     if (kids !== null) {
       for (const k of kids) {
         if (k !== null)
-          walkRayFirst(k, ox, oy, oz, ix, iy, iz, clip[0], clip[1], best);
+          walkRayFirst(k, ox, oy, oz, ix, iy, iz, en, ex, best);
       }
     }
   }
@@ -4487,9 +4553,13 @@ function buildOctree(items, options) {
       },
       items: items.length
     },
+    get planeTests() {
+      return planeTests;
+    },
     queryFrustum(planes) {
       beginQuery();
-      walkFrustum(root, planes, false);
+      planeTests = 0;
+      walkFrustum(root, planes, 63);
       return Uint32Array.from(out);
     },
     queryBox(min, max) {
@@ -4548,6 +4618,7 @@ function buildOctree(items, options) {
 }
 function buildBVH(items, options) {
   const capacity = Math.max(1, options?.capacity ?? 8);
+  const planeMask = options?.planeMask ?? true;
   let layout = [];
   let overflow = [];
   const removed = new Set;
@@ -4610,17 +4681,51 @@ function buildBVH(items, options) {
   function alive(it) {
     return !removed.has(it.id);
   }
-  function walkFrustum(n, planes, fullyInside) {
-    if (!fullyInside) {
+  let planeTests = 0;
+  function maskedPlanes(planes, cx, cy, cz, hx, hy, hz, mask, full) {
+    let m = full ? 63 : mask;
+    for (let i = 0;i < 6; i++) {
+      const bit = 1 << i;
+      if ((m & bit) === 0)
+        continue;
+      planeTests++;
+      const o = i * 4;
+      const ax = planes[o], ay = planes[o + 1], az = planes[o + 2];
+      const reach = Math.abs(ax) * hx + Math.abs(ay) * hy + Math.abs(az) * hz;
+      const d = ax * cx + ay * cy + az * cz + planes[o + 3];
+      if (d < -reach)
+        return FRUSTUM_PRUNED;
+      if (d >= reach)
+        m &= ~bit;
+    }
+    return m;
+  }
+  function itemOutsideMasked(planes, cx, cy, cz, hx, hy, hz, mask) {
+    const m = planeMask ? mask : 63;
+    for (let i = 0;i < 6; i++) {
+      const bit = 1 << i;
+      if ((m & bit) === 0)
+        continue;
+      planeTests++;
+      const o = i * 4;
+      const ax = planes[o], ay = planes[o + 1], az = planes[o + 2];
+      if (ax * cx + ay * cy + az * cz + planes[o + 3] < -(Math.abs(ax) * hx + Math.abs(ay) * hy + Math.abs(az) * hz))
+        return true;
+    }
+    return false;
+  }
+  function walkFrustum(n, planes, mask) {
+    if (mask !== 0) {
       const cx = (n.b.minx + n.b.maxx) * 0.5;
       const cy = (n.b.miny + n.b.maxy) * 0.5;
       const cz = (n.b.minz + n.b.maxz) * 0.5;
       const hx = (n.b.maxx - n.b.minx) * 0.5;
       const hy = (n.b.maxy - n.b.miny) * 0.5;
       const hz = (n.b.maxz - n.b.minz) * 0.5;
-      if (aabbOutsideFrustum(planes, cx, cy, cz, hx, hy, hz))
+      const r2 = maskedPlanes(planes, cx, cy, cz, hx, hy, hz, mask, !planeMask);
+      if (r2 === FRUSTUM_PRUNED)
         return;
-      fullyInside = aabbInsideFrustum(planes, cx, cy, cz, hx, hy, hz);
+      mask = r2;
     }
     const l = n.left;
     const r = n.right;
@@ -4629,14 +4734,14 @@ function buildBVH(items, options) {
         const it = layout[i];
         if (!alive(it))
           continue;
-        if (fullyInside || !aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz)) {
+        if (mask === 0 || !itemOutsideMasked(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz, mask)) {
           out.push(it.id);
         }
       }
       return;
     }
-    walkFrustum(l, planes, fullyInside);
-    walkFrustum(r, planes, fullyInside);
+    walkFrustum(l, planes, mask);
+    walkFrustum(r, planes, mask);
   }
   function walkBox(n, min, max) {
     if (!boundsOverlap(n.b, min, max))
@@ -4703,9 +4808,10 @@ function buildBVH(items, options) {
     walkPoint(r, x, y, z);
   }
   function walkRay(n, ox, oy, oz, ix, iy, iz, t0, t1) {
-    const clip = clipRay(ox, oy, oz, ix, iy, iz, n.b, t0, t1);
-    if (clip === null)
+    const en = slabEnter(ox, oy, oz, ix, iy, iz, n.b.minx, n.b.miny, n.b.minz, n.b.maxx, n.b.maxy, n.b.maxz, t0, t1);
+    if (en < 0)
       return;
+    const ex = slabExit;
     const l = n.left;
     const r = n.right;
     if (l === null || r === null) {
@@ -4713,38 +4819,33 @@ function buildBVH(items, options) {
         const it = layout[i];
         if (!alive(it))
           continue;
-        const b = {
-          minx: it.cx - it.hx,
-          maxx: it.cx + it.hx,
-          miny: it.cy - it.hy,
-          maxy: it.cy + it.hy,
-          minz: it.cz - it.hz,
-          maxz: it.cz + it.hz
-        };
-        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, t1);
-        if (hit !== null)
-          hits.push({ id: it.id, t: hit[0] });
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, t1);
+        if (hit >= 0)
+          hits.push({ id: it.id, t: hit });
       }
       return;
     }
-    const cl = clipRay(ox, oy, oz, ix, iy, iz, l.b, clip[0], clip[1]);
-    const cr = clipRay(ox, oy, oz, ix, iy, iz, r.b, clip[0], clip[1]);
-    if (cl !== null && (cr === null || cl[0] <= cr[0])) {
-      walkRay(l, ox, oy, oz, ix, iy, iz, cl[0], cl[1]);
-      if (cr !== null)
-        walkRay(r, ox, oy, oz, ix, iy, iz, cr[0], cr[1]);
-    } else if (cr !== null) {
-      walkRay(r, ox, oy, oz, ix, iy, iz, cr[0], cr[1]);
-      if (cl !== null)
-        walkRay(l, ox, oy, oz, ix, iy, iz, cl[0], cl[1]);
+    const cl = slabEnter(ox, oy, oz, ix, iy, iz, l.b.minx, l.b.miny, l.b.minz, l.b.maxx, l.b.maxy, l.b.maxz, en, ex);
+    const clEx = cl >= 0 ? slabExit : 0;
+    const cr = slabEnter(ox, oy, oz, ix, iy, iz, r.b.minx, r.b.miny, r.b.minz, r.b.maxx, r.b.maxy, r.b.maxz, en, ex);
+    const crEx = cr >= 0 ? slabExit : 0;
+    if (cl >= 0 && (cr < 0 || cl <= cr)) {
+      walkRay(l, ox, oy, oz, ix, iy, iz, cl, clEx);
+      if (cr >= 0)
+        walkRay(r, ox, oy, oz, ix, iy, iz, cr, crEx);
+    } else if (cr >= 0) {
+      walkRay(r, ox, oy, oz, ix, iy, iz, cr, crEx);
+      if (cl >= 0)
+        walkRay(l, ox, oy, oz, ix, iy, iz, cl, clEx);
     }
   }
   function walkRayFirst(n, ox, oy, oz, ix, iy, iz, t0, t1, best) {
     if (t0 > best.t)
       return;
-    const clip = clipRay(ox, oy, oz, ix, iy, iz, n.b, t0, t1);
-    if (clip === null || clip[0] > best.t)
+    const en = slabEnter(ox, oy, oz, ix, iy, iz, n.b.minx, n.b.miny, n.b.minz, n.b.maxx, n.b.maxy, n.b.maxz, t0, t1);
+    if (en < 0 || en > best.t)
       return;
+    const ex = slabExit;
     const l = n.left;
     const r = n.right;
     if (l === null || r === null) {
@@ -4752,33 +4853,29 @@ function buildBVH(items, options) {
         const it = layout[i];
         if (!alive(it))
           continue;
-        const b = {
-          minx: it.cx - it.hx,
-          maxx: it.cx + it.hx,
-          miny: it.cy - it.hy,
-          maxy: it.cy + it.hy,
-          minz: it.cz - it.hz,
-          maxz: it.cz + it.hz
-        };
-        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, best.t);
-        if (hit !== null && hit[0] < best.t) {
-          best.t = hit[0];
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t);
+        if (hit >= 0 && hit < best.t) {
+          best.t = hit;
           best.id = it.id;
         }
       }
       return;
     }
-    const cl = clipRay(ox, oy, oz, ix, iy, iz, l.b, clip[0], clip[1]);
-    const cr = clipRay(ox, oy, oz, ix, iy, iz, r.b, clip[0], clip[1]);
-    const nearIsLeft = cl !== null && (cr === null || cl[0] <= cr[0]);
+    const cl = slabEnter(ox, oy, oz, ix, iy, iz, l.b.minx, l.b.miny, l.b.minz, l.b.maxx, l.b.maxy, l.b.maxz, en, ex);
+    const clEx = cl >= 0 ? slabExit : 0;
+    const cr = slabEnter(ox, oy, oz, ix, iy, iz, r.b.minx, r.b.miny, r.b.minz, r.b.maxx, r.b.maxy, r.b.maxz, en, ex);
+    const crEx = cr >= 0 ? slabExit : 0;
+    const nearIsLeft = cl >= 0 && (cr < 0 || cl <= cr);
     const near = nearIsLeft ? l : r;
     const far = nearIsLeft ? r : l;
     const cn = nearIsLeft ? cl : cr;
     const cf = nearIsLeft ? cr : cl;
-    if (cn !== null)
-      walkRayFirst(near, ox, oy, oz, ix, iy, iz, cn[0], cn[1], best);
-    if (cf !== null && cf[0] < best.t)
-      walkRayFirst(far, ox, oy, oz, ix, iy, iz, cf[0], cf[1], best);
+    const cnEx = nearIsLeft ? clEx : crEx;
+    const cfEx = nearIsLeft ? crEx : clEx;
+    if (cn >= 0)
+      walkRayFirst(near, ox, oy, oz, ix, iy, iz, cn, cnEx, best);
+    if (cf >= 0 && cf < best.t)
+      walkRayFirst(far, ox, oy, oz, ix, iy, iz, cf, cfEx, best);
   }
   const index = {
     kind: "bvh",
@@ -4793,10 +4890,14 @@ function buildBVH(items, options) {
     }, get depth() {
       return depth2;
     }, items: items.length },
+    get planeTests() {
+      return planeTests;
+    },
     queryFrustum(planes) {
       out.length = 0;
+      planeTests = 0;
       if (root !== null)
-        walkFrustum(root, planes, false);
+        walkFrustum(root, planes, 63);
       scanOverflowFrustum(planes);
       return Uint32Array.from(out);
     },
@@ -4857,17 +4958,9 @@ function buildBVH(items, options) {
       for (const it of overflow) {
         if (!alive(it))
           continue;
-        const b = {
-          minx: it.cx - it.hx,
-          maxx: it.cx + it.hx,
-          miny: it.cy - it.hy,
-          maxy: it.cy + it.hy,
-          minz: it.cz - it.hz,
-          maxz: it.cz + it.hz
-        };
-        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, Infinity);
-        if (hit !== null)
-          hits.push({ id: it.id, t: hit[0] });
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, Infinity);
+        if (hit >= 0)
+          hits.push({ id: it.id, t: hit });
       }
       hits.sort((a, b) => a.t - b.t);
       return hits.slice();
@@ -4882,17 +4975,9 @@ function buildBVH(items, options) {
       for (const it of overflow) {
         if (!alive(it))
           continue;
-        const b = {
-          minx: it.cx - it.hx,
-          maxx: it.cx + it.hx,
-          miny: it.cy - it.hy,
-          maxy: it.cy + it.hy,
-          minz: it.cz - it.hz,
-          maxz: it.cz + it.hz
-        };
-        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, best.t);
-        if (hit !== null && hit[0] < best.t) {
-          best.t = hit[0];
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t);
+        if (hit >= 0 && hit < best.t) {
+          best.t = hit;
           best.id = it.id;
         }
       }
@@ -4928,6 +5013,7 @@ function buildBVH(items, options) {
   }
   return index;
 }
+var slabExit = 0, FRUSTUM_PRUNED = -1;
 var init_spatial = () => {};
 
 // packages/core/src/culling.ts
@@ -4950,6 +5036,215 @@ function recordView(words, base, count, stride, fields) {
   };
 }
 function projectBox(mvp, cx, cy, cz, hx, hy, hz, out, tileW, tileH, zMap = 0) {
+  const m0 = mvp[0], m1 = mvp[1], m2 = mvp[2], m3 = mvp[3];
+  const m4 = mvp[4], m5 = mvp[5], m6 = mvp[6], m7 = mvp[7];
+  const m8 = mvp[8], m9 = mvp[9], m10 = mvp[10], m11 = mvp[11];
+  const m12 = mvp[12], m13 = mvp[13], m14 = mvp[14], m15 = mvp[15];
+  const nxC = m0 * cx + m4 * cy + m8 * cz + m12;
+  const nyC = m1 * cx + m5 * cy + m9 * cz + m13;
+  const nzC = m2 * cx + m6 * cy + m10 * cz + m14;
+  const wC = m3 * cx + m7 * cy + m11 * cz + m15;
+  const r0x = m0 * hx, r0y = m4 * hy, r0z = m8 * hz;
+  const r1x = m1 * hx, r1y = m5 * hy, r1z = m9 * hz;
+  const r2x = m2 * hx, r2y = m6 * hy, r2z = m10 * hz;
+  const r3x = m3 * hx, r3y = m7 * hy, r3z = m11 * hz;
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  let minZ = Infinity, minW = Infinity, anyFinite = 0;
+  const zm = zMap === 1;
+  {
+    const w = wC - r3x - r3y - r3z;
+    if (w < minW)
+      minW = w;
+    if (w > 0.0001) {
+      anyFinite = 1;
+      const px = ((nxC - r0x - r0y - r0z) / w * 0.5 + 0.5) * tileW;
+      const py = ((nyC - r1x - r1y - r1z) / w * 0.5 + 0.5) * tileH;
+      let d = (nzC - r2x - r2y - r2z) / w;
+      if (zm)
+        d = (d + 1) * 0.5;
+      if (px < x0)
+        x0 = px;
+      if (px > x1)
+        x1 = px;
+      if (py < y0)
+        y0 = py;
+      if (py > y1)
+        y1 = py;
+      if (d < minZ)
+        minZ = d;
+    }
+  }
+  {
+    const w = wC + r3x - r3y - r3z;
+    if (w < minW)
+      minW = w;
+    if (w > 0.0001) {
+      anyFinite = 1;
+      const px = ((nxC + r0x - r0y - r0z) / w * 0.5 + 0.5) * tileW;
+      const py = ((nyC + r1x - r1y - r1z) / w * 0.5 + 0.5) * tileH;
+      let d = (nzC + r2x - r2y - r2z) / w;
+      if (zm)
+        d = (d + 1) * 0.5;
+      if (px < x0)
+        x0 = px;
+      if (px > x1)
+        x1 = px;
+      if (py < y0)
+        y0 = py;
+      if (py > y1)
+        y1 = py;
+      if (d < minZ)
+        minZ = d;
+    }
+  }
+  {
+    const w = wC - r3x + r3y - r3z;
+    if (w < minW)
+      minW = w;
+    if (w > 0.0001) {
+      anyFinite = 1;
+      const px = ((nxC - r0x + r0y - r0z) / w * 0.5 + 0.5) * tileW;
+      const py = ((nyC - r1x + r1y - r1z) / w * 0.5 + 0.5) * tileH;
+      let d = (nzC - r2x + r2y - r2z) / w;
+      if (zm)
+        d = (d + 1) * 0.5;
+      if (px < x0)
+        x0 = px;
+      if (px > x1)
+        x1 = px;
+      if (py < y0)
+        y0 = py;
+      if (py > y1)
+        y1 = py;
+      if (d < minZ)
+        minZ = d;
+    }
+  }
+  {
+    const w = wC + r3x + r3y - r3z;
+    if (w < minW)
+      minW = w;
+    if (w > 0.0001) {
+      anyFinite = 1;
+      const px = ((nxC + r0x + r0y - r0z) / w * 0.5 + 0.5) * tileW;
+      const py = ((nyC + r1x + r1y - r1z) / w * 0.5 + 0.5) * tileH;
+      let d = (nzC + r2x + r2y - r2z) / w;
+      if (zm)
+        d = (d + 1) * 0.5;
+      if (px < x0)
+        x0 = px;
+      if (px > x1)
+        x1 = px;
+      if (py < y0)
+        y0 = py;
+      if (py > y1)
+        y1 = py;
+      if (d < minZ)
+        minZ = d;
+    }
+  }
+  {
+    const w = wC - r3x - r3y + r3z;
+    if (w < minW)
+      minW = w;
+    if (w > 0.0001) {
+      anyFinite = 1;
+      const px = ((nxC - r0x - r0y + r0z) / w * 0.5 + 0.5) * tileW;
+      const py = ((nyC - r1x - r1y + r1z) / w * 0.5 + 0.5) * tileH;
+      let d = (nzC - r2x - r2y + r2z) / w;
+      if (zm)
+        d = (d + 1) * 0.5;
+      if (px < x0)
+        x0 = px;
+      if (px > x1)
+        x1 = px;
+      if (py < y0)
+        y0 = py;
+      if (py > y1)
+        y1 = py;
+      if (d < minZ)
+        minZ = d;
+    }
+  }
+  {
+    const w = wC + r3x - r3y + r3z;
+    if (w < minW)
+      minW = w;
+    if (w > 0.0001) {
+      anyFinite = 1;
+      const px = ((nxC + r0x - r0y + r0z) / w * 0.5 + 0.5) * tileW;
+      const py = ((nyC + r1x - r1y + r1z) / w * 0.5 + 0.5) * tileH;
+      let d = (nzC + r2x - r2y + r2z) / w;
+      if (zm)
+        d = (d + 1) * 0.5;
+      if (px < x0)
+        x0 = px;
+      if (px > x1)
+        x1 = px;
+      if (py < y0)
+        y0 = py;
+      if (py > y1)
+        y1 = py;
+      if (d < minZ)
+        minZ = d;
+    }
+  }
+  {
+    const w = wC - r3x + r3y + r3z;
+    if (w < minW)
+      minW = w;
+    if (w > 0.0001) {
+      anyFinite = 1;
+      const px = ((nxC - r0x + r0y + r0z) / w * 0.5 + 0.5) * tileW;
+      const py = ((nyC - r1x + r1y + r1z) / w * 0.5 + 0.5) * tileH;
+      let d = (nzC - r2x + r2y + r2z) / w;
+      if (zm)
+        d = (d + 1) * 0.5;
+      if (px < x0)
+        x0 = px;
+      if (px > x1)
+        x1 = px;
+      if (py < y0)
+        y0 = py;
+      if (py > y1)
+        y1 = py;
+      if (d < minZ)
+        minZ = d;
+    }
+  }
+  {
+    const w = wC + r3x + r3y + r3z;
+    if (w < minW)
+      minW = w;
+    if (w > 0.0001) {
+      anyFinite = 1;
+      const px = ((nxC + r0x + r0y + r0z) / w * 0.5 + 0.5) * tileW;
+      const py = ((nyC + r1x + r1y + r1z) / w * 0.5 + 0.5) * tileH;
+      let d = (nzC + r2x + r2y + r2z) / w;
+      if (zm)
+        d = (d + 1) * 0.5;
+      if (px < x0)
+        x0 = px;
+      if (px > x1)
+        x1 = px;
+      if (py < y0)
+        y0 = py;
+      if (py > y1)
+        y1 = py;
+      if (d < minZ)
+        minZ = d;
+    }
+  }
+  out[0] = x0;
+  out[1] = x1;
+  out[2] = y0;
+  out[3] = y1;
+  out[4] = minZ;
+  out[5] = minW;
+  out[6] = anyFinite;
+  return out;
+}
+function projectBoxLegacy(mvp, cx, cy, cz, hx, hy, hz, out, tileW, tileH, zMap = 0) {
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   let minZ = Infinity, minW = Infinity, anyFinite = 0;
   for (let k = 0;k < 8; k++) {
@@ -5128,6 +5423,9 @@ function softwareOccluder(options) {
   const width = Math.max(2, options?.width ?? 256);
   const height = Math.max(2, options?.height ?? 144);
   const zMap = options?.zMap ?? 0;
+  const tiled = (options?.raster ?? "tiled") !== "legacy";
+  const earlyOut = options?.earlyOut ?? true;
+  const projectFn = (options?.project ?? "cse") === "legacy" ? projectBoxLegacy : projectBox;
   const dims = [{ w: width, h: height }];
   for (;; ) {
     const prev = dims[dims.length - 1];
@@ -5184,9 +5482,95 @@ function softwareOccluder(options) {
       }
     }
   }
+  const TILE = 8;
+  function rasterTriTiled(i0, i1, i2) {
+    const x0 = cornerPx[i0], y0 = cornerPy[i0], z0 = cornerZ[i0];
+    const x1 = cornerPx[i1], y1 = cornerPy[i1], z1 = cornerZ[i1];
+    const x2 = cornerPx[i2], y2 = cornerPy[i2], z2 = cornerZ[i2];
+    const area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+    if (Math.abs(area) < 0.000000000001)
+      return;
+    const sign = area > 0 ? 1 : -1;
+    let minx = Math.floor(Math.min(x0, x1, x2)) - 1;
+    let maxx = Math.ceil(Math.max(x0, x1, x2)) + 1;
+    let miny = Math.floor(Math.min(y0, y1, y2)) - 1;
+    let maxy = Math.ceil(Math.max(y0, y1, y2)) + 1;
+    minx = Math.max(0, minx);
+    miny = Math.max(0, miny);
+    maxx = Math.min(width, maxx);
+    maxy = Math.min(height, maxy);
+    if (minx >= maxx || miny >= maxy)
+      return;
+    const A0 = -(y2 - y1) * sign, B0 = (x2 - x1) * sign, C0 = ((y2 - y1) * x1 - (x2 - x1) * y1) * sign;
+    const A1 = -(y0 - y2) * sign, B1 = (x0 - x2) * sign, C1 = ((y0 - y2) * x2 - (x0 - x2) * y2) * sign;
+    const A2 = -(y1 - y0) * sign, B2 = (x1 - x0) * sign, C2 = ((y1 - y0) * x0 - (x1 - x0) * y0) * sign;
+    const dx10 = x1 - x0, dy10 = y1 - y0, dz10 = z1 - z0;
+    const dx20 = x2 - x0, dy20 = y2 - y0, dz20 = z2 - z0;
+    const zx = (dz10 * dy20 - dy10 * dz20) / area;
+    const zy = (dx10 * dz20 - dz10 * dx20) / area;
+    const reach0 = (Math.abs(A0) + Math.abs(B0)) * (TILE - 1);
+    const reach1 = (Math.abs(A1) + Math.abs(B1)) * (TILE - 1);
+    const reach2 = (Math.abs(A2) + Math.abs(B2)) * (TILE - 1);
+    const tilesX = maxx + TILE - 1 >> 3;
+    const tilesY = maxy + TILE - 1 >> 3;
+    for (let ty = miny >> 3;ty < tilesY; ty++) {
+      const py0 = ty * TILE;
+      const pyLo = Math.max(py0, miny);
+      const pyHi = Math.min(py0 + TILE, maxy);
+      for (let tx = minx >> 3;tx < tilesX; tx++) {
+        const px0 = tx * TILE;
+        const ex0 = px0 + 0.5, ey0 = py0 + 0.5;
+        const e0 = A0 * ex0 + B0 * ey0 + C0;
+        const e1 = A1 * ex0 + B1 * ey0 + C1;
+        const e2 = A2 * ex0 + B2 * ey0 + C2;
+        if (e0 + reach0 < 0 || e1 + reach1 < 0 || e2 + reach2 < 0)
+          continue;
+        if (e0 - reach0 >= 0 && e1 - reach1 >= 0 && e2 - reach2 >= 0) {
+          const pxLo2 = Math.max(px0, minx);
+          const pxHi2 = Math.min(px0 + TILE, maxx);
+          for (let py = pyLo;py < pyHi; py++) {
+            let z = z0 + zx * (pxLo2 + 0.5 - x0) + zy * (py + 0.5 - y0);
+            let idx = py * width + pxLo2;
+            for (let px = pxLo2;px < pxHi2; px++) {
+              if (z < zbuf[idx])
+                zbuf[idx] = z;
+              z += zx;
+              idx++;
+            }
+          }
+          continue;
+        }
+        const pxLo = Math.max(px0, minx);
+        const pxHi = Math.min(px0 + TILE, maxx);
+        const dpx = pxLo - px0;
+        for (let py = pyLo;py < pyHi; py++) {
+          const dpy = py - py0;
+          let r0 = A0 * dpx + B0 * dpy + e0;
+          let r1 = A1 * dpx + B1 * dpy + e1;
+          let r2 = A2 * dpx + B2 * dpy + e2;
+          let z = z0 + zx * (pxLo + 0.5 - x0) + zy * (py + 0.5 - y0);
+          let idx = py * width + pxLo;
+          for (let px = pxLo;px < pxHi; px++) {
+            if (r0 >= 0 && r1 >= 0 && r2 >= 0 && z < zbuf[idx])
+              zbuf[idx] = z;
+            r0 += A0;
+            r1 += A1;
+            r2 += A2;
+            z += zx;
+            idx++;
+          }
+        }
+      }
+    }
+  }
   function rasterQuad(a, b, c, d) {
-    rasterTri(a, b, c);
-    rasterTri(a, c, d);
+    if (tiled) {
+      rasterTriTiled(a, b, c);
+      rasterTriTiled(a, c, d);
+    } else {
+      rasterTri(a, b, c);
+      rasterTri(a, c, d);
+    }
   }
   function mipOf(size) {
     let L = 0;
@@ -5283,7 +5667,7 @@ function softwareOccluder(options) {
         throw new Error("rune/core: softwareOccluder.hidden — begin(mvp) first");
       if (!reduced)
         throw new Error("rune/core: softwareOccluder.hidden — reduce() first (the mips are the test)");
-      const p = projectBox(mvp, cx, cy, cz, hx, hy, hz, proj, width, height, zMap);
+      const p = projectFn(mvp, cx, cy, cz, hx, hy, hz, proj, width, height, zMap);
       if (p[6] < 1)
         return false;
       if (p[5] <= 0.0001)
@@ -5303,12 +5687,15 @@ function softwareOccluder(options) {
       const mip = mips[L];
       const tx0 = x0 >> L, tx1 = Math.min(x1 - 1 >> L, lw - 1);
       const ty0 = y0 >> L, ty1 = Math.min(y1 - 1 >> L, lh - 1);
+      const near = p[4];
       let zmax = -Infinity;
       for (let ty = ty0;ty <= ty1; ty++) {
         for (let tx = tx0;tx <= tx1; tx++) {
           const z = mip[ty * lw + tx];
           if (z > zmax)
             zmax = z;
+          if (earlyOut && zmax >= near - 0.00001)
+            return false;
         }
       }
       return p[4] > zmax + 0.00001;

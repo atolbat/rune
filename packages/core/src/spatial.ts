@@ -103,6 +103,10 @@ export interface SpatialIndex {
   /** The BVH's own: rebuilds the whole tree over the live set (the
    *  octree needs none — its splits are incremental). */
   rebuild?(): void
+  /** Task 205 — the instrumented counter: plane evaluations performed by
+   *  the LAST queryFrustum (the mask-inheritance win, measured not
+   *  claimed — the legacy walk re-arms all six planes at every node). */
+  readonly planeTests: number
 }
 
 // ─── the shared AABB–plane predicate (the GPU kernel's mirror) ────────────
@@ -235,6 +239,73 @@ function clipRay(
   return [t0, t1]
 }
 
+// ─── Task 205 — THE ALLOCATION-FREE SLAB WALK (the picking path) ──────────
+
+/** clipRay's numeric twin (the ryg discipline: no allocations in the hot
+ *  walk — the old path bought a [t0, t1] tuple per NODE and a six-field
+ *  NodeBounds object per LEAF ITEM, all short-lived GC garbage on the
+ *  click path). Returns the ENTRY t, or −1 on a miss; the EXIT t lands
+ *  in the module scratch `slabExit`. The arithmetic order is clipRay's
+ *  own, so every t is bit-identical — the walks decide identically and
+ *  the tie law survives. */
+let slabExit = 0
+function slabEnter(
+  ox: number, oy: number, oz: number,
+  ix: number, iy: number, iz: number,
+  minx: number, miny: number, minz: number,
+  maxx: number, maxy: number, maxz: number,
+  t0: number, t1: number,
+): number {
+  let en = t0
+  let ex = t1
+  if (ix === Infinity || ix === -Infinity) {
+    if (ox < minx || ox > maxx) return -1
+  } else {
+    let ta = (minx - ox) * ix
+    let tb = (maxx - ox) * ix
+    if (ta > tb) { const s = ta; ta = tb; tb = s }
+    if (ta > en) en = ta
+    if (tb < ex) ex = tb
+    if (en > ex) return -1
+  }
+  if (iy === Infinity || iy === -Infinity) {
+    if (oy < miny || oy > maxy) return -1
+  } else {
+    let ta = (miny - oy) * iy
+    let tb = (maxy - oy) * iy
+    if (ta > tb) { const s = ta; ta = tb; tb = s }
+    if (ta > en) en = ta
+    if (tb < ex) ex = tb
+    if (en > ex) return -1
+  }
+  if (iz === Infinity || iz === -Infinity) {
+    if (oz < minz || oz > maxz) return -1
+  } else {
+    let ta = (minz - oz) * iz
+    let tb = (maxz - oz) * iz
+    if (ta > tb) { const s = ta; ta = tb; tb = s }
+    if (ta > en) en = ta
+    if (tb < ex) ex = tb
+    if (en > ex) return -1
+  }
+  slabExit = ex
+  return en
+}
+
+// ─── Task 205 — THE MASKED FRUSTUM TEST (plane-mask inheritance) ─────────
+
+/** Sýkora & Jelínek 2007 (Efficient View Frustum Culling) — the Cesium
+ *  JS line: `mask`'s set bits name the planes the PARENT cell
+ *  INTERSECTED. A plane proven fully INSIDE for the parent is proven for
+ *  every descendant (cells only shrink), so its bit never comes back —
+ *  deep nodes end up testing the one or two planes the camera actually
+ *  crosses instead of all six, twice (the old walk ran the outside scan
+ *  and the inside scan separately). `full` re-arms all six bits: the
+ *  Task-201 baseline walk, the A/B leg and the oracle. Returns
+ *  FRUSTUM_PRUNED (fully outside — cut the subtree) or the child mask
+ *  (0 = fully inside — the subtree answers with no further plane test). */
+const FRUSTUM_PRUNED = -1
+
 // ─── THE OCTREE ───────────────────────────────────────────────────────────
 
 interface OctNode {
@@ -257,9 +328,10 @@ interface OctNode {
  *  splits a leaf the moment it crosses the capacity (the split machinery
  *  is shared with the build); remove() tombstones (the tree shape is
  *  never torn down mid-query); update() = remove + insert. */
-export function buildOctree(items: readonly SpatialBox[], options?: { capacity?: number; maxDepth?: number }): SpatialIndex {
+export function buildOctree(items: readonly SpatialBox[], options?: { capacity?: number; maxDepth?: number; planeMask?: boolean }): SpatialIndex {
   const capacity = Math.max(1, options?.capacity ?? 8)
   const maxDepth = Math.max(1, options?.maxDepth ?? 12)
+  const planeMask = options?.planeMask ?? true
   let nodes = 0
   let leaves = 0
   let depth = 0
@@ -397,19 +469,43 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
     return !removed.has(it.id)
   }
 
-  function walkFrustum(n: OctNode, planes: ArrayLike<number>, fullyInside: boolean): void {
-    if (!fullyInside) {
+  // ── Task 205 — the instrumented masked walk ──
+  let planeTests = 0
+  function maskedPlanes(
+    planes: ArrayLike<number>,
+    cx: number, cy: number, cz: number,
+    hx: number, hy: number, hz: number,
+    mask: number, full: boolean,
+  ): number {
+    let m = full ? 0b111111 : mask
+    for (let i = 0; i < 6; i++) {
+      const bit = 1 << i
+      if ((m & bit) === 0) continue
+      planeTests++
+      const o = i * 4
+      const ax = planes[o], ay = planes[o + 1], az = planes[o + 2]
+      const reach = Math.abs(ax) * hx + Math.abs(ay) * hy + Math.abs(az) * hz
+      const d = ax * cx + ay * cy + az * cz + planes[o + 3]
+      if (d < -reach) return FRUSTUM_PRUNED
+      if (d >= reach) m &= ~bit
+    }
+    return m
+  }
+
+  function walkFrustum(n: OctNode, planes: ArrayLike<number>, mask: number): void {
+    if (mask !== 0) {
       const cx = (n.b.minx + n.b.maxx) * 0.5
       const cy = (n.b.miny + n.b.maxy) * 0.5
       const cz = (n.b.minz + n.b.maxz) * 0.5
       const hx = (n.b.maxx - n.b.minx) * 0.5
       const hy = (n.b.maxy - n.b.miny) * 0.5
       const hz = (n.b.maxz - n.b.minz) * 0.5
-      if (aabbOutsideFrustum(planes, cx, cy, cz, hx, hy, hz)) return
-      fullyInside = aabbInsideFrustum(planes, cx, cy, cz, hx, hy, hz)
+      const r = maskedPlanes(planes, cx, cy, cz, hx, hy, hz, mask, !planeMask)
+      if (r === FRUSTUM_PRUNED) return
+      mask = r
     }
     if (n.items !== null) {
-      if (fullyInside) {
+      if (mask === 0) {
         for (const it of n.items) {
           if (!alive(it)) continue
           if (seen[it.id] !== stamp) { seen[it.id] = stamp; out.push(it.id) }
@@ -427,7 +523,7 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
     const kids = n.kids
     if (kids !== null) {
       for (const k of kids) {
-        if (k !== null) walkFrustum(k, planes, fullyInside)
+        if (k !== null) walkFrustum(k, planes, mask)
       }
     }
   }
@@ -511,19 +607,15 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
         if (!alive(it)) continue
         if (seen[it.id] === stamp) continue
         seen[it.id] = stamp
-        const b: NodeBounds = {
-          minx: it.cx - it.hx, maxx: it.cx + it.hx,
-          miny: it.cy - it.hy, maxy: it.cy + it.hy,
-          minz: it.cz - it.hz, maxz: it.cz + it.hz,
-        }
         // THE GLOBAL INTERVAL — not the leaf's clip: a straddler box lives
         // in several leaves, and the ray may cross the cell's EMPTY part
         // before reaching the box (the leaf-local test would fail there,
         // but the stamp suppresses the later leaf's TRUE hit — the dedup
         // must carry the box's own interval, the same numbers from any
-        // leaf it belongs to)
-        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, Infinity)
-        if (hit !== null) hits.push({ id: it.id, t: hit[0] })
+        // leaf it belongs to). Task 205: the slab walk is numeric — no
+        // NodeBounds literal, no [t, t] tuple per item.
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, Infinity)
+        if (hit >= 0) hits.push({ id: it.id, t: hit })
       }
       return
     }
@@ -537,22 +629,19 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
 
   // raycast's walk: the running best t prunes every node whose ENTRY is
   // already beyond it (the octree has no child ordering — the pruning is
-  // purely the interval; the BVH twin below adds the near-first order)
+  // purely the interval; the BVH twin below adds the near-first order).
+  // Task 205: the numeric slab walk — allocation-free on the click path.
   function walkRayFirst(n: OctNode, ox: number, oy: number, oz: number, ix: number, iy: number, iz: number, t0: number, t1: number, best: { t: number; id: number }): void {
     if (t0 > best.t) return
-    const clip = clipRay(ox, oy, oz, ix, iy, iz, n.b, t0, t1)
-    if (clip === null || clip[0] > best.t) return
+    const en = slabEnter(ox, oy, oz, ix, iy, iz, n.b.minx, n.b.miny, n.b.minz, n.b.maxx, n.b.maxy, n.b.maxz, t0, t1)
+    if (en < 0 || en > best.t) return
+    const ex = slabExit
     if (n.items !== null) {
       for (const it of n.items) {
         if (!alive(it)) continue
-        const b: NodeBounds = {
-          minx: it.cx - it.hx, maxx: it.cx + it.hx,
-          miny: it.cy - it.hy, maxy: it.cy + it.hy,
-          minz: it.cz - it.hz, maxz: it.cz + it.hz,
-        }
-        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, best.t)
-        if (hit !== null && hit[0] < best.t) {
-          best.t = hit[0]
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t)
+        if (hit >= 0 && hit < best.t) {
+          best.t = hit
           best.id = it.id
         }
       }
@@ -561,7 +650,7 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
     const kids = n.kids
     if (kids !== null) {
       for (const k of kids) {
-        if (k !== null) walkRayFirst(k, ox, oy, oz, ix, iy, iz, clip[0], clip[1], best)
+        if (k !== null) walkRayFirst(k, ox, oy, oz, ix, iy, iz, en, ex, best)
       }
     }
   }
@@ -603,9 +692,13 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
       get depth() { return depth },
       items: items.length,
     },
+    get planeTests(): number {
+      return planeTests
+    },
     queryFrustum(planes: ArrayLike<number>): Uint32Array {
       beginQuery()
-      walkFrustum(root, planes, false)
+      planeTests = 0
+      walkFrustum(root, planes, 0b111111)
       return Uint32Array.from(out)
     },
     queryBox(min, max) {
@@ -687,8 +780,9 @@ interface BvhNode {
  *  list the queries scan linearly (the amortized-rebuild pattern — the
  *  fresh minority costs a sweep, the settled majority keeps its
  *  near-log walk); rebuild() folds the overflow back into a fresh tree. */
-export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: number }): SpatialIndex {
+export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: number; planeMask?: boolean }): SpatialIndex {
   const capacity = Math.max(1, options?.capacity ?? 8)
+  const planeMask = options?.planeMask ?? true
   // the mutable build state — rebuild() re-runs the builder over the live set
   let layout: SpatialBox[] = []
   let overflow: SpatialBox[] = []
@@ -754,16 +848,63 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
     return !removed.has(it.id)
   }
 
-  function walkFrustum(n: BvhNode, planes: ArrayLike<number>, fullyInside: boolean): void {
-    if (!fullyInside) {
+  // ── Task 205 — the instrumented masked walk (the BVH twin — items live
+  // INSIDE the node's tight bounds, so a plane proven inside for the node
+  // is proven for every item in it: the leaf test inherits the mask too;
+  // the octree's straddlers keep the full six) ──
+  let planeTests = 0
+  function maskedPlanes(
+    planes: ArrayLike<number>,
+    cx: number, cy: number, cz: number,
+    hx: number, hy: number, hz: number,
+    mask: number, full: boolean,
+  ): number {
+    let m = full ? 0b111111 : mask
+    for (let i = 0; i < 6; i++) {
+      const bit = 1 << i
+      if ((m & bit) === 0) continue
+      planeTests++
+      const o = i * 4
+      const ax = planes[o], ay = planes[o + 1], az = planes[o + 2]
+      const reach = Math.abs(ax) * hx + Math.abs(ay) * hy + Math.abs(az) * hz
+      const d = ax * cx + ay * cy + az * cz + planes[o + 3]
+      if (d < -reach) return FRUSTUM_PRUNED
+      if (d >= reach) m &= ~bit
+    }
+    return m
+  }
+  /** The item's outside test restricted to the still-intersected planes
+   *  (the legacy leg re-arms all six — the A/B counter stays honest). */
+  function itemOutsideMasked(
+    planes: ArrayLike<number>,
+    cx: number, cy: number, cz: number,
+    hx: number, hy: number, hz: number,
+    mask: number,
+  ): boolean {
+    const m = planeMask ? mask : 0b111111
+    for (let i = 0; i < 6; i++) {
+      const bit = 1 << i
+      if ((m & bit) === 0) continue
+      planeTests++
+      const o = i * 4
+      const ax = planes[o], ay = planes[o + 1], az = planes[o + 2]
+      if (ax * cx + ay * cy + az * cz + planes[o + 3]
+        < -(Math.abs(ax) * hx + Math.abs(ay) * hy + Math.abs(az) * hz)) return true
+    }
+    return false
+  }
+
+  function walkFrustum(n: BvhNode, planes: ArrayLike<number>, mask: number): void {
+    if (mask !== 0) {
       const cx = (n.b.minx + n.b.maxx) * 0.5
       const cy = (n.b.miny + n.b.maxy) * 0.5
       const cz = (n.b.minz + n.b.maxz) * 0.5
       const hx = (n.b.maxx - n.b.minx) * 0.5
       const hy = (n.b.maxy - n.b.miny) * 0.5
       const hz = (n.b.maxz - n.b.minz) * 0.5
-      if (aabbOutsideFrustum(planes, cx, cy, cz, hx, hy, hz)) return
-      fullyInside = aabbInsideFrustum(planes, cx, cy, cz, hx, hy, hz)
+      const r = maskedPlanes(planes, cx, cy, cz, hx, hy, hz, mask, !planeMask)
+      if (r === FRUSTUM_PRUNED) return
+      mask = r
     }
     const l = n.left
     const r = n.right
@@ -771,14 +912,14 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
       for (let i = n.from; i < n.to; i++) {
         const it = layout[i]
         if (!alive(it)) continue
-        if (fullyInside || !aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz)) {
+        if (mask === 0 || !itemOutsideMasked(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz, mask)) {
           out.push(it.id)
         }
       }
       return
     }
-    walkFrustum(l, planes, fullyInside)
-    walkFrustum(r, planes, fullyInside)
+    walkFrustum(l, planes, mask)
+    walkFrustum(r, planes, mask)
   }
 
   function walkBox(n: BvhNode, min: readonly number[], max: readonly number[]): void {
@@ -841,70 +982,71 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
   }
 
   function walkRay(n: BvhNode, ox: number, oy: number, oz: number, ix: number, iy: number, iz: number, t0: number, t1: number): void {
-    const clip = clipRay(ox, oy, oz, ix, iy, iz, n.b, t0, t1)
-    if (clip === null) return
+    const en = slabEnter(ox, oy, oz, ix, iy, iz, n.b.minx, n.b.miny, n.b.minz, n.b.maxx, n.b.maxy, n.b.maxz, t0, t1)
+    if (en < 0) return
+    const ex = slabExit
     const l = n.left
     const r = n.right
     if (l === null || r === null) {
       for (let i = n.from; i < n.to; i++) {
         const it = layout[i]
         if (!alive(it)) continue
-        const b: NodeBounds = {
-          minx: it.cx - it.hx, maxx: it.cx + it.hx,
-          miny: it.cy - it.hy, maxy: it.cy + it.hy,
-          minz: it.cz - it.hz, maxz: it.cz + it.hz,
-        }
-        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, t1)
-        if (hit !== null) hits.push({ id: it.id, t: hit[0] })
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, t1)
+        if (hit >= 0) hits.push({ id: it.id, t: hit })
       }
       return
     }
     // THE ORDERED DESCENT: the near child first — its hits land before the
-    // far child's walk can prune anything (raycast()'s best-t twin below)
-    const cl = clipRay(ox, oy, oz, ix, iy, iz, l.b, clip[0], clip[1])
-    const cr = clipRay(ox, oy, oz, ix, iy, iz, r.b, clip[0], clip[1])
-    if (cl !== null && (cr === null || cl[0] <= cr[0])) {
-      walkRay(l, ox, oy, oz, ix, iy, iz, cl[0], cl[1])
-      if (cr !== null) walkRay(r, ox, oy, oz, ix, iy, iz, cr[0], cr[1])
-    } else if (cr !== null) {
-      walkRay(r, ox, oy, oz, ix, iy, iz, cr[0], cr[1])
-      if (cl !== null) walkRay(l, ox, oy, oz, ix, iy, iz, cl[0], cl[1])
+    // far child's walk can prune anything (raycast()'s best-t twin below).
+    // Task 205: the exits are captured before the second slab call (the
+    // scratch is module-wide — one writer at a time).
+    const cl = slabEnter(ox, oy, oz, ix, iy, iz, l.b.minx, l.b.miny, l.b.minz, l.b.maxx, l.b.maxy, l.b.maxz, en, ex)
+    const clEx = cl >= 0 ? slabExit : 0
+    const cr = slabEnter(ox, oy, oz, ix, iy, iz, r.b.minx, r.b.miny, r.b.minz, r.b.maxx, r.b.maxy, r.b.maxz, en, ex)
+    const crEx = cr >= 0 ? slabExit : 0
+    if (cl >= 0 && (cr < 0 || cl <= cr)) {
+      walkRay(l, ox, oy, oz, ix, iy, iz, cl, clEx)
+      if (cr >= 0) walkRay(r, ox, oy, oz, ix, iy, iz, cr, crEx)
+    } else if (cr >= 0) {
+      walkRay(r, ox, oy, oz, ix, iy, iz, cr, crEx)
+      if (cl >= 0) walkRay(l, ox, oy, oz, ix, iy, iz, cl, clEx)
     }
   }
 
   function walkRayFirst(n: BvhNode, ox: number, oy: number, oz: number, ix: number, iy: number, iz: number, t0: number, t1: number, best: { t: number; id: number }): void {
     if (t0 > best.t) return
-    const clip = clipRay(ox, oy, oz, ix, iy, iz, n.b, t0, t1)
-    if (clip === null || clip[0] > best.t) return
+    const en = slabEnter(ox, oy, oz, ix, iy, iz, n.b.minx, n.b.miny, n.b.minz, n.b.maxx, n.b.maxy, n.b.maxz, t0, t1)
+    if (en < 0 || en > best.t) return
+    const ex = slabExit
     const l = n.left
     const r = n.right
     if (l === null || r === null) {
       for (let i = n.from; i < n.to; i++) {
         const it = layout[i]
         if (!alive(it)) continue
-        const b: NodeBounds = {
-          minx: it.cx - it.hx, maxx: it.cx + it.hx,
-          miny: it.cy - it.hy, maxy: it.cy + it.hy,
-          minz: it.cz - it.hz, maxz: it.cz + it.hz,
-        }
-        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, best.t)
-        if (hit !== null && hit[0] < best.t) {
-          best.t = hit[0]
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t)
+        if (hit >= 0 && hit < best.t) {
+          best.t = hit
           best.id = it.id
         }
       }
       return
     }
     // near child first, the far child pruned by whatever the near walk found
-    const cl = clipRay(ox, oy, oz, ix, iy, iz, l.b, clip[0], clip[1])
-    const cr = clipRay(ox, oy, oz, ix, iy, iz, r.b, clip[0], clip[1])
-    const nearIsLeft = cl !== null && (cr === null || cl[0] <= cr[0])
+    // (the exits captured before the second slab call — the scratch rule)
+    const cl = slabEnter(ox, oy, oz, ix, iy, iz, l.b.minx, l.b.miny, l.b.minz, l.b.maxx, l.b.maxy, l.b.maxz, en, ex)
+    const clEx = cl >= 0 ? slabExit : 0
+    const cr = slabEnter(ox, oy, oz, ix, iy, iz, r.b.minx, r.b.miny, r.b.minz, r.b.maxx, r.b.maxy, r.b.maxz, en, ex)
+    const crEx = cr >= 0 ? slabExit : 0
+    const nearIsLeft = cl >= 0 && (cr < 0 || cl <= cr)
     const near = nearIsLeft ? l : r
     const far = nearIsLeft ? r : l
     const cn = nearIsLeft ? cl : cr
     const cf = nearIsLeft ? cr : cl
-    if (cn !== null) walkRayFirst(near, ox, oy, oz, ix, iy, iz, cn[0], cn[1], best)
-    if (cf !== null && cf[0] < best.t) walkRayFirst(far, ox, oy, oz, ix, iy, iz, cf[0], cf[1], best)
+    const cnEx = nearIsLeft ? clEx : crEx
+    const cfEx = nearIsLeft ? crEx : clEx
+    if (cn >= 0) walkRayFirst(near, ox, oy, oz, ix, iy, iz, cn, cnEx, best)
+    if (cf >= 0 && cf < best.t) walkRayFirst(far, ox, oy, oz, ix, iy, iz, cf, cfEx, best)
   }
 
   const index: SpatialIndex = {
@@ -914,9 +1056,13 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
       return buildCount + overflow.length - removed.size - removedOverflowCount()
     },
     stats: { get nodes() { return nodes }, get leaves() { return leaves }, get depth() { return depth }, items: items.length },
+    get planeTests(): number {
+      return planeTests
+    },
     queryFrustum(planes: ArrayLike<number>): Uint32Array {
       out.length = 0
-      if (root !== null) walkFrustum(root, planes, false)
+      planeTests = 0
+      if (root !== null) walkFrustum(root, planes, 0b111111)
       scanOverflowFrustum(planes)
       return Uint32Array.from(out)
     },
@@ -967,13 +1113,8 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
       if (root !== null) walkRay(root, ox, oy, oz, ix, iy, iz, 0, Infinity)
       for (const it of overflow) {
         if (!alive(it)) continue
-        const b: NodeBounds = {
-          minx: it.cx - it.hx, maxx: it.cx + it.hx,
-          miny: it.cy - it.hy, maxy: it.cy + it.hy,
-          minz: it.cz - it.hz, maxz: it.cz + it.hz,
-        }
-        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, Infinity)
-        if (hit !== null) hits.push({ id: it.id, t: hit[0] })
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, Infinity)
+        if (hit >= 0) hits.push({ id: it.id, t: hit })
       }
       hits.sort((a, b) => a.t - b.t)
       return hits.slice()
@@ -986,14 +1127,9 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
       if (root !== null) walkRayFirst(root, ox, oy, oz, ix, iy, iz, 0, Infinity, best)
       for (const it of overflow) {
         if (!alive(it)) continue
-        const b: NodeBounds = {
-          minx: it.cx - it.hx, maxx: it.cx + it.hx,
-          miny: it.cy - it.hy, maxy: it.cy + it.hy,
-          minz: it.cz - it.hz, maxz: it.cz + it.hz,
-        }
-        const hit = clipRay(ox, oy, oz, ix, iy, iz, b, 0, best.t)
-        if (hit !== null && hit[0] < best.t) {
-          best.t = hit[0]
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t)
+        if (hit >= 0 && hit < best.t) {
+          best.t = hit
           best.id = it.id
         }
       }

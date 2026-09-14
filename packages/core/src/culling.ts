@@ -104,8 +104,179 @@ export type ProjectedBox = Float64Array
  *  own guard — a straddler is never flat-culled, never hidden). `zMap`:
  *  0 = the WebGPU-style z ∈ [0,1] (the demo's own matrices — the value
  *  rides as-is); 1 = the GL-style z ∈ [−1,1] (remapped (nz+1)·0.5 — the
- *  monotonicity is all the consumers need). */
+ *  monotonicity is all the consumers need).
+ *
+ *  Task 205 — THE CSE CORNER TRANSFORM (ryg, «View frustum culling»,
+ *  fgiesen.wordpress.com 2010): the eight corners share the CENTER's
+ *  four row-dots and the twelve per-axis half-extent products — 24
+ *  multiplies for the whole box instead of 96, with the ±1 sign flips
+ *  UNROLLED to literal adds (a variable-times-±1 is still a full
+ *  multiply in JS). The reassociation moves the last fp bits (the
+ *  fuzz gates quantify it); the ±2-texel read guard and the 1e-5
+ *  verdict slack swallow it — and the query side was the MEASURED
+ *  bottleneck of hiddenView (the mip scan was never the cost). */
 export function projectBox(
+  mvp: ArrayLike<number>,
+  cx: number, cy: number, cz: number,
+  hx: number, hy: number, hz: number,
+  out: ProjectedBox,
+  tileW: number, tileH: number,
+  zMap: 0 | 1 = 0,
+): ProjectedBox {
+  const m0 = mvp[0], m1 = mvp[1], m2 = mvp[2], m3 = mvp[3]
+  const m4 = mvp[4], m5 = mvp[5], m6 = mvp[6], m7 = mvp[7]
+  const m8 = mvp[8], m9 = mvp[9], m10 = mvp[10], m11 = mvp[11]
+  const m12 = mvp[12], m13 = mvp[13], m14 = mvp[14], m15 = mvp[15]
+  // the center's row dots (12 mults)
+  const nxC = m0 * cx + m4 * cy + m8 * cz + m12
+  const nyC = m1 * cx + m5 * cy + m9 * cz + m13
+  const nzC = m2 * cx + m6 * cy + m10 * cz + m14
+  const wC = m3 * cx + m7 * cy + m11 * cz + m15
+  // the per-axis half products (12 mults) — rows 0..3 × (hx, hy, hz)
+  const r0x = m0 * hx, r0y = m4 * hy, r0z = m8 * hz
+  const r1x = m1 * hx, r1y = m5 * hy, r1z = m9 * hz
+  const r2x = m2 * hx, r2y = m6 * hy, r2z = m10 * hz
+  const r3x = m3 * hx, r3y = m7 * hy, r3z = m11 * hz
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity
+  let minZ = Infinity, minW = Infinity, anyFinite = 0
+  const zm = zMap === 1
+  // the eight corners, signs literal (k: x=bit0, y=bit1, z=bit2)
+  { // (−,−,−)
+    const w = wC - r3x - r3y - r3z
+    if (w < minW) minW = w
+    if (w > 1e-4) {
+      anyFinite = 1
+      const px = ((nxC - r0x - r0y - r0z) / w * 0.5 + 0.5) * tileW
+      const py = ((nyC - r1x - r1y - r1z) / w * 0.5 + 0.5) * tileH
+      let d = (nzC - r2x - r2y - r2z) / w
+      if (zm) d = (d + 1) * 0.5
+      if (px < x0) x0 = px
+      if (px > x1) x1 = px
+      if (py < y0) y0 = py
+      if (py > y1) y1 = py
+      if (d < minZ) minZ = d
+    }
+  }
+  { // (+,−,−)
+    const w = wC + r3x - r3y - r3z
+    if (w < minW) minW = w
+    if (w > 1e-4) {
+      anyFinite = 1
+      const px = ((nxC + r0x - r0y - r0z) / w * 0.5 + 0.5) * tileW
+      const py = ((nyC + r1x - r1y - r1z) / w * 0.5 + 0.5) * tileH
+      let d = (nzC + r2x - r2y - r2z) / w
+      if (zm) d = (d + 1) * 0.5
+      if (px < x0) x0 = px
+      if (px > x1) x1 = px
+      if (py < y0) y0 = py
+      if (py > y1) y1 = py
+      if (d < minZ) minZ = d
+    }
+  }
+  { // (−,+,−)
+    const w = wC - r3x + r3y - r3z
+    if (w < minW) minW = w
+    if (w > 1e-4) {
+      anyFinite = 1
+      const px = ((nxC - r0x + r0y - r0z) / w * 0.5 + 0.5) * tileW
+      const py = ((nyC - r1x + r1y - r1z) / w * 0.5 + 0.5) * tileH
+      let d = (nzC - r2x + r2y - r2z) / w
+      if (zm) d = (d + 1) * 0.5
+      if (px < x0) x0 = px
+      if (px > x1) x1 = px
+      if (py < y0) y0 = py
+      if (py > y1) y1 = py
+      if (d < minZ) minZ = d
+    }
+  }
+  { // (+,+,−)
+    const w = wC + r3x + r3y - r3z
+    if (w < minW) minW = w
+    if (w > 1e-4) {
+      anyFinite = 1
+      const px = ((nxC + r0x + r0y - r0z) / w * 0.5 + 0.5) * tileW
+      const py = ((nyC + r1x + r1y - r1z) / w * 0.5 + 0.5) * tileH
+      let d = (nzC + r2x + r2y - r2z) / w
+      if (zm) d = (d + 1) * 0.5
+      if (px < x0) x0 = px
+      if (px > x1) x1 = px
+      if (py < y0) y0 = py
+      if (py > y1) y1 = py
+      if (d < minZ) minZ = d
+    }
+  }
+  { // (−,−,+)
+    const w = wC - r3x - r3y + r3z
+    if (w < minW) minW = w
+    if (w > 1e-4) {
+      anyFinite = 1
+      const px = ((nxC - r0x - r0y + r0z) / w * 0.5 + 0.5) * tileW
+      const py = ((nyC - r1x - r1y + r1z) / w * 0.5 + 0.5) * tileH
+      let d = (nzC - r2x - r2y + r2z) / w
+      if (zm) d = (d + 1) * 0.5
+      if (px < x0) x0 = px
+      if (px > x1) x1 = px
+      if (py < y0) y0 = py
+      if (py > y1) y1 = py
+      if (d < minZ) minZ = d
+    }
+  }
+  { // (+,−,+)
+    const w = wC + r3x - r3y + r3z
+    if (w < minW) minW = w
+    if (w > 1e-4) {
+      anyFinite = 1
+      const px = ((nxC + r0x - r0y + r0z) / w * 0.5 + 0.5) * tileW
+      const py = ((nyC + r1x - r1y + r1z) / w * 0.5 + 0.5) * tileH
+      let d = (nzC + r2x - r2y + r2z) / w
+      if (zm) d = (d + 1) * 0.5
+      if (px < x0) x0 = px
+      if (px > x1) x1 = px
+      if (py < y0) y0 = py
+      if (py > y1) y1 = py
+      if (d < minZ) minZ = d
+    }
+  }
+  { // (−,+,+)
+    const w = wC - r3x + r3y + r3z
+    if (w < minW) minW = w
+    if (w > 1e-4) {
+      anyFinite = 1
+      const px = ((nxC - r0x + r0y + r0z) / w * 0.5 + 0.5) * tileW
+      const py = ((nyC - r1x + r1y + r1z) / w * 0.5 + 0.5) * tileH
+      let d = (nzC - r2x + r2y + r2z) / w
+      if (zm) d = (d + 1) * 0.5
+      if (px < x0) x0 = px
+      if (px > x1) x1 = px
+      if (py < y0) y0 = py
+      if (py > y1) y1 = py
+      if (d < minZ) minZ = d
+    }
+  }
+  { // (+,+,+)
+    const w = wC + r3x + r3y + r3z
+    if (w < minW) minW = w
+    if (w > 1e-4) {
+      anyFinite = 1
+      const px = ((nxC + r0x + r0y + r0z) / w * 0.5 + 0.5) * tileW
+      const py = ((nyC + r1x + r1y + r1z) / w * 0.5 + 0.5) * tileH
+      let d = (nzC + r2x + r2y + r2z) / w
+      if (zm) d = (d + 1) * 0.5
+      if (px < x0) x0 = px
+      if (px > x1) x1 = px
+      if (py < y0) y0 = py
+      if (py > y1) y1 = py
+      if (d < minZ) minZ = d
+    }
+  }
+  out[0] = x0; out[1] = x1; out[2] = y0; out[3] = y1
+  out[4] = minZ; out[5] = minW; out[6] = anyFinite
+  return out
+}
+
+/** The Task-201 per-corner form of projectBox — the A/B baseline and the
+ *  reassociation-noise oracle (the fuzz gates compare the two). */
+export function projectBoxLegacy(
   mvp: ArrayLike<number>,
   cx: number, cy: number, cz: number,
   hx: number, hy: number, hz: number,
@@ -382,7 +553,26 @@ export function clusterize(view: RecordView, options?: { cell?: number }): {
  *  including the GPU's own pyramid; the converse does not hold). That is
  *  the right direction for a worker-side pre-cull: never wrong, often
  *  enough right to skip whole draw submissions. */
-export function softwareOccluder(options?: { width?: number; height?: number; zMap?: 0 | 1 }): {
+export function softwareOccluder(options?: {
+  width?: number
+  height?: number
+  zMap?: 0 | 1
+  /** Task 205 — THE RASTER ENGINE: 'tiled' (default) walks 8×8 tiles with
+   *  the reject/accept tier tests (Greene's hierarchical tiling) and steps
+   *  the edge planes + the depth gradient INCREMENTALLY; 'legacy' is the
+   *  Task-201 per-pixel barycentric loop, kept as the A/B baseline and
+   *  the fuzz oracle (both must answer identically). */
+  raster?: 'tiled' | 'legacy'
+  /** Task 205 — the two-sided early-out in hidden(): the running max is
+   *  monotone, so the scan can stop the moment the verdict is decided —
+   *  ABOVE (occluded) or AT/BELOW (a tile at the near corner: not
+   *  occluded). Exact-same boolean either way (the proofs are below). */
+  earlyOut?: boolean
+  /** Task 205 — THE PROJECTOR: 'cse' (default — ryg's corner-transform
+   *  CSE, 24 mults per box instead of 96) or 'legacy' (the Task-201
+   *  per-corner form — the A/B leg and the reassociation-noise oracle). */
+  project?: 'cse' | 'legacy'
+}): {
   readonly width: number
   readonly height: number
   readonly levels: number
@@ -396,6 +586,9 @@ export function softwareOccluder(options?: { width?: number; height?: number; zM
   const width = Math.max(2, options?.width ?? 256)
   const height = Math.max(2, options?.height ?? 144)
   const zMap: 0 | 1 = options?.zMap ?? 0
+  const tiled = (options?.raster ?? 'tiled') !== 'legacy'
+  const earlyOut = options?.earlyOut ?? true
+  const projectFn = (options?.project ?? 'cse') === 'legacy' ? projectBoxLegacy : projectBox
   // the mip dims: level 0 = the tile, then the 2×2 halves down to 1×1
   const dims: { w: number; h: number }[] = [{ w: width, h: height }]
   for (;;) {
@@ -462,10 +655,122 @@ export function softwareOccluder(options?: { width?: number; height?: number; zM
     }
   }
 
+  /** THE TILE-TIER RASTER (Task 205 — the research harvest). The face
+   *  quads are LARGE screen-space primitives (a building's front is most
+   *  of the tile buffer), so the per-pixel loop of the legacy path pays
+   *  full barycentric math for pixels that are provably INSIDE or
+   *  provably OUTSIDE the triangle. The fix is Greene's hierarchical
+   *  tiling (SIGGRAPH 96, the «pyramid rasterization» lineage) at ONE
+   *  tier — the 8×8 tile — with the rawrunprotected coarse test shape:
+   *  each edge plane is evaluated ONCE at the tile's first pixel center,
+   *  and the linear swing |A|·7 + |B|·7 bounds it over the whole tile:
+   *    · REJECT: any edge's best case < 0 — no pixel center in the tile
+   *      is covered, skip it without touching a pixel;
+   *    · ACCEPT: every edge's worst case ≥ 0 — all 64 centers are
+   *      covered, fill them with NO edge tests (the interior bulk);
+   *    · PARTIAL: only the boundary tiles pay the per-pixel walk — and
+   *      that walk is the ryg/Dyrkorn incremental form: the three edge
+   *      values and the DEPTH GRADIENT step by one add per pixel (z is
+   *      affine over the screen triangle — the same rasterizer identity
+   *      the legacy path cites, evaluated as a gradient instead of three
+   *      barycentric products).
+   *  The tiers only classify what the per-pixel test would have decided
+   *  (the bounds are exact for a linear edge plane), so the covered SET
+   *  is the legacy path's set up to fp reassociation at the e≈0 rim —
+   *  the fuzz gate quantifies that as zero verdict drift. */
+  const TILE = 8
+  function rasterTriTiled(i0: number, i1: number, i2: number): void {
+    const x0 = cornerPx[i0], y0 = cornerPy[i0], z0 = cornerZ[i0]
+    const x1 = cornerPx[i1], y1 = cornerPy[i1], z1 = cornerZ[i1]
+    const x2 = cornerPx[i2], y2 = cornerPy[i2], z2 = cornerZ[i2]
+    const area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
+    if (Math.abs(area) < 1e-12) return
+    const sign = area > 0 ? 1 : -1
+    let minx = Math.floor(Math.min(x0, x1, x2)) - 1
+    let maxx = Math.ceil(Math.max(x0, x1, x2)) + 1
+    let miny = Math.floor(Math.min(y0, y1, y2)) - 1
+    let maxy = Math.ceil(Math.max(y0, y1, y2)) + 1
+    minx = Math.max(0, minx); miny = Math.max(0, miny)
+    maxx = Math.min(width, maxx); maxy = Math.min(height, maxy)
+    if (minx >= maxx || miny >= maxy) return
+    // the edge planes in sign space: e_i(px + .5, py + .5) = A_i·px + B_i·py + C_i
+    // (the EXACT expansion of the legacy path's three expressions)
+    const A0 = -(y2 - y1) * sign, B0 = (x2 - x1) * sign, C0 = ((y2 - y1) * x1 - (x2 - x1) * y1) * sign
+    const A1 = -(y0 - y2) * sign, B1 = (x0 - x2) * sign, C1 = ((y0 - y2) * x2 - (x0 - x2) * y2) * sign
+    const A2 = -(y1 - y0) * sign, B2 = (x1 - x0) * sign, C2 = ((y1 - y0) * x0 - (x1 - x0) * y0) * sign
+    // the depth gradients: z(x, y) = z0 + zx·(x − x0) + zy·(y − y0)
+    const dx10 = x1 - x0, dy10 = y1 - y0, dz10 = z1 - z0
+    const dx20 = x2 - x0, dy20 = y2 - y0, dz20 = z2 - z0
+    const zx = (dz10 * dy20 - dy10 * dz20) / area
+    const zy = (dx10 * dz20 - dz10 * dx20) / area
+    // the tile-swing bound of each edge plane over 8 pixel centers
+    const reach0 = (Math.abs(A0) + Math.abs(B0)) * (TILE - 1)
+    const reach1 = (Math.abs(A1) + Math.abs(B1)) * (TILE - 1)
+    const reach2 = (Math.abs(A2) + Math.abs(B2)) * (TILE - 1)
+    const tilesX = (maxx + TILE - 1) >> 3
+    const tilesY = (maxy + TILE - 1) >> 3
+    for (let ty = miny >> 3; ty < tilesY; ty++) {
+      const py0 = ty * TILE
+      const pyLo = Math.max(py0, miny)
+      const pyHi = Math.min(py0 + TILE, maxy)
+      for (let tx = minx >> 3; tx < tilesX; tx++) {
+        const px0 = tx * TILE
+        // the three edge values at the tile's first pixel center
+        const ex0 = px0 + 0.5, ey0 = py0 + 0.5
+        const e0 = A0 * ex0 + B0 * ey0 + C0
+        const e1 = A1 * ex0 + B1 * ey0 + C1
+        const e2 = A2 * ex0 + B2 * ey0 + C2
+        // REJECT — some edge's best case is still negative
+        if (e0 + reach0 < 0 || e1 + reach1 < 0 || e2 + reach2 < 0) continue
+        // ACCEPT — every edge's worst case is covered: fill without tests
+        if (e0 - reach0 >= 0 && e1 - reach1 >= 0 && e2 - reach2 >= 0) {
+          const pxLo = Math.max(px0, minx)
+          const pxHi = Math.min(px0 + TILE, maxx)
+          for (let py = pyLo; py < pyHi; py++) {
+            let z = z0 + zx * (pxLo + 0.5 - x0) + zy * (py + 0.5 - y0)
+            let idx = py * width + pxLo
+            for (let px = pxLo; px < pxHi; px++) {
+              if (z < zbuf[idx]) zbuf[idx] = z
+              z += zx
+              idx++
+            }
+          }
+          continue
+        }
+        // PARTIAL — the per-pixel walk, incremental (3 edge adds + 1 z add).
+        // The row starts ride the tile-origin evaluation: e_i + A_i·dpx +
+        // B_i·dpy with dpx = pxLo − px0, dpy = py − py0 lands exactly on
+        // the pixel-center form A_i·(pxLo+.5) + B_i·(py+.5) + C_i.
+        const pxLo = Math.max(px0, minx)
+        const pxHi = Math.min(px0 + TILE, maxx)
+        const dpx = pxLo - px0
+        for (let py = pyLo; py < pyHi; py++) {
+          const dpy = py - py0
+          let r0 = A0 * dpx + B0 * dpy + e0
+          let r1 = A1 * dpx + B1 * dpy + e1
+          let r2 = A2 * dpx + B2 * dpy + e2
+          let z = z0 + zx * (pxLo + 0.5 - x0) + zy * (py + 0.5 - y0)
+          let idx = py * width + pxLo
+          for (let px = pxLo; px < pxHi; px++) {
+            if (r0 >= 0 && r1 >= 0 && r2 >= 0 && z < zbuf[idx]) zbuf[idx] = z
+            r0 += A0; r1 += A1; r2 += A2
+            z += zx
+            idx++
+          }
+        }
+      }
+    }
+  }
+
   /** A face quad (its 4 projected corners) as 2 triangles. */
   function rasterQuad(a: number, b: number, c: number, d: number): void {
-    rasterTri(a, b, c)
-    rasterTri(a, c, d)
+    if (tiled) {
+      rasterTriTiled(a, b, c)
+      rasterTriTiled(a, c, d)
+    } else {
+      rasterTri(a, b, c)
+      rasterTri(a, c, d)
+    }
   }
 
   function mipOf(size: number): number {
@@ -571,7 +876,7 @@ export function softwareOccluder(options?: { width?: number; height?: number; zM
     hidden(cx: number, cy: number, cz: number, hx: number, hy: number, hz: number): boolean {
       if (mvp === null) throw new Error('rune/core: softwareOccluder.hidden — begin(mvp) first')
       if (!reduced) throw new Error('rune/core: softwareOccluder.hidden — reduce() first (the mips are the test)')
-      const p = projectBox(mvp, cx, cy, cz, hx, hy, hz, proj, width, height, zMap)
+      const p = projectFn(mvp, cx, cy, cz, hx, hy, hz, proj, width, height, zMap)
       if (p[6] < 1) return false      // fully behind the eye — not our call
       if (p[5] <= 1e-4) return false  // a straddler — keep it (the kernel's own class)
       let x0 = Math.max(0, Math.floor(p[0]))
@@ -590,11 +895,23 @@ export function softwareOccluder(options?: { width?: number; height?: number; zM
       const mip = mips[L]
       const tx0 = x0 >> L, tx1 = Math.min((x1 - 1) >> L, lw - 1)
       const ty0 = y0 >> L, ty1 = Math.min((y1 - 1) >> L, lh - 1)
+      // Task 205 — the one-sided early-out: the running max is MONOTONE, so
+      // the moment it reaches the box's NEAREST corner (≥ near − eps) the
+      // final zmax cannot be below it — p[4] ≤ zmax + eps — the verdict is
+      // «not hidden», settled by whatever tile caused the crossing (the
+      // background's 1.0 tiles settle most visible boxes on the FIRST
+      // tile). The converse cannot early-exit: «hidden» needs EVERY tile
+      // below near − eps, and the unvisited tiles' max is unknown — the
+      // occluded verdict pays the full scan (a few tiles at the mip the
+      // rect picked). Same boolean as the full scan either way — the
+      // proof is the monotone max, not a tolerance.
+      const near = p[4]
       let zmax = -Infinity
       for (let ty = ty0; ty <= ty1; ty++) {
         for (let tx = tx0; tx <= tx1; tx++) {
           const z = mip[ty * lw + tx]
           if (z > zmax) zmax = z
+          if (earlyOut && zmax >= near - 1e-5) return false
         }
       }
       // the occludee's NEAREST corner vs the region's FARTHEST front plane
