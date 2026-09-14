@@ -11,7 +11,10 @@ import { chromium } from 'playwright'
 
 const browser = await chromium.launch({
   headless: true,
-  args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox', '--no-sandbox'],
+  // the occlusion page's own flag set (demo-smoke.mjs's hizBrowser —
+  // SwiftShader WebGPU needs --enable-unsafe-webgpu + Vulkan, else the
+  // adapter answers null and the WG tier honestly refuses to boot)
+  args: ['--no-sandbox', '--disable-gpu-sandbox', '--enable-unsafe-webgpu', '--use-angle=swiftshader', '--enable-features=Vulkan', '--enable-unsafe-swiftshader'],
 })
 const page = await browser.newPage()
 const errors = []
@@ -22,7 +25,7 @@ await page.goto('https://atolbat.github.io/rune/demo/occlusion/', { waitUntil: '
 const stats = await page.waitForFunction(
   () => (window.__hizStats && window.__hizStats.validation !== null && window.__hizStats.drawn > 0 ? window.__hizStats : undefined),
   null,
-  { timeout: 120_000 },
+  { timeout: 300_000 },
 ).then(h => h.jsonValue())
 
 const logText = await page.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
