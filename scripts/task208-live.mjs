@@ -28,12 +28,19 @@ try {
   console.log('[live] served tier.js carries the seed resource:', v208tier ? 'yes' : 'NO')
 
   // ── 2. the boot validation on the live stack (the x-seed gate rides it) ─
+  // THE STEADY-STATE SAMPLING LAW (Task 208's own finding): the boot
+  // validation ends at the x-seed gate's MOVED camera, the loop then starts
+  // at the orbit — a hard camera cut the seed honestly bills with ONE
+  // frame of depth-buried promotions (the probe: cut 2830 → 1701 → healed;
+  // the live canvas reads its own variant ~4371). The gate measures the
+  // STEADY orbit, so the wait rides until the drawn count settles under the
+  // Task-207 threshold instead of catching the first readback.
   const page = await browser.newPage({ viewport: { width: 960, height: 720 } })
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message.slice(0, 160)}`))
   page.on('console', (m) => { if (m.type() === 'error') errors.push(`console: ${m.text().slice(0, 160)}`) })
   await page.goto(BASE, { waitUntil: 'networkidle', timeout: 45_000 })
   const stats = await page.waitForFunction(
-    () => (window.__hizStats && window.__hizStats.validation !== null && window.__hizStats.drawn > 0 ? window.__hizStats : undefined),
+    () => (window.__hizStats && window.__hizStats.validation !== null && window.__hizStats.drawn > 0 && window.__hizStats.drawn < 2300 ? window.__hizStats : undefined),
     null,
     { timeout: 300_000 },
   ).then(h => h.jsonValue())
