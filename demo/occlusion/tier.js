@@ -92,7 +92,7 @@
 // that whole candidate crowd depth-only. The seed replaces the warm-up
 // with a VERSIONED CARRY: the pyramid object already survives the frame
 // boundary, so `pyramid-reduce-2` — the LATE downsample, after the
-// phase-1 depth writers, bevy PR #18711's own position — doubles as the
+// phase-1 depth writers, bevy issue #18711's tracked position — doubles
 // writer of a PERSISTENT `hiz-seed` resource, and the next frame's FIRST
 // cull reads it as the imported version (the framegraph's own staleness
 // channel counts the lag). Phase 1 goes from the 23-wall pyramid to the
@@ -111,8 +111,8 @@
 // visible box (its own rect holds either background 1.0 or surfaces
 // behind it), so the final verdicts stay pixel-exact at any camera,
 // however old the seed. The one-frame lag costs fill, never a pixel.
-import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=207'
-import { buildShaders } from './shaders.js?v=207'
+import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=209'
+import { buildShaders } from './shaders.js?v=209'
 import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H } from './scene.js?v=203'
 const SKY = [0.045, 0.055, 0.09, 1]
 const LIGHT = [0.5, 0.8, 0.35]
@@ -298,7 +298,7 @@ export async function buildTier(deps) {
     name: 'pyramid-reduce-2', kind: KERNEL, cost: 2,
     // read-modify-write over the feedback fill's tile — AND THE SEED'S
     // WRITER (Task 208): the late downsample, after the phase-1 depth
-    // writers, in bevy PR #18711's own position — the built pyramid IS
+    // writers, in bevy issue #18711's tracked position — the built pyramid IS
     // the next frame's carry
     reads: [R.hiz], writes: [R.hiz, R.seed],
     when: props => props.feedback === true && props.culling === true && props.fresh === true,
@@ -319,7 +319,10 @@ export async function buildTier(deps) {
   fg.pass({
     name: 'color', kind: 'render', cost: 6,
     reads: [R.scene, R.mesh], writes: [R.target],
-    execute: ({ props }) => color.run({ target: props.target, camera: props.camera, light: LIGHT }),
+    // Task 209 — the near-first order rides the color draw (the early-Z
+    // harvest; the set/history draws keep the plain compact — a depth-only
+    // fill has no overdraw to save)
+    execute: ({ props }) => color.run({ target: props.target, camera: props.camera, light: LIGHT, order: props.order === true }),
   })
   fg.pass({
     // the debug strip — the OVERLAY LAW: reads the target it draws on top
@@ -360,7 +363,7 @@ export async function buildTier(deps) {
   let lastFrame = null // the last compiled frame (the graph stats' source)
   let lastReport = null // the last run report (executed + staleness)
   let seedLive = false // Task 208 — did the seed own the last frame's phase 1
-  function renderTo(targetId, mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false, feedbackOn = true, seedOn = true) {
+  function renderTo(targetId, mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false, feedbackOn = true, seedOn = true, orderOn = true) {
     const camera = { mvp, eye }
     // NOTE the boolean hygiene (the Task-202 lesson): `historyOn !== 0`
     // with historyOn === false is TRUE — every gate answers `=== true` /
@@ -397,6 +400,11 @@ export async function buildTier(deps) {
       seed,
       fresh: !cached,
       wantStats: wantStats === true,
+      // Task 209 — the near-first order (the early-Z harvest): a COLOR-pass
+      // draw option, not a culling policy — the verdicts never change with
+      // it, so it rides the run props only (the compiled frame's shape and
+      // the amortized-cull cache key both stay untouched)
+      order: orderOn === true || orderOn === 1,
     }
     lastFrame = fg.compile(props) // cached by policy — the declarations never see the camera
     lastReport = lastFrame.run(props)
@@ -418,6 +426,14 @@ export async function buildTier(deps) {
   // ── the RAW per-record verdicts (the CPU-model gates' channel)
   function readVerdicts() {
     return device.readVerdicts(sceneHandle)
+  }
+
+  // ── Task 209 — THE COMPACT'S OWN READBACK (the identity/order gates'
+  //    channel): the visible list + the verdict words the compact READ
+  //    (hist-aware) + the drawn count. WG only — null on the GL leg (the
+  //    collapse draw keeps no list; the order is a WG-leg harvest).
+  function readList() {
+    return device.readList(sceneHandle)
   }
 
   // ── the frame-graph channel (the HUD line + the validation's gate) ────
@@ -470,8 +486,8 @@ export async function buildTier(deps) {
     }).catch(() => { blitPending = false })
   }
 
-  function frame(mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false, feedbackOn = true, seedOn = true) {
-    renderTo(SNAPSHOT ? surface.targetId : 0, mvp, eye, hizOn, debug, occluders, hysteresisOn, historyOn, cacheOn, wantStats, feedbackOn, seedOn)
+  function frame(mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false, feedbackOn = true, seedOn = true, orderOn = true) {
+    renderTo(SNAPSHOT ? surface.targetId : 0, mvp, eye, hizOn, debug, occluders, hysteresisOn, historyOn, cacheOn, wantStats, feedbackOn, seedOn, orderOn)
     if (SNAPSHOT) blitSnapshot()
   }
 
@@ -534,13 +550,14 @@ export async function buildTier(deps) {
       : `WebGPU — storage pyramid + compute cull + one drawIndexedIndirect${device.antialias ? ' · MSAA 4x resolve' : ''}`,
     drawsLine: backend === 'webgl2'
       ? `draws: 2 (fill + collapse color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid) · TF passes: 2 (cull + hysteresis; +1 cull ON the feedback) · ${pyramid.levels - 1} reduce quads (×2 the feedback frame; ×1 the seed frame)`
-      : `draws: 2 (fill + indirect color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid) · dispatches: 3 (cull + hysteresis + compact; +1 cull ON the feedback) · ${pyramid.levels - 1} reduce quads (×2 the feedback frame; ×1 the seed frame)`,
+      : `draws: 2 (fill + indirect color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid) · dispatches: 3 (cull + hysteresis + compact; +1 cull ON the feedback; +1 order ON the near-first list — the early-Z harvest) · ${pyramid.levels - 1} reduce quads (×2 the feedback frame; ×1 the seed frame)`,
     canvas: displayCanvas,
     surface,
     renderTo,
     frame,
     readStats,
     readVerdicts,
+    readList,
     aspect,
     graphStats,
     graphLine,

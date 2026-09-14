@@ -313,8 +313,8 @@ geometry trap on the occluder side.
 
 | # | candidate | verdict |
 |---|-----------|---------|
-| A1 | parallel compact (ballot / TileScan, stable) | **IMPLEMENT** (Task 209 candidate) |
-| A2 | front-to-back color order (early-Z harvest) | **IMPLEMENT** (Task 209 candidate, pairs with A1) |
+| A1 | parallel compact (ballot / TileScan, stable) | **IMPLEMENTED — Task 209** (the Hillis-Steele single-workgroup spelling, not ballot: no feature gate needed) |
+| A2 | front-to-back color order (early-Z harvest) | **IMPLEMENTED — Task 209** (the depth-bucket bitonic; GL keeps index order — no list) |
 | A3 | cross-frame seed (bevy delta) | **IMPLEMENTED — Task 208, this round** |
 | A4 | single-pass pyramid (subgroup SPD) | BACKLOG, strengthened (bevy #22286 shipped it; WGSL port source now exists) |
 | A5 | dirty-rect HZB reduce | REJECT at 480×270 (revisit at 4K tiles) |

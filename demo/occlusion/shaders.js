@@ -4,6 +4,18 @@
 // but they implement ONE contract each, and the DRIVER code (tier.js) is
 // written once. The device picks the column by backend.
 //
+// Task 209 — THE DEPTH BUCKET (WG-only): the cull column packs a
+// byte-quantized NDC-z bucket (0 = the nearest field) into the verdict
+// word's bits 16..23 for the compact family's `order` entry — the
+// near-first bitonic that lets the color pass's early-Z reject the rear
+// layers (Pettineo's front-to-back law). Every decode in the stack masks
+// with & 0xFF (the compact, the fbfill collapse, readVerdicts), so the
+// verdict vocabulary is untouched; the hysteresis fold CARRIES the bits
+// through (the hist region is the compact's source). The GL column never
+// writes buckets — its words stay clean and its draw keeps the index
+// order (the collapse draw has no list; the order option is a WG-leg
+// no-op, documented in the device).
+//
 // THE CONTRACTS (what every pair agrees on):
 //   z      — corner + records → the r32f tile, fs writes the EXACT depth
 //            (WGSL @builtin(position).z / GLSL gl_FragCoord.z)
@@ -186,9 +198,19 @@ void main() { o = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0); }`,
   }
   // near-straddle: a corner at/behind the eye — keep visible, count honestly
   if (minW <= 1e-4) {
+    // Task 209 — THE DEPTH BUCKET (the near-first order's key) rides the
+    // verdict word's bits 16..23: NDC z is 0=near, 1=far, the bucket is
+    // the byte-quantized NEAREST corner. A STRADDLING box rides bucket 0 —
+    // a box crossing the near plane IS the near field (its behind-eye
+    // corners' minZ is garbage; the policy nails it to the front)
     scene[${FLAGS_OFF}u + i] = 4u;
     return;
   }
+  // Task 209 — the visible records' order key: 8 bits of NDC-z (the
+  // bucket the order entry's bitonic sorts by, near-first; the compact
+  // and every verdict decode masks it away — & 0xFF — so the vocabulary
+  // is untouched). Computed HERE because the cull already holds minZ.
+  let bkt = u32(clamp(minZ, 0.0, 1.0) * 255.0);
   // the Hi-Z test (toggled by the uniform — the OFF leg of the parity gate)
   if (params.misc.x > 0.5) {
     var px0 = i32(floor(x0)); var px1 = i32(ceil(x1));
@@ -275,7 +297,7 @@ void main() { o = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0); }`,
         for (var ty = fy0; ty <= fy1; ty = ty + 1u) {
           for (var tx = fx0; tx <= fx1; tx = tx + 1u) {
             if (pyramid[fi.x + ty * fi.y + tx] >= minZ - 1e-5) {
-              scene[${FLAGS_OFF}u + i] = 1u;
+              scene[${FLAGS_OFF}u + i] = 1u | (bkt << 16u);
               return;
             }
           }
@@ -285,7 +307,7 @@ void main() { o = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0); }`,
       }
     }
   }
-  scene[${FLAGS_OFF}u + i] = 1u;
+  scene[${FLAGS_OFF}u + i] = 1u | (bkt << 16u);
 `
 
   const cull = {
@@ -685,7 +707,10 @@ struct VOut { @builtin(position) pos: vec4<f32> }
 @vertex fn vsMain(@location(0) corner: vec3<f32>, @builtin(instance_index) ii: u32) -> VOut {
   // THE RAW VERDICT the first cull wrote THIS frame: flag ∈ {1 visible,
   // 4 near-straddle} draws depth, everything else collapses to nothing.
-  let flag = scene[${FLAGS_OFF}u + ii];
+  // Task 209 — THE MASKED DECODE: the raw word's bits 16..23 carry the
+  // depth bucket (the order entry's key); the collapse tests the VERDICT
+  // BYTE only
+  let flag = scene[${FLAGS_OFF}u + ii] & 0xFFu;
   var o: VOut;
   if (flag != 1u && flag != 4u) {
     o.pos = vec4<f32>(0.0, 0.0, 2.0, 1.0); // z=2 sits outside every [0,1] clip — zero pixels

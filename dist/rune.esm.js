@@ -15382,40 +15382,144 @@ struct CompactParams { words: vec4<u32> }
 @group(0) @binding(0) var<uniform> params: CompactParams;
 @group(0) @binding(1) var<storage, read_write> scene: array<u32>;
 @group(0) @binding(3) var<storage, read_write> args: array<u32>;
+var<workgroup> scan: array<u32, 64>;
+var<workgroup> tally: array<atomic<u32>, 3>;
+var<workgroup> keys: array<u32, 2048>;
+var<workgroup> wgDrawn: u32;
 @compute @workgroup_size(64)
-fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
-  if (gid.x != 0u) { return; }
-  let n = params.words.x;      // the record count
-  let indexCount = params.words.y;
-  let flagsOff = params.words.z;
+fn compact(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+  // ONE workgroup — the stability law: the tile loop runs in ascending
+  // order, so the running base + the in-tile stable scan produce exactly
+  // the serial loop's list (the dispatch has always been 1 workgroup)
+  if (wid.x != 0u) { return; }
+  let t = lid.x;
+  let n = params.words.x;        // the record count
+  let flagsOff = params.words.z; // the compact's source region (hist-aware)
+  // words.y — the indexCount (thread 0 forwards it to the args);
   // words.w — the boot-time occluder count, carried for diagnostics only
-  var out = 0u; var frustum = 0u; var occluded = 0u; var straddle = 0u;
-  for (var i = 0u; i < n; i = i + 1u) {
-    // Task 201 — THE HIST DECODE: the read region may carry the hysteresis
-    // encoding (verdict | streak<<8); the raw flags carry streak 0, so ONE
-    // mask answers both — byte-identical for the raw vocabulary (1..4)
-    let f = scene[flagsOff + i] & 0xFFu;
-    let visible = f == 1u || f == 4u;
-    if (visible) {
-      scene[out] = i;          // the list region (word 0) — ascending, stable
-      out = out + 1u;
-      if (f == 4u) { straddle = straddle + 1u; }
-    } else if (f == 2u) {
-      frustum = frustum + 1u;
-    } else if (f == 3u) {
-      occluded = occluded + 1u;
+  if (t < 3u) { atomicStore(&tally[t], 0u); }
+  var base = 0u;                 // the running visible count (tiles done)
+  var myF = 0u; var myO = 0u; var myS = 0u; // per-lane verdict tallies
+  for (var b = 0u; b < n; b = b + 64u) {
+    let i = b + t;
+    var vis = 0u;
+    if (i < n) {
+      // Task 201 — THE HIST DECODE: the read region may carry the
+      // hysteresis encoding (verdict | streak<<8 | bucket<<16); the raw
+      // flags carry streak 0, so ONE mask answers both — byte-identical
+      // for the raw vocabulary (1..4)
+      let f = scene[flagsOff + i] & 0xFFu;
+      if (f == 1u || f == 4u) {
+        vis = 1u;
+        if (f == 4u) { myS = myS + 1u; }
+      } else if (f == 2u) {
+        myF = myF + 1u;
+      } else if (f == 3u) {
+        myO = myO + 1u;
+      }
     }
+    scan[t] = vis;
+    workgroupBarrier();
+    // THE HILLIS-STEELE INCLUSIVE SCAN (6 doubling steps; read → barrier
+    // → add keeps every step ordered — the classic in-place spelling)
+    var d = 1u;
+    loop {
+      if (d >= 64u) { break; }
+      var left = 0u;
+      if (t >= d) { left = scan[t - d]; }
+      workgroupBarrier();
+      if (t >= d) { scan[t] = scan[t] + left; }
+      workgroupBarrier();
+      d = d << 1u;
+    }
+    // the scatter: EXCLUSIVE prefix = inclusive − predicate; the running
+    // base + that IS the record's global index-order rank — the list is
+    // byte-identical to the serial spelling, by construction
+    if (vis == 1u) { scene[base + scan[t] - 1u] = i; }
+    base = base + scan[63];
+    workgroupBarrier(); // scan[63] read by all before the next tile's writes
   }
-  // the stats block: drawn = ALL visible records — the accounting invariant
-  // frustum + occluded + drawn === n (the GL CPU-sweep twin counts from 0)
-  args[0u] = out;
-  args[1u] = frustum;
-  args[2u] = occluded;
-  args[3u] = straddle;
-  // drawIndexedIndirect at byte 32: [indexCount, instanceCount, firstIndex,
-  // baseVertex, firstInstance] — words 8..12
-  args[8u] = indexCount;
-  args[9u] = out;
+  atomicAdd(&tally[0], myF);
+  atomicAdd(&tally[1], myO);
+  atomicAdd(&tally[2], myS);
+  workgroupBarrier();
+  if (t == 0u) {
+    // the stats block: drawn = ALL visible records — the accounting
+    // invariant frustum + occluded + drawn === n (the GL CPU-sweep twin
+    // counts from 0)
+    args[0u] = base;
+    args[1u] = atomicLoad(&tally[0]);
+    args[2u] = atomicLoad(&tally[1]);
+    args[3u] = atomicLoad(&tally[2]);
+    // drawIndexedIndirect at byte 32: [indexCount, instanceCount,
+    // firstIndex, baseVertex, firstInstance] — words 8..12
+    args[8u] = params.words.y;
+    args[9u] = base;
+  }
+}
+@compute @workgroup_size(64)
+fn order(@builtin(local_invocation_id) lid: vec3<u32>) {
+  let t = lid.x;
+  // the compact's drawn count — a storage read is MAY-be-non-uniform to
+  // WGSL's analysis; workgroupUniformLoad (its own barrier) makes the
+  // early return uniform, keeping every barrier below legal
+  if (t == 0u) { wgDrawn = args[0u]; }
+  let drawn = workgroupUniformLoad(&wgDrawn);
+  if (drawn == 0u || drawn > 2048u) { return; } // the honest cap — index order stays (the default workgroup-storage limit is 16 KB: 2048 keys + the scan = 8.5 KB, half of it)
+  var pad = 1u;
+  loop { if (pad >= drawn) { break; } pad = pad << 1u; }
+  // load: (bucket << 24) | recordIndex — the bucket from the verdict
+  // word's bits 16..23 (the compact's own source region); the padding
+  // key 0xFFFFFFFF sorts last and never writes back
+  var i = t;
+  loop {
+    if (i >= pad) { break; }
+    if (i < drawn) {
+      let rec = scene[i];
+      keys[i] = (((scene[params.words.z + rec] >> 16u) & 0xFFu) << 24u) | rec;
+    } else {
+      keys[i] = 0xFFFFFFFFu;
+    }
+    i = i + 64u;
+  }
+  workgroupBarrier();
+  // THE BITONIC NETWORK: k grows the block, j halves the partner stride;
+  // every element sits in EXACTLY ONE pair per stage and the pair's LOWER
+  // slot's lane swaps both ends, so a stage carries no cross-lane hazard —
+  // one barrier per stage. Unique keys ⇒ a strict total order ⇒ the
+  // network needs no stability argument
+  var k = 2u;
+  loop {
+    if (k > pad) { break; }
+    var j = k >> 1u;
+    loop {
+      if (j == 0u) { break; }
+      var i2 = t;
+      loop {
+        if (i2 >= pad) { break; }
+        let p = i2 ^ j;
+        if (p > i2) {
+          let a = keys[i2];
+          let b = keys[p];
+          let asc = (i2 & k) == 0u;
+          let swap = select(b > a, b < a, asc);
+          if (swap) { keys[i2] = b; keys[p] = a; }
+        }
+        i2 = i2 + 64u;
+      }
+      workgroupBarrier();
+      j = j >> 1u;
+    }
+    k = k << 1u;
+  }
+  // store: plain indices back — the draw's list indirection reads
+  // scene[ii] as the record, zero shader changes downstream
+  var i3 = t;
+  loop {
+    if (i3 >= drawn) { break; }
+    scene[i3] = keys[i3] & 0xFFFFFFu;
+    i3 = i3 + 64u;
+  }
 }`;
 var HYST_WGSL = `
 struct HystParams { words: vec4<u32> }
@@ -15433,13 +15537,19 @@ fn hysteresis(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   let prev = scene[params.words.z + i];
   let streak = min((prev >> 8u) & 0xFFu, 15u);
-  if (raw == 3u) {
+  // Task 209 — THE MASKED DECODE + THE BUCKET CARRY: the raw word's bits
+  // 16..23 carry the depth bucket the cull packed (the order entry's
+  // sort key); the fold must test the VERDICT BYTE, and its write must
+  // CARRY the bucket through — the hist region is the compact's source,
+  // and the near-first order must survive the temporal fold
+  if ((raw & 0xFFu) == 3u) {
     let s = min(streak + 1u, 15u);
     let K = (params.words.w >> 8u) & 0xFFu;
     let verdict = select(1u, 3u, s >= K);
-    scene[params.words.z + i] = verdict | (s << 8u);
+    scene[params.words.z + i] = verdict | (s << 8u) | (raw & 0xFFFF0000u);
   } else {
-    // visible/frustum/straddle show immediately; the streak resets
+    // visible/frustum/straddle show immediately; the streak resets —
+    // the verbatim copy carries the bucket's bits untouched
     scene[params.words.z + i] = raw;
   }
 }
@@ -15543,7 +15653,8 @@ function attachVisiblePass(device, spec) {
         geometry: spec.mesh,
         records: spec.scene,
         uniforms: block,
-        indexCount: call.indexCount ?? indexCount
+        indexCount: call.indexCount ?? indexCount,
+        order: call.order === true
       });
     }
   };
@@ -15887,6 +15998,9 @@ ${REDUCE}`;
       throw new Error("rune: drawVisible — the program handle is not this device's own");
     s.compactU32[1] = optionsIn.indexCount ?? 36;
     gpu.runCompute(s.compactId, "compact", s.compactBlock, 1);
+    if (optionsIn.order === true) {
+      gpu.runCompute(s.compactId, "order", s.compactBlock, 1);
+    }
     const offset = allocUniforms(new Uint8Array(optionsIn.uniforms.buffer, optionsIn.uniforms.byteOffset, optionsIn.uniforms.byteLength));
     gpu.bindTarget(optionsIn.target, optionsIn.clear);
     gpu.usePipeline(prog.pipelineId);
@@ -16000,6 +16114,22 @@ ${REDUCE}`;
     const u = new Uint32Array(f.buffer, 0, 4);
     return { drawn: u[0], frustum: u[1], occluded: u[2], straddle: u[3] };
   }
+  async function readList(sceneHandle) {
+    const s = scenes.get(sceneHandle);
+    if (s === undefined)
+      throw new Error("rune: readList — the scene handle is not this device's own");
+    const verdictOff = s.compactU32[2];
+    const listWords = Math.max(s.flagsWord, verdictOff);
+    const span = listWords + sceneHandle.total;
+    const f = await gpu.readExternalBuffer(s.bufferId, span * 4);
+    const u = new Uint32Array(f.buffer, 0, span);
+    const stats = await readCullStats(sceneHandle);
+    return {
+      list: u.slice(0, listWords),
+      verdicts: u.slice(verdictOff, verdictOff + sceneHandle.total),
+      drawn: stats.drawn
+    };
+  }
   function surface(width, height, surfaceOptions) {
     const s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color });
     return { targetId: s.targetId, width, height, read: () => s.read() };
@@ -16029,6 +16159,7 @@ ${REDUCE}`;
     visiblePass: (spec) => attachVisiblePass(device, spec),
     debugStrip: (spec) => attachDebugStrip(device, spec),
     readVerdicts,
+    readList,
     hizFrame,
     hizScene: (spec) => attachHizScene(device, spec),
     readCullStats,
@@ -16215,6 +16346,7 @@ function createGlDevice(renderer, options, clear) {
     return id;
   }
   function drawVisible(optionsIn) {
+    optionsIn.order;
     const s = scenes.get(optionsIn.records);
     if (s === undefined)
       throw new Error("rune: drawVisible — the records handle is not this device's scene");
@@ -16411,6 +16543,7 @@ function createGlDevice(renderer, options, clear) {
     visiblePass: (spec) => attachVisiblePass(device, spec),
     debugStrip: (spec) => attachDebugStrip(device, spec),
     readVerdicts,
+    readList: () => Promise.resolve(null),
     hizFrame,
     hizScene: (spec) => attachHizScene(device, spec),
     readCullStats,

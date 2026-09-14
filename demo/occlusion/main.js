@@ -24,7 +24,7 @@
 // window.__hizStats — the live counters (the smoke/gates read it);
 // window.__hizGate — the probe verdict (?probe=1: WG-only, the Task-196
 // contract; ?probe=1&mode=webgl2: both tiers + the cross-tier parity).
-import { buildTier } from './tier.js?v=208'
+import { buildTier } from './tier.js?v=209'
 import {
   createScene, cameraAt, VAL_CAMERAS,
   HIZ_W, HIZ_H, LEVELS,
@@ -33,7 +33,7 @@ import {
   buildOctree, buildBVH, frustumPlanes, aabbOutsideFrustum,
   recordView, flatCull, clusterize, softwareOccluder, cameraRay, rayBoxes,
   layerPolicy,
-} from '../../dist/rune.esm.js?v=207'
+} from '../../dist/rune.esm.js?v=209'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -52,8 +52,8 @@ const democtl = { pause() {}, resume() {} }
 const shell = window.RuneDemoShell.mount({
   layout: 'page',
   title: 'Hi-Z occlusion culling',
-  desc: 'Hierarchical Z-buffer culling, GPU-driven — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts). Task 201: the scenario composes its frame from PASS BRICKS (depthPass → pyramid → occlusionPass → hysteresisPass → visiblePass — the regl/WebGPU syntax the scenario owns), the Frostbite temporal policy runs device-side (an occluded verdict needs 3 consecutive frames — no popping, pixel-parity-safe), and the pure CPU kit (octree/BVH rays + hit tests + picking, the flat/billboard edge-on test, vegetation clustering, the layer policy for transparency, and the software occluder — the boxes\u2019 front faces rasterized CPU-side into a tiny depth pyramid) gates the GPU\u2019s own verdicts. Task 202: the web-searched research techniques, implemented and pushed further — the HISTORY FEEDBACK brick (the two-pass HZB: Nanite\u2019s «first pass uses the HZB from last frame», Aaltonen\u2019s two-phase, the CryEngine coverage buffer — but WITHOUT reprojection: the prev-visible set re-renders at the current camera, so the lag never costs a pixel) and the AMORTIZED-CULL policy (the verdicts reuse while the camera stands bit-still). Task 203: THE FRAME GRAPH — the recipe is now a DECLARATION (versioned resource handles, conditional reads, per-pass gates) that the engine compiles into a frame DAG: dead branches leave the frame (Hi-Z off → the whole prepass branch disappears), transient lifetimes schedule into aliasing slots, barriers are emitted at every cross-lane hazard, and the amortized cull becomes a first-class graph concept — the staleness of the reused verdicts is counted, not hidden. Task 205: THE RESEARCH HARVEST — the niche papers, measured in the engine: Greene\u2019s hierarchical tile tiers + the rawrunprotected coarse edge tests + the ryg/Dyrkorn incremental edge walk with a depth gradient power the occluder raster (1.9× on this city), ryg\u2019s CSE corner transform cuts the query projection 96 mults → 24 (the hidden() sweep 1.3×), Sýkora–Jelínek plane-mask inheritance walks the octree/BVH with 4× fewer plane evaluations, and the picking ray is allocation-free — every technique benched against its legacy twin (packages/core/bench/research205.bench.ts), every parity gate held (tiled ≡ legacy verdicts, mask ≡ legacy sets, the tie law). Task 206: THE CLOSE-CAMERA ROUND — the field report («the near boxes cover the screen, thousands still drawn») reproduced headless and fixed twice: the frustum plane counts moved to CLIP SPACE (a box fully behind the camera was landing in the straddle bucket, DRAWN — 6802 of 16407 at dist 12; now frustum-culled, the honest straddle ring is 1–3), and the cull kernel gained the budgeted Greene descent (the coarse tap\u2019s grid-rounding slop poisoned the region max on gappy small-box screens; the fine pass scans only the box\u2019s own texels — drawn 8134 → 428 at the guilty camera, 4388 → 2391 on the default view, pixel parity identical). Task 207: THE SAME-FRAME FEEDBACK — the second field report («the colored boxes still don\u2019t occlude the rear colored boxes; behind the gray parallelepipeds they already don\u2019t draw») answered with the CURRENT-FRAME two-pass HZB: after the first cull\u2019s verdicts, the fresh visible set re-renders depth-only into the pyramid, the pyramid rebuilds, and a SECOND cull lands — the colored city occludes ITSELF within the frame (the survivors\u2019 depth V1, never the whole scene\u2019s fill), declared as three new frame-graph passes (feedback-fill / pyramid-reduce-2 / cull-verdicts-2) that die with the culling gate exactly like the shadows-off law. Task 208: THE CROSS-FRAME SEED — the bevy two-phase delta (research round 207\u2019s ranked candidate #1): the pyramid CARRIES across the frame boundary as a persistent frame-graph resource (hiz-seed — reduce-2, the late downsample after the phase-1 depth writers, is its author; the next frame\u2019s first cull reads the imported version and the staleness channel counts the lag), so the K-wall warm-up + the first reduce chain LEAVE the seeded frame entirely and the feedback fill\u2019s pass set collapses from the whole K-wall-visible crowd to exactly the final set (2767 → 428 at the report\u2019s camera — the tile only depends on its front layer, the fixed-point law) while the final buckets land bit-identical on both backends; sound under motion by cull#2\u2019s own law — the same-frame re-cull never wrongly culls a visible box, so the one-frame-old carry costs fill, never a pixel.',
-  hint: 'Drag — orbit · wheel/pinch — zoom · CLICK — pick a box (the octree/BVH ray) · the buttons toggle the culling tiers, the pyramid view, the occluder policy (the «City occludes» experiment), the temporal policy (hysteresis: watch the drawn count decay over 3 frames), the history feedback (the two-pass HZB: the city occludes itself — watch the occluded count climb), the same-frame self-occlusion (ON by default — the colored boxes occlude the boxes behind them within THIS frame; put the camera close among the boxes and watch the drawn count), and the cross-frame seed (ON by default — the carried pyramid owns phase 1: the warm-up passes leave the frame, watch the frame-graph line drop two passes and the seed\u2019s staleness counter). The WebGPU / WebGL2 radios boot the same bricks on each backend\u2019s own mechanisms — and the parity gates hold on both.',
+  desc: 'Hierarchical Z-buffer culling, GPU-driven — 16384 boxes behind a city of occluders, on BOTH backends through the library\u2019s common bricks (packages/gl device.ts). Task 201: the scenario composes its frame from PASS BRICKS (depthPass → pyramid → occlusionPass → hysteresisPass → visiblePass — the regl/WebGPU syntax the scenario owns), the Frostbite temporal policy runs device-side (an occluded verdict needs 3 consecutive frames — no popping, pixel-parity-safe), and the pure CPU kit (octree/BVH rays + hit tests + picking, the flat/billboard edge-on test, vegetation clustering, the layer policy for transparency, and the software occluder — the boxes\u2019 front faces rasterized CPU-side into a tiny depth pyramid) gates the GPU\u2019s own verdicts. Task 202: the web-searched research techniques, implemented and pushed further — the HISTORY FEEDBACK brick (the two-pass HZB: Nanite\u2019s «first pass uses the HZB from last frame», Aaltonen\u2019s two-phase, the CryEngine coverage buffer — but WITHOUT reprojection: the prev-visible set re-renders at the current camera, so the lag never costs a pixel) and the AMORTIZED-CULL policy (the verdicts reuse while the camera stands bit-still). Task 203: THE FRAME GRAPH — the recipe is now a DECLARATION (versioned resource handles, conditional reads, per-pass gates) that the engine compiles into a frame DAG: dead branches leave the frame (Hi-Z off → the whole prepass branch disappears), transient lifetimes schedule into aliasing slots, barriers are emitted at every cross-lane hazard, and the amortized cull becomes a first-class graph concept — the staleness of the reused verdicts is counted, not hidden. Task 205: THE RESEARCH HARVEST — the niche papers, measured in the engine: Greene\u2019s hierarchical tile tiers + the rawrunprotected coarse edge tests + the ryg/Dyrkorn incremental edge walk with a depth gradient power the occluder raster (1.9× on this city), ryg\u2019s CSE corner transform cuts the query projection 96 mults → 24 (the hidden() sweep 1.3×), Sýkora–Jelínek plane-mask inheritance walks the octree/BVH with 4× fewer plane evaluations, and the picking ray is allocation-free — every technique benched against its legacy twin (packages/core/bench/research205.bench.ts), every parity gate held (tiled ≡ legacy verdicts, mask ≡ legacy sets, the tie law). Task 206: THE CLOSE-CAMERA ROUND — the field report («the near boxes cover the screen, thousands still drawn») reproduced headless and fixed twice: the frustum plane counts moved to CLIP SPACE (a box fully behind the camera was landing in the straddle bucket, DRAWN — 6802 of 16407 at dist 12; now frustum-culled, the honest straddle ring is 1–3), and the cull kernel gained the budgeted Greene descent (the coarse tap\u2019s grid-rounding slop poisoned the region max on gappy small-box screens; the fine pass scans only the box\u2019s own texels — drawn 8134 → 428 at the guilty camera, 4388 → 2391 on the default view, pixel parity identical). Task 207: THE SAME-FRAME FEEDBACK — the second field report («the colored boxes still don\u2019t occlude the rear colored boxes; behind the gray parallelepipeds they already don\u2019t draw») answered with the CURRENT-FRAME two-pass HZB: after the first cull\u2019s verdicts, the fresh visible set re-renders depth-only into the pyramid, the pyramid rebuilds, and a SECOND cull lands — the colored city occludes ITSELF within the frame (the survivors\u2019 depth V1, never the whole scene\u2019s fill), declared as three new frame-graph passes (feedback-fill / pyramid-reduce-2 / cull-verdicts-2) that die with the culling gate exactly like the shadows-off law. Task 208: THE CROSS-FRAME SEED — the bevy two-phase delta (research round 207\u2019s ranked candidate #1): the pyramid CARRIES across the frame boundary as a persistent frame-graph resource (hiz-seed — reduce-2, the late downsample after the phase-1 depth writers, is its author; the next frame\u2019s first cull reads the imported version and the staleness channel counts the lag), so the K-wall warm-up + the first reduce chain LEAVE the seeded frame entirely and the feedback fill\u2019s pass set collapses from the whole K-wall-visible crowd to exactly the final set (2767 → 428 at the report\u2019s camera — the tile only depends on its front layer, the fixed-point law) while the final buckets land bit-identical on both backends; sound under motion by cull#2\u2019s own law — the same-frame re-cull never wrongly culls a visible box, so the one-frame-old carry costs fill, never a pixel. Task 209: THE PARALLEL COMPACT + THE NEAR-FIRST ORDER — the research round\u2019s A1+A2 pair: the last serial N-loop in the frame is gone (the flags-to-list compact now runs as ONE workgroup of 64 lanes walking 64-wide tiles — a Hillis-Steele scan per tile + a running base produce the BYTE-IDENTICAL ascending list, by construction), and the visible list sorts NEAR-FIRST (the cull packs a byte-quantized NDC-z bucket into the verdict word\u2019s spare bits; a bitonic network in workgroup shared memory orders the list by (bucket, index) — unique keys, a strict total order, deterministic on every backend) so the color pass\u2019s early-Z rejects the rear layers; the hysteresis fold CARRIES the bucket through, every decode masks with & 0xFF, and the GL leg\u2019s collapse draw keeps its index order (the order is a WG-leg harvest — a documented no-op there).',
+  hint: 'Drag — orbit · wheel/pinch — zoom · CLICK — pick a box (the octree/BVH ray) · the buttons toggle the culling tiers, the pyramid view, the occluder policy (the «City occludes» experiment), the temporal policy (hysteresis: watch the drawn count decay over 3 frames), the history feedback (the two-pass HZB: the city occludes itself — watch the occluded count climb), the same-frame self-occlusion (ON by default — the colored boxes occlude the boxes behind them within THIS frame; put the camera close among the boxes and watch the drawn count), the cross-frame seed (ON by default — the carried pyramid owns phase 1: the warm-up passes leave the frame, watch the frame-graph line drop two passes and the seed\u2019s staleness counter), and the near-first order (ON by default — the visible list sorts nearest-first so early-Z eats the overdraw; the drawn count and the pixels stay exactly the same). The WebGPU / WebGL2 radios boot the same bricks on each backend\u2019s own mechanisms — and the parity gates hold on both.',
   defaults: { mode: MODE_PARAM === 'webgl2' ? 'webgl2' : 'webgpu' },
   onPause() { democtl.pause() },
   onResume() { democtl.resume() },
@@ -238,6 +238,13 @@ let feedbackOn = true
 // costs fill, never a pixel. OFF = the Task-207 shape (the fresh K-wall
 // warm-up every frame) — the comparison leg.
 let seedOn = true
+// Task 209 — THE NEAR-FIRST ORDER (the early-Z harvest): the color pass's
+// visible list sorts (depth bucket, index) — near-first — so the
+// fixed-function depth test rejects the rear layers before they rasterize
+// (Pettineo's front-to-back law). The compact's byte-identity holds either
+// way (the order is a permutation of the SAME list, never a culling
+// policy); the GL leg ignores it (the collapse draw has no list).
+let orderOn = true
 let paused = false
 let rafId = 0
 let frameIndex = 0
@@ -269,7 +276,7 @@ function refreshHud() {
   hud.innerHTML =
     `instances <b>${scene.N}</b> (occluders <b>${stats.occluders}</b>${cityOccludes ? ' — the whole city writes depth' : ` · occludees ${OCCL}`})\n` +
     `frustum-culled ${stats.frustumCulled} · <b>occlusion-culled ${stats.occlusionCulled}</b>\n` +
-    `drawn <b>${stats.drawn}</b> (${pct}%) · near-straddle ${stats.nearStraddle} · hysteresis <b>${stats.hysteresis ? `ON (K=3${hysteresisOn ? '' : '·idle'}` : 'OFF'}</b> · history <b>${historyOn ? 'ON (prev-visible occluders)' : 'OFF'}</b> · feedback <b>${feedbackOn ? 'ON (same-frame — the city occludes itself)' : 'OFF'}</b> · x-seed <b>${stats.seed ? `ON (phase 1 = the carried pyramid${stats.seedStale >= 0 ? `, ${stats.seedStale}f stale` : ''})` : 'OFF (the K-wall warm-up)'}</b>\n` +
+    `drawn <b>${stats.drawn}</b> (${pct}%) · near-straddle ${stats.nearStraddle} · hysteresis <b>${stats.hysteresis ? `ON (K=3${hysteresisOn ? '' : '·idle'}` : 'OFF'}</b> · history <b>${historyOn ? 'ON (prev-visible occluders)' : 'OFF'}</b> · feedback <b>${feedbackOn ? 'ON (same-frame — the city occludes itself)' : 'OFF'}</b> · x-seed <b>${stats.seed ? `ON (phase 1 = the carried pyramid${stats.seedStale >= 0 ? `, ${stats.seedStale}f stale` : ''})` : 'OFF (the K-wall warm-up)'}</b> · near-first <b>${orderOn ? 'ON (early-Z harvest)' : 'OFF (index order)'}</b>\n` +
     `Hi-Z ${HIZ_W}x${HIZ_H} · ${LEVELS} mips · tier <b>${hizOn ? 'ON' : 'OFF'}</b>\n` +
     `kit: clusters <b>${stats.clusters}</b> (cell 8) · cluster-cull ${stats.clusterCulled} · flat-culled ${stats.flatCulled} · soft-HiZ ${stats.softOccluded}\n` +
     `${tier !== null && tier.graphLine !== undefined ? tier.graphLine() + '\n' : ''}` +
@@ -340,7 +347,7 @@ function loop(t) {
     // read-stats COPY PASS (the copy-lane root — the overlap plan's one
     // web-real parallelism: the async readback beside the color render)
     const wantStats = frameIndex % 12 === 0 && frameIndex > 2
-    tier.frame(mvp, eye, hizOn ? 1 : 0, showPyramid, cityOccludes ? scene.N : scene.K, hysteresisOn, historyOn, false, wantStats, feedbackOn, seedOn)
+    tier.frame(mvp, eye, hizOn ? 1 : 0, showPyramid, cityOccludes ? scene.N : scene.K, hysteresisOn, historyOn, false, wantStats, feedbackOn, seedOn, orderOn)
   } catch (e) {
     noteError(`frame failed: ${e instanceof Error ? e.message : String(e)}`)
   }
@@ -1024,6 +1031,107 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     if (!movedInvariant) shell.log.error(`cross-frame seed motion accounting FAILED — frustum+occluded+drawn must equal ${scene.N}`)
     cameras.push({ yaw: camV.yaw, policy: 'x-seed', parity: seedIdentical && movedIdentical ? 'IDENTICAL' : 'DIFFERS', drawnOn: seedStats.drawn, drawnOff: refStats.drawn, fillPassSetBoot: plainStats.drawn, trace, movedDrawn: movedSeedStats.drawn, movedRefDrawn: movedRefStats.drawn, invariantOn: seedInvariant, invariantOff: movedInvariant, ok: seedOk })
   }
+  // ── Task 209 — THE PARALLEL COMPACT + NEAR-FIRST ORDER gate (the
+  //    research round's A1+A2 pair). Five honest properties at the
+  //    report's own camera:
+  //    (a) THE BYTE-IDENTITY: with the order OFF, the parallel compact's
+  //        list must equal the JS oracle (the verdict bytes recomputed,
+  //        element-for-element) — the running base + the in-tile stable
+  //        scan IS the global ascending rank; the ORACLE is the CPU
+  //        model, not the old kernel — an independent reference;
+  //    (b) THE ORDER: with the order ON, the list must ascend strictly
+  //        by (depth bucket, record index) — the bitonic's unique-key
+  //        total order — and carry EXACTLY the same SET (the order is a
+  //        permutation, never a culling policy: drawn unchanged);
+  //    (c) PIXEL PARITY order-ON vs order-OFF: the opaque geometry +
+  //        the depth test make the image order-invariant (the law that
+  //        lets the early-Z harvest ship default-ON);
+  //    (d) THE TEMPORAL COMPOSITION: hysteresis ON — the fold must CARRY
+  //        the bucket (a visible record's hist word keeps its bits; the
+  //        order sorts by what the compact reads) and the identity must
+  //        hold on the folded words;
+  //    (e) THE ACCOUNTING INVARIANT on every leg. The GL leg: readList is
+  //        null by contract (the collapse draw keeps no list — the order
+  //        is a WG-leg harvest); the parity legs still run there (the
+  //        option must be a true no-op, never a break).
+  {
+    const camV = { yaw: 0, pitch: 0.1, dist: 12 }
+    const fixed = cameraAt(camV.yaw, camV.pitch, camV.dist)
+    // THE SETTLE DISCIPLINE (the Task-208b lesson): the previous gate's
+    // last leg left the carry at the MOVED camera — a fresh leg here
+    // would read a one-frame-stale pyramid and pay the honest promotion
+    // bill (drawn inflated by the depth-buried middle layer), muddying
+    // the cross-leg drawn comparison. Warm the carry at THIS camera
+    // first (the fixed-point law converges in one frame; two to be sure)
+    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, true, true)
+    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, true, true)
+    // (a) order OFF — the pure compact output
+    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, true, false)
+    const offStats = await t.readStats()
+    const offList = await t.readList()
+    const offImg = await t.surface.read()
+    // (b) order ON — the bitonic's product (same camera, same policy: the
+    //     verdicts reuse, the color pass re-renders with the new order)
+    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, true, true)
+    const onStats = await t.readStats()
+    const onList = await t.readList()
+    const onImg = await t.surface.read()
+    let identityOk = true, setOk = true, sortedOk = true, bucketNonZero = 0, drawnEqual = true
+    if (offList !== null && onList !== null) {
+      const oracleOf = words => {
+        const out = []
+        for (let i = 0; i < scene.N; i++) {
+          const f = words[i] & 0xFF
+          if (f === 1 || f === 4) out.push(i)
+        }
+        return out
+      }
+      const oracle = oracleOf(offList.verdicts)
+      identityOk = oracle.length === offList.drawn && oracle.every((rec, k) => offList.list[k] === rec)
+      const onOracle = oracleOf(onList.verdicts)
+      const sortedCopy = Array.from(onList.list.slice(0, onList.drawn)).sort((a, b) => a - b)
+      drawnEqual = onList.drawn === offList.drawn
+      setOk = drawnEqual && onOracle.length === onList.drawn && sortedCopy.every((rec, k) => onOracle[k] === rec)
+      const bkt = rec => (onList.verdicts[rec] >> 16) & 0xFF
+      for (let k = 0; k + 1 < onList.drawn; k++) {
+        const a = onList.list[k], b = onList.list[k + 1]
+        if (bkt(a) > bkt(b) || (bkt(a) === bkt(b) && a > b)) { sortedOk = false; break }
+      }
+      bucketNonZero = oracle.reduce((n, rec) => n + ((offList.verdicts[rec] >> 16) & 0xFF > 0 ? 1 : 0), 0)
+    }
+    const parityIdentical = onImg.data.length === offImg.data.length && onImg.data.every((v, i) => v === offImg.data[i])
+    const invariantOk = offStats.frustum + offStats.occluded + offStats.drawn === scene.N
+      && onStats.frustum + onStats.occluded + onStats.drawn === scene.N
+    // (d) the hysteresis composition — the fold carries the bucket
+    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, true, false, false, false, true, true, true)
+    const hystList = await t.readList()
+    let carryOk = true, hystIdentityOk = true
+    if (hystList !== null) {
+      let vis = 0
+      hystIdentityOk = true
+      for (let i = 0; i < scene.N; i++) {
+        const f = hystList.verdicts[i] & 0xFF
+        if (f === 1 || f === 4) vis++
+      }
+      hystIdentityOk = vis === hystList.drawn
+      carryOk = false
+      for (let i = 0; i < scene.N; i++) {
+        const f = hystList.verdicts[i] & 0xFF
+        if ((f === 1 || f === 4) && ((hystList.verdicts[i] >> 16) & 0xFF) > 0) { carryOk = true; break }
+      }
+    }
+    const hasList = offList !== null
+    const orderOk = identityOk && setOk && sortedOk && drawnEqual && parityIdentical && invariantOk && carryOk && hystIdentityOk
+    allOk = allOk && orderOk
+    shell.log.event(`parallel compact + near-first @dist ${camV.dist} pitch ${camV.pitch}: ${hasList ? `the list is BYTE-IDENTICAL to the JS oracle (${offList.drawn} records) · the ordered list ascends (bucket, index) ${sortedOk ? 'EXACTLY' : 'BROKEN'} · the set unchanged (drawn ${onStats.drawn}${drawnEqual ? '=' : '≠'}${offStats.drawn}) · ${bucketNonZero} visible records ride a nonzero depth bucket · the hysteresis fold carries the bucket ${carryOk ? 'YES' : 'NO'}` : 'the GL leg — no list (the collapse draw); the order is a documented WG-leg no-op'} · pixel parity order-ON vs OFF ${parityIdentical ? 'IDENTICAL' : 'DIFFERS'} — ${orderOk ? 'PASS' : 'FAIL'}`)
+    if (!identityOk) shell.log.error('parallel compact identity FAILED — the 64-lane scan\u2019s list must equal the JS oracle element-for-element (the running base + the in-tile stable scan IS the global ascending rank)')
+    if (!setOk || !drawnEqual) shell.log.error(`near-first order set FAILED — the order is a permutation, never a culling policy (drawn ${onStats.drawn} vs ${offStats.drawn}, the sorted set must equal the oracle)`)
+    if (!sortedOk) shell.log.error('near-first order sortedness FAILED — the list must ascend strictly by (depth bucket, record index)')
+    if (!parityIdentical) shell.log.error('near-first order pixel parity FAILED — the opaque geometry + the depth test make the image order-invariant; the early-Z harvest must never move a pixel')
+    if (!invariantOk) shell.log.error('near-first order accounting FAILED — frustum+occluded+drawn must equal ' + scene.N + ' on every leg')
+    if (!carryOk || !hystIdentityOk) shell.log.error('near-first order temporal composition FAILED — the hysteresis fold must carry the bucket bits and keep the identity on the folded words')
+    cameras.push({ yaw: camV.yaw, policy: 'order', parity: parityIdentical ? 'IDENTICAL' : 'DIFFERS', drawnOn: onStats.drawn, drawnOff: offStats.drawn, invariantOn: invariantOk, invariantOff: carryOk, ok: orderOk })
+  }
   const verdict = { pass: allOk && crossOk && errors.length === 0, tier: t.mode, cameras, crossChecked, errors: errors.length }
   stats.validation = verdict
   if (anchor !== null) wgProbeHashes = anchor
@@ -1254,6 +1362,13 @@ tierButton('Self-occlusion: ON', true, on => {
 tierButton('X-seed: ON', true, on => {
   seedOn = on
   shell.log.event(`the cross-frame seed ${on ? 'ON (the bevy two-phase delta — the carried pyramid owns phase 1: the z-fill + the first reduce leave the frame, the feedback fill collapses to ≈ the final set; the one-frame staleness costs fill, never a pixel — cull#2 re-tests everything same-frame)' : 'OFF (the Task-207 shape — the fresh K-wall warm-up every frame: the feedback fill re-renders the whole candidate set)'}`)
+  refreshHud()
+})
+// Task 209 — the near-first order (WG leg: the GL collapse draw has no
+// list — the button reports the no-op there)
+tierButton('Near-first: ON', true, on => {
+  orderOn = on
+  shell.log.event(`the near-first order ${on ? 'ON (the early-Z harvest — the visible list sorts by depth bucket, nearest first: the fixed-function depth test rejects the rear layers before they rasterize; the pixels are order-invariant, the overdraw is not)' : 'OFF (the index order — the Task-199 stable spelling)'}`)
   refreshHud()
 })
 const valButton = document.createElement('button')

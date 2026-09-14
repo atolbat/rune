@@ -33,6 +33,8 @@ export type {
   HistoryPassCall, HistoryPassHandle,
   FeedbackPassCall, FeedbackPassHandle,
   VisiblePassCall, VisiblePassHandle, DebugStripHandle,
+  // Task 209 — the compact's debug readout (the near-first order's gate channel)
+  VisibleListReadout,
 } from './device.ts'
 // Task 200/201 — the clean spatial structures (octree + BVH, now with the
 // rays, hit tests, spheres, and the dynamic octree) and THE COMPOSABLE

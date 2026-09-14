@@ -252,6 +252,22 @@ export interface DrawOptions {
   readonly records: SceneHandle
   readonly uniforms: Float32Array
   readonly indexCount?: number
+  /** Task 209 — THE NEAR-FIRST ORDER (WG-only): after the compact, the
+   *  family's `order` entry bitonic-sorts the visible list by (depth
+   *  bucket, record index) so the color pass rides early-Z rejection
+   *  behind the front layer. The GL collapse draw has no list — the
+   *  option is a documented no-op there. */
+  readonly order?: boolean
+}
+
+/** Task 209 — the compact's debug readout (readList): the list region
+ *  (valid for [0..drawn)) + the FULL verdict words the compact read (raw
+ *  or hist per the scene's declaration — the depth bucket rides bits
+ *  16..23 on the WG leg) + the drawn count from the args. */
+export interface VisibleListReadout {
+  readonly list: Uint32Array
+  readonly verdicts: Uint32Array
+  readonly drawn: number
 }
 
 /** Task 199 — THE FRAME RECIPE as a brick: the Hi-Z pipeline sequence
@@ -470,6 +486,9 @@ export interface VisiblePassCall {
   readonly light?: ArrayLike<number>
   readonly clear?: boolean
   readonly indexCount?: number
+  /** Task 209 — the near-first list order for this draw (WG-only; see
+   *  DrawOptions.order — the early-Z harvest). */
+  readonly order?: boolean
 }
 export interface VisiblePassHandle {
   /** THE VISIBLE SET — the compacted indirect draw (WG) / the collapse
@@ -636,6 +655,12 @@ export interface RenderDevice {
   /** Task 201 — the RAW per-record verdicts (1..4, pre-hysteresis): the
    *  CPU-model gates' channel (the soft-Hi-Z soundness compare). */
   readVerdicts(scene: SceneHandle): Promise<Uint8Array>
+  /** Task 209 — the compact's own source readback: the visible list (the
+   *  compact's output — [0..drawn) valid) + the FULL verdict words it
+   *  read (raw or hist per the scene's declaration; the depth bucket
+   *  rides bits 16..23 on the WG leg) + the drawn count. WG only: the
+   *  GL collapse draw keeps no list — null there. */
+  readList(scene: SceneHandle): Promise<VisibleListReadout | null>
   /** Task 199 — the whole Hi-Z frame in ONE call (the recipe as a brick). */
   hizFrame(spec: HizFrameSpec): HizFrameHandle
   /** Task 200 — THE SCENARIO BRICK: the dictionary + the handles become a
@@ -673,11 +698,46 @@ void main() {
   o = vec4(max(max(a, b), max(c, dd)), 0.0, 0.0, 1.0);
 }`
 
-/** THE COMPACT (WG-only — the drawVisible brick's first half): the flags →
- *  the stable ascending visible list + the drawIndexedIndirect args + the
- *  stats block. Single thread, no atomics — the STABLE draw order the
- *  pixel-parity gates demand (an atomic-order flip at an equal-depth
- *  collision would fake a divergence).
+/** THE COMPACT FAMILY (WG-only — the drawVisible brick's first half):
+ *  TWO entries, one bind group, one 16-byte uniform.
+ *  `compact` — Task 209 — THE PARALLEL COMPACT: the flags → the stable
+ *  ascending visible list + the drawIndexedIndirect args + the stats
+ *  block. ONE workgroup of 64 lanes walking the records in 64-wide
+ *  tiles: a Hillis-Steele inclusive scan per tile + a running base
+ *  carries the index-order rank across tiles — the output list is
+ *  BYTE-IDENTICAL to the single-thread spelling it replaced (the
+ *  running base + the in-tile stable scan IS the global ascending rank,
+ *  by construction), at 64 lanes of width instead of one thread's N
+ *  iterations (the last serial N-loop in the frame, gone — the
+ *  graphics-research-208 A1 candidate, landed). The stats ride per-lane
+ *  registers + one workgroup-atomic fold at the end — counts commute,
+ *  the tally is deterministic.
+ *  `order` — Task 209 — THE NEAR-FIRST ORDER (the early-Z harvest, the
+ *  research A2 candidate): after the compact, bitonic-sort the visible
+ *  list by (depth bucket, record index) in workgroup shared memory so
+ *  the color pass's early-Z rejects the rear layers (Pettineo's «To
+ *  Early-Z, or Not To Early-Z» position — the front-to-back submission
+ *  the fixed-function depth test rewards). The bucket rides the verdict
+ *  word's bits 16..23 (the cull packs it: NDC-z 0=near → bucket 0; a
+ *  near-straddle record rides bucket 0 — a straddling box IS the near
+ *  field). Keys pack (bucket << 24) | recordIndex — UNIQUE keys, so the
+ *  fixed network needs no stability argument: the sorted order is a
+ *  strict total order, deterministic on every backend. Padded to the
+ *  next power of two ≤ 2048 (8 KB of keys + the scan/tally = 8.5 KB —
+ *  HALF the 16 KB default workgroup-storage limit; the adapter's 32 K
+ *  would need a requiredLimits ask the facade declines to make); a drawn
+ *  count above the cap keeps the compact's index order (the honest
+ *  ladder — every default-ON frame draws ≤ ~1.7k on this city; the
+ *  >2048 crowd is the wide single-cull comparison legs, where the order
+ *  is irrelevant anyway). `drawn` arrives from args[0] — the compact's own
+ *  write, the previous dispatch in this same compute pass (WebGPU
+ *  orders dispatches); workgroupUniformLoad makes it a UNIFORM value so
+ *  the early return keeps the barriers below legal.
+ *  The STABLE-ORDER LAW (the pixel-parity gates' demand) holds in both
+ *  spellings: the compact's list is ascending by record index; the order
+ *  entry's list is ascending by (bucket, index) — equally deterministic.
+ *  The GL leg never runs this family (its collapse draw has no list —
+ *  DrawOptions.order is a documented WG-leg no-op there).
  * Task 199 — EVERY RECORD IS TESTED: the pre-196-199 kernel short-circuited
  *  the first k records to visible (the pyramid builders never tested
  *  themselves); the occluder boundary is now a POLICY, not a kernel
@@ -689,46 +749,151 @@ void main() {
  * rw/ro/rw — the scene (rw, the list writes) rides binding 1, a 16-byte
  * UNUSED read-only placeholder sits at binding 2 (a layout may declare
  * more than the entry reads; the placeholder keeps the args at binding 3,
- * the next rw slot), the args (rw) at binding 3. */
+ * the next rw slot), the args (rw) at binding 3 — the order entry READS
+ * args[0] (the compact's drawn) and writes neither. */
 const COMPACT_WGSL = `
 struct CompactParams { words: vec4<u32> }
 @group(0) @binding(0) var<uniform> params: CompactParams;
 @group(0) @binding(1) var<storage, read_write> scene: array<u32>;
 @group(0) @binding(3) var<storage, read_write> args: array<u32>;
+var<workgroup> scan: array<u32, 64>;
+var<workgroup> tally: array<atomic<u32>, 3>;
+var<workgroup> keys: array<u32, 2048>;
+var<workgroup> wgDrawn: u32;
 @compute @workgroup_size(64)
-fn compact(@builtin(global_invocation_id) gid: vec3<u32>) {
-  if (gid.x != 0u) { return; }
-  let n = params.words.x;      // the record count
-  let indexCount = params.words.y;
-  let flagsOff = params.words.z;
+fn compact(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
+  // ONE workgroup — the stability law: the tile loop runs in ascending
+  // order, so the running base + the in-tile stable scan produce exactly
+  // the serial loop's list (the dispatch has always been 1 workgroup)
+  if (wid.x != 0u) { return; }
+  let t = lid.x;
+  let n = params.words.x;        // the record count
+  let flagsOff = params.words.z; // the compact's source region (hist-aware)
+  // words.y — the indexCount (thread 0 forwards it to the args);
   // words.w — the boot-time occluder count, carried for diagnostics only
-  var out = 0u; var frustum = 0u; var occluded = 0u; var straddle = 0u;
-  for (var i = 0u; i < n; i = i + 1u) {
-    // Task 201 — THE HIST DECODE: the read region may carry the hysteresis
-    // encoding (verdict | streak<<8); the raw flags carry streak 0, so ONE
-    // mask answers both — byte-identical for the raw vocabulary (1..4)
-    let f = scene[flagsOff + i] & 0xFFu;
-    let visible = f == 1u || f == 4u;
-    if (visible) {
-      scene[out] = i;          // the list region (word 0) — ascending, stable
-      out = out + 1u;
-      if (f == 4u) { straddle = straddle + 1u; }
-    } else if (f == 2u) {
-      frustum = frustum + 1u;
-    } else if (f == 3u) {
-      occluded = occluded + 1u;
+  if (t < 3u) { atomicStore(&tally[t], 0u); }
+  var base = 0u;                 // the running visible count (tiles done)
+  var myF = 0u; var myO = 0u; var myS = 0u; // per-lane verdict tallies
+  for (var b = 0u; b < n; b = b + 64u) {
+    let i = b + t;
+    var vis = 0u;
+    if (i < n) {
+      // Task 201 — THE HIST DECODE: the read region may carry the
+      // hysteresis encoding (verdict | streak<<8 | bucket<<16); the raw
+      // flags carry streak 0, so ONE mask answers both — byte-identical
+      // for the raw vocabulary (1..4)
+      let f = scene[flagsOff + i] & 0xFFu;
+      if (f == 1u || f == 4u) {
+        vis = 1u;
+        if (f == 4u) { myS = myS + 1u; }
+      } else if (f == 2u) {
+        myF = myF + 1u;
+      } else if (f == 3u) {
+        myO = myO + 1u;
+      }
     }
+    scan[t] = vis;
+    workgroupBarrier();
+    // THE HILLIS-STEELE INCLUSIVE SCAN (6 doubling steps; read → barrier
+    // → add keeps every step ordered — the classic in-place spelling)
+    var d = 1u;
+    loop {
+      if (d >= 64u) { break; }
+      var left = 0u;
+      if (t >= d) { left = scan[t - d]; }
+      workgroupBarrier();
+      if (t >= d) { scan[t] = scan[t] + left; }
+      workgroupBarrier();
+      d = d << 1u;
+    }
+    // the scatter: EXCLUSIVE prefix = inclusive − predicate; the running
+    // base + that IS the record's global index-order rank — the list is
+    // byte-identical to the serial spelling, by construction
+    if (vis == 1u) { scene[base + scan[t] - 1u] = i; }
+    base = base + scan[63];
+    workgroupBarrier(); // scan[63] read by all before the next tile's writes
   }
-  // the stats block: drawn = ALL visible records — the accounting invariant
-  // frustum + occluded + drawn === n (the GL CPU-sweep twin counts from 0)
-  args[0u] = out;
-  args[1u] = frustum;
-  args[2u] = occluded;
-  args[3u] = straddle;
-  // drawIndexedIndirect at byte 32: [indexCount, instanceCount, firstIndex,
-  // baseVertex, firstInstance] — words 8..12
-  args[8u] = indexCount;
-  args[9u] = out;
+  atomicAdd(&tally[0], myF);
+  atomicAdd(&tally[1], myO);
+  atomicAdd(&tally[2], myS);
+  workgroupBarrier();
+  if (t == 0u) {
+    // the stats block: drawn = ALL visible records — the accounting
+    // invariant frustum + occluded + drawn === n (the GL CPU-sweep twin
+    // counts from 0)
+    args[0u] = base;
+    args[1u] = atomicLoad(&tally[0]);
+    args[2u] = atomicLoad(&tally[1]);
+    args[3u] = atomicLoad(&tally[2]);
+    // drawIndexedIndirect at byte 32: [indexCount, instanceCount,
+    // firstIndex, baseVertex, firstInstance] — words 8..12
+    args[8u] = params.words.y;
+    args[9u] = base;
+  }
+}
+@compute @workgroup_size(64)
+fn order(@builtin(local_invocation_id) lid: vec3<u32>) {
+  let t = lid.x;
+  // the compact's drawn count — a storage read is MAY-be-non-uniform to
+  // WGSL's analysis; workgroupUniformLoad (its own barrier) makes the
+  // early return uniform, keeping every barrier below legal
+  if (t == 0u) { wgDrawn = args[0u]; }
+  let drawn = workgroupUniformLoad(&wgDrawn);
+  if (drawn == 0u || drawn > 2048u) { return; } // the honest cap — index order stays (the default workgroup-storage limit is 16 KB: 2048 keys + the scan = 8.5 KB, half of it)
+  var pad = 1u;
+  loop { if (pad >= drawn) { break; } pad = pad << 1u; }
+  // load: (bucket << 24) | recordIndex — the bucket from the verdict
+  // word's bits 16..23 (the compact's own source region); the padding
+  // key 0xFFFFFFFF sorts last and never writes back
+  var i = t;
+  loop {
+    if (i >= pad) { break; }
+    if (i < drawn) {
+      let rec = scene[i];
+      keys[i] = (((scene[params.words.z + rec] >> 16u) & 0xFFu) << 24u) | rec;
+    } else {
+      keys[i] = 0xFFFFFFFFu;
+    }
+    i = i + 64u;
+  }
+  workgroupBarrier();
+  // THE BITONIC NETWORK: k grows the block, j halves the partner stride;
+  // every element sits in EXACTLY ONE pair per stage and the pair's LOWER
+  // slot's lane swaps both ends, so a stage carries no cross-lane hazard —
+  // one barrier per stage. Unique keys ⇒ a strict total order ⇒ the
+  // network needs no stability argument
+  var k = 2u;
+  loop {
+    if (k > pad) { break; }
+    var j = k >> 1u;
+    loop {
+      if (j == 0u) { break; }
+      var i2 = t;
+      loop {
+        if (i2 >= pad) { break; }
+        let p = i2 ^ j;
+        if (p > i2) {
+          let a = keys[i2];
+          let b = keys[p];
+          let asc = (i2 & k) == 0u;
+          let swap = select(b > a, b < a, asc);
+          if (swap) { keys[i2] = b; keys[p] = a; }
+        }
+        i2 = i2 + 64u;
+      }
+      workgroupBarrier();
+      j = j >> 1u;
+    }
+    k = k << 1u;
+  }
+  // store: plain indices back — the draw's list indirection reads
+  // scene[ii] as the record, zero shader changes downstream
+  var i3 = t;
+  loop {
+    if (i3 >= drawn) { break; }
+    scene[i3] = keys[i3] & 0xFFFFFFu;
+    i3 = i3 + 64u;
+  }
 }`
 
 // ─── Task 201 — THE HYSTERESIS KERNEL (the WG leg of the temporal policy) ──
@@ -756,13 +921,19 @@ fn hysteresis(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   let prev = scene[params.words.z + i];
   let streak = min((prev >> 8u) & 0xFFu, 15u);
-  if (raw == 3u) {
+  // Task 209 — THE MASKED DECODE + THE BUCKET CARRY: the raw word's bits
+  // 16..23 carry the depth bucket the cull packed (the order entry's
+  // sort key); the fold must test the VERDICT BYTE, and its write must
+  // CARRY the bucket through — the hist region is the compact's source,
+  // and the near-first order must survive the temporal fold
+  if ((raw & 0xFFu) == 3u) {
     let s = min(streak + 1u, 15u);
     let K = (params.words.w >> 8u) & 0xFFu;
     let verdict = select(1u, 3u, s >= K);
-    scene[params.words.z + i] = verdict | (s << 8u);
+    scene[params.words.z + i] = verdict | (s << 8u) | (raw & 0xFFFF0000u);
   } else {
-    // visible/frustum/straddle show immediately; the streak resets
+    // visible/frustum/straddle show immediately; the streak resets —
+    // the verbatim copy carries the bucket's bits untouched
     scene[params.words.z + i] = raw;
   }
 }
@@ -925,6 +1096,9 @@ function attachVisiblePass(device: RenderDevice, spec: { scene: SceneHandle; mes
         records: spec.scene,
         uniforms: block,
         indexCount: call.indexCount ?? indexCount,
+        // Task 209 — the near-first order (the early-Z harvest): the
+        // scenario's per-draw policy, straight through to the WG draw
+        order: call.order === true,
       })
     },
   }
@@ -1377,6 +1551,15 @@ ${REDUCE}`
     //    tape contract: compute inside an open render pass is refused)
     s.compactU32[1] = optionsIn.indexCount ?? 36
     gpu.runCompute(s.compactId, 'compact', s.compactBlock, 1)
+    // 1½. Task 209 — THE NEAR-FIRST ORDER: the family's second entry
+    //     bitonic-sorts the list the compact just wrote (the same compute
+    //     pass — WebGPU orders dispatches) by (depth bucket, index), so
+    //     the draw's early-Z rejects the rear layers. The keys come from
+    //     the verdict words' bits 16..23 — the compact's own source
+    //     region rides the shared uniform's words.z
+    if (optionsIn.order === true) {
+      gpu.runCompute(s.compactId, 'order', s.compactBlock, 1)
+    }
     // 2. THE PASS + ONE GPU-DRIVEN DRAW — the whole visible set, the
     //    instanceCount GPU-written, zero CPU readbacks
     const offset = allocUniforms(new Uint8Array(optionsIn.uniforms.buffer, optionsIn.uniforms.byteOffset, optionsIn.uniforms.byteLength))
@@ -1521,6 +1704,28 @@ ${REDUCE}`
     return { drawn: u[0], frustum: u[1], occluded: u[2], straddle: u[3] }
   }
 
+  /** Task 209 — the compact's debug readback (the WG leg): the list
+   *  region + the verdict words the compact READ (compactU32[2] is the
+   *  kernel's own source — hist-aware, exactly what the list was built
+   *  from) in one storage readback; the drawn count rides the args. The
+   *  identity/order gates consume this — the JS oracle recomputes the
+   *  list from the verdict bytes and compares element-for-element. */
+  async function readList(sceneHandle: SceneHandle): Promise<VisibleListReadout | null> {
+    const s = scenes.get(sceneHandle)
+    if (s === undefined) throw new Error('rune: readList — the scene handle is not this device\'s own')
+    const verdictOff = s.compactU32[2]
+    const listWords = Math.max(s.flagsWord, verdictOff)
+    const span = listWords + sceneHandle.total
+    const f = await gpu.readExternalBuffer(s.bufferId, span * 4)
+    const u = new Uint32Array(f.buffer, 0, span)
+    const stats = await readCullStats(sceneHandle)
+    return {
+      list: u.slice(0, listWords),
+      verdicts: u.slice(verdictOff, verdictOff + sceneHandle.total),
+      drawn: stats.drawn,
+    }
+  }
+
   function surface(width: number, height: number, surfaceOptions?: { depth?: boolean }): DeviceSurface {
     const s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color })
     return { targetId: s.targetId, width, height, read: () => s.read() }
@@ -1554,6 +1759,7 @@ ${REDUCE}`
     visiblePass: (spec) => attachVisiblePass(device, spec),
     debugStrip: (spec) => attachDebugStrip(device, spec),
     readVerdicts,
+    readList,
     hizFrame,
     // Task 200 — the scenario brick: the same attachHizScene body drives
     // BOTH device closures (it calls only the interface's own bricks)
@@ -1764,6 +1970,11 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
   }
 
   function drawVisible(optionsIn: DrawOptions): void {
+    // Task 209 — `order` is IGNORED on the GL leg (a documented no-op): the
+    // collapse draw runs all N instances with the vertex-shader collapse —
+    // there is no compacted list to sort; the near-first early-Z harvest is
+    // the WG leg's own
+    void optionsIn.order
     const s = scenes.get(optionsIn.records) as GlScene | undefined
     if (s === undefined) throw new Error('rune: drawVisible — the records handle is not this device\'s scene')
     const prog = programs.get(optionsIn.program) as GlProgram | undefined
@@ -2003,6 +2214,9 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     visiblePass: (spec) => attachVisiblePass(device, spec),
     debugStrip: (spec) => attachDebugStrip(device, spec),
     readVerdicts,
+    // Task 209 — the WG leg's list readback has NO GL twin: the collapse draw
+    // keeps no list (order is a WG-leg harvest — null answers the contract)
+    readList: () => Promise.resolve(null),
     hizFrame,
     // Task 200 — the scenario brick: the same attachHizScene body drives
     // BOTH device closures (it calls only the interface's own bricks)
