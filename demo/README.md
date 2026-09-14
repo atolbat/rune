@@ -66,6 +66,13 @@ For an immersive fullscreen demo pass `layout: 'fullscreen'` to the shell —
 the stage fills the whole viewport and the controls hide behind a compact
 menu button (see `demo/model-viewer`).
 
+**Long descriptions collapse** (Task 210): when `desc` exceeds ~240 chars or
+`hint` exceeds ~320, the shell clamps the header to a two-line teaser and
+puts the full description + the hint behind one "Read more" toggle — write
+the complete research history into `desc`, the page stays compact. The
+gallery cards follow the same law: a one-line summary + a `<details>` block
+for the long notes (the click guard keeps the card link quiet).
+
 ## Files
 
 ```

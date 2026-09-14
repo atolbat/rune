@@ -553,6 +553,26 @@ export function clusterize(view: RecordView, options?: { cell?: number }): {
  *  including the GPU's own pyramid; the converse does not hold). That is
  *  the right direction for a worker-side pre-cull: never wrong, often
  *  enough right to skip whole draw submissions. */
+// Task 210 — THE SIX FACE QUADS ARE CONSTANTS: writeBox's faceAlong
+// allocated a fresh ids[] and walked 8 corners × 3 faces on EVERY box —
+// the no-allocations-in-hot-loops law (bench E/D) applied. Computed once
+// at module load, read forever: index = axis * 2 + (front ? 0 : 1).
+const FACE_QUADS: ReadonlyArray<readonly [number, number, number, number]> = (() => {
+  const table: (readonly [number, number, number, number])[] = []
+  for (let axis = 0; axis < 3; axis++) {
+    for (let frontI = 0; frontI < 2; frontI++) {
+      const front = frontI === 0
+      const ids: number[] = []
+      for (let k = 0; k < 8; k++) {
+        const bit = (k >> axis) & 1
+        if (front ? bit === 0 : bit === 1) ids.push(k)
+      }
+      table[axis * 2 + frontI] = [ids[0], ids[1], ids[3], ids[2]]
+    }
+  }
+  return table
+})()
+
 export function softwareOccluder(options?: {
   width?: number
   height?: number
@@ -818,18 +838,9 @@ export function softwareOccluder(options?: {
       // occlusion the box does not have) keeps the brick sound: every
       // texel's value is a real surface depth of this box.
       // corner k: (k&1)→x, ((k>>1)&1)→y, ((k>>2)&1)→z half signs
-      const faceAlong = (axis: 0 | 1 | 2, front: boolean): [number, number, number, number] => {
-        // the four corners sharing the axis's chosen face plane, in
-        // PERIMETER order: the k enumeration walks the two free bits
-        // row-major ((hi,lo) = 00, 01, 10, 11) — a BOWTIE as a quad; the
-        // last two swap into the walk-around order (00, 01, 11, 10)
-        const ids: number[] = []
-        for (let k = 0; k < 8; k++) {
-          const bit = (k >> axis) & 1
-          if (front ? bit === 0 : bit === 1) ids.push(k)
-        }
-        return [ids[0], ids[1], ids[3], ids[2]]
-      }
+      // Task 210 — the quad itself is the FACE_QUADS constant (the old
+      // per-box closure + ids[] push-allocation is gone; the perimeter
+      // order [ids[0], ids[1], ids[3], ids[2]] is verbatim in the table)
       const m = mvp as ArrayLike<number>
       const faceNear = (axis: 0 | 1 | 2): boolean => {
         // project the two face centers along the axis; the NEARER one is
@@ -849,7 +860,7 @@ export function softwareOccluder(options?: {
         return dFront <= dBack
       }
       for (const axis of [0, 1, 2] as const) {
-        const quad = faceAlong(axis, faceNear(axis))
+        const quad = FACE_QUADS[axis * 2 + (faceNear(axis) ? 0 : 1)]
         rasterQuad(quad[0], quad[1], quad[2], quad[3])
       }
     },
@@ -858,18 +869,28 @@ export function softwareOccluder(options?: {
       this.writeBox(view.cx(i), view.cy(i), view.cz(i), view.hx(i), view.hy(i), view.hz(i))
     },
     reduce(): void {
+      // Task 210 — THE ARRAY-ROUND WINNER (bench G, scripts/task210-core.js,
+      // node/bun/chromium): the flat t-loop paid `t % wo.w` + `(t / wo.w) | 0`
+      // per texel — two integer divisions the JIT cannot hoist. The nested
+      // y/x form with HOISTED row pointers and the clamp bounds lifted out
+      // of the inner loop measured 1.37× (node V8) / 1.5× (bun JSC) / 1.26×
+      // (Chromium) faster over THIS 480×270 chain — and the writes are
+      // bit-identical (the same four loads through the same clamps feed the
+      // same Math.max, only the ADDRESS ARITHMETIC changed).
       reduced = true
       for (let L = 1; L < mips.length; L++) {
         const src = mips[L - 1]
         const dst = mips[L]
         const wi = dims[L - 1], wo = dims[L]
-        for (let t = 0; t < wo.w * wo.h; t++) {
-          const x = t % wo.w, y = (t / wo.w) | 0
-          const x0 = Math.min(x * 2, wi.w - 1), x1 = Math.min(x * 2 + 1, wi.w - 1)
-          const y0 = Math.min(y * 2, wi.h - 1), y1 = Math.min(y * 2 + 1, wi.h - 1)
-          const a = src[y0 * wi.w + x0], b = src[y0 * wi.w + x1]
-          const c = src[y1 * wi.w + x0], d = src[y1 * wi.w + x1]
-          dst[t] = Math.max(a, b, c, d)
+        const wLast = wi.w - 1, hLast = wi.h - 1, srcW = wi.w
+        for (let y = 0; y < wo.h; y++) {
+          const r0 = Math.min(y * 2, hLast) * srcW
+          const r1 = Math.min(y * 2 + 1, hLast) * srcW
+          let t = y * wo.w
+          for (let x = 0; x < wo.w; x++, t++) {
+            const x0 = Math.min(x * 2, wLast), x1 = Math.min(x * 2 + 1, wLast)
+            dst[t] = Math.max(src[r0 + x0], src[r0 + x1], src[r1 + x0], src[r1 + x1])
+          }
         }
       }
     },

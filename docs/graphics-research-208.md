@@ -345,3 +345,94 @@ edit would leave `?v=208`-cached copies stale for nothing).
 **Pettineo check (RSS, 2026-09-14)**: the newest post remains «Ten Years
 of D3D12» (Sep 7, 2025); «To Early-Z, or Not To Early-Z» (Apr 2025) is
 still his latest occlusion-relevant word — A2's anchor is current.
+
+## Task 210 — the array round (2026-09-14): the measured CPU laws
+
+The user's ask: array speed during scene manipulation and occlusion —
+reading, writing, copying, resizing — at the JS, V8 and wasm level. The
+instrument: `scripts/task210-core.js` (a plain classic script so the exact
+same source runs everywhere), **105 variants across 13 groups**, every one
+checksum-gated against its group's truth variant, a **hand-emitted wasm
+binary** (no toolchain: memcpy/memfill bulk ops, u32/u64 loops, the masked
+extract, the compact, a 2×2 f32/f64 pyramid reduce, a 64-byte record copy)
+racing the JS lanes on the SAME shapes, driven by
+`scripts/task210-arrays.mjs` over **three runtimes**: node 24 (V8), bun
+1.3 (JSC), headless Chromium 151 (the browser V8). Discipline: 3 warmups,
+measure-many calibration, 3 rounds × 4 samples, min + median reported.
+The full table: `scripts/out/task210/results.json` (gitignored — the
+scripts regenerate it); the headline laws:
+
+**The engine-relevant winners (integrated)**
+
+- **G — the pyramid reduce**: the flat `t`-loop paid `t % wo.w` and
+  `(t / wo.w) | 0` per texel — two integer divisions the JIT cannot hoist.
+  Nested y/x with hoisted row pointers and lifted clamp bounds:
+  **1.37× (node) / 1.5× (bun) / 1.26× (Chromium)** over the real
+  480×270 chain, bit-identical mips (proven by `task210-parity.mjs` on
+  five chains incl. odd tails). LANDED in `softwareOccluder.reduce()`.
+- **writeBox's face quads are constants**: the per-box `faceAlong` closure
+  allocated a fresh `ids[]` and walked 8 corners × 3 faces on EVERY box —
+  replaced by a 6-entry `FACE_QUADS` table computed at module load. The
+  no-allocations-in-hot-loops law, applied. LANDED.
+
+**The confirmed laws (the engine already lives by them — now measured)**
+
+- **E — sparse compaction**: a **pre-packed bitset word-walk (the
+  `instances.ts` shape) beats the plain-array push 15–22×** (0.80µs vs
+  12.3µs @ 16407, ~0.4% survivors) and beats the typed-counter sweep 12×.
+  The two-pass count-then-scatter loses (the count buys an exact-size
+  alloc, not speed). The demo's JS oracle keeps plain_push by contract —
+  it is validation-only, and the E numbers say the ENGINE's bitset
+  walk is the right production shape.
+- **H — SoA vs objects**: reading `{cx,cy,cz}` off an object array is
+  **2× (Chromium) / 2.8× (bun) / 8× (node)** slower than SoA Float32
+  lanes; AoS f64 is the runner-up. The kit's `recordView` (SoA over the
+  scene's own buffer) is the right front door; `spatialBoxes` (objects)
+  stays a one-time build input.
+- **J — elements kinds**: `Int32Array` reads beat even PACKED_SMI plain
+  arrays (1.6× node), HOLEY costs 3.4× (and `new Array(n)` + writes =
+  HOLEY). Typed arrays are not just for buffers — they are the fastest
+  integer lane V8 has.
+- **A/B — copies and fills**: `set()` / `copyWithin()` / wasm
+  `memory.copy` / `memory.fill` all saturate at memcpy/memset class
+  (48 GB/s @ 64KB, ~20–27 GB/s @ 1MB); JS element loops are 3–5× off;
+  plain-array copies 10–50× off; `Array.from(typed)` ~100× off;
+  **BigInt64Array is 64× poison under JSC** (5.4ms vs 85µs node for 1MB).
+  `alloc_zeroed` at 1MB runs at **328 GB/s** — zero pages are mmap-free;
+  never fill-zero what a fresh allocation gives you.
+- **F — sorting**: typed `.sort()` WITHOUT a comparator keeps its crown;
+  any comparator costs 4.4×; LSD radix wins at scale (**1.8× over sort()
+  @ 16407**, the 2×16-bit pass beats 4×8 there, flips at 2048).
+- **K — views**: `subarray` is 31ns, `new Uint32Array(ab, off, n)` 17–45ns
+  — view creation is FREE; `slice()` pays the copy (9.5µs @ 16407 words).
+
+**The cross-engine splits (the honest footnotes)**
+
+- **C2 — the growth ladder**: a resizable ArrayBuffer's `resize()` ladder
+  (4KB→1MB) is **43× faster than new+set on V8** (6µs vs 258µs — the
+  in-place VA remap) and ~100× on Chromium — but **LOSES on JSC** (390µs
+  vs 265µs: JavaScriptCore copies on resize). A V8-targeting hot path may
+  grow in place; a portable one keeps new+set.
+- **C — growth with traffic**: when the writes dominate (the real growth
+  pattern), the policy is noise — new+set ×2, ×1.5, transfer, RAB and
+  wasm-Memory.grow all land within ±15%; `exact_realloc_every_append` is
+  the 1000× strawman the textbooks promise it to be.
+- **D — the masked extract (readVerdicts' shape)**: the plain `& 255` loop
+  is within noise of wasm at N=16407 (7.5µs vs 7.0µs) — the incumbent
+  SURVIVES the challenge; wasm's unroll4 wins only at 4×N (1.5×).
+  DataView is 18× poison under JSC. Manual unrolls LOSE on V8 here
+  (the mixed u32-load/u8-store lane defeats BCE) — the engines grew
+  opinions, measure before unrolling.
+- **I — the 16-float record copy**: the segment `set()` fast path is the
+  floor (5µs); the wasm 64-byte record copy beats the JS bitset-walk +
+  unroll16 **9.4× on node** but only 1.4× on bun — and the REAL
+  `instances.ts` walk (the `lb = word & -word` + clz32 shape, not the
+  naive per-bit test the bench also ran) is already the E-group winner.
+
+**The meta-law (paid for in debugging hours, twice)**: a browser tab
+coarsens `performance.now()` to 100µs without cross-origin isolation —
+timing ONE fast call reads exactly zero, and a naive `target/dt`
+calibration explodes to its iteration cap (our "3ms" samples became
+15–75 SECONDS of wall time). Measure-MANY calibration (run the op until
+the clock moves, then divide) is the only robust shape — the Task-193
+clock lesson, one level deeper.

@@ -30,6 +30,17 @@
     a.card:hover { border-color: #3b4a70; transform: translateY(-1px); }
     .card b { font-size: 16px; color: #9ecbff; }
     .card span { color: #6b7691; font-size: 13px; }
+    /* Task 210 — the card's long research history lives in a collapsible
+       details block; the click guard stops the toggle from navigating. */
+    .card details { margin-top: 2px; }
+    .card details summary {
+      list-style: none; cursor: pointer; user-select: none;
+      color: #7aa2f7; font-size: 12.5px; padding: 2px 0;
+    }
+    .card details summary::-webkit-details-marker { display: none; }
+    .card details summary::before { content: '▸ '; color: #46547a; }
+    .card details[open] details summary::before, .card details[open] summary::before { content: '▾ '; }
+    .card details p { margin: 6px 0 0; color: #6b7691; font-size: 12.5px; line-height: 1.55; }
     footer { color: #6b7691; font-size: 13px; }
     footer code { color: #9ecbff; }
   </style>
@@ -47,19 +58,35 @@
       </a>
       <a class="card" href="./model-viewer/">
         <b>model-viewer</b>
-        <span>Three three.js example models (glTF·AVIF·Draco, FBX, normal map): a fullscreen viewer with a load button and progress bar, model switching, drag rotation — and tap-to-pick: a two-level BVH walk (the mesh tier, then the picked mesh's lazy per-triangle BVH) identifies the mesh, the triangle and the distance through the @rune/core picking bricks.</span>
+        <span>Three three.js example models (glTF·AVIF·Draco, FBX, normal map): a fullscreen viewer with load progress, model switching, drag rotation and tap-to-pick.</span>
+        <details>
+          <summary>Full notes</summary>
+          <p>Three three.js example models (glTF·AVIF·Draco, FBX, normal map): a fullscreen viewer with a load button and progress bar, model switching, drag rotation — and tap-to-pick: a two-level BVH walk (the mesh tier, then the picked mesh's lazy per-triangle BVH) identifies the mesh, the triangle and the distance through the @rune/core picking bricks.</p>
+        </details>
       </a>
       <a class="card" href="./particles/">
         <b>particles</b>
-        <span>@rune/particles live: eight presets (fountain, fireworks, galaxy, embers, drift, snow, orbit, meteor) — a CPU-simulated SoA system baked into a billboard soup, one blended draw call, zero allocations per frame — with the CPU-tier frustum cull on every preset (the soup upload shrinks with the view) and the frame as a DECLARED GRAPH (createFrameGraph: passes with versioned resources, Pause gates the sim and the staleness counts, the HUD carries the compiled frame's own numbers).</span>
+        <span>@rune/particles live: eight presets (fountain, fireworks, galaxy, embers, drift, snow, orbit, meteor), one blended draw call, zero allocations per frame.</span>
+        <details>
+          <summary>Full notes</summary>
+          <p>@rune/particles live: eight presets (fountain, fireworks, galaxy, embers, drift, snow, orbit, meteor) — a CPU-simulated SoA system baked into a billboard soup, one blended draw call, zero allocations per frame — with the CPU-tier frustum cull on every preset (the soup upload shrinks with the view) and the frame as a DECLARED GRAPH (createFrameGraph: passes with versioned resources, Pause gates the sim and the staleness counts, the HUD carries the compiled frame's own numbers).</p>
+        </details>
       </a>
       <a class="card" href="./vfx/">
         <b>vfx</b>
-        <span>The game-VFX study on @rune/particles: 24 demos (muzzle flashes, a composed explosion, emitter shapes, trails with collision, the texture sequencer, PBR mesh particles, sub-emitters, noise, alpha-tested petals, a custom behavior, billboard modes, soft particles with a depth prepass, blend equations, a follow object, plus the rune originals — rocket, rainstorm, slash, vortex, fireflies, dust, grass, lightning, a cutting laser, and the GPU compute tier: 160k embers simulated in WebGPU compute shaders) — one carousel page, ◀ ▶ or the sheet — every demo's frame is its own declared graph (re-declared per switch: the layer soups alias into one slot, the sim's lane follows the tier, the overlay law keeps every draw live).</span>
+        <span>The game-VFX study on @rune/particles: 24 demos — muzzle flashes, explosions, trails, soft particles, and the GPU compute tier (160k embers in WebGPU compute).</span>
+        <details>
+          <summary>Full notes</summary>
+          <p>The game-VFX study on @rune/particles: 24 demos (muzzle flashes, a composed explosion, emitter shapes, trails with collision, the texture sequencer, PBR mesh particles, sub-emitters, noise, alpha-tested petals, a custom behavior, billboard modes, soft particles with a depth prepass, blend equations, a follow object, plus the rune originals — rocket, rainstorm, slash, vortex, fireflies, dust, grass, lightning, a cutting laser, and the GPU compute tier: 160k embers simulated in WebGPU compute shaders) — one carousel page, ◀ ▶ or the sheet — every demo's frame is its own declared graph (re-declared per switch: the layer soups alias into one slot, the sim's lane follows the tier, the overlay law keeps every draw live).</p>
+        </details>
       </a>
       <a class="card" href="./occlusion/">
         <b>occlusion</b>
-        <span>Hi-Z occlusion culling, the GPU-driven tier: a depth prepass, a reduced-Z pyramid, a cull pass, then the visible set — 16384 boxes behind a city of occluders, 51–71% of them never drawn, with a pixel-parity gate proving the culling changes nothing. On BOTH backends: WebGPU (compute + one drawIndexedIndirect) and WebGL2 (an FBO pyramid + a transform-feedback cull + a vertex-collapse draw); software adapters get the snapshot mode. Task 206: the close-camera round — clip-space frustum counts (boxes behind the camera were drawn as «straddle») + the budgeted Greene descent in the cull kernel (the fine pass over the box's own texels): drawn 8134 → 428 at the guilty close camera, pixel parity identical on both backends. Task 207: the same-frame feedback — the colored boxes now occlude the boxes behind them WITHIN the frame (the second field report's ask): the first cull's survivors re-render depth-only into the pyramid, it rebuilds, a second cull lands — drawn 2767 → 428 at the report's camera (exactly the brute whole-scene fill's power, at a sixth of its instance count), ON by default, declared as three frame-graph passes that die with the culling gate. Task 208: the cross-frame seed — the bevy two-phase delta: the pyramid carries across the frame boundary as a persistent frame-graph resource (hiz-seed — the late downsample after the phase-1 depth writers is its author; the next frame’s first cull reads the imported version and the staleness channel counts the lag), so the K-wall warm-up leaves the seeded frame entirely and the feedback fill’s pass set collapses to exactly the final set (2767 → 428, up to ×36 less depth-only raster) while the final buckets land bit-identical — the fixed-point law, proven on both backends and under a cross-camera jump (the lag costs fill, never a pixel). Task 209: the parallel compact + the near-first order — the last serial N-loop in the frame is gone (the flags-to-list compact runs as one 64-lane workgroup: a Hillis-Steele scan per tile + a running base produce the byte-identical ascending list), and the visible list sorts NEAR-FIRST (the cull packs a depth bucket into the verdict word's spare bits; a bitonic network orders the list by (bucket, index) — unique keys, deterministic on every backend) so the color pass's early-Z rejects the rear layers; the hysteresis fold carries the bucket, every decode masks, and the pixels are order-invariant (the gate's own proof).</span>
+        <span>Hi-Z occlusion culling, GPU-driven: 16384 boxes behind a city of occluders, 51–71% never drawn, a pixel-parity gate proving the culling changes nothing — on BOTH backends.</span>
+        <details>
+          <summary>Full history (Tasks 196–209)</summary>
+          <p>WebGPU (compute + one drawIndexedIndirect) and WebGL2 (an FBO pyramid + a transform-feedback cull + a vertex-collapse draw); software adapters get the snapshot mode. Task 206 — the close-camera round: clip-space frustum counts (boxes behind the camera were drawn as «straddle») + the budgeted Greene descent in the cull kernel (the fine pass over the box's own texels): drawn 8134 → 428 at the guilty close camera, pixel parity identical on both backends. Task 207 — the same-frame feedback: the colored boxes now occlude the boxes behind them WITHIN the frame (the second field report's ask): the first cull's survivors re-render depth-only into the pyramid, it rebuilds, a second cull lands — drawn 2767 → 428 at the report's camera (exactly the brute whole-scene fill's power, at a sixth of its instance count), ON by default, declared as three frame-graph passes that die with the culling gate. Task 208 — the cross-frame seed: the bevy two-phase delta: the pyramid carries across the frame boundary as a persistent frame-graph resource (hiz-seed — the late downsample after the phase-1 depth writers is its author; the next frame's first cull reads the imported version and the staleness channel counts the lag), so the K-wall warm-up leaves the seeded frame entirely and the feedback fill's pass set collapses to exactly the final set (2767 → 428, up to ×36 less depth-only raster) while the final buckets land bit-identical — the fixed-point law, proven on both backends and under a cross-camera jump (the lag costs fill, never a pixel). Task 209 — the parallel compact + the near-first order: the last serial N-loop in the frame is gone (the flags-to-list compact runs as one 64-lane workgroup: a Hillis-Steele scan per tile + a running base produce the byte-identical ascending list), and the visible list sorts NEAR-FIRST (the cull packs a depth bucket into the verdict word's spare bits; a bitonic network orders the list by (bucket, index) — unique keys, deterministic on every backend) so the color pass's early-Z rejects the rear layers; the hysteresis fold carries the bucket, every decode masks, and the pixels are order-invariant (the gate's own proof).</p>
+        </details>
       </a>
     </div>
     <footer>
@@ -67,5 +94,17 @@
       The demo list and standard live in <code>demo/README.md</code> in the repository.
     </footer>
   </main>
+  <script>
+    // Task 210 — the details toggle must not navigate the surrounding card
+    // link: prevent the default anchor navigation AND the summary's own
+    // toggle, then flip .open manually.
+    document.querySelectorAll('a.card details').forEach(function (d) {
+      d.addEventListener('click', function (e) {
+        e.preventDefault()
+        e.stopPropagation()
+        d.open = !d.open
+      })
+    })
+  </script>
 </body>
 </html>

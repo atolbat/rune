@@ -32,7 +32,7 @@
 (function () {
   'use strict'
 
-  var SHELL_VERSION = '1.1.0'
+  var SHELL_VERSION = '1.2.0'
   var MAX_ENTRIES = 400
   var READY_TIMEOUT_MS = 6000
 
@@ -95,6 +95,12 @@
       '  <pre class="rd-reason" id="reason"></pre>' +
       '</section>'
 
+    /* Task 210 — THE COLLAPSIBLE DESCRIPTION: the demos grew multi-task
+     * research histories (the occlusion desc is ~4KB) and the header had
+     * become a wall of text pushing the stage below the fold. The header
+     * now shows a 2-line teaser; the full description + the hint live
+     * behind one "Read more" toggle. Short descriptions (≤ 240 chars)
+     * render expanded exactly as before — nothing changes for small demos. */
     app.innerHTML = fullscreen
       ? STAGE +
         '<button type="button" class="rd-fab" id="rd-fab" aria-label="Menu" aria-expanded="false" aria-controls="rd-sheet">\u2630</button>' +
@@ -106,22 +112,39 @@
         '</div>'
       : '<header class="rd-head">' +
         '  <h1 class="rd-title"></h1>' +
-        '  <p class="rd-desc"></p>' +
+        '  <div class="rd-more" id="rd-more">' +
+        '    <p class="rd-desc"></p>' +
+        '    <p class="rd-hint"></p>' +
+        '    <button type="button" class="rd-more-toggle" id="rd-more-toggle" hidden>Read more</button>' +
+        '  </div>' +
         '</header>' +
         STAGE +
         '<section class="rd-toolbar">' +
         SEG +
         ACTIONS +
         '</section>' +
-        LOG +
-        '<p class="rd-hint"></p>'
+        LOG
 
     if (fullscreen) {
       app.querySelector('.rd-sheet-title').textContent = opts.title
     } else {
       app.querySelector('.rd-title').textContent = opts.title
+      var descMore = app.querySelector('#rd-more')
+      var descToggle = app.querySelector('#rd-more-toggle')
       app.querySelector('.rd-desc').textContent = opts.desc
       app.querySelector('.rd-hint').innerHTML = opts.hint
+      if (String(opts.desc).length > 240 || String(opts.hint).length > 320) {
+        var moreOpen = false
+        descMore.classList.add('rd-more--collapsed')
+        descToggle.hidden = false
+        descToggle.setAttribute('aria-expanded', 'false')
+        descToggle.addEventListener('click', function () {
+          moreOpen = !moreOpen
+          descMore.classList.toggle('rd-more--collapsed', !moreOpen)
+          descToggle.textContent = moreOpen ? 'Show less \u25B4' : 'Read more \u25BE'
+          descToggle.setAttribute('aria-expanded', String(moreOpen))
+        })
+      }
     }
 
     var slot = app.querySelector('#rd-slot')

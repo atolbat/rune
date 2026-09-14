@@ -5611,15 +5611,6 @@ function softwareOccluder(options) {
         cornerPy[k] = (ny * 0.5 + 0.5) * height;
         cornerZ[k] = nz;
       }
-      const faceAlong = (axis, front) => {
-        const ids = [];
-        for (let k = 0;k < 8; k++) {
-          const bit = k >> axis & 1;
-          if (front ? bit === 0 : bit === 1)
-            ids.push(k);
-        }
-        return [ids[0], ids[1], ids[3], ids[2]];
-      };
       const m = mvp;
       const faceNear = (axis) => {
         const half = axis === 0 ? hx : axis === 1 ? hy : hz;
@@ -5639,7 +5630,7 @@ function softwareOccluder(options) {
         return dFront <= dBack;
       };
       for (const axis of [0, 1, 2]) {
-        const quad = faceAlong(axis, faceNear(axis));
+        const quad = FACE_QUADS[axis * 2 + (faceNear(axis) ? 0 : 1)];
         rasterQuad(quad[0], quad[1], quad[2], quad[3]);
       }
     },
@@ -5652,13 +5643,15 @@ function softwareOccluder(options) {
         const src = mips[L - 1];
         const dst = mips[L];
         const wi = dims[L - 1], wo = dims[L];
-        for (let t = 0;t < wo.w * wo.h; t++) {
-          const x = t % wo.w, y = t / wo.w | 0;
-          const x0 = Math.min(x * 2, wi.w - 1), x1 = Math.min(x * 2 + 1, wi.w - 1);
-          const y0 = Math.min(y * 2, wi.h - 1), y1 = Math.min(y * 2 + 1, wi.h - 1);
-          const a = src[y0 * wi.w + x0], b = src[y0 * wi.w + x1];
-          const c = src[y1 * wi.w + x0], d = src[y1 * wi.w + x1];
-          dst[t] = Math.max(a, b, c, d);
+        const wLast = wi.w - 1, hLast = wi.h - 1, srcW = wi.w;
+        for (let y = 0;y < wo.h; y++) {
+          const r0 = Math.min(y * 2, hLast) * srcW;
+          const r1 = Math.min(y * 2 + 1, hLast) * srcW;
+          let t = y * wo.w;
+          for (let x = 0;x < wo.w; x++, t++) {
+            const x0 = Math.min(x * 2, wLast), x1 = Math.min(x * 2 + 1, wLast);
+            dst[t] = Math.max(src[r0 + x0], src[r0 + x1], src[r1 + x0], src[r1 + x1]);
+          }
         }
       }
     },
@@ -5787,7 +5780,25 @@ function rayBoxes(view, ox, oy, oz, dx, dy, dz) {
   hits.sort((a, b) => a.t - b.t);
   return hits;
 }
-var HYST_STREAK_SCALE = 32;
+var HYST_STREAK_SCALE = 32, FACE_QUADS;
+var init_culling = __esm(() => {
+  FACE_QUADS = (() => {
+    const table = [];
+    for (let axis = 0;axis < 3; axis++) {
+      for (let frontI = 0;frontI < 2; frontI++) {
+        const front = frontI === 0;
+        const ids = [];
+        for (let k = 0;k < 8; k++) {
+          const bit = k >> axis & 1;
+          if (front ? bit === 0 : bit === 1)
+            ids.push(k);
+        }
+        table[axis * 2 + frontI] = [ids[0], ids[1], ids[3], ids[2]];
+      }
+    }
+    return table;
+  })();
+});
 
 // packages/core/src/framegraph.ts
 function laneOf(kind) {
@@ -6521,6 +6532,7 @@ var init_src = __esm(() => {
   init_gpgpu();
   init_noise();
   init_spatial();
+  init_culling();
   init_sort();
 });
 

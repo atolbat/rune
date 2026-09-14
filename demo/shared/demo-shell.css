@@ -58,6 +58,29 @@ body {
 
 .rd-desc { margin: 0; color: var(--rd-muted); font-size: 14px; }
 
+/* Task 210 — the collapsible description block (see demo-shell.js): the
+   teaser clamps the long research-history descriptions to two lines and
+   hides the hint; the toggle reveals the full text. */
+.rd-more { display: flex; flex-direction: column; gap: 8px; }
+.rd-more--collapsed .rd-desc {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.rd-more--collapsed .rd-hint { display: none; }
+.rd-more-toggle {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--rd-accent);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.rd-more-toggle:hover { text-decoration: underline; }
+
 /* ---------- Stage ---------- */
 
 .rd-stage {

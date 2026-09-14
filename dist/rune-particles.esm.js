@@ -409,6 +409,23 @@ function sphereOutsideFrustum(planes, cx, cy, cz, radius) {
   }
   return false;
 }
+// packages/core/src/culling.ts
+var FACE_QUADS = (() => {
+  const table = [];
+  for (let axis = 0;axis < 3; axis++) {
+    for (let frontI = 0;frontI < 2; frontI++) {
+      const front = frontI === 0;
+      const ids = [];
+      for (let k = 0;k < 8; k++) {
+        const bit = k >> axis & 1;
+        if (front ? bit === 0 : bit === 1)
+          ids.push(k);
+      }
+      table[axis * 2 + frontI] = [ids[0], ids[1], ids[3], ids[2]];
+    }
+  }
+  return table;
+})();
 // packages/core/src/gpu/bitonic.ts
 var BITONIC_PAD_KEY = 1000000000000000000000000000000;
 var BITONIC_SENTINEL = 33554432;
