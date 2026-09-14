@@ -90,9 +90,12 @@ try {
     const off = await run(0, K, false)
     const plain = await run(1, K, false)
     const fb = await run(1, K, true)
+    // the graph snapshot MUST be taken while the feedback frame is still
+    // the last compiled one — __fgDebug.last() reports the LAST renderTo,
+    // and the city leg below compiles a feedback-OFF frame over it
+    const graph = window.__fgDebug.last()
     const city = await run(1, N, false)
     let hash = r => { let h = 2166136261; for (let i = 0; i < r.img.data.length; i++) { h ^= r.img.data[i]; h = Math.imul(h, 16777619) } return h >>> 0 }
-    const graph = window.__fgDebug.last()
     return {
       plainDrawn: plain.s.drawn, fbDrawn: fb.s.drawn, cityDrawn: city.s.drawn,
       fbOccluded: fb.s.occluded, plainOccluded: plain.s.occluded,
