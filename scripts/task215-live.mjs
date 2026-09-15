@@ -161,5 +161,8 @@ try {
   await browser.close()
 }
 
-console.log(`\n[live] ${failures === 0 ? 'VERDICT: PASS — the depth-reuse harvest is live (the presented frame\\'s own depth, bit-identical) and the scene store mirror has its first live consumer' : `VERDICT: FAIL (${failures})`}`)
+const verdictText = failures === 0
+  ? 'VERDICT: PASS — the depth-reuse harvest is live (the presented frame\'s own depth, bit-identical) and the scene store mirror has its first live consumer'
+  : `VERDICT: FAIL (${failures})`
+console.log(`\n[live] ${verdictText}`)
 process.exit(failures === 0 ? 0 : 1)
