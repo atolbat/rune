@@ -34,7 +34,7 @@
 //   (createFrameGraph from @rune/core — the recipe as data, the engine
 //   compiles the DAG) and the CPU-tier frustum cull (the facade's
 //   render.cull, Task 136) runs on every preset.
-import { createRenderer, createFrameGraph } from '../../dist/rune.esm.js?v=216'
+import { createRenderer, createFrameGraph } from '../../dist/rune.esm.js?v=217'
 import { materialOf, TEXTURE, VERTEX_COLOR } from '../../dist/rune-materials.esm.js?v=150'
 import { createParticles, createRamp } from '../../dist/rune-particles.esm.js?v=199'
 

@@ -47,7 +47,7 @@ struct VOut {
   col = mix(col, vec3<f32>(0.44, 0.42, 0.40), smoothstep(0.55, 0.75, t));
   col = mix(col, vec3<f32>(0.88, 0.90, 0.93), smoothstep(0.84, 0.96, t));
   let lam = clamp(dot(normalize(v.n), normalize(p.light.xyz)), 0.0, 1.0);
-  var lit = col * (0.38 + 0.62 * lam);
+  var lit = col * (0.46 + 0.54 * lam);
   let fog = clamp((v.dist - p.misc.y) / max(p.misc.z - p.misc.y, 1.0), 0.0, 1.0);
   lit = mix(lit, vec3<f32>(0.56, 0.66, 0.78), fog * 0.92);
   return vec4<f32>(lit, 1.0);
@@ -84,7 +84,7 @@ void main() {
   col = mix(col, vec3(0.44, 0.42, 0.40), smoothstep(0.55, 0.75, t));
   col = mix(col, vec3(0.88, 0.90, 0.93), smoothstep(0.84, 0.96, t));
   float lam = clamp(dot(normalize(v_n), normalize(u_light.xyz)), 0.0, 1.0);
-  vec3 lit = col * (0.38 + 0.62 * lam);
+  vec3 lit = col * (0.46 + 0.54 * lam);
   float fog = clamp((v_dist - u_misc.y) / max(u_misc.z - u_misc.y, 1.0), 0.0, 1.0);
   lit = mix(lit, vec3(0.56, 0.66, 0.78), fog * 0.92);
   o = vec4(lit, 1.0);

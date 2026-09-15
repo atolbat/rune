@@ -36,6 +36,11 @@
  *   · AXIS-SEPARATED PUSHOUT — X and Z move independently (each axis
  *     resolves its own overlaps): sliding along a wall IS the
  *     composition of two 1-D clamps, no normals, no solver iterations.
+ *     Task 217 — THE STEP-UP LADDER: a diagonal approach whose body
+ *     straddles two consecutive steps (the upper one a «wall» at the
+ *     current feet) climbs rung by rung — each raise re-reads the world,
+ *     the next step's nose becomes steppable at the raised feet — where
+ *     the one-shot answer shoved the body sideways off the staircase.
  *
  *   · ZERO STEADY-STATE ALLOCATIONS — the contact object, the id
  *     scratch, and the box scratch are created once at boot and reused
@@ -61,6 +66,12 @@ export interface CharacterSpec {
   readonly jumpSpeed: number
   /** Max ledge the body mounts while grounded, m (the staircase law). */
   readonly stepHeight: number
+  /** Task 217 — THE LEDGE SAVE: the max ledge the body mounts while
+   *  AIRBORNE, m. A jump that clips a platform's front face with its
+   *  feet within this distance below the top pops ONTO the platform
+   *  instead of bouncing off the face (the parkour near-miss law).
+   *  Default 0.35; 0 disables (the Task-216 behavior). */
+  readonly airStepUp?: number
   /** Post-edge jump grace, s (the coyote law). */
   readonly coyoteTime: number
   /** Pre-landing press grace, s (the buffer law). */
@@ -187,60 +198,85 @@ export function createCharacter(spec: CharacterSpec, world: CharacterWorld, x0: 
     state.ground = null
   }
 
-  /** One axis's move + overlap resolve: the step-up when every obstacle
-   *  is a mountable ledge, the 1-D clamp otherwise (the wall law — the
-   *  other axis rides untouched, that IS the slide). */
+  /** One axis's move + overlap resolve: THE MOUNT LADDER when the way
+   *  holds mountable ledges (raise to the highest top within the phase's
+   *  bound, RE-QUERY, repeat), the 1-D clamp when a true wall remains
+   *  (the wall law — the other axis rides untouched, that IS the slide).
+   *  Task 217 taught the ladder TWO phases: GROUNDED (the bound is
+   *  stepHeight — a diagonal approach whose body straddles two
+   *  consecutive steps climbs BOTH, one rung at a time, where the
+   *  one-shot answer read the upper step as a wall and shoved the body
+   *  sideways off the stairs) and AIRBORNE (THE LEDGE SAVE — the bound
+   *  is airStepUp: a jump clipping a platform's face with its feet just
+   *  below the top pops ONTO the platform, and a body that sinks a hair
+   *  below a seam mounts back instead of teleporting out the far side). */
   function moveAxis(axis: 'x' | 'z', delta: number): void {
     if (delta === 0) return
     const r = spec.radius
     if (axis === 'x') state.x += delta
     else state.z += delta
-    // the body AABB at the MOVED position; a hair above the feet so the
-    // ground being STOOD on (top == feet) never reads as an obstacle
-    const y0 = state.y + 1e-4
-    const y1 = state.y + spec.height
-    const n = world.boxesIn(state.x - r, y0, state.z - r, state.x + r, y1, state.z + r, ids)
+    // the mount bound: stepHeight on the ground, airStepUp in the air
+    // (the ledge save); the body AABB at the MOVED position below keeps a
+    // hair above the feet so the ground being STOOD on (top == feet)
+    // never reads as an obstacle
+    const bound = state.grounded ? spec.stepHeight : (spec.airStepUp ?? 0.35)
+    let y0 = state.y + 1e-4
+    let n = world.boxesIn(state.x - r, y0, state.z - r, state.x + r, state.y + spec.height, state.z + r, ids)
     if (n === 0) return
-    let stepTop = -Infinity
-    let wall = false
-    for (let k = 0; k < n; k++) {
-      if (!world.boxAt(ids[k]!, box)) continue
-      const top = box[1]! + box[4]!
-      const rise = top - state.y
-      if (state.grounded && rise > EPS && rise <= spec.stepHeight) {
-        if (top > stepTop) stepTop = top
-      } else {
-        wall = true
-      }
-    }
-    if (!wall) {
-      if (stepTop > -Infinity) {
-        // THE STEP-UP: mount the highest ledge in the way (the staircase)
+    if (bound > 0) {
+      // THE LADDER: each rung raises to the highest ledge within the
+      // bound of the CURRENT feet, then re-reads the world — a box
+      // that was a wall at the old feet (the next step's nose, two rises
+      // up) becomes steppable at the raised feet. The body's span
+      // (2·radius) straddles at most two adjacent steps, so two rungs
+      // resolve any staircase approach; the bound of 4 is the safety net
+      // against degenerate stacks (a raise that never clears).
+      for (let rung = 0; rung < 4 && n > 0; rung++) {
+        let stepTop = -Infinity
+        for (let k = 0; k < n; k++) {
+          if (!world.boxAt(ids[k]!, box)) continue
+          const top = box[1]! + box[4]!
+          if (top - state.y > EPS && top - state.y <= bound && top > stepTop) stepTop = top
+        }
+        if (stepTop === -Infinity) break // only walls remain — the clamp below
+        // THE MOUNT: one rung up (≤ bound by construction); a mount IS a
+        // landing — the next substep's carry probe re-reads the mover
         state.y = stepTop
         contact.top = stepTop
         contact.mover = -1
         contact.vx = 0; contact.vy = 0; contact.vz = 0
         state.ground = contact
+        state.grounded = true
+        y0 = state.y + 1e-4
+        n = world.boxesIn(state.x - r, y0, state.z - r, state.x + r, state.y + spec.height, state.z + r, ids)
       }
-      return
+      if (n === 0) return // the ladder cleared the way — climbed, no clamp
     }
-    // THE PUSHOUT: each wall resolves to its NEARER side (the body's
-    // position vs the box's center on the moved axis — the minimal exit,
-    // NOT the travel direction's face: a body grazing a box's far edge
-    // while falling past it must stay, never teleport to the far face).
-    // Steps (steppable ledges) are excluded — they are not walls.
+    // THE PUSHOUT: each wall resolves to its exit — the ENTRY side when
+    // this move walked into it (the pre-move position was clear on this
+    // axis: the body goes back where it came from), the NEARER side for
+    // a pre-existing penetration (a body grazing a box's far edge while
+    // falling past it must stay, never teleport to the far face).
+    // Mountable ledges (within the phase's bound) are excluded — not walls.
     for (let k = 0; k < n; k++) {
       if (!world.boxAt(ids[k]!, box)) continue
       const top = box[1]! + box[4]!
       const rise = top - state.y
-      if (state.grounded && rise > EPS && rise <= spec.stepHeight) continue // a step, not a wall
+      if (rise > EPS && rise <= bound) continue // a mountable ledge, not a wall
       const c = axis === 'x' ? box[0]! : box[2]!
       const h = axis === 'x' ? box[3]! : box[5]!
       const lo = c - h
       const hi = c + h
       const pos = axis === 'x' ? state.x : state.z
       if (pos + r <= lo || pos - r >= hi) continue // (a same-axis twin the query saw; not penetrating)
-      if (pos < c) {
+      // the entry-side test: was the body clear of this box on this axis
+      // BEFORE the move? (pos − delta: the pre-move coordinate)
+      const pre = pos - delta
+      let exitLeft: boolean
+      if (pre + r <= lo + EPS) exitLeft = true // walked in from the LEFT — go back left
+      else if (pre - r >= hi - EPS) exitLeft = false // walked in from the RIGHT — go back right
+      else exitLeft = pos < c // pre-existing penetration — the nearer side
+      if (exitLeft) {
         // exit the LEFT side
         if (axis === 'x') { state.x = lo - r - EPS; if (state.vx > 0) state.vx = 0 }
         else { state.z = lo - r - EPS; if (state.vz > 0) state.vz = 0 }

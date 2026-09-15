@@ -111,7 +111,7 @@
 // visible box (its own rect holds either background 1.0 or surfaces
 // behind it), so the final verdicts stay pixel-exact at any camera,
 // however old the seed. The one-frame lag costs fill, never a pixel.
-import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=216'
+import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=217'
 import { buildShaders } from './shaders.js?v=210'
 import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H } from './scene.js?v=203'
 const SKY = [0.045, 0.055, 0.09, 1]
@@ -143,6 +143,12 @@ export async function buildTier(deps) {
   const surfSpec = deps.surf ?? { w: 480, h: 270 }
   const SURF_W = surfSpec.w, SURF_H = surfSpec.h
   const terrainSpec = deps.terrain ?? null
+  // Task 217 — THE SKY (the walker's field report: the occlusion demo's
+  // near-black navy read as «всё чёрное» in a game viewport). The clear
+  // color is the CALLER's now — the occlusion demo keeps its own SKY
+  // (bit-identical classic frame), the walker passes the fog's own
+  // daytime blue so the horizon blends seamless.
+  const SKY_COLOR = deps.sky ?? SKY
 
   // ── the device boot (one syntax; the GPU-process storm retries live in
   //    createDevice — 4 attempts, the Task-197 cadence) ────────────────────
@@ -150,7 +156,7 @@ export async function buildTier(deps) {
   const device = await createDevice({
     backend,
     canvas: bootCanvas,
-    clear: { color: SKY, depth: 1 },
+    clear: { color: SKY_COLOR, depth: 1 },
     antialias: true,   // WG: the 4x-resolve canvas; GL: the context cascade
     dprCap: 2,         // mobile-first: supersample where it pays, cap the fill
     onError: noteError,
@@ -437,7 +443,7 @@ export async function buildTier(deps) {
       // the depth test interleaves the two opaque layers honestly)
       name: 'terrain-color', kind: 'render', cost: 3,
       reads: [R.terrainMesh], writes: [R.target],
-      execute: ({ props }) => terrainColor.run({ target: props.target, camera: props.camera, clear: true }),
+      execute: ({ props }) => terrainColor.run({ target: props.target, camera: props.camera, clear: true, fogNear: terrainSpec.fogNear, fogFar: terrainSpec.fogFar }),
     })
   }
   fg.pass({

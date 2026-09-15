@@ -7340,27 +7340,23 @@ function createCharacter(spec, world, x0, y0, z0) {
       state.x += delta;
     else
       state.z += delta;
-    const y02 = state.y + 0.0001;
-    const y1 = state.y + spec.height;
-    const n = world.boxesIn(state.x - r, y02, state.z - r, state.x + r, y1, state.z + r, ids);
+    const bound = state.grounded ? spec.stepHeight : spec.airStepUp ?? 0.35;
+    let y02 = state.y + 0.0001;
+    let n = world.boxesIn(state.x - r, y02, state.z - r, state.x + r, state.y + spec.height, state.z + r, ids);
     if (n === 0)
       return;
-    let stepTop = -Infinity;
-    let wall = false;
-    for (let k = 0;k < n; k++) {
-      if (!world.boxAt(ids[k], box))
-        continue;
-      const top = box[1] + box[4];
-      const rise = top - state.y;
-      if (state.grounded && rise > EPS && rise <= spec.stepHeight) {
-        if (top > stepTop)
-          stepTop = top;
-      } else {
-        wall = true;
-      }
-    }
-    if (!wall) {
-      if (stepTop > -Infinity) {
+    if (bound > 0) {
+      for (let rung = 0;rung < 4 && n > 0; rung++) {
+        let stepTop = -Infinity;
+        for (let k = 0;k < n; k++) {
+          if (!world.boxAt(ids[k], box))
+            continue;
+          const top = box[1] + box[4];
+          if (top - state.y > EPS && top - state.y <= bound && top > stepTop)
+            stepTop = top;
+        }
+        if (stepTop === -Infinity)
+          break;
         state.y = stepTop;
         contact.top = stepTop;
         contact.mover = -1;
@@ -7368,15 +7364,19 @@ function createCharacter(spec, world, x0, y0, z0) {
         contact.vy = 0;
         contact.vz = 0;
         state.ground = contact;
+        state.grounded = true;
+        y02 = state.y + 0.0001;
+        n = world.boxesIn(state.x - r, y02, state.z - r, state.x + r, state.y + spec.height, state.z + r, ids);
       }
-      return;
+      if (n === 0)
+        return;
     }
     for (let k = 0;k < n; k++) {
       if (!world.boxAt(ids[k], box))
         continue;
       const top = box[1] + box[4];
       const rise = top - state.y;
-      if (state.grounded && rise > EPS && rise <= spec.stepHeight)
+      if (rise > EPS && rise <= bound)
         continue;
       const c = axis === "x" ? box[0] : box[2];
       const h = axis === "x" ? box[3] : box[5];
@@ -7385,7 +7385,15 @@ function createCharacter(spec, world, x0, y0, z0) {
       const pos = axis === "x" ? state.x : state.z;
       if (pos + r <= lo || pos - r >= hi)
         continue;
-      if (pos < c) {
+      const pre = pos - delta;
+      let exitLeft;
+      if (pre + r <= lo + EPS)
+        exitLeft = true;
+      else if (pre - r >= hi - EPS)
+        exitLeft = false;
+      else
+        exitLeft = pos < c;
+      if (exitLeft) {
         if (axis === "x") {
           state.x = lo - r - EPS;
           if (state.vx > 0)

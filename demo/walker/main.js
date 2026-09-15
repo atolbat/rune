@@ -24,12 +24,12 @@
 // window.__walker — the live counters (the smoke/gates read it);
 // window.__walkerGate — the boot validation's promise (the deterministic
 // autopilot: a scripted walk over the course, the laws asserted live).
-import { buildTier } from '../occlusion/tier.js?v=216'
+import { buildTier } from '../occlusion/tier.js?v=217'
 import { perspective, lookAt, mat4Mul, BOX_VERTS, BOX_INDICES } from '../occlusion/scene.js?v=203'
-import { createWorld, BODY, EYE_HEIGHT } from './world.js?v=216'
-import { createControls } from './controls.js?v=216'
-import { terrainShaders } from './shaders-terrain.js?v=216'
-import { createCharacter, createScaleGovernor } from '../../dist/rune.esm.js?v=216'
+import { createWorld, BODY, EYE_HEIGHT } from './world.js?v=217'
+import { createControls } from './controls.js?v=217'
+import { terrainShaders } from './shaders-terrain.js?v=217'
+import { createCharacter, createScaleGovernor } from '../../dist/rune.esm.js?v=217'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -40,7 +40,10 @@ const N_PARAM = Math.max(512, Math.min(16384, Number(PARAMS.get('crowd')) || 700
 
 const democtl = { pause() {}, resume() {} }
 const shell = window.RuneDemoShell.mount({
-  layout: 'page',
+  // Task 217 — THE GAME IS THE SCREEN (the report's «канвас на весь
+  // экран»): the shell's fullscreen layout — the stage fixes over the
+  // whole viewport, every control hides behind the FAB menu
+  layout: 'fullscreen',
   title: 'First-person parkour walker',
   desc: 'Ходи по террэйну от первого лица и прыгай по объектам — платформы, лестницы, башни, лифты и фермы (в т.ч. сложные составные), на ОБОИХ бэкендах, MOBILE-FIRST. Task 216: точный треугольный семплер высот (gridHeightSampler — коллизии читают ТЕ ЖЕ байты, что и меш), кинематический character-кирпич (@rune/core: ground-oracle, ray-закон против туннелирования, coyote time, jump buffer, step-up на лестницах, ground glue на склонах, перенос платформ), террэйн-пассы в фрейм-графе (drawMesh — глубина холмов становится базовым слоем Hi-Z пирамиды: холмы КУЛЛЯТ толпу), адаптивный render-scale governor (EMA по времени кадра + гистерезисная лестница + cooldown → renderer.setDpr на обоих бэкендах), и весь недавний стек вживую: SoA-store с dirty-диапазонами для лифтов (≈144 Б/кадр против полного региона), override-lane октодерева (деревья заморожены), SPD-пирамида (2 диспатча), кросс-кадровый seed, same-frame feedback, near-first порядок, гистерезис вердиктов. Тач: левая половина — джойстик, правая — взгляд, кнопка JUMP; десктоп: клик → pointer lock, WASD + Space.',
   hint: 'MOBILE: левая половина экрана — виртуальный джойстик (ходьба), правая — взгляд (drag), кнопка JUMP — прыжок (удерживай для автобанихопа — jump buffer). DESKTOP: клик по канвасу → pointer lock, WASD/стрелки — ходьба, мышь — взгляд, Space — прыжок. Курс: платформы → лестница (step-up) → лифт (перенос платформы) → ферма через разрыв → башня с экспрессом → арка → финиш. Кнопки: Culling (Hi-Z вкл/выкл — смотри drawn), Pyramid view (пирамида), Quality AUTO (адаптивное разрешение — на слабом GPU само деградирует и восстанавливается). Стой неподвижно — A6 depth-reuse включает depth-harvest (2 диспатча вместо ре-рендера выживших).',
@@ -89,7 +92,8 @@ const stats = {
   drawn: -1, occluded: -1, total: scene.N,
   fps: 0, msAvg: 0,
   grounded: false, airFrames: 0, groundTop: 0, groundMover: -1, speed: 0,
-  x: 0, y: 0, z: 0,
+  x: 0, y: 0, z: 0, yaw: 0, pitch: 0,
+  isTouch: false, joyActive: false, jumpHeld: false,
   uploadBytes: 0, uploadFull: scene.N * 48,
   scaleLevel: SCALE_LEVELS.length - 1, scaleApplied: null, ema: 0,
   validation: null, checks: [],
@@ -150,7 +154,17 @@ async function bootTier(backend) {
       FORCE_SNAPSHOT,
       // Task 216 — THE WALKER EXTENSIONS:
       surf: { w: 960, h: 540 }, // a GAME's surface (the culling viz ran 480×270)
-      terrain: { geometry: world.soup, color: terrainShaders.color, z: terrainShaders.z },
+      // Task 217 — THE SKY (the field report's «террейн не виден, там
+      // всё чёрное»): the old clear was the occlusion demo's near-black
+      // navy [0.045, 0.055, 0.09] — 85..96% of the canvas read BLACK in
+      // portrait. The clear now carries the fog's own color — the
+      // horizon blends seamless (the fog IS the aerial perspective)
+      sky: [0.56, 0.66, 0.78, 1],
+      terrain: {
+        geometry: world.soup, color: terrainShaders.color, z: terrainShaders.z,
+        // less wash on the mid hills: the near terrain keeps its color
+        fogNear: 320, fogFar: 700,
+      },
       attachControls(canvas) {
         controls.attach(canvas, stage)
       },
@@ -207,8 +221,9 @@ function startLoop() {
     try { tier.applyEdits(upload.ranges) } catch { /* a lost device */ }
 
     // 2. THE INPUT: the validation autopilot (deterministic) or the controls
+    //    (?bare — the gates' touch legs own the input from frame one)
     let input
-    if (!validationDone) {
+    if (!validationDone && !BARE) {
       input = autopilot(dt, simT)
     } else {
       const c = controls.consume(cam.yaw)
@@ -223,6 +238,10 @@ function startLoop() {
     walker.step(vdt, input)
     const s = walker.state
     stats.x = +s.x.toFixed(2); stats.y = +s.y.toFixed(2); stats.z = +s.z.toFixed(2)
+    stats.yaw = +cam.yaw.toFixed(3); stats.pitch = +cam.pitch.toFixed(3)
+    stats.isTouch = controls.state.isTouch
+    stats.joyActive = controls.state.joyActive
+    stats.jumpHeld = controls.state.jumpHeld
     stats.grounded = s.grounded
     stats.airFrames = s.grounded ? 0 : stats.airFrames + 1
     stats.groundTop = s.ground !== null ? +s.ground.top.toFixed(2) : 0
@@ -508,6 +527,47 @@ async function finishValidation() {
     // the platform hops actually happened (a rescue-free run is not
     // demanded — but the hops must LAND: the last platform's ground id)
     check('the run law — the hop chain reached the last platform', targetIdx >= 6 || rescueCount > 0, `target=${targetIdx} rescues=${rescueCount}`)
+    // ── Task 217 — THE FIELD REPORT'S OWN LAWS (the stairs + the edges) ──
+    // (1) THE DIAGONAL STAIRS: the analog stick's natural drift climbs
+    //     the staircase — the mount ladder's rung-by-rung answer to the
+    //     one-shot resolver's sideways shove (the report's complaint).
+    //     A deterministic mini-run: teleport to the base off-center,
+    //     walk a 12° diagonal at the fixed 1/120, assert the top.
+    {
+      const idleIn = { dirX: 0, dirZ: 0, jumpHeld: false }
+      walker.teleport(-1.5, course.stairBase + 0.05, course.stairZ + 2.4)
+      for (let k = 0; k < 60; k++) walker.step(1 / 120, idleIn) // settle
+      const a = (12 * Math.PI) / 180
+      const dir = { dirX: Math.sin(a), dirZ: -Math.cos(a), jumpHeld: false }
+      let air = 0
+      let steps = 0
+      for (; steps < 1600 && walker.state.z > course.landingZ + 1.4; steps++) {
+        walker.step(1 / 120, dir)
+        if (!walker.state.grounded) air++
+      }
+      check('the diagonal stairs law — a 12° drift climbs to the pad, zero air frames',
+        walker.state.y > course.stairTop - 0.2 && air === 0,
+        `y=${walker.state.y.toFixed(2)} top=${course.stairTop.toFixed(2)} air=${air}`)
+      // (2) THE EDGE FORGIVENESS (the footprint oracle): the toes hold
+      //     the platform to the last 30% of the foot — the center past
+      //     the edge by 0.5·r stays GROUNDED; past 1.5·r it falls.
+      const plat = course.stairTop // the landing pad's own top
+      walker.teleport(0, plat, course.landingZ) // re-seat on the pad's center
+      for (let k = 0; k < 30; k++) walker.step(1 / 120, idleIn)
+      const heldX = 2.2 - BODY.radius * 0.5 // the center 0.5·r PAST the pad's +x edge
+      walker.teleport(heldX, plat, course.landingZ)
+      for (let k = 0; k < 30; k++) walker.step(1 / 120, idleIn)
+      const heldGround = walker.state.grounded
+      const fellX = 2.2 + BODY.radius * 1.5 // the center 1.5·r past — the toes off too
+      walker.teleport(fellX, plat, course.landingZ)
+      for (let k = 0; k < 30; k++) walker.step(1 / 120, idleIn)
+      const fellGround = walker.state.grounded
+      check('the edge law — the toes hold to 0.5·r past the edge, not 1.5·r',
+        heldGround === true && fellGround === false,
+        `held@+0.5r ${heldGround ? 'GROUND' : 'AIR'} · past@+1.5r ${fellGround ? 'GROUND' : 'AIR'}`)
+      // re-seat for the still-frame law below (a STATIC spot on the pad)
+      walker.teleport(0, course.stairTop, course.landingZ)
+    }
     // the A6 shape law: a still window swaps the fill for the depth-harvest
     const still = buildCamera(tier.aspect())
     for (let f = 0; f < 6; f++) {
@@ -565,12 +625,10 @@ function refreshHud() {
   const ground = s.ground === null ? 'AIR' : s.ground.mover < 0 ? 'terrain' : s.ground.mover
   const kind = s.grounded ? `GROUND ${ground} top ${stats.groundTop}` : `AIR (${stats.airFrames}f) vy ${s.vy.toFixed(1)}`
   hud.innerHTML =
-    `<b>walker</b> — ${tier.mode} ${tier.kind} · ${stats.fps} fps (${stats.msAvg} ms)` +
-    `\nculling: drawn ${stats.drawn} · occluded ${stats.occluded} · ${stats.total} total · seed ${stats.seedOn ? 'carries phase 1' : 'cold'}` +
-    `\nfeet: ${kind} · speed ${stats.speed} m/s · pos ${stats.x}, ${stats.y}, ${stats.z}` +
-    `\nmovers: 3 dirty · ${stats.uploadBytes} B/frame vs ${(stats.uploadFull / 1024).toFixed(0)} KB full (${Math.round(stats.uploadFull / Math.max(stats.uploadBytes, 1))}× cut)` +
-    `\nscale: level ${stats.scaleLevel + 1}/${SCALE_LEVELS.length} (${SCALE_LEVELS[stats.scaleLevel]}×) · ema ${stats.ema} ms · ${qualityAuto ? 'AUTO' : 'FIXED'}` +
-    (stats.validation === null ? '\nvalidation: running (the autopilot walks the course…)' : `\nvalidation: ${stats.validation.pass ? 'PASS' : 'FAIL'} — ${stats.validation.checks} laws`)
+    `<b>walker</b> ${tier.mode} ${tier.kind} · ${stats.fps} fps · drawn ${stats.drawn}/${stats.total} · seed ${stats.seedOn ? 'warm' : 'cold'}` +
+    `\n${kind} · ${stats.speed} m/s · ${stats.x}, ${stats.y}, ${stats.z} · ${stats.isTouch ? 'TOUCH' : 'desktop'}` +
+    `\nmovers ${stats.uploadBytes} B/f vs ${(stats.uploadFull / 1024).toFixed(0)} KB · scale ${SCALE_LEVELS[stats.scaleLevel]}× · ${qualityAuto ? 'AUTO' : 'FIXED'}` +
+    (stats.validation === null ? '\nvalidation: running…' : `\nvalidation: ${stats.validation.pass ? 'PASS' : 'FAIL'} — ${stats.validation.checks} laws`)
 }
 
 // ── the buttons ────────────────────────────────────────────────────────────
@@ -599,11 +657,26 @@ const qualityBtn = makeBtn('Quality AUTO', () => {
   }
   qualityBtn.textContent = `Quality ${qualityAuto ? 'AUTO' : 'FIXED'}`
 })
+const fsBtn = makeBtn('⛶ Fullscreen', () => {
+  // the REAL fullscreen where the platform allows it (Android/Chrome,
+  // desktop); the fixed stage already covers the viewport everywhere
+  // else — the button hides where the API is missing (iOS Safari)
+  if (document.fullscreenElement !== null && document.exitFullscreen !== undefined) {
+    void document.exitFullscreen()
+    return
+  }
+  const root = document.documentElement
+  if (typeof root.requestFullscreen === 'function') void root.requestFullscreen().catch(() => {})
+})
 const btnRow = document.createElement('div')
 btnRow.className = 'walker-btns'
 btnRow.append(cullBtn, stripBtn, qualityBtn)
-const toolbar = typeof document !== 'undefined' ? document.querySelector('.rd-toolbar') : null
-if (toolbar !== null) toolbar.appendChild(btnRow)
+if (document.documentElement.requestFullscreen === undefined) fsBtn.style.display = 'none'
+else btnRow.append(fsBtn)
+// Task 217 — THE FAB SHEET is the toolbar now: the fullscreen stage has
+// no page chrome of its own, the shell's ☰ menu carries the buttons
+const sheet = typeof document !== 'undefined' ? document.querySelector('#rd-sheet') : null
+if (sheet !== null) sheet.appendChild(btnRow)
 else stage.appendChild(btnRow)
 
 // ── the boot ───────────────────────────────────────────────────────────────

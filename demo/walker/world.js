@@ -22,7 +22,7 @@
 import {
   terrain, terrainGrid, gridHeightSampler, heightHills,
   buildOctreeRecords, recordView, adoptStore,
-} from '../../dist/rune.esm.js?v=216'
+} from '../../dist/rune.esm.js?v=217'
 
 export const TERRAIN_SIZE = 512
 export const TERRAIN_SEG = 128 // step 4 m exactly (the sampler's power-of-two round trip)
@@ -30,10 +30,11 @@ export const TERRAIN_AMP = 15
 const RELIEF = heightHills(7)
 
 // the walker's tuned body (the character brick's spec — the course's
-// gaps are engineered against THESE numbers)
+// gaps are engineered against THESE numbers; airStepUp — the Task-217
+// ledge save: a jump clipping a platform's face pops onto the top)
 export const BODY = {
   radius: 0.38, height: 1.7, walkSpeed: 7.5, accelGround: 55, accelAir: 16,
-  gravity: 22, jumpSpeed: 8.2, stepHeight: 0.62, coyoteTime: 0.12,
+  gravity: 22, jumpSpeed: 8.2, stepHeight: 0.62, airStepUp: 0.35, coyoteTime: 0.12,
   jumpBuffer: 0.15, maxFall: 55, snapDown: 0.2, fixedDt: 1 / 120,
 }
 export const EYE_HEIGHT = 1.62
@@ -88,17 +89,21 @@ export function createWorld(crowdCount = 7000) {
 
   // station C — the staircase (10 steps, 0.55 rise, 1.1 run): the FIRST
   // step is one step-up from the local terrain; the chain climbs to the
-  // landing pad — the ONLY route up (that is the point of stairs)
+  // landing pad — the ONLY route up (that is the point of stairs).
+  // Task 217 (the field report's stairs): the steps widened 3.2 → 4.4 m
+  // (the analog stick's drift deserves room) and the pad's near edge is
+  // FLUSH with the last step's far edge (the old 0.15 m seam dropped the
+  // body the moment the CENTER crossed it — the point ray's blind spot)
   const stairZ = runEndZ - 4.5
   const stairBase = h(0, stairZ)
   for (let s = 0; s < 10; s++) {
     const top = stairBase + 0.55 + s * 0.55
     const depth = top - (stairBase - 2) // every step reaches 2 m below — no gaps on slopes
-    put(0, top - depth / 2, stairZ - s * 1.1, 1.6, depth / 2, 0.55, ...tint(PAL.stair), 'stair')
+    put(0, top - depth / 2, stairZ - s * 1.1, 2.2, depth / 2, 0.55, ...tint(PAL.stair), 'stair')
   }
   const stairTop = stairBase + 10 * 0.55 + 0.55
   const landingZ = stairZ - 10 * 1.1 - 2.2
-  put(0, stairTop - 0.25, landingZ, 2.2, 0.25, 2.6, ...tint(PAL.pad), 'pad')
+  put(0, stairTop - 0.25, landingZ, 2.2, 0.25, 2.75, ...tint(PAL.pad), 'pad')
 
   // station D — THE ELEVATOR: swings so its TOP passes the landing pad's
   // level (board at the pad, ride — the carry law), adjacent to the pad
@@ -219,18 +224,43 @@ export function createWorld(crowdCount = 7000) {
   const octree = buildOctreeRecords(view)
 
   // ── THE GROUND ORACLE (the character brick's world) ──────────────────
+  // Task 217 — THE FOOTPRINT PROBE: five columns — the center + the four
+  // toe corners at 0.7·radius — answer as ONE ground (the highest walkable
+  // top under ANY column). The Task-216 point ray dropped the body the
+  // moment the CENTER left a surface (the field report's icy platform
+  // edges, the stair→pad seam); the toes keep it standing to the last 30%
+  // of the foot — the platformer edge law. The fromY ceiling stays the
+  // CALLER's: a surface above the feet is never ground (the carry probe's
+  // own discipline — the toes must not snap the body onto higher boxes).
+  const FOOT = BODY.radius * 0.7
+  const COLX = [0, -FOOT, FOOT, -FOOT, FOOT]
+  const COLZ = [0, -FOOT, -FOOT, FOOT, FOOT]
   const oracle = {
     groundBelow(x, z, fromY, out) {
       let best = -Infinity
       let bestId = -1
-      const th = h(x, z)
-      if (th <= fromY + 1e-6) { best = th; bestId = -1 }
-      // the ray law: every box top in the column below fromY, the highest wins
-      const hits = octree.queryRay(x, fromY + 1e-6, z, 0, -1, 0)
+      const lim = fromY + 1e-3
+      for (let c = 0; c < 5; c++) {
+        const th = h(x + COLX[c], z + COLZ[c])
+        if (th <= lim && th > best) { best = th; bestId = -1 }
+      }
+      // the ray law over the footprint: one box query over the five
+      // columns' hull, the per-box test = any column inside its x/z span
+      const hits = octree.queryBox([x - FOOT, fromY - 500, z - FOOT], [x + FOOT, lim, z + FOOT])
       for (let k = 0; k < hits.length; k++) {
-        const wo = INST_OFF + hits[k].id * 12
+        const id = hits[k]
+        const wo = INST_OFF + id * 12
         const top = sceneF32[wo + 1] + sceneF32[wo + 4]
-        if (top <= fromY + 1e-3 && top > best) { best = top; bestId = hits[k].id }
+        if (top > lim || top <= best) continue
+        const bx = sceneF32[wo], bz = sceneF32[wo + 2]
+        const hx = sceneF32[wo + 3], hz = sceneF32[wo + 5]
+        for (let c = 0; c < 5; c++) {
+          if (Math.abs(x + COLX[c] - bx) <= hx && Math.abs(z + COLZ[c] - bz) <= hz) {
+            best = top
+            bestId = id
+            break
+          }
+        }
       }
       if (best === -Infinity) return false
       out.top = best
@@ -277,6 +307,6 @@ export function createWorld(crowdCount = 7000) {
     soup, sampler: h, grid, oracle, octree, sceneStore,
     movers: MOVERS, moverOf, tickMovers, moverPos, moverVel,
     spawn: { x: 0, y: plazaH + 0.25, z: 18, yaw: 0 },
-    course: { plazaH, stairBase, stairTop, landingZ, elevZ, elevBase, ferryY, ferryZ0, ferryZ1, towerZ, towerBase, towerH, towerTop, archZ, archBase, finishZ },
+    course: { plazaH, stairZ, stairBase, stairTop, landingZ, elevZ, elevBase, ferryY, ferryZ0, ferryZ1, towerZ, towerBase, towerH, towerTop, archZ, archBase, finishZ },
   }
 }
