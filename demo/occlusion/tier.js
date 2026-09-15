@@ -111,7 +111,7 @@
 // visible box (its own rect holds either background 1.0 or surfaces
 // behind it), so the final verdicts stay pixel-exact at any camera,
 // however old the seed. The one-frame lag costs fill, never a pixel.
-import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=215'
+import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=216'
 import { buildShaders } from './shaders.js?v=210'
 import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H } from './scene.js?v=203'
 const SKY = [0.045, 0.055, 0.09, 1]
@@ -126,6 +126,23 @@ export async function buildTier(deps) {
   const { backend, scene, shell, noteError, stage, PROBE, FORCE_SNAPSHOT, attachControls, pauseLoop, resumeLoop } = deps
   const { K, N, INST_OFF, FLAGS_OFF, HIST_OFF, sceneWords, sceneF32 } = scene
   void pauseLoop; void resumeLoop // (the diagnostics channel's pause hooks — kept for the contract)
+  // ── Task 216 — THE WALKER EXTENSIONS (both optional, both defaulting to
+  //    the occlusion demo's own shape — the classic tier's compiled frames
+  //    stay BIT-IDENTICAL when neither is given):
+  //    · surf {w, h} — the render surface's own dims (the walker is a GAME:
+  //      a higher base resolution than the culling visualization's 480×270)
+  //    · terrain {geometry, color, z} — the TERRAIN PASSES: a static
+  //      @rune/prims soup (parallel positions/normals/uvs) drawn as ONE
+  //      plain mesh (drawMesh — Task 216's device brick) twice per frame:
+  //      depth-only into the pyramid tile (the hills OCCLUDE — the tile's
+  //      base layer, the crowd's fill merges on top through the depth
+  //      test) and lit into the target. The bricks the crowd rides
+  //      (history/feedback) stop clearing the tile (noClear) — the
+  //      terrain-z pass owns the clear; the crowd's color pass stops
+  //      clearing the target — terrain-color owns it.
+  const surfSpec = deps.surf ?? { w: 480, h: 270 }
+  const SURF_W = surfSpec.w, SURF_H = surfSpec.h
+  const terrainSpec = deps.terrain ?? null
 
   // ── the device boot (one syntax; the GPU-process storm retries live in
   //    createDevice — 4 attempts, the Task-197 cadence) ────────────────────
@@ -186,6 +203,49 @@ export async function buildTier(deps) {
   const dict = buildShaders(scene)
   const pyramid = device.pyramid(HIZ_W, HIZ_H)
   const mesh = device.geometry(BOX_VERTS, BOX_INDICES)
+  // ── Task 216 — THE TERRAIN BRICKS: one depth-only column into the
+  //    pyramid's tile + one lit column into the target, both over the
+  //    SAME parallel soup (the exact-mesh sampler's own bytes — the feet
+  //    and the pixels read one source of truth)
+  let terrainZ = null
+  let terrainColor = null
+  if (terrainSpec !== null) {
+    const zBlock = new Float32Array(16)
+    const colorBlock = new Float32Array(28) // mvp(16) + misc(4) + light(4) + eye(4)
+    // THE TAPE CONTRACT (the pyramid's own build() pattern): a drawMesh
+    // leaves the WG render pass OPEN (the facade's bindTarget memo); the
+    // next brick's COMPUTE — the history pass's compact, the crowd's
+    // compact in drawVisible, the pyramid's reduce — refuses to run under
+    // an open render pass. Every terrain draw therefore ENDS its pass on
+    // the WG leg (GL has no passes — gpu is null there, the natural guard)
+    const endTilePass = () => { if (device.gpu !== null) device.gpu.endPass() }
+    terrainZ = {
+      run(call) {
+        zBlock.set(call.camera.mvp, 0)
+        device.drawMesh({ target: pyramid.zTarget, clear: call.clear !== false, program: terrainZProg, geometry: terrainSpec.geometry, uniforms: zBlock })
+        endTilePass()
+      },
+    }
+    terrainColor = {
+      run(call) {
+        colorBlock.set(call.camera.mvp, 0)
+        colorBlock[16] = SURF_H
+        colorBlock[17] = call.fogNear ?? 240
+        colorBlock[18] = call.fogFar ?? 620
+        colorBlock[19] = 0
+        colorBlock[20] = LIGHT[0]; colorBlock[21] = LIGHT[1]; colorBlock[22] = LIGHT[2]; colorBlock[23] = 0
+        colorBlock[24] = call.camera.eye[0]; colorBlock[25] = call.camera.eye[1]; colorBlock[26] = call.camera.eye[2]; colorBlock[27] = 1
+        device.drawMesh({ target: call.target, clear: call.clear !== false, program: terrainColorProg, geometry: terrainSpec.geometry, uniforms: colorBlock })
+        endTilePass()
+      },
+    }
+  }
+  const terrainZProg = terrainSpec !== null
+    ? device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: terrainSpec.z.wg, gl: terrainSpec.z.gl })
+    : null
+  const terrainColorProg = terrainSpec !== null
+    ? device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: terrainSpec.color.wg, gl: terrainSpec.color.gl })
+    : null
   // Task 215 (A6 — the depth-reuse harvest): the surface's depth attachment
   // is a SAMPLEABLE depth texture (WG: depth32float / GL: DEPTH_COMPONENT32F)
   // — the color pass's own depth survives the pass, and a STILL camera can
@@ -194,12 +254,12 @@ export async function buildTier(deps) {
   // law's own product).
   const surface = device.surface(SURF_W, SURF_H, { depth: true, depthTexture: true })
 
-  const hist = device.historyPass({ scene: sceneHandle, mesh, pyramid, shaders: dict.hist, fill: dict.z })
+  const hist = device.historyPass({ scene: sceneHandle, mesh, pyramid, shaders: dict.hist, fill: dict.z, noClear: terrainSpec !== null })
   // Task 207 — THE SAME-FRAME FEEDBACK BRICK: the first cull's fresh RAW
   // visible set, depth-only into the tile (the second cull's seed — the
   // colored city occludes ITSELF within the frame; the field report's own
   // ask, answered with the survivors' depth instead of the whole scene's)
-  const fbfill = device.feedbackPass({ scene: sceneHandle, mesh, pyramid, shaders: dict.fbfill })
+  const fbfill = device.feedbackPass({ scene: sceneHandle, mesh, pyramid, shaders: dict.fbfill, noClear: terrainSpec !== null })
   const occl = device.occlusionPass({ scene: sceneHandle, pyramid, kernel: dict.cull })
   const smooth = device.hysteresisPass({ scene: sceneHandle, frames: HYST_FRAMES })
   const color = device.visiblePass({ scene: sceneHandle, mesh, shaders: dict.color, surface })
@@ -235,6 +295,16 @@ export async function buildTier(deps) {
     seed: fg.resource({ name: 'hiz-seed', kind: 'texture', bytes: 0, transient: false, external: pyramid }),
     target: fg.resource({ name: 'target', kind: 'texture', width: SURF_W, height: SURF_H, transient: false, external: surface }),
   }
+  // Task 216 — the terrain's soup, a persistent buffer (the exact-mesh
+  // sampler's own bytes; the walker's feet and the pixels read one source)
+  if (terrainSpec !== null) {
+    const g = terrainSpec.geometry
+    R.terrainMesh = fg.resource({
+      name: 'terrain-mesh', kind: 'buffer',
+      bytes: (g.positions.length + (g.normals?.length ?? 0) + (g.uvs?.length ?? 0)) * 4,
+      transient: false, external: { mesh: true, vertexCount: g.vertexCount },
+    })
+  }
 
   // Task 208 — when the seed OWNS phase 1: the policy asks for it, the
   // pyramid carries a written version (frame 1 boots the honest way — an
@@ -248,6 +318,17 @@ export async function buildTier(deps) {
   const seedActive = p => p.seed === true && p.feedback === true && p.culling === true && p.fresh === true && p.history !== true
 
   let pendingStats = null // the read-stats copy pass's in-flight readback
+  if (terrainSpec !== null) {
+    fg.pass({
+      // Task 216 — THE TERRAIN'S OWN DEPTH: the hills occlude — the
+      // pyramid tile's BASE layer, drawn before the crowd's warm-up fill
+      // (which stops clearing: the depth test merges the boxes on top)
+      name: 'terrain-z', kind: 'render', cost: 2,
+      reads: [R.terrainMesh], writes: [R.hiz],
+      when: p => !seedActive(p),
+      execute: ({ props }) => terrainZ.run({ camera: props.camera, clear: true }),
+    })
+  }
   fg.pass({
     // the prepass: gate OFF = the K-wall fill (byte-identical to the
     // Task-201 depthPass frame); gate ON = the two-pass HZB — the
@@ -259,8 +340,12 @@ export async function buildTier(deps) {
     // this whole warm-up (the fill + the reduce below) leaves the frame —
     // the first cull reads the carried pyramid instead, and the feedback
     // branch rebuilds everything it needs from its own fill.
+    // Task 216 — with a terrain present this pass READS hi-z too (the
+    // overlay law: the crowd's depth MERGES onto the terrain's base layer
+    // through the depth test — a read-modify-write, never a blind write)
     name: 'z-fill', kind: 'render', cost: 3,
-    reads: [R.scene, R.mesh], writes: [R.hiz],
+    reads: terrainSpec !== null ? [R.scene, R.mesh, R.hiz] : [R.scene, R.mesh],
+    writes: [R.hiz],
     when: p => !seedActive(p),
     execute: ({ props }) => hist.run({ camera: props.camera, occluders: props.occluders, gate: props.history === true }),
   })
@@ -299,9 +384,20 @@ export async function buildTier(deps) {
   // Gating: the branch needs the cull's fresh verdicts (fresh), the pyramid
   // (culling) and the policy bit itself — with any of them off the whole
   // branch leaves the frame exactly like the shadows-off law.
+  if (terrainSpec !== null) {
+    fg.pass({
+      // Task 216 — THE TERRAIN'S OWN DEPTH, phase-2 spelling: the tile's
+      // base layer before the feedback fill (the seed frame's ONLY tile
+      // writer pair — the boot branch above left the frame)
+      name: 'terrain-z-2', kind: 'render', cost: 2,
+      reads: [R.terrainMesh], writes: [R.hiz],
+      when: props => props.feedback === true && props.culling === true && props.fresh === true && props.reuse !== true,
+      execute: ({ props }) => terrainZ.run({ camera: props.camera, clear: true }),
+    })
+  }
   fg.pass({
     name: 'feedback-fill', kind: 'render', cost: 3,
-    reads: [R.scene, R.mesh], writes: [R.hiz],
+    reads: terrainSpec !== null ? [R.scene, R.mesh, R.hiz] : [R.scene, R.mesh], writes: [R.hiz],
     // Task 215 (A6) — the still-frame skip: a bit-identical camera + the
     // reuse policy means the presented frame's own depth can stand in for
     // the fill (the depth-harvest pass below) — the branch leaves the
@@ -334,13 +430,31 @@ export async function buildTier(deps) {
     when: props => props.fresh === true,
     execute: ({ props }) => smooth.run({ gate: props.hysteresis === true }),
   })
+  if (terrainSpec !== null) {
+    fg.pass({
+      // Task 216 — THE TERRAIN'S OWN COLOR: the lit soup INTO the target,
+      // clearing it (the crowd's color pass then draws WITHOUT the clear —
+      // the depth test interleaves the two opaque layers honestly)
+      name: 'terrain-color', kind: 'render', cost: 3,
+      reads: [R.terrainMesh], writes: [R.target],
+      execute: ({ props }) => terrainColor.run({ target: props.target, camera: props.camera, clear: true }),
+    })
+  }
   fg.pass({
     name: 'color', kind: 'render', cost: 6,
-    reads: [R.scene, R.mesh], writes: [R.target],
+    // Task 216 — with a terrain present this pass READS the target too (the
+    // OVERLAY LAW: the crowd draws OVER the terrain's color, a read-modify-
+    // write — a pure second write would leave terrain-color's version
+    // reader-less and the branch-culling law would drop it from the frame,
+    // an invisible terrain with working collision)
+    reads: terrainSpec !== null ? [R.scene, R.mesh, R.target] : [R.scene, R.mesh],
+    writes: [R.target],
     // Task 209 — the near-first order rides the color draw (the early-Z
     // harvest; the set/history draws keep the plain compact — a depth-only
     // fill has no overdraw to save)
-    execute: ({ props }) => color.run({ target: props.target, camera: props.camera, light: LIGHT, order: props.order === true }),
+    // Task 216 — with a terrain present the crowd does NOT clear (the
+    // terrain-color pass owns the target's clear + depth base)
+    execute: ({ props }) => color.run({ target: props.target, camera: props.camera, light: LIGHT, order: props.order === true, clear: terrainSpec === null }),
   })
   fg.pass({
     // Task 215 (A6) — THE DEPTH-REUSE HARVEST: the presented frame's OWN
@@ -688,6 +802,25 @@ export async function buildTier(deps) {
     if (SNAPSHOT) blitSnapshot()
   }
 
+  // ── Task 216 — THE ADAPTIVE RENDER-SCALE HOOK (mobile-first): the
+  //    walker's governor (a @rune/core brick) decides the LEVEL; this is
+  //    the engine side — the live canvas's backing store re-derived at
+  //    bootDpr × scale through the renderer's own setDpr path (both
+  //    renderers grew it this round). The snapshot/probe legs render to
+  //    the FIXED surface — the scale is a documented no-op there (null).
+  let bootDpr = null
+  function setRenderScale(scale) {
+    if (MODE !== 'live' || displayCanvas === null || displayCanvas.clientWidth <= 0) return null
+    if (bootDpr === null) {
+      const d = displayCanvas.width / displayCanvas.clientWidth
+      if (!(d > 0) || !Number.isFinite(d)) return null
+      bootDpr = d
+    }
+    const dpr = Math.max(0.2, Math.min(8, bootDpr * scale))
+    device.renderer.setDpr(dpr)
+    return { w: displayCanvas.width, h: displayCanvas.height, dpr }
+  }
+
   /** The live camera aspect — the canvas's own CSS shape (portrait aware). */
   function aspect() {
     if (displayCanvas === null) return 16 / 9
@@ -779,6 +912,9 @@ export async function buildTier(deps) {
     renderTo,
     frame,
     applyEdits,
+    /** Task 216 — the adaptive render-scale hook (see above; null on the
+     *  fixed-surface legs). */
+    setRenderScale,
     readStats,
     readVerdicts,
     readList,

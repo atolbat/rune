@@ -905,3 +905,182 @@ honest), task211-local PASS both backends on the new code, and the
 standing gates re-run green with the 209 gate's legs isolated to its own
 subject (its drive now passes `reuse: false` explicitly — the gate pins
 the Task-208/209 frame shape; the A6 shape is the 215 gate's own law).
+
+## Task 216 — THE FIRST-PERSON WALKER: THE CHARACTER BRICK, THE TERRAIN PASSES, THE ADAPTIVE SCALE (2026-09-15)
+
+The ask: «Создай новое демо, где от первого лица ходишь по террэйну и
+прыгаешь по объектам, втч сложным. Мобайл Фёрст. Создавай и применяй
+новые технологии.» Three new engine bricks, one new demo, the whole
+recent stack applied in a single game loop — and the occlusion tier
+grew optional TERRAIN passes without moving a bit of its classic frame
+(every standing gate re-ran green).
+
+### The exact-mesh sampler (packages/prims/terrain.ts)
+
+The terrain's height GRID (terrainGrid — pass 1 of terrain(), now
+exported) builds BOTH the render soup and the collision oracle: one
+source of truth for the pixels and the feet. gridHeightSampler
+reproduces the soup's own TRIANGLE interpolation — not bilinear: the
+mesh splits every cell along the (i,j)→(i+1,j+1) diagonal, the sampler
+picks the same triangle by the diagonal test and interpolates in the
+same barycentric forms. The laws (terrainSampler.test.ts, 7): the
+VERTEX law (bit-exact at every grid vertex — the walker's world uses a
+power-of-two step so the (x+half)/step round trip lands on integer grid
+coordinates exactly); the SOUP law (an independent barycentric oracle
+walks the soup's triangles — tolerance 1e-4, the oracle's own f32-corner
+noise floor, the sampler itself being the MORE accurate of the two: it
+reads the grid's f32 heights at exact f64 cell coordinates); the
+diagonal, continuity, clamp (a bounded world — the border plane answers,
+no NaN, no falling off), determinism, and the anchor (terrain() and
+terrainGrid() are the same bytes — the mesh/sampler contract).
+
+### The kinematic character (packages/core/character.ts)
+
+A ground-oracle controller: the controller never knows what a terrain or
+a box IS — the world answers three questions (the highest walkable
+surface below a point with the surface's own velocity; the boxes
+overlapping an AABB; a box's six numbers by id), and the demo's oracle
+mounts the Task-213 octree (records-built) under the terrain sampler.
+THE LAWS: the RAY law (the ground probe is an infinite-down ray — any
+platform, however thin, catches any fall speed in one substep; no swept
+volume, no tunneling); THE FEEL LAWS — coyote time (a jump fired within
+0.12 s after walking off an edge still launches), jump buffer (a press
+within 0.15 s before landing fires on touchdown — a held jump
+auto-bunnyhops), STEP-UP (a grounded body meeting only ledges ≤ 0.62 m
+mounts the highest instead of stopping — staircases, the «сложные
+объекты», are walkable), GROUND GLUE (a grounded body within a step of
+its ground stays glued walking down slopes AND stair-descents — no
+air-frame stutter); THE MOVER CARRY (a platform is a frame of reference:
+its displacement rides the body BEFORE the input moves, and the contact
+is RE-PROBED fresh every substep — a mover whose velocity changed, or
+which rose INTO the body between substeps, carries with its CURRENT
+numbers and rides its top; the round's own caught bug: a stale carry
+fell one substep behind and the walker dropped off a platform it stood
+on); AXIS-SEPARATED PUSHOUT (X and Z resolve independently — sliding
+along a wall IS two 1-D clamps; the exit side is the NEARER side by the
+body's position vs the box's center, never the travel direction's face —
+the second caught bug: a body grazing a box's far edge while falling
+teleported to the far face); fixed-substep determinism (the accumulator
+runs whole 1/120 s substeps, the same script → the same trajectory
+bits); zero steady-state allocations (the contact, the id scratch and
+the box scratch are boot-owned out-params). 13 test laws: the parabola
+(apex ≈ v₀²/2g, flight ≈ 2v₀/g), land, tunnel (a 200 m/s fall onto a
+0.1 m platform), the running gap jump, coyote (0.08 s fires, 0.25 s
+does not), buffer, step-up, the 10-step staircase (never one air frame),
+the wall (stops at face − radius, the other axis slides), the ceiling,
+the carry (a rising elevator + a horizontal ferry), glue (slopes and
+stair-descents stay grounded, a real ledge falls), determinism
+(bit-identical trajectories).
+
+### The adaptive render-scale governor (packages/core/scale.ts)
+
+Mobile-first's honest answer to the unknown GPU: the frame time decides
+the resolution. THE LAWS (8 tests): EMA first (one slow frame is a
+hitch, not a signal — the average absorbs it); THE STREAK LAW (the
+counter reads the RAW frame, the gate reads the EMA — counting the EMA
+alone let a single hitch's DECAY TAIL read as 7 frames of sustained
+overload and step the ladder down on one GC pause, the exact jitter the
+governor exists to kill; requiring both keeps the hitch law and the
+sustained law); hysteresis (8 over-budget frames step down, 30
+under-budget climb back — climbing is deliberately harder); the cooldown
+(a step arms 2 s — a surface recreation must not run every frame); the
+floor and ceiling; the manual pick (setLevel resets the streaks — a
+user's choice must not be fought at once); the oscillation law
+(alternating slow/fast frames around the target NEVER move — the
+margins' whole purpose); junk samples refused. The engine side: both
+renderers grew setDpr (the mutable override channel — the backing store
+re-derived through the same resize path a css change rides; the GL
+twin's live-DPR poll stands down while an override is pinned), and the
+tier exposes setRenderScale(scale) (live legs re-derive at bootDpr ×
+scale; the snapshot/probe legs answer null — the documented no-op).
+
+### The terrain passes (the tier + the device's drawMesh)
+
+The device's new drawMesh brick: a plain parallel-attribute soup
+(@rune/prims Geometry — positions/normals/uvs, no index) as ONE
+non-instanced draw on both backends (WG: the program's attr slots bind
+the arrays in order through the facade's keyed cache; GL: the
+from:'mesh' decls with their mesh slots over a per-array buffer cache —
+3 contract tests on the recording facades). The walker's frame gains
+three declared passes: terrain-z / terrain-z-2 (the hills' depth into
+the pyramid tile — the tile's BASE layer: the crowd's history/feedback
+bricks stop clearing (noClear) and merge on top through the depth test,
+so the HILLS OCCLUDE the crowd) and terrain-color (the lit soup — the
+height palette the terrain prim bakes into uv.y, the central-difference
+normals' lambert, the distance fog). TWO CAUGHT BUGS of the round live
+in these passes' wiring: THE OVERLAY LAW (the crowd's color pass must
+READ the target — a pure second write left terrain-color's version
+reader-less and the graph's branch-culling law rendered the terrain
+INVISIBLE while its collision worked); and THE TAPE CONTRACT (a drawMesh
+leaves the WG render pass open; the next brick's compute — the compact
+in drawVisible, the pyramid's reduce — refuses to run under an open
+render pass; every terrain draw ENDS its pass, the pyramid's own
+build()'s pattern). The A6 fixed point survives the terrain: the harvest
+path reads the surface's depth (terrain + crowd), the classic path
+builds the same set (terrain-z-2 + the feedback fill) — the walker's
+still-frame gate proves the shape swap on both backends.
+
+### The demo (demo/walker)
+
+A seeded parkour course over a 512 m hills heightfield (a deterministic
+xorshift world — the same bytes on every boot, every backend): the
+plaza, a 6-hop platform run (each hop engineered against the character's
+tuned arc — takeoff 1.8..4.2 m, rises ≤ 1.2 m), the 10-step staircase,
+the elevator (the carry law's stage), the ferry gap (the platform slides
+the exact 11 m pad-to-pad), the tower with the express elevator and the
+ledge ladder, the arch's beam, the finish pad — and a 7 000-box crowd
+scattered over the hills (the corridor kept clean), culled by the full
+tier (the seed carries phase 1, the same-frame feedback, the near-first
+order, the hysteresis fold — drawn ~150-500 of 7k at the course's
+checkpoints). THE COURSE'S ANCHORING POLICY (a caught lesson): every
+structural piece anchors to the LOCAL terrain with small offsets — each
+station reachable from the ground beneath it (a missed hop lands on the
+terrain and the course continues); the first staircase draft anchored to
+a global height ladder and the walker stood before an unreachable wall.
+The movers (the elevator, the ferry, the express) ride the FULL
+Task-211/213 path every frame: column writes → markRecordDirty →
+coalesced 4-aligned dirty ranges → the tier's partial upload (144 B/frame
+against the full 72 KB region — a 500× cut) with the octree's override
+lane keeping the collision tree honest (the node counts never move).
+MOBILE-FIRST input: the left half of the stage is a virtual joystick,
+the right half the look drag, a 84px thumb-range JUMP button (touch
+only — the controls module reveals it on the first touch); desktop gets
+pointer lock + WASD + Space. The HUD carries the honest numbers (fps,
+drawn/occluded/total, the ground contact + its top, the movers' upload
+math, the scale level + the EMA, the validation verdict).
+
+### The validation (the page's own, deterministic)
+
+A scripted autopilot walks the course — GEOMETRY-DRIVEN (steer to the
+next platform; ONE arc per approach — a jump lock, the round's third
+caught lesson: a held jump bunnyhop-chained past every platform; a
+progress watchdog backs away from any block), stepped at a FIXED 1/60
+(the trajectory a pure function of the seeded world + the script — the
+same bits on every backend). 12 laws, asserted live on the page: the
+settle (spawns grounded on the plaza), the hop chain (the landing's
+ground id IS the progress), the 10-step staircase (y ≡ stairTop), the
+elevator ride (the carry law measured live — 18 grounded samples, max
+error 4 cm), the feet law (grounded ⇒ feet ≡ the oracle's own top, 81
+samples over the run), the culling law (drawn < total behind the hills),
+the upload law (the dirty ranges against the full region), the A6 shape
+law (a still camera swaps the fill for the depth-harvest), the terrain
+passes live, the scale law (the governor steps under injected load), the
+pixels law (the drawn count moved with the camera), zero errors. THE
+READBACK DISCIPLINE (the round's fourth lesson, the 211 class): the
+finish's own readbacks hung the SwiftShader queue even on a paused loop
+— the laws now read the LOOP-fed channel (the counts refresh every 12
+frames in the page's own safe lane), and the finish's async work parks
+the loop until it lands.
+
+Gates: 2221/2221 tests (+31: the sampler 7, the character 13, the
+governor 8, the drawMesh contracts 3), tsc 0, lint 0 errors (386
+warnings — the new baseline, +18 from the new bricks' honest `!`
+assertions), task216-local ALL PASS on both backends (WG: 12/12 laws,
+the snapshot leg's honest setRenderScale null; GL: 12/12 laws, the LIVE
+leg's setRenderScale re-derives the backing store 672×378 → 420×237 →
+restored), the demo-smoke's new walker section green (its own WG-capable
+browser — the main smoke browser's light args carry no adapter), and
+every standing gate re-run green on the tier surgery: task209-order
+BOTH legs (the numbers bit-equal 209), task211-local, task212-leak
+(nodes 55828 → 55828, the lane frozen), task214-local (the SPD parity),
+task215-local (the A6 parity + both mirror lanes).

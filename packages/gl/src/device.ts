@@ -161,11 +161,14 @@ export interface UniformLane {
  *  cull just TF-wrote, never the hysteresis fold's output). */
 export interface GlAttrDecl {
   readonly location: number
-  readonly from: 'geometry' | 'records' | 'flags' | 'rawFlags'
+  readonly from: 'geometry' | 'records' | 'flags' | 'rawFlags' | 'mesh'
   readonly size: number
   readonly stride: number
   readonly offset: number
   readonly divisor: number
+  /** from:'mesh' only — WHICH parallel mesh buffer the attribute reads:
+   *  0 positions, 1 normals, 2 uvs (the @rune/prims Geometry shape). */
+  readonly mesh?: 0 | 1 | 2
 }
 
 export interface ProgramSpec {
@@ -204,6 +207,9 @@ export interface ProgramHandle {
 interface WgProgramEntry {
   readonly pipelineId: number
   readonly depth: { test: string; write: boolean }
+  /** Task 216 — the program's vertex-slot decl (drawMesh binds slot i ←
+   *  the mesh's parallel array i; the corner/records draws ignore it). */
+  readonly attrs?: readonly (number | GpuAttrSlot)[]
 }
 
 export interface GeometryHandle {
@@ -275,6 +281,27 @@ export interface CullerSpec {
 export interface CullerHandle {
   /** Fire the per-record verdict pass. The block layout = the spec's lanes. */
   run(block: Float32Array): void
+}
+
+/** Task 216 — A PLAIN MESH for drawMesh: the @rune/prims Geometry shape
+ *  (PARALLEL attribute arrays, triangle soup, no index buffer). The
+ *  terrain's collision sampler and its render geometry read the same
+ *  bytes — one source of truth for the feet and the pixels. */
+export interface MeshGeometry {
+  readonly positions: Float32Array
+  readonly normals?: Float32Array
+  readonly uvs?: Float32Array
+  readonly vertexCount: number
+}
+
+export interface MeshDrawOptions {
+  readonly target: number
+  readonly clear: boolean
+  readonly program: ProgramHandle
+  readonly geometry: MeshGeometry
+  readonly uniforms: Float32Array
+  /** Vertex count override (default: geometry.vertexCount). */
+  readonly vertexCount?: number
 }
 
 export interface DrawOptions {
@@ -661,6 +688,12 @@ export interface RenderDevice {
   pyramid(w: number, h: number): PyramidHandle
   program(spec: ProgramSpec): ProgramHandle
   geometry(vertices: Float32Array, indices?: Uint16Array | Uint32Array): GeometryHandle
+  /** Task 216 — THE PLAIN MESH DRAW: one program, one parallel-attribute
+   *  soup, one non-instanced draw. The WG leg binds the program's attr
+   *  slots to the mesh's arrays in order (slot i ← array i); the GL leg
+   *  binds the `from:'mesh'` decls with their mesh slot. The terrain's
+   *  color pass and its depth-only z twin both ride this. */
+  drawMesh(options: MeshDrawOptions): void
   drawInstanced(options: DrawOptions & { instances: number }): void
   drawVisible(options: DrawOptions): void
   drawQuad(options: {
@@ -682,13 +715,13 @@ export interface RenderDevice {
    *  re-rendered depth-only at the current camera (the two-pass HZB's
    *  phase 1) + the occluder fill on top. `shaders` = the prev-set
    *  column (the dictionary's `hist`), `fill` = the plain z column. */
-  historyPass(spec: { scene: SceneHandle; mesh: GeometryHandle; pyramid: PyramidHandle; shaders: PassShaders; fill: PassShaders }): HistoryPassHandle
+  historyPass(spec: { scene: SceneHandle; mesh: GeometryHandle; pyramid: PyramidHandle; shaders: PassShaders; fill: PassShaders; noClear?: boolean }): HistoryPassHandle
   /** Task 207 — THE SAME-FRAME FEEDBACK PASS: the FIRST cull's fresh RAW
    *  visible set (not the smoothed hist), drawn depth-only into the
    *  pyramid's level-0 tile — the current-frame phase 2 (the second cull's
    *  seed; the colored city occludes itself within the frame). `shaders` =
    *  the dictionary's `fbfill` column. */
-  feedbackPass(spec: { scene: SceneHandle; mesh: GeometryHandle; pyramid: PyramidHandle; shaders: PassShaders }): FeedbackPassHandle
+  feedbackPass(spec: { scene: SceneHandle; mesh: GeometryHandle; pyramid: PyramidHandle; shaders: PassShaders; noClear?: boolean }): FeedbackPassHandle
   visiblePass(spec: { scene: SceneHandle; mesh: GeometryHandle; shaders: PassShaders; surface?: DeviceSurface }): VisiblePassHandle
   debugStrip(spec: { pyramid: PyramidHandle; shaders: PassShaders }): DebugStripHandle
   /** Task 201 — the RAW per-record verdicts (1..4, pre-hysteresis): the
@@ -1206,7 +1239,7 @@ function attachDebugStrip(device: RenderDevice, spec: { pyramid: PyramidHandle; 
  *  rides drawInstanced (the plain z prepass, no clear when it follows the
  *  set). The identity gate (gate off) runs the fill ALONE with the clear —
  *  byte-identical to depthPass's own frame. */
-function attachHistoryPass(device: RenderDevice, spec: { scene: SceneHandle; mesh: GeometryHandle; pyramid: PyramidHandle; shaders: PassShaders; fill: PassShaders }): HistoryPassHandle {
+function attachHistoryPass(device: RenderDevice, spec: { scene: SceneHandle; mesh: GeometryHandle; pyramid: PyramidHandle; shaders: PassShaders; fill: PassShaders; noClear?: boolean }): HistoryPassHandle {
   // the set column (the prev-visible pass) + the fill column (the plain z)
   // — the same intrinsic states as the depth passes (less + write + the
   // consistent-winding cull 'back')
@@ -1226,11 +1259,15 @@ function attachHistoryPass(device: RenderDevice, spec: { scene: SceneHandle; mes
         // 1. THE PREV-VISIBLE SET — exactly what the last frame drew
         //    (WG: the compacted list + the GPU-written instanceCount, zero
         //    on a cold start; GL: the collapse draw, floor(a_flag) decode).
-        //    The draw CLEARS the tile — the depth attachment starts fresh.
+        //    The draw CLEARS the tile — the depth attachment starts fresh
+        //    (Task 216 — unless a TERRAIN-Z pass cleared it first: the
+        //    terrain's depth is the tile's base layer, the crowd merges
+        //    on top through the depth test — the same law the fill's
+        //    own no-clear merge rides)
         setBlock.set(call.camera.mvp, 0)
         device.drawVisible({
           target: spec.pyramid.zTarget,
-          clear: true,
+          clear: spec.noClear !== true,
           program: setProg,
           geometry: spec.mesh,
           records: spec.scene,
@@ -1255,7 +1292,7 @@ function attachHistoryPass(device: RenderDevice, spec: { scene: SceneHandle; mes
         // depthPass's own frame; the parity gates' OFF leg)
         device.drawInstanced({
           target: spec.pyramid.zTarget,
-          clear: true,
+          clear: spec.noClear !== true,
           program: fillProg,
           geometry: spec.mesh,
           records: spec.scene,
@@ -1276,7 +1313,7 @@ function attachHistoryPass(device: RenderDevice, spec: { scene: SceneHandle; mes
  *  instanced draw, instance = record); the GL column collapses on the
  *  TF-written RAW verdict buffer (the rawFlags feed — the same shape the
  *  no-hist configuration has always run). */
-function attachFeedbackPass(device: RenderDevice, spec: { scene: SceneHandle; mesh: GeometryHandle; pyramid: PyramidHandle; shaders: PassShaders }): FeedbackPassHandle {
+function attachFeedbackPass(device: RenderDevice, spec: { scene: SceneHandle; mesh: GeometryHandle; pyramid: PyramidHandle; shaders: PassShaders; noClear?: boolean }): FeedbackPassHandle {
   const program = device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: spec.shaders.wg, gl: spec.shaders.gl })
   const block = new Float32Array(16)
   const indexCount = spec.mesh.indices !== undefined ? spec.mesh.indices.length : 36
@@ -1285,7 +1322,10 @@ function attachFeedbackPass(device: RenderDevice, spec: { scene: SceneHandle; me
       block.set(call.camera.mvp, 0)
       device.drawInstanced({
         target: spec.pyramid.zTarget,
-        clear: true, // the fresh pyramid: the survivors replace the K walls entirely (V1 ⊇ every visible occluder — the cover-transfer law)
+        // the fresh pyramid: the survivors replace the K walls entirely (V1
+        // ⊇ every visible occluder — the cover-transfer law). Task 216: a
+        // terrain-z pass keeps the terrain's depth as the base layer
+        clear: spec.noClear !== true,
         program,
         geometry: spec.mesh,
         records: spec.scene,
@@ -1833,12 +1873,32 @@ ${SPD_DEPTH}${TOP}`
       raster: { cull: spec.cull ?? 'none', frontFace: 'ccw' },
     })
     const handle: ProgramHandle = { backend: 'webgpu', depth }
-    wgPrograms.set(handle, { pipelineId, depth })
+    wgPrograms.set(handle, { pipelineId, depth, attrs: spec.wg.attrs })
     return handle
   }
 
   function geometry(vertices: Float32Array, indices?: Uint16Array | Uint32Array): GeometryHandle {
     return { vertices, indices }
+  }
+
+  function drawMesh(optionsIn: MeshDrawOptions): void {
+    const prog = wgPrograms.get(optionsIn.program)
+    if (prog === undefined) throw new Error('rune: drawMesh — the program handle is not this device\'s own')
+    const g = optionsIn.geometry
+    // THE PARALLEL FEED: slot i ← array i (positions, normals, uvs — the
+    // @rune/prims Geometry shape); the facade's keyed cache uploads each
+    // array ONCE (the terrain is static), the per-pass bind memo rides
+    const arrays = [g.positions, g.normals, g.uvs]
+    const offset = allocUniforms(new Uint8Array(optionsIn.uniforms.buffer, optionsIn.uniforms.byteOffset, optionsIn.uniforms.byteLength))
+    gpu.bindTarget(optionsIn.target, optionsIn.clear)
+    gpu.usePipeline(prog.pipelineId)
+    const slots = Math.min(prog.attrs?.length ?? 1, 3)
+    for (let i = 0; i < slots; i++) {
+      const data = arrays[i]
+      if (data !== undefined && data.length > 0) gpu.bindVertexBuffer(i, data, 3)
+    }
+    gpu.bindUniforms(offset)
+    gpu.draw(optionsIn.vertexCount ?? g.vertexCount, 1)
   }
 
   function bindGeometryFeed(vertices: Float32Array, indices?: Uint16Array | Uint32Array, size = 3): void {
@@ -2089,6 +2149,7 @@ ${SPD_DEPTH}${TOP}`
     pyramid,
     program,
     geometry,
+    drawMesh,
     drawInstanced,
     drawVisible,
     drawQuad,
@@ -2286,6 +2347,36 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     geometryBuf = gl.createBuffer(vertices)
     if (indices !== undefined) gl.createElementBuffer(indices)
     return { vertices, indices }
+  }
+
+  // Task 216 — THE MESH DRAW's parallel buffers, keyed by the array's
+  // identity (the facade uploads once — the terrain is static — and a
+  // re-draw re-binds the same id; the geometry() corner buffer above is
+  // single-slot by the box crowd's own contract, the mesh needs its own)
+  const meshBuffers = new Map<Float32Array, number>()
+  function meshBufferOf(data: Float32Array): number {
+    let id = meshBuffers.get(data)
+    if (id === undefined) {
+      id = gl.createBuffer(data)
+      meshBuffers.set(data, id)
+    }
+    return id
+  }
+
+  function drawMesh(optionsIn: MeshDrawOptions): void {
+    const prog = programs.get(optionsIn.program) as GlProgram | undefined
+    if (prog === undefined) throw new Error('rune: drawMesh — the program handle is not this device\'s own')
+    openPass(optionsIn.target, optionsIn.clear, prog)
+    setUniformLanes(prog, optionsIn.uniforms)
+    const g = optionsIn.geometry
+    const arrays: readonly (Float32Array | undefined)[] = [g.positions, g.normals, g.uvs]
+    for (const attr of prog.attrs) {
+      if (attr.from !== 'mesh') continue
+      const data = arrays[attr.mesh ?? 0]
+      if (data === undefined || data.length === 0) continue
+      gl.bindVertexBuffer(meshBufferOf(data), attr.location, attr.size, attr.stride, attr.offset, 0)
+    }
+    gl.drawArrays('triangles', 0, optionsIn.vertexCount ?? g.vertexCount, 1)
   }
 
   function setUniformLanes(prog: GlProgram, block: Float32Array): void {
@@ -2621,6 +2712,7 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     pyramid,
     program,
     geometry,
+    drawMesh,
     drawInstanced,
     drawVisible,
     drawQuad,

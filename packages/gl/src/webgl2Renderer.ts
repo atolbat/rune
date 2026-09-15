@@ -122,6 +122,9 @@ export interface WebGL2Renderer {
   live(spec: DrawSpec, deps?: readonly ReadableSignal[], props?: unknown): LiveCommand
   frame(callback: (ctx: FrameContext, record: Recorder) => void): FrameHandle
   resize(cssWidth: number, cssHeight: number): void
+  /** Task 216 — THE ADAPTIVE RENDER-SCALE HOOK: rewrite the boot dpr and
+   *  re-derive the backing store (the mobile-first ladder's engine side). */
+  setDpr(dpr: number): void
   step(nowMs: number): void
   /** Task 200 — THE MANUAL-FRAME SERVICE BOUNDARY: run the frame-boundary
    *  services WITHOUT the renderer's own recorded tape. A raw-facade driver
@@ -406,7 +409,12 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
   // state check (syncCanvasState) and the live-DPR re-read diverge from these.
   let lastBufferW = -1
   let lastBufferH = -1
-  let lastDpr = canvasDpr(canvas, options.dpr)
+  // Task 216: dprOpt is the MUTABLE override channel — setDpr() (the
+  // adaptive render-scale hook) rewrites it and re-derives the backing
+  // store through the same resize path a css change rides. The live-DPR
+  // poll below stands down whenever an override is pinned.
+  let dprOpt = options.dpr
+  let lastDpr = canvasDpr(canvas, dprOpt)
   let dprPollFrame = 0
   let disposed = false
   // Task 137 — the CONTEXT-LOSS contract: a lost context makes every GL
@@ -571,7 +579,7 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
       const [w, h] = size.peek()
       // Task 129: the live DPR read (not the boot snapshot) — a zoom change
       // mid-session must re-derive the pass resolution with the new DPR.
-      const dprNow = canvasDpr(canvas, options.dpr)
+      const dprNow = canvasDpr(canvas, dprOpt)
       return [Math.max(1, Math.round(w * dprNow)), Math.max(1, Math.round(h * dprNow))]
     })
   }
@@ -737,13 +745,24 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     return { cancel: () => removeItem(frameCallbacks, callback) }
   }
 
+  /** Task 216 — THE ADAPTIVE RENDER-SCALE HOOK (the WG twin's contract):
+   *  overrides the boot dpr and re-derives the backing store through
+   *  resize()'s own path; clamped to (0, 8]; the poll stands down. */
+  function setDpr(dpr: number): void {
+    if (!(dpr > 0) || !Number.isFinite(dpr)) return
+    const next = Math.min(8, dpr)
+    if (next === dprOpt) return
+    dprOpt = next
+    resize(lastCssWidth, lastCssHeight)
+  }
+
   function resize(cssWidth: number, cssHeight: number): void {
     // Idempotency: repeated observer firings with the same CSS size (and
     // the same DPR) do not touch the backing store (every canvas.width
     // write resets the buffer). The DPR is RE-READ live on every call: a
     // browser zoom / display move changes devicePixelRatio mid-session,
     // and the boot-time snapshot would mis-size every later buffer.
-    const dprNow = canvasDpr(canvas, options.dpr)
+    const dprNow = canvasDpr(canvas, dprOpt)
     if (cssWidth === lastCssWidth && cssHeight === lastCssHeight && dprNow === lastDpr) return
     lastCssWidth = cssWidth
     lastCssHeight = cssHeight
@@ -783,7 +802,7 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     // at the boot DPR forever: poll it cheaply (a property read every 64th
     // frame) and re-derive when it moves. OffscreenCanvas has no DPR (it is
     // always 1) — the HTML path only.
-    if ((++dprPollFrame & 63) === 0 && options.dpr === undefined && !isOffscreenCanvas(canvas) && canvas.clientWidth > 0) {
+    if ((++dprPollFrame & 63) === 0 && dprOpt === undefined && !isOffscreenCanvas(canvas) && canvas.clientWidth > 0) {
       const live = canvasDpr(canvas, undefined)
       if (live !== lastDpr) {
         lastCssWidth = -1 // force the guard open
@@ -1104,6 +1123,7 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     live,
     frame,
     resize,
+    setDpr,
     step,
     service,
     start,

@@ -31,23 +31,39 @@ export interface TerrainOptions {
   readonly amplitude?: number
 }
 
-/**
- * A grid terrain of size × size, segments × segments cells ((segments+1)²
- * grid vertices). Height = height(x̂, ẑ)·amplitude, where x̂, ẑ ∈ [-1, 1].
- */
-export function terrain(
+/** The height grid alone — the COLLISION half of a terrain (Task 216).
+ *  The mesh (terrain()) and the physics (gridHeightSampler()) must read
+ *  the SAME bytes or a walker's feet leave the ground between vertices:
+ *  this type is the one source both consume. terrain() calls terrainGrid()
+ *  internally, so the soup and the grid are bit-identical by construction
+ *  (the sampler law's own anchor). */
+export interface TerrainGrid {
+  /** heights[j · vertsPerSide + i] — the f32 height of vertex (i, j) at
+   *  x = −size/2 + i·step, z = −size/2 + j·step (step = size/cells). */
+  readonly heights: Float32Array
+  /** Vertices per side (cells + 1). */
+  readonly vertsPerSide: number
+  /** The world size — the grid spans [−size/2, +size/2]². */
+  readonly size: number
+  readonly hMin: number
+  readonly hMax: number
+}
+
+/** Pass 1 of terrain() alone: the height grid over the relief function
+ *  (x̂, ẑ ∈ [−1, 1] → height · amplitude). Deterministic — the same seed
+ *  → the same bytes. */
+export function terrainGrid(
   size: number,
   segments: number,
   height: TerrainHeightFn,
   options: TerrainOptions = {},
-): Geometry {
+): TerrainGrid {
   const amp = options.amplitude ?? 1
   const cells = Math.max(1, Math.floor(segments))
   const vertsPerSide = cells + 1
   const n = vertsPerSide * vertsPerSide
-  const half = size / 2
-  const step = size / cells
-  // Pass 1: the height grid (needed in full — for neighbor-based normals and min/max)
+  // (the grid itself carries heights only; the sampler derives its own
+  //  half/step from size — nothing else is needed here)
   const heights = new Float32Array(n)
   for (let j = 0; j < vertsPerSide; j++) {
     for (let i = 0; i < vertsPerSide; i++) {
@@ -67,6 +83,70 @@ export function terrain(
     if (h < hMin) hMin = h
     if (h > hMax) hMax = h
   }
+  return { heights, vertsPerSide, size, hMin, hMax }
+}
+
+/** The EXACT-MESH height sampler (Task 216 — the walker's ground oracle):
+ *  heightAt(x, z) reproduces the soup's TRIANGLE interpolation bit-exactly
+ *  — not bilinear over the cell. The mesh splits every cell along the
+ *  (i,j)→(i+1,j+1) diagonal into A,B,C = (i,j),(i,j+1),(i+1,j+1) and
+ *  A,C,D = (i,j),(i+1,j+1),(i+1,j); the sampler picks the same triangle by
+ *  the diagonal test (fz > fx → the B side) and interpolates in the same
+ *  barycentric forms:
+ *
+ *    B-side:  h = hA + (hB − hA)·fz + (hC − hB)·fx
+ *    D-side:  h = hA + (hD − hA)·fx + (hC − hD)·fz
+ *
+ *  Outside the grid the border cell CLAMPS (a bounded world: the edge
+ *  reads the border's plane — no falling off the map, no NaN). */
+export function gridHeightSampler(grid: TerrainGrid): (x: number, z: number) => number {
+  const { heights, vertsPerSide, size } = grid
+  const cells = vertsPerSide - 1
+  const half = size / 2
+  const step = size / cells
+  const V = vertsPerSide
+  return (x: number, z: number): number => {
+    // grid coords, clamped to the border CELL (fx/fz clamp inside)
+    const gx = (x + half) / step
+    const gz = (z + half) / step
+    const i = Math.min(Math.max(Math.floor(gx), 0), cells - 1)
+    const j = Math.min(Math.max(Math.floor(gz), 0), cells - 1)
+    const fx = Math.min(Math.max(gx - i, 0), 1)
+    const fz = Math.min(Math.max(gz - j, 0), 1)
+    const hA = heights[j * V + i]!
+    if (fz > fx) {
+      // the B side — triangle (i,j), (i,j+1), (i+1,j+1)
+      const hB = heights[(j + 1) * V + i]!
+      const hC = heights[(j + 1) * V + (i + 1)]!
+      return hA + (hB - hA) * fz + (hC - hB) * fx
+    }
+    // the D side — triangle (i,j), (i+1,j+1), (i+1,j)
+    const hD = heights[j * V + (i + 1)]!
+    const hC = heights[(j + 1) * V + (i + 1)]!
+    return hA + (hD - hA) * fx + (hC - hD) * fz
+  }
+}
+
+/**
+ * A grid terrain of size × size, segments × segments cells ((segments+1)²
+ * grid vertices). Height = height(x̂, ẑ)·amplitude, where x̂, ẑ ∈ [-1, 1].
+ */
+export function terrain(
+  size: number,
+  segments: number,
+  height: TerrainHeightFn,
+  options: TerrainOptions = {},
+): Geometry {
+  const grid = terrainGrid(size, segments, height, options)
+  const cells = grid.vertsPerSide - 1
+  const vertsPerSide = grid.vertsPerSide
+  const half = size / 2
+  const step = size / cells
+  // Pass 1 (the height grid) lives in terrainGrid() — the MESH and the
+  // SAMPLER read the same bytes (the collision law's own anchor)
+  const heights = grid.heights
+  const hMin = grid.hMin
+  const hMax = grid.hMax
   const hSpan = Math.max(hMax - hMin, 1e-6)
   const at = (i: number, j: number): number =>
     heights[Math.min(Math.max(j, 0), cells) * vertsPerSide + Math.min(Math.max(i, 0), cells)]

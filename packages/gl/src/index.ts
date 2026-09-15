@@ -62,8 +62,18 @@ export {
   // for the demos.
   createStore, adoptStore, createMarkSet, createMarkSetFrom,
   packKey, unpackKeyHi, unpackKeyLo,
+  // Task 216 — THE KINEMATIC CHARACTER + THE ADAPTIVE SCALE GOVERNOR:
+  // the walker demo's two pure core bricks (the ground-oracle controller
+  // and the frame-time ladder) — the dist surface carries them for the
+  // demos.
+  createCharacter, createScaleGovernor,
 } from '@rune/core'
 export type { SpatialBox, SpatialIndex, RayHit } from '@rune/core'
+export type {
+  CharacterSpec, CharacterWorld, CharacterInput, CharacterState,
+  Character, GroundContact,
+  ScaleGovernor, ScaleGovernorSpec, ScaleGovernorSample,
+} from '@rune/core'
 export type {
   RecordView, ProjectedBox, HysteresisPolicy, FlatCull,
   LayerVerdict, SpatialCluster,
@@ -160,6 +170,10 @@ export type { PortableCommand, ReplaySummary, PortabilityHarness } from './harne
 // inside"): the basic solids the particle/mesh demos bake into soups.
 export { cube, box } from '@rune/prims'
 export type { CubeGeometry, BoxParams } from '@rune/prims'
+// Task 216 — the terrain bricks: the height GRID (collision's half) +
+// the EXACT-MESH sampler (the walker's ground oracle) + the soup builder
+export { terrain, terrainGrid, gridHeightSampler, heightHills } from '@rune/prims'
+export type { TerrainGrid } from '@rune/prims'
 export { quad, plane } from '@rune/prims'
 export type { QuadGeometry, PlaneParams } from '@rune/prims'
 export { sphere, capsule, torus, torusKnot } from '@rune/prims'

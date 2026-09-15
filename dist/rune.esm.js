@@ -7297,6 +7297,297 @@ var init_sort = __esm(() => {
   BIT_U32 = new Uint32Array(BIT_F32.buffer);
 });
 
+// packages/core/src/character.ts
+function createCharacter(spec, world, x0, y0, z0) {
+  const contact = { top: 0, mover: -1, vx: 0, vy: 0, vz: 0 };
+  const probe = { top: 0, mover: -1, vx: 0, vy: 0, vz: 0 };
+  const ids = new Uint32Array(96);
+  const box = new Float64Array(6);
+  const state = {
+    x: x0,
+    y: y0,
+    z: z0,
+    vx: 0,
+    vy: 0,
+    vz: 0,
+    grounded: false,
+    ground: null,
+    stepped: 0,
+    owed: 0
+  };
+  let coyote = 0;
+  let buffer = 0;
+  let jumpWasHeld = false;
+  function land(g) {
+    state.grounded = true;
+    state.vy = 0;
+    contact.top = g.top;
+    contact.mover = g.mover;
+    contact.vx = g.vx;
+    contact.vy = g.vy;
+    contact.vz = g.vz;
+    state.ground = contact;
+  }
+  function goAir() {
+    state.grounded = false;
+    state.ground = null;
+  }
+  function moveAxis(axis, delta) {
+    if (delta === 0)
+      return;
+    const r = spec.radius;
+    if (axis === "x")
+      state.x += delta;
+    else
+      state.z += delta;
+    const y02 = state.y + 0.0001;
+    const y1 = state.y + spec.height;
+    const n = world.boxesIn(state.x - r, y02, state.z - r, state.x + r, y1, state.z + r, ids);
+    if (n === 0)
+      return;
+    let stepTop = -Infinity;
+    let wall = false;
+    for (let k = 0;k < n; k++) {
+      if (!world.boxAt(ids[k], box))
+        continue;
+      const top = box[1] + box[4];
+      const rise = top - state.y;
+      if (state.grounded && rise > EPS && rise <= spec.stepHeight) {
+        if (top > stepTop)
+          stepTop = top;
+      } else {
+        wall = true;
+      }
+    }
+    if (!wall) {
+      if (stepTop > -Infinity) {
+        state.y = stepTop;
+        contact.top = stepTop;
+        contact.mover = -1;
+        contact.vx = 0;
+        contact.vy = 0;
+        contact.vz = 0;
+        state.ground = contact;
+      }
+      return;
+    }
+    for (let k = 0;k < n; k++) {
+      if (!world.boxAt(ids[k], box))
+        continue;
+      const top = box[1] + box[4];
+      const rise = top - state.y;
+      if (state.grounded && rise > EPS && rise <= spec.stepHeight)
+        continue;
+      const c = axis === "x" ? box[0] : box[2];
+      const h = axis === "x" ? box[3] : box[5];
+      const lo = c - h;
+      const hi = c + h;
+      const pos = axis === "x" ? state.x : state.z;
+      if (pos + r <= lo || pos - r >= hi)
+        continue;
+      if (pos < c) {
+        if (axis === "x") {
+          state.x = lo - r - EPS;
+          if (state.vx > 0)
+            state.vx = 0;
+        } else {
+          state.z = lo - r - EPS;
+          if (state.vz > 0)
+            state.vz = 0;
+        }
+      } else {
+        if (axis === "x") {
+          state.x = hi + r + EPS;
+          if (state.vx < 0)
+            state.vx = 0;
+        } else {
+          state.z = hi + r + EPS;
+          if (state.vz < 0)
+            state.vz = 0;
+        }
+      }
+    }
+  }
+  function substep(dt, input) {
+    coyote = Math.max(0, coyote - dt);
+    buffer = Math.max(0, buffer - dt);
+    if (input.jumpHeld && !jumpWasHeld)
+      buffer = spec.jumpBuffer;
+    jumpWasHeld = input.jumpHeld;
+    let dx = input.dirX;
+    let dz = input.dirZ;
+    const dl = Math.hypot(dx, dz);
+    if (dl > 1) {
+      dx /= dl;
+      dz /= dl;
+    }
+    const wantX = dx * spec.walkSpeed;
+    const wantZ = dz * spec.walkSpeed;
+    if (state.grounded && world.groundBelow(state.x, state.z, state.y + CARRY_TOL, probe)) {
+      state.x += probe.vx * dt;
+      state.z += probe.vz * dt;
+      state.y = Math.max(state.y + probe.vy * dt, probe.top);
+    }
+    const a = (state.grounded ? spec.accelGround : spec.accelAir) * dt;
+    state.vx += Math.max(-a, Math.min(a, wantX - state.vx));
+    state.vz += Math.max(-a, Math.min(a, wantZ - state.vz));
+    state.vy -= spec.gravity * dt;
+    if (state.vy < -spec.maxFall)
+      state.vy = -spec.maxFall;
+    if (buffer > 0 && (state.grounded || coyote > 0)) {
+      state.vy = spec.jumpSpeed;
+      goAir();
+      coyote = 0;
+      buffer = 0;
+    }
+    const feet = state.y;
+    const newY = feet + state.vy * dt;
+    if (state.vy <= 0) {
+      if (world.groundBelow(state.x, state.z, feet + EPS, probe)) {
+        const top = probe.top;
+        if (newY <= top) {
+          state.y = top;
+          land(probe);
+        } else if (state.grounded && feet - top <= Math.max(spec.stepHeight, spec.snapDown)) {
+          state.y = top;
+          land(probe);
+        } else {
+          state.y = newY;
+          goAir();
+        }
+      } else {
+        state.y = newY;
+        goAir();
+      }
+    } else {
+      const n = world.boxesIn(state.x - spec.radius, feet, state.z - spec.radius, state.x + spec.radius, newY + spec.height, state.z + spec.radius, ids);
+      let ceiling = Infinity;
+      for (let k = 0;k < n; k++) {
+        if (!world.boxAt(ids[k], box))
+          continue;
+        const bottom = box[1] - box[4];
+        if (bottom >= feet - EPS && bottom < ceiling)
+          ceiling = bottom;
+      }
+      if (newY + spec.height > ceiling) {
+        state.y = ceiling - spec.height;
+        state.vy = 0;
+        goAir();
+      } else {
+        state.y = newY;
+        goAir();
+      }
+    }
+    moveAxis("x", state.vx * dt);
+    moveAxis("z", state.vz * dt);
+    if (state.grounded)
+      coyote = spec.coyoteTime;
+  }
+  return {
+    state,
+    step(dt, input) {
+      let budget = state.owed + dt;
+      let ran = 0;
+      while (budget >= spec.fixedDt - 0.000000001 && ran < 64) {
+        substep(spec.fixedDt, input);
+        budget -= spec.fixedDt;
+        ran++;
+      }
+      state.owed = ran === 64 ? 0 : budget;
+      state.stepped = ran;
+    },
+    teleport(x, y, z) {
+      state.x = x;
+      state.y = y;
+      state.z = z;
+      state.vx = 0;
+      state.vy = 0;
+      state.vz = 0;
+      state.grounded = false;
+      state.ground = null;
+      coyote = 0;
+      buffer = 0;
+    }
+  };
+}
+var EPS = 0.000001, CARRY_TOL = 0.1;
+
+// packages/core/src/scale.ts
+function createScaleGovernor(spec) {
+  const levels = Math.max(2, Math.floor(spec.levels));
+  const target = spec.targetMs;
+  const alpha = spec.emaAlpha ?? 0.2;
+  const downNeed = Math.max(1, spec.downNeed ?? 8);
+  const upNeed = Math.max(1, spec.upNeed ?? 30);
+  const downMargin = spec.downMargin ?? 0.15;
+  const upMargin = spec.upMargin ?? 0.25;
+  const cooldownS = spec.cooldown ?? 2;
+  let level = Math.min(levels - 1, Math.max(0, Math.floor(spec.startLevel ?? levels - 1)));
+  let ema = Number.NaN;
+  let over = 0;
+  let under = 0;
+  let cooldownLeft = 0;
+  let clock = 0;
+  let lastDt = 1 / 60;
+  const verdict = (changed) => ({
+    level,
+    changed,
+    ema: Number.isFinite(ema) ? ema : target,
+    overStreak: over,
+    underStreak: under,
+    cooldownLeft
+  });
+  return {
+    spec,
+    observe(frameSeconds) {
+      if (!(frameSeconds > 0) || !Number.isFinite(frameSeconds))
+        return verdict(false);
+      lastDt = frameSeconds;
+      clock += frameSeconds;
+      if (cooldownLeft > 0)
+        cooldownLeft = Math.max(0, cooldownLeft - frameSeconds);
+      ema = Number.isFinite(ema) ? ema + (frameSeconds - ema) * alpha : frameSeconds;
+      const raw = frameSeconds;
+      if (raw > target * (1 + downMargin) && ema > target * (1 + downMargin)) {
+        over++;
+        under = 0;
+      } else if (raw < target * (1 - upMargin) && ema < target * (1 - upMargin)) {
+        under++;
+        over = 0;
+      } else {
+        over = 0;
+        under = 0;
+      }
+      if (cooldownLeft <= 0) {
+        if (over >= downNeed && level > 0) {
+          level--;
+          over = 0;
+          under = 0;
+          cooldownLeft = cooldownS;
+          return verdict(true);
+        }
+        if (under >= upNeed && level < levels - 1) {
+          level++;
+          under = 0;
+          over = 0;
+          cooldownLeft = cooldownS;
+          return verdict(true);
+        }
+      }
+      return verdict(false);
+    },
+    peek() {
+      return verdict(false);
+    },
+    setLevel(next) {
+      level = Math.min(levels - 1, Math.max(0, Math.floor(next)));
+      over = 0;
+      under = 0;
+      cooldownLeft = cooldownS;
+    }
+  };
+}
+
 // packages/core/src/index.ts
 var exports_src = {};
 __export(exports_src, {
@@ -7358,6 +7649,7 @@ __export(exports_src, {
   createSsboTier: () => createSsboTier,
   createSharedRegistry: () => createSharedRegistry,
   createSegmentStore: () => createSegmentStore,
+  createScaleGovernor: () => createScaleGovernor,
   createResourceJournal: () => createResourceJournal,
   createMsgFeedWriter: () => createMsgFeedWriter,
   createMsgFeedReader: () => createMsgFeedReader,
@@ -7373,6 +7665,7 @@ __export(exports_src, {
   createFrameGraph: () => createFrameGraph,
   createFeed: () => createFeed,
   createEpoch: () => createEpoch,
+  createCharacter: () => createCharacter,
   createCaps: () => createCaps,
   countTiles: () => countTiles,
   clusterize: () => clusterize,
@@ -10245,13 +10538,11 @@ function ridged2D(x, y, seed, octaves = 5, ridgePower = 1.3) {
 }
 
 // packages/prims/src/terrain.ts
-function terrain(size, segments, height, options = {}) {
+function terrainGrid(size, segments, height, options = {}) {
   const amp = options.amplitude ?? 1;
   const cells = Math.max(1, Math.floor(segments));
   const vertsPerSide = cells + 1;
   const n = vertsPerSide * vertsPerSide;
-  const half = size / 2;
-  const step = size / cells;
   const heights = new Float32Array(n);
   for (let j = 0;j < vertsPerSide; j++) {
     for (let i = 0;i < vertsPerSide; i++) {
@@ -10269,6 +10560,41 @@ function terrain(size, segments, height, options = {}) {
     if (h > hMax)
       hMax = h;
   }
+  return { heights, vertsPerSide, size, hMin, hMax };
+}
+function gridHeightSampler(grid) {
+  const { heights, vertsPerSide, size } = grid;
+  const cells = vertsPerSide - 1;
+  const half = size / 2;
+  const step = size / cells;
+  const V = vertsPerSide;
+  return (x, z) => {
+    const gx = (x + half) / step;
+    const gz = (z + half) / step;
+    const i = Math.min(Math.max(Math.floor(gx), 0), cells - 1);
+    const j = Math.min(Math.max(Math.floor(gz), 0), cells - 1);
+    const fx = Math.min(Math.max(gx - i, 0), 1);
+    const fz = Math.min(Math.max(gz - j, 0), 1);
+    const hA = heights[j * V + i];
+    if (fz > fx) {
+      const hB = heights[(j + 1) * V + i];
+      const hC2 = heights[(j + 1) * V + (i + 1)];
+      return hA + (hB - hA) * fz + (hC2 - hB) * fx;
+    }
+    const hD = heights[j * V + (i + 1)];
+    const hC = heights[(j + 1) * V + (i + 1)];
+    return hA + (hD - hA) * fx + (hC - hD) * fz;
+  };
+}
+function terrain(size, segments, height, options = {}) {
+  const grid = terrainGrid(size, segments, height, options);
+  const cells = grid.vertsPerSide - 1;
+  const vertsPerSide = grid.vertsPerSide;
+  const half = size / 2;
+  const step = size / cells;
+  const heights = grid.heights;
+  const hMin = grid.hMin;
+  const hMax = grid.hMax;
   const hSpan = Math.max(hMax - hMin, 0.000001);
   const at = (i, j) => heights[Math.min(Math.max(j, 0), cells) * vertsPerSide + Math.min(Math.max(i, 0), cells)];
   const normalAt = (i, j, out, o) => {
@@ -11911,7 +12237,8 @@ function createWebGL2Renderer(options) {
   let lastCssHeight = -1;
   let lastBufferW = -1;
   let lastBufferH = -1;
-  let lastDpr = canvasDpr(canvas, options.dpr);
+  let dprOpt = options.dpr;
+  let lastDpr = canvasDpr(canvas, dprOpt);
   let dprPollFrame = 0;
   let disposed = false;
   let contextLost = false;
@@ -12009,7 +12336,7 @@ function createWebGL2Renderer(options) {
   function pass(fragment, passOptions = {}) {
     return createPassCommand(fragment, passOptions, 0, () => {
       const [w, h] = size.peek();
-      const dprNow = canvasDpr(canvas, options.dpr);
+      const dprNow = canvasDpr(canvas, dprOpt);
       return [Math.max(1, Math.round(w * dprNow)), Math.max(1, Math.round(h * dprNow))];
     });
   }
@@ -12114,8 +12441,17 @@ function createWebGL2Renderer(options) {
     frameCallbacks.push(callback);
     return { cancel: () => removeItem(frameCallbacks, callback) };
   }
+  function setDpr(dpr) {
+    if (!(dpr > 0) || !Number.isFinite(dpr))
+      return;
+    const next = Math.min(8, dpr);
+    if (next === dprOpt)
+      return;
+    dprOpt = next;
+    resize(lastCssWidth, lastCssHeight);
+  }
   function resize(cssWidth, cssHeight) {
-    const dprNow = canvasDpr(canvas, options.dpr);
+    const dprNow = canvasDpr(canvas, dprOpt);
     if (cssWidth === lastCssWidth && cssHeight === lastCssHeight && dprNow === lastDpr)
       return;
     lastCssWidth = cssWidth;
@@ -12142,7 +12478,7 @@ function createWebGL2Renderer(options) {
       lastCssWidth = -1;
       gl.setViewport(w, h);
     }
-    if ((++dprPollFrame & 63) === 0 && options.dpr === undefined && !isOffscreenCanvas(canvas) && canvas.clientWidth > 0) {
+    if ((++dprPollFrame & 63) === 0 && dprOpt === undefined && !isOffscreenCanvas(canvas) && canvas.clientWidth > 0) {
       const live2 = canvasDpr(canvas, undefined);
       if (live2 !== lastDpr) {
         lastCssWidth = -1;
@@ -12361,6 +12697,7 @@ function createWebGL2Renderer(options) {
     live,
     frame,
     resize,
+    setDpr,
     step,
     service,
     start,
@@ -15668,7 +16005,8 @@ async function createWebGpuRenderer(options) {
   let cancelScheduled = null;
   let lastCssWidth = -1;
   let lastCssHeight = -1;
-  let lastDpr = canvasDpr(canvas, options.dpr);
+  let dprOpt = options.dpr;
+  let lastDpr = canvasDpr(canvas, dprOpt);
   await gpu.configure(canvas.width, canvas.height);
   const clear = options.clear ?? DEFAULT_CLEAR3;
   gpu.setCanvasClearColor(clear.color, clear.depth ?? 1);
@@ -15726,7 +16064,7 @@ async function createWebGpuRenderer(options) {
   function pass(fragment, passOptions = {}) {
     return createPassCommand(fragment, passOptions, 0, () => {
       const [w, h] = size.peek();
-      const dprNow = canvasDpr(canvas, options.dpr);
+      const dprNow = canvasDpr(canvas, dprOpt);
       return [Math.max(1, Math.round(w * dprNow)), Math.max(1, Math.round(h * dprNow))];
     });
   }
@@ -15757,8 +16095,17 @@ async function createWebGpuRenderer(options) {
   function recordIntoWriter(command2, props = {}) {
     command2.record(props, frameCtx, writer);
   }
+  function setDpr(dpr) {
+    if (!(dpr > 0) || !Number.isFinite(dpr))
+      return;
+    const next = Math.min(8, dpr);
+    if (next === dprOpt)
+      return;
+    dprOpt = next;
+    resize(lastCssWidth, lastCssHeight);
+  }
   function resize(cssWidth, cssHeight) {
-    const dprNow = canvasDpr(canvas, options.dpr);
+    const dprNow = canvasDpr(canvas, dprOpt);
     if (cssWidth === lastCssWidth && cssHeight === lastCssHeight && dprNow === lastDpr)
       return;
     lastCssWidth = cssWidth;
@@ -15868,7 +16215,7 @@ async function createWebGpuRenderer(options) {
     feeds.clear();
     gpu.dispose();
   }
-  return { gpu, multiDraw: options.multiDraw ?? true, size, aspect, time, uploads, transients, transport: options.transport ?? null, feed, restoreResources: session !== null ? (options2) => session.restore(options2?.workingSet) : undefined, ensureResident: session !== null ? (resourceId) => session.ensureResident(resourceId) : undefined, evictLRU: session !== null ? (options2) => session.evictLRU(options2) : undefined, residencyStats: session !== null ? () => session.residencyStats() : undefined, command, pass, surface, frame, resize, step, start, stop, restart, dispose };
+  return { gpu, multiDraw: options.multiDraw ?? true, size, aspect, time, uploads, transients, transport: options.transport ?? null, feed, restoreResources: session !== null ? (options2) => session.restore(options2?.workingSet) : undefined, ensureResident: session !== null ? (resourceId) => session.ensureResident(resourceId) : undefined, evictLRU: session !== null ? (options2) => session.evictLRU(options2) : undefined, residencyStats: session !== null ? () => session.residencyStats() : undefined, command, pass, surface, frame, resize, setDpr, step, start, stop, restart, dispose };
 }
 var DEFAULT_SURFACE_COLOR = [0.07, 0.08, 0.11, 1];
 function createErrorStorm(report) {
@@ -16663,7 +17010,7 @@ function attachHistoryPass(device, spec) {
         setBlock.set(call.camera.mvp, 0);
         device.drawVisible({
           target: spec.pyramid.zTarget,
-          clear: true,
+          clear: spec.noClear !== true,
           program: setProg,
           geometry: spec.mesh,
           records: spec.scene,
@@ -16683,7 +17030,7 @@ function attachHistoryPass(device, spec) {
       } else {
         device.drawInstanced({
           target: spec.pyramid.zTarget,
-          clear: true,
+          clear: spec.noClear !== true,
           program: fillProg,
           geometry: spec.mesh,
           records: spec.scene,
@@ -16704,7 +17051,7 @@ function attachFeedbackPass(device, spec) {
       block.set(call.camera.mvp, 0);
       device.drawInstanced({
         target: spec.pyramid.zTarget,
-        clear: true,
+        clear: spec.noClear !== true,
         program,
         geometry: spec.mesh,
         records: spec.scene,
@@ -17123,11 +17470,29 @@ ${SPD_DEPTH}${TOP}`;
       raster: { cull: spec.cull ?? "none", frontFace: "ccw" }
     });
     const handle = { backend: "webgpu", depth: depth2 };
-    wgPrograms.set(handle, { pipelineId, depth: depth2 });
+    wgPrograms.set(handle, { pipelineId, depth: depth2, attrs: spec.wg.attrs });
     return handle;
   }
   function geometry(vertices, indices) {
     return { vertices, indices };
+  }
+  function drawMesh(optionsIn) {
+    const prog = wgPrograms.get(optionsIn.program);
+    if (prog === undefined)
+      throw new Error("rune: drawMesh — the program handle is not this device's own");
+    const g = optionsIn.geometry;
+    const arrays = [g.positions, g.normals, g.uvs];
+    const offset = allocUniforms(new Uint8Array(optionsIn.uniforms.buffer, optionsIn.uniforms.byteOffset, optionsIn.uniforms.byteLength));
+    gpu.bindTarget(optionsIn.target, optionsIn.clear);
+    gpu.usePipeline(prog.pipelineId);
+    const slots = Math.min(prog.attrs?.length ?? 1, 3);
+    for (let i = 0;i < slots; i++) {
+      const data = arrays[i];
+      if (data !== undefined && data.length > 0)
+        gpu.bindVertexBuffer(i, data, 3);
+    }
+    gpu.bindUniforms(offset);
+    gpu.draw(optionsIn.vertexCount ?? g.vertexCount, 1);
   }
   function bindGeometryFeed(vertices, indices, size = 3) {
     gpu.bindVertexBuffer(0, vertices, size);
@@ -17327,6 +17692,7 @@ ${SPD_DEPTH}${TOP}`;
     pyramid,
     program,
     geometry,
+    drawMesh,
     drawInstanced,
     drawVisible,
     drawQuad,
@@ -17498,6 +17864,33 @@ function createGlDevice(renderer, options, clear) {
     if (indices !== undefined)
       gl.createElementBuffer(indices);
     return { vertices, indices };
+  }
+  const meshBuffers = new Map;
+  function meshBufferOf(data) {
+    let id = meshBuffers.get(data);
+    if (id === undefined) {
+      id = gl.createBuffer(data);
+      meshBuffers.set(data, id);
+    }
+    return id;
+  }
+  function drawMesh(optionsIn) {
+    const prog = programs.get(optionsIn.program);
+    if (prog === undefined)
+      throw new Error("rune: drawMesh — the program handle is not this device's own");
+    openPass(optionsIn.target, optionsIn.clear, prog);
+    setUniformLanes(prog, optionsIn.uniforms);
+    const g = optionsIn.geometry;
+    const arrays = [g.positions, g.normals, g.uvs];
+    for (const attr of prog.attrs) {
+      if (attr.from !== "mesh")
+        continue;
+      const data = arrays[attr.mesh ?? 0];
+      if (data === undefined || data.length === 0)
+        continue;
+      gl.bindVertexBuffer(meshBufferOf(data), attr.location, attr.size, attr.stride, attr.offset, 0);
+    }
+    gl.drawArrays("triangles", 0, optionsIn.vertexCount ?? g.vertexCount, 1);
   }
   function setUniformLanes(prog, block) {
     let word = 0;
@@ -17766,6 +18159,7 @@ function createGlDevice(renderer, options, clear) {
     pyramid,
     program,
     geometry,
+    drawMesh,
     drawInstanced,
     drawVisible,
     drawQuad,
@@ -21025,6 +21419,8 @@ export {
   unpackKeyHi,
   torusKnot,
   torus,
+  terrainGrid,
+  terrain,
   sphere,
   softwareOccluder,
   showOnWebGpu,
@@ -21049,6 +21445,8 @@ export {
   layerPolicy,
   isOffscreenCanvas,
   hysteresisPolicy,
+  heightHills,
+  gridHeightSampler,
   getCanvasCssSize,
   frustumVerdicts,
   frustumPlanes,
@@ -21060,6 +21458,7 @@ export {
   createWebGpuRenderer,
   createWebGL2Renderer,
   createStore,
+  createScaleGovernor,
   createResourceSessionGPU,
   createResourceSessionGL,
   createResourceJournal,
@@ -21072,6 +21471,7 @@ export {
   createGpuParticles,
   createFrameGraph,
   createDevice,
+  createCharacter,
   computeMipLevels,
   combineWebgpuScope,
   clusterize,

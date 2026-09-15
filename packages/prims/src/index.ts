@@ -34,8 +34,8 @@ export { SHAPES, segmentValue, shapeById, defaultValues } from './registry.ts'
 export type { ParamMeta, ShapeMeta } from './registry.ts'
 
 // terrain: static + adaptive + quadtree patches
-export { terrain, heightHills, heightRidged, heightIsland, heightDunes, heightCanyon } from './terrain.ts'
-export type { TerrainHeightFn, TerrainOptions } from './terrain.ts'
+export { terrain, terrainGrid, gridHeightSampler, heightHills, heightRidged, heightIsland, heightDunes, heightCanyon } from './terrain.ts'
+export type { TerrainHeightFn, TerrainOptions, TerrainGrid } from './terrain.ts'
 export { createAdaptiveTerrain, worldHills, worldRidged, worldDunes, worldCanyon, worldIsland, adaptivePresets } from './adaptive.ts'
 export type { WorldHeightFn, AdaptiveTerrainParams, AdaptiveTerrain, AdaptivePreset } from './adaptive.ts'
 export { createTerrainQuadtree, terrainHills, terrainRidges, terrainDunes, terrainCanyon } from './terrainQuadtree.ts'

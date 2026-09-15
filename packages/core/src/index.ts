@@ -237,3 +237,18 @@ export {
 } from './gpu/bitonic.ts'
 export { sortBackToFront, RADIX_16BIT_MIN } from './sort.ts'
 export type { SortScratch } from './sort.ts'
+
+// ─── Task 216: THE KINEMATIC CHARACTER + THE ADAPTIVE SCALE ────────────────
+// The first-person walker's two pure bricks: the character controller (a
+// ground-oracle-driven kinematic body — the ray law, the feel laws: coyote
+// / buffer / step-up / glue, the mover carry, fixed-substep determinism,
+// zero steady-state allocations) and the render-scale governor (the
+// mobile-first adaptive resolution: an EMA over frame times, a hysteresis
+// ladder with cooldown — pure, testable, engine-free).
+export { createCharacter } from './character.ts'
+export type {
+  CharacterSpec, CharacterWorld, CharacterInput, CharacterState,
+  Character, GroundContact,
+} from './character.ts'
+export { createScaleGovernor } from './scale.ts'
+export type { ScaleGovernor, ScaleGovernorSpec, ScaleGovernorSample } from './scale.ts'

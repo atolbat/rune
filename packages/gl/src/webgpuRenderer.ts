@@ -90,6 +90,9 @@ export interface WebGpuRenderer {
   surface(options?: SurfaceOptions): Surface<WgpuCommand>
   frame(callback: GpuFrameCallback): { cancel(): void }
   resize(cssWidth: number, cssHeight: number): void
+  /** Task 216 — THE ADAPTIVE RENDER-SCALE HOOK: rewrite the boot dpr and
+   *  re-derive the backing store (the mobile-first ladder's engine side). */
+  setDpr(dpr: number): void
   step(nowMs: number): void
   start(): void
   stop(): void
@@ -235,7 +238,11 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
   let lastCssHeight = -1
   // Task 129 parity: the live-DPR guard (a browser zoom change moves
   // devicePixelRatio mid-session; the boot snapshot would mis-size buffers).
-  let lastDpr = canvasDpr(canvas, options.dpr)
+  // Task 216: dprOpt is the MUTABLE override channel — setDpr() (the
+  // adaptive render-scale hook) rewrites it and re-derives the backing
+  // store through the same resize path a css change rides.
+  let dprOpt = options.dpr
+  let lastDpr = canvasDpr(canvas, dprOpt)
 
   await gpu.configure(canvas.width, canvas.height)
   // Task 116: the canvas clear from the `clear` option — the facade state
@@ -312,7 +319,7 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
     return createPassCommand(fragment, passOptions, 0, () => {
       const [w, h] = size.peek()
       // Task 129 parity: the live DPR read (see the GL twin).
-      const dprNow = canvasDpr(canvas, options.dpr)
+      const dprNow = canvasDpr(canvas, dprOpt)
       return [Math.max(1, Math.round(w * dprNow)), Math.max(1, Math.round(h * dprNow))]
     })
   }
@@ -352,10 +359,23 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
     command.record(props, frameCtx, writer)
   }
 
+  /** Task 216 — THE ADAPTIVE RENDER-SCALE HOOK: overrides the boot dpr
+   *  (the canvas's backing store shrinks/grows under the same css size;
+   *  the browser upscales — mobile-first adaptive resolution) and
+   *  re-derives the backing store through resize()'s own path. Clamped
+   *  to (0, 8] — an honest refusal of junk. */
+  function setDpr(dpr: number): void {
+    if (!(dpr > 0) || !Number.isFinite(dpr)) return
+    const next = Math.min(8, dpr)
+    if (next === dprOpt) return
+    dprOpt = next
+    resize(lastCssWidth, lastCssHeight)
+  }
+
   function resize(cssWidth: number, cssHeight: number): void {
     // Task 129 parity: the DPR is RE-READ live (see the GL twin) — a mid-session
     // zoom change must re-derive the backing store with the new DPR.
-    const dprNow = canvasDpr(canvas, options.dpr)
+    const dprNow = canvasDpr(canvas, dprOpt)
     if (cssWidth === lastCssWidth && cssHeight === lastCssHeight && dprNow === lastDpr) return
     lastCssWidth = cssWidth
     lastCssHeight = cssHeight
@@ -477,7 +497,7 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
     gpu.dispose()
   }
 
-  return { gpu, multiDraw: options.multiDraw ?? true, size, aspect, time, uploads, transients, transport: options.transport ?? null, feed, restoreResources: session !== null ? (options?: { workingSet?: WorkingSet }) => session.restore(options?.workingSet) : undefined, ensureResident: session !== null ? (resourceId: number) => session.ensureResident(resourceId) : undefined, evictLRU: session !== null ? (options?: { budgetBytes?: number; pinned?: WorkingSet }) => session.evictLRU(options) : undefined, residencyStats: session !== null ? () => session.residencyStats() : undefined, command, pass, surface, frame, resize, step, start, stop, restart, dispose }
+  return { gpu, multiDraw: options.multiDraw ?? true, size, aspect, time, uploads, transients, transport: options.transport ?? null, feed, restoreResources: session !== null ? (options?: { workingSet?: WorkingSet }) => session.restore(options?.workingSet) : undefined, ensureResident: session !== null ? (resourceId: number) => session.ensureResident(resourceId) : undefined, evictLRU: session !== null ? (options?: { budgetBytes?: number; pinned?: WorkingSet }) => session.evictLRU(options) : undefined, residencyStats: session !== null ? () => session.residencyStats() : undefined, command, pass, surface, frame, resize, setDpr, step, start, stop, restart, dispose }
 }
 
 /** Default surface clear color — the renderer background. */

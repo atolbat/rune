@@ -718,6 +718,50 @@ try {
     await mirrorPage.close()
   }
 
+  // ─── walker: the first-person parkour demo (Task 216) ─────────────────
+  // (the terrain passes + the character brick + the autopilot validation).
+  // The smoke boots the WG leg (the 216 gate covers both backends in
+  // depth); the checks: the page's own 12-law validation verdict, the
+  // terrain passes live in the frame graph, the culling honest, the log
+  // health. A slim crowd keeps the headless boot quick.
+  {
+    // the walker boots WebGPU (the terrain passes + the bricks) — its own
+    // browser with the WG-capable flags (the main smoke browser's light
+    // args carry no adapter; the occlusion section's own twin)
+    const walkerBrowser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-gpu-sandbox', '--enable-unsafe-webgpu', '--use-angle=swiftshader', '--enable-features=Vulkan', '--enable-unsafe-swiftshader'],
+    })
+    try {
+    const walkerPage = await walkerBrowser.newPage({ viewport: { width: 960, height: 720 } })
+    const walkerErrors = []
+    walkerPage.on('pageerror', e => walkerErrors.push(String(e)))
+    await walkerPage.goto(`http://localhost:${port}/demo/walker/?crowd=400`, { waitUntil: 'networkidle' })
+    const walkerStats = await walkerPage.waitForFunction(
+      () => (window.__walker && window.__walker.validation !== null ? window.__walker : undefined),
+      null,
+      { timeout: 240_000 },
+    ).then(h => h.jsonValue())
+    await walkerPage.waitForTimeout(600)
+    const walkerGraph = await walkerPage.evaluate(() => (window.__walkerTier !== undefined ? window.__walkerTier.graphStats() : null))
+    const walkerLive = walkerGraph !== null ? walkerGraph.live : []
+    const walkerValidation = walkerStats?.validation?.pass === true
+    const walkerTerrainLive = walkerLive.includes('terrain-color')
+    const walkerCullHonest = walkerStats.drawn > 20 && walkerStats.drawn < walkerStats.total
+    const walkerLogText = await walkerPage.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
+    const walkerClean = !/rendering stopped|frame error|failed/i.test(walkerLogText) && walkerErrors.length === 0
+    console.log(
+      `[smoke] walker (${walkerStats?.kind}): validation ${walkerValidation ? 'PASS' : 'FAIL'} (${walkerStats?.validation?.checks} laws), ` +
+        `drawn ${walkerStats.drawn}/${walkerStats.total}, terrain ${walkerTerrainLive ? 'live' : 'MISSING'}, log ${walkerClean ? 'clean' : 'DIRTY'}`,
+    )
+    var walkerOk = walkerValidation && walkerTerrainLive && walkerCullHonest && walkerClean
+    if (!walkerOk) console.log(`[smoke] walker sub-flags: validation ${walkerValidation} terrain ${walkerTerrainLive} cull ${walkerCullHonest} clean ${walkerClean} (errors ${walkerErrors.length})`)
+    await walkerPage.close()
+    } finally {
+      await walkerBrowser.close()
+    }
+  }
+
   if (errors.length) {
     console.error('[smoke] page errors:')
     for (const error of errors) console.error(`  ${error}`)
@@ -757,13 +801,14 @@ try {
     hizOk &&
     hizGlOk &&
     mirrorOk &&
+    walkerOk &&
     viewerLogEntries > 0 &&
     mobileViewerOk &&
     errors.length === 0
 
   if (errors.length > 0) console.log(`[smoke] page errors (${errors.length}): ${errors.slice(0, 4).join(' | ').slice(0, 600)}`)
   if (!ok) {
-    const flags = { alive, pausedStill, aliveAgain, canvasCount, logEntries, mobileOk, viewerAlive, pbrGpuClean, loadText, sambaStatsOk, sambaAlive, gpuHealthy, pinchZoomed, matcapOk, matcapAlive, matcapGpuClean, viewerPickOk, particlesOk, particlesAlive, particlesGpuClean, mobileParticlesOk, particlesFgOk, particlesCullOk, vfxFirst, vfxAllLive, vfxLabels: vfxLabels.visible, vfxGpuClean, mobileVfxOk, vfxFgOk, hizOk, hizGlOk, mirrorOk, viewerLogEntries, mobileViewerOk, errorsN: errors.length }
+    const flags = { alive, pausedStill, aliveAgain, canvasCount, logEntries, mobileOk, viewerAlive, pbrGpuClean, loadText, sambaStatsOk, sambaAlive, gpuHealthy, pinchZoomed, matcapOk, matcapAlive, matcapGpuClean, viewerPickOk, particlesOk, particlesAlive, particlesGpuClean, mobileParticlesOk, particlesFgOk, particlesCullOk, vfxFirst, vfxAllLive, vfxLabels: vfxLabels.visible, vfxGpuClean, mobileVfxOk, vfxFgOk, hizOk, hizGlOk, mirrorOk, walkerOk, viewerLogEntries, mobileViewerOk, errorsN: errors.length }
     const failing = Object.fromEntries(Object.entries(flags).filter(([, v]) => !v || v === 0))
     console.log('[smoke] failing flags:', JSON.stringify(failing))
   }
