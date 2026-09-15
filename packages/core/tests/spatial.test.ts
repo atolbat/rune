@@ -384,3 +384,175 @@ describe('Task 201: the spatial surface — rays, points, spheres, dynamics', ()
     expect(asSet(bvh.queryFrustum(planes))).toEqual(bruteSurvivors(all.filter(it => it.id !== 500), planes))
   })
 })
+
+describe('Task 212: the override lane — the dynamic-index leak the field report caught', () => {
+  // The report: «Scene edit сразу взвинчивает мс на кадр... Со временем мс
+  // увеличивается.» The root cause: update() was remove+insert, and every
+  // intermediate object stayed in the octree's leaves FOREVER (3.3M nodes
+  // in one second at 48 drones × 60fps — measured, scripts/task212-leak.mjs)
+  // while the BVH's overflow grew 48/frame and the fold baked it all in.
+  // The lane is the fix: O(1) updates, bounded memory, freshest answers.
+
+  test('the leak law: 48 movers × 1200 updates grow NOTHING (nodes, lane, live)', () => {
+    const items = makeBoxes(800, 212)
+    const oct = buildOctree(items)
+    const bvh = buildBVH(items)
+    const octNodes0 = oct.stats.nodes
+    const bvhNodes0 = bvh.stats.nodes
+    const r = rng(1212)
+    const movers = items.slice(0, 48).map(it => ({ ...it }))
+    for (let f = 0; f < 1200; f++) {
+      for (const m of movers) {
+        m.cx += (r() - 0.5) * 0.4
+        m.cy = Math.max(0.2, m.cy + (r() - 0.5) * 0.2)
+        m.cz += (r() - 0.5) * 0.4
+        const box: SpatialBox = { ...m }
+        oct.update(box)
+        bvh.update(box)
+      }
+      if (f % 300 === 299) {
+        // the lane holds AT MOST one entry per distinct mover id
+        expect(oct.stats.lane).toBe(48)
+        expect(bvh.stats.lane).toBe(48)
+      }
+    }
+    expect(oct.stats.nodes).toBe(octNodes0) // ZERO tree growth — the leak law
+    expect(bvh.stats.nodes).toBe(bvhNodes0)
+    expect(oct.live).toBe(800)
+    expect(bvh.live).toBe(800)
+  })
+
+  test('the lane answers from the FRESHEST bounds (both structures, every query family)', () => {
+    const items = makeBoxes(150, 77)
+    const oct = buildOctree(items)
+    const bvh = buildBVH(items)
+    const it = items[7]
+    // boot position answers
+    expect(asSet(oct.queryPoint(it.cx, it.cy, it.cz)).has(it.id)).toBe(true)
+    expect(asSet(bvh.queryPoint(it.cx, it.cy, it.cz)).has(it.id)).toBe(true)
+    // teleport far away (OUTSIDE the boot root bounds — the lane cannot
+    // lean on the tree's geometry, by construction)
+    const nx = it.cx + 400, ny = it.cy + 40, nz = it.cz - 350
+    const moved: SpatialBox = { id: it.id, cx: nx, cy: ny, cz: nz, hx: it.hx, hy: it.hy, hz: it.hz }
+    oct.update(moved)
+    bvh.update(moved)
+    // the stale position is gone, the fresh one answers — point, box, sphere, ray, raycast
+    expect(asSet(oct.queryPoint(it.cx, it.cy, it.cz)).has(it.id)).toBe(false)
+    expect(asSet(bvh.queryPoint(it.cx, it.cy, it.cz)).has(it.id)).toBe(false)
+    expect(asSet(oct.queryPoint(nx, ny, nz)).has(it.id)).toBe(true)
+    expect(asSet(bvh.queryPoint(nx, ny, nz)).has(it.id)).toBe(true)
+    const min: [number, number, number] = [nx - 1, ny - 1, nz - 1]
+    const max: [number, number, number] = [nx + 1, ny + 1, nz + 1]
+    expect(asSet(oct.queryBox(min, max)).has(it.id)).toBe(true)
+    expect(asSet(bvh.queryBox(min, max)).has(it.id)).toBe(true)
+    expect(asSet(oct.querySphere(nx, ny, nz, 2)).has(it.id)).toBe(true)
+    expect(asSet(bvh.querySphere(nx, ny, nz, 2)).has(it.id)).toBe(true)
+    const hitsOct = oct.queryRay(nx - 10, ny, nz, 1, 0, 0)
+    const hitsBvh = bvh.queryRay(nx - 10, ny, nz, 1, 0, 0)
+    expect(hitsOct.some(h => h.id === it.id)).toBe(true)
+    expect(hitsBvh.some(h => h.id === it.id)).toBe(true)
+    expect(oct.raycast(nx - 10, ny, nz, 1, 0, 0)?.id).toBe(it.id)
+    expect(bvh.raycast(nx - 10, ny, nz, 1, 0, 0)?.id).toBe(it.id)
+    // frustum: a camera that sees ONLY the fresh position
+    const planes = frustumPlanes(mvpFor([nx + 30, ny + 5, nz], [nx, ny, nz]))
+    expect(asSet(oct.queryFrustum(planes)).has(it.id)).toBe(true)
+    // and the frustum walk stays honest as a SET against the brute truth
+    const truth = bruteSurvivors(items.map(b => b.id === it.id ? moved : b), planes)
+    expect(asSet(oct.queryFrustum(planes))).toEqual(truth)
+    expect(asSet(bvh.queryFrustum(planes))).toEqual(truth)
+  })
+
+  test('remove → re-insert round-trips: ONE answer per id, the live count honest', () => {
+    for (const build of [buildOctree, buildBVH]) {
+      const items = makeBoxes(90, 5150)
+      const idx = build(items)
+      const it = items[3]
+      const planes = frustumPlanes(mvpFor([30, 25, 30], [0, 5, 0]))
+      for (let k = 0; k < 25; k++) {
+        idx.remove(it.id)
+        expect(idx.live).toBe(89)
+        expect(asSet(idx.queryFrustum(planes)).has(it.id)).toBe(false)
+        // re-insert AT A NEW SPOT: the stale copy (tree, leaves, overflow —
+        // wherever the old object lives) must stay skipped — exactly ONE
+        // answer, from the freshest bounds (the BVH's latent duplicate bug)
+        const nx = it.cx + (k + 1) * 3, ny = it.cy, nz = it.cz - (k + 1) * 2
+        idx.insert({ id: it.id, cx: nx, cy: ny, cz: nz, hx: it.hx, hy: it.hy, hz: it.hz })
+        expect(idx.live).toBe(90)
+        const got = idx.queryFrustum(planes)
+        expect(got.filter(v => v === it.id).length).toBeLessThanOrEqual(1)
+        expect(asSet(idx.queryPoint(nx, ny, nz)).has(it.id)).toBe(true)
+      }
+      // a LIVE re-insert (no remove first) — same law: newest bounds, no
+      // second copy anywhere, the live count untouched
+      const before = idx.stats.nodes
+      idx.insert({ id: items[8].id, cx: items[8].cx + 25, cy: items[8].cy, cz: items[8].cz, hx: 1, hy: 1, hz: 1 })
+      expect(idx.live).toBe(90)
+      expect(idx.stats.nodes).toBe(before)
+      expect(asSet(idx.queryPoint(items[8].cx + 25, items[8].cy, items[8].cz)).has(items[8].id)).toBe(true)
+      expect(asSet(idx.queryPoint(items[8].cx, items[8].cy, items[8].cz)).has(items[8].id)).toBe(false)
+    }
+  })
+
+  test('rebuild() folds the lane: identical answers, empty lane, honest live, clean re-arm', () => {
+    const items = makeBoxes(140, 31337)
+    for (const build of [buildOctree, buildBVH]) {
+      const idx = build(items)
+      const planes = frustumPlanes(mvpFor([35, 18, 35], [0, 5, 0]))
+      const movers = items.slice(0, 20).map((it, k) => ({ ...it, cx: it.cx + k * 7, cz: it.cz - k * 5 }))
+      for (const m of movers) idx.update(m)
+      expect(idx.stats.lane).toBe(20)
+      const before = bruteSurvivors(items.map(b => movers.find(m => m.id === b.id) ?? b), planes)
+      const got = asSet(idx.queryFrustum(planes))
+      expect(got).toEqual(before)
+      idx.rebuild?.()
+      expect(idx.stats.lane).toBe(0)
+      expect(idx.live).toBe(140)
+      expect(asSet(idx.queryFrustum(planes))).toEqual(before)
+      // re-arm: the next update lands in the lane again
+      idx.update({ ...movers[0], cx: movers[0].cx + 100 })
+      expect(idx.stats.lane).toBe(1)
+      expect(asSet(idx.queryFrustum(planes))).toEqual(
+        bruteSurvivors(items.map(b => b.id === movers[0].id ? { ...movers[0], cx: movers[0].cx + 100 } : (movers.find(m => m.id === b.id) ?? b)), planes))
+    }
+  })
+
+  test('the drone cadence vs the brute truth: every frame honest, boot node count at the end', () => {
+    const items = makeBoxes(220, 4242)
+    const oct = buildOctree(items)
+    const bvh = buildBVH(items)
+    const octNodes0 = oct.stats.nodes
+    const bvhNodes0 = bvh.stats.nodes
+    const r = rng(99)
+    const drones = items.slice(0, 12).map(it => ({ ...it }))
+    const anchors = drones.map(d => ({ ...d, p: r() * 6.28, w: 0.4 + r() }))
+    for (let f = 0; f < 240; f++) {
+      const t = f / 60
+      const current = items.slice()
+      for (let d = 0; d < drones.length; d++) {
+        const a = anchors[d]
+        const box: SpatialBox = {
+          id: a.id,
+          cx: a.cx + Math.sin(t * a.w + a.p) * 8,
+          cy: a.cy,
+          cz: a.cz + Math.cos(t * a.w * 0.7 + a.p) * 6,
+          hx: a.hx, hy: a.hy, hz: a.hz,
+        }
+        oct.update(box)
+        bvh.update(box)
+        current[a.id] = box
+      }
+      if (f % 40 === 39) {
+        const planes = frustumPlanes(mvpFor([(r() * 2 - 1) * 45, 10 + r() * 15, (r() * 2 - 1) * 45], [0, 5, 0]))
+        const truth = bruteSurvivors(current, planes)
+        expect(asSet(oct.queryFrustum(planes))).toEqual(truth)
+        expect(asSet(bvh.queryFrustum(planes))).toEqual(truth)
+      }
+    }
+    expect(oct.stats.nodes).toBe(octNodes0)
+    expect(bvh.stats.nodes).toBe(bvhNodes0)
+    expect(oct.stats.lane).toBe(12)
+    expect(bvh.stats.lane).toBe(12)
+    expect(oct.live).toBe(220)
+    expect(bvh.live).toBe(220)
+  })
+})

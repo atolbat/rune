@@ -77,7 +77,7 @@ export interface SpatialIndex {
   readonly count: number
   /** The LIVE item count (build count + inserts − removes). */
   readonly live: number
-  readonly stats: { readonly nodes: number; readonly leaves: number; readonly depth: number; readonly items: number }
+  readonly stats: { readonly nodes: number; readonly leaves: number; readonly depth: number; readonly items: number; readonly lane: number }
   /** The frustum walk: `planes` is frustumPlanes()'s 24-float layout.
    *  Returns the SURVIVOR ids — every box NOT fully outside any single
    *  plane (traversal order; treat as a set). */
@@ -94,14 +94,21 @@ export interface SpatialIndex {
   raycast(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number): RayHit | null
   /** Adds a box (the octree splits a full leaf on the spot; the BVH
    *  appends to a linear overflow list until rebuild() — both honest,
-   *  both documented). Re-inserting a removed id clears the tombstone. */
+   *  both documented). ANY re-insert of an id the structure already
+   *  knows (tombstoned or live) rides the override lane (see update()) —
+   *  the tree is never handed a second copy of an id it already owns,
+   *  and the live count rides the byId authority either way. */
   insert(box: SpatialBox): void
   /** Tombstones the id (queries skip it; the tree shape stays). */
   remove(id: number): void
-  /** Moves a box: remove(id) + insert(new bounds) — the dynamic twin. */
+  /** Moves a box — THE OVERRIDE LANE (Task 212): a live id's freshest
+   *  bounds land in a small id→box map the queries read AFTER the tree,
+   *  while the tree's own copy is skipped by id — O(1) per update, no
+   *  stale growth, no duplicate answers. A dead id rides insert(). */
   update(box: SpatialBox): void
-  /** The BVH's own: rebuilds the whole tree over the live set (the
-   *  octree needs none — its splits are incremental). */
+  /** THE FOLD: rebuilds the whole tree over the live set's FRESHEST
+   *  objects (the override lane empties back into the tree, the loose
+   *  bounds re-tighten). Both structures fold. */
   rebuild?(): void
   /** Task 205 — the instrumented counter: plane evaluations performed by
    *  the LAST queryFrustum (the mask-inheritance win, measured not
@@ -327,7 +334,12 @@ interface OctNode {
  *  Task 201 — THE DYNAMIC OCTREE: insert() walks the same center rule and
  *  splits a leaf the moment it crosses the capacity (the split machinery
  *  is shared with the build); remove() tombstones (the tree shape is
- *  never torn down mid-query); update() = remove + insert. */
+ *  never torn down mid-query). Task 212 — THE OVERRIDE LANE: update() on
+ *  a live id never touches the tree (the leaves hold the id's old object,
+ *  unreachable for a cheap removal); the FRESHEST box lands in a small
+ *  id→box lane the walks read after the tree while the tree's own stale
+ *  copy is skipped by id — O(1) per update, zero growth, zero duplicate
+ *  answers. rebuild() folds the lane back in (both structures fold). */
 export function buildOctree(items: readonly SpatialBox[], options?: { capacity?: number; maxDepth?: number; planeMask?: boolean }): SpatialIndex {
   const capacity = Math.max(1, options?.capacity ?? 8)
   const maxDepth = Math.max(1, options?.maxDepth ?? 12)
@@ -436,13 +448,26 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
     n.kids = kids
   }
 
-  const root = buildNode(items.slice() as SpatialBox[], unionOf(items), 1)
+  let root = buildNode(items.slice() as SpatialBox[], unionOf(items), 1)
+
+  // ── Task 212 — THE OVERRIDE LANE + THE LIVE-SET AUTHORITY ─────────────
+  // byId holds the FRESHEST box per live id; moved holds the live ids the
+  // LANE owns — their tree copies are stale by construction (update()
+  // cannot find the old object cheaply), so the walks skip those ids and
+  // read the lane's geometry instead. This is the fix for the field
+  // report («scene edit взвинчивает мс, со временем растёт»): update()
+  // used to be remove+insert, which left every intermediate object in the
+  // leaves FOREVER — 48 drones at 60fps grew this tree 55k → 3.3M nodes
+  // in ONE SECOND (measured, scripts/task212-leak.mjs) and the frame
+  // with it; rebuild() now folds the lane back in.
+  const byId = new Map<number, SpatialBox>()
+  for (const it of items) byId.set(it.id, it)
+  const moved = new Map<number, SpatialBox>()
 
   // ── the live-set bookkeeping (the dynamic twin) + the query machinery:
   //    the stamp mask deduplicates the straddlers (`seen` re-grows when an
   //    inserted id outruns the build's maxId) ──
   const removed = new Set<number>()
-  let live = items.length
   let maxId = items.length === 0 ? 0 : Math.max(...items.map(b => b.id))
   let seen = new Uint8Array(maxId + 1)
   let stamp = 0
@@ -465,8 +490,9 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
     seen = grown
   }
 
-  function alive(it: SpatialBox): boolean {
-    return !removed.has(it.id)
+  function indexed(it: SpatialBox): boolean {
+    // the tree's copy answers ONLY for ids the override lane doesn't own
+    return !removed.has(it.id) && !moved.has(it.id)
   }
 
   // ── Task 205 — the instrumented masked walk ──
@@ -507,12 +533,12 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
     if (n.items !== null) {
       if (mask === 0) {
         for (const it of n.items) {
-          if (!alive(it)) continue
+          if (!indexed(it)) continue
           if (seen[it.id] !== stamp) { seen[it.id] = stamp; out.push(it.id) }
         }
       } else {
         for (const it of n.items) {
-          if (!alive(it)) continue
+          if (!indexed(it)) continue
           if (seen[it.id] === stamp) continue
           seen[it.id] = stamp // (mark either way: one verdict per box per query)
           if (!aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz)) out.push(it.id)
@@ -532,7 +558,7 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
     if (!boundsOverlap(n.b, min, max)) return
     if (n.items !== null) {
       for (const it of n.items) {
-        if (!alive(it)) continue
+        if (!indexed(it)) continue
         if (seen[it.id] === stamp) continue
         seen[it.id] = stamp
         if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0]
@@ -555,7 +581,7 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
     if (!boxReachesSphere(n.b, cx, cy, cz, radius)) return
     if (n.items !== null) {
       for (const it of n.items) {
-        if (!alive(it)) continue
+        if (!indexed(it)) continue
         if (seen[it.id] === stamp) continue
         seen[it.id] = stamp
         const b: NodeBounds = {
@@ -579,7 +605,7 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
     if (x < n.b.minx || x > n.b.maxx || y < n.b.miny || y > n.b.maxy || z < n.b.minz || z > n.b.maxz) return
     if (n.items !== null) {
       for (const it of n.items) {
-        if (!alive(it)) continue
+        if (!indexed(it)) continue
         if (seen[it.id] === stamp) continue
         seen[it.id] = stamp
         if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
@@ -604,7 +630,7 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
     if (clip === null) return
     if (n.items !== null) {
       for (const it of n.items) {
-        if (!alive(it)) continue
+        if (!indexed(it)) continue
         if (seen[it.id] === stamp) continue
         seen[it.id] = stamp
         // THE GLOBAL INTERVAL — not the leaf's clip: a straddler box lives
@@ -638,7 +664,7 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
     const ex = slabExit
     if (n.items !== null) {
       for (const it of n.items) {
-        if (!alive(it)) continue
+        if (!indexed(it)) continue
         const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t)
         if (hit >= 0 && hit < best.t) {
           best.t = hit
@@ -680,16 +706,93 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
     }
   }
 
+  // ── Task 212 — the override lane's scans: the freshest copies answer
+  // with the walks' own per-item predicates (the stamp mask dedups the id
+  // exactly like a straddler's several leaves; the lane is small — the
+  // hot minority of movers) ──
+  function laneFrustum(planes: ArrayLike<number>): void {
+    for (const it of moved.values()) {
+      if (seen[it.id] === stamp) continue
+      seen[it.id] = stamp
+      if (!aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz)) out.push(it.id)
+    }
+  }
+  function laneBox(min: readonly number[], max: readonly number[]): void {
+    for (const it of moved.values()) {
+      if (seen[it.id] === stamp) continue
+      seen[it.id] = stamp
+      if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0]
+        && it.cy + it.hy > min[1] && it.cy - it.hy < max[1]
+        && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) out.push(it.id)
+    }
+  }
+  function laneSphere(cx: number, cy: number, cz: number, radius: number): void {
+    for (const it of moved.values()) {
+      if (seen[it.id] === stamp) continue
+      seen[it.id] = stamp
+      const dx = Math.max(it.cx - it.hx - cx, 0, cx - (it.cx + it.hx))
+      const dy = Math.max(it.cy - it.hy - cy, 0, cy - (it.cy + it.hy))
+      const dz = Math.max(it.cz - it.hz - cz, 0, cz - (it.cz + it.hz))
+      if (dx * dx + dy * dy + dz * dz <= radius * radius) out.push(it.id)
+    }
+  }
+  function lanePoint(x: number, y: number, z: number): void {
+    for (const it of moved.values()) {
+      if (seen[it.id] === stamp) continue
+      seen[it.id] = stamp
+      if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) out.push(it.id)
+    }
+  }
+  function laneRay(ox: number, oy: number, oz: number, ix: number, iy: number, iz: number): void {
+    for (const it of moved.values()) {
+      if (seen[it.id] === stamp) continue
+      seen[it.id] = stamp
+      const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, Infinity)
+      if (hit >= 0) hits.push({ id: it.id, t: hit })
+    }
+  }
+  function laneRayFirst(ox: number, oy: number, oz: number, ix: number, iy: number, iz: number, best: { t: number; id: number }): void {
+    for (const it of moved.values()) {
+      const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t)
+      if (hit >= 0 && hit < best.t) {
+        best.t = hit
+        best.id = it.id
+      }
+    }
+  }
+
+  /** Task 212 — THE FOLD: rebuild the whole tree over the live set (byId's
+   * freshest objects, deduped by id — the override lane empties into the
+   * tree, the tombstones stay gone, the loose bounds re-tighten to the
+   * live union). The BVH's own twin; both structures now fold. */
+  function rebuild(): void {
+    const liveItems = Array.from(byId.values())
+    // the fresh tree holds ONLY byId ids — the old root (with every
+    // tombstoned copy) is garbage, so the tombstone Set's entries point
+    // at nothing anymore: cleared, it can never grow unbounded across a
+    // long edit session (a later remove() of the same id just re-adds it)
+    removed.clear()
+    nodes = 0
+    leaves = 0
+    depth = 0
+    moved.clear()
+    root = buildNode(liveItems, unionOf(liveItems), 1)
+  }
+
   const index: SpatialIndex = {
     kind: 'octree',
     count: items.length,
     get live(): number {
-      return live
+      // Task 212 — byId IS the live set (the old manual counter lied on
+      // the remove→re-insert round-trip: remove dropped it, the tombstone
+      // re-insert left it — one live box undercounted forever)
+      return byId.size
     },
     stats: {
       get nodes() { return nodes },
       get leaves() { return leaves },
       get depth() { return depth },
+      get lane() { return moved.size },
       items: items.length,
     },
     get planeTests(): number {
@@ -699,21 +802,25 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
       beginQuery()
       planeTests = 0
       walkFrustum(root, planes, 0b111111)
+      laneFrustum(planes)
       return Uint32Array.from(out)
     },
     queryBox(min, max) {
       beginQuery()
       walkBox(root, min as readonly number[], max as readonly number[])
+      laneBox(min as readonly number[], max as readonly number[])
       return Uint32Array.from(out)
     },
     querySphere(cx: number, cy: number, cz: number, radius: number) {
       beginQuery()
       walkSphere(root, cx, cy, cz, radius)
+      laneSphere(cx, cy, cz, radius)
       return Uint32Array.from(out)
     },
     queryPoint(x: number, y: number, z: number) {
       beginQuery()
       walkPoint(root, x, y, z)
+      lanePoint(x, y, z)
       return Uint32Array.from(out)
     },
     queryRay(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number) {
@@ -723,6 +830,7 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
       const iy = dy !== 0 ? 1 / dy : Infinity
       const iz = dz !== 0 ? 1 / dz : Infinity
       walkRay(root, ox, oy, oz, ix, iy, iz, 0, Infinity)
+      laneRay(ox, oy, oz, ix, iy, iz)
       hits.sort((a, b) => a.t - b.t)
       return hits.slice()
     },
@@ -732,27 +840,47 @@ export function buildOctree(items: readonly SpatialBox[], options?: { capacity?:
       const iz = dz !== 0 ? 1 / dz : Infinity
       const best = { t: Infinity, id: -1 }
       walkRayFirst(root, ox, oy, oz, ix, iy, iz, 0, Infinity, best)
+      laneRayFirst(ox, oy, oz, ix, iy, iz, best)
       return best.id >= 0 ? { id: best.id, t: best.t } : null
     },
     insert(box: SpatialBox): void {
       maxId = Math.max(maxId, box.id)
       ensureCapacity(box.id)
-      if (removed.delete(box.id)) {
-        // a re-insert of a tombstoned id: the live count is unchanged
-      } else {
-        live++
+      if (removed.delete(box.id) || byId.has(box.id)) {
+        // Task 212 — a re-inserted id (tombstoned OR live) rides THE
+        // OVERRIDE LANE: the stale copy in the leaves is skipped by id,
+        // the lane answers for the freshest box. The old tombstone path
+        // dropped a SECOND copy into the leaves (the stamp mask deduped
+        // the ANSWERS — the tree still grew); the old live path churned
+        // the same way update() used to. The live count rides byId: a
+        // tombstone's re-insert counts back what its remove dropped, a
+        // live re-insert changes nothing
+        byId.set(box.id, box)
+        moved.set(box.id, box)
+        return
       }
+      byId.set(box.id, box)
       insertAt(root, box)
     },
     remove(id: number): void {
       if (removed.has(id)) return
       removed.add(id)
-      live--
+      byId.delete(id)
+      moved.delete(id)
     },
     update(box: SpatialBox): void {
-      this.remove(box.id)
+      if (byId.has(box.id)) {
+        // Task 212 — the dynamic twin's honest shape: the FRESHEST bounds
+        // into the override lane, O(1), nothing grows (the old
+        // remove+insert left every intermediate object in the leaves
+        // forever — the leak the field report caught)
+        byId.set(box.id, box)
+        moved.set(box.id, box)
+        return
+      }
       this.insert(box)
     },
+    rebuild,
   }
   return index
 }
@@ -779,7 +907,12 @@ interface BvhNode {
  *  layout cannot be spliced cheaply); insert() appends to an OVERFLOW
  *  list the queries scan linearly (the amortized-rebuild pattern — the
  *  fresh minority costs a sweep, the settled majority keeps its
- *  near-log walk); rebuild() folds the overflow back into a fresh tree. */
+ *  near-log walk); rebuild() folds the overflow back into a fresh tree.
+ *  Task 212 — THE OVERRIDE LANE: update() on a live id never touches the
+ *  layout (the old remove+insert flooded the overflow with every
+ *  intermediate object and the fold baked them all in — the leak behind
+ *  the field report); the freshest box lands in a small id→box lane the
+ *  queries read after the overflow, and rebuild() folds the LIVE SET. */
 export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: number; planeMask?: boolean }): SpatialIndex {
   const capacity = Math.max(1, options?.capacity ?? 8)
   const planeMask = options?.planeMask ?? true
@@ -787,11 +920,21 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
   let layout: SpatialBox[] = []
   let overflow: SpatialBox[] = []
   const removed = new Set<number>()
+  // ── Task 212 — THE OVERRIDE LANE + THE LIVE-SET AUTHORITY (the octree
+  // twin's comment above): byId = the freshest box per live id; moved =
+  // the live ids the LANE owns (their layout/overflow copies are stale —
+  // the walks skip them by id, the lane answers). The old update() =
+  // remove+insert pushed EVERY intermediate object into the overflow and
+  // rebuild() folded them all back in — the layout grew 48 items per
+  // frame, forever (measured: bvh.live lied +2880 after one second). The
+  // lane is O(1) and bounded; rebuild() folds byId.
+  const byId = new Map<number, SpatialBox>()
+  for (const it of items) byId.set(it.id, it)
+  const moved = new Map<number, SpatialBox>()
   let nodes = 0
   let leaves = 0
   let depth = 0
   let root: BvhNode | null = null
-  let buildCount = items.length
 
   function centerAlong(b: SpatialBox, axis: number): number {
     return axis === 0 ? b.cx : axis === 1 ? b.cy : b.cz
@@ -827,15 +970,21 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
   }
 
   function rebuild(): void {
-    const liveItems = items
-      .filter(it => !removed.has(it.id))
-      .concat(overflow.filter(it => !removed.has(it.id)))
-    layout = liveItems.slice()
+    // Task 212 — THE FOLD over the live set's FRESHEST objects: byId holds
+    // one box per live id (the lane's and the overflow's newest), so the
+    // rebuilt layout is deduped and bounded — the old fold concatenated
+    // items + the whole overflow, keeping every stale intermediate object
+    // an update() ever pushed. The fresh layout holds ONLY byId ids, so
+    // the tombstone Set's entries point at nothing — cleared, it can
+    // never grow unbounded across a long edit session
+    const liveItems = Array.from(byId.values())
+    layout = liveItems
     overflow = []
+    removed.clear()
+    moved.clear()
     nodes = 0
     leaves = 0
     depth = 0
-    buildCount = layout.length
     root = layout.length === 0 ? null : buildNode(0, layout.length, 1)
   }
 
@@ -844,8 +993,9 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
   const out: number[] = []
   const hits: RayHit[] = []
 
-  function alive(it: SpatialBox): boolean {
-    return !removed.has(it.id)
+  function indexed(it: SpatialBox): boolean {
+    // the layout/overflow copy answers ONLY for ids the lane doesn't own
+    return !removed.has(it.id) && !moved.has(it.id)
   }
 
   // ── Task 205 — the instrumented masked walk (the BVH twin — items live
@@ -911,7 +1061,7 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
     if (l === null || r === null) {
       for (let i = n.from; i < n.to; i++) {
         const it = layout[i]
-        if (!alive(it)) continue
+        if (!indexed(it)) continue
         if (mask === 0 || !itemOutsideMasked(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz, mask)) {
           out.push(it.id)
         }
@@ -929,7 +1079,7 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
     if (l === null || r === null) {
       for (let i = n.from; i < n.to; i++) {
         const it = layout[i]
-        if (!alive(it)) continue
+        if (!indexed(it)) continue
         if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0]
           && it.cy + it.hy > min[1] && it.cy - it.hy < max[1]
           && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) {
@@ -949,7 +1099,7 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
     if (l === null || r === null) {
       for (let i = n.from; i < n.to; i++) {
         const it = layout[i]
-        if (!alive(it)) continue
+        if (!indexed(it)) continue
         const b: NodeBounds = {
           minx: it.cx - it.hx, maxx: it.cx + it.hx,
           miny: it.cy - it.hy, maxy: it.cy + it.hy,
@@ -970,7 +1120,7 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
     if (l === null || r === null) {
       for (let i = n.from; i < n.to; i++) {
         const it = layout[i]
-        if (!alive(it)) continue
+        if (!indexed(it)) continue
         if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
           out.push(it.id)
         }
@@ -990,7 +1140,7 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
     if (l === null || r === null) {
       for (let i = n.from; i < n.to; i++) {
         const it = layout[i]
-        if (!alive(it)) continue
+        if (!indexed(it)) continue
         const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, t1)
         if (hit >= 0) hits.push({ id: it.id, t: hit })
       }
@@ -1023,7 +1173,7 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
     if (l === null || r === null) {
       for (let i = n.from; i < n.to; i++) {
         const it = layout[i]
-        if (!alive(it)) continue
+        if (!indexed(it)) continue
         const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t)
         if (hit >= 0 && hit < best.t) {
           best.t = hit
@@ -1053,9 +1203,11 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
     kind: 'bvh',
     count: items.length,
     get live(): number {
-      return buildCount + overflow.length - removed.size - removedOverflowCount()
+      // Task 212 — byId IS the live set (the old arithmetic counted the
+      // overflow's stale intermediates: 48 drones × 60fps lied +2880/s)
+      return byId.size
     },
-    stats: { get nodes() { return nodes }, get leaves() { return leaves }, get depth() { return depth }, items: items.length },
+    stats: { get nodes() { return nodes }, get leaves() { return leaves }, get depth() { return depth }, get lane() { return moved.size }, items: items.length },
     get planeTests(): number {
       return planeTests
     },
@@ -1064,13 +1216,21 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
       planeTests = 0
       if (root !== null) walkFrustum(root, planes, 0b111111)
       scanOverflowFrustum(planes)
+      scanLaneFrustum(planes)
       return Uint32Array.from(out)
     },
     queryBox(min, max) {
       out.length = 0
       if (root !== null) walkBox(root, min as readonly number[], max as readonly number[])
       for (const it of overflow) {
-        if (!alive(it)) continue
+        if (!indexed(it)) continue
+        if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0]
+          && it.cy + it.hy > min[1] && it.cy - it.hy < max[1]
+          && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) {
+          out.push(it.id)
+        }
+      }
+      for (const it of moved.values()) {
         if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0]
           && it.cy + it.hy > min[1] && it.cy - it.hy < max[1]
           && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) {
@@ -1083,7 +1243,7 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
       out.length = 0
       if (root !== null) walkSphere(root, cx, cy, cz, radius)
       for (const it of overflow) {
-        if (!alive(it)) continue
+        if (!indexed(it)) continue
         const b: NodeBounds = {
           minx: it.cx - it.hx, maxx: it.cx + it.hx,
           miny: it.cy - it.hy, maxy: it.cy + it.hy,
@@ -1091,13 +1251,24 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
         }
         if (boxReachesSphere(b, cx, cy, cz, radius)) out.push(it.id)
       }
+      for (const it of moved.values()) {
+        const dx = Math.max(it.cx - it.hx - cx, 0, cx - (it.cx + it.hx))
+        const dy = Math.max(it.cy - it.hy - cy, 0, cy - (it.cy + it.hy))
+        const dz = Math.max(it.cz - it.hz - cz, 0, cz - (it.cz + it.hz))
+        if (dx * dx + dy * dy + dz * dz <= radius * radius) out.push(it.id)
+      }
       return Uint32Array.from(out)
     },
     queryPoint(x: number, y: number, z: number) {
       out.length = 0
       if (root !== null) walkPoint(root, x, y, z)
       for (const it of overflow) {
-        if (!alive(it)) continue
+        if (!indexed(it)) continue
+        if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
+          out.push(it.id)
+        }
+      }
+      for (const it of moved.values()) {
         if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
           out.push(it.id)
         }
@@ -1112,7 +1283,11 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
       const iz = dz !== 0 ? 1 / dz : Infinity
       if (root !== null) walkRay(root, ox, oy, oz, ix, iy, iz, 0, Infinity)
       for (const it of overflow) {
-        if (!alive(it)) continue
+        if (!indexed(it)) continue
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, Infinity)
+        if (hit >= 0) hits.push({ id: it.id, t: hit })
+      }
+      for (const it of moved.values()) {
         const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, Infinity)
         if (hit >= 0) hits.push({ id: it.id, t: hit })
       }
@@ -1126,7 +1301,14 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
       const best = { t: Infinity, id: -1 }
       if (root !== null) walkRayFirst(root, ox, oy, oz, ix, iy, iz, 0, Infinity, best)
       for (const it of overflow) {
-        if (!alive(it)) continue
+        if (!indexed(it)) continue
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t)
+        if (hit >= 0 && hit < best.t) {
+          best.t = hit
+          best.id = it.id
+        }
+      }
+      for (const it of moved.values()) {
         const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t)
         if (hit >= 0 && hit < best.t) {
           best.t = hit
@@ -1136,31 +1318,49 @@ export function buildBVH(items: readonly SpatialBox[], options?: { capacity?: nu
       return best.id >= 0 ? { id: best.id, t: best.t } : null
     },
     insert(box: SpatialBox): void {
-      if (removed.delete(box.id)) {
-        // re-insert of a tombstoned id — rides the overflow list like any
-        // fresh item (the next rebuild() folds it into the tree)
+      if (removed.delete(box.id) || byId.has(box.id)) {
+        // Task 212 — a re-inserted id (tombstoned OR live) rides THE
+        // OVERRIDE LANE: the stale layout/overflow copy is skipped by id,
+        // the lane answers for the freshest box. The old tombstone path
+        // pushed a SECOND copy into the overflow while the tombstone's
+        // clearing revived the stale one — DUPLICATE answers (the BVH has
+        // no stamp mask; the latent bug the lane kills); the old live path
+        // churned the overflow the way update() used to. The live count
+        // rides byId: a tombstone's re-insert counts back what its remove
+        // dropped, a live re-insert changes nothing
+        byId.set(box.id, box)
+        moved.set(box.id, box)
+        return
       }
+      byId.set(box.id, box)
       overflow.push(box)
     },
     remove(id: number): void {
       removed.add(id)
+      byId.delete(id)
+      moved.delete(id)
     },
     update(box: SpatialBox): void {
-      this.remove(box.id)
+      if (byId.has(box.id)) {
+        // Task 212 — the freshest bounds into the lane, O(1) (the old
+        // remove+insert churned the overflow with every intermediate)
+        byId.set(box.id, box)
+        moved.set(box.id, box)
+        return
+      }
       this.insert(box)
     },
     rebuild,
   }
 
-  function removedOverflowCount(): number {
-    let n = 0
-    for (const it of overflow) if (removed.has(it.id)) n++
-    return n
+  function scanLaneFrustum(planes: ArrayLike<number>): void {
+    for (const it of moved.values()) {
+      if (!aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz)) out.push(it.id)
+    }
   }
-
   function scanOverflowFrustum(planes: ArrayLike<number>): void {
     for (const it of overflow) {
-      if (!alive(it)) continue
+      if (!indexed(it)) continue
       if (!aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz)) out.push(it.id)
     }
   }

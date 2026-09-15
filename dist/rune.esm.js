@@ -4287,9 +4287,12 @@ function buildOctree(items, options) {
     n.items = null;
     n.kids = kids;
   }
-  const root = buildNode(items.slice(), unionOf(items), 1);
+  let root = buildNode(items.slice(), unionOf(items), 1);
+  const byId = new Map;
+  for (const it of items)
+    byId.set(it.id, it);
+  const moved = new Map;
   const removed = new Set;
-  let live = items.length;
   let maxId = items.length === 0 ? 0 : Math.max(...items.map((b) => b.id));
   let seen = new Uint8Array(maxId + 1);
   let stamp = 0;
@@ -4310,8 +4313,8 @@ function buildOctree(items, options) {
     grown.set(seen);
     seen = grown;
   }
-  function alive(it) {
-    return !removed.has(it.id);
+  function indexed(it) {
+    return !removed.has(it.id) && !moved.has(it.id);
   }
   let planeTests = 0;
   function maskedPlanes(planes, cx, cy, cz, hx, hy, hz, mask, full) {
@@ -4348,7 +4351,7 @@ function buildOctree(items, options) {
     if (n.items !== null) {
       if (mask === 0) {
         for (const it of n.items) {
-          if (!alive(it))
+          if (!indexed(it))
             continue;
           if (seen[it.id] !== stamp) {
             seen[it.id] = stamp;
@@ -4357,7 +4360,7 @@ function buildOctree(items, options) {
         }
       } else {
         for (const it of n.items) {
-          if (!alive(it))
+          if (!indexed(it))
             continue;
           if (seen[it.id] === stamp)
             continue;
@@ -4381,7 +4384,7 @@ function buildOctree(items, options) {
       return;
     if (n.items !== null) {
       for (const it of n.items) {
-        if (!alive(it))
+        if (!indexed(it))
           continue;
         if (seen[it.id] === stamp)
           continue;
@@ -4405,7 +4408,7 @@ function buildOctree(items, options) {
       return;
     if (n.items !== null) {
       for (const it of n.items) {
-        if (!alive(it))
+        if (!indexed(it))
           continue;
         if (seen[it.id] === stamp)
           continue;
@@ -4436,7 +4439,7 @@ function buildOctree(items, options) {
       return;
     if (n.items !== null) {
       for (const it of n.items) {
-        if (!alive(it))
+        if (!indexed(it))
           continue;
         if (seen[it.id] === stamp)
           continue;
@@ -4461,7 +4464,7 @@ function buildOctree(items, options) {
       return;
     if (n.items !== null) {
       for (const it of n.items) {
-        if (!alive(it))
+        if (!indexed(it))
           continue;
         if (seen[it.id] === stamp)
           continue;
@@ -4489,7 +4492,7 @@ function buildOctree(items, options) {
     const ex = slabExit;
     if (n.items !== null) {
       for (const it of n.items) {
-        if (!alive(it))
+        if (!indexed(it))
           continue;
         const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t);
         if (hit >= 0 && hit < best.t) {
@@ -4535,11 +4538,78 @@ function buildOctree(items, options) {
         insertAt(kids[k], it);
     }
   }
+  function laneFrustum(planes) {
+    for (const it of moved.values()) {
+      if (seen[it.id] === stamp)
+        continue;
+      seen[it.id] = stamp;
+      if (!aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz))
+        out.push(it.id);
+    }
+  }
+  function laneBox(min, max) {
+    for (const it of moved.values()) {
+      if (seen[it.id] === stamp)
+        continue;
+      seen[it.id] = stamp;
+      if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0] && it.cy + it.hy > min[1] && it.cy - it.hy < max[1] && it.cz + it.hz > min[2] && it.cz - it.hz < max[2])
+        out.push(it.id);
+    }
+  }
+  function laneSphere(cx, cy, cz, radius) {
+    for (const it of moved.values()) {
+      if (seen[it.id] === stamp)
+        continue;
+      seen[it.id] = stamp;
+      const dx = Math.max(it.cx - it.hx - cx, 0, cx - (it.cx + it.hx));
+      const dy = Math.max(it.cy - it.hy - cy, 0, cy - (it.cy + it.hy));
+      const dz = Math.max(it.cz - it.hz - cz, 0, cz - (it.cz + it.hz));
+      if (dx * dx + dy * dy + dz * dz <= radius * radius)
+        out.push(it.id);
+    }
+  }
+  function lanePoint(x, y, z) {
+    for (const it of moved.values()) {
+      if (seen[it.id] === stamp)
+        continue;
+      seen[it.id] = stamp;
+      if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz)
+        out.push(it.id);
+    }
+  }
+  function laneRay(ox, oy, oz, ix, iy, iz) {
+    for (const it of moved.values()) {
+      if (seen[it.id] === stamp)
+        continue;
+      seen[it.id] = stamp;
+      const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, Infinity);
+      if (hit >= 0)
+        hits.push({ id: it.id, t: hit });
+    }
+  }
+  function laneRayFirst(ox, oy, oz, ix, iy, iz, best) {
+    for (const it of moved.values()) {
+      const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t);
+      if (hit >= 0 && hit < best.t) {
+        best.t = hit;
+        best.id = it.id;
+      }
+    }
+  }
+  function rebuild() {
+    const liveItems = Array.from(byId.values());
+    removed.clear();
+    nodes = 0;
+    leaves = 0;
+    depth2 = 0;
+    moved.clear();
+    root = buildNode(liveItems, unionOf(liveItems), 1);
+  }
   const index = {
     kind: "octree",
     count: items.length,
     get live() {
-      return live;
+      return byId.size;
     },
     stats: {
       get nodes() {
@@ -4551,6 +4621,9 @@ function buildOctree(items, options) {
       get depth() {
         return depth2;
       },
+      get lane() {
+        return moved.size;
+      },
       items: items.length
     },
     get planeTests() {
@@ -4560,21 +4633,25 @@ function buildOctree(items, options) {
       beginQuery();
       planeTests = 0;
       walkFrustum(root, planes, 63);
+      laneFrustum(planes);
       return Uint32Array.from(out);
     },
     queryBox(min, max) {
       beginQuery();
       walkBox(root, min, max);
+      laneBox(min, max);
       return Uint32Array.from(out);
     },
     querySphere(cx, cy, cz, radius) {
       beginQuery();
       walkSphere(root, cx, cy, cz, radius);
+      laneSphere(cx, cy, cz, radius);
       return Uint32Array.from(out);
     },
     queryPoint(x, y, z) {
       beginQuery();
       walkPoint(root, x, y, z);
+      lanePoint(x, y, z);
       return Uint32Array.from(out);
     },
     queryRay(ox, oy, oz, dx, dy, dz) {
@@ -4584,6 +4661,7 @@ function buildOctree(items, options) {
       const iy = dy !== 0 ? 1 / dy : Infinity;
       const iz = dz !== 0 ? 1 / dz : Infinity;
       walkRay(root, ox, oy, oz, ix, iy, iz, 0, Infinity);
+      laneRay(ox, oy, oz, ix, iy, iz);
       hits.sort((a, b) => a.t - b.t);
       return hits.slice();
     },
@@ -4593,26 +4671,36 @@ function buildOctree(items, options) {
       const iz = dz !== 0 ? 1 / dz : Infinity;
       const best = { t: Infinity, id: -1 };
       walkRayFirst(root, ox, oy, oz, ix, iy, iz, 0, Infinity, best);
+      laneRayFirst(ox, oy, oz, ix, iy, iz, best);
       return best.id >= 0 ? { id: best.id, t: best.t } : null;
     },
     insert(box) {
       maxId = Math.max(maxId, box.id);
       ensureCapacity(box.id);
-      if (removed.delete(box.id)) {} else {
-        live++;
+      if (removed.delete(box.id) || byId.has(box.id)) {
+        byId.set(box.id, box);
+        moved.set(box.id, box);
+        return;
       }
+      byId.set(box.id, box);
       insertAt(root, box);
     },
     remove(id) {
       if (removed.has(id))
         return;
       removed.add(id);
-      live--;
+      byId.delete(id);
+      moved.delete(id);
     },
     update(box) {
-      this.remove(box.id);
+      if (byId.has(box.id)) {
+        byId.set(box.id, box);
+        moved.set(box.id, box);
+        return;
+      }
       this.insert(box);
-    }
+    },
+    rebuild
   };
   return index;
 }
@@ -4622,11 +4710,14 @@ function buildBVH(items, options) {
   let layout = [];
   let overflow = [];
   const removed = new Set;
+  const byId = new Map;
+  for (const it of items)
+    byId.set(it.id, it);
+  const moved = new Map;
   let nodes = 0;
   let leaves = 0;
   let depth2 = 0;
   let root = null;
-  let buildCount = items.length;
   function centerAlong(b, axis) {
     return axis === 0 ? b.cx : axis === 1 ? b.cy : b.cz;
   }
@@ -4666,20 +4757,21 @@ function buildBVH(items, options) {
     return { b, from, to, left: buildNode(from, mid, level + 1), right: buildNode(mid, to, level + 1) };
   }
   function rebuild() {
-    const liveItems = items.filter((it) => !removed.has(it.id)).concat(overflow.filter((it) => !removed.has(it.id)));
-    layout = liveItems.slice();
+    const liveItems = Array.from(byId.values());
+    layout = liveItems;
     overflow = [];
+    removed.clear();
+    moved.clear();
     nodes = 0;
     leaves = 0;
     depth2 = 0;
-    buildCount = layout.length;
     root = layout.length === 0 ? null : buildNode(0, layout.length, 1);
   }
   rebuild();
   const out = [];
   const hits = [];
-  function alive(it) {
-    return !removed.has(it.id);
+  function indexed(it) {
+    return !removed.has(it.id) && !moved.has(it.id);
   }
   let planeTests = 0;
   function maskedPlanes(planes, cx, cy, cz, hx, hy, hz, mask, full) {
@@ -4732,7 +4824,7 @@ function buildBVH(items, options) {
     if (l === null || r === null) {
       for (let i = n.from;i < n.to; i++) {
         const it = layout[i];
-        if (!alive(it))
+        if (!indexed(it))
           continue;
         if (mask === 0 || !itemOutsideMasked(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz, mask)) {
           out.push(it.id);
@@ -4751,7 +4843,7 @@ function buildBVH(items, options) {
     if (l === null || r === null) {
       for (let i = n.from;i < n.to; i++) {
         const it = layout[i];
-        if (!alive(it))
+        if (!indexed(it))
           continue;
         if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0] && it.cy + it.hy > min[1] && it.cy - it.hy < max[1] && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) {
           out.push(it.id);
@@ -4770,7 +4862,7 @@ function buildBVH(items, options) {
     if (l === null || r === null) {
       for (let i = n.from;i < n.to; i++) {
         const it = layout[i];
-        if (!alive(it))
+        if (!indexed(it))
           continue;
         const b = {
           minx: it.cx - it.hx,
@@ -4796,7 +4888,7 @@ function buildBVH(items, options) {
     if (l === null || r === null) {
       for (let i = n.from;i < n.to; i++) {
         const it = layout[i];
-        if (!alive(it))
+        if (!indexed(it))
           continue;
         if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
           out.push(it.id);
@@ -4817,7 +4909,7 @@ function buildBVH(items, options) {
     if (l === null || r === null) {
       for (let i = n.from;i < n.to; i++) {
         const it = layout[i];
-        if (!alive(it))
+        if (!indexed(it))
           continue;
         const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, t1);
         if (hit >= 0)
@@ -4851,7 +4943,7 @@ function buildBVH(items, options) {
     if (l === null || r === null) {
       for (let i = n.from;i < n.to; i++) {
         const it = layout[i];
-        if (!alive(it))
+        if (!indexed(it))
           continue;
         const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t);
         if (hit >= 0 && hit < best.t) {
@@ -4881,7 +4973,7 @@ function buildBVH(items, options) {
     kind: "bvh",
     count: items.length,
     get live() {
-      return buildCount + overflow.length - removed.size - removedOverflowCount();
+      return byId.size;
     },
     stats: { get nodes() {
       return nodes;
@@ -4889,6 +4981,8 @@ function buildBVH(items, options) {
       return leaves;
     }, get depth() {
       return depth2;
+    }, get lane() {
+      return moved.size;
     }, items: items.length },
     get planeTests() {
       return planeTests;
@@ -4899,6 +4993,7 @@ function buildBVH(items, options) {
       if (root !== null)
         walkFrustum(root, planes, 63);
       scanOverflowFrustum(planes);
+      scanLaneFrustum(planes);
       return Uint32Array.from(out);
     },
     queryBox(min, max) {
@@ -4906,8 +5001,13 @@ function buildBVH(items, options) {
       if (root !== null)
         walkBox(root, min, max);
       for (const it of overflow) {
-        if (!alive(it))
+        if (!indexed(it))
           continue;
+        if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0] && it.cy + it.hy > min[1] && it.cy - it.hy < max[1] && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) {
+          out.push(it.id);
+        }
+      }
+      for (const it of moved.values()) {
         if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0] && it.cy + it.hy > min[1] && it.cy - it.hy < max[1] && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) {
           out.push(it.id);
         }
@@ -4919,7 +5019,7 @@ function buildBVH(items, options) {
       if (root !== null)
         walkSphere(root, cx, cy, cz, radius);
       for (const it of overflow) {
-        if (!alive(it))
+        if (!indexed(it))
           continue;
         const b = {
           minx: it.cx - it.hx,
@@ -4932,6 +5032,13 @@ function buildBVH(items, options) {
         if (boxReachesSphere(b, cx, cy, cz, radius))
           out.push(it.id);
       }
+      for (const it of moved.values()) {
+        const dx = Math.max(it.cx - it.hx - cx, 0, cx - (it.cx + it.hx));
+        const dy = Math.max(it.cy - it.hy - cy, 0, cy - (it.cy + it.hy));
+        const dz = Math.max(it.cz - it.hz - cz, 0, cz - (it.cz + it.hz));
+        if (dx * dx + dy * dy + dz * dz <= radius * radius)
+          out.push(it.id);
+      }
       return Uint32Array.from(out);
     },
     queryPoint(x, y, z) {
@@ -4939,8 +5046,13 @@ function buildBVH(items, options) {
       if (root !== null)
         walkPoint(root, x, y, z);
       for (const it of overflow) {
-        if (!alive(it))
+        if (!indexed(it))
           continue;
+        if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
+          out.push(it.id);
+        }
+      }
+      for (const it of moved.values()) {
         if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
           out.push(it.id);
         }
@@ -4956,8 +5068,13 @@ function buildBVH(items, options) {
       if (root !== null)
         walkRay(root, ox, oy, oz, ix, iy, iz, 0, Infinity);
       for (const it of overflow) {
-        if (!alive(it))
+        if (!indexed(it))
           continue;
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, Infinity);
+        if (hit >= 0)
+          hits.push({ id: it.id, t: hit });
+      }
+      for (const it of moved.values()) {
         const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, Infinity);
         if (hit >= 0)
           hits.push({ id: it.id, t: hit });
@@ -4973,8 +5090,15 @@ function buildBVH(items, options) {
       if (root !== null)
         walkRayFirst(root, ox, oy, oz, ix, iy, iz, 0, Infinity, best);
       for (const it of overflow) {
-        if (!alive(it))
+        if (!indexed(it))
           continue;
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t);
+        if (hit >= 0 && hit < best.t) {
+          best.t = hit;
+          best.id = it.id;
+        }
+      }
+      for (const it of moved.values()) {
         const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t);
         if (hit >= 0 && hit < best.t) {
           best.t = hit;
@@ -4984,28 +5108,38 @@ function buildBVH(items, options) {
       return best.id >= 0 ? { id: best.id, t: best.t } : null;
     },
     insert(box) {
-      if (removed.delete(box.id)) {}
+      if (removed.delete(box.id) || byId.has(box.id)) {
+        byId.set(box.id, box);
+        moved.set(box.id, box);
+        return;
+      }
+      byId.set(box.id, box);
       overflow.push(box);
     },
     remove(id) {
       removed.add(id);
+      byId.delete(id);
+      moved.delete(id);
     },
     update(box) {
-      this.remove(box.id);
+      if (byId.has(box.id)) {
+        byId.set(box.id, box);
+        moved.set(box.id, box);
+        return;
+      }
       this.insert(box);
     },
     rebuild
   };
-  function removedOverflowCount() {
-    let n = 0;
-    for (const it of overflow)
-      if (removed.has(it.id))
-        n++;
-    return n;
+  function scanLaneFrustum(planes) {
+    for (const it of moved.values()) {
+      if (!aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz))
+        out.push(it.id);
+    }
   }
   function scanOverflowFrustum(planes) {
     for (const it of overflow) {
-      if (!alive(it))
+      if (!indexed(it))
         continue;
       if (!aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz))
         out.push(it.id);

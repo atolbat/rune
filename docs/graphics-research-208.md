@@ -527,3 +527,87 @@ to cost).
   says the bytes landed; the TELEPORT probe (a visible record moved
   through the store, behind the frustum, verdict 1 → 2) proves the
   CULL reads them — end to end, on both backends.
+
+## Task 212 — THE OVERRIDE LANE (the dynamic-index leak, the third field report)
+
+The report: «Scene edit сразу взвинчивает мс на кадр, увеличивая лаги в
+разы. Со временем мс увеличивается.» The store's upload path was already
+KBs (Task 211); the leak sat in the DYNAMIC INDEXES the edit mode feeds.
+
+**The diagnosis** (measured, `scripts/task212-leak.mjs` — the report
+reproduced headless against the real scene and the real indexes):
+`update()` was `remove(id) + insert(newBounds)`, and:
+
+- the octree's `remove` only TOMBSTONES — the tree shape is never torn
+  down mid-query — so every intermediate object stayed in the leaves
+  FOREVER: 48 drones at 60 fps grew the tree **55 828 → 3.3M nodes in
+  one second**, and every walk pays for all of it;
+- the BVH's `insert` appends to the linear overflow (the
+  amortized-rebuild pattern), so the overflow grew **48 objects a
+  frame**, and `rebuild()` — every 180 frames — folded `items + the
+  whole overflow` into the layout, BAKING every stale intermediate in:
+  the layout grew +8 640 entries per fold cycle, forever, and each fold
+  cost more than the last (~25 ms and climbing);
+- `bvh.live` lied upward through the old arithmetic
+  (`buildCount + overflow − removed` counted the intermediates).
+
+Two compounding symptoms, exactly the report's two sentences: the
+~25 ms fold spike on a ~16.7 ms frame is «лаги в разы» at once, and the
+never-shrinking structures + growing fold + GC pressure are «со временем
+увеличивается».
+
+**The fix — THE OVERRIDE LANE** (`packages/core/src/spatial.ts`):
+
+- `byId`, a small id→box Map, is the LIVE-SET AUTHORITY (the freshest
+  bounds per live id); `moved`, the ids the LANE owns. `update()` on a
+  live id is O(1): `byId.set` + `moved.set`, nothing else. The tree's
+  own stale copy is skipped by id (`indexed()`), and every walk reads
+  the lane AFTER the tree with the same per-item predicate (the stamp
+  mask dedups the id exactly like a straddler's several leaves).
+- The lane is BOUNDED by the distinct-mover count, not the update
+  count: 48 drones ride a 48-entry lane forever. `stats.lane` exposes
+  it; `live` rides `byId.size` (both structures — the octree's manual
+  counter also lied on the remove→re-insert round-trip).
+- THE FOLD (`rebuild()`, now on BOTH structures) rebuilds over byId's
+  freshest objects: the lane empties into the tree, the tombstone Set
+  clears (the fresh tree holds only byId ids — the Set can never grow
+  unbounded across a long edit session), the loose bounds re-tighten.
+  The DEMO folds on a LANE BUDGET (256), never a blind cadence —
+  the lane's linear per-query scan is the only cost driver, and at 48
+  the fold buys nothing (the old 180-frame timer billed ~25 ms every
+  3 s for nothing).
+- **A latent BVH bug killed by the same lane**: a re-insert of a
+  tombstoned id used to push a SECOND copy into the overflow while the
+  tombstone's clearing revived the stale layout copy — DUPLICATE
+  answers (the BVH has no stamp mask). ANY re-insert of a known id
+  (tombstoned or live) now rides the lane: the stale copy is skipped
+  by id, exactly one answer, from the freshest bounds.
+- **The live-set law, measured** (the 60 s leak run): octree nodes
+  55 828 → 55 828 (1.00×), the lane 48/48 flat, both live counts
+  honest (Δ0), zero duplicate answers, zero stale-geometry ghosts,
+  octree ≡ BVH ≡ brute force at every mark, tick 25.2 → 8.1 µs
+  (0.32× — it falls as JIT warms, it no longer climbs), zero folds
+  fired; the explicit fold probe: answers IDENTICAL, lanes empty,
+  re-arm clean, a moved box found at its NEW position and rejected at
+  the stale one.
+
+**The regression tests** (`packages/core/tests/spatial.test.ts`, 5 new):
+the leak law (48 movers × 1 200 updates grow NOTHING — nodes, lane,
+live), the freshest-bounds law (every query family tracks a teleported
+box OUTSIDE the boot root bounds), the remove→re-insert round-trip (one
+answer per id, honest live, the live-re-insert twin), the fold
+(identical answers, empty lane, re-arm), and the drone cadence against
+the brute truth (every 40th frame, boot node count at the end).
+
+**The local gates** (`scripts/task212-local.mjs`, both backends — the
+living page, a 20-second wall-clock flight): the lane pinned at 48/48,
+node counts NEVER move, live counts honest, msAvg flat (WG 0.91, GL
+1.06 — BEFORE the fix this climbed without bound), the upload math
+alive throughout, the fold probe through the page's own channel
+(`__hizEdits.fold()` — lanes 0/0, re-armed 48/48, the re-split tree
+stable), zero errors. Gate lessons riding the round: the fold and the
+lane read must share ONE JS task (a rAF interleaves otherwise and
+re-arms the lane before the read), and msAvg's EMA EXCLUDES frames
+slower than 250 ms — on a slow boot it converges FROM BELOW, so the
+flatness law compares the end against the MAX of the first two samples
+(a from-below climb is convergence, never a leak).
