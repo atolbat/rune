@@ -41,7 +41,7 @@ export type {
 // CULLING KIT (the pure policies + CPU bricks the frame recipes compose
 // from): the dist surface carries them for the demos.
 export {
-  buildOctree, buildBVH, aabbOutsideFrustum, aabbInsideFrustum, frustumPlanes,
+  buildOctree, buildBVH, buildOctreeRecords, buildBVHRecords, aabbOutsideFrustum, aabbInsideFrustum, frustumPlanes,
   recordView, projectBox, frustumVerdicts,
   hysteresisPolicy, decodeVerdict, decodeStreak, HYST_STREAK_SCALE,
   flatCull, layerPolicy, clusterize, softwareOccluder,

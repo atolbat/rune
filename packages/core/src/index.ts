@@ -184,7 +184,7 @@ export {
 // lacked: a worker's pre-shipping cull, an occluder ranking, a marquee.
 // Task 201: rays (queryRay/raycast), spheres, points (hit tests), and the
 // dynamic octree (insert/remove/update) grew the same surface.
-export { buildOctree, buildBVH, aabbOutsideFrustum, aabbInsideFrustum } from './spatial.ts'
+export { buildOctree, buildBVH, buildOctreeRecords, buildBVHRecords, aabbOutsideFrustum, aabbInsideFrustum } from './spatial.ts'
 export type { SpatialBox, SpatialIndex, RayHit } from './spatial.ts'
 // ─── Task 211: THE UNIFIED DATA SURFACE ────────────────────────────────────
 // The Task-210 array laws applied as a SYSTEM: schema-driven SoA columns

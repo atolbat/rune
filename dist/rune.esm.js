@@ -4031,25 +4031,6 @@ function aabbInsideFrustum(planes, cx, cy, cz, hx, hy, hz) {
   }
   return true;
 }
-function unionOf(items) {
-  let minx = Infinity, miny = Infinity, minz = Infinity;
-  let maxx = -Infinity, maxy = -Infinity, maxz = -Infinity;
-  for (const b of items) {
-    if (b.cx - b.hx < minx)
-      minx = b.cx - b.hx;
-    if (b.cy - b.hy < miny)
-      miny = b.cy - b.hy;
-    if (b.cz - b.hz < minz)
-      minz = b.cz - b.hz;
-    if (b.cx + b.hx > maxx)
-      maxx = b.cx + b.hx;
-    if (b.cy + b.hy > maxy)
-      maxy = b.cy + b.hy;
-    if (b.cz + b.hz > maxz)
-      maxz = b.cz + b.hz;
-  }
-  return { minx, miny, minz, maxx, maxy, maxz };
-}
 function boundsOverlap(b, min, max) {
   return b.minx < max[0] && b.maxx > min[0] && b.miny < max[1] && b.maxy > min[1] && b.minz < max[2] && b.maxz > min[2];
 }
@@ -4058,63 +4039,6 @@ function boxReachesSphere(b, cx, cy, cz, radius) {
   const dy = Math.max(b.miny - cy, 0, cy - b.maxy);
   const dz = Math.max(b.minz - cz, 0, cz - b.maxz);
   return dx * dx + dy * dy + dz * dz <= radius * radius;
-}
-function clipRay(ox, oy, oz, ix, iy, iz, b, t0, t1) {
-  if (ix === Infinity || ix === -Infinity) {
-    if (ox < b.minx || ox > b.maxx)
-      return null;
-  } else {
-    let ta = (b.minx - ox) * ix;
-    let tb = (b.maxx - ox) * ix;
-    if (ta > tb) {
-      const s = ta;
-      ta = tb;
-      tb = s;
-    }
-    if (ta > t0)
-      t0 = ta;
-    if (tb < t1)
-      t1 = tb;
-    if (t0 > t1)
-      return null;
-  }
-  if (iy === Infinity || iy === -Infinity) {
-    if (oy < b.miny || oy > b.maxy)
-      return null;
-  } else {
-    let ta = (b.miny - oy) * iy;
-    let tb = (b.maxy - oy) * iy;
-    if (ta > tb) {
-      const s = ta;
-      ta = tb;
-      tb = s;
-    }
-    if (ta > t0)
-      t0 = ta;
-    if (tb < t1)
-      t1 = tb;
-    if (t0 > t1)
-      return null;
-  }
-  if (iz === Infinity || iz === -Infinity) {
-    if (oz < b.minz || oz > b.maxz)
-      return null;
-  } else {
-    let ta = (b.minz - oz) * iz;
-    let tb = (b.maxz - oz) * iz;
-    if (ta > tb) {
-      const s = ta;
-      ta = tb;
-      tb = s;
-    }
-    if (ta > t0)
-      t0 = ta;
-    if (tb < t1)
-      t1 = tb;
-    if (t0 > t1)
-      return null;
-  }
-  return [t0, t1];
 }
 function slabEnter(ox, oy, oz, ix, iy, iz, minx, miny, minz, maxx, maxy, maxz, t0, t1) {
   let en = t0;
@@ -4176,7 +4100,95 @@ function slabEnter(ox, oy, oz, ix, iy, iz, minx, miny, minz, maxx, maxy, maxz, t
   slabExit = ex;
   return en;
 }
+function kitRows(cap) {
+  const c = Math.max(16, cap);
+  return { cap: c, n: 0, geo: new Float64Array(c * 6), ids: new Int32Array(c) };
+}
+function growRows(rows, need) {
+  if (need <= rows.cap)
+    return;
+  let cap = rows.cap * 2;
+  while (cap < need)
+    cap *= 2;
+  const geo = new Float64Array(cap * 6);
+  geo.set(rows.geo);
+  const ids = new Int32Array(cap);
+  ids.set(rows.ids);
+  rows.cap = cap;
+  rows.geo = geo;
+  rows.ids = ids;
+}
+function allocRow(rows, id) {
+  growRows(rows, rows.n + 1);
+  const row = rows.n++;
+  rows.ids[row] = id;
+  return row;
+}
+function assertKitId(id) {
+  if (!Number.isInteger(id) || id < 0 || id > 2147483647) {
+    throw new Error(`spatial kit: box id must be a non-negative int32 (got ${id})`);
+  }
+}
+function unionRows(rows, list) {
+  const geo = rows.geo;
+  let minx = Infinity, miny = Infinity, minz = Infinity;
+  let maxx = -Infinity, maxy = -Infinity, maxz = -Infinity;
+  for (let i = 0;i < list.length; i++) {
+    const o = list[i] * 6;
+    if (geo[o] - geo[o + 3] < minx)
+      minx = geo[o] - geo[o + 3];
+    if (geo[o + 1] - geo[o + 4] < miny)
+      miny = geo[o + 1] - geo[o + 4];
+    if (geo[o + 2] - geo[o + 5] < minz)
+      minz = geo[o + 2] - geo[o + 5];
+    if (geo[o] + geo[o + 3] > maxx)
+      maxx = geo[o] + geo[o + 3];
+    if (geo[o + 1] + geo[o + 4] > maxy)
+      maxy = geo[o + 1] + geo[o + 4];
+    if (geo[o + 2] + geo[o + 5] > maxz)
+      maxz = geo[o + 2] + geo[o + 5];
+  }
+  return { minx, miny, minz, maxx, maxy, maxz };
+}
 function buildOctree(items, options) {
+  const rows = kitRows(items.length);
+  for (let i = 0;i < items.length; i++) {
+    const it = items[i];
+    assertKitId(it.id);
+    const row = allocRow(rows, it.id);
+    const o = row * 6;
+    rows.geo[o] = it.cx;
+    rows.geo[o + 1] = it.cy;
+    rows.geo[o + 2] = it.cz;
+    rows.geo[o + 3] = it.hx;
+    rows.geo[o + 4] = it.hy;
+    rows.geo[o + 5] = it.hz;
+  }
+  return octreeFromRows(rows, items.length, options);
+}
+function buildOctreeRecords(view, options) {
+  const rows = kitRows(view.count);
+  const w = view.words;
+  const cOff = view.base + view.center;
+  const hOff = view.base + view.half;
+  const stride = view.stride;
+  const geo = rows.geo;
+  for (let i = 0;i < view.count; i++) {
+    const co = cOff + i * stride;
+    const ho = hOff + i * stride;
+    rows.ids[i] = i;
+    const o = i * 6;
+    geo[o] = w[co];
+    geo[o + 1] = w[co + 1];
+    geo[o + 2] = w[co + 2];
+    geo[o + 3] = w[ho];
+    geo[o + 4] = w[ho + 1];
+    geo[o + 5] = w[ho + 2];
+  }
+  rows.n = view.count;
+  return octreeFromRows(rows, view.count, options);
+}
+function octreeFromRows(rows, count, options) {
   const capacity = Math.max(1, options?.capacity ?? 8);
   const maxDepth = Math.max(1, options?.maxDepth ?? 12);
   const planeMask = options?.planeMask ?? true;
@@ -4186,14 +4198,16 @@ function buildOctree(items, options) {
   function cellDegenerate(cell) {
     return cell.maxx - cell.minx <= 0.000000001 || cell.maxy - cell.miny <= 0.000000001 || cell.maxz - cell.minz <= 0.000000001;
   }
-  function octantsOf(it, cell) {
+  function octantMask(row, cell) {
+    const g = rows.geo;
+    const o = row * 6;
     const mx = (cell.minx + cell.maxx) * 0.5;
     const my = (cell.miny + cell.maxy) * 0.5;
     const mz = (cell.minz + cell.maxz) * 0.5;
-    const lox = it.cx - it.hx, hix = it.cx + it.hx;
-    const loy = it.cy - it.hy, hiy = it.cy + it.hy;
-    const loz = it.cz - it.hz, hiz = it.cz + it.hz;
-    const hit = new Array(8).fill(false);
+    const lox = g[o] - g[o + 3], hix = g[o] + g[o + 3];
+    const loy = g[o + 1] - g[o + 4], hiy = g[o + 1] + g[o + 4];
+    const loz = g[o + 2] - g[o + 5], hiz = g[o + 2] + g[o + 5];
+    let mask = 0;
     for (let x = 0;x < 2; x++) {
       if (x === 0 ? lox >= mx : hix <= mx)
         continue;
@@ -4203,11 +4217,11 @@ function buildOctree(items, options) {
         for (let z = 0;z < 2; z++) {
           if (z === 0 ? loz >= mz : hiz <= mz)
             continue;
-          hit[y * 4 + z * 2 + x] = true;
+          mask |= 1 << y * 4 + z * 2 + x;
         }
       }
     }
-    return hit;
+    return mask;
   }
   function childCell(cell, k) {
     const mx = (cell.minx + cell.maxx) * 0.5;
@@ -4241,11 +4255,13 @@ function buildOctree(items, options) {
     if (level > depth2)
       depth2 = level;
     const octants = Array.from({ length: 8 }, () => []);
-    for (const it of itemsAt) {
-      const hit = octantsOf(it, cell);
+    for (let i = 0;i < itemsAt.length; i++) {
+      const hit = octantMask(itemsAt[i], cell);
+      if (hit === 0)
+        continue;
       for (let k = 0;k < 8; k++)
-        if (hit[k])
-          octants[k].push(it);
+        if (hit & 1 << k)
+          octants[k].push(itemsAt[i]);
     }
     let progress = false;
     for (const o of octants) {
@@ -4267,11 +4283,13 @@ function buildOctree(items, options) {
     if (n.level >= maxDepth || cellDegenerate(n.b))
       return;
     const octants = Array.from({ length: 8 }, () => []);
-    for (const it of itemsAt) {
-      const hit = octantsOf(it, n.b);
+    for (let i = 0;i < itemsAt.length; i++) {
+      const hit = octantMask(itemsAt[i], n.b);
+      if (hit === 0)
+        continue;
       for (let k = 0;k < 8; k++)
-        if (hit[k])
-          octants[k].push(it);
+        if (hit & 1 << k)
+          octants[k].push(itemsAt[i]);
     }
     let progress = false;
     for (const o of octants) {
@@ -4287,13 +4305,19 @@ function buildOctree(items, options) {
     n.items = null;
     n.kids = kids;
   }
-  let root = buildNode(items.slice(), unionOf(items), 1);
-  const byId = new Map;
-  for (const it of items)
-    byId.set(it.id, it);
+  const initial = new Array(count);
+  for (let i = 0;i < count; i++)
+    initial[i] = i;
+  let root = buildNode(initial, unionRows(rows, initial), 1);
+  const rowOf = new Map;
+  for (let i = 0;i < count; i++)
+    rowOf.set(rows.ids[i], i);
   const moved = new Map;
   const removed = new Set;
-  let maxId = items.length === 0 ? 0 : Math.max(...items.map((b) => b.id));
+  let maxId = 0;
+  for (let i = 0;i < count; i++)
+    if (rows.ids[i] > maxId)
+      maxId = rows.ids[i];
   let seen = new Uint8Array(maxId + 1);
   let stamp = 0;
   const out = [];
@@ -4312,9 +4336,6 @@ function buildOctree(items, options) {
     const grown = new Uint8Array(Math.max(seen.length * 2, id + 1));
     grown.set(seen);
     seen = grown;
-  }
-  function indexed(it) {
-    return !removed.has(it.id) && !moved.has(it.id);
   }
   let planeTests = 0;
   function maskedPlanes(planes, cx, cy, cz, hx, hy, hz, mask, full) {
@@ -4349,24 +4370,32 @@ function buildOctree(items, options) {
       mask = r;
     }
     if (n.items !== null) {
+      const g = rows.geo;
+      const ids = rows.ids;
+      const items = n.items;
       if (mask === 0) {
-        for (const it of n.items) {
-          if (!indexed(it))
+        for (let i = 0;i < items.length; i++) {
+          const row = items[i];
+          const id = ids[row];
+          if (removed.has(id) || moved.has(id))
             continue;
-          if (seen[it.id] !== stamp) {
-            seen[it.id] = stamp;
-            out.push(it.id);
+          if (seen[id] !== stamp) {
+            seen[id] = stamp;
+            out.push(id);
           }
         }
       } else {
-        for (const it of n.items) {
-          if (!indexed(it))
+        for (let i = 0;i < items.length; i++) {
+          const row = items[i];
+          const id = ids[row];
+          if (removed.has(id) || moved.has(id))
             continue;
-          if (seen[it.id] === stamp)
+          if (seen[id] === stamp)
             continue;
-          seen[it.id] = stamp;
-          if (!aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz))
-            out.push(it.id);
+          seen[id] = stamp;
+          const o = row * 6;
+          if (!aabbOutsideFrustum(planes, g[o], g[o + 1], g[o + 2], g[o + 3], g[o + 4], g[o + 5]))
+            out.push(id);
         }
       }
       return;
@@ -4383,14 +4412,20 @@ function buildOctree(items, options) {
     if (!boundsOverlap(n.b, min, max))
       return;
     if (n.items !== null) {
-      for (const it of n.items) {
-        if (!indexed(it))
+      const g = rows.geo;
+      const ids = rows.ids;
+      const items = n.items;
+      for (let i = 0;i < items.length; i++) {
+        const row = items[i];
+        const id = ids[row];
+        if (removed.has(id) || moved.has(id))
           continue;
-        if (seen[it.id] === stamp)
+        if (seen[id] === stamp)
           continue;
-        seen[it.id] = stamp;
-        if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0] && it.cy + it.hy > min[1] && it.cy - it.hy < max[1] && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) {
-          out.push(it.id);
+        seen[id] = stamp;
+        const o = row * 6;
+        if (g[o] + g[o + 3] > min[0] && g[o] - g[o + 3] < max[0] && g[o + 1] + g[o + 4] > min[1] && g[o + 1] - g[o + 4] < max[1] && g[o + 2] + g[o + 5] > min[2] && g[o + 2] - g[o + 5] < max[2]) {
+          out.push(id);
         }
       }
       return;
@@ -4407,22 +4442,23 @@ function buildOctree(items, options) {
     if (!boxReachesSphere(n.b, cx, cy, cz, radius))
       return;
     if (n.items !== null) {
-      for (const it of n.items) {
-        if (!indexed(it))
+      const g = rows.geo;
+      const ids = rows.ids;
+      const items = n.items;
+      for (let i = 0;i < items.length; i++) {
+        const row = items[i];
+        const id = ids[row];
+        if (removed.has(id) || moved.has(id))
           continue;
-        if (seen[it.id] === stamp)
+        if (seen[id] === stamp)
           continue;
-        seen[it.id] = stamp;
-        const b = {
-          minx: it.cx - it.hx,
-          maxx: it.cx + it.hx,
-          miny: it.cy - it.hy,
-          maxy: it.cy + it.hy,
-          minz: it.cz - it.hz,
-          maxz: it.cz + it.hz
-        };
-        if (boxReachesSphere(b, cx, cy, cz, radius))
-          out.push(it.id);
+        seen[id] = stamp;
+        const o = row * 6;
+        const dx = Math.max(g[o] - g[o + 3] - cx, 0, cx - (g[o] + g[o + 3]));
+        const dy = Math.max(g[o + 1] - g[o + 4] - cy, 0, cy - (g[o + 1] + g[o + 4]));
+        const dz = Math.max(g[o + 2] - g[o + 5] - cz, 0, cz - (g[o + 2] + g[o + 5]));
+        if (dx * dx + dy * dy + dz * dz <= radius * radius)
+          out.push(id);
       }
       return;
     }
@@ -4438,14 +4474,20 @@ function buildOctree(items, options) {
     if (x < n.b.minx || x > n.b.maxx || y < n.b.miny || y > n.b.maxy || z < n.b.minz || z > n.b.maxz)
       return;
     if (n.items !== null) {
-      for (const it of n.items) {
-        if (!indexed(it))
+      const g = rows.geo;
+      const ids = rows.ids;
+      const items = n.items;
+      for (let i = 0;i < items.length; i++) {
+        const row = items[i];
+        const id = ids[row];
+        if (removed.has(id) || moved.has(id))
           continue;
-        if (seen[it.id] === stamp)
+        if (seen[id] === stamp)
           continue;
-        seen[it.id] = stamp;
-        if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
-          out.push(it.id);
+        seen[id] = stamp;
+        const o = row * 6;
+        if (Math.abs(x - g[o]) <= g[o + 3] && Math.abs(y - g[o + 1]) <= g[o + 4] && Math.abs(z - g[o + 2]) <= g[o + 5]) {
+          out.push(id);
         }
       }
       return;
@@ -4459,19 +4501,26 @@ function buildOctree(items, options) {
     }
   }
   function walkRay(n, ox, oy, oz, ix, iy, iz, t0, t1) {
-    const clip = clipRay(ox, oy, oz, ix, iy, iz, n.b, t0, t1);
-    if (clip === null)
+    const en = slabEnter(ox, oy, oz, ix, iy, iz, n.b.minx, n.b.miny, n.b.minz, n.b.maxx, n.b.maxy, n.b.maxz, t0, t1);
+    if (en < 0)
       return;
+    const ex = slabExit;
     if (n.items !== null) {
-      for (const it of n.items) {
-        if (!indexed(it))
+      const g = rows.geo;
+      const ids = rows.ids;
+      const items = n.items;
+      for (let i = 0;i < items.length; i++) {
+        const row = items[i];
+        const id = ids[row];
+        if (removed.has(id) || moved.has(id))
           continue;
-        if (seen[it.id] === stamp)
+        if (seen[id] === stamp)
           continue;
-        seen[it.id] = stamp;
-        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, Infinity);
+        seen[id] = stamp;
+        const o = row * 6;
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, g[o] - g[o + 3], g[o + 1] - g[o + 4], g[o + 2] - g[o + 5], g[o] + g[o + 3], g[o + 1] + g[o + 4], g[o + 2] + g[o + 5], 0, Infinity);
         if (hit >= 0)
-          hits.push({ id: it.id, t: hit });
+          hits.push({ id, t: hit });
       }
       return;
     }
@@ -4479,7 +4528,7 @@ function buildOctree(items, options) {
     if (kids !== null) {
       for (const k of kids) {
         if (k !== null)
-          walkRay(k, ox, oy, oz, ix, iy, iz, clip[0], clip[1]);
+          walkRay(k, ox, oy, oz, ix, iy, iz, en, ex);
       }
     }
   }
@@ -4491,13 +4540,19 @@ function buildOctree(items, options) {
       return;
     const ex = slabExit;
     if (n.items !== null) {
-      for (const it of n.items) {
-        if (!indexed(it))
+      const g = rows.geo;
+      const ids = rows.ids;
+      const items = n.items;
+      for (let i = 0;i < items.length; i++) {
+        const row = items[i];
+        const id = ids[row];
+        if (removed.has(id) || moved.has(id))
           continue;
-        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t);
+        const o = row * 6;
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, g[o] - g[o + 3], g[o + 1] - g[o + 4], g[o + 2] - g[o + 5], g[o] + g[o + 3], g[o + 1] + g[o + 4], g[o + 2] + g[o + 5], 0, best.t);
         if (hit >= 0 && hit < best.t) {
           best.t = hit;
-          best.id = it.id;
+          best.id = id;
         }
       }
       return;
@@ -4510,21 +4565,23 @@ function buildOctree(items, options) {
       }
     }
   }
-  function insertAt(n, it) {
-    if (it.cx - it.hx < n.b.minx)
-      n.b.minx = it.cx - it.hx;
-    if (it.cy - it.hy < n.b.miny)
-      n.b.miny = it.cy - it.hy;
-    if (it.cz - it.hz < n.b.minz)
-      n.b.minz = it.cz - it.hz;
-    if (it.cx + it.hx > n.b.maxx)
-      n.b.maxx = it.cx + it.hx;
-    if (it.cy + it.hy > n.b.maxy)
-      n.b.maxy = it.cy + it.hy;
-    if (it.cz + it.hz > n.b.maxz)
-      n.b.maxz = it.cz + it.hz;
+  function insertAt(n, row) {
+    const g = rows.geo;
+    const o = row * 6;
+    if (g[o] - g[o + 3] < n.b.minx)
+      n.b.minx = g[o] - g[o + 3];
+    if (g[o + 1] - g[o + 4] < n.b.miny)
+      n.b.miny = g[o + 1] - g[o + 4];
+    if (g[o + 2] - g[o + 5] < n.b.minz)
+      n.b.minz = g[o + 2] - g[o + 5];
+    if (g[o] + g[o + 3] > n.b.maxx)
+      n.b.maxx = g[o] + g[o + 3];
+    if (g[o + 1] + g[o + 4] > n.b.maxy)
+      n.b.maxy = g[o + 1] + g[o + 4];
+    if (g[o + 2] + g[o + 5] > n.b.maxz)
+      n.b.maxz = g[o + 2] + g[o + 5];
     if (n.items !== null) {
-      n.items.push(it);
+      n.items.push(row);
       if (n.items.length > capacity)
         growLeaf(n);
       return;
@@ -4532,84 +4589,125 @@ function buildOctree(items, options) {
     const kids = n.kids;
     if (kids === null)
       return;
-    const hit = octantsOf(it, n.b);
+    const hit = octantMask(row, n.b);
+    if (hit === 0)
+      return;
     for (let k = 0;k < 8; k++) {
-      if (hit[k] && kids[k] !== null)
-        insertAt(kids[k], it);
+      if (hit & 1 << k) {
+        const kid = kids[k];
+        if (kid !== null)
+          insertAt(kid, row);
+      }
     }
   }
   function laneFrustum(planes) {
-    for (const it of moved.values()) {
-      if (seen[it.id] === stamp)
+    const g = rows.geo;
+    for (const row of moved.values()) {
+      const id = rows.ids[row];
+      if (seen[id] === stamp)
         continue;
-      seen[it.id] = stamp;
-      if (!aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz))
-        out.push(it.id);
+      seen[id] = stamp;
+      const o = row * 6;
+      if (!aabbOutsideFrustum(planes, g[o], g[o + 1], g[o + 2], g[o + 3], g[o + 4], g[o + 5]))
+        out.push(id);
     }
   }
   function laneBox(min, max) {
-    for (const it of moved.values()) {
-      if (seen[it.id] === stamp)
+    const g = rows.geo;
+    for (const row of moved.values()) {
+      const id = rows.ids[row];
+      if (seen[id] === stamp)
         continue;
-      seen[it.id] = stamp;
-      if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0] && it.cy + it.hy > min[1] && it.cy - it.hy < max[1] && it.cz + it.hz > min[2] && it.cz - it.hz < max[2])
-        out.push(it.id);
+      seen[id] = stamp;
+      const o = row * 6;
+      if (g[o] + g[o + 3] > min[0] && g[o] - g[o + 3] < max[0] && g[o + 1] + g[o + 4] > min[1] && g[o + 1] - g[o + 4] < max[1] && g[o + 2] + g[o + 5] > min[2] && g[o + 2] - g[o + 5] < max[2])
+        out.push(id);
     }
   }
   function laneSphere(cx, cy, cz, radius) {
-    for (const it of moved.values()) {
-      if (seen[it.id] === stamp)
+    const g = rows.geo;
+    for (const row of moved.values()) {
+      const id = rows.ids[row];
+      if (seen[id] === stamp)
         continue;
-      seen[it.id] = stamp;
-      const dx = Math.max(it.cx - it.hx - cx, 0, cx - (it.cx + it.hx));
-      const dy = Math.max(it.cy - it.hy - cy, 0, cy - (it.cy + it.hy));
-      const dz = Math.max(it.cz - it.hz - cz, 0, cz - (it.cz + it.hz));
+      seen[id] = stamp;
+      const o = row * 6;
+      const dx = Math.max(g[o] - g[o + 3] - cx, 0, cx - (g[o] + g[o + 3]));
+      const dy = Math.max(g[o + 1] - g[o + 4] - cy, 0, cy - (g[o + 1] + g[o + 4]));
+      const dz = Math.max(g[o + 2] - g[o + 5] - cz, 0, cz - (g[o + 2] + g[o + 5]));
       if (dx * dx + dy * dy + dz * dz <= radius * radius)
-        out.push(it.id);
+        out.push(id);
     }
   }
   function lanePoint(x, y, z) {
-    for (const it of moved.values()) {
-      if (seen[it.id] === stamp)
+    const g = rows.geo;
+    for (const row of moved.values()) {
+      const id = rows.ids[row];
+      if (seen[id] === stamp)
         continue;
-      seen[it.id] = stamp;
-      if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz)
-        out.push(it.id);
+      seen[id] = stamp;
+      const o = row * 6;
+      if (Math.abs(x - g[o]) <= g[o + 3] && Math.abs(y - g[o + 1]) <= g[o + 4] && Math.abs(z - g[o + 2]) <= g[o + 5])
+        out.push(id);
     }
   }
   function laneRay(ox, oy, oz, ix, iy, iz) {
-    for (const it of moved.values()) {
-      if (seen[it.id] === stamp)
+    const g = rows.geo;
+    for (const row of moved.values()) {
+      const id = rows.ids[row];
+      if (seen[id] === stamp)
         continue;
-      seen[it.id] = stamp;
-      const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, Infinity);
+      seen[id] = stamp;
+      const o = row * 6;
+      const hit = slabEnter(ox, oy, oz, ix, iy, iz, g[o] - g[o + 3], g[o + 1] - g[o + 4], g[o + 2] - g[o + 5], g[o] + g[o + 3], g[o + 1] + g[o + 4], g[o + 2] + g[o + 5], 0, Infinity);
       if (hit >= 0)
-        hits.push({ id: it.id, t: hit });
+        hits.push({ id, t: hit });
     }
   }
   function laneRayFirst(ox, oy, oz, ix, iy, iz, best) {
-    for (const it of moved.values()) {
-      const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t);
+    const g = rows.geo;
+    for (const row of moved.values()) {
+      const id = rows.ids[row];
+      const o = row * 6;
+      const hit = slabEnter(ox, oy, oz, ix, iy, iz, g[o] - g[o + 3], g[o + 1] - g[o + 4], g[o + 2] - g[o + 5], g[o] + g[o + 3], g[o + 1] + g[o + 4], g[o + 2] + g[o + 5], 0, best.t);
       if (hit >= 0 && hit < best.t) {
         best.t = hit;
-        best.id = it.id;
+        best.id = id;
       }
     }
   }
   function rebuild() {
-    const liveItems = Array.from(byId.values());
+    const live = [];
+    for (const row of rowOf.values())
+      live.push(row);
+    const geo = rows.geo;
+    const ids = rows.ids;
+    for (let k = 0;k < live.length; k++) {
+      const src = live[k];
+      if (src !== k) {
+        const so = src * 6, to = k * 6;
+        for (let f = 0;f < 6; f++)
+          geo[to + f] = geo[so + f];
+        ids[k] = ids[src];
+      }
+      rowOf.set(ids[k], k);
+    }
+    rows.n = live.length;
     removed.clear();
     nodes = 0;
     leaves = 0;
     depth2 = 0;
     moved.clear();
-    root = buildNode(liveItems, unionOf(liveItems), 1);
+    const fresh = new Array(live.length);
+    for (let i = 0;i < live.length; i++)
+      fresh[i] = i;
+    root = buildNode(fresh, unionRows(rows, fresh), 1);
   }
   const index = {
     kind: "octree",
-    count: items.length,
+    count,
     get live() {
-      return byId.size;
+      return rowOf.size;
     },
     stats: {
       get nodes() {
@@ -4624,7 +4722,7 @@ function buildOctree(items, options) {
       get lane() {
         return moved.size;
       },
-      items: items.length
+      items: count
     },
     get planeTests() {
       return planeTests;
@@ -4675,72 +4773,132 @@ function buildOctree(items, options) {
       return best.id >= 0 ? { id: best.id, t: best.t } : null;
     },
     insert(box) {
-      maxId = Math.max(maxId, box.id);
-      ensureCapacity(box.id);
-      if (removed.delete(box.id) || byId.has(box.id)) {
-        byId.set(box.id, box);
-        moved.set(box.id, box);
+      this.insertBox(box.id, box.cx, box.cy, box.cz, box.hx, box.hy, box.hz);
+    },
+    insertBox(id, cx, cy, cz, hx, hy, hz) {
+      assertKitId(id);
+      maxId = Math.max(maxId, id);
+      ensureCapacity(id);
+      let row = rowOf.get(id);
+      if (row === undefined)
+        row = allocRow(rows, id);
+      const known = removed.delete(id) || rowOf.has(id);
+      const o = row * 6;
+      rows.geo[o] = cx;
+      rows.geo[o + 1] = cy;
+      rows.geo[o + 2] = cz;
+      rows.geo[o + 3] = hx;
+      rows.geo[o + 4] = hy;
+      rows.geo[o + 5] = hz;
+      rowOf.set(id, row);
+      if (known) {
+        moved.set(id, row);
         return;
       }
-      byId.set(box.id, box);
-      insertAt(root, box);
+      insertAt(root, row);
     },
     remove(id) {
       if (removed.has(id))
         return;
       removed.add(id);
-      byId.delete(id);
+      rowOf.delete(id);
       moved.delete(id);
     },
     update(box) {
-      if (byId.has(box.id)) {
-        byId.set(box.id, box);
-        moved.set(box.id, box);
+      this.updateBox(box.id, box.cx, box.cy, box.cz, box.hx, box.hy, box.hz);
+    },
+    updateBox(id, cx, cy, cz, hx, hy, hz) {
+      const row = rowOf.get(id);
+      if (row !== undefined) {
+        const o = row * 6;
+        rows.geo[o] = cx;
+        rows.geo[o + 1] = cy;
+        rows.geo[o + 2] = cz;
+        rows.geo[o + 3] = hx;
+        rows.geo[o + 4] = hy;
+        rows.geo[o + 5] = hz;
+        moved.set(id, row);
         return;
       }
-      this.insert(box);
+      this.insertBox(id, cx, cy, cz, hx, hy, hz);
     },
     rebuild
   };
   return index;
 }
 function buildBVH(items, options) {
+  const rows = kitRows(items.length);
+  for (let i = 0;i < items.length; i++) {
+    const it = items[i];
+    assertKitId(it.id);
+    const row = allocRow(rows, it.id);
+    const o = row * 6;
+    rows.geo[o] = it.cx;
+    rows.geo[o + 1] = it.cy;
+    rows.geo[o + 2] = it.cz;
+    rows.geo[o + 3] = it.hx;
+    rows.geo[o + 4] = it.hy;
+    rows.geo[o + 5] = it.hz;
+  }
+  return bvhFromRows(rows, items.length, options);
+}
+function buildBVHRecords(view, options) {
+  const rows = kitRows(view.count);
+  const w = view.words;
+  const cOff = view.base + view.center;
+  const hOff = view.base + view.half;
+  const stride = view.stride;
+  const geo = rows.geo;
+  for (let i = 0;i < view.count; i++) {
+    const co = cOff + i * stride;
+    const ho = hOff + i * stride;
+    rows.ids[i] = i;
+    const o = i * 6;
+    geo[o] = w[co];
+    geo[o + 1] = w[co + 1];
+    geo[o + 2] = w[co + 2];
+    geo[o + 3] = w[ho];
+    geo[o + 4] = w[ho + 1];
+    geo[o + 5] = w[ho + 2];
+  }
+  rows.n = view.count;
+  return bvhFromRows(rows, view.count, options);
+}
+function bvhFromRows(rows, count, options) {
   const capacity = Math.max(1, options?.capacity ?? 8);
   const planeMask = options?.planeMask ?? true;
   let layout = [];
   let overflow = [];
   const removed = new Set;
-  const byId = new Map;
-  for (const it of items)
-    byId.set(it.id, it);
+  const rowOf = new Map;
+  for (let i = 0;i < count; i++)
+    rowOf.set(rows.ids[i], i);
   const moved = new Map;
   let nodes = 0;
   let leaves = 0;
   let depth2 = 0;
   let root = null;
-  function centerAlong(b, axis) {
-    return axis === 0 ? b.cx : axis === 1 ? b.cy : b.cz;
-  }
   function buildNode(from, to, level) {
     nodes++;
     if (level > depth2)
       depth2 = level;
+    const g = rows.geo;
     let minx = Infinity, miny = Infinity, minz = Infinity;
     let maxx = -Infinity, maxy = -Infinity, maxz = -Infinity;
     for (let i = from;i < to; i++) {
-      const b2 = layout[i];
-      if (b2.cx - b2.hx < minx)
-        minx = b2.cx - b2.hx;
-      if (b2.cy - b2.hy < miny)
-        miny = b2.cy - b2.hy;
-      if (b2.cz - b2.hz < minz)
-        minz = b2.cz - b2.hz;
-      if (b2.cx + b2.hx > maxx)
-        maxx = b2.cx + b2.hx;
-      if (b2.cy + b2.hy > maxy)
-        maxy = b2.cy + b2.hy;
-      if (b2.cz + b2.hz > maxz)
-        maxz = b2.cz + b2.hz;
+      const o = layout[i] * 6;
+      if (g[o] - g[o + 3] < minx)
+        minx = g[o] - g[o + 3];
+      if (g[o + 1] - g[o + 4] < miny)
+        miny = g[o + 1] - g[o + 4];
+      if (g[o + 2] - g[o + 5] < minz)
+        minz = g[o + 2] - g[o + 5];
+      if (g[o] + g[o + 3] > maxx)
+        maxx = g[o] + g[o + 3];
+      if (g[o + 1] + g[o + 4] > maxy)
+        maxy = g[o + 1] + g[o + 4];
+      if (g[o + 2] + g[o + 5] > maxz)
+        maxz = g[o + 2] + g[o + 5];
     }
     const b = { minx, miny, minz, maxx, maxy, maxz };
     if (to - from <= capacity) {
@@ -4750,15 +4908,33 @@ function buildBVH(items, options) {
     const ex = b.maxx - b.minx, ey = b.maxy - b.miny, ez = b.maxz - b.minz;
     const axis = ex >= ey && ex >= ez ? 0 : ey >= ez ? 1 : 2;
     const slice = layout.slice(from, to);
-    slice.sort((p, q) => centerAlong(p, axis) - centerAlong(q, axis));
+    const geo = rows.geo;
+    slice.sort((a, b2) => geo[a * 6 + axis] - geo[b2 * 6 + axis]);
     for (let k = 0;k < slice.length; k++)
       layout[from + k] = slice[k];
     const mid = from + (to - from >> 1);
     return { b, from, to, left: buildNode(from, mid, level + 1), right: buildNode(mid, to, level + 1) };
   }
   function rebuild() {
-    const liveItems = Array.from(byId.values());
-    layout = liveItems;
+    const live = [];
+    for (const row of rowOf.values())
+      live.push(row);
+    const geo = rows.geo;
+    const ids = rows.ids;
+    for (let k = 0;k < live.length; k++) {
+      const src = live[k];
+      if (src !== k) {
+        const so = src * 6, to = k * 6;
+        for (let f = 0;f < 6; f++)
+          geo[to + f] = geo[so + f];
+        ids[k] = ids[src];
+      }
+      rowOf.set(ids[k], k);
+    }
+    rows.n = live.length;
+    layout = [];
+    for (let i = 0;i < live.length; i++)
+      layout.push(i);
     overflow = [];
     removed.clear();
     moved.clear();
@@ -4770,9 +4946,6 @@ function buildBVH(items, options) {
   rebuild();
   const out = [];
   const hits = [];
-  function indexed(it) {
-    return !removed.has(it.id) && !moved.has(it.id);
-  }
   let planeTests = 0;
   function maskedPlanes(planes, cx, cy, cz, hx, hy, hz, mask, full) {
     let m = full ? 63 : mask;
@@ -4822,12 +4995,16 @@ function buildBVH(items, options) {
     const l = n.left;
     const r = n.right;
     if (l === null || r === null) {
+      const g = rows.geo;
+      const ids = rows.ids;
       for (let i = n.from;i < n.to; i++) {
-        const it = layout[i];
-        if (!indexed(it))
+        const row = layout[i];
+        const id = ids[row];
+        if (removed.has(id) || moved.has(id))
           continue;
-        if (mask === 0 || !itemOutsideMasked(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz, mask)) {
-          out.push(it.id);
+        const o = row * 6;
+        if (mask === 0 || !itemOutsideMasked(planes, g[o], g[o + 1], g[o + 2], g[o + 3], g[o + 4], g[o + 5], mask)) {
+          out.push(id);
         }
       }
       return;
@@ -4841,12 +5018,16 @@ function buildBVH(items, options) {
     const l = n.left;
     const r = n.right;
     if (l === null || r === null) {
+      const g = rows.geo;
+      const ids = rows.ids;
       for (let i = n.from;i < n.to; i++) {
-        const it = layout[i];
-        if (!indexed(it))
+        const row = layout[i];
+        const id = ids[row];
+        if (removed.has(id) || moved.has(id))
           continue;
-        if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0] && it.cy + it.hy > min[1] && it.cy - it.hy < max[1] && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) {
-          out.push(it.id);
+        const o = row * 6;
+        if (g[o] + g[o + 3] > min[0] && g[o] - g[o + 3] < max[0] && g[o + 1] + g[o + 4] > min[1] && g[o + 1] - g[o + 4] < max[1] && g[o + 2] + g[o + 5] > min[2] && g[o + 2] - g[o + 5] < max[2]) {
+          out.push(id);
         }
       }
       return;
@@ -4860,20 +5041,19 @@ function buildBVH(items, options) {
     const l = n.left;
     const r = n.right;
     if (l === null || r === null) {
+      const g = rows.geo;
+      const ids = rows.ids;
       for (let i = n.from;i < n.to; i++) {
-        const it = layout[i];
-        if (!indexed(it))
+        const row = layout[i];
+        const id = ids[row];
+        if (removed.has(id) || moved.has(id))
           continue;
-        const b = {
-          minx: it.cx - it.hx,
-          maxx: it.cx + it.hx,
-          miny: it.cy - it.hy,
-          maxy: it.cy + it.hy,
-          minz: it.cz - it.hz,
-          maxz: it.cz + it.hz
-        };
-        if (boxReachesSphere(b, cx, cy, cz, radius))
-          out.push(it.id);
+        const o = row * 6;
+        const dx = Math.max(g[o] - g[o + 3] - cx, 0, cx - (g[o] + g[o + 3]));
+        const dy = Math.max(g[o + 1] - g[o + 4] - cy, 0, cy - (g[o + 1] + g[o + 4]));
+        const dz = Math.max(g[o + 2] - g[o + 5] - cz, 0, cz - (g[o + 2] + g[o + 5]));
+        if (dx * dx + dy * dy + dz * dz <= radius * radius)
+          out.push(id);
       }
       return;
     }
@@ -4886,12 +5066,16 @@ function buildBVH(items, options) {
     const l = n.left;
     const r = n.right;
     if (l === null || r === null) {
+      const g = rows.geo;
+      const ids = rows.ids;
       for (let i = n.from;i < n.to; i++) {
-        const it = layout[i];
-        if (!indexed(it))
+        const row = layout[i];
+        const id = ids[row];
+        if (removed.has(id) || moved.has(id))
           continue;
-        if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
-          out.push(it.id);
+        const o = row * 6;
+        if (Math.abs(x - g[o]) <= g[o + 3] && Math.abs(y - g[o + 1]) <= g[o + 4] && Math.abs(z - g[o + 2]) <= g[o + 5]) {
+          out.push(id);
         }
       }
       return;
@@ -4907,13 +5091,17 @@ function buildBVH(items, options) {
     const l = n.left;
     const r = n.right;
     if (l === null || r === null) {
+      const g = rows.geo;
+      const ids = rows.ids;
       for (let i = n.from;i < n.to; i++) {
-        const it = layout[i];
-        if (!indexed(it))
+        const row = layout[i];
+        const id = ids[row];
+        if (removed.has(id) || moved.has(id))
           continue;
-        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, t1);
+        const o = row * 6;
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, g[o] - g[o + 3], g[o + 1] - g[o + 4], g[o + 2] - g[o + 5], g[o] + g[o + 3], g[o + 1] + g[o + 4], g[o + 2] + g[o + 5], 0, t1);
         if (hit >= 0)
-          hits.push({ id: it.id, t: hit });
+          hits.push({ id, t: hit });
       }
       return;
     }
@@ -4941,14 +5129,18 @@ function buildBVH(items, options) {
     const l = n.left;
     const r = n.right;
     if (l === null || r === null) {
+      const g = rows.geo;
+      const ids = rows.ids;
       for (let i = n.from;i < n.to; i++) {
-        const it = layout[i];
-        if (!indexed(it))
+        const row = layout[i];
+        const id = ids[row];
+        if (removed.has(id) || moved.has(id))
           continue;
-        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t);
+        const o = row * 6;
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, g[o] - g[o + 3], g[o + 1] - g[o + 4], g[o + 2] - g[o + 5], g[o] + g[o + 3], g[o + 1] + g[o + 4], g[o + 2] + g[o + 5], 0, best.t);
         if (hit >= 0 && hit < best.t) {
           best.t = hit;
-          best.id = it.id;
+          best.id = id;
         }
       }
       return;
@@ -4971,9 +5163,9 @@ function buildBVH(items, options) {
   }
   const index = {
     kind: "bvh",
-    count: items.length,
+    count,
     get live() {
-      return byId.size;
+      return rowOf.size;
     },
     stats: { get nodes() {
       return nodes;
@@ -4983,7 +5175,7 @@ function buildBVH(items, options) {
       return depth2;
     }, get lane() {
       return moved.size;
-    }, items: items.length },
+    }, items: count },
     get planeTests() {
       return planeTests;
     },
@@ -5000,16 +5192,22 @@ function buildBVH(items, options) {
       out.length = 0;
       if (root !== null)
         walkBox(root, min, max);
-      for (const it of overflow) {
-        if (!indexed(it))
+      const g = rows.geo;
+      const ids = rows.ids;
+      for (const row of overflow) {
+        const id = ids[row];
+        if (removed.has(id) || moved.has(id))
           continue;
-        if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0] && it.cy + it.hy > min[1] && it.cy - it.hy < max[1] && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) {
-          out.push(it.id);
+        const o = row * 6;
+        if (g[o] + g[o + 3] > min[0] && g[o] - g[o + 3] < max[0] && g[o + 1] + g[o + 4] > min[1] && g[o + 1] - g[o + 4] < max[1] && g[o + 2] + g[o + 5] > min[2] && g[o + 2] - g[o + 5] < max[2]) {
+          out.push(id);
         }
       }
-      for (const it of moved.values()) {
-        if (it.cx + it.hx > min[0] && it.cx - it.hx < max[0] && it.cy + it.hy > min[1] && it.cy - it.hy < max[1] && it.cz + it.hz > min[2] && it.cz - it.hz < max[2]) {
-          out.push(it.id);
+      for (const row of moved.values()) {
+        const id = rows.ids[row];
+        const o = row * 6;
+        if (g[o] + g[o + 3] > min[0] && g[o] - g[o + 3] < max[0] && g[o + 1] + g[o + 4] > min[1] && g[o + 1] - g[o + 4] < max[1] && g[o + 2] + g[o + 5] > min[2] && g[o + 2] - g[o + 5] < max[2]) {
+          out.push(id);
         }
       }
       return Uint32Array.from(out);
@@ -5018,26 +5216,27 @@ function buildBVH(items, options) {
       out.length = 0;
       if (root !== null)
         walkSphere(root, cx, cy, cz, radius);
-      for (const it of overflow) {
-        if (!indexed(it))
+      const g = rows.geo;
+      const ids = rows.ids;
+      for (const row of overflow) {
+        const id = ids[row];
+        if (removed.has(id) || moved.has(id))
           continue;
-        const b = {
-          minx: it.cx - it.hx,
-          maxx: it.cx + it.hx,
-          miny: it.cy - it.hy,
-          maxy: it.cy + it.hy,
-          minz: it.cz - it.hz,
-          maxz: it.cz + it.hz
-        };
-        if (boxReachesSphere(b, cx, cy, cz, radius))
-          out.push(it.id);
-      }
-      for (const it of moved.values()) {
-        const dx = Math.max(it.cx - it.hx - cx, 0, cx - (it.cx + it.hx));
-        const dy = Math.max(it.cy - it.hy - cy, 0, cy - (it.cy + it.hy));
-        const dz = Math.max(it.cz - it.hz - cz, 0, cz - (it.cz + it.hz));
+        const o = row * 6;
+        const dx = Math.max(g[o] - g[o + 3] - cx, 0, cx - (g[o] + g[o + 3]));
+        const dy = Math.max(g[o + 1] - g[o + 4] - cy, 0, cy - (g[o + 1] + g[o + 4]));
+        const dz = Math.max(g[o + 2] - g[o + 5] - cz, 0, cz - (g[o + 2] + g[o + 5]));
         if (dx * dx + dy * dy + dz * dz <= radius * radius)
-          out.push(it.id);
+          out.push(id);
+      }
+      for (const row of moved.values()) {
+        const id = rows.ids[row];
+        const o = row * 6;
+        const dx = Math.max(g[o] - g[o + 3] - cx, 0, cx - (g[o] + g[o + 3]));
+        const dy = Math.max(g[o + 1] - g[o + 4] - cy, 0, cy - (g[o + 1] + g[o + 4]));
+        const dz = Math.max(g[o + 2] - g[o + 5] - cz, 0, cz - (g[o + 2] + g[o + 5]));
+        if (dx * dx + dy * dy + dz * dz <= radius * radius)
+          out.push(id);
       }
       return Uint32Array.from(out);
     },
@@ -5045,16 +5244,22 @@ function buildBVH(items, options) {
       out.length = 0;
       if (root !== null)
         walkPoint(root, x, y, z);
-      for (const it of overflow) {
-        if (!indexed(it))
+      const g = rows.geo;
+      const ids = rows.ids;
+      for (const row of overflow) {
+        const id = ids[row];
+        if (removed.has(id) || moved.has(id))
           continue;
-        if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
-          out.push(it.id);
+        const o = row * 6;
+        if (Math.abs(x - g[o]) <= g[o + 3] && Math.abs(y - g[o + 1]) <= g[o + 4] && Math.abs(z - g[o + 2]) <= g[o + 5]) {
+          out.push(id);
         }
       }
-      for (const it of moved.values()) {
-        if (Math.abs(x - it.cx) <= it.hx && Math.abs(y - it.cy) <= it.hy && Math.abs(z - it.cz) <= it.hz) {
-          out.push(it.id);
+      for (const row of moved.values()) {
+        const id = rows.ids[row];
+        const o = row * 6;
+        if (Math.abs(x - g[o]) <= g[o + 3] && Math.abs(y - g[o + 1]) <= g[o + 4] && Math.abs(z - g[o + 2]) <= g[o + 5]) {
+          out.push(id);
         }
       }
       return Uint32Array.from(out);
@@ -5067,17 +5272,23 @@ function buildBVH(items, options) {
       const iz = dz !== 0 ? 1 / dz : Infinity;
       if (root !== null)
         walkRay(root, ox, oy, oz, ix, iy, iz, 0, Infinity);
-      for (const it of overflow) {
-        if (!indexed(it))
+      const g = rows.geo;
+      const ids = rows.ids;
+      for (const row of overflow) {
+        const id = ids[row];
+        if (removed.has(id) || moved.has(id))
           continue;
-        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, Infinity);
+        const o = row * 6;
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, g[o] - g[o + 3], g[o + 1] - g[o + 4], g[o + 2] - g[o + 5], g[o] + g[o + 3], g[o + 1] + g[o + 4], g[o + 2] + g[o + 5], 0, Infinity);
         if (hit >= 0)
-          hits.push({ id: it.id, t: hit });
+          hits.push({ id, t: hit });
       }
-      for (const it of moved.values()) {
-        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, Infinity);
+      for (const row of moved.values()) {
+        const id = rows.ids[row];
+        const o = row * 6;
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, g[o] - g[o + 3], g[o + 1] - g[o + 4], g[o + 2] - g[o + 5], g[o] + g[o + 3], g[o + 1] + g[o + 4], g[o + 2] + g[o + 5], 0, Infinity);
         if (hit >= 0)
-          hits.push({ id: it.id, t: hit });
+          hits.push({ id, t: hit });
       }
       hits.sort((a, b) => a.t - b.t);
       return hits.slice();
@@ -5089,60 +5300,97 @@ function buildBVH(items, options) {
       const best = { t: Infinity, id: -1 };
       if (root !== null)
         walkRayFirst(root, ox, oy, oz, ix, iy, iz, 0, Infinity, best);
-      for (const it of overflow) {
-        if (!indexed(it))
+      const g = rows.geo;
+      const ids = rows.ids;
+      for (const row of overflow) {
+        const id = ids[row];
+        if (removed.has(id) || moved.has(id))
           continue;
-        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t);
+        const o = row * 6;
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, g[o] - g[o + 3], g[o + 1] - g[o + 4], g[o + 2] - g[o + 5], g[o] + g[o + 3], g[o + 1] + g[o + 4], g[o + 2] + g[o + 5], 0, best.t);
         if (hit >= 0 && hit < best.t) {
           best.t = hit;
-          best.id = it.id;
+          best.id = id;
         }
       }
-      for (const it of moved.values()) {
-        const hit = slabEnter(ox, oy, oz, ix, iy, iz, it.cx - it.hx, it.cy - it.hy, it.cz - it.hz, it.cx + it.hx, it.cy + it.hy, it.cz + it.hz, 0, best.t);
+      for (const row of moved.values()) {
+        const id = rows.ids[row];
+        const o = row * 6;
+        const hit = slabEnter(ox, oy, oz, ix, iy, iz, g[o] - g[o + 3], g[o + 1] - g[o + 4], g[o + 2] - g[o + 5], g[o] + g[o + 3], g[o + 1] + g[o + 4], g[o + 2] + g[o + 5], 0, best.t);
         if (hit >= 0 && hit < best.t) {
           best.t = hit;
-          best.id = it.id;
+          best.id = id;
         }
       }
       return best.id >= 0 ? { id: best.id, t: best.t } : null;
     },
     insert(box) {
-      if (removed.delete(box.id) || byId.has(box.id)) {
-        byId.set(box.id, box);
-        moved.set(box.id, box);
+      this.insertBox(box.id, box.cx, box.cy, box.cz, box.hx, box.hy, box.hz);
+    },
+    insertBox(id, cx, cy, cz, hx, hy, hz) {
+      assertKitId(id);
+      let row = rowOf.get(id);
+      if (row === undefined)
+        row = allocRow(rows, id);
+      const known = removed.delete(id) || rowOf.has(id);
+      const o = row * 6;
+      rows.geo[o] = cx;
+      rows.geo[o + 1] = cy;
+      rows.geo[o + 2] = cz;
+      rows.geo[o + 3] = hx;
+      rows.geo[o + 4] = hy;
+      rows.geo[o + 5] = hz;
+      rowOf.set(id, row);
+      if (known) {
+        moved.set(id, row);
         return;
       }
-      byId.set(box.id, box);
-      overflow.push(box);
+      overflow.push(row);
     },
     remove(id) {
       removed.add(id);
-      byId.delete(id);
+      rowOf.delete(id);
       moved.delete(id);
     },
     update(box) {
-      if (byId.has(box.id)) {
-        byId.set(box.id, box);
-        moved.set(box.id, box);
+      this.updateBox(box.id, box.cx, box.cy, box.cz, box.hx, box.hy, box.hz);
+    },
+    updateBox(id, cx, cy, cz, hx, hy, hz) {
+      const row = rowOf.get(id);
+      if (row !== undefined) {
+        const o = row * 6;
+        rows.geo[o] = cx;
+        rows.geo[o + 1] = cy;
+        rows.geo[o + 2] = cz;
+        rows.geo[o + 3] = hx;
+        rows.geo[o + 4] = hy;
+        rows.geo[o + 5] = hz;
+        moved.set(id, row);
         return;
       }
-      this.insert(box);
+      this.insertBox(id, cx, cy, cz, hx, hy, hz);
     },
     rebuild
   };
   function scanLaneFrustum(planes) {
-    for (const it of moved.values()) {
-      if (!aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz))
-        out.push(it.id);
+    const g = rows.geo;
+    for (const row of moved.values()) {
+      const id = rows.ids[row];
+      const o = row * 6;
+      if (!aabbOutsideFrustum(planes, g[o], g[o + 1], g[o + 2], g[o + 3], g[o + 4], g[o + 5]))
+        out.push(id);
     }
   }
   function scanOverflowFrustum(planes) {
-    for (const it of overflow) {
-      if (!indexed(it))
+    const g = rows.geo;
+    const ids = rows.ids;
+    for (const row of overflow) {
+      const id = ids[row];
+      if (removed.has(id) || moved.has(id))
         continue;
-      if (!aabbOutsideFrustum(planes, it.cx, it.cy, it.cz, it.hx, it.hy, it.hz))
-        out.push(it.id);
+      const o = row * 6;
+      if (!aabbOutsideFrustum(planes, g[o], g[o + 1], g[o + 2], g[o + 3], g[o + 4], g[o + 5]))
+        out.push(id);
     }
   }
   return index;
@@ -7132,9 +7380,11 @@ __export(exports_src, {
   classifyDeviceLost: () => classifyDeviceLost,
   chunkRect: () => chunkRect,
   cameraRay: () => cameraRay,
+  buildOctreeRecords: () => buildOctreeRecords,
   buildOctree: () => buildOctree,
   buildFrameReRecording: () => buildFrameReRecording,
   buildFrame: () => buildFrame,
+  buildBVHRecords: () => buildBVHRecords,
   buildBVH: () => buildBVH,
   bitonicPassSequence: () => bitonicPassSequence,
   bitonicPadCount: () => bitonicPadCount,
@@ -20562,7 +20812,9 @@ export {
   capsule,
   canvasDpr,
   cameraRay,
+  buildOctreeRecords,
   buildOctree,
+  buildBVHRecords,
   buildBVH,
   box,
   applyResOpGL,

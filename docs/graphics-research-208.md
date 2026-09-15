@@ -611,3 +611,104 @@ re-arms the lane before the read), and msAvg's EMA EXCLUDES frames
 slower than 250 ms — on a slow boot it converges FROM BELOW, so the
 flatness law compares the end against the MAX of the first two samples
 (a from-below climb is convergence, never a leak).
+
+## Task 213 — THE KIT'S OWN SoA ROUND (the records front door, bit-identical)
+
+The Task-211 promise was «the store feeds everything»; the spatial kit
+was the last consumer still eating OBJECTS — `buildOctree(SpatialBox[])`
+boxed the demo's 16 407 records into 16 407 heap objects before the
+first query, and every drone edit allocated a fresh box per drone per
+frame on top of the store's dirty bookkeeping. The Task-210 H-group had
+already measured the shape's tax: an object-array walk of the six AABB
+fields runs 2.5–8× behind the flat record words on V8 (JSC holds
+1.0–1.2× on monomorphic reads — the honest split). This round moved the
+kit's STORAGE onto the flat lane and made the store's own shape the
+kit's front door.
+
+**The storage** (`packages/core/src/spatial.ts`, both structures): ONE
+interleaved `Float64Array` of `[cx, cy, cz, hx, hy, hz]` rows (48 B —
+one cache line per box; the Task-210 column measured `aos_f64` winning
+JSC outright and within 13% of the parallel split on V8 — the
+cross-engine compromise) + ONE `Int32Array` of ids. Every leaf, layout
+cell, overflow slot and override-lane entry holds a ROW INDEX; every
+predicate reads the six doubles at `row * 6`. The byId authority of
+Task 212 became rowOf (id → row); the GEOMETRY is always the freshest
+write (`updateBox` overwrites the row in place — the lane exists for
+the tree's stale PLACEMENT, never for stale data: there is exactly one
+copy of every box's numbers in the kit). The fold compacts the columns
+to the live rows in place (the strictly-increasing first-touch row
+order makes the sweep safe — no row is clobbered before it is read)
+and the fresh tree builds over the identity.
+
+**The front doors**: `buildOctreeRecords(view)` / `buildBVHRecords(view)`
+take the strided `RecordView` every other kit brick already speaks —
+zero boxing, zero copies, f32 words landing in the f64 columns exactly
+(every f32 is an f64; the trees read the GPU kernel's own numbers).
+The object door stays open as a compat shim (it writes one row); the
+SCALAR twins `insertBox`/`updateBox` take six numbers — the store-
+driven edit loop now touches zero objects per frame. The id contract
+fails loud at the door (fractional/negative/≥2³¹ ids throw — the stamp
+array is indexed by id and used to corrupt silently).
+
+**The allocation kills riding the rewrite**: `octantsOf`'s fresh
+`boolean[8]` per item per split became a bit mask; the sphere walks'
+six-field `NodeBounds` literal per item became the inlined arithmetic
+on the row (the last per-item allocation in the walks); the octree's
+`queryRay` moved onto Task-205's numeric slab lane (the `[t0, t1]`
+tuple per node is gone — the BVH had ridden it since 205); the BVH's
+median split sorts ROW INDICES reading the center column (the
+comparator values are `centerAlong`'s own, the stable sort keeps the
+equal-key order — the permutation is the object path's exactly).
+
+**The proof** (`packages/core/tests/task213.test.ts`, 8 tests): the
+records-built trees must answer with the EXACT arrays of their object-
+built twins — order included (the storage permutation may never
+permute a walk), plus the stats and the instrumented `planeTests`
+counters; the strided read is surgical (a POISONED NaN-padded record
+region — a builder reading one word off answers NaN geometry and every
+gate fails loudly); the scalar twins stay interchangeable with the
+object twins across a 400-step mixed churn; the leak law holds through
+the SCALAR lane (48 movers × 1 200 `updateBox` grow nothing, the fold
+empties, the freshest-geometry verdicts match brute); the fold compacts
+(removes shrink the tree, the post-fold structure answers identically
+to a fresh object build over the same live set); the id guard throws.
+
+**The measured A/B** (`packages/core/bench/spatial213.bench.ts`, the
+public API only — the same file runs against the pre-rewrite kit, the
+records legs skipping themselves; the demo's own city at N=16 407, both
+runtimes, checksum-gated):
+
+| lane | bun (JSC) | node (V8) |
+|---|---|---|
+| octree battery (48f+96p+48s+48r+48c) | 320.9 → 195–229 ms | 271.3 → 252–287 ms |
+| **bvh battery** | **30.3 → 17.6–18.9 ms** | **45.8 → 28.5–28.7 ms** |
+| octree boot | 34.2 → 22.3–22.8 ms | 42.5 → 20.8 ms |
+| bvh boot | 26.7 → 28.6–29.5 ms (+9%) | 34.8 → 32.1 ms |
+| the fold (octree) | 28.5 → 19.1–19.8 ms | 38.3 → 20.5 ms |
+| the fold (bvh) | 25.0 → 26.6–27.2 ms | 32.3 → 29.5 ms |
+| churn updateBox vs update(box) | 5.0 → 4.4 ms | 4.3 → 3.7 ms |
+
+The BVH battery is the headline: **−37% (JSC) / −41% (V8)** — the
+tight leaf ranges now walk a contiguous f64 column instead of pointer-
+chasing object fields. The octree battery improves 14–29% on JSC and
+7% on V8 (the straddler duplication keeps its leaf lists jumpier).
+The honest costs, kept: the BVH BOOT pays +9% on JSC (the index sort's
+comparator reads the column through an indirection the object sort did
+not pay; V8 lands −7% anyway), and the octree boot on V8 sits within
+noise on the worst runs. The oracle walk (the validation gate's own
+sweep) reads the flat words 1.1× (JSC) to 2.6× (V8) faster than the
+object array it replaced.
+
+**The demo**: the trees are built by `buildOctreeRecords(view)` /
+`buildBVHRecords(view)` over the SAME `recordView` the kit bricks read
+(the `spatialBoxes` array of 16 407 objects is GONE — the boot stops
+boxing the city), the drone squad edits through `updateBox` (zero
+objects per frame), and the validation gate's brute oracle walks the
+flat record words (an oracle must not lean on a second copy of the
+city). The Task-212 laws ride through unchanged — the leak gate re-run
+on the new kit: nodes 55 828 → 55 828 (1.00×), lane 48/48 flat, zero
+duplicates, zero ghosts, octree ≡ BVH ≡ brute at every mark, the fold
+probe clean; task209-order PASS on BOTH legs (the numbers bit-equal
+209); task211-local PASS on BOTH legs (the record mirror, the teleport
+probe, the 427× upload math — the SoA kit changes the kit's storage,
+never the frame's policy).
