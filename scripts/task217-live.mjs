@@ -172,7 +172,19 @@ async function mobileLeg(mode) {
   })
   const jx = cRect.x + cRect.w * 0.25, jy = cRect.y + cRect.h * 0.72
   await touch(page, 'pointerdown', jx, jy)
-  await page.waitForTimeout(150)
+  // THE FADE-IN WAIT: the 120 ms CSS transition can land late on a
+  // loaded page (the live gate's own catch: a 150 ms sample read 0.47 —
+  // the fade mid-flight); the law WAITS for the visuals, never samples
+  const joyShown = await page.waitForFunction(
+    () => {
+      const base = document.querySelector('.walker-joy')
+      return base !== null
+        && parseFloat(getComputedStyle(base).opacity) > 0.5
+        && window.__walker.joyActive === true
+        && window.__walker.isTouch === true
+    },
+    null, { timeout: 10_000, polling: 120 },
+  ).then(() => true).catch(() => false)
   const joy = await page.evaluate(() => {
     const base = document.querySelector('.walker-joy')
     return {
@@ -183,7 +195,7 @@ async function mobileLeg(mode) {
     }
   })
   check(`[${mode}:mobile] the joystick law — the visuals appear at the anchor`,
-    joy.exists && joy.opacity > 0.5 && joy.active && joy.isTouch, `opacity ${joy.opacity.toFixed(2)} · active ${joy.active}`)
+    joyShown && joy.active && joy.isTouch, `opacity ${joy.opacity.toFixed(2)} · active ${joy.active}`)
   const startX = await page.evaluate(() => window.__walker.x)
   for (let k = 1; k <= 12; k++) {
     await touch(page, 'pointermove', jx + k * 8, jy)
