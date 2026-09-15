@@ -361,13 +361,22 @@ export interface GPUFacade {
    *  targetId 0 (canvas) is not read — honest reject (a presented texture
    *  lives one frame); read the surface (renderer.surface().read()). */
   readTargetPixels(targetId: number): Promise<Uint8Array>
-  /** Render target: the pass writes into a texture (view + optional depth). */
+  /** Render target: the pass writes into a texture (view + optional depth).
+   *  Task 215 (A6 — the depth-reuse harvest): `depthTextureId` binds a
+   *  CALLER-OWNED samplable depth texture (createTexture(w, h,
+   *  'depth32float') — RENDER_ATTACHMENT|TEXTURE_BINDING) as the target's
+   *  depth attachment instead of the facade's internal depth24plus. The
+   *  color pass then writes its depth into a texture the compute lane can
+   *  textureLoad — the "late downsample" source (the canvas attachment is
+   *  not samplable portably; a dedicated depth texture is the recipe's own
+   *  answer). Refused loudly when the texture is not a depth format. */
   createTarget(
     textureId: number,
     width: number,
     height: number,
     depth: boolean,
     color: readonly [number, number, number, number],
+    depthTextureId?: number,
   ): number
   /** Sets the CANVAS clear color + depth value (target 0) — what a
    *  bindTarget(0, clear=true) pass writes before drawing. Renderer-level

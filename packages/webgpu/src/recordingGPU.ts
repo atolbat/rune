@@ -126,8 +126,8 @@ export function createRecordingGPU(): RecordingGPU {
       calls.push(`readTargetPixels(${targetId})`)
       return Promise.resolve(new Uint8Array(0))
     },
-    createTarget: (textureId, width, height, depth) => {
-      calls.push(`createTarget(${textureId},${width},${height}${depth ? ',depth' : ''})`)
+    createTarget: (textureId, width, height, depth, color, depthTextureId) => {
+      calls.push(`createTarget(${textureId},${width},${height}${depth ? ',depth' : ''}${depthTextureId !== undefined ? `,depthTex=${depthTextureId}` : ''})`)
       return nextTargetId++
     },
     bindTarget: (targetId, clear) => {

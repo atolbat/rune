@@ -239,13 +239,13 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
       journal.record({ kind: 'view.destroy', id: viewId })
     },
     // Task 197: depthBits rides the op (absent = the historical 16).
-    createTarget: (textureId, width, height, depth, color, depthBits) => {
-      const rawId = raw.createTarget(rawTex(textureId), width, height, depth, color, depthBits)
+    createTarget: (textureId, width, height, depth, color, depthBits, depthTextureId) => {
+      const rawId = raw.createTarget(rawTex(textureId), width, height, depth, color, depthBits, depthTextureId !== undefined ? rawTex(depthTextureId) : undefined)
       const id = nextTarget++
       targetMap.set(id, rawId)
       targetParent.set(id, textureId)
       touch(textureId)
-      journal.record({ kind: 'target.create', id, textureId, width, height, depth, color, ...(depthBits !== undefined ? { depthBits } : {}) })
+      journal.record({ kind: 'target.create', id, textureId, width, height, depth, color, ...(depthBits !== undefined ? { depthBits } : {}), ...(depthTextureId !== undefined ? { depthTextureId } : {}) })
       return id
     },
     bindTarget: (targetId, clear) => {
@@ -392,7 +392,7 @@ export function createResourceSessionGL(raw: GLFacade, journal: ResourceJournal)
         break
       }
       case 'target.create': {
-        const rawId = raw.createTarget(rawTex(op.textureId), op.width, op.height, op.depth, op.color, op.depthBits)
+        const rawId = raw.createTarget(rawTex(op.textureId), op.width, op.height, op.depth, op.color, op.depthBits, op.depthTextureId !== undefined ? rawTex(op.depthTextureId) : undefined)
         targetMap.set(op.id, rawId)
         targetParent.set(op.id, op.textureId)
         touch(op.textureId)

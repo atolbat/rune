@@ -161,6 +161,10 @@ export async function createRealGPU(
     view: GPUTextureView
     depthView: GPUTextureView | null
     depthTexture: GPUTexture | null
+    /** Task 215 (A6) — the depth attachment's format (the pipeline variant
+     *  axis): 'depth24plus' (the internal default) or the caller's
+     *  depth32float harvest texture. */
+    depthFormat: GPUTextureFormat
     color: readonly number[]
     /** Task 80 (readback): target size and texture — copyTextureToBuffer. */
     width: number
@@ -244,6 +248,10 @@ export async function createRealGPU(
   // bindTarget owns this flag exactly like passHasDepth; the variant
   // cache keys by (sampleType × depth-presence × target format).
   let currentTargetFormat: GPUTextureFormat | null = null // null — unknown yet (treat as the canvas format)
+  // Task 215 (A6) — the CURRENT pass's depth attachment format (the
+  // pipeline variant's fourth axis — see setPipelineVariant). bindTarget
+  // owns it; the canvas's own depth attachments are depth24plus.
+  let currentDepthFormat: GPUTextureFormat | null = null
   // Task 164 — THE MERGED COMPUTE PASS: runCompute used to open AND close a
   // GPUComputePassEncoder per call — the bitonic sort loop dispatches ~171
   // times per frame (Task 179 halved the 342: the sortStep twin per pass
@@ -445,7 +453,11 @@ export async function createRealGPU(
         ? format
         : (resolveGpuFormat(textureFormat) as GPUTextureFormat)
     const filterable =
-      textureFormat !== 'rgba32float' || device.features.has('float32-filterable' as GPUFeatureName)
+      // Task 215 — depth formats are never linearly filterable (the
+      // capability table): the sampler goes NEAREST, and the compute
+      // 'depth' binding (textureLoad) never touches it anyway
+      !String(gpuFormat).startsWith('depth')
+      && (textureFormat !== 'rgba32float' || device.features.has('float32-filterable' as GPUFeatureName))
     const texture = device.createTexture({
       size: [w, h],
       format: gpuFormat,
@@ -497,7 +509,7 @@ export async function createRealGPU(
       ...(appliedAniso > 1 ? { maxAnisotropy: appliedAniso } : {}),
     })
     const id = nextTextureId++
-    textureRecords[id] = { texture, sampler, view: texture.createView(), format: gpuFormat, filterable }
+    textureRecords[id] = { texture, sampler, view: texture.createView(), format: gpuFormat, filterable, width: w, height: h }
     return id
   }
 
@@ -727,9 +739,9 @@ export async function createRealGPU(
     pipelineRecords[pipelineId] = record
     // The default 'float' variant — filterable textures (all except
     // rgba32float on devices without 'float32-filterable'). Eagerly built
-    // WITH depth (the canvas default); the depth-less and non-canvas-format
-    // twins stay lazy.
-    record.variants.set('float|1|' + format + '|1', buildPipeline(record, 'float', true, format, 1))
+    // WITH depth (the canvas default — depth24plus); the depth-less,
+    // non-canvas-format and non-depth24plus twins stay lazy.
+    record.variants.set(`float|1|${format}|1|depth24plus`, buildPipeline(record, 'float', true, format, 1, 'depth24plus'))
   }
 
   /** Task 69: build a pipeline for a specific texture binding sampleType.
@@ -752,6 +764,13 @@ export async function createRealGPU(
     // Task 198 — the pass's sample count (1 everywhere except the MSAA
     // canvas; a pipeline's multisample.count MUST equal the pass's).
     samples = 1,
+    // Task 215 (A6) — the pass's DEPTH attachment format (the fourth
+    // variant axis): the z tile and the harvest surface run depth32float
+    // (the exact-f32 winner selection — the parity anchor), the canvas and
+    // the default targets depth24plus. A pipeline's depthStencil.format
+    // MUST equal the pass's attachment format or every draw on the pass
+    // is invalid (Dawn's own message — the first A6 boot caught it).
+    depthFormat: GPUTextureFormat = 'depth24plus',
   ): GPURenderPipeline {
     const wgsl = record.wgsl
     const attrs = record.attrs
@@ -887,7 +906,7 @@ export async function createRealGPU(
       // NO depthStencil at all — the format would be a validation error
       // there (a phone field report: a post chain's scene surface).
       depthStencil: withDepth ? {
-        format: 'depth24plus',
+        format: depthFormat,
         depthWriteEnabled: desc.depth === false ? false : (desc.depth?.write ?? true),
         depthCompare: desc.depth === false ? 'always' : depthCompareOf(desc.depth?.test),
       } : undefined,
@@ -945,13 +964,16 @@ export async function createRealGPU(
     // Task 196: the pass's own color format; unknown (null) only before
     // the first bindTarget — the canvas format is the safe default.
     const targetFormat = currentTargetFormat ?? format
+    // Task 215 (A6): the pass's own DEPTH format — depth24plus (the canvas
+    // default) or depth32float (the z tile / the harvest surface)
+    const depthFormat = currentDepthFormat ?? 'depth24plus'
     // Task 198: × the pass's SAMPLE COUNT — the MSAA canvas (4x) and the
     // 1x targets (the r32f z tile, the 1x surfaces) need separate
     // pipeline twins; multisample.count is part of compatibility.
-    const key = `${variant}|${passHasDepth ? 1 : 0}|${targetFormat}|${passSamples}`
+    const key = `${variant}|${passHasDepth ? 1 : 0}|${targetFormat}|${passSamples}|${depthFormat}`
     let pipeline = record.variants.get(key)
     if (pipeline === undefined) {
-      pipeline = buildPipeline(record, variant, passHasDepth, targetFormat, passSamples)
+      pipeline = buildPipeline(record, variant, passHasDepth, targetFormat, passSamples, depthFormat)
       record.variants.set(key, pipeline)
     }
     if (pipeline === currentPipeline) return
@@ -1269,21 +1291,44 @@ export async function createRealGPU(
     targetHeight: number,
     depth: boolean,
     color: readonly [number, number, number, number],
+    depthTextureId?: number,
   ): number {
     const record = textureRecords[textureId]
     if (record === undefined) throw new Error(`rune: createTarget — texture ${textureId} not found`)
     let targetDepthView: GPUTextureView | null = null
     let targetDepthTexture: GPUTexture | null = null
+    let targetDepthFormat: GPUTextureFormat = 'depth24plus'
     if (depth) {
-      targetDepthTexture = device.createTexture({
-        size: [targetWidth, targetHeight],
-        format: 'depth24plus',
-        usage: GPUTextureUsage.RENDER_ATTACHMENT,
-      })
-      targetDepthView = targetDepthTexture.createView()
+      if (depthTextureId !== undefined) {
+        // Task 215 (A6 — the depth-reuse harvest): the caller's OWN depth
+        // texture as the attachment — samplable (TEXTURE_BINDING was baked
+        // at createTexture), so the frame's depth survives the pass as a
+        // texture the compute lane can textureLoad. The honest refusal: a
+        // non-depth format here would silently render garbage (the depth
+        // write would be dropped at pass-validation time, deep inside the
+        // submit) — fail at the door instead.
+        const depthRecord = textureRecords[depthTextureId]
+        if (depthRecord === undefined) throw new Error(`rune: createTarget — depth texture ${depthTextureId} not found`)
+        if (!String(depthRecord.format).startsWith('depth')) {
+          throw new Error(`rune: createTarget — depthTextureId ${depthTextureId} is '${depthRecord.format}', not a depth format (createTexture(w, h, 'depth32float'))`)
+        }
+        if (depthRecord.width !== targetWidth || depthRecord.height !== targetHeight) {
+          throw new Error(`rune: createTarget — the depth texture ${depthTextureId} (${depthRecord.width}x${depthRecord.height}) does not match the target ${targetWidth}x${targetHeight}`)
+        }
+        targetDepthView = depthRecord.view
+        targetDepthTexture = depthRecord.texture
+        targetDepthFormat = depthRecord.format
+      } else {
+        targetDepthTexture = device.createTexture({
+          size: [targetWidth, targetHeight],
+          format: 'depth24plus',
+          usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        })
+        targetDepthView = targetDepthTexture.createView()
+      }
     }
     const id = nextTargetId++
-    targets.set(id, { view: record.view, depthView: targetDepthView, depthTexture: targetDepthTexture, color, width: targetWidth, height: targetHeight, textureId })
+    targets.set(id, { view: record.view, depthView: targetDepthView, depthTexture: targetDepthTexture, depthFormat: targetDepthFormat, color, width: targetWidth, height: targetHeight, textureId })
     return id
   }
 
@@ -1317,6 +1362,13 @@ export async function createRealGPU(
     currentTargetFormat = targetId === 0
       ? format
       : (textureRecords[targets.get(targetId)?.textureId ?? -1]?.format ?? format)
+    // Task 215 (A6) — the pass's DEPTH attachment format, the fourth variant
+    // axis: the canvas's own depth attachments are depth24plus (the 1x and
+    // the 4x twins), a target's is its record's (the internal depth24plus
+    // default or the caller's depth32float harvest texture).
+    currentDepthFormat = targetId === 0
+      ? 'depth24plus'
+      : (targets.get(targetId)?.depthFormat ?? 'depth24plus')
     encoder ??= device.createCommandEncoder()
     const loadOp: GPULoadOp = clear ? 'clear' : 'load'
     let colorView: GPUTextureView
@@ -2312,6 +2364,11 @@ interface TextureRecord {
   readonly view: GPUTextureView
   readonly format: GPUTextureFormat
   readonly filterable: boolean
+  /** Task 215 — the target's depth-attachment validation (a mismatched
+   *  depth texture would fail deep inside the first submit, not at the
+   *  door). */
+  readonly width: number
+  readonly height: number
 }
 
 /** The sub-view id namespace base (nextTextureViewId starts here — the

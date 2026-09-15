@@ -199,13 +199,13 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
     endPass: () => raw.endPass(),
     submit: () => raw.submit(),
 
-    createTarget: (textureId, width, height, depth, color) => {
-      const rawId = raw.createTarget(rawTex(textureId), width, height, depth, color)
+    createTarget: (textureId, width, height, depth, color, depthTextureId) => {
+      const rawId = raw.createTarget(rawTex(textureId), width, height, depth, color, depthTextureId !== undefined ? rawTex(depthTextureId) : undefined)
       const id = nextTarget++
       targetMap.set(id, rawId)
       targetParent.set(id, textureId)
       touch(textureId)
-      journal.record({ kind: 'target.create', id, textureId, width, height, depth, color })
+      journal.record({ kind: 'target.create', id, textureId, width, height, depth, color, ...(depthTextureId !== undefined ? { depthTextureId } : {}) })
       return id
     },
     bindTarget: (targetId, clear) => {
@@ -336,7 +336,7 @@ export function createResourceSessionGPU(raw: GPUFacade, journal: ResourceJourna
         break
       }
       case 'target.create': {
-        const rawId = raw.createTarget(rawTex(op.textureId), op.width, op.height, op.depth, op.color)
+        const rawId = raw.createTarget(rawTex(op.textureId), op.width, op.height, op.depth, op.color, op.depthTextureId !== undefined ? rawTex(op.depthTextureId) : undefined)
         targetMap.set(op.id, rawId)
         targetParent.set(op.id, op.textureId)
         touch(op.textureId)

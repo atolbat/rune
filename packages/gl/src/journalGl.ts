@@ -134,9 +134,9 @@ export function withJournal(gl: GLFacade, journal: Journal): GLFacade {
         gl.multiDrawElementsInstanced?.(mode, elementBufferId, counts, instanceCounts, offsets, drawcount, twoByte),
     } : {}),
     // Task 197: depthBits rides the op (absent = the historical 16).
-    createTarget: (textureId, width, height, depth, color, depthBits) => {
-      const id = gl.createTarget(textureId, width, height, depth, color, depthBits)
-      journal.record({ kind: 'createTarget', id, textureId, width, height, depth, color, ...(depthBits !== undefined ? { depthBits } : {}) })
+    createTarget: (textureId, width, height, depth, color, depthBits, depthTextureId) => {
+      const id = gl.createTarget(textureId, width, height, depth, color, depthBits, depthTextureId)
+      journal.record({ kind: 'createTarget', id, textureId, width, height, depth, color, ...(depthBits !== undefined ? { depthBits } : {}), ...(depthTextureId !== undefined ? { depthTextureId } : {}) })
       return id
     },
     bindTarget: (targetId, clear) => gl.bindTarget(targetId, clear),
@@ -217,7 +217,7 @@ function applyOp(op: DeclOp, gl: GLFacade, sourceFor?: (kind: string) => GLImage
       gl.createBuffer(op.data instanceof Float32Array ? op.data : toFloat32Array(op.data), op.usage)
       break
     case 'createTarget':
-      gl.createTarget(op.textureId, op.width, op.height, op.depth, op.color as ClearColor, op.depthBits)
+      gl.createTarget(op.textureId, op.width, op.height, op.depth, op.color as ClearColor, op.depthBits, op.depthTextureId)
       break
     case 'texImage2DFromSource': {
       const source = sourceFor?.(op.sourceKind) ?? null

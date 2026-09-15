@@ -521,13 +521,22 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     const depth = surfaceOptions.depth ?? false
     const color = surfaceOptions.color ?? (options.clear ?? DEFAULT_CLEAR).color
     const textureId = gl.createTexture(width, height)
+    // Task 215 (A6 — the depth-reuse harvest): the surface's depth as a
+    // SAMPLEABLE DEPTH_COMPONENT32F texture — the color pass's depth
+    // survives the pass for the late downsample (needs depth: true; the
+    // precision is 32f exactly — the harvest's parity anchor, the
+    // depthBits axis is ignored in this mode)
+    const depthTextureId = surfaceOptions.depthTexture === true && depth
+      ? gl.createTexture(width, height, { format: 'depth32f' })
+      : undefined
     // Task 197: the depth precision axis passes through (16 default / 24 /
     // 32-float — the Hi-Z parity anchor; see GLFacade.createTarget).
-    const targetId = gl.createTarget(textureId, width, height, depth, color, surfaceOptions.depthBits)
+    const targetId = gl.createTarget(textureId, width, height, depth, color, surfaceOptions.depthBits, depthTextureId)
     let surfaceDisposed = false
     const result: Surface<CompiledCommand> = {
       targetId,
       texture: { textureId, width, height },
+      ...(depthTextureId !== undefined ? { depthTextureId } : {}),
       width,
       height,
       pass: (fragment: string, passOptions: PassOptions = {}) =>
@@ -551,6 +560,7 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
         surfaceDisposed = true
         gl.deleteTarget(targetId)
         gl.deleteTexture(textureId)
+        if (depthTextureId !== undefined) gl.deleteTexture(depthTextureId)
       },
     }
     return result

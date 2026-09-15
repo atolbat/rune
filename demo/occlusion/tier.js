@@ -111,7 +111,7 @@
 // visible box (its own rect holds either background 1.0 or surfaces
 // behind it), so the final verdicts stay pixel-exact at any camera,
 // however old the seed. The one-frame lag costs fill, never a pixel.
-import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=214'
+import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=215'
 import { buildShaders } from './shaders.js?v=210'
 import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H } from './scene.js?v=203'
 const SKY = [0.045, 0.055, 0.09, 1]
@@ -186,7 +186,13 @@ export async function buildTier(deps) {
   const dict = buildShaders(scene)
   const pyramid = device.pyramid(HIZ_W, HIZ_H)
   const mesh = device.geometry(BOX_VERTS, BOX_INDICES)
-  const surface = device.surface(SURF_W, SURF_H, { depth: true })
+  // Task 215 (A6 — the depth-reuse harvest): the surface's depth attachment
+  // is a SAMPLEABLE depth texture (WG: depth32float / GL: DEPTH_COMPONENT32F)
+  // — the color pass's own depth survives the pass, and a STILL camera can
+  // rebuild the pyramid from it instead of re-rendering the survivors
+  // depth-only (the presented frame IS the front layer — the fixed-point
+  // law's own product).
+  const surface = device.surface(SURF_W, SURF_H, { depth: true, depthTexture: true })
 
   const hist = device.historyPass({ scene: sceneHandle, mesh, pyramid, shaders: dict.hist, fill: dict.z })
   // Task 207 — THE SAME-FRAME FEEDBACK BRICK: the first cull's fresh RAW
@@ -211,7 +217,12 @@ export async function buildTier(deps) {
   const R = {
     scene: fg.resource({ name: 'scene', kind: 'buffer', bytes: sceneWords.length * 4, transient: false, external: sceneHandle, exported: true }),
     mesh: fg.resource({ name: 'mesh', kind: 'buffer', bytes: BOX_VERTS.length * 4, transient: false, external: mesh }),
-    hiz: fg.resource({ name: 'hi-z', kind: 'texture', width: HIZ_W, height: HIZ_H, format: 'r32f', external: pyramid }),
+    // Task 215 (A6) — hi-z is now PERSISTENT (transient: false): the
+    // pyramid physically survives the frame boundary (the storage buffer
+    // / the texture ladder — the seed's own law), and the still-frame path
+    // reads the CARRIED version (cull#2 with the feedback branch gated out
+    // — the staleness channel counts it, exactly like cull#1's seed read).
+    hiz: fg.resource({ name: 'hi-z', kind: 'texture', width: HIZ_W, height: HIZ_H, format: 'r32f', transient: false, external: pyramid }),
     // Task 208 — THE CROSS-FRAME SEED: the pyramid's carry across the
     // frame boundary, as its OWN persistent resource. Physically the
     // SAME object as hi-z (bytes: 0 — counting it would double the
@@ -291,7 +302,14 @@ export async function buildTier(deps) {
   fg.pass({
     name: 'feedback-fill', kind: 'render', cost: 3,
     reads: [R.scene, R.mesh], writes: [R.hiz],
-    when: props => props.feedback === true && props.culling === true && props.fresh === true,
+    // Task 215 (A6) — the still-frame skip: a bit-identical camera + the
+    // reuse policy means the presented frame's own depth can stand in for
+    // the fill (the depth-harvest pass below) — the branch leaves the
+    // frame exactly like any gate-off leg, and cull-verdicts-2 falls back
+    // to the carried pyramid (the Task-208 staleness law: the lag costs
+    // fill, never a pixel — and the K=3 hysteresis fold absorbs a verdict
+    // flicker through the transition anyway)
+    when: props => props.feedback === true && props.culling === true && props.fresh === true && props.reuse !== true,
     execute: ({ props }) => fbfill.run({ camera: props.camera }),
   })
   fg.pass({
@@ -301,7 +319,7 @@ export async function buildTier(deps) {
     // writers, in bevy issue #18711's tracked position — the built pyramid IS
     // the next frame's carry
     reads: [R.hiz], writes: [R.hiz, R.seed],
-    when: props => props.feedback === true && props.culling === true && props.fresh === true,
+    when: props => props.feedback === true && props.culling === true && props.fresh === true && props.reuse !== true,
     execute: () => pyramid.build(),
   })
   fg.pass({
@@ -323,6 +341,28 @@ export async function buildTier(deps) {
     // harvest; the set/history draws keep the plain compact — a depth-only
     // fill has no overdraw to save)
     execute: ({ props }) => color.run({ target: props.target, camera: props.camera, light: LIGHT, order: props.order === true }),
+  })
+  fg.pass({
+    // Task 215 (A6) — THE DEPTH-REUSE HARVEST: the presented frame's OWN
+    // depth becomes the pyramid (the "late downsample" — after ALL the
+    // frame's depth writers, bevy #18711's own position). The still-camera
+    // fixed-point law: the color pass renders the final visible set, its
+    // depth attachment IS the front layer, and the front layer is ALL the
+    // pyramid ever depended on (Task 208's own proof) — so the harvested
+    // pyramid ≡ the feedback-built one, bit for bit at a converged camera
+    // (the reuse gate's dispatch). The fill render it replaces is the
+    // whole point: a still camera + live edits (the drones) used to pay
+    // the depth-only re-render of the survivor crowd every frame.
+    name: 'depth-harvest', kind: KERNEL, cost: 2,
+    reads: [R.target], writes: [R.hiz, R.seed],
+    // KEEP: the harvest is the SEED'S AUTHOR — its consumers live in the
+    // NEXT frame (cull#1's imported read), not in this one; without the
+    // keep the branch-culling law (a reader-less write is a dead branch —
+    // the same law that would take the color pass without the strip's
+    // overlay read) would drop it from the frame as unreachable
+    keep: true,
+    when: props => props.reuse === true && props.culling === true && props.fresh === true,
+    execute: () => { if (pyramid.harvestDepth !== undefined && surface.depthTextureId !== undefined) pyramid.harvestDepth(surface.depthTextureId) },
   })
   fg.pass({
     // the debug strip — the OVERLAY LAW: reads the target it draws on top
@@ -363,7 +403,14 @@ export async function buildTier(deps) {
   let lastFrame = null // the last compiled frame (the graph stats' source)
   let lastReport = null // the last run report (executed + staleness)
   let seedLive = false // Task 208 — did the seed own the last frame's phase 1
-  function renderTo(targetId, mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false, feedbackOn = true, seedOn = true, orderOn = true) {
+  // Task 215 (A6) — the still-camera detector: the previous renderTo's mvp
+  // WORDS. A bit-identical mvp means the camera did not move — the
+  // presented frame's own depth can stand in for the feedback fill (the
+  // reuse policy). The orbit camera recomputes the mvp every frame — the
+  // same state produces the same floats (deterministic math), so a frozen
+  // camera (auto=0, no drag) reads still from frame 2 on.
+  let lastMvpSeen = null // Float32Array — the previous renderTo's mvp words
+  function renderTo(targetId, mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false, feedbackOn = true, seedOn = true, orderOn = true, reuseOn = true) {
     const camera = { mvp, eye }
     // NOTE the boolean hygiene (the Task-202 lesson): `historyOn !== 0`
     // with historyOn === false is TRUE — every gate answers `=== true` /
@@ -379,6 +426,24 @@ export async function buildTier(deps) {
     const feedback = feedbackOn === true || feedbackOn === 1
     const seedWanted = seedOn === true || seedOn === 1
     const seed = seedWanted && lastReport !== null && (lastReport.stale['hiz-seed'] ?? -1) >= 0
+    // Task 215 (A6) — the reuse policy: a STILL camera + a surface frame
+    // (the canvas present path carries no samplable depth — the doc's own
+    // catch; snapshot/probe/validation legs all render to the surface) +
+    // the harvest bricks present. With all that, the feedback FILL leaves
+    // the frame and the depth-harvest pass (after color) becomes the
+    // pyramid's author — the fill's render cost traded for two dispatches.
+    let still = false
+    if (lastMvpSeen !== null && mvp.length === 16) {
+      still = true
+      for (let i = 0; i < 16; i++) {
+        if (lastMvpSeen[i] !== mvp[i]) { still = false; break }
+      }
+    }
+    lastMvpSeen = Float32Array.from(mvp)
+    const reuse = (reuseOn === true || reuseOn === 1) && still && feedback
+      && targetId === surface.targetId
+      && surface.depthTextureId !== undefined
+      && pyramid.harvestDepth !== undefined
     const key = `${hizOn ? 1 : 0}|${occluders}|${hysteresisOn ? 1 : 0}|${historyOn ? 1 : 0}|${feedback ? 1 : 0}|${seed ? 1 : 0}`
     let cached = cacheOn && lastCulled !== null && lastCulled.key === key
     if (cached) {
@@ -405,6 +470,10 @@ export async function buildTier(deps) {
       // it, so it rides the run props only (the compiled frame's shape and
       // the amortized-cull cache key both stay untouched)
       order: orderOn === true || orderOn === 1,
+      // Task 215 (A6) — the depth-reuse policy bits: `still` is the camera's
+      // own state (a fact, not a policy), `reuse` is the resolved leg
+      still,
+      reuse,
     }
     lastFrame = fg.compile(props) // cached by policy — the declarations never see the camera
     lastReport = lastFrame.run(props)
@@ -543,8 +612,79 @@ export async function buildTier(deps) {
     }
   }
 
-  function frame(mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false, feedbackOn = true, seedOn = true, orderOn = true) {
-    renderTo(SNAPSHOT ? surface.targetId : 0, mvp, eye, hizOn, debug, occluders, hysteresisOn, historyOn, cacheOn, wantStats, feedbackOn, seedOn, orderOn)
+  // ── Task 215 (A6) — THE DEPTH-REUSE PARITY GATE: at a still converged
+  //    camera, the harvested pyramid (the color pass's own depth — the
+  //    reuse path) must equal the feedback-built one (the survivors'
+  //    depth-only re-render) BIT FOR BIT, the drawn counts equal, the
+  //    presented pixels equal, and the frame shapes must show the honest
+  //    swap (feedback-fill gated out, depth-harvest live). The caller
+  //    supplies the camera (the validation/gate legs' own mvp) and pauses
+  //    the loop (the readback discipline).
+  async function reuseParity(mvp, eye) {
+    if (surface.depthTextureId === undefined || pyramid.harvestDepth === undefined) return null
+    try {
+      const settle = async reuseOn => {
+        // four frames at the camera under the given spelling: frame 1 is a
+        // camera move (the classic path converges the carry), the rest ride
+        // the still camera — the spelling's own frame shape
+        for (let f = 0; f < 4; f++) {
+          renderTo(surface.targetId, mvp, eye, 1, false, K, false, false, false, false, true, true, true, reuseOn)
+        }
+        device.submit() // the readback discipline (the frame's own present already submitted — belt and braces)
+        const stats = await readStats()
+        const img = await surface.read()
+        let h = 2166136261
+        for (let i = 0; i < img.data.length; i++) {
+          h ^= img.data[i]
+          h = Math.imul(h, 16777619)
+        }
+        const words = pyramid.readWords !== undefined ? await pyramid.readWords() : null
+        return { stats, hash: h, words, graph: lastFrame !== null ? lastFrame.passes.map(p => p.name) : [] }
+      }
+      const off = await settle(false)
+      const on = await settle(true)
+      let diffs = 0
+      let first = -1
+      let words = null
+      if (off.words !== null && on.words !== null && off.words.length === on.words.length) {
+        words = off.words.length
+        for (let i = 0; i < words; i++) {
+          if (off.words[i] !== on.words[i]) {
+            diffs++
+            if (first < 0) first = i
+          }
+        }
+      }
+      const harvestLive = on.graph.includes('depth-harvest') && !on.graph.includes('feedback-fill') && !on.graph.includes('pyramid-reduce-2')
+      const fillClassic = off.graph.includes('feedback-fill') && off.graph.includes('pyramid-reduce-2') && !off.graph.includes('depth-harvest')
+      const drawnEqual = on.stats.drawn === off.stats.drawn
+      const occludedEqual = on.stats.occluded === off.stats.occluded
+      const hashEqual = on.hash === off.hash
+      return {
+        // WG: the words compare rides the verdict (the storage pyramid);
+        // GL: no storage pyramid — the drawn/occluded/pixel laws + the
+        // honest frame-shape swap carry the gate
+        pass: (words === null || diffs === 0) && drawnEqual && occludedEqual && hashEqual && harvestLive && fillClassic,
+        words,
+        diffs: words === null ? null : diffs,
+        first,
+        drawnOff: off.stats.drawn,
+        drawnOn: on.stats.drawn,
+        occludedOff: off.stats.occluded,
+        occludedOn: on.stats.occluded,
+        hashEqual,
+        harvestLive,
+        fillClassic,
+        graphOn: on.graph,
+        graphOff: off.graph,
+      }
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+
+  function frame(mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false, feedbackOn = true, seedOn = true, orderOn = true, reuseOn = true) {
+    renderTo(SNAPSHOT ? surface.targetId : 0, mvp, eye, hizOn, debug, occluders, hysteresisOn, historyOn, cacheOn, wantStats, feedbackOn, seedOn, orderOn, reuseOn)
     if (SNAPSHOT) blitSnapshot()
   }
 
@@ -597,6 +737,9 @@ export async function buildTier(deps) {
       // Task 214 — the SPD parity channel (the probe scripts' window into
       // the single-pass downsampler's bit-identity gate)
       spdParity: () => spdParity(),
+      // Task 215 (A6) — the depth-reuse parity channel (the gate's window
+      // into the harvest law: both spellings at a still camera, compared)
+      reuseParity: (mvp, eye) => reuseParity(mvp, eye),
       // Task 211 — the record mirror's readback (the edit-mode gate's
       // channel): the GPU's own copy of record `id`, vs __hizEdits.record
       records: id => device.readRecords(sceneHandle, id, 1),
@@ -629,8 +772,8 @@ export async function buildTier(deps) {
       ? `WebGL2 — FBO pyramid + TF cull + vertex-collapse draw${device.antialias ? ' · context MSAA' : ''}`
       : `WebGPU — storage pyramid + compute cull + one drawIndexedIndirect${device.antialias ? ' · MSAA 4x resolve' : ''}`,
     drawsLine: backend === 'webgl2'
-      ? `draws: 2 (fill + collapse color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid) · TF passes: 2 (cull + hysteresis; +1 cull ON the feedback) · ${pyramid.levels - 1} reduce quads (×2 the feedback frame; ×1 the seed frame)`
-      : `draws: 2 (fill + indirect color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid) · dispatches: 3 (cull + hysteresis + compact; +1 cull ON the feedback; +1 order ON the near-first list — the early-Z harvest) · Task 214 — the pyramid builds in ONE SPD DISPATCH PAIR (${Math.ceil(HIZ_W / 64) * Math.ceil(HIZ_H / 64)} region workgroups + the top reduce) where the legacy chain spent ${pyramid.levels} (×2 the feedback frame; ×1 the seed frame)`,
+      ? `draws: 2 (fill + collapse color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid; Task 215 — a STILL camera swaps the fill for the depth harvest: 1 quad + the ladder, the presented frame's own depth) · TF passes: 2 (cull + hysteresis; +1 cull ON the feedback) · ${pyramid.levels - 1} reduce quads (×2 the feedback frame; ×1 the seed frame)`
+      : `draws: 2 (fill + indirect color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid; Task 215 — a STILL camera swaps the fill for TWO DISPATCHES: the SPD pair over the presented frame's own depth32float) · dispatches: 3 (cull + hysteresis + compact; +1 cull ON the feedback; +1 order ON the near-first list — the early-Z harvest) · Task 214 — the pyramid builds in ONE SPD DISPATCH PAIR (${Math.ceil(HIZ_W / 64) * Math.ceil(HIZ_H / 64)} region workgroups + the top reduce) where the legacy chain spent ${pyramid.levels} (×2 the feedback frame; ×1 the seed frame)`,
     canvas: displayCanvas,
     surface,
     renderTo,
@@ -640,6 +783,7 @@ export async function buildTier(deps) {
     readVerdicts,
     readList,
     spdParity,
+    reuseParity,
     aspect,
     graphStats,
     graphLine,

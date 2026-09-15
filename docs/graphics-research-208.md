@@ -167,7 +167,7 @@ the whole tile; the bookkeeping (per-level dirty rects + guarded reduces)
 costs more than 9 tiny dispatches on a 480×270 tile. **Revisit at 4K-class
 tiles** where the reduce chain is 12+ levels over 2M texels.
 
-### A6 — ✎ DEPTH REUSE FROM THE PRESENTED FRAME — BACKLOG
+### A6 — ✎ DEPTH REUSE FROM THE PRESENTED FRAME — IMPLEMENTED THIS ROUND (Task 215)
 
 Build the seed from the color pass's own depth buffer (render depth into a
 samplable depth texture on the main pass, late-downsample it) — saves the
@@ -798,3 +798,110 @@ numbers bit-equal 209), task212-leak PASS (nodes 55 828 → 55 828,
 lane 48/48, fold clean), task211-local PASS both legs, demo-smoke full
 PASS (WG drawn 4353 / GL drawn 1694 — the same verdicts as the
 object-built kit).
+
+## Task 215 — THE DEPTH-REUSE HARVEST + THE SCENE-MIRROR DEMO (2026-09-15)
+
+**Leg 1 — research A6, the presented frame's own depth as the pyramid's
+author** (the occlusion demo, both backends). The recipe's portability
+catch was the whole job: the color pass must render with a DEDICATED
+samplable depth texture as its attachment (WG: a depth32float texture
+with TEXTURE_BINDING — the facade's `createTarget` grew `depthTextureId`,
+the caller's own texture replacing the internal depth24plus; GL: a
+DEPTH_COMPONENT32F texture attached where the renderbuffer was — the
+format catalog grew `'depth32f'`). On it ride three structural pieces:
+
+- **The parity anchor**: the z tile's own depth attachment moved to
+  depth32float too (the WG side — the GL tile already ran
+  DEPTH_COMPONENT32F by its ladder). Both paths now pick their winning
+  fragments at EXACT f32, and the tile's r32f color write IS the winner's
+  `position.z` — so the feedback path's tile and the harvest path's
+  surface depth carry the SAME values for the same set. The WG render
+  pipelines gained the DEPTH FORMAT as the FOURTH variant axis
+  (sampleType × depth-presence × color format × sample count × **depth
+  format**) — Dawn's own first-boot message caught the need: a pipeline's
+  `depthStencil.format` must equal the pass's attachment format.
+- **The harvest**: `PyramidHandle.harvestDepth(depthTextureId)` — WG: the
+  SAME two-dispatch SPD pair with `zAt` reading `texture_depth_2d` (the
+  facade's `'depth'` compute binding — present since Task 196, first
+  consumed here; the family lazy + memoized per source texture, the
+  storage written directly, the tile never touched); GL: one texelFetch
+  harvest quad into the r32f tile + the FBO reduce ladder (the program
+  lazy).
+- **The still-frame policy**: `renderTo` gained a still-camera detector
+  (the mvp bit-identical to the previous call) + the `reuse` flag. A
+  still frame gates the feedback branch out (cull#2 falls back to the
+  carried pyramid — the Task-208 staleness law, and the K=3 hysteresis
+  fold absorbs the transition), and the new `depth-harvest` pass —
+  declared after the color pass, `keep: true` (its consumers live in the
+  NEXT frame; without the keep the branch-culling law — a reader-less
+  write is a dead branch — would drop it) — becomes the pyramid's author.
+  hi-z turned PERSISTENT in the graph (it always physically was; the seed
+  twin's own law).
+
+**The gate is the fixed-point law, executable**: at a still converged
+camera the harvested pyramid ≡ the feedback-built one, word for word —
+172 902 words, 0 diffs, drawn/occluded equal, pixels identical, the frame
+shapes honest (feedback-fill gated out, depth-harvest live). The win the
+recipe promised: a still camera + live edits (the drone squads) used to
+pay the depth-only re-render of the survivor crowd every frame — now two
+dispatches (WG) / one quad + the ladder (GL), and the seed refreshes
+THROUGH the color pass's own depth (the edits land in the pyramid with
+the presented frame, one cull of staleness — the seed law's own class).
+The honest limit, kept in the doc's own words: the LIVE-CANVAS path (a
+real GPU presenting straight to the canvas) carries no samplable depth —
+the reuse idles off there (the GL live loop; every WG snapshot/probe/
+validation leg renders to the surface, and the software WG tier IS
+snapshot mode — the gates' whole world). The live-canvas redirect is the
+documented follow-up.
+
+**Leg 2 — the store mirror's first LIVE consumer**
+(`demo/scene-mirror/`): the Task-214 library surface — @rune/scene's SAB
+regions as adopted SoAStores + the stamp-driven dirty ranges both
+directions — was library-and-tests only; this page is the integration
+ask answered. A 4176-node city (3600 buildings, 480 props, two drone
+squads) runs in a real Web Worker over the SAB (`runSceneWorker`'s
+Atomics.wait rhythm — publish wakes it, `take()` reads its epoch, the
+bridge in zero-copy snapshotViews mode); the main thread writes the 96
+movers through the Scene API; every frame the mirror resolves EXACTLY
+the re-uploaded bytes (staticRanges + pool ranges per camera +
+worldRanges in rank space) and the HUD carries the honest math (~85×
+under the full locals region). The canvas draws the city FROM THE
+STORE'S OWN BYTES — the worlds column + the visibility bitsets, zero
+copies end to end. The boot gates prove the laws on the page: the
+aliasing law, the exact-dirt law (one moved slot = exactly its bytes in
+every SoA column — the pos/quat/scale fan-out), the pool ≡ snapshot law,
+the stale-take watermark discipline, the upload math. The honest
+degrade: without cross-origin isolation (GitHub Pages serves no
+COOP/COEP) the SAB cannot cross the worker boundary — the T0 lane
+(`runScenePipeline` on the main thread, the mirror's `observe(epoch)`
+spelling) runs the same pipeline and SAYS SO in the HUD; the local gate
+serves COOP/COEP headers, so the WORKER lane is gated locally and the
+T0 lane on production — both lanes, each in its own environment. The
+demo ships its own bundle (`dist/rune-scene.esm.js`, the @rune/scene
+index with @rune/core inlined — the worker imports it as a module).
+
+**Gate lessons this round taught**: (a) the WG pipeline DEPTH-FORMAT
+variant axis (above — Dawn's attachment-compatibility message on the
+very first boot); (b) the frame graph's branch-culling law cuts a
+cross-frame writer without an in-frame reader — `keep: true` is the
+designed mechanism for the seed's authors; (c) the graph's transient
+law refused cull#2's read of a hi-z nobody wrote THIS frame — the fix
+was making hi-z honest (persistent, which it always physically was);
+(d) a gate's own camera math must multiply in the project's order
+(proj × view, not view × proj — drawn=1 was the tell); (e) the SoA
+dirty-range reader must map each column through ITS OWN base and width
+(the pos/quat/scale fan-out — an interleaved assumption answers garbage
+slots).
+
+**Gates**: 2188/2188 tests (+2 device contracts: the WG depth-source
+compute family lazy+memoized, the GL harvest quad + ladder; the Task-198
+recording expectations updated for the depth32float z-tile attachment),
+tsc 0, lint 0 errors (368 warnings — baseline), task215-local ALL PASS
+(WG: the A6 parity 0 diffs of 172 902 words, drawn 722 = 722, pixels
+identical, the shapes honest, the loop alive; GL: the parity
+drawn/occluded/pixels equal, the still-canvas honest classic shape; the
+scene-mirror worker lane 6/6 + the T0 lane 5/5, the dirt live, the culls
+honest), task211-local PASS both backends on the new code, and the
+standing gates re-run green with the 209 gate's legs isolated to its own
+subject (its drive now passes `reuse: false` explicitly — the gate pins
+the Task-208/209 frame shape; the A6 shape is the 215 gate's own law).

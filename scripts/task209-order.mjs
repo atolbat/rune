@@ -118,9 +118,13 @@ try {
     }
     const mvp = mul(perspective(), lookAt(eye, center))
     for (let f = 0; f < cfg.frames; f++) {
-      // the full 13-arg renderTo: (target, mvp, eye, hiz, debug, occluders,
-      // hysteresis, history, cache, wantStats, feedback, seed, order)
-      tier.renderTo(tier.surface.targetId, mvp, eye, cfg.hiz, false, cfg.occluders, cfg.hysteresis === true, false, false, false, cfg.feedback !== false, cfg.seed !== false, cfg.order !== false)
+      // the full renderTo spelling: (target, mvp, eye, hiz, debug, occluders,
+      // hysteresis, history, cache, wantStats, feedback, seed, order, reuse).
+      // Task 215 — reuse defaults FALSE here: this gate pins the Task-208/209
+      // frame SHAPE (the fill + the reduce-2 branch), and A6 legitimately
+      // swaps that shape on still frames — the round's own gate (215) owns
+      // the new shape's law
+      tier.renderTo(tier.surface.targetId, mvp, eye, cfg.hiz, false, cfg.occluders, cfg.hysteresis === true, false, false, false, cfg.feedback !== false, cfg.seed !== false, cfg.order !== false, cfg.reuse === true)
     }
     const s = await tier.readStats()
     const img = await tier.surface.read()

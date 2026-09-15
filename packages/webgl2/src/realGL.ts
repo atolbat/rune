@@ -50,6 +50,12 @@ const ENUM = {
   // sized internal format table 8.3) with the RED (0x1903) upload channel.
   // The WebGL2 twin of WebGPU's r32float storage tile: one f32 per texel.
   R32F: 0x822e,
+  // Task 215 (A6) — the depth-reuse harvest's source plane: a
+  // DEPTH_COMPONENT32F texture (0x8CAC, the sized internal format) is
+  // renderable AND sampleable in WebGL2 core — the color pass's depth
+  // attachment becomes a texture the reduce lane can texelFetch.
+  DEPTH_COMPONENT32F: 0x8cac,
+  DEPTH_COMPONENT: 0x1902,
   RED: 0x1903,
   RGBA: 0x1908,
   UNSIGNED_BYTE: 0x1401,
@@ -71,6 +77,8 @@ function formatInfo(format: GLTextureFormat): FormatInfo {
       return { internalFormat: ENUM.RGBA32F, uploadFormat: ENUM.RGBA, uploadType: ENUM.FLOAT }
     case 'r32f':
       return { internalFormat: ENUM.R32F, uploadFormat: ENUM.RED, uploadType: ENUM.FLOAT }
+    case 'depth32f':
+      return { internalFormat: ENUM.DEPTH_COMPONENT32F, uploadFormat: ENUM.DEPTH_COMPONENT, uploadType: ENUM.FLOAT }
     default:
       return { internalFormat: ENUM.RGBA8, uploadFormat: ENUM.RGBA, uploadType: ENUM.UNSIGNED_BYTE }
   }
@@ -83,6 +91,9 @@ interface TargetRecord {
   readonly height: number
   readonly depth: boolean
   readonly depthRenderbuffer: WebGLRenderbuffer | null
+  /** Task 215 — the depth attachment is a CALLER-OWNED texture (not a
+   *  renderbuffer): deleteTarget leaves the texture alone. */
+  readonly depthTexture: boolean
   readonly color: readonly number[]
 }
 
@@ -394,12 +405,12 @@ export function createRealGL(
    *  R32F rides OES_texture_float_linear; a pyramid sampling its own texels
    *  must not depend on an optional extension). */
   function magFilter(format: GLTextureFormat): number {
-    if (format === 'r32f') return ENUM.NEAREST
+    if (format === 'r32f' || format === 'depth32f') return ENUM.NEAREST
     return format === 'rgba32f' && !floatLinearExt ? ENUM.NEAREST : ENUM.LINEAR
   }
   /** The MIN filter by format and presence of a mip chain. */
   function minFilter(format: GLTextureFormat, mipLevels: number): number {
-    if (format === 'r32f') return mipLevels > 1 ? ENUM.NEAREST_MIPMAP_NEAREST : ENUM.NEAREST
+    if (format === 'r32f' || format === 'depth32f') return mipLevels > 1 ? ENUM.NEAREST_MIPMAP_NEAREST : ENUM.NEAREST
     const linear = !(format === 'rgba32f' && !floatLinearExt)
     if (mipLevels > 1) return linear ? ENUM.LINEAR_MIPMAP_LINEAR : ENUM.NEAREST_MIPMAP_NEAREST
     return linear ? ENUM.LINEAR : ENUM.NEAREST
@@ -1092,13 +1103,32 @@ export function createRealGL(
     depth: boolean,
     color: readonly [number, number, number, number],
     depthBits?: 16 | 24 | 32,
+    depthTextureId?: number,
   ): number {
     const fbo = gl.createFramebuffer()
     if (fbo === null) throw new Error('rune: createFramebuffer returned null')
     let depthRenderbuffer: WebGLRenderbuffer | null = null
+    let attachedDepthTexture = false
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, textures.get(textureId) ?? null, 0)
     if (depth) {
+      // Task 215 (A6 — the depth-reuse harvest): the caller's OWN depth
+      // texture as the attachment — renderable AND sampleable (the color
+      // pass's depth survives the pass for the late downsample). The FBO
+      // completeness check below is the honest refusal for every mismatch
+      // (a non-depth texture, a wrong size — the FBO lands incomplete and
+      // the throw fires). The texture stays CALLER-OWNED: deleteTarget
+      // never deletes it.
+      if (depthTextureId !== undefined) {
+        const depthTexture = textures.get(depthTextureId)
+        if (depthTexture === undefined) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, currentTarget === 0 ? null : targets.get(currentTarget)?.fbo ?? null)
+          gl.deleteFramebuffer(fbo)
+          throw new Error(`rune: createTarget — depth texture ${depthTextureId} not found`)
+        }
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, depthTexture, 0)
+        attachedDepthTexture = true
+      } else {
       // Task 197 — the depth precision axis (the Hi-Z parity anchor):
       // 16 (default, the historical DEPTH_COMPONENT16), 24
       // (DEPTH_COMPONENT24 — WebGPU depth24plus parity), 32
@@ -1112,6 +1142,7 @@ export function createRealGL(
       gl.bindRenderbuffer(gl.RENDERBUFFER, depthRenderbuffer)
       gl.renderbufferStorage(gl.RENDERBUFFER, depthFormat, width, height)
       gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthRenderbuffer)
+      }
     }
     const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER)
     // Restore the previous target before a possible throw: the state does not leak
@@ -1130,6 +1161,9 @@ export function createRealGL(
       height,
       depth,
       depthRenderbuffer,
+      // Task 215 — a texture-backed depth attachment is caller-owned: the
+      // FBO holds a reference, the deletion stays with the texture's owner
+      depthTexture: attachedDepthTexture,
       color,
     })
     return id

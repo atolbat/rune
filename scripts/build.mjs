@@ -34,6 +34,10 @@ const targets = [
   { entrypoint: 'packages/animation/src/index.ts', outfile: 'rune-animation.esm.js' },
   { entrypoint: 'packages/materials/src/index.ts', outfile: 'rune-materials.esm.js' },
   { entrypoint: 'packages/particles/src/index.ts', outfile: 'rune-particles.esm.js' },
+  // Task 215 — the scene-mirror demo's own bundle: @rune/scene (the
+  // worker-driven scene graph + the Task-214 store mirror) with @rune/core
+  // inlined — the demo's worker imports it as a module
+  { entrypoint: 'packages/scene/src/index.ts', outfile: 'rune-scene.esm.js' },
 ]
 
 let failed = false

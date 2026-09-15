@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>rune — scene store mirror</title>
+  <link rel="stylesheet" href="../shared/demo-shell.css?v=215" />
+  <style>
+    /* the demo's own chrome: a wide stage for the data-system view (the
+       shell provides the layout, the log and the pause control). */
+    .mirror-stage { position: relative; aspect-ratio: 16 / 9; }
+    @media (orientation: portrait) {
+      .mirror-stage { aspect-ratio: 4 / 5; }
+    }
+    .mirror-canvas {
+      display: block; width: 100%; height: 100%;
+      background: #0b0d13; border-radius: 8px;
+    }
+    .mirror-hud {
+      position: absolute; left: 10px; top: 10px; margin: 0;
+      padding: 8px 10px; border-radius: 8px;
+      background: rgba(8, 10, 16, 0.78); border: 1px solid #26304a;
+      color: #9fb4d8; font: 11px/1.5 ui-monospace, Menlo, Consolas, monospace;
+      white-space: pre; pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script src="../shared/demo-shell.js?v=215"></script>
+  <script type="module" src="./main.js?v=215"></script>
+</body>
+</html>

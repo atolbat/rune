@@ -271,11 +271,19 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
     // Canvas format: pipelines (targets: [format]) fit both the canvas
     // and the surface — no second pipeline-creation branch
     const textureId = gpu.createTexture(width, height, 'canvas')
-    const targetId = gpu.createTarget(textureId, width, height, depth, color)
+    // Task 215 (A6 — the depth-reuse harvest): the surface's depth as a
+    // SAMPLEABLE depth32float texture — the color pass's depth survives
+    // the pass for the late downsample (needs depth: true; the internal
+    // depth24plus stays the default otherwise)
+    const depthTextureId = surfaceOptions.depthTexture === true && depth
+      ? gpu.createTexture(width, height, 'depth32float')
+      : undefined
+    const targetId = gpu.createTarget(textureId, width, height, depth, color, depthTextureId)
     let surfaceDisposed = false
     return {
       targetId,
       texture: { textureId, width, height },
+      ...(depthTextureId !== undefined ? { depthTextureId } : {}),
       width,
       height,
       pass: (fragment: string, passOptions: PassOptions = {}) =>
@@ -295,6 +303,7 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
         surfaceDisposed = true
         gpu.deleteTarget(targetId)
         gpu.deleteTexture(textureId)
+        if (depthTextureId !== undefined) gpu.deleteTexture(depthTextureId)
       },
     }
   }

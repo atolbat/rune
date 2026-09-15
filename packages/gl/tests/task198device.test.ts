@@ -175,11 +175,15 @@ describe('Task 198: the common bricks — the WebGPU leg', () => {
     expect(pyr.dims[3]).toEqual({ w: 1, h: 1 })
     expect(pyr.offsets).toEqual([0, 64, 80, 84])
     expect(calls.filter(c => c === 'createTexture(8,8,r32float)').length).toBe(1)
-    expect(calls).toContain('createTarget(1,8,8,depth)') // the z tile (level 0)
+    // Task 215 — the z tile's depth attachment is a depth32float TEXTURE
+    // (the exact-f32 winner selection — the harvest's parity anchor): the
+    // record carries the depthTex= mark
+    expect(calls.filter(c => c === 'createTexture(8,8,depth32float)').length).toBe(1)
+    expect(calls).toContain('createTarget(1,8,8,depth,depthTex=2)') // the z tile (level 0) + the exact-f32 depth attachment
     // the storage buffer (65 words) + the reduce family with the z-tile slot
     expect(calls.some(c => c.startsWith('createExternalBuffer(340,140)'))).toBe(true) // 85 words
     const createCalls = calls.filter(c => c.startsWith('createCompute('))
-    expect(createCalls.some(c => c.startsWith('createCompute(16,900003+tex:sampled@1)'))).toBe(true) // the storage + the z-tile slot
+    expect(createCalls.some(c => c.startsWith('createCompute(16,900004+tex:sampled@1)'))).toBe(true) // the storage + the z-tile slot (the depth texture shifted the call index — the storage is now 900004)
 
     const before = calls.length
     pyr.build()
@@ -200,6 +204,34 @@ describe('Task 198: the common bricks — the WebGPU leg', () => {
     expect(tail2.some(c => c.startsWith('runCompute(1,reduceL3,4,1)'))).toBe(true)
   })
 
+  it('Task 215 — harvestDepth (A6): the DEPTH-SOURCE compute family, lazy + memoized; the storage dispatches', async () => {
+    const { device, calls } = await wgDevice()
+    const pyr = device.pyramid(8, 8)
+    expect(pyr.harvestDepth).toBeDefined()
+    const before = calls.length
+    // a surface's depth texture id (the recording facade hands out plain ids)
+    pyr.harvestDepth?.(5)
+    let tail = calls.slice(before)
+    // THE LAZY FAMILY: the depth-source SPD — one createCompute with the
+    // 'depth' texture slot bound at the given id (the facade's
+    // texture_depth_2d binding), then the same two-dispatch spelling
+    const createIdx = tail.findIndex(c => c.startsWith('createCompute(') && c.includes('+tex:depth@5'))
+    expect(createIdx).toBeGreaterThanOrEqual(0)
+    expect(tail.some(c => c.startsWith('runCompute(1,spd,4,1)'))).toBe(true)
+    expect(tail.some(c => c.startsWith('runCompute(1,zToMip0,'))).toBe(false)
+    // MEMOIZED: a second harvest over the SAME source creates no family
+    const before2 = calls.length
+    pyr.harvestDepth?.(5)
+    tail = calls.slice(before2)
+    expect(tail.filter(c => c.startsWith('createCompute(')).length).toBe(0)
+    expect(tail.some(c => c.startsWith('runCompute(1,spd,4,1)'))).toBe(true)
+    // a DIFFERENT source texture re-creates the family (one per source)
+    const before3 = calls.length
+    pyr.harvestDepth?.(6)
+    tail = calls.slice(before3)
+    expect(tail.some(c => c.startsWith('createCompute(') && c.includes('+tex:depth@6'))).toBe(true)
+  })
+
   it('occlusionCuller → the scene + pyramid STORAGE buffers (the Task-196 slots) + readCullStats', async () => {
     const { device, calls } = await wgDevice()
     const scene = device.scene(LAYOUT)
@@ -210,7 +242,8 @@ describe('Task 198: the common bricks — the WebGPU leg', () => {
     expect(createCalls.length).toBe(3)
     // THE SLOT MAP: the scene (rw) at binding 1 + the pyramid storage (ro) at
     // binding 2 — the facade's fixed [rw, ro, rw] types match the Task-196 form
-    expect(createCalls[2]).toContain('900001+900008')
+    // (Task 215: the depth32float texture call shifted the storage id +1)
+    expect(createCalls[2]).toContain('900001+900009')
 
     const block = new Float32Array(20)
     culler.run(block)
@@ -352,6 +385,29 @@ describe('Task 198: the common bricks — the WebGL2 leg', () => {
     const tail = calls.slice(before)
     expect(tail.filter(c => c === 'drawArrays(triangle-strip,0,4,1)').length).toBe(3)
     expect(tail.some(c => c === 'bindTexture(1,0)')).toBe(true)
+  })
+
+  it('Task 215 — harvestDepth (A6): the harvest quad into the tile + the ladder; the program is lazy', async () => {
+    const { device, calls } = await glDevice()
+    const pyr = device.pyramid(8, 8)
+    expect(pyr.harvestDepth).toBeDefined()
+    // the harvest program is LAZY — nothing until the first call
+    expect(calls.filter(c => c.startsWith('createProgram(')).length).toBe(1) // the reduce program only
+    const before = calls.length
+    pyr.harvestDepth?.(4)
+    const tail = calls.slice(before)
+    // THE HARVEST QUAD: the tile target bound (cleared to its far value),
+    // the DEPTH texture bound as the source, ONE fullscreen strip
+    expect(tail.some(c => c === 'bindTarget(2,1)')).toBe(true) // the z tile's target
+    expect(tail.some(c => c === 'bindTexture(4,0)')).toBe(true) // the depth texture, unit 0
+    // then THE LADDER: the reduce quads ride the same strip over the tile
+    expect(tail.filter(c => c === 'drawArrays(triangle-strip,0,4,1)').length).toBe(4) // 1 harvest + 3 reduce quads
+    // the harvest program was created once (2 total now) — a second harvest reuses it
+    const before2 = calls.length
+    pyr.harvestDepth?.(4)
+    const tail2 = calls.slice(before2)
+    expect(tail2.filter(c => c.startsWith('createProgram(')).length).toBe(0)
+    expect(tail2.filter(c => c === 'drawArrays(triangle-strip,0,4,1)').length).toBe(4)
   })
 
   it('readCullStats → the flag readback + the full-record sweep (Task 199)', async () => {

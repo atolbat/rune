@@ -20,7 +20,7 @@
 // restore wire — the context-loss recovery — rides the Task-167
 // sync-point pass; the dist changed, the mark moves), the untouched bundles
 // keep their Task 149 marks.
-import { createRenderer, createFrameGraph, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=214'
+import { createRenderer, createFrameGraph, capsule, cube, plane, sphere, torusKnot } from '../../dist/rune.esm.js?v=215'
 import {
   materialOf, TEXTURE, VERTEX_COLOR, ALPHA_CUTOFF, LAMBERT, FLAT_ALBEDO,
   DOUBLE_SIDED, PBR, pbrMask, SOFT_PARTICLES, PBR_ENV, OUTPUT_DITHER, BILLBOARD,

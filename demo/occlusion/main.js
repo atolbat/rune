@@ -24,7 +24,7 @@
 // window.__hizStats — the live counters (the smoke/gates read it);
 // window.__hizGate — the probe verdict (?probe=1: WG-only, the Task-196
 // contract; ?probe=1&mode=webgl2: both tiers + the cross-tier parity).
-import { buildTier } from './tier.js?v=214'
+import { buildTier } from './tier.js?v=215'
 import {
   createScene, cameraAt, VAL_CAMERAS,
   HIZ_W, HIZ_H, LEVELS,
@@ -33,7 +33,7 @@ import {
   buildOctreeRecords, buildBVHRecords, frustumPlanes, aabbOutsideFrustum,
   recordView, flatCull, clusterize, softwareOccluder, cameraRay, rayBoxes,
   layerPolicy, adoptStore,
-} from '../../dist/rune.esm.js?v=214'
+} from '../../dist/rune.esm.js?v=215'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -498,10 +498,10 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
   let crossChecked = 0
   for (const camV of VAL_CAMERAS) {
     const { eye, mvp, fwd, right, up, fovY } = cameraAt(camV.yaw, camV.pitch, camV.dist)
-    t.renderTo(t.surface.targetId, mvp, eye, 1, false)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, false, false, true, true, true, false)
     const on = await t.surface.read()
     const onStats = await t.readStats()
-    t.renderTo(t.surface.targetId, mvp, eye, 0, false)
+    t.renderTo(t.surface.targetId, mvp, eye, 0, false, scene.K, false, false, false, false, true, true, true, false)
     const off = await t.surface.read()
     const offStats = await t.readStats()
     const hashOn = await sha256hex(on.data)
@@ -723,7 +723,7 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
       // subset of the GPU's; a stale cross-camera seed could wrongly cull
       // a wall in phase 1 and fake violations cull#2 would then honestly
       // commit)
-      t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, false, false, true, false)
+      t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, false, false, true, false, true, false)
       const verdicts = await t.readVerdicts()
       // Task 205 — the pass is TIMED now (the research harvest's own
       // metric rides the gate line: the tile-tier raster + the CSE
@@ -775,10 +775,10 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     // Task 208 — seed OFF on the city leg: the all-N fill IS the point
     // here (the seeded frame would gate the z-fill away and the «every
     // box writes depth» policy would never run)
-    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.N, false, false, false, false, true, false)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.N, false, false, false, false, true, false, true, false)
     const on = await t.surface.read()
     const onStats = await t.readStats()
-    t.renderTo(t.surface.targetId, mvp, eye, 0, false, scene.N)
+    t.renderTo(t.surface.targetId, mvp, eye, 0, false, scene.N, false, false, false, false, true, true, true, false)
     const off = await t.surface.read()
     const offStats = await t.readStats()
     const hashOnC = await sha256hex(on.data)
@@ -817,14 +817,14 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     // Task 208 — seed OFF on the whole hysteresis leg: the decay/saturation
     // law compares the streaks against the RAW reference at a FIXED policy
     // (a seeded phase 1 would drift the reference with the carry's age)
-    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, false, false, true, false)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, false, false, true, false, true, false)
     const offStats = await t.readStats()
     const off = await t.surface.read()
     // frame 1 of ON: the streaks are fresh — the occluded boxes stay drawn
-    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, true, false, false, false, true, false)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, true, false, false, false, true, false, true, false)
     const oneStats = await t.readStats()
     // five more frames: the streaks saturate (K = 3)
-    for (let f = 0; f < 5; f++) t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, true, false, false, false, true, false)
+    for (let f = 0; f < 5; f++) t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, true, false, false, false, true, false, true, false)
     const satStats = await t.readStats()
     const sat = await t.surface.read()
     const hystIdentical = sat.data.length === off.data.length && sat.data.every((v, i) => v === off.data[i])
@@ -862,7 +862,7 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     // the plain reference (history OFF = the K-wall fill alone; Task 208 —
     // seed OFF: the leg's law compares the history's coverage against the
     // PLAIN frame's, and a cross-camera carry could shift either side)
-    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, false)
+    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, false, true, false)
     const plainStats = await t.readStats()
     const plain = await t.surface.read()
     const plainInvariant = plainStats.frustum + plainStats.occluded + plainStats.drawn === scene.N
@@ -870,7 +870,7 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     // set accretes into the pyramid (frame 2's history = frame 1's set)
     let histInvariant = true
     for (let f = 0; f < 3; f++) {
-      t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, true)
+      t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, true, false, false, true, true, true, false)
       const stepStats = await t.readStats()
       histInvariant = histInvariant && stepStats.frustum + stepStats.occluded + stepStats.drawn === scene.N
     }
@@ -881,10 +881,10 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     // the MOTION leg: plain reference at the stepped camera vs the
     // feedback-on frame there (the history still carries the fixed
     // camera's set — a real one-frame-old set at a moved camera)
-    t.renderTo(t.surface.targetId, moved.mvp, moved.eye, 1, false, scene.K, false, false, false, false, true, false)
+    t.renderTo(t.surface.targetId, moved.mvp, moved.eye, 1, false, scene.K, false, false, false, false, true, false, true, false)
     const movedPlainStats = await t.readStats()
     const movedPlain = await t.surface.read()
-    t.renderTo(t.surface.targetId, moved.mvp, moved.eye, 1, false, scene.K, false, true)
+    t.renderTo(t.surface.targetId, moved.mvp, moved.eye, 1, false, scene.K, false, true, false, false, true, true, true, false)
     const movedHistStats = await t.readStats()
     const movedHist = await t.surface.read()
     const movedIdentical = movedHist.data.length === movedPlain.data.length && movedHist.data.every((v, i) => v === movedPlain.data[i])
@@ -924,15 +924,15 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     const camV = { yaw: 0, pitch: 0.1, dist: 12 }
     const { eye, mvp } = cameraAt(camV.yaw, camV.pitch, camV.dist)
     // the plain ON frame (feedback OFF — the Task-206 shape)
-    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, false, false, false)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, false, false, false, true, true, false)
     const plainStats = await t.readStats()
     const plain = await t.surface.read()
     // the feedback frame (same camera, same K policy — only V1's depth added)
-    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, false, false, true)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, false, false, true, true, true, false)
     const fbStats = await t.readStats()
     const fb = await t.surface.read()
     // the brute reference (every record writes the fill — the Task-199 experiment)
-    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.N, false, false, false, false, false)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.N, false, false, false, false, false, true, true, false)
     const cityStats = await t.readStats()
     const fbIdentical = fb.data.length === plain.data.length && fb.data.every((v, i) => v === plain.data[i])
     const fbRicher = fbStats.occluded >= plainStats.occluded && fbStats.drawn <= plainStats.drawn
@@ -963,11 +963,11 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     const { eye, mvp } = cameraAt(camV.yaw, camV.pitch, camV.dist)
     const skipsBefore = t.cullSkips()
     // the fresh cull (arms the cache), then two frozen frames (both skip)
-    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, true)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, true, false, true, true, true, false)
     const fresh = await t.surface.read()
     const freshStats = await t.readStats()
-    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, true)
-    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, true)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, true, false, true, true, true, false)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, true, false, true, true, true, false)
     const cached = await t.surface.read()
     const cachedStats = await t.readStats()
     const skips = t.cullSkips() - skipsBefore
@@ -1017,7 +1017,7 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     const camV = VAL_CAMERAS[0]
     const { eye, mvp } = cameraAt(camV.yaw, camV.pitch, camV.dist)
     // (a) Hi-Z off + view off: the prepass branch dies
-    t.renderTo(t.surface.targetId, mvp, eye, 0, false)
+    t.renderTo(t.surface.targetId, mvp, eye, 0, false, scene.K, false, false, false, false, true, true, true, false)
     const off = t.graphStats()
     const branchDead = off.culled.includes('z-fill') && off.culled.includes('pyramid-reduce')
       && !off.live.includes('z-fill') && !off.live.includes('pyramid-reduce')
@@ -1029,7 +1029,7 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     // these two legs (the classic laws they pin — the z-fill's imported
     // scene edge, the strip's z-fill-fed overlay — are the WARM-UP
     // frame's own; the seed's shape gets its own dedicated leg below)
-    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, false, false, true, false)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, false, false, true, false, true, false)
     const on = t.graphStats()
     const prepassBindsPrev = on.edges.some(e => e.startsWith('import→z-fill scene@'))
     const stripGated = on.gated.includes('pyramid-view') && !on.live.includes('pyramid-view')
@@ -1039,12 +1039,12 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     const fbLive = on.live.includes('feedback-fill') && on.live.includes('pyramid-reduce-2') && on.live.includes('cull-verdicts-2')
     const fbBindsCull1 = on.edges.some(e => e.startsWith('cull-verdicts→feedback-fill scene@'))
     const foldBindsCull2 = on.edges.some(e => e.startsWith('cull-verdicts-2→hysteresis scene@'))
-    t.renderTo(t.surface.targetId, mvp, eye, 1, true, scene.K, false, false, false, false, true, false)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, true, scene.K, false, false, false, false, true, false, true, false)
     const view = t.graphStats()
     const overlayOk = view.live.includes('pyramid-view') && view.live.includes('color') && view.live.includes('z-fill')
     // (d) the amortized frame: arm then freeze
-    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, true)
-    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, true)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, true, false, true, true, true, false)
+    t.renderTo(t.surface.targetId, mvp, eye, 1, false, scene.K, false, false, true, false, true, true, true, false)
     const frozen = t.graphStats()
     const amortGated = frozen.gated.includes('cull-verdicts') && frozen.gated.includes('hysteresis')
       && frozen.gated.includes('feedback-fill') && frozen.gated.includes('cull-verdicts-2')
@@ -1117,11 +1117,11 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     const moved = cameraAt(camV.yaw + 0.04, camV.pitch, camV.dist)
     // (c)'s boot measurement: the plain frame's drawn = the K-wall phase-1
     // pass set (V1@boot — the crowd the boot feedback fill rasters)
-    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, false, false)
+    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, false, false, true, false)
     const plainStats = await t.readStats()
     // the reference: the Task-207 feedback frame, seed OFF (the fresh
     // K-wall warm-up + the same-frame re-cull)
-    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, false)
+    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, false, true, false)
     const refStats = await t.readStats()
     const ref = await t.surface.read()
     // warm the carry: four seed frames at the FIXED camera — the buckets
@@ -1129,7 +1129,7 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     const trace = []
     let seedInvariant = true
     for (let f = 0; f < 4; f++) {
-      t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, true)
+      t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, true, true, false)
       const s = await t.readStats()
       trace.push(s.drawn)
       seedInvariant = seedInvariant && s.frustum + s.occluded + s.drawn === scene.N
@@ -1148,10 +1148,10 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     const fbChainLive = g.live.includes('feedback-fill') && g.live.includes('cull-verdicts-2')
     // (f) the motion leg: the fresh reference at the stepped camera vs the
     // seed frame there (the carry still holds the FIXED camera's pyramid)
-    t.renderTo(t.surface.targetId, moved.mvp, moved.eye, 1, false, scene.K, false, false, false, false, true, false)
+    t.renderTo(t.surface.targetId, moved.mvp, moved.eye, 1, false, scene.K, false, false, false, false, true, false, true, false)
     const movedRefStats = await t.readStats()
     const movedRef = await t.surface.read()
-    t.renderTo(t.surface.targetId, moved.mvp, moved.eye, 1, false, scene.K, false, false, false, false, true, true)
+    t.renderTo(t.surface.targetId, moved.mvp, moved.eye, 1, false, scene.K, false, false, false, false, true, true, true, false)
     const movedSeedStats = await t.readStats()
     const movedSeed = await t.surface.read()
     const movedIdentical = movedSeed.data.length === movedRef.data.length && movedSeed.data.every((v, i) => v === movedRef.data[i])
@@ -1201,16 +1201,16 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     // bill (drawn inflated by the depth-buried middle layer), muddying
     // the cross-leg drawn comparison. Warm the carry at THIS camera
     // first (the fixed-point law converges in one frame; two to be sure)
-    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, true, true)
-    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, true, true)
+    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, true, true, false)
+    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, true, true, false)
     // (a) order OFF — the pure compact output
-    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, true, false)
+    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, true, false, false)
     const offStats = await t.readStats()
     const offList = await t.readList()
     const offImg = await t.surface.read()
     // (b) order ON — the bitonic's product (same camera, same policy: the
     //     verdicts reuse, the color pass re-renders with the new order)
-    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, true, true)
+    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, false, false, false, false, true, true, true, false)
     const onStats = await t.readStats()
     const onList = await t.readList()
     const onImg = await t.surface.read()
@@ -1241,7 +1241,7 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     const invariantOk = offStats.frustum + offStats.occluded + offStats.drawn === scene.N
       && onStats.frustum + onStats.occluded + onStats.drawn === scene.N
     // (d) the hysteresis composition — the fold carries the bucket
-    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, true, false, false, false, true, true, true)
+    t.renderTo(t.surface.targetId, fixed.mvp, fixed.eye, 1, false, scene.K, true, false, false, false, true, true, true, false)
     const hystList = await t.readList()
     let carryOk = true, hystIdentityOk = true
     if (hystList !== null) {
@@ -1293,6 +1293,31 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     }
     allOk = allOk && spdOk
   }
+  // ── Task 215 — THE DEPTH-REUSE gate (research A6 — the presented frame's
+  //    own depth as the pyramid's author): at a still converged camera the
+  //    harvest path (the color pass's depth32float — the surface's samplable
+  //    attachment) must reproduce the feedback path (the survivors'
+  //    depth-only re-render) BIT FOR BIT — the pyramid words (WG), the
+  //    drawn/occluded counts, the presented pixels, and the honest frame
+  //    shape swap (feedback-fill gated out, depth-harvest live). The
+  //    still-camera fixed-point law, executable.
+  {
+    const camV = VAL_CAMERAS[0]
+    const { eye, mvp } = cameraAt(camV.yaw, camV.pitch, camV.dist)
+    const parity = t.reuseParity !== undefined ? await t.reuseParity(mvp, eye) : null
+    let reuseOk = true
+    if (parity !== null && parity.error === undefined) {
+      reuseOk = parity.pass === true
+      if (!reuseOk) {
+        shell.log.error(`depth-reuse parity FAILED — ${parity.diffs !== null && parity.diffs > 0 ? `${parity.diffs} of ${parity.words} storage words differ (first at word ${parity.first}); ` : ''}drawn ${parity.drawnOff} vs ${parity.drawnOn}, occluded ${parity.occludedOff} vs ${parity.occludedOn}, pixels ${parity.hashEqual ? 'identical' : 'DIFFER'}, harvest ${parity.harvestLive ? 'live' : 'missing'}, fill ${parity.fillClassic ? 'classic' : 'not gated'} — the still-camera fixed-point law is the contract`)
+      }
+      shell.log.event(`depth reuse (A6): the presented frame's own depth rebuilds the pyramid — ${parity.words !== null ? `${parity.words.toLocaleString()} storage words BIT-IDENTICAL to the feedback fill's (${parity.diffs} diffs), ` : ''}drawn ${parity.drawnOn} = occluded ${parity.occludedOn}, pixels identical, the fill render traded for ${t.mode === 'webgl2' ? '1 harvest quad + the reduce ladder' : 'the 2-dispatch SPD pair'} at a still camera — ${reuseOk ? 'PASS' : 'FAIL'}`)
+    } else if (parity !== null) {
+      reuseOk = false
+      shell.log.error(`depth-reuse gate crashed: ${parity.error}`)
+    }
+    allOk = allOk && reuseOk
+  }
   const verdict = { pass: allOk && crossOk && errors.length === 0, tier: t.mode, cameras, crossChecked, errors: errors.length }
   stats.validation = verdict
   if (anchor !== null) wgProbeHashes = anchor
@@ -1303,7 +1328,7 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
   if (t.drain !== null && t.drain !== undefined) {
     try { t.drain(performance.now()) } catch { /* the drain itself is best-effort */ }
   }
-  shell.log.event(`validation: ${verdict.pass ? 'PASS' : 'FAIL'} — pixel parity over ${cameras.length} cameras, the accounting invariant, the culling effect, the CPU spatial + ray + cluster + soft-Hi-Z gates, the temporal policy, the SPD bit-identity${crossChecked > 0 ? `, the cross-tier bounded parity ×${crossChecked}` : ''}${errors.length > 0 ? `, ${errors.length} GPU errors` : ''}`)
+  shell.log.event(`validation: ${verdict.pass ? 'PASS' : 'FAIL'} — pixel parity over ${cameras.length} cameras, the accounting invariant, the culling effect, the CPU spatial + ray + cluster + soft-Hi-Z gates, the temporal policy, the SPD bit-identity, the depth-reuse still-camera law${crossChecked > 0 ? `, the cross-tier bounded parity ×${crossChecked}` : ''}${errors.length > 0 ? `, ${errors.length} GPU errors` : ''}`)
   return verdict
   } finally {
     editHold = false

@@ -25,7 +25,7 @@ export type GLImageSource =
  *  WebGL2; linear filtering of rgba16f is core, rgba32f —
  *  OES_texture_float_linear (without it MIN_FILTER degrades to NEAREST);
  *  rendering TO a float target — EXT_color_buffer_float. */
-export type GLTextureFormat = 'rgba8' | 'rgba16f' | 'rgba32f' | 'r32f'
+export type GLTextureFormat = 'rgba8' | 'rgba16f' | 'rgba32f' | 'r32f' | 'depth32f'
 
 export interface GLFacade {
   createProgram(vertex: string, fragment: string): number
@@ -296,6 +296,14 @@ export interface GLFacade {
     depth: boolean,
     color: readonly [number, number, number, number],
     depthBits?: 16 | 24 | 32,
+    /** Task 215 (A6 — the depth-reuse harvest): a CALLER-OWNED depth
+     *  texture (createTexture(w, h, { format: 'depth32f' })) attached as
+     *  the target's depth attachment instead of a renderbuffer — the
+     *  color pass's depth then survives the pass as a SAMPLEABLE texture
+     *  (the "late downsample" source). The FBO completeness check is the
+     *  honest refusal for every mismatch (a non-depth texture or a wrong
+     *  size leaves the FBO incomplete and createTarget throws). */
+    depthTextureId?: number,
   ): number
   /** Switch the target: 0 = the canvas. clear — clear the target with its color
    *  (ignored for the canvas: BeginPass clears the canvas). */

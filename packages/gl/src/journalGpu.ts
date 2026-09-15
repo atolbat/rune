@@ -142,9 +142,9 @@ export function withJournalGpu(gpu: GPUFacade, journal: Journal): GPUFacade {
     ...(rawMultiDrawIndexed !== undefined ? { multiDrawIndexed: (args: Uint32Array, drawCount: number) => rawMultiDrawIndexed(args, drawCount) } : {}),
     endPass: () => gpu.endPass(),
     submit: () => gpu.submit(),
-    createTarget: (textureId, w, h, depth, color) => {
-      const id = gpu.createTarget(textureId, w, h, depth, color)
-      journal.record({ kind: 'createTarget', id, textureId, width: w, height: h, depth, color: color as ClearColor })
+    createTarget: (textureId, w, h, depth, color, depthTextureId) => {
+      const id = gpu.createTarget(textureId, w, h, depth, color, depthTextureId)
+      journal.record({ kind: 'createTarget', id, textureId, width: w, height: h, depth, color: color as ClearColor, ...(depthTextureId !== undefined ? { depthTextureId } : {}) })
       return id
     },
     bindTarget: (targetId, clear) => gpu.bindTarget(targetId, clear),
@@ -233,7 +233,7 @@ function applyGpuOp(op: DeclOp, gpu: GPUFacade, sourceFor?: (kind: string) => GP
       gpu.createTexture(op.width, op.height, op.format, op.options)
       break
     case 'createTarget':
-      gpu.createTarget(op.textureId, op.width, op.height, op.depth, op.color as ClearColor)
+      gpu.createTarget(op.textureId, op.width, op.height, op.depth, op.color as ClearColor, op.depthTextureId)
       break
     case 'texImage2DFromSource': {
       const source = sourceFor?.(op.sourceKind) ?? null

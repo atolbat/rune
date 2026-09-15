@@ -686,6 +686,38 @@ try {
     }
   }
 
+  // ─── scene-mirror: the worker-driven scene graph's SAB as adopted stores ──
+  // (Task 215 — the store mirror's live consumer). The smoke server serves
+  // no COOP/COEP → the honest T0 lane (the same pipeline on the main
+  // thread); the checks: the boot validation (the aliasing law, the exact
+  // dirt, the pool ≡ snapshot, the watermark discipline, the upload math),
+  // the live dirty-range counters, the visible counts, the log health.
+  {
+    const mirrorPage = await browser.newPage({ viewport: { width: 960, height: 720 } })
+    const mirrorErrors = []
+    mirrorPage.on('pageerror', e => mirrorErrors.push(String(e)))
+    await mirrorPage.goto(`http://localhost:${port}/demo/scene-mirror/`, { waitUntil: 'networkidle' })
+    const mirrorStats = await mirrorPage.waitForFunction(
+      () => (window.__mirrorStats && window.__mirrorStats.validation !== null ? window.__mirrorStats : undefined),
+      null,
+      { timeout: 120_000 },
+    ).then(h => h.jsonValue())
+    await mirrorPage.waitForTimeout(1000)
+    const mirrorLive = await mirrorPage.evaluate(() => ({ ...window.__mirrorStats, publish: { ...window.__mirrorStats.publish }, visible: [...window.__mirrorStats.visible] }))
+    const mirrorValidation = mirrorStats?.validation?.pass === true
+    const mirrorDirtLive = mirrorLive.publish.bytes > 0 && mirrorLive.publish.ranges > 0
+    const mirrorCullHonest = mirrorLive.visible[0] > 100 && mirrorLive.visible[0] < mirrorLive.nodes
+    const mirrorLogText = await mirrorPage.evaluate(() => document.querySelector('#log-list')?.textContent ?? '')
+    const mirrorClean = !/rendering stopped|frame error|failed/i.test(mirrorLogText) && mirrorErrors.length === 0
+    console.log(
+      `[smoke] scene-mirror (${mirrorStats?.lane}): validation ${mirrorValidation ? 'PASS' : 'FAIL'}, ` +
+        `publish dirt ${mirrorLive.publish.bytes} B / ${mirrorLive.publish.ranges} ranges, visible A ${mirrorLive.visible[0]}/${mirrorLive.nodes}, log ${mirrorClean ? 'clean' : 'DIRTY'}`,
+    )
+    var mirrorOk = mirrorValidation && mirrorDirtLive && mirrorCullHonest && mirrorClean
+    if (!mirrorOk) console.log(`[smoke] mirror sub-flags: validation ${mirrorValidation} dirtLive ${mirrorDirtLive} cullHonest ${mirrorCullHonest} clean ${mirrorClean} (errors ${mirrorErrors.length})`)
+    await mirrorPage.close()
+  }
+
   if (errors.length) {
     console.error('[smoke] page errors:')
     for (const error of errors) console.error(`  ${error}`)
@@ -724,13 +756,14 @@ try {
     vfxFgOk &&
     hizOk &&
     hizGlOk &&
+    mirrorOk &&
     viewerLogEntries > 0 &&
     mobileViewerOk &&
     errors.length === 0
 
   if (errors.length > 0) console.log(`[smoke] page errors (${errors.length}): ${errors.slice(0, 4).join(' | ').slice(0, 600)}`)
   if (!ok) {
-    const flags = { alive, pausedStill, aliveAgain, canvasCount, logEntries, mobileOk, viewerAlive, pbrGpuClean, loadText, sambaStatsOk, sambaAlive, gpuHealthy, pinchZoomed, matcapOk, matcapAlive, matcapGpuClean, viewerPickOk, particlesOk, particlesAlive, particlesGpuClean, mobileParticlesOk, particlesFgOk, particlesCullOk, vfxFirst, vfxAllLive, vfxLabels: vfxLabels.visible, vfxGpuClean, mobileVfxOk, vfxFgOk, hizOk, hizGlOk, viewerLogEntries, mobileViewerOk, errorsN: errors.length }
+    const flags = { alive, pausedStill, aliveAgain, canvasCount, logEntries, mobileOk, viewerAlive, pbrGpuClean, loadText, sambaStatsOk, sambaAlive, gpuHealthy, pinchZoomed, matcapOk, matcapAlive, matcapGpuClean, viewerPickOk, particlesOk, particlesAlive, particlesGpuClean, mobileParticlesOk, particlesFgOk, particlesCullOk, vfxFirst, vfxAllLive, vfxLabels: vfxLabels.visible, vfxGpuClean, mobileVfxOk, vfxFgOk, hizOk, hizGlOk, mirrorOk, viewerLogEntries, mobileViewerOk, errorsN: errors.length }
     const failing = Object.fromEntries(Object.entries(flags).filter(([, v]) => !v || v === 0))
     console.log('[smoke] failing flags:', JSON.stringify(failing))
   }

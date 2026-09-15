@@ -52,6 +52,15 @@ export interface SurfaceOptions {
   *  documented asymmetry). The Hi-Z parity anchor: 32 makes the surface's
   *  depth decisions exact-f32. */
   readonly depthBits?: 16 | 24 | 32
+  /** Task 215 (A6 — the depth-reuse harvest): the surface's depth
+  *  attachment becomes a SAMPLEABLE depth texture (WG: depth32float with
+  *  TEXTURE_BINDING; GL: a DEPTH_COMPONENT32F texture) instead of the
+  *  internal depth attachment — the color pass's depth then survives the
+  *  pass as a texture the reduce lane can read (the "late downsample"
+  *  source). The Surface return carries its textureId. Requires depth:
+  *  true. On GL the precision is 32f exactly (the harvest's parity anchor
+  *  — depthBits is ignored in this mode). */
+  readonly depthTexture?: boolean
 }
 
 /** Result of reading a surface (Task 80: readback — the first slice of
@@ -77,6 +86,11 @@ export interface Surface<C> {
   readonly targetId: number
   /** Surface texture — an input for subsequent passes. */
   readonly texture: { readonly textureId: number; readonly width: number; readonly height: number }
+  /** Task 215 (A6) — the SAMPLEABLE depth texture behind the surface's
+   *  depth attachment (present only with SurfaceOptions.depthTexture):
+   *  the color pass's own depth, alive after the pass — the "late
+   *  downsample" source. */
+  readonly depthTextureId?: number
   readonly width: number
   readonly height: number
   /** Fullscreen pass writing INTO this surface. */

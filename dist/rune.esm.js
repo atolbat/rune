@@ -7954,6 +7954,8 @@ var ENUM = {
   RGBA16F: 34842,
   RGBA32F: 34836,
   R32F: 33326,
+  DEPTH_COMPONENT32F: 36012,
+  DEPTH_COMPONENT: 6402,
   RED: 6403,
   RGBA: 6408,
   UNSIGNED_BYTE: 5121,
@@ -7972,6 +7974,8 @@ function formatInfo(format) {
       return { internalFormat: ENUM.RGBA32F, uploadFormat: ENUM.RGBA, uploadType: ENUM.FLOAT };
     case "r32f":
       return { internalFormat: ENUM.R32F, uploadFormat: ENUM.RED, uploadType: ENUM.FLOAT };
+    case "depth32f":
+      return { internalFormat: ENUM.DEPTH_COMPONENT32F, uploadFormat: ENUM.DEPTH_COMPONENT, uploadType: ENUM.FLOAT };
     default:
       return { internalFormat: ENUM.RGBA8, uploadFormat: ENUM.RGBA, uploadType: ENUM.UNSIGNED_BYTE };
   }
@@ -8056,12 +8060,12 @@ function createRealGL(gl, onViewportHeal) {
     floatLinearExt = false;
   }
   function magFilter(format) {
-    if (format === "r32f")
+    if (format === "r32f" || format === "depth32f")
       return ENUM.NEAREST;
     return format === "rgba32f" && !floatLinearExt ? ENUM.NEAREST : ENUM.LINEAR;
   }
   function minFilter(format, mipLevels) {
-    if (format === "r32f")
+    if (format === "r32f" || format === "depth32f")
       return mipLevels > 1 ? ENUM.NEAREST_MIPMAP_NEAREST : ENUM.NEAREST;
     const linear = !(format === "rgba32f" && !floatLinearExt);
     if (mipLevels > 1)
@@ -8445,21 +8449,33 @@ function createRealGL(gl, onViewportHeal) {
     canvasHeight = height;
     gl.viewport(0, 0, width, height);
   }
-  function createTarget(textureId, width, height, depth2, color, depthBits) {
+  function createTarget(textureId, width, height, depth2, color, depthBits, depthTextureId) {
     const fbo = gl.createFramebuffer();
     if (fbo === null)
       throw new Error("rune: createFramebuffer returned null");
     let depthRenderbuffer = null;
+    let attachedDepthTexture = false;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, textures.get(textureId) ?? null, 0);
     if (depth2) {
-      const depthFormat2 = depthBits === 24 ? gl.DEPTH_COMPONENT24 : depthBits === 32 ? gl.DEPTH_COMPONENT32F : gl.DEPTH_COMPONENT16;
-      depthRenderbuffer = gl.createRenderbuffer();
-      if (depthRenderbuffer === null)
-        throw new Error("rune: createRenderbuffer returned null");
-      gl.bindRenderbuffer(gl.RENDERBUFFER, depthRenderbuffer);
-      gl.renderbufferStorage(gl.RENDERBUFFER, depthFormat2, width, height);
-      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthRenderbuffer);
+      if (depthTextureId !== undefined) {
+        const depthTexture = textures.get(depthTextureId);
+        if (depthTexture === undefined) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, currentTarget === 0 ? null : targets.get(currentTarget)?.fbo ?? null);
+          gl.deleteFramebuffer(fbo);
+          throw new Error(`rune: createTarget — depth texture ${depthTextureId} not found`);
+        }
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, depthTexture, 0);
+        attachedDepthTexture = true;
+      } else {
+        const depthFormat2 = depthBits === 24 ? gl.DEPTH_COMPONENT24 : depthBits === 32 ? gl.DEPTH_COMPONENT32F : gl.DEPTH_COMPONENT16;
+        depthRenderbuffer = gl.createRenderbuffer();
+        if (depthRenderbuffer === null)
+          throw new Error("rune: createRenderbuffer returned null");
+        gl.bindRenderbuffer(gl.RENDERBUFFER, depthRenderbuffer);
+        gl.renderbufferStorage(gl.RENDERBUFFER, depthFormat2, width, height);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthRenderbuffer);
+      }
     }
     const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
     gl.bindFramebuffer(gl.FRAMEBUFFER, currentTarget === 0 ? null : targets.get(currentTarget)?.fbo ?? null);
@@ -8477,6 +8493,7 @@ function createRealGL(gl, onViewportHeal) {
       height,
       depth: depth2,
       depthRenderbuffer,
+      depthTexture: attachedDepthTexture,
       color
     });
     return id;
@@ -11109,9 +11126,9 @@ function withJournal(gl, journal) {
     ...gl.multiDrawElementsInstanced !== undefined ? {
       multiDrawElementsInstanced: (mode, elementBufferId, counts, instanceCounts, offsets, drawcount, twoByte) => gl.multiDrawElementsInstanced?.(mode, elementBufferId, counts, instanceCounts, offsets, drawcount, twoByte)
     } : {},
-    createTarget: (textureId, width, height, depth2, color, depthBits) => {
-      const id = gl.createTarget(textureId, width, height, depth2, color, depthBits);
-      journal.record({ kind: "createTarget", id, textureId, width, height, depth: depth2, color, ...depthBits !== undefined ? { depthBits } : {} });
+    createTarget: (textureId, width, height, depth2, color, depthBits, depthTextureId) => {
+      const id = gl.createTarget(textureId, width, height, depth2, color, depthBits, depthTextureId);
+      journal.record({ kind: "createTarget", id, textureId, width, height, depth: depth2, color, ...depthBits !== undefined ? { depthBits } : {}, ...depthTextureId !== undefined ? { depthTextureId } : {} });
       return id;
     },
     bindTarget: (targetId, clear) => gl.bindTarget(targetId, clear),
@@ -11156,7 +11173,7 @@ function applyOp(op, gl, sourceFor) {
       gl.createBuffer(op.data instanceof Float32Array ? op.data : toFloat32Array(op.data), op.usage);
       break;
     case "createTarget":
-      gl.createTarget(op.textureId, op.width, op.height, op.depth, op.color, op.depthBits);
+      gl.createTarget(op.textureId, op.width, op.height, op.depth, op.color, op.depthBits, op.depthTextureId);
       break;
     case "texImage2DFromSource": {
       const source = sourceFor?.(op.sourceKind) ?? null;
@@ -11333,13 +11350,13 @@ function createResourceSessionGL(raw, journal) {
       viewParent.delete(viewId);
       journal.record({ kind: "view.destroy", id: viewId });
     },
-    createTarget: (textureId, width, height, depth2, color, depthBits) => {
-      const rawId = raw.createTarget(rawTex(textureId), width, height, depth2, color, depthBits);
+    createTarget: (textureId, width, height, depth2, color, depthBits, depthTextureId) => {
+      const rawId = raw.createTarget(rawTex(textureId), width, height, depth2, color, depthBits, depthTextureId !== undefined ? rawTex(depthTextureId) : undefined);
       const id = nextTarget++;
       targetMap.set(id, rawId);
       targetParent.set(id, textureId);
       touch(textureId);
-      journal.record({ kind: "target.create", id, textureId, width, height, depth: depth2, color, ...depthBits !== undefined ? { depthBits } : {} });
+      journal.record({ kind: "target.create", id, textureId, width, height, depth: depth2, color, ...depthBits !== undefined ? { depthBits } : {}, ...depthTextureId !== undefined ? { depthTextureId } : {} });
       return id;
     },
     bindTarget: (targetId, clear) => {
@@ -11451,7 +11468,7 @@ function createResourceSessionGL(raw, journal) {
         break;
       }
       case "target.create": {
-        const rawId = raw.createTarget(rawTex(op.textureId), op.width, op.height, op.depth, op.color, op.depthBits);
+        const rawId = raw.createTarget(rawTex(op.textureId), op.width, op.height, op.depth, op.color, op.depthBits, op.depthTextureId !== undefined ? rawTex(op.depthTextureId) : undefined);
         targetMap.set(op.id, rawId);
         targetParent.set(op.id, op.textureId);
         touch(op.textureId);
@@ -11956,11 +11973,13 @@ function createWebGL2Renderer(options) {
     const depth2 = surfaceOptions.depth ?? false;
     const color = surfaceOptions.color ?? (options.clear ?? DEFAULT_CLEAR2).color;
     const textureId = gl.createTexture(width, height);
-    const targetId = gl.createTarget(textureId, width, height, depth2, color, surfaceOptions.depthBits);
+    const depthTextureId = surfaceOptions.depthTexture === true && depth2 ? gl.createTexture(width, height, { format: "depth32f" }) : undefined;
+    const targetId = gl.createTarget(textureId, width, height, depth2, color, surfaceOptions.depthBits, depthTextureId);
     let surfaceDisposed = false;
     const result = {
       targetId,
       texture: { textureId, width, height },
+      ...depthTextureId !== undefined ? { depthTextureId } : {},
       width,
       height,
       pass: (fragment, passOptions = {}) => createPassCommand(fragment, passOptions, targetId, () => [width, height]),
@@ -11981,6 +12000,8 @@ function createWebGL2Renderer(options) {
         surfaceDisposed = true;
         gl.deleteTarget(targetId);
         gl.deleteTexture(textureId);
+        if (depthTextureId !== undefined)
+          gl.deleteTexture(depthTextureId);
       }
     };
     return result;
@@ -13470,6 +13491,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
   let passHasDepth = true;
   let passSamples = 1;
   let currentTargetFormat = null;
+  let currentDepthFormat = null;
   let computePass = null;
   let computeGroup = null;
   let computePipeline = null;
@@ -13565,7 +13587,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
   function createTexture(w, h, textureFormat = "rgba8unorm", options) {
     const mipLevels = options?.mipLevels ?? 1;
     const gpuFormat = textureFormat === "canvas" ? format : resolveGpuFormat(textureFormat);
-    const filterable = textureFormat !== "rgba32float" || device.features.has("float32-filterable");
+    const filterable = !String(gpuFormat).startsWith("depth") && (textureFormat !== "rgba32float" || device.features.has("float32-filterable"));
     const texture = device.createTexture({
       size: [w, h],
       format: gpuFormat,
@@ -13588,7 +13610,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
       ...appliedAniso > 1 ? { maxAnisotropy: appliedAniso } : {}
     });
     const id = nextTextureId++;
-    textureRecords[id] = { texture, sampler, view: texture.createView(), format: gpuFormat, filterable };
+    textureRecords[id] = { texture, sampler, view: texture.createView(), format: gpuFormat, filterable, width: w, height: h };
     return id;
   }
   function texSubImage2D(textureId, x, y, w, h, bytes) {
@@ -13687,9 +13709,9 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
       variants: new Map
     };
     pipelineRecords[pipelineId] = record;
-    record.variants.set("float|1|" + format + "|1", buildPipeline(record, "float", true, format, 1));
+    record.variants.set(`float|1|${format}|1|depth24plus`, buildPipeline(record, "float", true, format, 1, "depth24plus"));
   }
-  function buildPipeline(record, variant, withDepth, targetFormat, samples = 1) {
+  function buildPipeline(record, variant, withDepth, targetFormat, samples = 1, depthFormat2 = "depth24plus") {
     const wgsl = record.wgsl;
     const attrs = record.attrs;
     const desc = record.desc;
@@ -13766,7 +13788,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
         frontFace: desc.raster?.frontFace === "cw" ? "cw" : "ccw"
       },
       depthStencil: withDepth ? {
-        format: "depth24plus",
+        format: depthFormat2,
         depthWriteEnabled: desc.depth === false ? false : desc.depth?.write ?? true,
         depthCompare: desc.depth === false ? "always" : depthCompareOf(desc.depth?.test)
       } : undefined,
@@ -13812,10 +13834,11 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
   }
   function setPipelineVariant(record, variant) {
     const targetFormat = currentTargetFormat ?? format;
-    const key = `${variant}|${passHasDepth ? 1 : 0}|${targetFormat}|${passSamples}`;
+    const depthFormat2 = currentDepthFormat ?? "depth24plus";
+    const key = `${variant}|${passHasDepth ? 1 : 0}|${targetFormat}|${passSamples}|${depthFormat2}`;
     let pipeline = record.variants.get(key);
     if (pipeline === undefined) {
-      pipeline = buildPipeline(record, variant, passHasDepth, targetFormat, passSamples);
+      pipeline = buildPipeline(record, variant, passHasDepth, targetFormat, passSamples, depthFormat2);
       record.variants.set(key, pipeline);
     }
     if (pipeline === currentPipeline)
@@ -14014,22 +14037,38 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
     canvasClearA = a;
     canvasDepthClear = depth2 ?? 1;
   }
-  function createTarget(textureId, targetWidth, targetHeight, depth2, color) {
+  function createTarget(textureId, targetWidth, targetHeight, depth2, color, depthTextureId) {
     const record = textureRecords[textureId];
     if (record === undefined)
       throw new Error(`rune: createTarget — texture ${textureId} not found`);
     let targetDepthView = null;
     let targetDepthTexture = null;
+    let targetDepthFormat = "depth24plus";
     if (depth2) {
-      targetDepthTexture = device.createTexture({
-        size: [targetWidth, targetHeight],
-        format: "depth24plus",
-        usage: GPUTextureUsage.RENDER_ATTACHMENT
-      });
-      targetDepthView = targetDepthTexture.createView();
+      if (depthTextureId !== undefined) {
+        const depthRecord = textureRecords[depthTextureId];
+        if (depthRecord === undefined)
+          throw new Error(`rune: createTarget — depth texture ${depthTextureId} not found`);
+        if (!String(depthRecord.format).startsWith("depth")) {
+          throw new Error(`rune: createTarget — depthTextureId ${depthTextureId} is '${depthRecord.format}', not a depth format (createTexture(w, h, 'depth32float'))`);
+        }
+        if (depthRecord.width !== targetWidth || depthRecord.height !== targetHeight) {
+          throw new Error(`rune: createTarget — the depth texture ${depthTextureId} (${depthRecord.width}x${depthRecord.height}) does not match the target ${targetWidth}x${targetHeight}`);
+        }
+        targetDepthView = depthRecord.view;
+        targetDepthTexture = depthRecord.texture;
+        targetDepthFormat = depthRecord.format;
+      } else {
+        targetDepthTexture = device.createTexture({
+          size: [targetWidth, targetHeight],
+          format: "depth24plus",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT
+        });
+        targetDepthView = targetDepthTexture.createView();
+      }
     }
     const id = nextTargetId++;
-    targets.set(id, { view: record.view, depthView: targetDepthView, depthTexture: targetDepthTexture, color, width: targetWidth, height: targetHeight, textureId });
+    targets.set(id, { view: record.view, depthView: targetDepthView, depthTexture: targetDepthTexture, depthFormat: targetDepthFormat, color, width: targetWidth, height: targetHeight, textureId });
     return id;
   }
   function bindTarget(targetId, clear) {
@@ -14049,6 +14088,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
     }
     currentTarget = targetId;
     currentTargetFormat = targetId === 0 ? format : textureRecords[targets.get(targetId)?.textureId ?? -1]?.format ?? format;
+    currentDepthFormat = targetId === 0 ? "depth24plus" : targets.get(targetId)?.depthFormat ?? "depth24plus";
     encoder ??= device.createCommandEncoder();
     const loadOp = clear ? "clear" : "load";
     let colorView;
@@ -15064,9 +15104,9 @@ function withJournalGpu(gpu, journal) {
     ...rawMultiDrawIndexed !== undefined ? { multiDrawIndexed: (args, drawCount) => rawMultiDrawIndexed(args, drawCount) } : {},
     endPass: () => gpu.endPass(),
     submit: () => gpu.submit(),
-    createTarget: (textureId, w, h, depth2, color) => {
-      const id = gpu.createTarget(textureId, w, h, depth2, color);
-      journal.record({ kind: "createTarget", id, textureId, width: w, height: h, depth: depth2, color });
+    createTarget: (textureId, w, h, depth2, color, depthTextureId) => {
+      const id = gpu.createTarget(textureId, w, h, depth2, color, depthTextureId);
+      journal.record({ kind: "createTarget", id, textureId, width: w, height: h, depth: depth2, color, ...depthTextureId !== undefined ? { depthTextureId } : {} });
       return id;
     },
     bindTarget: (targetId, clear) => gpu.bindTarget(targetId, clear),
@@ -15120,7 +15160,7 @@ function applyGpuOp(op, gpu, sourceFor) {
       gpu.createTexture(op.width, op.height, op.format, op.options);
       break;
     case "createTarget":
-      gpu.createTarget(op.textureId, op.width, op.height, op.depth, op.color);
+      gpu.createTarget(op.textureId, op.width, op.height, op.depth, op.color, op.depthTextureId);
       break;
     case "texImage2DFromSource": {
       const source = sourceFor?.(op.sourceKind) ?? null;
@@ -15282,13 +15322,13 @@ function createResourceSessionGPU(raw, journal) {
     ...rawMultiDrawIndexed !== undefined ? { multiDrawIndexed: (args, drawCount) => rawMultiDrawIndexed(args, drawCount) } : {},
     endPass: () => raw.endPass(),
     submit: () => raw.submit(),
-    createTarget: (textureId, width, height, depth2, color) => {
-      const rawId = raw.createTarget(rawTex(textureId), width, height, depth2, color);
+    createTarget: (textureId, width, height, depth2, color, depthTextureId) => {
+      const rawId = raw.createTarget(rawTex(textureId), width, height, depth2, color, depthTextureId !== undefined ? rawTex(depthTextureId) : undefined);
       const id = nextTarget++;
       targetMap.set(id, rawId);
       targetParent.set(id, textureId);
       touch(textureId);
-      journal.record({ kind: "target.create", id, textureId, width, height, depth: depth2, color });
+      journal.record({ kind: "target.create", id, textureId, width, height, depth: depth2, color, ...depthTextureId !== undefined ? { depthTextureId } : {} });
       return id;
     },
     bindTarget: (targetId, clear) => {
@@ -15419,7 +15459,7 @@ function createResourceSessionGPU(raw, journal) {
         break;
       }
       case "target.create": {
-        const rawId = raw.createTarget(rawTex(op.textureId), op.width, op.height, op.depth, op.color);
+        const rawId = raw.createTarget(rawTex(op.textureId), op.width, op.height, op.depth, op.color, op.depthTextureId !== undefined ? rawTex(op.depthTextureId) : undefined);
         targetMap.set(op.id, rawId);
         targetParent.set(op.id, op.textureId);
         touch(op.textureId);
@@ -15655,11 +15695,13 @@ async function createWebGpuRenderer(options) {
     const depth2 = surfaceOptions.depth ?? false;
     const color = surfaceOptions.color ?? DEFAULT_SURFACE_COLOR;
     const textureId = gpu.createTexture(width, height, "canvas");
-    const targetId = gpu.createTarget(textureId, width, height, depth2, color);
+    const depthTextureId = surfaceOptions.depthTexture === true && depth2 ? gpu.createTexture(width, height, "depth32float") : undefined;
+    const targetId = gpu.createTarget(textureId, width, height, depth2, color, depthTextureId);
     let surfaceDisposed = false;
     return {
       targetId,
       texture: { textureId, width, height },
+      ...depthTextureId !== undefined ? { depthTextureId } : {},
       width,
       height,
       pass: (fragment, passOptions = {}) => createPassCommand(fragment, passOptions, targetId, () => [width, height]),
@@ -15676,6 +15718,8 @@ async function createWebGpuRenderer(options) {
         surfaceDisposed = true;
         gpu.deleteTarget(targetId);
         gpu.deleteTexture(textureId);
+        if (depthTextureId !== undefined)
+          gpu.deleteTexture(depthTextureId);
       }
     };
   }
@@ -16293,6 +16337,13 @@ void main() {
   float dd = texelFetch(u_src, ivec2(x1, y1), 0).r;
   o = vec4(max(max(a, b), max(c, dd)), 0.0, 0.0, 1.0);
 }`;
+var HARVEST_GLSL_FS = `#version 300 es
+precision highp float;
+uniform sampler2D u_src;
+out vec4 o;
+void main() {
+  o = vec4(texelFetch(u_src, ivec2(gl_FragCoord.xy), 0).r, 0.0, 0.0, 1.0);
+}`;
 var COMPACT_WGSL = `
 struct CompactParams { words: vec4<u32> }
 @group(0) @binding(0) var<uniform> params: CompactParams;
@@ -16824,7 +16875,8 @@ function createWgDevice(renderer, options, clear) {
       offsets.push(offsets[L - 1] + dims[L - 1].w * dims[L - 1].h);
     const words = offsets[offsets.length - 1] + dims[dims.length - 1].w * dims[dims.length - 1].h;
     const zTexId = gpu.createTexture(w, h, "r32float");
-    const zTarget = gpu.createTarget(zTexId, w, h, true, [1, 1, 1, 1]);
+    const zDepthId = gpu.createTexture(w, h, "depth32float");
+    const zTarget = gpu.createTarget(zTexId, w, h, true, [1, 1, 1, 1], zDepthId);
     const storageId = gpu.createExternalBuffer(words * 4, WG_USAGE.STORAGE | WG_USAGE.COPY_DST | WG_USAGE.COPY_SRC);
     let REDUCE = "";
     for (let L = 1;L < dims.length; L++) {
@@ -16857,10 +16909,7 @@ fn reduceL${L}(@builtin(global_invocation_id) gid: vec3<u32>) {
       const d = dims[L];
       return `fn st${L}(x: u32, y: u32, v: f32) { if (x < ${d.w}u && y < ${d.h}u) { pyramid[${offsets[L]}u + y * ${d.w}u + x] = v; } }`;
     };
-    const SPD = `
-fn zAt(x: u32, y: u32) -> f32 {
-  return textureLoad(zTex, vec2<i32>(vec2<u32>(min(x, ${w - 1}u), min(y, ${h - 1}u))), 0).r;
-}
+    const SPD_BODY = `
 fn mx4(a: f32, b: f32, c: f32, d: f32) -> f32 { return max(max(a, b), max(c, d)); }
 fn st0(x: u32, y: u32, v: f32) { if (x < ${w}u && y < ${h}u) { pyramid[y * ${w}u + x] = v; } }
 ${storeFn(1)}
@@ -16965,6 +17014,16 @@ fn spd(@builtin(workgroup_id) wgid: vec3<u32>, @builtin(local_invocation_index) 
   }
 }
 `;
+    const SPD_TILE = `
+fn zAt(x: u32, y: u32) -> f32 {
+  return textureLoad(zTex, vec2<i32>(vec2<u32>(min(x, ${w - 1}u), min(y, ${h - 1}u))), 0).r;
+}
+${SPD_BODY}`;
+    const SPD_DEPTH = `
+fn zAt(x: u32, y: u32) -> f32 {
+  return textureLoad(zDepth, vec2<i32>(vec2<u32>(min(x, ${w - 1}u), min(y, ${h - 1}u))), 0);
+}
+${SPD_BODY}`;
     let TOP = "";
     if (dims.length >= 8) {
       let body = "";
@@ -17016,7 +17075,11 @@ fn zToMip0(@builtin(global_invocation_id) gid: vec3<u32>) {
   let z = textureLoad(zTex, vec2<i32>(vec2<u32>(x, y)), 0).r;
   pyramid[t] = z;
 }
-${REDUCE}${SPD}${TOP}`;
+${REDUCE}${SPD_TILE}${TOP}`;
+    const PYR_DEPTH_WGSL = `
+@group(0) @binding(1) var<storage, read_write> pyramid: array<f32>;
+@group(0) @binding(6) var zDepth: texture_depth_2d;
+${SPD_DEPTH}${TOP}`;
     const reduceId = gpu.createCompute(PYR_WGSL, 16, [storageId], [{ kind: "sampled", textureId: zTexId }]);
     const flat = (w2, h2) => Math.max(1, Math.ceil(w2 * h2 / 64));
     const block = new Float32Array(4);
@@ -17035,7 +17098,19 @@ ${REDUCE}${SPD}${TOP}`;
       }
     };
     const readWords = () => gpu.readExternalBuffer(storageId, words * 4);
-    return { zTarget, textures: [], storageId, offsets, levels, width: w, height: h, dims, build, buildLegacy, readWords };
+    let depthReduceId = 0;
+    let depthReduceTex = -1;
+    const harvestDepth = (depthTextureId) => {
+      gpu.endPass();
+      if (depthReduceTex !== depthTextureId) {
+        depthReduceId = gpu.createCompute(PYR_DEPTH_WGSL, 16, [storageId], [{ kind: "depth", textureId: depthTextureId }]);
+        depthReduceTex = depthTextureId;
+      }
+      gpu.runCompute(depthReduceId, "spd", block, regionTops);
+      if (levels >= 8)
+        gpu.runCompute(depthReduceId, "spdTop", block, 1);
+    };
+    return { zTarget, textures: [], storageId, offsets, levels, width: w, height: h, dims, build, buildLegacy, readWords, harvestDepth };
   }
   function program(spec) {
     if (spec.wg === undefined) {
@@ -17230,8 +17305,14 @@ ${REDUCE}${SPD}${TOP}`;
     return new Float32Array(f.buffer, f.byteOffset + (s.recordsWord + first * stride) * 4, count * stride);
   }
   function surface(width, height, surfaceOptions) {
-    const s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color });
-    return { targetId: s.targetId, width, height, read: () => s.read() };
+    const s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color, ...surfaceOptions?.depthTexture === true ? { depthTexture: true } : {} });
+    return {
+      targetId: s.targetId,
+      width,
+      height,
+      ...s.depthTextureId !== undefined ? { depthTextureId: s.depthTextureId } : {},
+      read: () => s.read()
+    };
   }
   const device = {
     backend: "webgpu",
@@ -17386,7 +17467,21 @@ function createGlDevice(renderer, options, clear) {
         gl.drawArrays("triangle-strip", 0, 4, 1);
       }
     };
-    return { zTarget, textures, levels, width: w, height: h, dims, build };
+    let harvestProgramId = 0;
+    const harvestDepth = (depthTextureId) => {
+      if (harvestProgramId === 0)
+        harvestProgramId = gl.createProgram(REDUCE_GLSL_VS, HARVEST_GLSL_FS);
+      gl.useProgram(harvestProgramId);
+      gl.setUniform1i(harvestProgramId, "u_src", 0);
+      gl.setDepthMode("always", false);
+      gl.setCull("none");
+      gl.bindVertexBuffer(quadBuf, 0, 2);
+      gl.bindTarget(zTarget, true);
+      gl.bindTexture(depthTextureId, 0);
+      gl.drawArrays("triangle-strip", 0, 4, 1);
+      build();
+    };
+    return { zTarget, textures, levels, width: w, height: h, dims, build, harvestDepth };
   }
   function program(spec) {
     if (spec.gl === undefined) {
@@ -17636,6 +17731,16 @@ function createGlDevice(renderer, options, clear) {
     };
   }
   function surface(width, height, surfaceOptions) {
+    if (surfaceOptions?.depthTexture === true) {
+      const s2 = renderer.surface({ width, height, depth: true, color: clear.color, depthTexture: true });
+      return {
+        targetId: s2.targetId,
+        width,
+        height,
+        ...s2.depthTextureId !== undefined ? { depthTextureId: s2.depthTextureId } : {},
+        read: () => s2.read()
+      };
+    }
     let s = null;
     for (const bits of [24, 16]) {
       try {

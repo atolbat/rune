@@ -242,6 +242,18 @@ export interface PyramidHandle {
   /** Task 214 (WG only) — the whole storage pyramid's words (every level,
   *  flat) — the parity gate's readback channel. */
   readonly readWords?: () => Promise<Float32Array>
+  /** Task 215 (A6 — the depth-reuse harvest): rebuild the pyramid from a
+   *  RENDER PASS's own depth texture (the surface's depthTextureId — the
+   *  presented frame's front layer) instead of a depth-only re-render of
+   *  the survivors. WG: the depth-source SPD pair (the same two-dispatch
+   *  cascade, zAt over texture_depth_2d — the storage is written directly,
+   *  the z tile untouched); GL: the harvest quad (texelFetch the depth
+   *  texture into the tile) + the FBO reduce ladder. The bit-identity law
+   *  (the gate's own proof): at a still converged camera the harvested
+   *  pyramid ≡ the feedback-built one, word for word — the winners are the
+   *  same fragments (both attachments test at exact f32), and the stored
+   *  z IS the fragment's own position.z on both paths. */
+  readonly harvestDepth?: (depthTextureId: number) => void
 }
 
 export interface CullerSpec {
@@ -623,6 +635,12 @@ export interface DeviceSurface {
   readonly targetId: number
   readonly width: number
   readonly height: number
+  /** Task 215 (A6 — the depth-reuse harvest): the SAMPLEABLE depth
+   *  texture behind this surface's depth attachment (present only when
+   *  the surface was created with depthTexture: true) — the color pass's
+   *  own depth, alive after the pass. The pyramid's harvestDepth(depth)
+   *  consumes it. */
+  readonly depthTextureId?: number
   read(): Promise<{ width: number; height: number; data: Uint8Array }>
 }
 
@@ -722,6 +740,18 @@ void main() {
   float c = texelFetch(u_src, ivec2(x0, y1), 0).r;
   float dd = texelFetch(u_src, ivec2(x1, y1), 0).r;
   o = vec4(max(max(a, b), max(c, dd)), 0.0, 0.0, 1.0);
+}`
+// Task 215 (A6 — the depth-reuse harvest): the GL harvest quad — a 1:1
+// copy of the presented frame's OWN depth texture into the r32f tile (the
+// same fragment's z at the same texel: the depth attachment and the tile's
+// color write carry the same f32, the FBO reduce ladder then runs as
+// usual). texelFetch — the depth texture is NEAREST-filtered by format.
+const HARVEST_GLSL_FS = `#version 300 es
+precision highp float;
+uniform sampler2D u_src;
+out vec4 o;
+void main() {
+  o = vec4(texelFetch(u_src, ivec2(gl_FragCoord.xy), 0).r, 0.0, 0.0, 1.0);
 }`
 
 /** THE COMPACT FAMILY (WG-only — the drawVisible brick's first half):
@@ -1493,7 +1523,17 @@ function createWgDevice(renderer: WebGpuRenderer, options: DeviceOptions, clear:
     for (let L = 1; L < dims.length; L++) offsets.push(offsets[L - 1] + dims[L - 1].w * dims[L - 1].h)
     const words = offsets[offsets.length - 1] + dims[dims.length - 1].w * dims[dims.length - 1].h
     const zTexId = gpu.createTexture(w, h, 'r32float')
-    const zTarget = gpu.createTarget(zTexId, w, h, true, [1, 1, 1, 1])
+    // Task 215 (A6 — the depth-reuse harvest) — the z tile's depth test at
+    // EXACT f32: the tile's own depth attachment becomes a depth32float
+    // texture. THE PARITY ANCHOR: the feedback path's tile winner (this
+    // attachment's 'less' test) and the harvest path's surface winner (the
+    // surface's depth32float, same precision) resolve IDENTICALLY, and the
+    // tile's r32f color write IS the winner's position.z — so the two
+    // paths' pyramids are bit-identical at a converged still camera (the
+    // reuse gate's own proof). The GL twin has run DEPTH_COMPONENT32F all
+    // along (the same anchor, the same law).
+    const zDepthId = gpu.createTexture(w, h, 'depth32float')
+    const zTarget = gpu.createTarget(zTexId, w, h, true, [1, 1, 1, 1], zDepthId)
     const storageId = gpu.createExternalBuffer(words * 4, WG_USAGE.STORAGE | WG_USAGE.COPY_DST | WG_USAGE.COPY_SRC)
     // the generated reduce family (the baked constants — the Task-196 code)
     let REDUCE = ''
@@ -1549,10 +1589,7 @@ fn reduceL${L}(@builtin(global_invocation_id) gid: vec3<u32>) {
       const d = dims[L]
       return `fn st${L}(x: u32, y: u32, v: f32) { if (x < ${d.w}u && y < ${d.h}u) { pyramid[${offsets[L]}u + y * ${d.w}u + x] = v; } }`
     }
-    const SPD = `
-fn zAt(x: u32, y: u32) -> f32 {
-  return textureLoad(zTex, vec2<i32>(vec2<u32>(min(x, ${w - 1}u), min(y, ${h - 1}u))), 0).r;
-}
+    const SPD_BODY = `
 fn mx4(a: f32, b: f32, c: f32, d: f32) -> f32 { return max(max(a, b), max(c, d)); }
 fn st0(x: u32, y: u32, v: f32) { if (x < ${w}u && y < ${h}u) { pyramid[y * ${w}u + x] = v; } }
 ${storeFn(1)}
@@ -1659,6 +1696,20 @@ fn spd(@builtin(workgroup_id) wgid: vec3<u32>, @builtin(local_invocation_index) 
   }
 }
 `
+    // the two SOURCE spellings of the cascade's mip0 read: the z tile
+    // (texture_2d<f32>, the z-prepass's product) and the COLOR PASS's OWN
+    // DEPTH (texture_depth_2d — Task 215's A6: the presented frame's front
+    // layer, the surface's samplable depth32float)
+    const SPD_TILE = `
+fn zAt(x: u32, y: u32) -> f32 {
+  return textureLoad(zTex, vec2<i32>(vec2<u32>(min(x, ${w - 1}u), min(y, ${h - 1}u))), 0).r;
+}
+${SPD_BODY}`
+    const SPD_DEPTH = `
+fn zAt(x: u32, y: u32) -> f32 {
+  return textureLoad(zDepth, vec2<i32>(vec2<u32>(min(x, ${w - 1}u), min(y, ${h - 1}u))), 0);
+}
+${SPD_BODY}`
     let TOP = ''
     if (dims.length >= 8) {
       let body = ''
@@ -1710,7 +1761,16 @@ fn zToMip0(@builtin(global_invocation_id) gid: vec3<u32>) {
   let z = textureLoad(zTex, vec2<i32>(vec2<u32>(x, y)), 0).r;
   pyramid[t] = z;
 }
-${REDUCE}${SPD}${TOP}`
+${REDUCE}${SPD_TILE}${TOP}`
+    // Task 215 (A6) — the DEPTH-SOURCE twin: the same two-dispatch cascade,
+    // zAt reading the color pass's own depth (texture_depth_2d — the
+    // facade's 'depth' compute binding). The storage is written directly:
+    // mip0's words ARE the depth texture's texels, the tile is never
+    // touched (the harvest never needs it).
+    const PYR_DEPTH_WGSL = `
+@group(0) @binding(1) var<storage, read_write> pyramid: array<f32>;
+@group(0) @binding(6) var zDepth: texture_depth_2d;
+${SPD_DEPTH}${TOP}`
     const reduceId = gpu.createCompute(PYR_WGSL, 16, [storageId], [{ kind: 'sampled', textureId: zTexId }])
     const flat = (w2: number, h2: number): number => Math.max(1, Math.ceil(w2 * h2 / 64))
     const block = new Float32Array(4)
@@ -1736,7 +1796,25 @@ ${REDUCE}${SPD}${TOP}`
       }
     }
     const readWords = (): Promise<Float32Array> => gpu.readExternalBuffer(storageId, words * 4)
-    return { zTarget, textures: [], storageId, offsets, levels, width: w, height: h, dims, build, buildLegacy, readWords }
+    // Task 215 (A6) — THE DEPTH-REUSE HARVEST: rebuild the pyramid from the
+    // presented frame's OWN depth (the surface's samplable depth32float) —
+    // the same two-dispatch SPD cascade over a different mip0 source. The
+    // compute family is LAZY (the surface's texture id is the caller's —
+    // one family per source texture, memoized).
+    let depthReduceId = 0
+    let depthReduceTex = -1
+    const harvestDepth = (depthTextureId: number): void => {
+      // the color pass leaves its render pass open — the compute dispatch
+      // needs it closed (the facade's tape contract)
+      gpu.endPass()
+      if (depthReduceTex !== depthTextureId) {
+        depthReduceId = gpu.createCompute(PYR_DEPTH_WGSL, 16, [storageId], [{ kind: 'depth', textureId: depthTextureId }])
+        depthReduceTex = depthTextureId
+      }
+      gpu.runCompute(depthReduceId, 'spd', block, regionTops)
+      if (levels >= 8) gpu.runCompute(depthReduceId, 'spdTop', block, 1)
+    }
+    return { zTarget, textures: [], storageId, offsets, levels, width: w, height: h, dims, build, buildLegacy, readWords, harvestDepth }
   }
 
   function program(spec: ProgramSpec): ProgramHandle {
@@ -1984,9 +2062,18 @@ ${REDUCE}${SPD}${TOP}`
     return new Float32Array(f.buffer, f.byteOffset + (s.recordsWord + first * stride) * 4, count * stride)
   }
 
-  function surface(width: number, height: number, surfaceOptions?: { depth?: boolean }): DeviceSurface {
-    const s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color })
-    return { targetId: s.targetId, width, height, read: () => s.read() }
+  function surface(width: number, height: number, surfaceOptions?: { depth?: boolean; depthTexture?: boolean }): DeviceSurface {
+    // Task 215 (A6) — depthTexture: the surface's depth attachment becomes
+    // a SAMPLEABLE depth32float texture (the color pass's own depth, alive
+    // after the pass — the harvest's source)
+    const s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color, ...(surfaceOptions?.depthTexture === true ? { depthTexture: true } : {}) })
+    return {
+      targetId: s.targetId,
+      width,
+      height,
+      ...(s.depthTextureId !== undefined ? { depthTextureId: s.depthTextureId } : {}),
+      read: () => s.read(),
+    }
   }
 
   const device: RenderDevice = {
@@ -2158,7 +2245,30 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
         gl.drawArrays('triangle-strip', 0, 4, 1)
       }
     }
-    return { zTarget, textures, levels, width: w, height: h, dims, build }
+    // Task 215 (A6 — the depth-reuse harvest): the GL leg — the harvest
+    // quad copies the presented frame's OWN depth texture into the tile
+    // (1:1, texelFetch), then the FBO reduce ladder runs as usual. The
+    // program is LAZY (one per device); the source is the surface's
+    // DEPTH_COMPONENT32F texture (the depthBits-32 surface contract) — a
+    // same-precision twin of the tile's own depth test, so the winner
+    // fragments and their z values match the feedback path's EXACTLY (the
+    // reuse gate's bit-identity law).
+    let harvestProgramId = 0
+    const harvestDepth = (depthTextureId: number): void => {
+      if (harvestProgramId === 0) harvestProgramId = gl.createProgram(REDUCE_GLSL_VS, HARVEST_GLSL_FS)
+      gl.useProgram(harvestProgramId)
+      gl.setUniform1i(harvestProgramId, 'u_src', 0)
+      gl.setDepthMode('always', false)
+      gl.setCull('none')
+      gl.bindVertexBuffer(quadBuf, 0, 2)
+      // the tile CLEARS to its far value (the target's [1,1,1,1]) — the
+      // harvest quad then writes every texel (a fullscreen strip)
+      gl.bindTarget(zTarget, true)
+      gl.bindTexture(depthTextureId, 0)
+      gl.drawArrays('triangle-strip', 0, 4, 1)
+      build()
+    }
+    return { zTarget, textures, levels, width: w, height: h, dims, build, harvestDepth }
   }
 
   function program(spec: ProgramSpec): ProgramHandle {
@@ -2469,7 +2579,21 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     }
   }
 
-  function surface(width: number, height: number, surfaceOptions?: { depth?: boolean }): DeviceSurface {
+  function surface(width: number, height: number, surfaceOptions?: { depth?: boolean; depthTexture?: boolean }): DeviceSurface {
+    // Task 215 (A6) — depthTexture: the surface's depth attachment becomes
+    // a SAMPLEABLE DEPTH_COMPONENT32F texture — the harvest's source AND
+    // the parity anchor (the same exact-f32 precision the tile's own
+    // ladder prefers; the ladder below stays the non-harvest fallback)
+    if (surfaceOptions?.depthTexture === true) {
+      const s = renderer.surface({ width, height, depth: true, color: clear.color, depthTexture: true })
+      return {
+        targetId: s.targetId,
+        width,
+        height,
+        ...(s.depthTextureId !== undefined ? { depthTextureId: s.depthTextureId } : {}),
+        read: () => s.read(),
+      }
+    }
     // the depth ladder: 24 matches the WG surface's depth24plus (the
     // cross-tier bounded-parity gate rides the same precision class)
     let s: ReturnType<WebGL2Renderer['surface']> | null = null
