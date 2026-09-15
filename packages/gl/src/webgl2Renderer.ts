@@ -61,6 +61,10 @@ export interface FrameHandle {
 /** WebGL2 renderer: canvas, auto-loop, resize/DPR, sim-time, commands and live. */
 export interface WebGL2Renderer {
   readonly gl: GLFacade
+  /** Task 219 — the unmasked RENDERER string (the software probe's source:
+   *  SwiftShader-GL legs identify themselves here; empty when the debug
+   * extension is absent or a facade was injected headless). */
+  readonly rendererInfo: string
   /** Caps — backend capabilities. null in headless mode (createGL injected). */
   readonly caps: Caps | null
   /** Task 169/187 — the multi-draw tier's live verdict: true when the option
@@ -357,6 +361,18 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
   // acquireWebGL2 yields a raw WebGL2RenderingContext — kept for caps-probing.
   // If createGL is injected (headless tests) — probing is skipped (no raw gl).
   const rawContext = options.createGL === undefined ? acquireWebGL2(canvas, options.glAttributes) : null
+  // Task 219 — THE SOFTWARE PROBE: the unmasked renderer string, read once
+  // from the raw context BEFORE the facade wraps it (ANGLE reports the true
+  // backend — 'SwiftShader' on the software legs; real GPUs name themselves).
+  let rendererInfo = ''
+  if (rawContext !== null) {
+    try {
+      const dbg = rawContext.getExtension('WEBGL_debug_renderer_info')
+      rendererInfo = dbg !== null
+        ? String(rawContext.getParameter(dbg.UNMASKED_RENDERER_WEBGL))
+        : String(rawContext.getParameter(rawContext.RENDERER))
+    } catch { /* the masked fallback is enough */ }
+  }
   // Task 129: the viewport-heal sink is wired into the raw facade — a
   // drawing-buffer divergence (the live "everything in the bottom-left
   // corner, as if the canvas shrank 4x" report) lands in the GL error log
@@ -1094,6 +1110,7 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
 
   return {
     gl,
+    rendererInfo,
     caps: probedCaps,
     // Task 169 — the live multi-draw verdict: the option AND the facade
     // method (realGL exposes it only when the context has WEBGL_multi_draw;

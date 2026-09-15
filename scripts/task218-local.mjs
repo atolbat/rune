@@ -110,10 +110,12 @@ async function validationLeg(mode) {
   check(`[${mode}] the boot — the loop runs, the crowd culled`, boot.stats.drawn > 30 && boot.stats.drawn < boot.stats.total, `drawn=${boot.stats.drawn}/${boot.stats.total}`)
   const live = boot.graph !== null ? boot.graph.live : []
   check(`[${mode}] the terrain passes live in the moving frame`, live.includes('terrain-color') && live.includes('terrain-z-2'), `live: ${live.join(',')}`)
-  // Task 218 — THE K WIRING LAW: the tier carries the flicker cure's K
-  // (24 — the occluded bursts that blinked the boxes ran up to ~23 frames)
+  // Task 218→219 — THE K WIRING LAW: the tier carries the honest damper's K
+  // (4 — Task 219 retired the 24-frame blanket: the pyramid now EQUALS the
+  // render surface, the false-cull class is dead by construction, and the
+  // remaining sub-pixel twinkle's streaks run 1–3 frames)
   const hystK = await page.evaluate(() => window.__walkerTier.hystFrames)
-  check(`[${mode}] the hysteresis K wiring — the flicker cure is armed`, hystK === 24, `hystFrames=${hystK} (need 24)`)
+  check(`[${mode}] the hysteresis K wiring — the honest damper is armed`, hystK === 4, `hystFrames=${hystK} (need 4)`)
 
   const statsV = await page.waitForFunction(
     () => (window.__walker && window.__walker.validation !== null ? window.__walker : undefined),
@@ -313,8 +315,9 @@ async function fallbackLeg() {
   await page.goto('http://localhost:8942/demo/walker/?crowd=512&mode=webgpu&live=1', { waitUntil: 'networkidle', timeout: 90_000 })
   // the container's present death: the WG device dies at the first
   // present, the canvas stays transparent — the watchdog checks at
-  // frames 90/180 (staged boots reset frameIndex), the chain walks to
-  // webgl2. WAIT for the landing (a frame-count journey, not wall time).
+  // frames 30/60 (staged boots reset frameIndex — Task 219 tightened the
+  // cadence from the masking era's 90), the chain walks to webgl2.
+  // WAIT for the landing (a frame-count journey, not wall time).
   const landed = await page.waitForFunction(
     () => window.__walker && window.__walker.frame > 40 && window.__walker.drawn > 0
       && (window.__walker.backend === 'webgl2' || (window.__walker.backend === 'webgpu' && window.__walker.kind === 'snapshot')),
@@ -400,7 +403,7 @@ async function flickerEvidenceLeg() {
   }, { timeout: 120_000 })
   console.log(`  [evidence] K=${report.k} · samples=${report.samples} (~${report.framesPerSample} frames apart) · raw flips=${report.totalFlips} (top id ${report.topFlips})`)
   console.log(`  [evidence] occluded runs ≤23 frames (K=24 MASKS these — the report's blinking): ${report.shortRuns} · honest runs (stay culled): ${report.longRuns}`)
-  check('[evidence] the oscilloscope ran and the cure is armed', report.k === 24 && report.samples > 60, `K=${report.k} · ${report.samples} samples`)
+  check('[evidence] the oscilloscope ran and the honest damper is armed', report.k === 4 && report.samples > 60, `K=${report.k} · ${report.samples} samples`)
   await ctx.close()
   server.stop(true)
 }

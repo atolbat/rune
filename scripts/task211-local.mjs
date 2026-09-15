@@ -50,26 +50,21 @@ function check(name, ok, detail = '') {
   if (!ok) failures++
 }
 
-/** The pixel-law hasher, per backend: WG (snapshot mode) → the
- * SURFACE hash (the parity gates' own probe — the blit/compositor path
- * that stretches the 2D canvas is raster-nondeterministic between
- * screenshots, the rendered surface is not); GL (live mode) → the CANVAS
- * screenshot (the color pass draws the canvas; the surface's FBO is the
- * validation target — nothing live writes it). Both under a PAUSED loop. */
-async function pixelHash(page, mode) {
+/** The pixel-law hasher: the SURFACE hash on BOTH backends (Task 219 —
+ * the crowd renders into the surface everywhere now; the canvas is a
+ * presentation surface reached by ONE blit, and a screenshot of a
+ * CSS-stretched canvas is raster-nondeterministic between shots on BOTH
+ * legs — the rendered surface is the deterministic truth). Under a PAUSED
+ * loop, as always. */
+async function pixelHash(page, _mode) {
   await page.evaluate(() => { window.__hizCtl.pause() })
   await page.waitForTimeout(400)
   try {
-    if (mode === 'webgpu') {
-      return await page.evaluate(async () => {
-        const r = await window.__hizTier.surface.read()
-        const d = await crypto.subtle.digest('SHA-256', new Uint8Array(r.data))
-        return Array.from(new Uint8Array(d), b => b.toString(16).padStart(2, '0')).join('')
-      })
-    }
-    const shot = await page.locator('#hiz-canvas').screenshot()
-    const d = await crypto.subtle.digest('SHA-256', new Uint8Array(shot))
-    return Array.from(new Uint8Array(d), b => b.toString(16).padStart(2, '0')).join('')
+    return await page.evaluate(async () => {
+      const r = await window.__hizTier.surface.read()
+      const d = await crypto.subtle.digest('SHA-256', new Uint8Array(r.data))
+      return Array.from(new Uint8Array(d), b => b.toString(16).padStart(2, '0')).join('')
+    })
   } finally {
     await page.evaluate(() => { window.__hizCtl.resume() })
   }

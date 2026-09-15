@@ -662,6 +662,10 @@ export interface DeviceSurface {
   readonly targetId: number
   readonly width: number
   readonly height: number
+  /** Task 219 — the surface's COLOR texture id (the presentation blit's
+   *  source: ONE quad per frame samples this texture into the live
+   *  canvas — the canonical single-pass present). */
+  readonly textureId: number
   /** Task 215 (A6 — the depth-reuse harvest): the SAMPLEABLE depth
    *  texture behind this surface's depth attachment (present only when
    *  the surface was created with depthTexture: true) — the color pass's
@@ -688,6 +692,16 @@ export interface RenderDevice {
   pyramid(w: number, h: number): PyramidHandle
   program(spec: ProgramSpec): ProgramHandle
   geometry(vertices: Float32Array, indices?: Uint16Array | Uint32Array): GeometryHandle
+  /** Task 219 — THE PRESENTATION BLIT: ONE fullscreen quad per frame
+   *  drawing the surface's color texture into the LIVE CANVAS (target 0).
+   *  This is the canonical WebGPU present shape — the canvas gets exactly
+   *  ONE pass, ONE getCurrentTexture, ZERO MSAA resolve chains (the
+   *  multi-pass canvas + load-after-discard construct killed real-GPU
+   *  presents in the field; see realGPU's canvas-pass law). The program
+   *  carries hasTextures (group 1) and samples with the surface's own
+   *  sampler. The live canvas's backing store may differ from the
+   *  surface's dims — the quad stretches, never distorts the frame graph. */
+  blitToCanvas(options: { program: ProgramHandle; surface: DeviceSurface }): void
   /** Task 216 — THE PLAIN MESH DRAW: one program, one parallel-attribute
    *  soup, one non-instanced draw. The WG leg binds the program's attr
    *  slots to the mesh's arrays in order (slot i ← array i); the GL leg
@@ -2139,9 +2153,29 @@ ${SPD_DEPTH}${TOP}`
       targetId: s.targetId,
       width,
       height,
+      textureId: s.texture.textureId,
       ...(s.depthTextureId !== undefined ? { depthTextureId: s.depthTextureId } : {}),
       read: () => s.read(),
     }
+  }
+
+  /** Task 219 — THE PRESENTATION BLIT (the WG leg): ONE quad, ONE
+   *  getCurrentTexture (inside bindTarget(0)), the surface's color texture
+   *  on group 1 — the canvas's whole interaction with the frame. The
+   *  program must be built with hasTextures: true (the group-1 texture
+   *  layout) and a 16-byte group-0 block (the facade's shared-UBO
+   *  contract — a vec4 pad keeps it). */
+  const blitPad = new Uint8Array(16)
+  function blitToCanvas(optionsIn: { program: ProgramHandle; surface: DeviceSurface }): void {
+    const prog = wgPrograms.get(optionsIn.program)
+    if (prog === undefined) throw new Error('rune: blitToCanvas — the program handle is not this device\'s own')
+    const offset = allocUniforms(blitPad)
+    gpu.bindTarget(0, true)
+    gpu.usePipeline(prog.pipelineId)
+    gpu.bindVertexBuffer(0, QUAD_LIST, 2)
+    gpu.bindTexture(optionsIn.surface.textureId)
+    gpu.bindUniforms(offset)
+    gpu.draw(6, 1)
   }
 
   const device: RenderDevice = {
@@ -2161,6 +2195,7 @@ ${SPD_DEPTH}${TOP}`
     drawInstanced,
     drawVisible,
     drawQuad,
+    blitToCanvas,
     occlusionCuller,
     // Task 201 — THE PASS BRICKS: the shared attach bodies drive BOTH
     // device closures (they call only the interface's surface); the
@@ -2206,6 +2241,9 @@ ${SPD_DEPTH}${TOP}`
 function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear: { color: [number, number, number, number]; depth: number }): RenderDevice {
   const gl = renderer.gl
   const onInfo = options.onInfo
+  // Task 219 — the software probe's string (the renderer probed the raw
+  // context at boot — ANGLE names SwiftShader honestly)
+  const glRendererInfo = renderer.rendererInfo ?? ''
   const scenes = new Map<SceneHandle, GlScene>()
   const programs = new Map<ProgramHandle, GlProgram>()
   let geometryBuf = 0
@@ -2690,6 +2728,7 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
         targetId: s.targetId,
         width,
         height,
+        textureId: s.texture.textureId,
         ...(s.depthTextureId !== undefined ? { depthTextureId: s.depthTextureId } : {}),
         read: () => s.read(),
       }
@@ -2705,15 +2744,36 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     }
     if (s === null) throw new Error('rune: the GL validation surface could not attach a depth renderbuffer')
     const fixed = s
-    return { targetId: fixed.targetId, width, height, read: () => fixed.read() }
+    return { targetId: fixed.targetId, width, height, textureId: fixed.texture.textureId, read: () => fixed.read() }
   }
+
+  /** Task 219 — THE PRESENTATION BLIT (the GL leg): ONE fullscreen strip
+   *  drawing the surface's color texture into the live canvas (target 0),
+   *  depth disabled — the same canonical single-pass present as the WG
+   *  twin (the multi-pass canvas construct is dead on both backends). */
+  function blitToCanvasGl(optionsIn: { program: ProgramHandle; surface: DeviceSurface }): void {
+    const prog = programs.get(optionsIn.program) as GlProgram | undefined
+    if (prog === undefined) throw new Error('rune: blitToCanvas — the program handle is not this device\'s own')
+    openPass(0, true, prog)
+    if (prog.lanes.length > 0) setUniformLanes(prog, EMPTY_F32)
+    gl.setDepthMode('always', false) // the present quad rides over everything
+    gl.bindTexture(optionsIn.surface.textureId, 0)
+    gl.bindVertexBuffer(quadBuf === 0 ? (quadBuf = gl.createBuffer(QUAD_STRIP)) : quadBuf, 0, 2)
+    gl.drawArrays('triangle-strip', 0, 4, 1)
+  }
+  const EMPTY_F32 = new Float32Array(4)
 
   const device: RenderDevice = {
     backend: 'webgl2',
     canvas: options.canvas,
     renderer,
-    adapterInfo: 'WebGL2 (ANGLE)',
-    software: false,
+    adapterInfo: glRendererInfo,
+    // Task 219 — THE GL SOFTWARE PROBE: SwiftShader-GL (the container's
+    // ANGLE legs) reports itself through the unmasked renderer string.
+    // The flag does NOT change the GL present path (GL canvas presents
+    // survive everywhere it runs) — the callers read it to size their
+    // render surfaces honestly (the software ladder caps the fill).
+    software: /swiftshader|llvmpipe|software|basic ?render/i.test(glRendererInfo),
     antialias: true, // the context cascade's first rung — the driver's own MSAA
     gpu: null,
     gl,
@@ -2725,6 +2785,7 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     drawInstanced,
     drawVisible,
     drawQuad,
+    blitToCanvas: blitToCanvasGl,
     occlusionCuller,
     // Task 201 — THE PASS BRICKS: the shared attach bodies drive BOTH
     // device closures (they call only the interface's surface); the
@@ -2765,6 +2826,9 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     dispose(): void {
       try { renderer.dispose() } catch { /* already dead */ }
     },
+  }
+  if (device.software && onInfo !== undefined) {
+    onInfo(`software GL renderer detected (${glRendererInfo.trim() || 'unknown'}) — the canvas presents stay (GL's own path), the caller's surface ladder caps the fill`)
   }
   return device
 }

@@ -198,6 +198,18 @@ export async function createRealGPU(
   // validation death at the first bindTarget after a resize).
   const canvasAntialias = hints?.antialias === true
   const MSAA_SAMPLES = 4
+  // ── Task 219 — THE CANVAS-PASS LAW ─────────────────────────────────────
+  // Under MSAA the canvas pass ends with storeOp:'discard' on the shared 4x
+  // color texture (the resolve already carried the pixels). A SECOND canvas
+  // pass in the same submit would loadOp:'load' those DISCARDED contents —
+  // spec-legal, contents UNDEFINED: on desktops the memory happens to
+  // survive, on mobile tilers it reads as garbage/black, and the second
+  // resolve overwrites the first pass's pixels. This exact construct was
+  // the WG live-canvas field death (Task 216-218: two canvas passes per
+  // frame). The facade now REFUSES it loudly instead of rendering undefined
+  // content — one canvas pass per submit cycle under antialias; render to
+  // an offscreen surface and blit once (blitToCanvas) if you need layers.
+  let canvasPassesThisSubmit = 0
   let msaaColorTexture: GPUTexture | null = null
   let msaaColorView: GPUTextureView | null = null
   let msaaDepthTexture: GPUTexture | null = null
@@ -1380,6 +1392,18 @@ export async function createRealGPU(
     let depthAttachment: GPURenderPassDepthStencilAttachment | undefined
     let clearValue: GPUColor
     if (targetId === 0) {
+      // Task 219 — THE CANVAS-PASS LAW: see the guard's declaration. The
+      // count resets at every submit (a NEW frame's present cycle begins).
+      if (canvasAntialias && canvasPassesThisSubmit >= 1) {
+        throw new Error(
+          'rune: the canvas-pass law — a SECOND render pass on the canvas in one submit under antialias. ' +
+          'The MSAA path discards the 4x texture at every pass end (the resolve already carried the pixels); ' +
+          'a following loadOp:load reads UNDEFINED contents and the second resolve overwrites the first pass — ' +
+          'black screens on mobile tilers, garbage on desktops. Render your layers into an offscreen surface ' +
+          'and present with ONE blit pass (device.blitToCanvas), or boot the renderer with antialias: false.',
+        )
+      }
+      canvasPassesThisSubmit++
       // Task 198 — THE MSAA CANVAS: the pass renders into the 4x color
       // texture and RESOLVES into the canvas texture (resolveTarget, the
       // only spec shape for a multisampled canvas — configure() has no
@@ -1628,6 +1652,9 @@ export async function createRealGPU(
     if (timerHandle !== null) timerHandle.onSubmit(encoder)
     device.queue.submit([encoder.finish()])
     encoder = null
+    // Task 219 — the canvas-pass law's cycle boundary: a submit ends the
+    // present cycle; the next frame's first canvas pass is legal again.
+    canvasPassesThisSubmit = 0
     // Task 174 — the multi-draw ring resets at the frame's structural end:
     // the next frame's writeBuffer calls are queue-ordered AFTER this
     // submit, so the slots are free to reuse (the GPU consumed this

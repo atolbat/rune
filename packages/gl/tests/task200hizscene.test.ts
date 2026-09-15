@@ -123,7 +123,7 @@ const EYE = [1, 2, 3]
 function fakeWgRenderer(gpu: GPUFacade): unknown {
   return {
     gpu,
-    surface: () => ({ targetId: 7, read: () => Promise.resolve({ width: 4, height: 4, data: new Uint8Array(64) }) }),
+    surface: () => ({ targetId: 7, texture: { textureId: 71, width: 4, height: 4 }, read: () => Promise.resolve({ width: 4, height: 4, data: new Uint8Array(64) }) }),
     dispose: () => {},
     step: () => {},
     service: () => {},
@@ -133,7 +133,7 @@ function fakeWgRenderer(gpu: GPUFacade): unknown {
 function fakeGlRenderer(gl: GLFacade): unknown {
   return {
     gl,
-    surface: () => ({ targetId: 9, read: () => Promise.resolve({ width: 4, height: 4, data: new Uint8Array(64) }) }),
+    surface: () => ({ targetId: 9, texture: { textureId: 91, width: 4, height: 4 }, read: () => Promise.resolve({ width: 4, height: 4, data: new Uint8Array(64) }) }),
     dispose: () => {},
     step: () => {},
     service: () => {},

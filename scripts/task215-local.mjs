@@ -77,22 +77,17 @@ async function occlusionLeg(mode) {
     moving.live.includes('feedback-fill') && moving.live.includes('pyramid-reduce-2') && !moving.live.includes('depth-harvest'),
     `live: ${moving.live.join(',')}`)
 
-  // (b) freeze the camera — the STILL frames swap the fill for the harvest
-  //     (WG snapshot mode renders every frame to the surface; the GL live
-  //     canvas carries no samplable depth — the doc's own catch — so the GL
-  //     CANVAS loop keeps the classic shape, and the surface-driven parity
-  //     below proves the swap itself)
+  // (b) freeze the camera — the STILL frames swap the fill for the harvest.
+  //     Task 219 — THE LIMITATION DISSOLVED: the live canvas loop renders
+  //     into THE SURFACE now (the canvas is a one-blit presentation target),
+  //     so the live leg carries the sampleable depth too — BOTH backends'
+  //     still frames harvest (the Task-215 doc's own catch is history).
   await page.evaluate(() => { window.__hizCam.auto = 0 })
   await page.waitForTimeout(700)
-  if (mode === 'webgpu') {
+  {
     const still1 = await page.evaluate(() => window.__hizTier.graphStats())
-    check(`[${mode}] the still frame: the harvest owns the pyramid (the fill gated out)`,
+    check(`[${mode}] the still frame: the harvest owns the pyramid (the fill gated out — live AND snapshot legs alike)`,
       still1.live.includes('depth-harvest') && !still1.live.includes('feedback-fill'),
-      `live: ${still1.live.join(',')}`)
-  } else {
-    const still1 = await page.evaluate(() => window.__hizTier.graphStats())
-    check(`[${mode}] the still CANVAS frame keeps the classic shape (no samplable depth on the live canvas — the doc's own catch; the surface parity below proves the swap)`,
-      still1.live.includes('feedback-fill') && !still1.live.includes('depth-harvest'),
       `live: ${still1.live.join(',')}`)
   }
 

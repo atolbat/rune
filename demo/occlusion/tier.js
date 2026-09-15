@@ -111,12 +111,22 @@
 // visible box (its own rect holds either background 1.0 or surfaces
 // behind it), so the final verdicts stay pixel-exact at any camera,
 // however old the seed. The one-frame lag costs fill, never a pixel.
-import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=218'
+import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=219'
 import { buildShaders } from './shaders.js?v=210'
-import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H } from './scene.js?v=203'
+import { BOX_VERTS, BOX_INDICES } from './scene.js?v=203'
 const SKY = [0.045, 0.055, 0.09, 1]
 const LIGHT = [0.5, 0.8, 0.35]
-const SURF_W = 480, SURF_H = 270
+// ── Task 219 — THE SURFACE LADDER (the render-resolution caps) ──────────
+// The crowd renders into THE SURFACE at every mode/backend; the canvas is
+// a presentation target (ONE blit pass per frame — the canonical present).
+// The caps keep every leg honest: a software adapter (SwiftShader — the
+// gates' container) gets the classic ~155k-texel budget whatever the
+// viewport; a real GPU's LIVE leg renders native-class (≤ 1 MP); a real
+// GPU's SNAPSHOT fallback (a present-death survivor) degrades to ≤ 553k —
+// the phone's «норм»-class picture at half the present-independent cost.
+const CAP_SOFTWARE = 155_520
+const CAP_SNAPSHOT = 552_960
+const CAP_LIVE = 1_048_576
 // Task 218 — the hysteresis K is the CALLER's now (the occlusion demo
 // keeps the Frostbite classic 3 — its frames stay bit-identical; the
 // walker's field report «боксы мерцают то исчезая то появляясь» measured
@@ -146,7 +156,6 @@ export async function buildTier(deps) {
   //      terrain-z pass owns the clear; the crowd's color pass stops
   //      clearing the target — terrain-color owns it.
   const surfSpec = deps.surf ?? { w: 480, h: 270 }
-  const SURF_W = surfSpec.w, SURF_H = surfSpec.h
   const terrainSpec = deps.terrain ?? null
   // Task 217 — THE SKY (the walker's field report: the occlusion demo's
   // near-black navy read as «всё чёрное» in a game viewport). The clear
@@ -163,7 +172,13 @@ export async function buildTier(deps) {
     backend,
     canvas: bootCanvas,
     clear: { color: SKY_COLOR, depth: 1 },
-    antialias: true,   // WG: the 4x-resolve canvas; GL: the context cascade
+    // Task 219 — THE CANVAS MSAA RETIRES on the WG leg: the live canvas
+    // gets exactly ONE 1x blit pass per frame now (the multi-pass
+    // MSAA-resolve construct — load-after-discard + a double
+    // getCurrentTexture — was the WG live-canvas field death; the facade's
+    // canvas-pass law refuses it outright). GL keeps the context cascade
+    // (its canvas presents were never the disease).
+    antialias: backend === 'webgl2',
     dprCap: 2,         // mobile-first: supersample where it pays, cap the fill
     onError: noteError,
     onInfo: message => shell.log.info(message),
@@ -179,13 +194,39 @@ export async function buildTier(deps) {
   const SNAPSHOT = backend === 'webgpu' && !FORCE_LIVE && (FORCE_SNAPSHOT || device.software)
   const MODE = PROBE ? 'probe' : SNAPSHOT ? 'snapshot' : 'live'
 
+  // ── Task 219 — THE SURFACE RESOLUTION (the render target every mode
+  //    renders into; the pyramid equals it — the occlusion-resolution
+  //    law). `follow:'canvas'` sizes it to the STAGE's own shape × the
+  //    boot dpr (the renderer's formula, dprCap 2) under the ladder's
+  //    caps; a fixed spec {w, h} rides as given (the caller's own
+  //    budget). The camera's ASPECT is the stage's CSS shape either way —
+  //    the projection and the surface agree by construction at boot.
+  let SURF_W, SURF_H
+  if (surfSpec.follow === 'canvas' && MODE !== 'probe') {
+    const dpr = Math.min(typeof window !== 'undefined' ? window.devicePixelRatio ?? 1 : 1, 2)
+    let w = Math.max(2, Math.round((stage.clientWidth || 480) * dpr))
+    let h = Math.max(2, Math.round((stage.clientHeight || 270) * dpr))
+    const cap = device.software ? CAP_SOFTWARE : SNAPSHOT ? CAP_SNAPSHOT : CAP_LIVE
+    const area = w * h
+    if (area > cap) {
+      const s = Math.sqrt(cap / area)
+      w = Math.max(2, Math.floor(w * s))
+      h = Math.max(2, Math.floor(h * s))
+    }
+    SURF_W = w
+    SURF_H = h
+  } else {
+    SURF_W = surfSpec.w
+    SURF_H = surfSpec.h
+  }
+
   let displayCanvas = null
   let snapshot2d = null
   if (MODE !== 'probe') {
     if (SNAPSHOT) {
       // the honest degrade: every frame renders into the surface and blits
       // into a 2D canvas — the full pipeline, zero presents. The canvas is
-      // 480×270 (the surface's own size) and CSS-stretched: a 1:1 blit, no
+      // the surface's own size and CSS-stretched: a 1:1 blit, no
       // quarter-fill games.
       displayCanvas = document.createElement('canvas')
       displayCanvas.width = SURF_W
@@ -217,8 +258,14 @@ export async function buildTier(deps) {
     stride: scene.STRIDE,
     fields: scene.FIELDS,
   })
-  const dict = buildShaders(scene)
-  const pyramid = device.pyramid(HIZ_W, HIZ_H)
+  // Task 219 — THE PYRAMID EQUALS THE SURFACE (the occlusion-resolution
+  // law): every texel of occlusion proof maps to a render pixel, so a
+  // visible sliver at render res is a full texel to the cull — the
+  // sub-texel false-cull class (the field flicker «боксы мерцают то
+  // исчезая то появляясь» — the pyramid was 480×270 against a 960×540+
+  // render) cannot exist by construction.
+  const dict = buildShaders(scene, { w: SURF_W, h: SURF_H })
+  const pyramid = device.pyramid(SURF_W, SURF_H)
   const mesh = device.geometry(BOX_VERTS, BOX_INDICES)
   // ── Task 216 — THE TERRAIN BRICKS: one depth-only column into the
   //    pyramid's tile + one lit column into the target, both over the
@@ -270,6 +317,11 @@ export async function buildTier(deps) {
   // depth-only (the presented frame IS the front layer — the fixed-point
   // law's own product).
   const surface = device.surface(SURF_W, SURF_H, { depth: true, depthTexture: true })
+  // Task 219 — THE PRESENTATION BLIT: the live canvas's whole interaction
+  // with the frame — ONE fullscreen quad sampling the surface's color
+  // texture (the canonical single-pass present; the multi-pass canvas is
+  // dead and the facade's canvas-pass law guards its return).
+  const blitProg = device.program({ depth: { test: 'less', write: false }, cull: 'none', wg: dict.blit.wg, gl: dict.blit.gl })
 
   const hist = device.historyPass({ scene: sceneHandle, mesh, pyramid, shaders: dict.hist, fill: dict.z, noClear: terrainSpec !== null })
   // Task 207 — THE SAME-FRAME FEEDBACK BRICK: the first cull's fresh RAW
@@ -299,7 +351,7 @@ export async function buildTier(deps) {
     // / the texture ladder — the seed's own law), and the still-frame path
     // reads the CARRIED version (cull#2 with the feedback branch gated out
     // — the staleness channel counts it, exactly like cull#1's seed read).
-    hiz: fg.resource({ name: 'hi-z', kind: 'texture', width: HIZ_W, height: HIZ_H, format: 'r32f', transient: false, external: pyramid }),
+    hiz: fg.resource({ name: 'hi-z', kind: 'texture', width: SURF_W, height: SURF_H, format: 'r32f', transient: false, external: pyramid }),
     // Task 208 — THE CROSS-FRAME SEED: the pyramid's carry across the
     // frame boundary, as its OWN persistent resource. Physically the
     // SAME object as hi-z (bytes: 0 — counting it would double the
@@ -514,10 +566,17 @@ export async function buildTier(deps) {
     execute: () => { pendingStats = device.readCullStats(sceneHandle) },
   })
   fg.pass({
-    // the frame boundary: the WG encoder submit / the GL service boundary
+    // the frame boundary: the WG encoder submit / the GL service boundary.
+    // Task 219 — THE SINGLE-PASS PRESENT: on the live legs the canvas gets
+    // exactly ONE blit draw (the surface's color texture → the canvas)
+    // before the submit; the snapshot legs keep the 2D putImageData path
+    // (blitSnapshot, zero GPU presents — the software degrade).
     name: 'present', kind: 'present', cost: 1,
     reads: [R.target],
-    execute: () => device.submit(),
+    execute: () => {
+      if (MODE === 'live') device.blitToCanvas({ program: blitProg, surface })
+      device.submit()
+    },
   })
 
   // ── THE FRAME = compile(policy) + run(props) ───────────────────────────
@@ -675,6 +734,11 @@ export async function buildTier(deps) {
 
   // ── the snapshot blit (software WG — zero presents) ─────────────────────
   let blitPending = false
+  let blitLanded = 0 // Task 219 — the snapshot's own "present" counter: the
+  let blitRefused = 0 // async readback+putImageData IS this leg's present —
+  // the watchdog must judge it only after its first LANDING (a SwiftShader
+  // readback can take dozens of frames to arrive — an empty canvas before
+  // the first landing is LATENCY, not death — the frame-217 predicate law)
   function blitSnapshot() {
     if (blitPending) return
     blitPending = true
@@ -682,8 +746,9 @@ export async function buildTier(deps) {
       blitPending = false
       if (snapshot2d !== null && result.data.length === SURF_W * SURF_H * 4) {
         snapshot2d.putImageData(new ImageData(new Uint8ClampedArray(result.data.buffer, result.data.byteOffset, result.data.length), SURF_W, SURF_H), 0, 0)
+        blitLanded++
       }
-    }).catch(() => { blitPending = false })
+    }).catch(() => { blitRefused++; blitPending = false })
   }
 
   // ── Task 214 — THE SPD PARITY GATE (the single-pass downsampler's
@@ -815,7 +880,14 @@ export async function buildTier(deps) {
   }
 
   function frame(mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false, feedbackOn = true, seedOn = true, orderOn = true, reuseOn = true) {
-    renderTo(SNAPSHOT ? surface.targetId : 0, mvp, eye, hizOn, debug, occluders, hysteresisOn, historyOn, cacheOn, wantStats, feedbackOn, seedOn, orderOn, reuseOn)
+    // Task 219 — EVERY mode renders into THE SURFACE (the crowd, the
+    // terrain, the strip — the graph's target); the live canvas is a
+    // presentation surface reached by the present pass's ONE blit (the
+    // multi-pass direct-to-canvas frame — the WG field death — is gone).
+    // The A6 depth-reuse rides free now: the live frame's target IS the
+    // surface with its sampleable depth (the Task-215 limitation — «the
+    // canvas present path carries no samplable depth» — dissolves).
+    renderTo(surface.targetId, mvp, eye, hizOn, debug, occluders, hysteresisOn, historyOn, cacheOn, wantStats, feedbackOn, seedOn, orderOn, reuseOn)
     if (SNAPSHOT) blitSnapshot()
   }
 
@@ -923,12 +995,24 @@ export async function buildTier(deps) {
       : `WebGPU — storage pyramid + compute cull + one drawIndexedIndirect${device.antialias ? ' · MSAA 4x resolve' : ''}`,
     drawsLine: backend === 'webgl2'
       ? `draws: 2 (fill + collapse color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid; Task 215 — a STILL camera swaps the fill for the depth harvest: 1 quad + the ladder, the presented frame's own depth) · TF passes: 2 (cull + hysteresis; +1 cull ON the feedback) · ${pyramid.levels - 1} reduce quads (×2 the feedback frame; ×1 the seed frame)`
-      : `draws: 2 (fill + indirect color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid; Task 215 — a STILL camera swaps the fill for TWO DISPATCHES: the SPD pair over the presented frame's own depth32float) · dispatches: 3 (cull + hysteresis + compact; +1 cull ON the feedback; +1 order ON the near-first list — the early-Z harvest) · Task 214 — the pyramid builds in ONE SPD DISPATCH PAIR (${Math.ceil(HIZ_W / 64) * Math.ceil(HIZ_H / 64)} region workgroups + the top reduce) where the legacy chain spent ${pyramid.levels} (×2 the feedback frame; ×1 the seed frame)`,
+      : `draws: 2 (fill + indirect color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid; Task 215 — a STILL camera swaps the fill for TWO DISPATCHES: the SPD pair over the presented frame's own depth32float) · dispatches: 3 (cull + hysteresis + compact; +1 cull ON the feedback; +1 order ON the near-first list — the early-Z harvest) · Task 214 — the pyramid builds in ONE SPD DISPATCH PAIR (${Math.ceil(SURF_W / 64) * Math.ceil(SURF_H / 64)} region workgroups + the top reduce) where the legacy chain spent ${pyramid.levels} (×2 the feedback frame; ×1 the seed frame)`,
     canvas: displayCanvas,
     surface,
+    /** Task 219 — THE OCCLUSION-RESOLUTION LAW's own channel: the pyramid's
+     * dims (== the surface's — the cull's proof resolution equals the
+     * render's; the gate asserts the equality and the ladder's caps). */
+    hizDims: { w: SURF_W, h: SURF_H },
     /** Task 218 — the hysteresis K this tier runs with (the wiring law's
-     * channel: the walker passes 24 — the flicker report's cure). */
+     * channel: the walker passes 4 — Task 219's honest damper, the
+     * pyramid-equality root cure rides above it). */
     hystFrames: HYST_FRAMES,
+    /** Task 219 — THE SNAPSHOT PRESENT HEALTH (the watchdog's predicate):
+     * `landed` = completed readback+putImageData cycles (the async present
+     * path's own frame counter), `refused` = rejected readbacks (a dead
+     * device's signature). A live canvas presents synchronously — the
+     * watchdog judges it at the frame cadence; a snapshot canvas is judged
+     * only once a blit has LANDED or been REFUSED. */
+    snapshotHealth: () => ({ landed: blitLanded, refused: blitRefused }),
     renderTo,
     frame,
     applyEdits,

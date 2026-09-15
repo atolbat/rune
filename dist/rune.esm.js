@@ -12207,6 +12207,13 @@ var DEFAULT_CLEAR2 = { color: [0.07, 0.08, 0.11, 1], depth: 1 };
 function createWebGL2Renderer(options) {
   const canvas = resolveCanvasAny(options.canvas);
   const rawContext = options.createGL === undefined ? acquireWebGL2(canvas, options.glAttributes) : null;
+  let rendererInfo = "";
+  if (rawContext !== null) {
+    try {
+      const dbg = rawContext.getExtension("WEBGL_debug_renderer_info");
+      rendererInfo = dbg !== null ? String(rawContext.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : String(rawContext.getParameter(rawContext.RENDERER));
+    } catch {}
+  }
   const rawGl = options.createGL !== undefined ? options.createGL(canvas) : createRealGL(rawContext, (message) => options.onGlError?.(message));
   const session = options.resources !== undefined ? createResourceSessionGL(rawGl, options.resources) : null;
   const gl = session !== null ? session.facade : options.journal !== undefined ? withJournal(rawGl, options.journal) : rawGl;
@@ -12681,6 +12688,7 @@ function createWebGL2Renderer(options) {
   })();
   return {
     gl,
+    rendererInfo,
     caps: probedCaps,
     get multiDraw() {
       return multiDrawActive;
@@ -13819,6 +13827,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
   let depthView = null;
   const canvasAntialias = hints?.antialias === true;
   const MSAA_SAMPLES = 4;
+  let canvasPassesThisSubmit = 0;
   let msaaColorTexture = null;
   let msaaColorView = null;
   let msaaDepthTexture = null;
@@ -14442,6 +14451,10 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
     let depthAttachment;
     let clearValue;
     if (targetId === 0) {
+      if (canvasAntialias && canvasPassesThisSubmit >= 1) {
+        throw new Error("rune: the canvas-pass law — a SECOND render pass on the canvas in one submit under antialias. " + "The MSAA path discards the 4x texture at every pass end (the resolve already carried the pixels); " + "a following loadOp:load reads UNDEFINED contents and the second resolve overwrites the first pass — " + "black screens on mobile tilers, garbage on desktops. Render your layers into an offscreen surface " + "and present with ONE blit pass (device.blitToCanvas), or boot the renderer with antialias: false.");
+      }
+      canvasPassesThisSubmit++;
       passSamples = canvasAntialias ? MSAA_SAMPLES : 1;
       const canvasView = gpuContext.getCurrentTexture().createView();
       clearValue = { r: canvasClearR, g: canvasClearG, b: canvasClearB, a: canvasClearA };
@@ -14616,6 +14629,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
       timerHandle.onSubmit(encoder);
     device.queue.submit([encoder.finish()]);
     encoder = null;
+    canvasPassesThisSubmit = 0;
     indirectRingSlot = 0;
   }
   function readTargetPixels(targetId) {
@@ -17690,9 +17704,23 @@ ${SPD_DEPTH}${TOP}`;
       targetId: s.targetId,
       width,
       height,
+      textureId: s.texture.textureId,
       ...s.depthTextureId !== undefined ? { depthTextureId: s.depthTextureId } : {},
       read: () => s.read()
     };
+  }
+  const blitPad = new Uint8Array(16);
+  function blitToCanvas(optionsIn) {
+    const prog = wgPrograms.get(optionsIn.program);
+    if (prog === undefined)
+      throw new Error("rune: blitToCanvas — the program handle is not this device's own");
+    const offset = allocUniforms(blitPad);
+    gpu.bindTarget(0, true);
+    gpu.usePipeline(prog.pipelineId);
+    gpu.bindVertexBuffer(0, QUAD_LIST, 2);
+    gpu.bindTexture(optionsIn.surface.textureId);
+    gpu.bindUniforms(offset);
+    gpu.draw(6, 1);
   }
   const device = {
     backend: "webgpu",
@@ -17711,6 +17739,7 @@ ${SPD_DEPTH}${TOP}`;
     drawInstanced,
     drawVisible,
     drawQuad,
+    blitToCanvas,
     occlusionCuller,
     depthPass: (spec) => attachDepthPass(device, spec),
     occlusionPass: (spec) => attachOcclusionPass(device, spec),
@@ -17751,6 +17780,7 @@ ${SPD_DEPTH}${TOP}`;
 function createGlDevice(renderer, options, clear) {
   const gl = renderer.gl;
   const onInfo = options.onInfo;
+  const glRendererInfo = renderer.rendererInfo ?? "";
   const scenes = new Map;
   const programs = new Map;
   let geometryBuf = 0;
@@ -18145,6 +18175,7 @@ function createGlDevice(renderer, options, clear) {
         targetId: s2.targetId,
         width,
         height,
+        textureId: s2.texture.textureId,
         ...s2.depthTextureId !== undefined ? { depthTextureId: s2.depthTextureId } : {},
         read: () => s2.read()
       };
@@ -18159,14 +18190,27 @@ function createGlDevice(renderer, options, clear) {
     if (s === null)
       throw new Error("rune: the GL validation surface could not attach a depth renderbuffer");
     const fixed = s;
-    return { targetId: fixed.targetId, width, height, read: () => fixed.read() };
+    return { targetId: fixed.targetId, width, height, textureId: fixed.texture.textureId, read: () => fixed.read() };
   }
+  function blitToCanvasGl(optionsIn) {
+    const prog = programs.get(optionsIn.program);
+    if (prog === undefined)
+      throw new Error("rune: blitToCanvas — the program handle is not this device's own");
+    openPass(0, true, prog);
+    if (prog.lanes.length > 0)
+      setUniformLanes(prog, EMPTY_F32);
+    gl.setDepthMode("always", false);
+    gl.bindTexture(optionsIn.surface.textureId, 0);
+    gl.bindVertexBuffer(quadBuf === 0 ? quadBuf = gl.createBuffer(QUAD_STRIP) : quadBuf, 0, 2);
+    gl.drawArrays("triangle-strip", 0, 4, 1);
+  }
+  const EMPTY_F32 = new Float32Array(4);
   const device = {
     backend: "webgl2",
     canvas: options.canvas,
     renderer,
-    adapterInfo: "WebGL2 (ANGLE)",
-    software: false,
+    adapterInfo: glRendererInfo,
+    software: /swiftshader|llvmpipe|software|basic ?render/i.test(glRendererInfo),
     antialias: true,
     gpu: null,
     gl,
@@ -18178,6 +18222,7 @@ function createGlDevice(renderer, options, clear) {
     drawInstanced,
     drawVisible,
     drawQuad,
+    blitToCanvas: blitToCanvasGl,
     occlusionCuller,
     depthPass: (spec) => attachDepthPass(device, spec),
     occlusionPass: (spec) => attachOcclusionPass(device, spec),
@@ -18204,6 +18249,9 @@ function createGlDevice(renderer, options, clear) {
       } catch {}
     }
   };
+  if (device.software && onInfo !== undefined) {
+    onInfo(`software GL renderer detected (${glRendererInfo.trim() || "unknown"}) — the canvas presents stay (GL's own path), the caller's surface ladder caps the fill`);
+  }
   return device;
 }
 

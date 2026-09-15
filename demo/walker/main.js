@@ -24,12 +24,12 @@
 // window.__walker — the live counters (the smoke/gates read it);
 // window.__walkerGate — the boot validation's promise (the deterministic
 // autopilot: a scripted walk over the course, the laws asserted live).
-import { buildTier } from '../occlusion/tier.js?v=218'
+import { buildTier } from '../occlusion/tier.js?v=219'
 import { perspective, lookAt, mat4Mul, BOX_VERTS, BOX_INDICES } from '../occlusion/scene.js?v=203'
-import { createWorld, BODY, EYE_HEIGHT } from './world.js?v=218'
-import { createControls } from './controls.js?v=218'
-import { terrainShaders } from './shaders-terrain.js?v=218'
-import { createCharacter, createScaleGovernor } from '../../dist/rune.esm.js?v=218'
+import { createWorld, BODY, EYE_HEIGHT } from './world.js?v=219'
+import { createControls } from './controls.js?v=219'
+import { terrainShaders } from './shaders-terrain.js?v=219'
+import { createCharacter, createScaleGovernor } from '../../dist/rune.esm.js?v=219'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -83,7 +83,11 @@ function noteError(message) {
 // blit — keeps WebGPU where the device is alive) → webgl2 (the device is
 // dead). A user-driven mode switch re-arms the chain from scratch.
 let wdStage = 0 // 0 = live armed, 1 = snapshot fallback armed, ≥2 = retired
-let wdNextFrame = 90
+// Task 219 — THE CADENCE: the first probe lands at frame 30 (~0.5 s — the
+// root cure made the live present the canonical single-pass blit, so a
+// DEAD canvas is a true driver death and heals fast; the 90-frame grace
+// of the band-aid era left the field staring at black for 2 s)
+let wdNextFrame = 30
 let wdBusy = false
 const wdMirror = typeof document !== 'undefined' ? document.createElement('canvas') : null
 if (wdMirror !== null) { wdMirror.width = 16; wdMirror.height = 16 }
@@ -105,9 +109,19 @@ async function watchdogStep() {
   wdBusy = true
   try {
     if (canvasHasPixels()) { wdStage = 2; return } // healthy — retire
+    // Task 219 — THE SNAPSHOT PREDICATE (the false-positive cure): the
+    // snapshot leg's present is an ASYNC readback+putImageData — a software
+    // stack can take dozens of frames to land the first one. An empty
+    // snapshot canvas before ANY blit landed is LATENCY, not death — wait
+    // for the tier's own predicate (landed/refused). The LIVE canvas
+    // presents synchronously — the frame cadence judges it directly.
+    if (tier.kind === 'snapshot') {
+      const health = typeof tier.snapshotHealth === 'function' ? tier.snapshotHealth() : { landed: 1, refused: 0 }
+      if (health.refused === 0 && health.landed === 0 && frameIndex < 900) return
+    }
     if (wdStage === 0 && tier.kind === 'live') {
       noteError(`the live canvas never presented (frame ${frameIndex}) — the WG snapshot path takes over`)
-      wdStage = 1; wdNextFrame = frameIndex + 90
+      wdStage = 1; wdNextFrame = frameIndex + 30
       await bootTier('webgpu', { snapshot: true, watchdog: true })
     } else {
       noteError(`the snapshot canvas is empty too (frame ${frameIndex}) — the WG device is dead — webgl2 takes over`)
@@ -199,7 +213,7 @@ async function bootTier(backend, opts = {}) {
   if (tier !== null) { try { tier.dispose() } catch { /* already dead */ } tier = null }
   // a user-driven boot re-arms the watchdog chain; a watchdog-driven one
   // (the fallback itself) keeps its stage — the chain must not restart
-  if (opts.watchdog !== true) { wdStage = 0; wdNextFrame = 90 }
+  if (opts.watchdog !== true) { wdStage = 0; wdNextFrame = 30 }
   // a fresh tier = a fresh loop state: a validation finish that hung on a
   // dead device left the loop parked (paused) — without this reset the
   // fallback boots into a frozen loop and the watchdog never re-checks.
@@ -221,14 +235,27 @@ async function bootTier(backend, opts = {}) {
       // Task 218 — ?live=1: the FIELD DEBUG hatch (a phone report walked the
       // live canvas-present path; the gates and the field force it open)
       forceLive: PARAMS.get('live') === '1' && opts.snapshot !== true,
-      // Task 218 — THE FLICKER CURE (the report's «боксы мерцают то
-      // исчезая то появляясь»): the silhouette-edge occluded bursts run up
-      // to ~23 frames — every K ≤ 15 blew through and the boxes blinked.
-      // K=24 (the kernel's new 31 cap carries it); the cull delay is CHEAP
-      // for opaque geometry (the depth test rejects the extra draws).
-      hystFrames: 24,
-      // Task 216 — THE WALKER EXTENSIONS:
-      surf: { w: 960, h: 540 }, // a GAME's surface (the culling viz ran 480×270)
+      // Task 219 — THE HONEST DAMPER: the flicker's ROOT was the pyramid's
+      // 480×270 tile against a 960×540+ render (sub-texel slivers falsely
+      // culled while visibly poking — 530 raw flips / 219 blinking runs in
+      // 12 s, the 218 oscilloscope); the pyramid now EQUALS the surface, the
+      // false-cull class is dead by construction, and what remains is the
+      // sub-pixel boundary twinkle (the Task-219 discriminator: a FIXED
+      // camera flips NOTHING; the ±0.0003 rad jitter flips only far
+      // sub-pixel boxes at the texel boundary — honest aliasing, invisible
+      // at distance). K=4 absorbs the twinkle's 1–3-frame streaks; the
+      // 24-frame blanket of the masking era is retired.
+      hystFrames: 4,
+      // Task 219 — THE SURFACE FOLLOWS THE CANVAS: the game renders into a
+      // surface shaped like its own stage (the boot dpr, capped — the
+      // software ladder protects the gates' containers, the live cap is
+      // native-class), and THE PYRAMID EQUALS THE SURFACE — the
+      // occlusion-resolution law. The field flicker's root: the pyramid
+      // was 480×270 against a 960×540+ render — sub-texel silhouettes
+      // flapped the verdicts (530 raw flips / 219 blinking runs in 12 s,
+      // the Task-218 oscilloscope); at equal resolutions a visible sliver
+      // is a full texel and the class cannot exist.
+      surf: { follow: 'canvas' },
       // Task 217 — THE SKY (the field report's «террейн не виден, там
       // всё чёрное»): the old clear was the occlusion demo's near-black
       // navy [0.045, 0.055, 0.09] — 85..96% of the canvas read BLACK in
@@ -293,7 +320,7 @@ function startLoop() {
     // THE WATCHDOG (staged frames, webgpu only): an empty canvas past the
     // grace window = the presents never landed — the fallback chain runs
     if (tier.mode === 'webgpu' && frameIndex >= wdNextFrame) {
-      wdNextFrame = frameIndex + 90
+      wdNextFrame = frameIndex + 30
       void watchdogStep()
       // the fallback's bootTier runs its SYNCHRONOUS prefix inside this
       // very callback (dispose + tier=null) — the rest of THIS frame must

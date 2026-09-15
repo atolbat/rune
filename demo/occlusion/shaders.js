@@ -42,6 +42,9 @@
 //            vertex shader; GL: the same collapse shape on the RAW verdict
 //            buffer (the rawFlags feed).
 //   panel  — one pyramid level as a tinted quad (the debug strip).
+//   blit   — Task 219 — THE PRESENTATION QUAD: the render surface's color
+//            texture onto the live canvas, ONE pass per frame (the
+//            canonical present — the multi-pass canvas is dead).
 //
 // THE CONVENTIONS each language keeps its own (documented where they bite):
 //   · WG framebuffer rows grow DOWN from NDC +y — GL FBO rows grow UP:
@@ -55,7 +58,7 @@
 //     height; WG reads @builtin(position).xy as-is). This kills the fog
 //     banding — the «flickering gray triangles on the empty spaces» field
 //     report — without adding a single cross-tier ULP.
-import { HIZ_W, HIZ_H, LEVELS, MAX_LEVEL, LEVEL_DIMS, LEVEL_OFF } from './scene.js?v=203'
+import { HIZ_W, HIZ_H } from './scene.js?v=203'
 
 const SKY = 'vec3<f32>(0.045, 0.055, 0.09)'
 const SKY_GLSL = 'vec3(0.045, 0.055, 0.09)'
@@ -69,12 +72,30 @@ const SKY_GLSL = 'vec3(0.045, 0.055, 0.09)'
  *  max-reduced pyramid: a contributor's own footprint max ≥ its own front
  *  surface ≥ its nearest AABB corner — a builder never self-culls, and one
  *  occluder fully behind another is honestly culled). */
-export function buildShaders(scene) {
+export function buildShaders(scene, dims) {
   const { N, INST_OFF, FLAGS_OFF } = scene
   const STRIDE = scene.STRIDE ?? 12
   const F = scene.FIELDS ?? { center: 0, half: 3, color: 6 }
   const CENTER = F.center, HALF = F.half, COLOR = F.color
   const STRIDE_BYTES = STRIDE * 4
+  // ── Task 219 — THE PYRAMID'S OWN DIMS (the caller's surface — the
+  //    occlusion-resolution law: the pyramid EQUALS the render target, so
+  //    a visible sliver at render res is a full texel to the cull and the
+  //    sub-texel false-cull class — the field flicker — cannot exist.
+  //    Default: the scene's classic 480×270 half-res tile.)
+  const W = dims?.w ?? HIZ_W
+  const H = dims?.h ?? HIZ_H
+  const LEVEL_DIMS = [{ w: W, h: H }]
+  for (;;) {
+    const prev = LEVEL_DIMS[LEVEL_DIMS.length - 1]
+    const w = Math.max(1, Math.ceil(prev.w / 2)), h = Math.max(1, Math.ceil(prev.h / 2))
+    LEVEL_DIMS.push({ w, h })
+    if (w === 1 && h === 1) break
+  }
+  const LEVELS = LEVEL_DIMS.length
+  const MAX_LEVEL = LEVELS - 1
+  const LEVEL_OFF = [0]
+  for (let L = 1; L < LEVELS; L++) LEVEL_OFF.push(LEVEL_OFF[L - 1] + LEVEL_DIMS[L - 1].w * LEVEL_DIMS[L - 1].h)
 
   // ── z: the depth prepass (records → the r32f tile) ──────────────────────
   const z = {
@@ -182,10 +203,10 @@ void main() { o = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0); }`,
     if (clip.z - clip.w > 0.0) { outF = outF + 1u; }
     if (w > 1e-4) {
       let nx = clip.x / w; let ny = clip.y / w; let nz = clip.z / w;
-      let px = (nx * 0.5 + 0.5) * f32(${HIZ_W});
+      let px = (nx * 0.5 + 0.5) * f32(${W});
       // WebGPU framebuffer rows grow DOWN from NDC +y (up): the tile's
       // row 0 is the TOP row — py = (1 - (ny*0.5+0.5)) * H.
-      let py = (0.5 - ny * 0.5) * f32(${HIZ_H});
+      let py = (0.5 - ny * 0.5) * f32(${H});
       x0 = min(x0, px); x1 = max(x1, px);
       y0 = min(y0, py); y1 = max(y1, py);
       minZ = min(minZ, nz);
@@ -216,7 +237,7 @@ void main() { o = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0); }`,
     var px0 = i32(floor(x0)); var px1 = i32(ceil(x1));
     var py0 = i32(floor(y0)); var py1 = i32(ceil(y1));
     px0 = max(px0, 0); py0 = max(py0, 0);
-    px1 = min(px1, ${HIZ_W}); py1 = min(py1, ${HIZ_H});
+    px1 = min(px1, ${W}); py1 = min(py1, ${H});
     // Task 200 — THE ONE-TEXEL GUARD (the cross-compiler ULP whetstone): the
     // projected rect rides fp32 mul/add chains the two compiler stacks may
     // contract differently (fma-vs-separate rounding); a ULP flip at an
@@ -226,7 +247,7 @@ void main() { o = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0); }`,
     // one texel per side can only GROW the sampled max — conservative on
     // every backend, knife-edge-proof.
     px0 = max(px0 - 1, 0); py0 = max(py0 - 1, 0);
-    px1 = min(px1 + 1, ${HIZ_W}); py1 = min(py1 + 1, ${HIZ_H});
+    px1 = min(px1 + 1, ${W}); py1 = min(py1 + 1, ${H});
     if (px1 > px0 && py1 > py0) {
       let rw = px1 - px0; let rh = py1 - py0;
       // Task 200 — THE INTEGER MIP (the log2 knife-edge): ceil(log2(s)) on an
@@ -378,8 +399,8 @@ void main() {
       float nx = clip.x / w, ny = clip.y / w, nz = clip.z / w;
       // GL: FBO texel row 0 = the BOTTOM row — the WG tier's Y-flip lesson,
       // inverted for this backend; GL NDC z spans [-1,1] → D=(nz+1)*0.5.
-      float px = (nx * 0.5 + 0.5) * float(${HIZ_W});
-      float py = (ny * 0.5 + 0.5) * float(${HIZ_H});
+      float px = (nx * 0.5 + 0.5) * float(${W});
+      float py = (ny * 0.5 + 0.5) * float(${H});
       float d = (nz + 1.0) * 0.5;
       x0 = min(x0, px); x1 = max(x1, px);
       y0 = min(y0, py); y1 = max(y1, py);
@@ -396,13 +417,13 @@ void main() {
   }
   // the Hi-Z test (u_misc.x — the OFF leg of the parity gate)
   if (u_misc.x > 0.5) {
-    int px0 = max(int(floor(x0)), 0), px1 = min(int(ceil(x1)), ${HIZ_W});
-    int py0 = max(int(floor(y0)), 0), py1 = min(int(ceil(y1)), ${HIZ_H});
+    int px0 = max(int(floor(x0)), 0), px1 = min(int(ceil(x1)), ${W});
+    int py0 = max(int(floor(y0)), 0), py1 = min(int(ceil(y1)), ${H});
     // Task 200 — THE ONE-TEXEL GUARD (the WG twin's comment): one texel per
     // side, floor-and-ceil outward — the sampled max only grows, the
     // fma-contraction ULP knife-edge at the rect edges is absorbed.
     px0 = max(px0 - 1, 0); py0 = max(py0 - 1, 0);
-    px1 = min(px1 + 1, ${HIZ_W}); py1 = min(py1 + 1, ${HIZ_H});
+    px1 = min(px1 + 1, ${W}); py1 = min(py1 + 1, ${H});
     if (px1 > px0 && py1 > py0) {
       int rw = px1 - px0, rh = py1 - py0;
       // Task 200 — THE INTEGER MIP: the COUNT FORM — the smallest L with
@@ -823,5 +844,51 @@ void main() {
     },
   }
 
-  return { z, cull, color, hist, fbfill, panel }
+  // ── blit: THE PRESENTATION QUAD (Task 219 — the single-pass present) ──
+  // ONE fullscreen quad sampling the render surface's color texture into
+  // the live canvas. The Y map is each backend's own row convention (the
+  // dictionary's own law at the top of this file): WG framebuffer rows
+  // grow DOWN from NDC +y (the canvas top samples v=0), GL FBO rows grow
+  // UP (the canvas top samples v=1). No uniforms, no depth — the whole
+  // canvas interaction with the frame is this one draw.
+  const blit = {
+    wg: {
+      code: `
+struct BlitParams { pad: vec4<f32> }
+@group(0) @binding(0) var<uniform> params: BlitParams;
+@group(1) @binding(0) var samp: sampler;
+@group(1) @binding(1) var tex: texture_2d<f32>;
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> }
+@vertex fn vsMain(@location(0) q: vec2<f32>) -> VOut {
+  var o: VOut;
+  o.pos = vec4<f32>(q, 0.0, 1.0);
+  o.uv = vec2<f32>(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5);
+  return o;
+}
+@fragment fn fsMain(i: VOut) -> @location(0) vec4<f32> {
+  return textureSample(tex, samp, i.uv);
+}`,
+      attrs: [2],
+      hasTextures: true,
+    },
+    gl: {
+      vs: `#version 300 es
+layout(location=0) in vec2 a_q;
+out vec2 v_uv;
+void main() {
+  gl_Position = vec4(a_q, 0.0, 1.0);
+  v_uv = vec2(a_q.x * 0.5 + 0.5, a_q.y * 0.5 + 0.5);
+}`,
+      fs: `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_tex;
+out vec4 o;
+void main() { o = texture(u_tex, v_uv); }`,
+      attrs: [],
+      lanes: [],
+    },
+  }
+
+  return { z, cull, color, hist, fbfill, panel, blit }
 }
