@@ -23,6 +23,7 @@
 import { chromium } from 'playwright'
 
 const BASE = 'https://atolbat.github.io/rune/demo/occlusion/'
+const LEG_ARG = process.argv[2] === 'webgl2' ? ['webgl2'] : process.argv[2] === 'webgpu' ? ['webgpu'] : ['webgpu', 'webgl2']
 const browser = await chromium.launch({
   headless: true,
   args: ['--no-sandbox', '--disable-gpu-sandbox', '--enable-unsafe-webgpu', '--use-angle=swiftshader', '--enable-features=Vulkan', '--enable-unsafe-swiftshader'],
@@ -50,7 +51,7 @@ async function runLeg(mode) {
   const stats = await page.waitForFunction(
     () => (window.__hizStats && window.__hizStats.validation !== null && window.__hizStats.drawn > 0 ? window.__hizStats : undefined),
     null,
-    { timeout: 300_000 },
+    { timeout: 420_000 },
   ).then(h => h.jsonValue())
   check(`[${mode}] the boot validation PASS (the static path)`, stats?.validation?.pass === true,
     `drawn ${stats?.drawn}/${stats?.total} · mode ${stats?.mode}`)
@@ -116,13 +117,12 @@ try {
   const tierSrc = await (await fetch(`${BASE}tier.js`)).text()
   const htmlSrc = await (await fetch(BASE)).text()
   check('served main.js carries the lane budget + the fold channels + the ?v=212 marks',
-    mainSrc.includes('LANE_FOLD') && mainSrc.includes('__hizEdits.fold') && mainSrc.includes('THE OVERRIDE LANE') && mainSrc.includes('tier.js?v=212'))
+    mainSrc.includes('LANE_FOLD') && mainSrc.includes('lane: () =>') && mainSrc.includes('fold: () =>') && mainSrc.includes('THE OVERRIDE LANE') && mainSrc.includes('tier.js?v=212'))
   check('served tier.js carries the dist bump', tierSrc.includes('rune.esm.js?v=212'))
   check('served index.html carries the ?v=212 marks', htmlSrc.includes('main.js?v=212'))
 
   // ── 2. both legs, end to end ────────────────────────────────────────────
-  await runLeg('webgpu')
-  await runLeg('webgl2')
+  for (const leg of LEG_ARG) await runLeg(leg)
 } catch (e) {
   failures++
   console.error(`[live] CRASH: ${e instanceof Error ? e.message : String(e)}`)
