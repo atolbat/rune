@@ -1009,14 +1009,18 @@ fn hysteresis(@builtin(global_invocation_id) gid: vec3<u32>) {
     return;
   }
   let prev = scene[params.words.z + i];
-  let streak = min((prev >> 8u) & 0xFFu, 15u);
+  // Task 218 — the streak cap is 31 (the byte field's own encoding limit;
+  // was 15 — the walker's field report «боксы мерцают» needed K=24: the
+  // silhouette-edge churn bursts run up to ~23 frames and blew through
+  // every K ≤ 15; the cap rides the byte, no layout change)
+  let streak = min((prev >> 8u) & 0xFFu, 31u);
   // Task 209 — THE MASKED DECODE + THE BUCKET CARRY: the raw word's bits
   // 16..23 carry the depth bucket the cull packed (the order entry's
   // sort key); the fold must test the VERDICT BYTE, and its write must
   // CARRY the bucket through — the hist region is the compact's source,
   // and the near-first order must survive the temporal fold
   if ((raw & 0xFFu) == 3u) {
-    let s = min(streak + 1u, 15u);
+    let s = min(streak + 1u, 31u);
     let K = (params.words.w >> 8u) & 0xFFu;
     let verdict = select(1u, 3u, s >= K);
     scene[params.words.z + i] = verdict | (s << 8u) | (raw & 0xFFFF0000u);
@@ -1045,7 +1049,10 @@ void main() {
     float verdict = floor(a_prev);
     float streak = (a_prev - verdict) * 32.0;
     if (raw == 3.0) {
-      streak = min(streak + 1.0, 15.0);
+      // Task 218 — the twin of the WGSL cap raise: 31 (the 1/32 encoding's
+      // own ceiling — streak/32 with streak=32 would collide with the next
+      // integer verdict; 31 is exact and lossless)
+      streak = min(streak + 1.0, 31.0);
       verdict = streak >= u_misc.y ? 3.0 : 1.0;
     } else {
       streak = 0.0;
@@ -2048,7 +2055,8 @@ ${SPD_DEPTH}${TOP}`
     }
     const computeId = gpu.createCompute(HYST_WGSL, 16, [s.bufferId])
     const workgroups = Math.max(1, Math.ceil(spec.scene.total / 64))
-    const K = Math.max(1, Math.min(15, spec.frames ?? 3))
+    // Task 218 — the clamp rides the kernel's own streak cap (31; was 15)
+    const K = Math.max(1, Math.min(31, spec.frames ?? 3))
     const block = new Float32Array(4)
     const u32 = new Uint32Array(block.buffer)
     u32[0] = spec.scene.total
@@ -2570,7 +2578,8 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
       ],
       uniforms: [{ name: 'u_misc', size: 4 }],
     })
-    const K = Math.max(1, Math.min(15, spec.frames ?? 3))
+    // Task 218 — the clamp rides the kernel's own streak cap (31; was 15)
+    const K = Math.max(1, Math.min(31, spec.frames ?? 3))
     const block = new Float32Array(4)
     return {
       run(call: HysteresisPassCall): void {

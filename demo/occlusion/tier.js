@@ -111,13 +111,18 @@
 // visible box (its own rect holds either background 1.0 or surfaces
 // behind it), so the final verdicts stay pixel-exact at any camera,
 // however old the seed. The one-frame lag costs fill, never a pixel.
-import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=217'
+import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=218'
 import { buildShaders } from './shaders.js?v=210'
 import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H } from './scene.js?v=203'
 const SKY = [0.045, 0.055, 0.09, 1]
 const LIGHT = [0.5, 0.8, 0.35]
 const SURF_W = 480, SURF_H = 270
-const HYST_FRAMES = 3 // the Frostbite K: consecutive occluded frames before the cull lands
+// Task 218 — the hysteresis K is the CALLER's now (the occlusion demo
+// keeps the Frostbite classic 3 — its frames stay bit-identical; the
+// walker's field report «боксы мерцают то исчезая то появляясь» measured
+// silhouette-edge occluded bursts up to ~23 frames — every K ≤ 15 blew
+// through — the walker passes 24, the kernel's new 31 cap carries it)
+const HYST_FRAMES_BASE = 3 // the Frostbite K: consecutive occluded frames before the cull lands
 
 /** Builds the Hi-Z tier on EITHER backend — the same bricks, the same
  *  declared graph, the same stats. Throws the honest refusal when the
@@ -149,6 +154,7 @@ export async function buildTier(deps) {
   // (bit-identical classic frame), the walker passes the fog's own
   // daytime blue so the horizon blends seamless.
   const SKY_COLOR = deps.sky ?? SKY
+  const HYST_FRAMES = deps.hystFrames ?? HYST_FRAMES_BASE
 
   // ── the device boot (one syntax; the GPU-process storm retries live in
   //    createDevice — 4 attempts, the Task-197 cadence) ────────────────────
@@ -164,8 +170,13 @@ export async function buildTier(deps) {
   })
 
   // the tier decision: a software WG adapter → snapshot mode (the documented
-  // container class where a canvas present kills the software GPU process)
-  const SNAPSHOT = backend === 'webgpu' && (FORCE_SNAPSHOT || device.software)
+  // container class where a canvas present kills the software GPU process).
+  // Task 218 — `forceLive` is the FIELD DEBUG hatch: a real-GPU device the
+  // software probe mislabels (or a human forcing the path a phone report
+  // walked) can demand the true canvas-present legs; the gates use it to
+  // exercise the live pipeline where the container survives presents.
+  const FORCE_LIVE = deps.forceLive === true
+  const SNAPSHOT = backend === 'webgpu' && !FORCE_LIVE && (FORCE_SNAPSHOT || device.software)
   const MODE = PROBE ? 'probe' : SNAPSHOT ? 'snapshot' : 'live'
 
   let displayCanvas = null
@@ -915,6 +926,9 @@ export async function buildTier(deps) {
       : `draws: 2 (fill + indirect color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid; Task 215 — a STILL camera swaps the fill for TWO DISPATCHES: the SPD pair over the presented frame's own depth32float) · dispatches: 3 (cull + hysteresis + compact; +1 cull ON the feedback; +1 order ON the near-first list — the early-Z harvest) · Task 214 — the pyramid builds in ONE SPD DISPATCH PAIR (${Math.ceil(HIZ_W / 64) * Math.ceil(HIZ_H / 64)} region workgroups + the top reduce) where the legacy chain spent ${pyramid.levels} (×2 the feedback frame; ×1 the seed frame)`,
     canvas: displayCanvas,
     surface,
+    /** Task 218 — the hysteresis K this tier runs with (the wiring law's
+     * channel: the walker passes 24 — the flicker report's cure). */
+    hystFrames: HYST_FRAMES,
     renderTo,
     frame,
     applyEdits,

@@ -24,12 +24,12 @@
 // window.__walker — the live counters (the smoke/gates read it);
 // window.__walkerGate — the boot validation's promise (the deterministic
 // autopilot: a scripted walk over the course, the laws asserted live).
-import { buildTier } from '../occlusion/tier.js?v=217'
+import { buildTier } from '../occlusion/tier.js?v=218'
 import { perspective, lookAt, mat4Mul, BOX_VERTS, BOX_INDICES } from '../occlusion/scene.js?v=203'
-import { createWorld, BODY, EYE_HEIGHT } from './world.js?v=217'
-import { createControls } from './controls.js?v=217'
-import { terrainShaders } from './shaders-terrain.js?v=217'
-import { createCharacter, createScaleGovernor } from '../../dist/rune.esm.js?v=217'
+import { createWorld, BODY, EYE_HEIGHT } from './world.js?v=218'
+import { createControls } from './controls.js?v=218'
+import { terrainShaders } from './shaders-terrain.js?v=218'
+import { createCharacter, createScaleGovernor } from '../../dist/rune.esm.js?v=218'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -61,6 +61,60 @@ function noteError(message) {
   errors.push(message)
   if (typeof window !== 'undefined') window.__walkerErrs = errors.slice()
   shell.log.error(message)
+  // Task 218 — THE DEVICE-LOST ACCELERATOR: a WG device loss is fatal for
+  // the tier (every later submit no-ops) — skip the watchdog's frame wait,
+  // webgl2 now. The storm's own message carries the phrase; the tier's
+  // mode check keeps a GL-side storm out of the recursion.
+  if (/device lost/i.test(message) && tier !== null && tier.mode === 'webgpu' && wdStage < 2) {
+    wdStage = 2
+    void bootTier('webgl2', { watchdog: true })
+  }
+}
+
+// ── Task 218 — THE LIVE-PRESENT WATCHDOG (the WG black-screen field report)
+// A WG device can die SILENTLY on the canvas-present path — the software
+// stack class (the first present kills the device unwatched; the tier's
+// snapshot decision normally dodges it, but an adapter misdetection or a
+// real-GPU driver variant walks straight in) — the canvas never presents,
+// the page background shows through, the HUD keeps lying «webgpu live».
+// The watchdog mirrors the tier's canvas into a 16×16 2D probe at staged
+// frames: an ALL-transparent mirror = the presents never landed. The
+// fallback chain: webgpu/live → webgpu/SNAPSHOT (the surface + the 2D
+// blit — keeps WebGPU where the device is alive) → webgl2 (the device is
+// dead). A user-driven mode switch re-arms the chain from scratch.
+let wdStage = 0 // 0 = live armed, 1 = snapshot fallback armed, ≥2 = retired
+let wdNextFrame = 90
+let wdBusy = false
+const wdMirror = typeof document !== 'undefined' ? document.createElement('canvas') : null
+if (wdMirror !== null) { wdMirror.width = 16; wdMirror.height = 16 }
+function canvasHasPixels() {
+  if (wdMirror === null || tier === null || tier.canvas === null || tier.canvas === undefined) return true
+  const c = tier.canvas
+  if (c.width === 0 || c.height === 0) return false
+  try {
+    const x = wdMirror.getContext('2d', { willReadFrequently: true })
+    x.clearRect(0, 0, 16, 16)
+    x.drawImage(c, 0, 0, 16, 16)
+    const d = x.getImageData(0, 0, 16, 16).data
+    for (let k = 3; k < d.length; k += 4) if (d[k] >= 8) return true
+    return false
+  } catch { return true } // a failed read is not proof of death
+}
+async function watchdogStep() {
+  if (wdBusy || wdStage >= 2 || tier === null) return
+  wdBusy = true
+  try {
+    if (canvasHasPixels()) { wdStage = 2; return } // healthy — retire
+    if (wdStage === 0 && tier.kind === 'live') {
+      noteError(`the live canvas never presented (frame ${frameIndex}) — the WG snapshot path takes over`)
+      wdStage = 1; wdNextFrame = frameIndex + 90
+      await bootTier('webgpu', { snapshot: true, watchdog: true })
+    } else {
+      noteError(`the snapshot canvas is empty too (frame ${frameIndex}) — the WG device is dead — webgl2 takes over`)
+      wdStage = 2
+      await bootTier('webgl2', { watchdog: true })
+    }
+  } finally { wdBusy = false }
 }
 if (typeof window !== 'undefined') {
   window.addEventListener('error', e => {
@@ -140,9 +194,21 @@ let finishRunning = false
 let stripOn = false
 let hizOn = true
 
-async function bootTier(backend) {
+async function bootTier(backend, opts = {}) {
   if (rafId !== 0) { cancelAnimationFrame(rafId); rafId = 0 }
   if (tier !== null) { try { tier.dispose() } catch { /* already dead */ } tier = null }
+  // a user-driven boot re-arms the watchdog chain; a watchdog-driven one
+  // (the fallback itself) keeps its stage — the chain must not restart
+  if (opts.watchdog !== true) { wdStage = 0; wdNextFrame = 90 }
+  // a fresh tier = a fresh loop state: a validation finish that hung on a
+  // dead device left the loop parked (paused) — without this reset the
+  // fallback boots into a frozen loop and the watchdog never re-checks.
+  // A watchdog boot also re-arms the validation (a fresh chance on the
+  // healthy backend; the hung promise is orphaned with its dead tier).
+  paused = false
+  finishRequested = false
+  finishRunning = false
+  if (opts.watchdog === true) validationRunning = false
   try {
     tier = await buildTier({
       backend,
@@ -151,7 +217,16 @@ async function bootTier(backend) {
       noteError,
       stage,
       PROBE,
-      FORCE_SNAPSHOT,
+      FORCE_SNAPSHOT: FORCE_SNAPSHOT || opts.snapshot === true,
+      // Task 218 — ?live=1: the FIELD DEBUG hatch (a phone report walked the
+      // live canvas-present path; the gates and the field force it open)
+      forceLive: PARAMS.get('live') === '1' && opts.snapshot !== true,
+      // Task 218 — THE FLICKER CURE (the report's «боксы мерцают то
+      // исчезая то появляясь»): the silhouette-edge occluded bursts run up
+      // to ~23 frames — every K ≤ 15 blew through and the boxes blinked.
+      // K=24 (the kernel's new 31 cap carries it); the cull delay is CHEAP
+      // for opaque geometry (the depth test rejects the extra draws).
+      hystFrames: 24,
       // Task 216 — THE WALKER EXTENSIONS:
       surf: { w: 960, h: 540 }, // a GAME's surface (the culling viz ran 480×270)
       // Task 217 — THE SKY (the field report's «террейн не виден, там
@@ -191,6 +266,12 @@ async function bootTier(backend) {
     if (!BARE && !validationRunning) void runValidation()
   } catch (e) {
     noteError(`boot failed: ${e instanceof Error ? e.message : String(e)}`)
+    // the fallback chain's own boot died (e.g. a second WG device refused
+    // after the first one's present death) — webgl2 is the next rung
+    if (opts.watchdog === true && backend === 'webgpu') {
+      wdStage = 2
+      await bootTier('webgl2', { watchdog: true })
+    }
   }
 }
 
@@ -207,6 +288,19 @@ function startLoop() {
     lastT = t
     frameIndex++
     if (dt < 0.25) msAvg = msAvg * 0.95 + dt * 1000 * 0.05
+    // a failed boot leaves no tier — idle the loop honestly (no deref spam)
+    if (tier === null) { if (frameIndex % 6 === 0) refreshHud(); return }
+    // THE WATCHDOG (staged frames, webgpu only): an empty canvas past the
+    // grace window = the presents never landed — the fallback chain runs
+    if (tier.mode === 'webgpu' && frameIndex >= wdNextFrame) {
+      wdNextFrame = frameIndex + 90
+      void watchdogStep()
+      // the fallback's bootTier runs its SYNCHRONOUS prefix inside this
+      // very callback (dispose + tier=null) — the rest of THIS frame must
+      // not deref the dead tier. Forfeit the frame; the new tier's loop
+      // takes over.
+      if (tier === null) return
+    }
 
     // 1. THE WORLD FIRST: the movers tick (store columns + dirty ranges +
     //    the octree's override lane), the upload lands BEFORE the passes.
@@ -266,6 +360,10 @@ function startLoop() {
     } catch (e) {
       noteError(`frame failed: ${e instanceof Error ? e.message : String(e)}`)
     }
+    // the device-lost accelerator (a fatal noteError from the frame's own
+    // catch) boots the fallback INSIDE this callback — the tier is gone;
+    // forfeit the rest of the frame
+    if (tier === null) return
     stats.frame = frameIndex
     stats.fps = Math.round(1000 / Math.max(msAvg, 0.1))
     stats.msAvg = +msAvg.toFixed(1)
@@ -626,6 +724,7 @@ function refreshHud() {
   const kind = s.grounded ? `GROUND ${ground} top ${stats.groundTop}` : `AIR (${stats.airFrames}f) vy ${s.vy.toFixed(1)}`
   hud.innerHTML =
     `<b>walker</b> ${tier.mode} ${tier.kind} · ${stats.fps} fps · drawn ${stats.drawn}/${stats.total} · seed ${stats.seedOn ? 'warm' : 'cold'}` +
+    (errors.length > 0 ? ` · <b>err ${errors.length}</b>` : '') +
     `\n${kind} · ${stats.speed} m/s · ${stats.x}, ${stats.y}, ${stats.z} · ${stats.isTouch ? 'TOUCH' : 'desktop'}` +
     `\nmovers ${stats.uploadBytes} B/f vs ${(stats.uploadFull / 1024).toFixed(0)} KB · scale ${SCALE_LEVELS[stats.scaleLevel]}× · ${qualityAuto ? 'AUTO' : 'FIXED'}` +
     (stats.validation === null ? '\nvalidation: running…' : `\nvalidation: ${stats.validation.pass ? 'PASS' : 'FAIL'} — ${stats.validation.checks} laws`)
