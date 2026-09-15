@@ -111,7 +111,7 @@
 // visible box (its own rect holds either background 1.0 or surfaces
 // behind it), so the final verdicts stay pixel-exact at any camera,
 // however old the seed. The one-frame lag costs fill, never a pixel.
-import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=213'
+import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=214'
 import { buildShaders } from './shaders.js?v=210'
 import { BOX_VERTS, BOX_INDICES, HIZ_W, HIZ_H } from './scene.js?v=203'
 const SKY = [0.045, 0.055, 0.09, 1]
@@ -486,6 +486,63 @@ export async function buildTier(deps) {
     }).catch(() => { blitPending = false })
   }
 
+  // ── Task 214 — THE SPD PARITY GATE (the single-pass downsampler's
+  //    bit-identity channel): dispatch BOTH spellings over the same z tile
+  //    — the SPD pair (the live form) and the legacy sequential chain (the
+  //    Task-196 spelling) — and compare EVERY storage word. THE POISON
+  //    DISCIPLINE: the storage is pre-filled with NaN before EACH build —
+  //    an under-budgeted phase (a hole the cascade never writes) shows up
+  //    as a stale/NaN word instead of silently inheriting the previous
+  //    build's value (the static-camera trap the first draft fell into:
+  //    the holes matched because the previous COMPLETE build of the SAME
+  //    tile had written the right numbers there). The z tile is untouched
+  //    between the builds (both read the same r32f texture), so any diff
+  //    is a real bug. WG only — null on the GL leg (its FBO pyramid is
+  //    the backend's own mechanism, untouched this round).
+  async function spdParity() {
+    if (pyramid.buildLegacy === undefined || pyramid.readWords === undefined || device.gpu === null) return null
+    try {
+      const gpu = device.gpu
+      const probe = await pyramid.readWords()
+      const poison = new Float32Array(probe.length).fill(NaN)
+      // poison FIRST, build, submit, then read — THE SUBMIT DISCIPLINE:
+      // readExternalBuffer submits only ITS OWN copy encoder, while the
+      // builds' dispatches sit in the facade's MERGED compute pass on the
+      // main encoder — without this submit the readback lands on the queue
+      // BEFORE the dispatches and both spellings read back the SAME stale
+      // bytes (the vacuous-comparison trap the first draft of this gate
+      // fell into: 0 diffs that proved nothing)
+      const buildPoisoned = async buildFn => {
+        gpu.writeExternalBuffer(pyramid.storageId ?? 0, poison)
+        buildFn()
+        device.submit()
+        return await pyramid.readWords()
+      }
+      const a = await buildPoisoned(() => pyramid.build())
+      const b = await buildPoisoned(() => pyramid.buildLegacy())
+      pyramid.build() // the belt-and-braces rebuild (the bytes are identical by the proof)
+      let diffs = 0
+      let first = -1
+      const n = Math.min(a.length, b.length)
+      for (let i = 0; i < n; i++) {
+        if (a[i] !== b[i]) {
+          diffs++
+          if (first < 0) first = i
+        }
+      }
+      return {
+        words: n,
+        diffs,
+        first,
+        pass: diffs === 0 && a.length === b.length,
+        spdDispatches: 1 + (pyramid.levels >= 8 ? 1 : 0),
+        legacyDispatches: 1 + (pyramid.levels - 1),
+      }
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+
   function frame(mvp, eye, hizOn, debug, occluders = K, hysteresisOn = false, historyOn = false, cacheOn = false, wantStats = false, feedbackOn = true, seedOn = true, orderOn = true) {
     renderTo(SNAPSHOT ? surface.targetId : 0, mvp, eye, hizOn, debug, occluders, hysteresisOn, historyOn, cacheOn, wantStats, feedbackOn, seedOn, orderOn)
     if (SNAPSHOT) blitSnapshot()
@@ -537,6 +594,9 @@ export async function buildTier(deps) {
       },
       stats: () => readStats(),
       verdicts: () => readVerdicts(),
+      // Task 214 — the SPD parity channel (the probe scripts' window into
+      // the single-pass downsampler's bit-identity gate)
+      spdParity: () => spdParity(),
       // Task 211 — the record mirror's readback (the edit-mode gate's
       // channel): the GPU's own copy of record `id`, vs __hizEdits.record
       records: id => device.readRecords(sceneHandle, id, 1),
@@ -570,7 +630,7 @@ export async function buildTier(deps) {
       : `WebGPU — storage pyramid + compute cull + one drawIndexedIndirect${device.antialias ? ' · MSAA 4x resolve' : ''}`,
     drawsLine: backend === 'webgl2'
       ? `draws: 2 (fill + collapse color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid) · TF passes: 2 (cull + hysteresis; +1 cull ON the feedback) · ${pyramid.levels - 1} reduce quads (×2 the feedback frame; ×1 the seed frame)`
-      : `draws: 2 (fill + indirect color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid) · dispatches: 3 (cull + hysteresis + compact; +1 cull ON the feedback; +1 order ON the near-first list — the early-Z harvest) · ${pyramid.levels - 1} reduce quads (×2 the feedback frame; ×1 the seed frame)`,
+      : `draws: 2 (fill + indirect color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid) · dispatches: 3 (cull + hysteresis + compact; +1 cull ON the feedback; +1 order ON the near-first list — the early-Z harvest) · Task 214 — the pyramid builds in ONE SPD DISPATCH PAIR (${Math.ceil(HIZ_W / 64) * Math.ceil(HIZ_H / 64)} region workgroups + the top reduce) where the legacy chain spent ${pyramid.levels} (×2 the feedback frame; ×1 the seed frame)`,
     canvas: displayCanvas,
     surface,
     renderTo,
@@ -579,6 +639,7 @@ export async function buildTier(deps) {
     readStats,
     readVerdicts,
     readList,
+    spdParity,
     aspect,
     graphStats,
     graphLine,

@@ -200,7 +200,7 @@ describe('Task 201: the pass bricks — the WebGPU leg', () => {
     bricks.frame({ camera: { mvp: MVP, eye: EYE }, occluders: 2 })
     const tail = calls.slice(before)
     const prepassIdx = tail.findIndex(c => c === 'drawIndexed(3,2)')
-    const reduceIdx = tail.findIndex(c => c.startsWith('runCompute(') && c.includes(',zToMip0,'))
+    const reduceIdx = tail.findIndex(c => c.startsWith('runCompute(') && c.includes(',spd,'))
     const cullIdx = tail.findIndex(c => c.startsWith('runCompute(') && c.includes(',cull,'))
     const hystIdx = tail.findIndex(c => c.startsWith('runCompute(') && c.includes(',hysteresis,'))
     const compactIdx = tail.findIndex(c => c.startsWith('runCompute(') && c.includes(',compact,'))

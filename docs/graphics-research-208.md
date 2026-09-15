@@ -142,7 +142,7 @@ This IS the round's answer to «как оптимизировать сложны
 warm-up died, and the machinery that remains is the survivors' depth and
 the re-cull.
 
-### A4 — ⚓ THE SINGLE-PASS PYRAMID (subgroup / shared-mem SPD) — BACKLOG, strengthened
+### A4 — ⚓ THE SINGLE-PASS PYRAMID (subgroup / shared-mem SPD) — IMPLEMENTED THIS ROUND (Task 214)
 
 ⚓ Granite's `hiz.comp` (page-read in 207-rb) builds the whole max-pyramid
 in one dispatch via workgroup shared memory; the Chrome-134 subgroup
@@ -712,3 +712,89 @@ probe clean; task209-order PASS on BOTH legs (the numbers bit-equal
 209); task211-local PASS on BOTH legs (the record mirror, the teleport
 probe, the 427× upload math — the SoA kit changes the kit's storage,
 never the frame's policy).
+
+## Task 214 — THE TWO-DISPATCH DOWNSAMPLER + THE SCENE STORE MIRROR (2026-09-15)
+
+**Leg 1 — the single-pass pyramid** (`packages/gl/src/device.ts`, WG
+path): the Task-196 chain spent TEN dispatches per frame on the Hi-Z
+build — `zToMip0` + nine sequential `reduceL`s, each one a frame-graph
+sync point between the z-pass and the cull. The A4 harvest (FidelityFX
+SPD v2.1, the shape bevy landed as #22286's `downsample_depth.wesl`)
+collapses them to TWO: the **region pass** — one 256-thread workgroup
+per 64×64 mip0 tile; each thread computes 4 clamped 2×2 maxes (and
+stores its region's own mip0 words), building mip1's 32×32; a
+16×16 shared-memory cascade then folds mip2..mip5 plus the region's
+1×1 top at level 6; and the **top pass** — ONE workgroup (64 threads)
+reducing the region-top grid into the last levels (read | barrier |
+write | barrier per level — the counts strictly descend, the in-place
+prefix overwrite is race-free). bevy's own TODO says «True single
+pass»; the two-dispatch form IS the landed upstream shape, and ours
+keeps the #22603 law (no Po2 assumption — the ceil-halved dims, every
+store bounds-checked, the clamps resolve inside the region).
+
+**The bit-identity proof, executable.** Nested ceilings collapse
+(`dims[6]` IS the region grid ⌈w/64⌉×⌈h/64⌉); every cascade value is a
+max over a sub-rectangle of the workgroup's region; the stored texels'
+sub-rectangles union to exactly the sequential chain's clamped windows;
+and the phantom (never-stored) values are maxes of sub-rectangles —
+≤ the true value wherever they fold in at the L6 top. The gate is not
+an argument, it is a dispatch: `PyramidHandle` grew `buildLegacy()`
+(the old chain, lazy pipelines — free until dispatched) and
+`readWords()` (the whole storage, flat), and the demo's `spdParity()`
+dispatches BOTH spellings over the same z tile and compares every
+storage word: **0 diffs of 172 902 words, 2 vs 10 dispatches** (the
+local gate, WG leg; the GL leg's FBO pyramid is that backend's own
+mechanism, untouched — `spdParity()` returns null by contract).
+
+**Two gate traps this round taught** (both now part of the parity
+channel's discipline): (a) a STATIC camera lets under-budgeted phases
+inherit the previous complete build's values — the holes hide from a
+naive compare; the cure is poison (pre-fill the storage with NaN
+through `writeExternalBuffer`, so any unwritten word answers NaN
+loudly); (b) the readback raced the queue — `readExternalBuffer`
+submits only its own copy-encoder while the build dispatches stayed in
+the merged compute pass, so the read landed BEFORE the writes; the cure
+is a `device.submit()` before the readback. The parity channel in the
+shipped demo carries both.
+
+**Leg 2 — @rune/scene's mirror/publish ON THE STORE**
+(`packages/scene/src/storeMirror.ts`): the Task-211 unified data
+surface had exactly one native consumer — the occlusion demo's own
+records region. This leg generalizes it into the scene package proper:
+the scene's SAB regions become **adopted SoAStores — zero copies** (the
+views alias the very bytes the worker reads and writes; `adoptStore`
+grew the `regionBytes` bound so a slice adoption of a region inside a
+larger buffer does not derive its capacity from the neighbor's bytes).
+The dirty-range surface now speaks BOTH directions: **publish**
+(`staticRanges(watermark)` — the exact slots whose locals changed,
+coalesced, 4-aligned; fresh sees nothing, the dead stay silent) and
+**mirror** (`ranges(epoch, camera, watermark)` — Task-85's own
+groupTouch/groupFlip stamps expressed as upload ranges over the
+double-buffered instance-pool rows; `worldRanges(watermark,
+layoutEpoch)` resolves worldStamp through `order[]` in RANK space —
+valid until the next pack, the same contract `worldMatrix(slot)`
+carries — and a layout-epoch change means the FULL region, never a
+skipped one). ONE watermark domain (H_CLOCK) serves every side: hold 0
+at boot, capture at the fresh take (the worker sleeps until the next
+publish — the window is safe by the bridge's own protocol), HOLD the
+old watermark on a stale take (re-uploading a frozen row is always
+sound; skipping never is). The bridge wrapper `take()` applies the
+discipline itself. Zero steady-state allocations: the stores and their
+MarkSets are created once and owned forever.
+
+The five contract tests (`packages/scene/tests/task214.test.ts`):
+adoption aliasing (the store IS the Scene API's bytes), the pool
+store's segment views + the stamp law, staticRanges' three-way verdict
+(changed / fresh / dead), worldRanges' rank-space dirt + the
+layout-epoch conservatism, and the bridge wrapper's watermark
+discipline (fresh captures, stale holds).
+
+**Gates**: 2188/2188 tests, tsc 0, lint 0 errors (368 warnings — the
+baseline), task214-local ALL PASS (WG: parity 0/172 902, dispatches
+2 vs 10, the loop alive after the gate's readbacks, zero errors; GL:
+the null contract, the loop alive, zero errors), and every standing
+gate re-run green on the new code: task209-order PASS both legs (the
+numbers bit-equal 209), task212-leak PASS (nodes 55 828 → 55 828,
+lane 48/48, fold clean), task211-local PASS both legs, demo-smoke full
+PASS (WG drawn 4353 / GL drawn 1694 — the same verdicts as the
+object-built kit).

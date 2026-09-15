@@ -184,10 +184,20 @@ describe('Task 198: the common bricks — the WebGPU leg', () => {
     const before = calls.length
     pyr.build()
     const tail = calls.slice(before)
-    // zToMip0 (1 workgroup for 64 texels) + reduceL1..3 (the baked entries)
-    expect(tail.some(c => c.startsWith('runCompute(1,zToMip0,4,1)'))).toBe(true)
-    expect(tail.some(c => c.startsWith('runCompute(1,reduceL1,4,1)'))).toBe(true)
-    expect(tail.some(c => c.startsWith('runCompute(1,reduceL3,4,1)'))).toBe(true)
+    // Task 214 — THE SPD SPELLING: one region dispatch per 64×64 tile
+    // (this tiny tile: grid 1×1 — ONE dispatch, no top pass); the legacy
+    // chain (zToMip0 + reduceL1..) stays COLD until buildLegacy — the
+    // pipelines are lazy, the parity gate's other leg dispatches it
+    expect(tail.some(c => c.startsWith('runCompute(1,spd,4,1)'))).toBe(true)
+    expect(tail.some(c => c.startsWith('runCompute(1,zToMip0,'))).toBe(false)
+    expect(tail.some(c => c.startsWith('runCompute(1,reduceL1,'))).toBe(false)
+    // the legacy spelling is still there — the bit-identity gate's leg
+    const before2 = calls.length
+    pyr.buildLegacy?.()
+    const tail2 = calls.slice(before2)
+    expect(tail2.some(c => c.startsWith('runCompute(1,zToMip0,4,1)'))).toBe(true)
+    expect(tail2.some(c => c.startsWith('runCompute(1,reduceL1,4,1)'))).toBe(true)
+    expect(tail2.some(c => c.startsWith('runCompute(1,reduceL3,4,1)'))).toBe(true)
   })
 
   it('occlusionCuller → the scene + pyramid STORAGE buffers (the Task-196 slots) + readCullStats', async () => {
@@ -226,7 +236,7 @@ describe('Task 198: the common bricks — the WebGPU leg', () => {
     // THE RECIPE ORDER: the z-prepass draw (2 instances — the POLICY), the
     // pyramid reduce family, the cull kernel, the compact, THEN the indirect
     const prepassIdx = tail.findIndex(c => c === 'drawIndexed(3,2)')
-    const reduceIdx = tail.findIndex(c => c.startsWith('runCompute(') && c.includes(',zToMip0,'))
+    const reduceIdx = tail.findIndex(c => c.startsWith('runCompute(') && c.includes(',spd,'))
     const cullIdx = tail.findIndex(c => c.startsWith('runCompute(') && c.includes(',cull,'))
     const compactIdx = tail.findIndex(c => c.startsWith('runCompute(') && c.includes(',compact,'))
     const indirectIdx = tail.findIndex(c => c === 'drawIndexedIndirect(900003,32)')

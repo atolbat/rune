@@ -227,8 +227,21 @@ export interface PyramidHandle {
   readonly width: number
   readonly height: number
   readonly dims: readonly { w: number; h: number }[]
-  /** The reduce chain — call after the z prepass, before the culler. */
+  /** The reduce chain — call after the z prepass, before the culler.
+   *  Task 214 — the live spelling is the TWO-DISPATCH single-pass
+   *  downsampler (the Granite/FidelityFX SPD harvest): the region pass
+   *  (one 256-thread workgroup per 64×64 tile — mip0 words + mip1..mip5 +
+   *  the level-6 region top) + the top pass (the last levels off the top
+   *  grid). */
   build(): void
+  /** Task 214 (WG only) — the LEGACY sequential chain (zToMip0 +
+   *  reduceL1..reduceLmax) over the same z tile: the bit-identity gate's
+   *  other leg. The pipelines are lazy — the entries cost nothing until
+   *  dispatched. */
+  readonly buildLegacy?: () => void
+  /** Task 214 (WG only) — the whole storage pyramid's words (every level,
+  *  flat) — the parity gate's readback channel. */
+  readonly readWords?: () => Promise<Float32Array>
 }
 
 export interface CullerSpec {
@@ -1506,6 +1519,183 @@ fn reduceL${L}(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `
     }
+    // ── Task 214 — THE SINGLE-PASS DOWNSAMPLER (the Granite/FidelityFX SPD
+    //    harvest — research A4, the form bevy landed as #22286): the whole
+    //    max-pyramid in TWO dispatches where the Task-196 chain spent TEN
+    //    (zToMip0 + nine sequential reduces — each a frame-graph sync point
+    //    between the z-pass and the cull). THE SHAPE (ffx_spd v2.1 /
+    //    bevy's downsample_depth): one 256-thread workgroup owns a 64×64
+    //    mip0 REGION — 4 clamped 2×2 maxes per thread build mip1's 32×32
+    //    (and write the region's own mip0 words), then a 16×16
+    //    shared-memory cascade folds mip2..mip5 + the region's 1×1 top at
+    //    level 6; the SECOND dispatch is ONE workgroup reducing the
+    //    region-top grid into the last levels. bevy's own TODO says «True
+    //    single pass» — the two-dispatch form IS the landed upstream shape;
+    //    ours keeps the storage buffer + the ceil-halved dims (the #22603
+    //    law: no Po2 assumption, every store bounds-checked). BIT-IDENTITY
+    //    to the sequential chain is provable, not hoped: nested ceilings
+    //    collapse (dims[6] IS the region grid ceil(w/64)×ceil(h/64)), every
+    //    clamp resolves INSIDE the workgroup's region, so every cascade
+    //    value is a max over a sub-rectangle of the region, the stored
+    //    texels' sub-rectangles union to exactly the chain's clamped
+    //    windows, and the phantom (never-stored) values are maxes of
+    //    sub-rectangles — ≤ the true value wherever they fold in (the L6
+    //    top). The parity gate dispatches BOTH spellings and compares every
+    //    storage word — the proof, executable.
+    const gridX = Math.ceil(w / 64), gridY = Math.ceil(h / 64)
+    const regionTops = gridX * gridY
+    const storeFn = (L: number): string => {
+      if (L >= dims.length) return `fn st${L}(x: u32, y: u32, v: f32) { }`
+      const d = dims[L]
+      return `fn st${L}(x: u32, y: u32, v: f32) { if (x < ${d.w}u && y < ${d.h}u) { pyramid[${offsets[L]}u + y * ${d.w}u + x] = v; } }`
+    }
+    const SPD = `
+fn zAt(x: u32, y: u32) -> f32 {
+  return textureLoad(zTex, vec2<i32>(vec2<u32>(min(x, ${w - 1}u), min(y, ${h - 1}u))), 0).r;
+}
+fn mx4(a: f32, b: f32, c: f32, d: f32) -> f32 { return max(max(a, b), max(c, d)); }
+fn st0(x: u32, y: u32, v: f32) { if (x < ${w}u && y < ${h}u) { pyramid[y * ${w}u + x] = v; } }
+${storeFn(1)}
+${storeFn(2)}
+${storeFn(3)}
+${storeFn(4)}
+${storeFn(5)}
+${dims.length > 6
+    ? `fn st6(x: u32, y: u32, v: f32) { pyramid[${offsets[6]}u + y * ${gridX}u + x] = v; }`
+    : 'fn st6(x: u32, y: u32, v: f32) { }'}
+var<workgroup> smem: array<array<f32, 16>, 16>;
+@compute @workgroup_size(256)
+fn spd(@builtin(workgroup_id) wgid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+  let wx = wgid.x % ${gridX}u;
+  let wy = wgid.x / ${gridX}u;
+  let ox = wx * 64u;
+  let oy = wy * 64u;
+  let x = lid & 15u;
+  let y = lid >> 4u;
+  // ── mip1's 32×32 (4 quads per thread) + the region's own mip0 words ──
+  var v: vec4<f32>;
+  for (var s = 0u; s < 4u; s = s + 1u) {
+    let ax = ox + 2u * x + 32u * (s & 1u);
+    let ay = oy + 2u * y + 32u * (s >> 1u);
+    let a = zAt(ax, ay);
+    let b = zAt(ax + 1u, ay);
+    let c = zAt(ax, ay + 1u);
+    let d = zAt(ax + 1u, ay + 1u);
+    st0(ax, ay, a); st0(ax + 1u, ay, b); st0(ax, ay + 1u, c); st0(ax + 1u, ay + 1u, d);
+    v[s] = mx4(a, b, c, d);
+  }
+  st1(wx * 32u + x, wy * 32u + y, v.x);
+  st1(wx * 32u + x + 16u, wy * 32u + y, v.y);
+  st1(wx * 32u + x, wy * 32u + y + 16u, v.z);
+  st1(wx * 32u + x + 16u, wy * 32u + y + 16u, v.w);
+  // ── mip2's 16×16: the four 8×8 quadrants through the shared cascade ──
+  for (var s = 0u; s < 4u; s = s + 1u) {
+    smem[x][y] = v[s];
+    workgroupBarrier();
+    if (lid < 64u) {
+      let u = lid & 7u;
+      let t = lid >> 3u;
+      let m2 = mx4(smem[2u * u][2u * t], smem[2u * u + 1u][2u * t], smem[2u * u][2u * t + 1u], smem[2u * u + 1u][2u * t + 1u]);
+      st2(wx * 16u + u + 8u * (s & 1u), wy * 16u + t + 8u * (s >> 1u), m2);
+      v[s] = m2;
+    }
+    workgroupBarrier();
+  }
+  // ── the 16×16 mip2 assembled in shared (the four 8×8 quadrants) ──
+  if (lid < 64u) {
+    let u = lid & 7u;
+    let t = lid >> 3u;
+    smem[u][t] = v.x;
+    smem[u + 8u][t] = v.y;
+    smem[u][t + 8u] = v.z;
+    smem[u + 8u][t + 8u] = v.w;
+  }
+  workgroupBarrier();
+  // ── mip3 8×8 (64 lanes) → mip4 4×4 (16 lanes) → mip5 2×2 + the region
+  //    top (lane 0): read | barrier | write | barrier — the in-place
+  //    prefix overwrite is race-free (the counts strictly descend). The
+  //    lane budgets are the GRIDS' own: mip3 is 8×8 = 64 texels (p,q ∈
+  //    [0,8)), mip4 is 4×4 = 16 (p,q ∈ [0,4)) — an under-budgeted phase
+  //    leaves STALE holes the parity gate cannot see at a static camera
+  //    (the previous complete build wrote the same values there)
+  if (lid < 64u) {
+    let p = lid & 7u;
+    let q = lid >> 3u;
+    let m3 = mx4(smem[2u * p][2u * q], smem[2u * p + 1u][2u * q], smem[2u * p][2u * q + 1u], smem[2u * p + 1u][2u * q + 1u]);
+    st3(wx * 8u + p, wy * 8u + q, m3);
+    v.x = m3;
+  }
+  workgroupBarrier();
+  if (lid < 64u) {
+    let p = lid & 7u;
+    let q = lid >> 3u;
+    smem[p][q] = v.x;
+  }
+  workgroupBarrier();
+  if (lid < 16u) {
+    let p = lid & 3u;
+    let q = lid >> 2u;
+    let m4 = mx4(smem[2u * p][2u * q], smem[2u * p + 1u][2u * q], smem[2u * p][2u * q + 1u], smem[2u * p + 1u][2u * q + 1u]);
+    st4(wx * 4u + p, wy * 4u + q, m4);
+    v.x = m4;
+  }
+  workgroupBarrier();
+  if (lid < 16u) {
+    let p = lid & 3u;
+    let q = lid >> 2u;
+    smem[p][q] = v.x;
+  }
+  workgroupBarrier();
+  if (lid == 0u) {
+    let a5 = mx4(smem[0u][0u], smem[1u][0u], smem[0u][1u], smem[1u][1u]);
+    let b5 = mx4(smem[2u][0u], smem[3u][0u], smem[2u][1u], smem[3u][1u]);
+    let c5 = mx4(smem[0u][2u], smem[1u][2u], smem[0u][3u], smem[1u][3u]);
+    let d5 = mx4(smem[2u][2u], smem[3u][2u], smem[2u][3u], smem[3u][3u]);
+    st5(wx * 2u, wy * 2u, a5);
+    st5(wx * 2u + 1u, wy * 2u, b5);
+    st5(wx * 2u, wy * 2u + 1u, c5);
+    st5(wx * 2u + 1u, wy * 2u + 1u, d5);
+    st6(wx, wy, mx4(a5, b5, c5, d5));
+  }
+}
+`
+    let TOP = ''
+    if (dims.length >= 8) {
+      let body = ''
+      for (let L = 7; L < dims.length; L++) {
+        const pi = dims[L - 1], qi = dims[L]
+        body += `
+  var t${L}: f32 = 0.0;
+  if (lid < ${qi.w * qi.h}u) {
+    let x = lid % ${qi.w}u;
+    let y = lid / ${qi.w}u;
+    let x0 = min(2u * x, ${pi.w - 1}u);
+    let x1 = min(2u * x + 1u, ${pi.w - 1}u);
+    let y0 = min(2u * y, ${pi.h - 1}u);
+    let y1 = min(2u * y + 1u, ${pi.h - 1}u);
+    t${L} = mx4(top[y0 * ${pi.w}u + x0], top[y0 * ${pi.w}u + x1], top[y1 * ${pi.w}u + x0], top[y1 * ${pi.w}u + x1]);
+  }
+  workgroupBarrier();
+  if (lid < ${qi.w * qi.h}u) {
+    pyramid[${offsets[L]}u + lid] = t${L};
+    top[lid] = t${L};
+  }
+  workgroupBarrier();
+`
+      }
+      TOP = `
+// ── the TOP pass: ONE workgroup reduces the region-top grid (level 6 —
+//    the region pass's product) into the last levels. Read | barrier |
+//    write | barrier per level — the counts strictly descend, the in-place
+//    prefix overwrite is race-free.
+var<workgroup> top: array<f32, ${regionTops}>;
+@compute @workgroup_size(64)
+fn spdTop(@builtin(local_invocation_index) lid: u32) {
+  for (var i = lid; i < ${regionTops}u; i = i + 64u) { top[i] = pyramid[${offsets[6]}u + i]; }
+  workgroupBarrier();
+${body}}
+`
+    }
     const PYR_WGSL = `
 @group(0) @binding(1) var<storage, read_write> pyramid: array<f32>;
 @group(0) @binding(6) var zTex: texture_2d<f32>;
@@ -1520,7 +1710,7 @@ fn zToMip0(@builtin(global_invocation_id) gid: vec3<u32>) {
   let z = textureLoad(zTex, vec2<i32>(vec2<u32>(x, y)), 0).r;
   pyramid[t] = z;
 }
-${REDUCE}`
+${REDUCE}${SPD}${TOP}`
     const reduceId = gpu.createCompute(PYR_WGSL, 16, [storageId], [{ kind: 'sampled', textureId: zTexId }])
     const flat = (w2: number, h2: number): number => Math.max(1, Math.ceil(w2 * h2 / 64))
     const block = new Float32Array(4)
@@ -1529,12 +1719,24 @@ ${REDUCE}`
       // the z-pass leaves its render pass open — the compute dispatch needs
       // it closed (the facade's tape contract)
       gpu.endPass()
+      // Task 214 — THE SINGLE-PASS DOWNSAMPLER: two dispatches where the
+      // Task-196 chain spent ten (zToMip0 + nine sequential reduces — each
+      // a frame-graph sync point between the z-pass and the cull).
+      gpu.runCompute(reduceId, 'spd', block, regionTops)
+      if (levels >= 8) gpu.runCompute(reduceId, 'spdTop', block, 1)
+    }
+    // Task 214 — the LEGACY spelling (the parity gate's other leg): the
+    // sequential chain over the SAME z tile; the gate dispatches both and
+    // compares every storage word — the bit-identity proof, executable.
+    const buildLegacy = (): void => {
+      gpu.endPass()
       gpu.runCompute(reduceId, 'zToMip0', block, flat(w, h))
       for (let L = 1; L < levels; L++) {
         gpu.runCompute(reduceId, `reduceL${L}`, block, flat(dims[L].w, dims[L].h))
       }
     }
-    return { zTarget, textures: [], storageId, offsets, levels, width: w, height: h, dims, build }
+    const readWords = (): Promise<Float32Array> => gpu.readExternalBuffer(storageId, words * 4)
+    return { zTarget, textures: [], storageId, offsets, levels, width: w, height: h, dims, build, buildLegacy, readWords }
   }
 
   function program(spec: ProgramSpec): ProgramHandle {

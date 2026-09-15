@@ -184,7 +184,7 @@ describe('Task 200: hizScene — the scenario brick, the WebGPU leg', () => {
     // THE RECIPE: the z-prepass draw (2 instances — the POLICY), the reduce
     // family, the cull kernel, the compact, then the indirect draw
     const prepassIdx = tail.findIndex(c => c === 'drawIndexed(3,2)')
-    const reduceIdx = tail.findIndex(c => c.startsWith('runCompute(') && c.includes(',zToMip0,'))
+    const reduceIdx = tail.findIndex(c => c.startsWith('runCompute(') && c.includes(',spd,'))
     const cullIdx = tail.findIndex(c => c.startsWith('runCompute(') && c.includes(',cull,'))
     const compactIdx = tail.findIndex(c => c.startsWith('runCompute(') && c.includes(',compact,'))
     const indirectIdx = tail.findIndex(c => c === 'drawIndexedIndirect(900003,32)')

@@ -97,6 +97,12 @@ export type { SceneWorkerHooks } from './worker.ts'
 export { createSceneWorkerBridge } from './mirror.ts'
 export type { SceneWorkerPort, SceneSnapshot, SceneWorkerBridge, SceneWorkerBridgeStats } from './mirror.ts'
 
+// Task 214 — the mirror/publish ON THE STORE: the scene's SAB regions as
+// adopted SoAStores (zero copies) + the stamp-driven dirty ranges both
+// directions feed (the Task-211 partial-upload surface, generalized).
+export { createSceneStoreMirror } from './storeMirror.ts'
+export type { SceneStoreMirror } from './storeMirror.ts'
+
 export {
   recommendSceneStrategy,
   measureScenePipeline,

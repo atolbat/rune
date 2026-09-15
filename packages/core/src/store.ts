@@ -589,18 +589,29 @@ export function createStore(columns: readonly StoreColumn[], options: StoreOptio
  * buffer (the occlusion scene's records region behind [list|flags|
  * hist]); `count` is the live record count. The store is
  * FIXED-CAPACITY: reserve() over capacity refuses loudly — the
- * buffer's layout belongs to its owner. */
+ * buffer's layout belongs to its owner. `regionBytes` (Task 214) bounds
+ * the region when the store adopts a SLICE of a larger buffer — without
+ * it the capacity derives from the whole buffer remainder (correct only
+ * when the region runs to the buffer's end, the occlusion demo's shape). */
 export function adoptStore(
   buffer: ArrayBufferLike,
   columns: readonly StoreColumn[],
   count: number,
   byteOffset = 0,
+  regionBytes?: number,
 ): SoAStore {
   validateColumns(columns)
   const stride = strideOf(columns)
-  const capacity = ((buffer.byteLength - byteOffset) / (stride * KIND_BYTES)) | 0
+  // Task 214 — regionBytes bounds a SLICE adoption (the scene's own
+  // regions live inside a larger buffer; without the bound the capacity
+  // would derive from the whole remainder and the views would run past
+  // the region into the neighbor's bytes)
+  const available = regionBytes !== undefined
+    ? Math.min(regionBytes, buffer.byteLength - byteOffset)
+    : buffer.byteLength - byteOffset
+  const capacity = (available / (stride * KIND_BYTES)) | 0
   if (capacity < 1 || byteOffset + capacity * stride * KIND_BYTES > buffer.byteLength) {
-    throw new Error(`store: the buffer (${buffer.byteLength}B @${byteOffset}) cannot hold one ${stride}-element record`)
+    throw new Error(`store: the buffer (${buffer.byteLength}B @${byteOffset}${regionBytes !== undefined ? `, region ${regionBytes}B` : ''}) cannot hold one ${stride}-element record`)
   }
   if (count < 0 || count > capacity) {
     throw new Error(`store: count ${count} outruns the adopted capacity ${capacity}`)

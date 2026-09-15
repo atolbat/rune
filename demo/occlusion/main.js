@@ -24,7 +24,7 @@
 // window.__hizStats — the live counters (the smoke/gates read it);
 // window.__hizGate — the probe verdict (?probe=1: WG-only, the Task-196
 // contract; ?probe=1&mode=webgl2: both tiers + the cross-tier parity).
-import { buildTier } from './tier.js?v=213'
+import { buildTier } from './tier.js?v=214'
 import {
   createScene, cameraAt, VAL_CAMERAS,
   HIZ_W, HIZ_H, LEVELS,
@@ -33,7 +33,7 @@ import {
   buildOctreeRecords, buildBVHRecords, frustumPlanes, aabbOutsideFrustum,
   recordView, flatCull, clusterize, softwareOccluder, cameraRay, rayBoxes,
   layerPolicy, adoptStore,
-} from '../../dist/rune.esm.js?v=213'
+} from '../../dist/rune.esm.js?v=214'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -1270,6 +1270,29 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
     if (!carryOk || !hystIdentityOk) shell.log.error('near-first order temporal composition FAILED — the hysteresis fold must carry the bucket bits and keep the identity on the folded words')
     cameras.push({ yaw: camV.yaw, policy: 'order', parity: parityIdentical ? 'IDENTICAL' : 'DIFFERS', drawnOn: onStats.drawn, drawnOff: offStats.drawn, invariantOn: invariantOk, invariantOff: carryOk, ok: orderOk })
   }
+  // ── Task 214 — THE SINGLE-PASS DOWNSAMPLER gate (research A4 — the
+  //    Granite/FidelityFX SPD harvest, bevy #22286's landed shape): the
+  //    pyramid now builds in TWO dispatches (the 64×64 region pass + the
+  //    top pass) where the Task-196 chain spent ten; the gate dispatches
+  //    BOTH spellings over the same z tile (the live frame's own city
+  //    depth data) and demands BIT-IDENTICAL storage words. GL leg: the
+  //    FBO pyramid is the backend's own mechanism — null by contract, the
+  //    gate is the honest no-op pass there.
+  {
+    const parity = t.spdParity !== undefined ? await t.spdParity() : null
+    let spdOk = true
+    if (parity !== null && parity.error === undefined) {
+      spdOk = parity.pass === true
+      if (!spdOk) shell.log.error(`SPD parity FAILED — ${parity.diffs} storage words differ (first at word ${parity.first}); the single-pass cascade must reproduce the sequential chain bit-for-bit (the clamp-containment proof is the contract)`)
+      shell.log.event(`single-pass downsampler: the pyramid's ${parity.words.toLocaleString()} storage words are BIT-IDENTICAL across both spellings (${parity.spdDispatches} dispatches vs the legacy chain's ${parity.legacyDispatches} — the frame-graph sync points between the z-pass and the cull, ${parity.legacyDispatches} → ${parity.spdDispatches}) — ${spdOk ? 'PASS' : 'FAIL'}`)
+    } else if (parity !== null) {
+      spdOk = false
+      shell.log.error(`SPD parity gate crashed: ${parity.error}`)
+    } else {
+      shell.log.event('single-pass downsampler: the GL leg — the FBO pyramid is the backend\'s own reduce (a documented no-op; the WG storage pyramid is the SPD leg)')
+    }
+    allOk = allOk && spdOk
+  }
   const verdict = { pass: allOk && crossOk && errors.length === 0, tier: t.mode, cameras, crossChecked, errors: errors.length }
   stats.validation = verdict
   if (anchor !== null) wgProbeHashes = anchor
@@ -1280,7 +1303,7 @@ async function validate(t = tier, cross = t.mode === 'webgpu' ? null : wgProbeHa
   if (t.drain !== null && t.drain !== undefined) {
     try { t.drain(performance.now()) } catch { /* the drain itself is best-effort */ }
   }
-  shell.log.event(`validation: ${verdict.pass ? 'PASS' : 'FAIL'} — pixel parity over ${cameras.length} cameras, the accounting invariant, the culling effect, the CPU spatial + ray + cluster + soft-Hi-Z gates, the temporal policy${crossChecked > 0 ? `, the cross-tier bounded parity ×${crossChecked}` : ''}${errors.length > 0 ? `, ${errors.length} GPU errors` : ''}`)
+  shell.log.event(`validation: ${verdict.pass ? 'PASS' : 'FAIL'} — pixel parity over ${cameras.length} cameras, the accounting invariant, the culling effect, the CPU spatial + ray + cluster + soft-Hi-Z gates, the temporal policy, the SPD bit-identity${crossChecked > 0 ? `, the cross-tier bounded parity ×${crossChecked}` : ''}${errors.length > 0 ? `, ${errors.length} GPU errors` : ''}`)
   return verdict
   } finally {
     editHold = false
