@@ -381,7 +381,7 @@ export function createRealGL(
   // feed rebinds die too — the deepest steady-state win of the family.
   // A pass-VAO bind (passVaoActive) never touches this mirror: the TF
   // family's VAO state is its own, and the default VAO is restored after.
-  const vertexBindMemo = new Map<number, { readonly bufferId: number; readonly size: number; readonly stride: number; readonly offset: number; readonly divisor: number }>()
+  const vertexBindMemo = new Map<number, { readonly bufferId: number; readonly size: number; readonly stride: number; readonly offset: number; readonly divisor: number; readonly type?: string }>()
   /** Drop the whole vertex-bind mirror (see vertexBindMemo — the pass-boundary + structural invalidations). */
   function invalidateVertexBinds(): void {
     vertexBindMemo.clear()
@@ -614,7 +614,7 @@ export function createRealGL(
    *  buffer takes the immutable-leaning path on some backends — the
    *  dual-use (write+read per frame) works on both, but the dynamic hint
    *  is what the usage was invented for. */
-  function createBuffer(data: Float32Array, usage: 'static' | 'dynamic' = 'static'): number {
+  function createBuffer(data: Float32Array | Int16Array | Int8Array, usage: 'static' | 'dynamic' = 'static'): number {
     const buffer = gl.createBuffer()
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer)
     gl.bufferData(gl.ARRAY_BUFFER, data, usage === 'dynamic' ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW)
@@ -632,10 +632,15 @@ export function createRealGL(
     return id
   }
 
-  function bindVertexBuffer(bufferId: number, location: number, size: number, stride?: number, byteOffset?: number, divisor?: number): void {
+  function bindVertexBuffer(bufferId: number, location: number, size: number, stride?: number, byteOffset?: number, divisor?: number, type?: 'float' | 'short' | 'byte'): void {
     const strideVal = stride ?? 0
     const offsetVal = byteOffset ?? 0
     const divisorVal = divisor ?? 0
+    // Task 223 — THE QUANTIZED FEED: 'short'/'byte' upload as normalized
+    // integers — the shader reads f32 components in [-1, 1] (the caller's
+    // bbox decode restores the range); every existing call stays 'float'.
+    const typeVal = type === 'short' ? gl.SHORT : type === 'byte' ? gl.BYTE : gl.FLOAT
+    const normalized = type !== undefined && type !== 'float'
     const buffer = buffers.get(bufferId)
     // Task 165 — the vertex-bind memo (see its declaration): an identical
     // pointer tuple re-asserted within the same pass is skipped entirely
@@ -645,10 +650,11 @@ export function createRealGL(
     if (!passVaoActive && buffer !== undefined) {
       const memo = vertexBindMemo.get(location)
       if (memo !== undefined && memo.bufferId === bufferId && memo.size === size
-        && memo.stride === strideVal && memo.offset === offsetVal && memo.divisor === divisorVal) {
+        && memo.stride === strideVal && memo.offset === offsetVal && memo.divisor === divisorVal
+        && memo.type === (type ?? 'float')) {
         return
       }
-      vertexBindMemo.set(location, { bufferId, size, stride: strideVal, offset: offsetVal, divisor: divisorVal })
+      vertexBindMemo.set(location, { bufferId, size, stride: strideVal, offset: offsetVal, divisor: divisorVal, type: type ?? 'float' })
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer ?? null)
     gl.enableVertexAttribArray(location)
@@ -658,7 +664,7 @@ export function createRealGL(
     // its locations live and die with the pass, never with the default VAO.
     if (!passVaoActive) defaultAttribBindings.set(location, bufferId)
     // M5: feed interleaving — the record's stride/offset (default: tight 0/0).
-    gl.vertexAttribPointer(location, size, gl.FLOAT, false, strideVal, offsetVal)
+    gl.vertexAttribPointer(location, size, typeVal, normalized, strideVal, offsetVal)
     // Task 75: the instance step (star quads: one feed record = one instance).
     // Called UNCONDITIONALLY (and with 0) — resets the divisor after instanced
     // commands, otherwise the attribute would "stick" with divisor=1 for regular geometry.
@@ -762,7 +768,7 @@ export function createRealGL(
   function createTexture(
     width: number,
     height: number,
-    options?: { mipLevels?: number; maxAnisotropy?: number; format?: GLTextureFormat },
+    options?: { mipLevels?: number; maxAnisotropy?: number; format?: GLTextureFormat; wrap?: 'clamp' | 'repeat' },
   ): number {
     const texture = gl.createTexture()
     invalidateUnitBinds()
@@ -800,8 +806,11 @@ export function createRealGL(
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minFilter(format, mipLevels))
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magFilter(format))
     }
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    // Task 223 — THE WRAP LAW: 'repeat' for tiling textures (the tree's
+    // bark V-wraps); the default stays CLAMP_TO_EDGE (the historical shape)
+    const wrapMode = options?.wrap === 'repeat' ? gl.REPEAT : gl.CLAMP_TO_EDGE
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrapMode)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrapMode)
     // Anisotropic filtering — only for textures with a mip chain (mipLevels>1).
     // On non-mip textures anisotropy is useless (MIN_FILTER=LINEAR, no
     // cross-mip interpolation). caps.has('anisotropic')=true iff the extension

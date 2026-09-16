@@ -143,8 +143,8 @@ async function sourceLeg() {
     index.includes('position: absolute; inset: 0'), '')
   check('source: the A6 capability-split law ships (harvest where the surface can, fill where it cannot)',
     main.includes('harvestCapable') && main.includes('tier.surface.depthTextureId !== undefined'), '')
-  const v222 = (main.match(/\?v=222/g) ?? []).length + (index.match(/\?v=222/g) ?? []).length
-  check('source: the cache-bust marks moved to v=222 (the current deploy state — Task 222)',
+  const v222 = (main.match(/\?v=223/g) ?? []).length + (index.match(/\?v=223/g) ?? []).length
+  check('source: the cache-bust marks moved to v=223 (the current deploy state — Task 222)',
     v222 >= 8, `${v222} marks`)
 }
 

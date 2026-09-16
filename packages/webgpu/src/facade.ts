@@ -106,12 +106,20 @@ export interface GpuTimerHandle {
  *  attribute offset=offset, format by size.
  *  Task 75: step='instance' → stepMode 'instance' (a feed record is read
  *  once per instance — quad-stars; corners are expanded from
- *  @builtin(vertex_index) in the shader). */
+ *  @builtin(vertex_index) in the shader).
+ *  Task 223 — THE QUANTIZED FEED: `format` overrides the size-derived
+ *  float32 pick ('snorm16x4' 8 B · 'snorm8x4' 4 B · 'snorm16x2' 4 B —
+ *  the shader receives normalized f32 components either way; the
+ *  arrayStride follows the FORMAT when stride is not given). A hero mesh
+ *  with an unshared triangle-cloud soup (a tree's 300k-leaf foliage) is
+ *  vertex-BANDWIDTH-bound — quantized attributes halve the bytes and the
+ *  mobile GPU's vertex fetch with them. */
 export type GpuAttrSlot = number | {
   readonly size: number
   readonly stride?: number
   readonly offset?: number
   readonly step?: 'vertex' | 'instance'
+  readonly format?: 'snorm16x4' | 'snorm8x4' | 'snorm16x2'
 }
 
 export interface GPUFacade {
@@ -140,7 +148,7 @@ export interface GPUFacade {
     width: number,
     height: number,
     format?: TextureFormat,
-    options?: { mipLevels?: number; maxAnisotropy?: number },
+    options?: { mipLevels?: number; maxAnisotropy?: number; wrap?: 'clamp' | 'repeat' },
   ): number
   texSubImage2D(textureId: number, x: number, y: number, width: number, height: number, bytes: Uint8Array): void
   /** Atomic upload from bitmap/canvas/video into mip 0 — a single
@@ -205,7 +213,9 @@ export interface GPUFacade {
   ensurePipeline(pipelineId: number, wgsl: string, attrs: readonly GpuAttrSlot[], hasTextures: boolean, desc?: GpuPipelineDesc): void
   usePipeline(pipelineId: number): void
   bindUniforms(dynamicOffset: number): void
-  bindVertexBuffer(slot: number, data: Float32Array, size: number): void
+  /** Task 223 — data widens to the quantized feeds (Int16Array/Int8Array
+ *  ride the same keyed cache; the byte length is the array's own). */
+  bindVertexBuffer(slot: number, data: Float32Array | Int16Array | Int8Array, size: number): void
   /** M5 (Task 73): the feed's dynamic vertex buffer — writeBuffer in a
    *  single call per frame. The key is the Float32Array itself (stable in
    *  the feed renderer). Binding is done by the executor via

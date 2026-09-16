@@ -155,7 +155,7 @@ export async function createRealGPU(
   // leaks, but only for the whole renderer session. dispose() cleans
   // everything. FR not applied: tied to the spec command's lifetime, not a
   // user-facing handle.
-  const vertexBuffers = new Map<Float32Array, GPUBuffer>()
+  const vertexBuffers = new Map<Float32Array | Int16Array | Int8Array, GPUBuffer>()
   const textureBindGroups = new Map<string, GPUBindGroup>()
   const targets = new Map<number, {
     view: GPUTextureView
@@ -458,7 +458,7 @@ export async function createRealGPU(
     w: number,
     h: number,
     textureFormat: TextureFormat = 'rgba8unorm',
-    options?: { mipLevels?: number; maxAnisotropy?: number },
+    options?: { mipLevels?: number; maxAnisotropy?: number; wrap?: 'clamp' | 'repeat' },
   ): number {
     const mipLevels = options?.mipLevels ?? 1
     // Task 67 HDR: 'rgba16float'/'rgba32float' — core WebGPU formats
@@ -524,8 +524,12 @@ export async function createRealGPU(
       // the mip-chain, always samples level 0 — which is what textures
       // without mips need).
       mipmapFilter: mipLevels > 1 && filterable ? 'linear' : 'nearest',
-      addressModeU: 'clamp-to-edge',
-      addressModeV: 'clamp-to-edge',
+      // Task 223 — THE WRAP LAW: 'repeat' for tiling textures (a tree's
+      // bark V-wraps along every branch tube, the foliage noise wraps
+      // over its UV span); the default stays clamp-to-edge (every
+      // existing consumer's shape).
+      addressModeU: options?.wrap === 'repeat' ? 'repeat' : 'clamp-to-edge',
+      addressModeV: options?.wrap === 'repeat' ? 'repeat' : 'clamp-to-edge',
       // maxAnisotropy: applied with mipmapFilter='linear'. WebGPU itself
       // validates: maxAnisotropy must be ∈ {1, 2, 4, 8, 16} and ≤
       // device.limits.maxAnisotropy. On mobile=1 — neutral effect.
@@ -876,15 +880,14 @@ export async function createRealGPU(
         // Task 75: slot.step='instance' → stepMode 'instance' — a feed record
         // is read once per INSTANCE (quad-stars: corners are expanded from
         // @builtin(vertex_index) in the shader, count=6, instances=feed.count).
-        buffers: attrs.map((slot, i) =>
-          typeof slot === 'number'
-            ? { arrayStride: slot * 4, attributes: [{ shaderLocation: i, offset: 0, format: vertexFormat(slot) }] }
-            : {
-                arrayStride: slot.stride ?? slot.size * 4,
-                attributes: [{ shaderLocation: i, offset: slot.offset ?? 0, format: vertexFormat(slot.size) }],
-                stepMode: slot.step === 'instance' ? 'instance' : 'vertex',
-              },
-        ),
+        buffers: attrs.map((slot, i) => {
+          // Task 223 — slotFormat unifies the tight/interleaved/quantized
+          // picks (the format's own stride when declared)
+          const f = slotFormat(slot)
+          const offset = typeof slot === 'number' ? 0 : (slot.offset ?? 0)
+          const step = typeof slot === 'number' ? 'vertex' : (slot.step === 'instance' ? 'instance' : 'vertex')
+          return { arrayStride: f.stride, attributes: [{ shaderLocation: i, offset, format: f.format }], stepMode: step }
+        }),
       },
       fragment: {
         module,
@@ -960,6 +963,18 @@ export async function createRealGPU(
     return 'float32'
   }
 
+  /** Task 223 — THE QUANTIZED FEED: the declared format wins over the
+ *  size-derived float32 pick; the stride follows the format's own byte
+ *  size (snorm16x4=8 · snorm8x4=4 · snorm16x2=4). */
+  function slotFormat(slot: GpuAttrSlot): { format: GPUVertexFormat; stride: number } {
+    if (typeof slot === 'number') return { format: vertexFormat(slot), stride: slot * 4 }
+    if (slot.format !== undefined) {
+      const stride = slot.stride ?? (slot.format === 'snorm16x4' ? 8 : 4)
+      return { format: slot.format, stride }
+    }
+    return { format: vertexFormat(slot.size), stride: slot.stride ?? slot.size * 4 }
+  }
+
   function usePipeline(pipelineId: number): void {
     const record = pipelineRecords[pipelineId]
     if (record === undefined) return
@@ -1023,7 +1038,7 @@ export async function createRealGPU(
     if (pass !== null) boundGroup0Offset = dynamicOffset
   }
 
-  function bindVertexBuffer(slot: number, data: Float32Array, _size: number): void {
+  function bindVertexBuffer(slot: number, data: Float32Array | Int16Array | Int8Array, _size: number): void {
     let buffer = vertexBuffers.get(data)
     if (buffer === undefined) {
       buffer = device.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST })
@@ -1078,7 +1093,7 @@ export async function createRealGPU(
    *      data.byteOffset + byteOffset, writeBuffer lands at the offset.
    *  ⚠️ Call forms: TypedArray → dataOffset/size in ELEMENTS; ArrayBuffer →
    *      in BYTES (GPUQueue.writeBuffer spec). */
-  function guardedWriteVertex(buffer: GPUBuffer, data: Float32Array, byteLength: number, byteOffset = 0): void {
+  function guardedWriteVertex(buffer: GPUBuffer, data: Float32Array | Int16Array | Int8Array, byteLength: number, byteOffset = 0): void {
     // (1) clamp: write no more than the GPU buffer's remaining window.
     const capped = Math.min(byteLength, buffer.size - byteOffset)
     if (capped !== byteLength) {
@@ -1119,10 +1134,11 @@ export async function createRealGPU(
         // the copy is the only cost of the fallback). Grown on demand;
         // writeBuffer takes the element offset/size form so a larger
         // staging writes exactly `capped` bytes.
-        let staging = sabStaging.get(data)
+        const dataKey = data as Float32Array
+        let staging = sabStaging.get(dataKey)
         if (staging === undefined || staging.byteLength < capped) {
           staging = new Uint8Array(new ArrayBuffer(capped))
-          sabStaging.set(data, staging)
+          sabStaging.set(dataKey, staging)
         }
         staging.set(new Uint8Array(data.buffer, data.byteOffset + byteOffset, capped))
         device.queue.writeBuffer(buffer, byteOffset, staging, 0, capped)

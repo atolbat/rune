@@ -58,6 +58,10 @@ import { createWebGL2Renderer } from './webgl2Renderer.ts'
 import type { WebGpuRenderer } from './webgpuRenderer.ts'
 import type { WebGL2Renderer } from './webgl2Renderer.ts'
 import type { GPUFacade, GpuAttrSlot } from '@rune/webgpu'
+
+/** The facade's copyExternalImageToTexture source union (kept local — the
+ * @webgpu/types module export shape varies by version). */
+type AnyImageSource = Parameters<GPUFacade['copyExternalImageToTexture']>[1]
 import type { GLFacade } from '@rune/webgl2'
 import type { AnyCanvas } from './canvasHelpers.ts'
 
@@ -302,6 +306,54 @@ export interface MeshDrawOptions {
   readonly uniforms: Float32Array
   /** Vertex count override (default: geometry.vertexCount). */
   readonly vertexCount?: number
+}
+
+/** Task 223 — THE INSTANCED MESH (the forest's hero brick): a plain mesh
+ * drawn N times over a RECORD RUN of the scene's instancing store — the
+ * Hi-Z cull's own vocabulary (a record = one tree: center/half feed the
+ * cull kernel's AABB, the spare words carry the draw's own transform).
+ *
+ * THE QUANTIZED FEED: each parallel array is Float32Array (the legacy
+ * path) OR the quantized twin — positions Int16Array (x4 snorm, decoded
+ * over [posMin, posMax]), normals Int8Array (x4 snorm, direct), uvs
+ * Int16Array (x2 snorm, over [uvMin, uvMax]). A hero mesh whose foliage
+ * is an unshared triangle cloud is vertex-BANDWIDTH-bound — 16 B/vertex
+ * against 32 halves the fetch. The GL attribute type follows the ARRAY
+ * type (Float32→FLOAT, Int16→SHORT normalized, Int8→BYTE normalized);
+ * the WG program decl carries the matching `format` per slot.
+ *
+ * THE VERDICT COLLAPSE: the WG shader reads the record + the SMOOTHED
+ * verdict (the hist word) from the scene storage by
+ * `u_base + instance_index`; the GL shader reads the records/flags
+ * attribute feeds (byte-shifted by baseInstance — the run is contiguous).
+ * A collapsed instance (verdict ∉ {1,4}) outputs a degenerate clip
+ * position — zero pixels, zero readbacks, no CPU list. */
+export interface InstancedMeshGeometry {
+  readonly positions: Float32Array | Int16Array
+  readonly normals?: Float32Array | Int8Array
+  readonly uvs?: Float32Array | Int16Array
+  readonly indices: Uint32Array
+  readonly vertexCount: number
+  readonly posMin?: readonly [number, number, number]
+  readonly posMax?: readonly [number, number, number]
+  readonly uvMin?: readonly [number, number]
+  readonly uvMax?: readonly [number, number]
+}
+
+export interface InstancedMeshDrawOptions {
+  readonly target: number
+  readonly clear: boolean
+  readonly program: ProgramHandle
+  readonly geometry: InstancedMeshGeometry
+  readonly uniforms: Float32Array
+  /** the scene whose records + verdicts drive the instances. */
+  readonly records: SceneHandle
+  /** the run's first record index — the GL byte-offset / the WG u_base. */
+  readonly baseInstance: number
+  /** the run's instance count. */
+  readonly instances: number
+  /** a texture bound for this draw (the program must be hasTextures). */
+  readonly texture?: number
 }
 
 export interface DrawOptions {
@@ -708,6 +760,25 @@ export interface RenderDevice {
    *  binds the `from:'mesh'` decls with their mesh slot. The terrain's
    *  color pass and its depth-only z twin both ride this. */
   drawMesh(options: MeshDrawOptions): void
+  /** Task 223 — THE INSTANCED MESH DRAW (see InstancedMeshDrawOptions):
+   *  one mesh × one RECORD RUN × one indexed instanced draw, the verdict
+   *  collapse in the shader. */
+  drawMeshInstanced(options: InstancedMeshDrawOptions): void
+  /** Task 223 — THE IMAGE TEXTURE: uploads a mip chain (bitmaps[0] = the
+   *  full-size level; a single-entry array = a plain texture). Returns
+   *  the facade texture id — bind it through drawMeshInstanced's
+   *  `texture` option (WG group 1 / GL unit 0). rgba8unorm, REPEAT wrap
+   *  when asked (tiling textures), LINEAR_MIPMAP_LINEAR when a chain. */
+  texture(bitmaps: readonly (ImageBitmap | HTMLCanvasElement | HTMLImageElement)[], options?: { wrap?: 'clamp' | 'repeat' }): number
+  /** Task 223 — THE COMPACT, STANDALONE (WG only; a documented no-op on
+   *  GL): runs the scene's compact kernel — the visible list + the
+   *  verdict COUNTERS into the args buffer — WITHOUT any draw. The
+   *  collapse-draw frames (the forest's instanced meshes never call
+   *  drawVisible) get the counts channel this way; readCullStats' args
+   *  readback then answers. Idempotent within a frame. MUST run outside
+   *  an open render pass (the tape contract — the caller's graph owns
+   *  the ordering). */
+  runCullCompact(scene: SceneHandle): boolean
   drawInstanced(options: DrawOptions & { instances: number }): void
   drawVisible(options: DrawOptions): void
   drawQuad(options: {
@@ -1927,6 +1998,64 @@ ${SPD_DEPTH}${TOP}`
     gpu.draw(optionsIn.vertexCount ?? g.vertexCount, 1)
   }
 
+  /** Task 223 — THE INSTANCED MESH DRAW (the WG leg): the mesh arrays at
+ *  their slots (the pipeline's quantized formats), the scene's storage at
+ *  group 2 (the shader fetches its own record by u_base + instance_index —
+ *  the collapse reads the smoothed verdict straight from the hist words),
+ *  ONE texture at group 1 when asked, one indexed instanced draw. The run
+ *  is CPU-known (the cell-band walker) — instanceCount is a plain number,
+ *  no indirect args, no compaction. */
+  function drawMeshInstanced(optionsIn: InstancedMeshDrawOptions): void {
+    const prog = wgPrograms.get(optionsIn.program)
+    if (prog === undefined) throw new Error('rune: drawMeshInstanced — the program handle is not this device\'s own')
+    const s = scenes.get(optionsIn.records)
+    if (s === undefined) throw new Error('rune: drawMeshInstanced — the records handle is not this device\'s scene')
+    if (optionsIn.instances <= 0) return
+    const g = optionsIn.geometry
+    const offset = allocUniforms(new Uint8Array(optionsIn.uniforms.buffer, optionsIn.uniforms.byteOffset, optionsIn.uniforms.byteLength))
+    gpu.bindTarget(optionsIn.target, optionsIn.clear)
+    gpu.usePipeline(prog.pipelineId)
+    gpu.bindStorageBuffer(s.bufferId)
+    const arrays: readonly (Float32Array | Int16Array | Int8Array | undefined)[] = [g.positions, g.normals, g.uvs]
+    const slots = Math.min(prog.attrs?.length ?? 1, 3)
+    for (let i = 0; i < slots; i++) {
+      const data = arrays[i]
+      if (data !== undefined && data.length > 0) gpu.bindVertexBuffer(i, data, 4)
+    }
+    gpu.bindIndexBuffer(g.indices)
+    if (optionsIn.texture !== undefined) gpu.bindTexture(optionsIn.texture)
+    gpu.bindUniforms(offset)
+    gpu.drawIndexed(g.indices.length, optionsIn.instances)
+  }
+
+  /** Task 223 — THE COMPACT, STANDALONE (the WG leg): the counts channel
+ *  for collapse-draw frames — the scene's compact writes the verdict
+ *  counters into the args buffer (readCullStats' own source), no draw,
+ *  no scene readback (a scene-storage readback MID-LOOP is the 211-class
+ *  poison on software queues: one hung mapAsync kills every later read). */
+  function runCullCompact(sceneHandle: SceneHandle): boolean {
+    const s = scenes.get(sceneHandle)
+    if (s === undefined) return false
+    gpu.runCompute(s.compactId, 'compact', s.compactBlock, 1)
+    return true
+  }
+
+  /** Task 223 — THE IMAGE TEXTURE (the WG leg): rgba8unorm + a mip chain
+ *  (copyExternalImageToTextureMip per level — the chain arrives
+ *  CPU-downscaled by the caller), REPEAT wrap when asked. */
+  function texture(bitmaps: readonly (ImageBitmap | HTMLCanvasElement | HTMLImageElement)[], options?: { wrap?: 'clamp' | 'repeat' }): number {
+    if (bitmaps.length === 0) throw new Error('rune: texture — an empty mip chain')
+    const w = bitmaps[0].width
+    const h = bitmaps[0].height
+    const id = gpu.createTexture(w, h, 'rgba8unorm', { mipLevels: bitmaps.length, wrap: options?.wrap })
+    for (let level = 0; level < bitmaps.length; level++) {
+      const src = bitmaps[level]
+      if (level === 0) gpu.copyExternalImageToTexture(id, src as AnyImageSource, 0, 0, src.width, src.height, false)
+      else gpu.copyExternalImageToTextureMip(id, level, src as AnyImageSource, 0, 0, src.width, src.height, false)
+    }
+    return id
+  }
+
   function bindGeometryFeed(vertices: Float32Array, indices?: Uint16Array | Uint32Array, size = 3): void {
     gpu.bindVertexBuffer(0, vertices, size)
     if (indices !== undefined) {
@@ -2200,6 +2329,9 @@ ${SPD_DEPTH}${TOP}`
     program,
     geometry,
     drawMesh,
+    drawMeshInstanced,
+    texture,
+    runCullCompact,
     drawInstanced,
     drawVisible,
     drawQuad,
@@ -2407,8 +2539,8 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
   // identity (the facade uploads once — the terrain is static — and a
   // re-draw re-binds the same id; the geometry() corner buffer above is
   // single-slot by the box crowd's own contract, the mesh needs its own)
-  const meshBuffers = new Map<Float32Array, number>()
-  function meshBufferOf(data: Float32Array): number {
+  const meshBuffers = new Map<Float32Array | Int16Array | Int8Array, number>()
+  function meshBufferOf(data: Float32Array | Int16Array | Int8Array): number {
     let id = meshBuffers.get(data)
     if (id === undefined) {
       id = gl.createBuffer(data)
@@ -2431,6 +2563,63 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
       gl.bindVertexBuffer(meshBufferOf(data), attr.location, attr.size, attr.stride, attr.offset, 0)
     }
     gl.drawArrays('triangles', 0, optionsIn.vertexCount ?? g.vertexCount, 1)
+  }
+
+  /** Task 223 — THE INSTANCED MESH DRAW (the GL leg): the mesh attrs with
+ *  their ARRAY-TYPE-DERIVED type (Float32→FLOAT · Int16→SHORT normalized ·
+ *  Int8→BYTE normalized), the records/flags feeds BYTE-SHIFTED by the
+ *  run's baseInstance (a contiguous record range — the GL attributes'
+ *  own divisor-1 step does the per-instance walk), ONE texture on unit 0
+ *  when asked, one drawElementsInstanced over the run's length. */
+  function drawMeshInstanced(optionsIn: InstancedMeshDrawOptions): void {
+    const prog = programs.get(optionsIn.program) as GlProgram | undefined
+    if (prog === undefined) throw new Error('rune: drawMeshInstanced — the program handle is not this device\'s own')
+    const s = scenes.get(optionsIn.records) as GlScene | undefined
+    if (s === undefined) throw new Error('rune: drawMeshInstanced — the records handle is not this device\'s scene')
+    if (optionsIn.instances <= 0) return
+    openPass(optionsIn.target, optionsIn.clear, prog)
+    setUniformLanes(prog, optionsIn.uniforms)
+    const g = optionsIn.geometry
+    const arrays: readonly (Float32Array | Int16Array | Int8Array | undefined)[] = [g.positions, g.normals, g.uvs]
+    for (const attr of prog.attrs) {
+      if (attr.from === 'mesh') {
+        const data = arrays[attr.mesh ?? 0]
+        if (data === undefined || data.length === 0) continue
+        const type = data instanceof Float32Array ? 'float' : data instanceof Int16Array ? 'short' : 'byte'
+        gl.bindVertexBuffer(meshBufferOf(data), attr.location, attr.size, attr.stride, attr.offset, 0, type)
+      } else if (attr.from === 'records') {
+        gl.bindVertexBuffer(s.recBuf, attr.location, attr.size, attr.stride, attr.offset + optionsIn.baseInstance * attr.stride, attr.divisor)
+      } else if (attr.from === 'flags') {
+        // the SMOOTHED verdicts (the hist pair when the scene carries one)
+        const feed = s.histA !== 0 ? s.histCur : s.flagBuf
+        gl.bindVertexBuffer(feed, attr.location, attr.size, attr.stride, attr.offset + optionsIn.baseInstance * attr.stride, attr.divisor)
+      }
+    }
+    if (optionsIn.texture !== undefined) gl.bindTexture(optionsIn.texture, 0)
+    gl.drawElements(elementBufferOf(g.indices), g.indices.length, optionsIn.instances, false)
+  }
+
+  /** Task 223 — THE COMPACT, STANDALONE (the GL leg): a documented no-op —
+ *  the stats sweep reads the flag buffer directly (no compact, no args). */
+  function runCullCompact(_sceneHandle: SceneHandle): boolean {
+    void _sceneHandle
+    return false
+  }
+
+  /** Task 223 — THE IMAGE TEXTURE (the GL leg): rgba8 + texStorage2D mip
+ *  chain + texImage2DFromSource/texImage2DLevel per level (each upload
+ *  raises TEXTURE_MAX_LEVEL — the facade's own progressive contract). */
+  function texture(bitmaps: readonly (ImageBitmap | HTMLCanvasElement | HTMLImageElement)[], options?: { wrap?: 'clamp' | 'repeat' }): number {
+    if (bitmaps.length === 0) throw new Error('rune: texture — an empty mip chain')
+    const w = bitmaps[0].width
+    const h = bitmaps[0].height
+    const id = gl.createTexture(w, h, { format: 'rgba8', mipLevels: bitmaps.length, wrap: options?.wrap })
+    for (let level = 0; level < bitmaps.length; level++) {
+      const src = bitmaps[level]
+      if (level === 0) gl.texImage2DFromSource(id, src, { flipY: false })
+      else gl.texImage2DLevel(id, level, src, { flipY: false })
+    }
+    return id
   }
 
   function setUniformLanes(prog: GlProgram, block: Float32Array): void {
@@ -2794,6 +2983,9 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     program,
     geometry,
     drawMesh,
+    drawMeshInstanced,
+    texture,
+    runCullCompact,
     drawInstanced,
     drawVisible,
     drawQuad,

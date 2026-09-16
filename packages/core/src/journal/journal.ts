@@ -57,7 +57,7 @@ export type DeclOp =
   | { readonly kind: 'destroyTexture'; readonly id: number }
   | { readonly kind: 'createProgram'; readonly id: number; readonly vertex: string; readonly fragment: string }
   | { readonly kind: 'destroyProgram'; readonly id: number }
-  | { readonly kind: 'createBuffer'; readonly id: number; readonly data: Float32Array; readonly usage?: 'static' | 'dynamic' }
+  | { readonly kind: 'createBuffer'; readonly id: number; readonly data: Float32Array | Int16Array | Int8Array; readonly usage?: 'static' | 'dynamic' }
   | { readonly kind: 'destroyBuffer'; readonly id: number }
   | { readonly kind: 'createTarget'; readonly id: number; readonly textureId: number; readonly width: number; readonly height: number; readonly depth: boolean; readonly color: ClearColor; readonly depthBits?: 16 | 24 | 32; readonly depthTextureId?: number }
   | { readonly kind: 'destroyTarget'; readonly id: number }
@@ -112,7 +112,11 @@ export function createJournal(): Journal {
       // typed state, and snapshot()/replay() do not crash on
       // op.data.slice (the "Unhandled rejection: op.data.slice is not
       // a function" regression). All other kinds pass through as is.
+      // Task 223 — the quantized feeds: Int16Array/Int8Array are already
+      // typed views — they journal verbatim (a toFloat32 copy would lie on
+      // replay); only the untyped escapee still normalizes.
       ops.push(op.kind === 'createBuffer' && !(op.data instanceof Float32Array)
+        && !(op.data instanceof Int16Array) && !(op.data instanceof Int8Array)
         ? { ...op, data: toFloat32Array(op.data) }
         : op)
     },
@@ -316,6 +320,10 @@ function cloneOp(op: DeclOp): DeclOp {
     // Task 61: toFloat32Array — protection from "stale" ops that got into the
     // journal bypassing record() normalization (external writes/experiments).
     // The live path is covered by record(); here — belt-and-suspenders.
+    // Task 223: the quantized views (Int16/Int8) slice as themselves.
+    if (op.data instanceof Int16Array || op.data instanceof Int8Array) {
+      return { ...op, data: op.data.slice() }
+    }
     return { ...op, data: toFloat32Array(op.data).slice() }
   }
   return op

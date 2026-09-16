@@ -34,7 +34,7 @@ export interface GLFacade {
    *  GPU rewrites every frame (the GPGPU TF tier's stream-output buffers,
    *  read back as vertex/PBO sources the same frame); 'static' (the
    *  default, the historical behavior) for one-shot uploads. */
-  createBuffer(data: Float32Array, usage?: 'static' | 'dynamic'): number
+  createBuffer(data: Float32Array | Int16Array | Int8Array, usage?: 'static' | 'dynamic'): number
   /** Task 140 — the GPU-side readback (a diagnostics surface): `dst.length`
    *  floats from the buffer into `dst`, through COPY_READ_BUFFER. A
    *  SYNCHRONOUS stall — one-shot diagnostic use, never per-frame. false =
@@ -51,8 +51,12 @@ export interface GLFacade {
    *  backward compatibility.
    *  divisor (Task 75): 1 → vertexAttribDivisor(loc, 1) — the attribute
    *  is read once per INSTANCE (star quads from the feed); 0/undefined —
-   *  regular per-vertex (backward compatibility). */
-  bindVertexBuffer(bufferId: number, location: number, size: number, stride?: number, byteOffset?: number, divisor?: number): void
+   *  regular per-vertex (backward compatibility).
+   *  type (Task 223 — THE QUANTIZED FEED): 'short' → gl.SHORT and
+   *  'byte' → gl.BYTE with NORMALIZED=true (the shader receives f32 in
+   *  [-1, 1] — the mesh's own bbox decodes positions back); default
+   *  'float' — the historical path, byte-for-byte. */
+  bindVertexBuffer(bufferId: number, location: number, size: number, stride?: number, byteOffset?: number, divisor?: number, type?: 'float' | 'short' | 'byte'): void
   setUniformMatrix4(programId: number, name: string, values: Float32Array): void
   setUniform4fv(programId: number, name: string, values: Float32Array): void
   setUniform3fv(programId: number, name: string, values: Float32Array): void
@@ -95,7 +99,7 @@ export interface GLFacade {
   createTexture(
     width: number,
     height: number,
-    options?: { mipLevels?: number; maxAnisotropy?: number; format?: GLTextureFormat },
+    options?: { mipLevels?: number; maxAnisotropy?: number; format?: GLTextureFormat; wrap?: 'clamp' | 'repeat' },
   ): number
   /** Task 67/132: `bytes` — a Uint8Array for rgba8 textures, or a
    *  Float32Array VIEW when the texture's storage format is rgba32f (the

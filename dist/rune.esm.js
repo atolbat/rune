@@ -2660,7 +2660,7 @@ function createJournal() {
   const ops = [];
   return {
     record(op) {
-      ops.push(op.kind === "createBuffer" && !(op.data instanceof Float32Array) ? { ...op, data: toFloat32Array(op.data) } : op);
+      ops.push(op.kind === "createBuffer" && !(op.data instanceof Float32Array) && !(op.data instanceof Int16Array) && !(op.data instanceof Int8Array) ? { ...op, data: toFloat32Array(op.data) } : op);
     },
     replay(apply) {
       for (const op of ops)
@@ -2828,6 +2828,9 @@ function createJournal() {
 }
 function cloneOp(op) {
   if (op.kind === "createBuffer") {
+    if (op.data instanceof Int16Array || op.data instanceof Int8Array) {
+      return { ...op, data: op.data.slice() };
+    }
     return { ...op, data: toFloat32Array(op.data).slice() };
   }
   return op;
@@ -8513,23 +8516,25 @@ function createRealGL(gl, onViewportHeal) {
     buffers.set(id, buffer);
     return id;
   }
-  function bindVertexBuffer(bufferId, location2, size, stride, byteOffset, divisor) {
+  function bindVertexBuffer(bufferId, location2, size, stride, byteOffset, divisor, type) {
     const strideVal = stride ?? 0;
     const offsetVal = byteOffset ?? 0;
     const divisorVal = divisor ?? 0;
+    const typeVal = type === "short" ? gl.SHORT : type === "byte" ? gl.BYTE : gl.FLOAT;
+    const normalized = type !== undefined && type !== "float";
     const buffer = buffers.get(bufferId);
     if (!passVaoActive && buffer !== undefined) {
       const memo = vertexBindMemo.get(location2);
-      if (memo !== undefined && memo.bufferId === bufferId && memo.size === size && memo.stride === strideVal && memo.offset === offsetVal && memo.divisor === divisorVal) {
+      if (memo !== undefined && memo.bufferId === bufferId && memo.size === size && memo.stride === strideVal && memo.offset === offsetVal && memo.divisor === divisorVal && memo.type === (type ?? "float")) {
         return;
       }
-      vertexBindMemo.set(location2, { bufferId, size, stride: strideVal, offset: offsetVal, divisor: divisorVal });
+      vertexBindMemo.set(location2, { bufferId, size, stride: strideVal, offset: offsetVal, divisor: divisorVal, type: type ?? "float" });
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer ?? null);
     gl.enableVertexAttribArray(location2);
     if (!passVaoActive)
       defaultAttribBindings.set(location2, bufferId);
-    gl.vertexAttribPointer(location2, size, gl.FLOAT, false, strideVal, offsetVal);
+    gl.vertexAttribPointer(location2, size, typeVal, normalized, strideVal, offsetVal);
     gl.vertexAttribDivisor(location2, divisorVal);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
   }
@@ -8613,8 +8618,9 @@ function createRealGL(gl, onViewportHeal) {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minFilter(format, mipLevels));
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magFilter(format));
     }
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const wrapMode = options?.wrap === "repeat" ? gl.REPEAT : gl.CLAMP_TO_EDGE;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrapMode);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrapMode);
     let appliedAniso = 1;
     if (mipLevels > 1 && anisoExt !== null) {
       const requested = options?.maxAnisotropy ?? anisoMax;
@@ -14052,8 +14058,8 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
       magFilter: filterable ? "linear" : "nearest",
       minFilter: filterable ? "linear" : "nearest",
       mipmapFilter: mipLevels > 1 && filterable ? "linear" : "nearest",
-      addressModeU: "clamp-to-edge",
-      addressModeV: "clamp-to-edge",
+      addressModeU: options?.wrap === "repeat" ? "repeat" : "clamp-to-edge",
+      addressModeV: options?.wrap === "repeat" ? "repeat" : "clamp-to-edge",
       ...appliedAniso > 1 ? { maxAnisotropy: appliedAniso } : {}
     });
     const id = nextTextureId++;
@@ -14212,10 +14218,11 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
       vertex: {
         module,
         entryPoint: "vsMain",
-        buffers: attrs.map((slot, i) => typeof slot === "number" ? { arrayStride: slot * 4, attributes: [{ shaderLocation: i, offset: 0, format: vertexFormat(slot) }] } : {
-          arrayStride: slot.stride ?? slot.size * 4,
-          attributes: [{ shaderLocation: i, offset: slot.offset ?? 0, format: vertexFormat(slot.size) }],
-          stepMode: slot.step === "instance" ? "instance" : "vertex"
+        buffers: attrs.map((slot, i) => {
+          const f = slotFormat(slot);
+          const offset = typeof slot === "number" ? 0 : slot.offset ?? 0;
+          const step = typeof slot === "number" ? "vertex" : slot.step === "instance" ? "instance" : "vertex";
+          return { arrayStride: f.stride, attributes: [{ shaderLocation: i, offset, format: f.format }], stepMode: step };
         })
       },
       fragment: {
@@ -14270,6 +14277,15 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
     if (size === 2)
       return "float32x2";
     return "float32";
+  }
+  function slotFormat(slot) {
+    if (typeof slot === "number")
+      return { format: vertexFormat(slot), stride: slot * 4 };
+    if (slot.format !== undefined) {
+      const stride = slot.stride ?? (slot.format === "snorm16x4" ? 8 : 4);
+      return { format: slot.format, stride };
+    }
+    return { format: vertexFormat(slot.size), stride: slot.stride ?? slot.size * 4 };
   }
   function usePipeline(pipelineId) {
     const record = pipelineRecords[pipelineId];
@@ -14349,10 +14365,11 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
             onGpuError?.(`writeBuffer(vertex SAB-direct) rejected: ${errorMessage(error)}`);
           }
         }
-        let staging = sabStaging.get(data);
+        const dataKey = data;
+        let staging = sabStaging.get(dataKey);
         if (staging === undefined || staging.byteLength < capped) {
           staging = new Uint8Array(new ArrayBuffer(capped));
-          sabStaging.set(data, staging);
+          sabStaging.set(dataKey, staging);
         }
         staging.set(new Uint8Array(data.buffer, data.byteOffset + byteOffset, capped));
         device.queue.writeBuffer(buffer, byteOffset, staging, 0, capped);
@@ -17677,6 +17694,55 @@ ${SPD_DEPTH}${TOP}`;
     gpu.bindUniforms(offset);
     gpu.draw(optionsIn.vertexCount ?? g.vertexCount, 1);
   }
+  function drawMeshInstanced(optionsIn) {
+    const prog = wgPrograms.get(optionsIn.program);
+    if (prog === undefined)
+      throw new Error("rune: drawMeshInstanced — the program handle is not this device's own");
+    const s = scenes.get(optionsIn.records);
+    if (s === undefined)
+      throw new Error("rune: drawMeshInstanced — the records handle is not this device's scene");
+    if (optionsIn.instances <= 0)
+      return;
+    const g = optionsIn.geometry;
+    const offset = allocUniforms(new Uint8Array(optionsIn.uniforms.buffer, optionsIn.uniforms.byteOffset, optionsIn.uniforms.byteLength));
+    gpu.bindTarget(optionsIn.target, optionsIn.clear);
+    gpu.usePipeline(prog.pipelineId);
+    gpu.bindStorageBuffer(s.bufferId);
+    const arrays = [g.positions, g.normals, g.uvs];
+    const slots = Math.min(prog.attrs?.length ?? 1, 3);
+    for (let i = 0;i < slots; i++) {
+      const data = arrays[i];
+      if (data !== undefined && data.length > 0)
+        gpu.bindVertexBuffer(i, data, 4);
+    }
+    gpu.bindIndexBuffer(g.indices);
+    if (optionsIn.texture !== undefined)
+      gpu.bindTexture(optionsIn.texture);
+    gpu.bindUniforms(offset);
+    gpu.drawIndexed(g.indices.length, optionsIn.instances);
+  }
+  function runCullCompact(sceneHandle) {
+    const s = scenes.get(sceneHandle);
+    if (s === undefined)
+      return false;
+    gpu.runCompute(s.compactId, "compact", s.compactBlock, 1);
+    return true;
+  }
+  function texture(bitmaps, options2) {
+    if (bitmaps.length === 0)
+      throw new Error("rune: texture — an empty mip chain");
+    const w = bitmaps[0].width;
+    const h = bitmaps[0].height;
+    const id = gpu.createTexture(w, h, "rgba8unorm", { mipLevels: bitmaps.length, wrap: options2?.wrap });
+    for (let level = 0;level < bitmaps.length; level++) {
+      const src = bitmaps[level];
+      if (level === 0)
+        gpu.copyExternalImageToTexture(id, src, 0, 0, src.width, src.height, false);
+      else
+        gpu.copyExternalImageToTextureMip(id, level, src, 0, 0, src.width, src.height, false);
+    }
+    return id;
+  }
   function bindGeometryFeed(vertices, indices, size = 3) {
     gpu.bindVertexBuffer(0, vertices, size);
     if (indices !== undefined) {
@@ -17890,6 +17956,9 @@ ${SPD_DEPTH}${TOP}`;
     program,
     geometry,
     drawMesh,
+    drawMeshInstanced,
+    texture,
+    runCullCompact,
     drawInstanced,
     drawVisible,
     drawQuad,
@@ -18090,6 +18159,55 @@ function createGlDevice(renderer, options, clear) {
       gl.bindVertexBuffer(meshBufferOf(data), attr.location, attr.size, attr.stride, attr.offset, 0);
     }
     gl.drawArrays("triangles", 0, optionsIn.vertexCount ?? g.vertexCount, 1);
+  }
+  function drawMeshInstanced(optionsIn) {
+    const prog = programs.get(optionsIn.program);
+    if (prog === undefined)
+      throw new Error("rune: drawMeshInstanced — the program handle is not this device's own");
+    const s = scenes.get(optionsIn.records);
+    if (s === undefined)
+      throw new Error("rune: drawMeshInstanced — the records handle is not this device's scene");
+    if (optionsIn.instances <= 0)
+      return;
+    openPass(optionsIn.target, optionsIn.clear, prog);
+    setUniformLanes(prog, optionsIn.uniforms);
+    const g = optionsIn.geometry;
+    const arrays = [g.positions, g.normals, g.uvs];
+    for (const attr of prog.attrs) {
+      if (attr.from === "mesh") {
+        const data = arrays[attr.mesh ?? 0];
+        if (data === undefined || data.length === 0)
+          continue;
+        const type = data instanceof Float32Array ? "float" : data instanceof Int16Array ? "short" : "byte";
+        gl.bindVertexBuffer(meshBufferOf(data), attr.location, attr.size, attr.stride, attr.offset, 0, type);
+      } else if (attr.from === "records") {
+        gl.bindVertexBuffer(s.recBuf, attr.location, attr.size, attr.stride, attr.offset + optionsIn.baseInstance * attr.stride, attr.divisor);
+      } else if (attr.from === "flags") {
+        const feed = s.histA !== 0 ? s.histCur : s.flagBuf;
+        gl.bindVertexBuffer(feed, attr.location, attr.size, attr.stride, attr.offset + optionsIn.baseInstance * attr.stride, attr.divisor);
+      }
+    }
+    if (optionsIn.texture !== undefined)
+      gl.bindTexture(optionsIn.texture, 0);
+    gl.drawElements(elementBufferOf(g.indices), g.indices.length, optionsIn.instances, false);
+  }
+  function runCullCompact(_sceneHandle) {
+    return false;
+  }
+  function texture(bitmaps, options2) {
+    if (bitmaps.length === 0)
+      throw new Error("rune: texture — an empty mip chain");
+    const w = bitmaps[0].width;
+    const h = bitmaps[0].height;
+    const id = gl.createTexture(w, h, { format: "rgba8", mipLevels: bitmaps.length, wrap: options2?.wrap });
+    for (let level = 0;level < bitmaps.length; level++) {
+      const src = bitmaps[level];
+      if (level === 0)
+        gl.texImage2DFromSource(id, src, { flipY: false });
+      else
+        gl.texImage2DLevel(id, level, src, { flipY: false });
+    }
+    return id;
   }
   function setUniformLanes(prog, block) {
     let word = 0;
@@ -18374,6 +18492,9 @@ function createGlDevice(renderer, options, clear) {
     program,
     geometry,
     drawMesh,
+    drawMeshInstanced,
+    texture,
+    runCullCompact,
     drawInstanced,
     drawVisible,
     drawQuad,

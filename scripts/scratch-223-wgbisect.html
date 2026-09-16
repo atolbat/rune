@@ -1,0 +1,144 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>223 bisect</title></head>
+<body>
+<pre id="out">booting…</pre>
+<script type="module">
+import { createDevice } from '../dist/rune.esm.js?v=223'
+const out = document.getElementById('out')
+const log = m => { out.textContent = m + '\n' + out.textContent }
+window.__report = {}
+
+const N = 277
+const STRIDE = 12
+const LIST = N, FLAGS = N, HIST = N, INST = 3 * N
+const words = new Uint32Array(INST + N * STRIDE)
+const f32 = new Float32Array(words.buffer)
+for (let k = 0; k < N; k++) {
+  f32[INST + k * STRIDE] = (k % 16) - 8
+  f32[INST + k * STRIDE + 1] = 1
+  f32[INST + k * STRIDE + 2] = (k % 11) - 5
+  f32[INST + k * STRIDE + 3] = 1
+  f32[INST + k * STRIDE + 4] = 1
+  f32[INST + k * STRIDE + 5] = 1
+}
+const sceneSpec = {
+  N, INST_OFF: INST, FLAGS_OFF: FLAGS, HIST_OFF: HIST,
+  STRIDE, FIELDS: { center: 0, half: 3 },
+  LIST_WORDS: LIST, sceneWords: words, sceneF32: f32,
+}
+
+const step = (async () => {
+  const device = await createDevice({
+    backend: 'webgpu',
+    canvas: document.createElement('canvas'),
+    clear: { color: [0.1, 0.1, 0.12, 1], depth: 1 },
+    onError: e => log('ERR: ' + e),
+  })
+  log('device: ' + device.adapterInfo.slice(0, 40) + ' software=' + device.software)
+  const t0 = performance.now()
+  // 1. the scene alone + a read
+  const sceneHandle = device.scene({
+    total: N, occluders: 0, words,
+    recordsF32: f32.subarray(INST),
+    flagsWord: FLAGS, histWord: HIST, recordsWord: INST,
+    stride: STRIDE, fields: { center: 0, half: 3 },
+  })
+  const r1 = await Promise.race([
+    device.debugSceneWords(sceneHandle, 64),
+    new Promise(res => setTimeout(() => res('HUNG'), 4000)),
+  ])
+  log('1. scene-only read: ' + (r1 instanceof Float32Array ? 'OK' : r1))
+  window.__report.step1 = r1 instanceof Float32Array
+
+  // 2. + the pyramid + the cull
+  const pyramid = device.pyramid(64, 64)
+  const shaders = await import('../demo/occlusion/shaders.js?v=223')
+  const dict = shaders.buildShaders(sceneSpec, { w: 64, h: 64 })
+  const occl = device.occlusionPass({ scene: sceneHandle, pyramid, kernel: dict.cull })
+  const mvp = new Float32Array([0.9, 0, 0, 0, 0, 1.1, 0, 0, 0, 0, 1.002, 1, 0, 0, -2.1, 0])
+  // a plausible view-proj (near 0.5 far 100)
+  occl.run({ camera: { mvp }, gate: false })
+  device.submit()
+  const r2 = await Promise.race([
+    device.debugSceneWords(sceneHandle, 64),
+    new Promise(res => setTimeout(() => res('HUNG'), 4000)),
+  ])
+  log('2. after-cull read: ' + (r2 instanceof Float32Array ? 'OK' : r2))
+  window.__report.step2 = r2 instanceof Float32Array
+
+  // 3. + a drawMeshInstanced-like storage bind: use drawInstanced (the box path)
+  const boxShaders = dict.z
+  const prog = device.program({ depth: { test: 'less', write: true }, cull: 'none', wg: boxShaders.wg, gl: boxShaders.gl })
+  const mesh = device.geometry(new Float32Array(36 * 3).fill(0.1), undefined)
+  device.drawInstanced({ target: pyramid.zTarget, clear: true, program: prog, geometry: mesh, records: sceneHandle, uniforms: new Float32Array(16), instances: 4 })
+  device.submit()
+  const r3 = await Promise.race([
+    device.debugSceneWords(sceneHandle, 64),
+    new Promise(res => setTimeout(() => res('HUNG'), 4000)),
+  ])
+  log('3. after-draw read: ' + (r3 instanceof Float32Array ? 'OK' : r3))
+  window.__report.step3 = r3 instanceof Float32Array
+  // 4. THE LOOP: 30 iterations of (cull + draw + submit), then read
+  for (let f = 0; f < 30; f++) {
+    occl.run({ camera: { mvp }, gate: true })
+    device.drawInstanced({ target: pyramid.zTarget, clear: true, program: prog, geometry: mesh, records: sceneHandle, uniforms: new Float32Array(16), instances: 4 })
+    device.submit()
+  }
+  const r4 = await Promise.race([
+    device.debugSceneWords(sceneHandle, 64),
+    new Promise(res => setTimeout(() => res('HUNG'), 4000)),
+  ])
+  log('4. after-30-frame loop read: ' + (r4 instanceof Float32Array ? 'OK' : r4))
+  window.__report.step4 = r4 instanceof Float32Array
+
+  // 6. THE FOREST'S OWN BRICK: drawMeshInstanced with the tree programs
+  // + a quantized mesh + a texture — the forest's exact draw shape
+  const treeMod = await import('../demo/forest/shaders.js?v=223')
+  const tsh = treeMod.treeShaders({ INST_OFF: INST, HIST_OFF: HIST, STRIDE })
+  const leafZ = device.program({ depth: { test: 'less', write: true }, cull: 'none', wg: tsh.leafZ.wg, gl: tsh.leafZ.gl })
+  const leafColor = device.program({ depth: { test: 'less', write: true }, cull: 'none', wg: tsh.leafColor.wg, gl: tsh.leafColor.gl })
+  // a tiny quantized mesh (a box: 8 verts, 12 tris)
+  const qpos = new Int16Array([[-100,-100,-100,0],[-100,-100,100,0],[-100,100,-100,0],[-100,100,100,0],[100,-100,-100,0],[100,-100,100,0],[100,100,-100,0],[100,100,100,0]].flat())
+  const qnrm = new Int8Array(8 * 4)
+  const quv = new Int16Array([0,0, 0,30000, 30000,0, 30000,30000, 0,0, 0,30000, 30000,0, 30000,30000])
+  const qidx = new Uint32Array([0,1,2, 2,1,3, 4,6,5, 5,6,7, 0,4,1, 1,4,5, 2,3,6, 6,3,7, 0,2,4, 4,2,6, 1,5,3, 3,5,7])
+  const g = { positions: qpos, normals: qnrm, uvs: quv, indices: qidx, vertexCount: 8, posMin: [-1,-1,-1], posMax: [1,1,1], uvMin: [0,0], uvMax: [1,1] }
+  // a 1×1 texture
+  const cnv = document.createElement('canvas'); cnv.width = 2; cnv.height = 2
+  const c2 = cnv.getContext('2d'); c2.fillStyle = '#3a6'; c2.fillRect(0, 0, 2, 2)
+  const texId = device.texture([cnv], { wrap: 'repeat' })
+  const blk = new Float32Array(40)
+  const surf2 = device.surface(256, 256, { depth: true })
+  for (let f = 0; f < 30; f++) {
+    blk.set(mvp, 0); blk[16] = 0; blk[17] = 0
+    blk[20] = -1; blk[21] = -1; blk[22] = -1; blk[24] = 2; blk[25] = 2; blk[26] = 2
+    blk[28] = 0; blk[29] = 0; blk[30] = 1; blk[31] = 1
+    blk[32] = 0.5; blk[33] = 0.8; blk[34] = 0.3; blk[36] = 0; blk[37] = 2; blk[38] = 10
+    occl.run({ camera: { mvp }, gate: true })
+    device.drawMeshInstanced({ target: surf2.targetId, clear: true, program: leafZ, geometry: g, uniforms: blk, records: sceneHandle, baseInstance: 0, instances: 8 })
+    device.drawMeshInstanced({ target: surf2.targetId, clear: false, program: leafColor, geometry: g, uniforms: blk, records: sceneHandle, baseInstance: 0, instances: 8, texture: texId })
+    device.submit()
+  }
+  const r6 = await Promise.race([
+    device.debugSceneWords(sceneHandle, 64),
+    new Promise(res => setTimeout(() => res('HUNG'), 4000)),
+  ])
+  log('6. after-forest-shape loop read: ' + (r6 instanceof Float32Array ? 'OK' : r6))
+  window.__report.step6 = r6 instanceof Float32Array
+
+  // 5. + the SURFACE read (the snapshot present's own lane)
+  const surface = device.surface(256, 256, { depth: true })
+  await surface.read()
+  const r5 = await Promise.race([
+    device.debugSceneWords(sceneHandle, 64),
+    new Promise(res => setTimeout(() => res('HUNG'), 4000)),
+  ])
+  log('5. after-surface-read read: ' + (r5 instanceof Float32Array ? 'OK' : r5))
+  window.__report.step5 = r5 instanceof Float32Array
+  window.__report.done = true
+  log('bisect done in ' + Math.round(performance.now() - t0) + ' ms')
+})().catch(e => { log('FATAL: ' + e); window.__report.fatal = String(e) })
+</script>
+</body>
+</html>

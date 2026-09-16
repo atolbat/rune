@@ -24,12 +24,12 @@
 // window.__walker — the live counters (the smoke/gates read it);
 // window.__walkerGate — the boot validation's promise (the deterministic
 // autopilot: a scripted walk over the course, the laws asserted live).
-import { buildTier } from '../occlusion/tier.js?v=222'
+import { buildTier } from '../occlusion/tier.js?v=223'
 import { perspective, lookAt, mat4Mul, BOX_VERTS, BOX_INDICES } from '../occlusion/scene.js?v=203'
-import { createWorld, BODY, EYE_HEIGHT } from './world.js?v=222'
-import { createControls } from './controls.js?v=222'
-import { terrainShaders } from './shaders-terrain.js?v=222'
-import { createCharacter, createScaleGovernor } from '../../dist/rune.esm.js?v=222'
+import { createWorld, BODY, EYE_HEIGHT } from './world.js?v=223'
+import { createControls } from './controls.js?v=223'
+import { terrainShaders } from './shaders-terrain.js?v=223'
+import { createCharacter, createScaleGovernor } from '../../dist/rune.esm.js?v=223'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')

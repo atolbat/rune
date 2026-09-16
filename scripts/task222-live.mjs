@@ -27,11 +27,11 @@ function check(name, ok, detail = '') {
 
 // ── the source checks (the deployed bytes) ────────────────────────────────
 const index = await (await fetch(LIVE)).text()
-const main = await (await fetch(LIVE + 'main.js?v=222')).text()
-const controls = await (await fetch(LIVE + 'controls.js?v=222')).text()
+const main = await (await fetch(LIVE + 'main.js?v=223')).text()
+const controls = await (await fetch(LIVE + 'controls.js?v=223')).text()
 const gallery = await (await fetch('https://atolbat.github.io/rune/demo/')).text()
-check('source: the walker page mounts the current cache-bust (v=222 — the Task-222 marks)',
-  index.includes('main.js?v=222'), '')
+check('source: the walker page mounts the current cache-bust (v=223 — the Task-222 marks)',
+  index.includes('main.js?v=223'), '')
 check('source: THE BLIND-PROBE LAW ships — a lit surface + a blank mirror RETIRES (the takeover branch is gone)',
   main.includes('THE BLIND-PROBE LAW') && main.includes('a BLIND PROBE')
     && !main.includes('the present lane drops the frames — the WG snapshot path takes over'),

@@ -190,8 +190,8 @@ async function sourceLeg() {
       && controls.includes('state.lookDY -= (e.clientY - lookLast.y) * lookSens * 1.6'),
     '')
   const index = await readFile(join(root, 'demo/walker/index.html'), 'utf8')
-  const v222 = (main.match(/\?v=222/g) ?? []).length + (index.match(/\?v=222/g) ?? []).length
-  check('source: the cache-bust marks moved to v=222 (the current deploy state — Task 222)',
+  const v222 = (main.match(/\?v=223/g) ?? []).length + (index.match(/\?v=223/g) ?? []).length
+  check('source: the cache-bust marks moved to v=223 (the current deploy state — Task 222)',
     v222 >= 8, `${v222} marks`)
 }
 

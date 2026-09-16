@@ -762,6 +762,43 @@ try {
     }
   }
 
+  // ─── forest: the dense-forest demo (Task 223) ──────────────────────────
+  // (SMOKE_FOREST=1 — the leg is the container's slowest by minutes; its
+  // full proof is task223-local's own gate — the same 7-law validation on
+  // both backends; the smoke keeps its quick battery honest)
+  if (process.env.SMOKE_FOREST === '1') {
+    const forestBrowser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-gpu-sandbox', '--enable-unsafe-webgpu', '--use-angle=swiftshader', '--enable-features=Vulkan', '--enable-unsafe-swiftshader'],
+    })
+    try {
+      const forestPage = await forestBrowser.newPage({ viewport: { width: 480, height: 320 } })
+      const forestErrors = []
+      forestPage.on('pageerror', e => forestErrors.push(String(e)))
+      await forestPage.goto(`http://localhost:${port}/demo/forest/?trees=150&mode=webgpu`, { waitUntil: 'networkidle', timeout: 120_000 })
+      const forestStats = await forestPage.waitForFunction(
+        () => { const v = window.__forest?.validation; return v !== null && v.checks >= 7 },
+        null, { timeout: 420_000, polling: 500 },
+      ).then(async () => {
+        await forestPage.waitForTimeout(4000) // the counts lane re-arms after the validation's pause
+        return forestPage.evaluate(() => window.__forest)
+      }).catch(() => null)
+      const forestValidation = forestStats?.validation?.pass === true
+      const forestCullHonest = forestStats !== null && forestStats.drawn > 0 && forestStats.drawn < forestStats.total
+      console.log(
+        `[smoke] forest (${forestStats?.kind}): validation ${forestValidation ? 'PASS' : 'FAIL'} (${forestStats?.validation?.checks} laws), ` +
+          `drawn ${forestStats?.drawn}/${forestStats?.total}, load ${forestStats?.loadMs} ms${forestErrors.length ? ', errors ' + forestErrors.length : ''}`,
+      )
+      if (!(forestValidation && forestCullHonest && forestErrors.length === 0)) {
+        console.log(`[smoke] forest sub-flags: validation ${forestValidation} cull ${forestCullHonest} errors ${forestErrors.length}`)
+        errors.push('forest: the smoke leg failed')
+      }
+      await forestPage.close()
+    } finally {
+      await forestBrowser.close()
+    }
+  }
+
   if (errors.length) {
     console.error('[smoke] page errors:')
     for (const error of errors) console.error(`  ${error}`)
