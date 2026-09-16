@@ -31,7 +31,7 @@ const files = {
   gallery: await (await fetch('https://atolbat.github.io/rune/demo/')).text(),
   readme: await (await fetch('https://atolbat.github.io/rune/demo/README.md')).text(),
 }
-check('source: the walker page mounts main.js?v=219', files.index.includes('main.js?v=219'))
+check('source: the walker page mounts the current cache-bust (v=220 — Task 220's marks)', files.index.includes('main.js?v=220'))
 check('source: THE SINGLE-PASS PRESENT ships (the tier blits through the present pass)', files.tier.includes('blitToCanvas') && files.tier.includes('THE SINGLE-PASS PRESENT'))
 check('source: the pyramid-equality law ships (the pyramid at the surface dims)', files.tier.includes('device.pyramid(SURF_W, SURF_H)') && files.tier.includes('THE PYRAMID EQUALS THE SURFACE'))
 check('source: the surface ladder ships (the caps)', files.tier.includes('CAP_SOFTWARE') && files.tier.includes('CAP_LIVE') && files.tier.includes("follow === 'canvas'"))
@@ -43,7 +43,7 @@ check('source: the two-stage verdict + the overlay swap ship (Task 220)', files.
 check('source: THE CANVAS-PASS LAW ships in dist (the construct cannot return)', files.dist.includes('the canvas-pass law'))
 check('source: the GL software probe ships in dist (the unmasked renderer)', files.dist.includes('UNMASKED_RENDERER_WEBGL'))
 check('source: the blit shaders ship (the Y-map conventions)', files.shaders.includes('0.5 - q.y * 0.5') && files.shaders.includes('a_q.y * 0.5 + 0.5'))
-check('source: the gallery card tells Task 219', files.gallery.includes('Task 219') && files.gallery.includes('216–219'))
+check('source: the gallery card tells the walker tasks (219 + 220)', files.gallery.includes('Task 219') && files.gallery.includes('Task 220') && files.gallery.includes('216–220'))
 check('source: the README row tells Task 219', files.readme.includes('Task 219'))
 
 const browser = await chromium.launch({

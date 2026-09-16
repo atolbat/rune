@@ -833,12 +833,23 @@ async function finishValidation() {
       harvestCapable ? harvestLive : fillHonest,
       `${harvestCapable ? 'harvest-capable' : 'MSAA-no-depth'} · ${live.join(',')}`)
     check('the terrain passes live in the frame', terrainLive, live.join(','))
-    // the scale governor's law (the channel probe): sustained over-budget
-    // frames step the ladder down; the level logic is backend-free
-    const before = governor.peek().level
-    for (let k = 0; k < 20; k++) governor.observe((1 / 60) * 1.8)
-    const after = governor.peek().level
-    check('the scale law — the governor steps down under sustained load', after < before, `${before}→${after}`)
+    // the scale governor's law — Task 220 made it a SELF-CONTAINED probe:
+    // the live loop's own governor has been riding the REAL frame times
+    // all run (a loaded page — the deployed SwiftShader leg — bottoms the
+    // ladder out before the finish: «0→0» cannot step down; a fresh step's
+    // 2 s cooldown blocks the 0.6 s probe the same way). A FRESH governor
+    // at the TOP with a cold cooldown measures the ladder's own law
+    // deterministically: 8 raw over-budget frames, EMA-seeded over from
+    // sample 1 (the first-sample seeding), step at observe 8 — every
+    // time, every backend, every load.
+    {
+      const probe = createScaleGovernor({ levels: SCALE_LEVELS.length, targetMs: 1 / 60, emaAlpha: 0.2, downNeed: 8, upNeed: 30, cooldown: 2 })
+      const before = probe.peek().level
+      let stepped = false
+      for (let k = 0; k < 40; k++) { if (probe.observe((1 / 60) * 1.8).changed) stepped = true }
+      const after = probe.peek().level
+      check('the scale law — the governor steps down under sustained load', stepped && after < before, `${before}→${after}${stepped ? '' : ' · no step in 40 over-budget frames'}`)
+    }
     governor.setLevel(SCALE_LEVELS.length - 1) // re-arm for the live loop
     // the pixels law: the drawn count MOVED across the run
     check('the pixels law — the camera walked (drawn moved)', drawnFirst === -1 || drawnMid !== drawnFirst, `${drawnFirst}→${drawnMid}`)
