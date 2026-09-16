@@ -377,6 +377,14 @@ export interface GPUFacade {
     depth: boolean,
     color: readonly [number, number, number, number],
     depthTextureId?: number,
+    /** Task 220 — THE MSAA SURFACE: the target's sample count (4 = the
+     *  multisampled render target). The pass renders into internal 4x
+     *  color+depth twins and RESOLVES into the CALLER's own texture (the
+     *  resolveTarget — the one spec shape; the resolve lands when the pass
+     *  ends). Refuses depthTextureId together with samples > 1 (the spec
+     *  has no depth resolve — the A6 harvest cannot ride a multisampled
+     *  target). Default 1. */
+    samples?: number,
   ): number
   /** Sets the CANVAS clear color + depth value (target 0) — what a
    *  bindTarget(0, clear=true) pass writes before drawing. Renderer-level

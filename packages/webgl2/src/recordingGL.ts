@@ -169,11 +169,13 @@ export function createRecordingGL(): RecordingGL {
       for (let i = 0; i < drawcount; i++) parts.push(`${counts[i]}×${instanceCounts[i]}@${offsets[i]}`)
       calls.push(`multiDrawElems(${elementBufferId},${twoByte ? 'u16' : 'u32'})×${drawcount}[${parts.join(',')}]`)
     },
-    createTarget: (textureId, width, height, depth, _color, depthBits, depthTextureId) => {
+    createTarget: (textureId, width, height, depth, _color, depthBits, depthTextureId, samples) => {
       // Task 197: depthBits rides the record (16 absent — the historical
       // default; 24/32 — the Hi-Z parity axis). Task 215: a caller-owned
-      // depth TEXTURE attachment rides the depthTex= mark.
-      calls.push(`createTarget(${textureId},${width},${height}${depth ? ',depth' : ''}${depthBits !== undefined && depth ? `,d${depthBits}` : ''}${depthTextureId !== undefined ? `,depthTex=${depthTextureId}` : ''})`)
+      // depth TEXTURE attachment rides the depthTex= mark. Task 220: the
+      // MSAA sample count rides the samples= mark (the resolve blit is a
+      // realGL-internal — bindTarget's boundary carries it).
+      calls.push(`createTarget(${textureId},${width},${height}${depth ? ',depth' : ''}${depthBits !== undefined && depth ? `,d${depthBits}` : ''}${depthTextureId !== undefined ? `,depthTex=${depthTextureId}` : ''}${samples !== undefined && samples > 1 ? `,samples=${samples}` : ''})`)
       return nextTarget++
     },
     bindTarget: (targetId, clear) => {

@@ -24,12 +24,12 @@
 // window.__walker — the live counters (the smoke/gates read it);
 // window.__walkerGate — the boot validation's promise (the deterministic
 // autopilot: a scripted walk over the course, the laws asserted live).
-import { buildTier } from '../occlusion/tier.js?v=219'
+import { buildTier } from '../occlusion/tier.js?v=220'
 import { perspective, lookAt, mat4Mul, BOX_VERTS, BOX_INDICES } from '../occlusion/scene.js?v=203'
-import { createWorld, BODY, EYE_HEIGHT } from './world.js?v=219'
-import { createControls } from './controls.js?v=219'
-import { terrainShaders } from './shaders-terrain.js?v=219'
-import { createCharacter, createScaleGovernor } from '../../dist/rune.esm.js?v=219'
+import { createWorld, BODY, EYE_HEIGHT } from './world.js?v=220'
+import { createControls } from './controls.js?v=220'
+import { terrainShaders } from './shaders-terrain.js?v=220'
+import { createCharacter, createScaleGovernor } from '../../dist/rune.esm.js?v=220'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -64,30 +64,51 @@ function noteError(message) {
   // Task 218 — THE DEVICE-LOST ACCELERATOR: a WG device loss is fatal for
   // the tier (every later submit no-ops) — skip the watchdog's frame wait,
   // webgl2 now. The storm's own message carries the phrase; the tier's
-  // mode check keeps a GL-side storm out of the recursion.
+  // mode check keeps a GL-side storm out of the recursion. Task 220: the
+  // rescue rides the OVERLAY boot — the dead canvas stays on screen (a
+  // frozen frame beats a black one) until the GL tier presents.
   if (/device lost/i.test(message) && tier !== null && tier.mode === 'webgpu' && wdStage < 2) {
     wdStage = 2
-    void bootTier('webgl2', { watchdog: true })
+    void bootTier('webgl2', { watchdog: true, overlay: true })
   }
 }
 
-// ── Task 218 — THE LIVE-PRESENT WATCHDOG (the WG black-screen field report)
-// A WG device can die SILENTLY on the canvas-present path — the software
-// stack class (the first present kills the device unwatched; the tier's
-// snapshot decision normally dodges it, but an adapter misdetection or a
-// real-GPU driver variant walks straight in) — the canvas never presents,
-// the page background shows through, the HUD keeps lying «webgpu live».
-// The watchdog mirrors the tier's canvas into a 16×16 2D probe at staged
-// frames: an ALL-transparent mirror = the presents never landed. The
-// fallback chain: webgpu/live → webgpu/SNAPSHOT (the surface + the 2D
-// blit — keeps WebGPU where the device is alive) → webgl2 (the device is
-// dead). A user-driven mode switch re-arms the chain from scratch.
+// ── Task 218/220 — THE LIVE-PRESENT WATCHDOG (the WG black-screen field
+// report, twice bitten). A WG device can die SILENTLY on the canvas-present
+// path — the canvas never presents, the page background shows through, the
+// HUD keeps lying «webgpu live». The watchdog mirrors the tier's canvas
+// into a 16×16 2D probe at staged frames; the fallback chain:
+// webgpu/live → webgpu/SNAPSHOT (the surface + the 2D blit — keeps WebGPU
+// where the device is alive) → webgl2 (the device is dead). A user-driven
+// mode switch re-arms the chain from scratch.
+//
+// Task 220 — THE TWO-STAGE VERDICT + THE OVERLAY SWAP (the second field
+// report: «сначала норм, потом на мгновение чёрный экран, потом снова
+// норм» — the live canvas WAS presenting; the watchdog still fired). THE
+// ISOLATION: a canvas.width write CLEARS the bitmap to transparent (spec)
+// until the next present — and the adaptive-scale governor's level drop
+// (setRenderScale → setDpr → canvas.width = ...) lands exactly in the
+// phone's boot window (the first frames are slow — WG pipeline compiles —
+// the EMA sags, downNeed:8 trips, the level drops right around frame 30).
+// The old probe read ONE blank sample — the resize gap, not a death — and
+// the swap's boot was the black flash. THE LAW: a blank probe is a
+// SUSPECT, never a verdict — the confirm probe lands 6 frames later
+// (past every resize-clear gap; the governor's 2 s cooldown makes two
+// drops inside the window impossible); only TWO consecutive blanks swap
+// the chain. THE PROBE also reads ANY channel now (alpha-only died to the
+// straight-alpha class — a browser handing the mirror RGB with A=0 reads
+// blank to an alpha-only check while the canvas looks fine). And the SWAP
+// ITSELF stops flashing: the fallback boots OVER the old canvas (both in
+// the stage, the new one on top) and the old one retires only after the
+// new tier's FIRST landed frame (the present ledger) — a rescue must
+// never black-flash the screen it is rescuing.
 let wdStage = 0 // 0 = live armed, 1 = snapshot fallback armed, ≥2 = retired
 // Task 219 — THE CADENCE: the first probe lands at frame 30 (~0.5 s — the
 // root cure made the live present the canonical single-pass blit, so a
 // DEAD canvas is a true driver death and heals fast; the 90-frame grace
 // of the band-aid era left the field staring at black for 2 s)
 let wdNextFrame = 30
+let wdSuspectFrame = -1 // Task 220 — the two-stage verdict's first blank
 let wdBusy = false
 const wdMirror = typeof document !== 'undefined' ? document.createElement('canvas') : null
 if (wdMirror !== null) { wdMirror.width = 16; wdMirror.height = 16 }
@@ -100,7 +121,12 @@ function canvasHasPixels() {
     x.clearRect(0, 0, 16, 16)
     x.drawImage(c, 0, 0, 16, 16)
     const d = x.getImageData(0, 0, 16, 16).data
-    for (let k = 3; k < d.length; k += 4) if (d[k] >= 8) return true
+    // Task 220 — ANY channel: the sky's own RGB is 143/168/199 — a
+    // visible frame lights R, G and B even when a straight/premultiplied
+    // alpha quirk zeroes the A byte (the alpha-only check's blind spot).
+    for (let k = 0; k < d.length; k += 4) {
+      if (d[k] >= 8 || d[k + 1] >= 8 || d[k + 2] >= 8 || d[k + 3] >= 8) return true
+    }
     return false
   } catch { return true } // a failed read is not proof of death
 }
@@ -108,7 +134,7 @@ async function watchdogStep() {
   if (wdBusy || wdStage >= 2 || tier === null) return
   wdBusy = true
   try {
-    if (canvasHasPixels()) { wdStage = 2; return } // healthy — retire
+    if (canvasHasPixels()) { wdStage = 2; wdSuspectFrame = -1; return } // healthy — retire
     // Task 219 — THE SNAPSHOT PREDICATE (the false-positive cure): the
     // snapshot leg's present is an ASYNC readback+putImageData — a software
     // stack can take dozens of frames to land the first one. An empty
@@ -120,13 +146,27 @@ async function watchdogStep() {
       if (health.refused === 0 && health.landed === 0 && frameIndex < 900) return
     }
     if (wdStage === 0 && tier.kind === 'live') {
-      noteError(`the live canvas never presented (frame ${frameIndex}) — the WG snapshot path takes over`)
+      // Task 220 — STAGE ONE (the suspect): a blank probe is never the
+      // verdict. The governor's resize-clear (and any first-present
+      // latency) heals inside frames; re-probe 6 frames later — past
+      // every transient gap, still 10× faster than the band-aid era.
+      if (wdSuspectFrame < 0) {
+        wdSuspectFrame = frameIndex
+        wdNextFrame = frameIndex + 6
+        shell.log.info(`the live canvas reads blank (frame ${frameIndex}) — a resize-clear or a first-present gap can look like this: confirming at frame ${frameIndex + 6}`)
+        return
+      }
+      // Task 220 — STAGE TWO (the verdict): blank twice, 6+ frames apart —
+      // the presents genuinely never land. The message carries BOTH
+      // frames (the field log's own evidence trail).
+      noteError(`the live canvas never presented (suspect frame ${wdSuspectFrame}, confirmed frame ${frameIndex}) — the WG snapshot path takes over`)
+      wdSuspectFrame = -1
       wdStage = 1; wdNextFrame = frameIndex + 30
-      await bootTier('webgpu', { snapshot: true, watchdog: true })
+      await bootTier('webgpu', { snapshot: true, watchdog: true, overlay: true })
     } else {
       noteError(`the snapshot canvas is empty too (frame ${frameIndex}) — the WG device is dead — webgl2 takes over`)
       wdStage = 2
-      await bootTier('webgl2', { watchdog: true })
+      await bootTier('webgl2', { watchdog: true, overlay: true })
     }
   } finally { wdBusy = false }
 }
@@ -196,6 +236,7 @@ stage.parentElement.classList.add('walker-stage')
 
 // ── the boot (the tier + the walker extensions) ────────────────────────────
 let tier = null
+let overlayTier = null // Task 220 — the rescue boot's frozen underlay (see bootTier)
 let rafId = 0
 let paused = false
 let frameIndex = 0
@@ -203,17 +244,41 @@ let lastT = -1
 let msAvg = 16.7
 let validationDone = false
 let validationRunning = false
+let validationErrorsAtStart = 0 // Task 220 — the re-armed validation's own
+// error baseline: a watchdog rescue's own notes (the honest verdict
+// «the live canvas never presented…») must not fail the FALLBACK tier's
+// «zero errors» law — the law counts NEW errors from the run's own start
+// (the field's «validation FAIL — zero errors during the validation» —
+// every law held, the chain's pre-run notes poisoned the count)
 let finishRequested = false
 let finishRunning = false
 let stripOn = false
 let hizOn = true
 
 async function bootTier(backend, opts = {}) {
+  // Task 220 — THE OVERLAY SWAP: a RESCUE boot (the watchdog chain / the
+  // device-lost accelerator) does NOT dispose the old tier first — the
+  // old canvas freezes on its last presented frame and stays visible
+  // while the new tier boots; the new canvas lands ON TOP (the stage's
+  // DOM order) and the old tier retires only after the new one's FIRST
+  // landed present (the loop's overlay checker reads presentHealth). A
+  // failed rescue boot RESUMES the old tier's loop — the screen never
+  // holds zero canvases, not even for one frame. A user-driven boot
+  // (the mode switch) keeps the honest immediate swap.
+  const overlay = opts.overlay === true && tier !== null
   if (rafId !== 0) { cancelAnimationFrame(rafId); rafId = 0 }
-  if (tier !== null) { try { tier.dispose() } catch { /* already dead */ } tier = null }
-  // a user-driven boot re-arms the watchdog chain; a watchdog-driven one
-  // (the fallback itself) keeps its stage — the chain must not restart
-  if (opts.watchdog !== true) { wdStage = 0; wdNextFrame = 30 }
+  if (!overlay) {
+    if (tier !== null) { try { tier.dispose() } catch { /* already dead */ } tier = null }
+    // a user-driven boot re-arms the watchdog chain; a watchdog-driven one
+    // (the fallback itself) keeps its stage — the chain must not restart
+    if (opts.watchdog !== true) { wdStage = 0; wdNextFrame = 30 }
+  } else {
+    // the old canvas keeps its pixels but must not keep its ID — the
+    // gates and the diagnostics address THE canvas (getElementById); the
+    // incoming tier's canvas takes the name (DOM order puts it on top).
+    if (tier.canvas !== null && tier.canvas !== undefined) tier.canvas.id = ''
+  }
+  wdSuspectFrame = -1
   // a fresh tier = a fresh loop state: a validation finish that hung on a
   // dead device left the loop parked (paused) — without this reset the
   // fallback boots into a frozen loop and the watchdog never re-checks.
@@ -224,7 +289,7 @@ async function bootTier(backend, opts = {}) {
   finishRunning = false
   if (opts.watchdog === true) validationRunning = false
   try {
-    tier = await buildTier({
+    const nextTier = await buildTier({
       backend,
       scene,
       shell,
@@ -273,6 +338,31 @@ async function bootTier(backend, opts = {}) {
       pauseLoop() { paused = true },
       resumeLoop() { paused = false },
     })
+    // Task 220 — the overlay handover: the new tier takes the screen (DOM
+    // order: its canvas sits on top); the OLD one parks as the underlay —
+    // frozen on its last presented frame — until the loop's overlay
+    // checker sees the new tier's FIRST landed present, then disposes it.
+    // A CHAINED rescue (snapshot refused → webgl2) parks only canvases
+    // that ever landed a frame: a blank never-landed tier adds nothing
+    // over the older underlay's real pixels — it is disposed at the door.
+    // The new canvas stays INVISIBLE until its first present lands: an
+    // empty alpha:false GL canvas (or an opaque WG one) composites BLACK
+    // from creation — visible-but-blank would cover the frozen frame the
+    // overlay exists to keep.
+    if (overlay) {
+      const cur = typeof tier.presentHealth === 'function' ? tier.presentHealth() : { presents: 1, landed: 1, refused: 0 }
+      const curLanded = tier.kind === 'live' ? cur.presents > 0 : cur.landed > 0
+      if (curLanded || overlayTier === null) {
+        if (overlayTier !== null) { try { overlayTier.dispose() } catch { /* a chained rescue — the older underlay is dead anyway */ } }
+        overlayTier = tier
+      } else {
+        try { tier.dispose() } catch { /* already dead */ }
+      }
+      if (typeof nextTier.presentHealth === 'function' && nextTier.canvas !== null && nextTier.canvas !== undefined) {
+        nextTier.canvas.style.visibility = 'hidden'
+      }
+    }
+    tier = nextTier
     stats.backend = tier.mode
     stats.kind = tier.kind
     stats.errors = errors.length
@@ -290,14 +380,26 @@ async function bootTier(backend, opts = {}) {
     if (jb !== null) stage.appendChild(jb) // keep the button on top
     shell.markReady()
     startLoop()
-    if (!BARE && !validationRunning) void runValidation()
+    if (!BARE && !validationRunning) {
+      validationErrorsAtStart = errors.length // Task 220 — the fresh run's own baseline
+      void runValidation()
+    }
   } catch (e) {
     noteError(`boot failed: ${e instanceof Error ? e.message : String(e)}`)
+    // Task 220 — a FAILED rescue boot must not strand the screen: the old
+    // tier (still alive under the overlay contract) resumes its loop —
+    // the frozen frame wakes up, the diagnostics keep flowing. Only a
+    // boot that disposed nothing AND kept nothing (the non-overlay path)
+    // walks the chain's next rung.
+    if (overlay && tier !== null) {
+      startLoop()
+      return
+    }
     // the fallback chain's own boot died (e.g. a second WG device refused
     // after the first one's present death) — webgl2 is the next rung
     if (opts.watchdog === true && backend === 'webgpu') {
       wdStage = 2
-      await bootTier('webgl2', { watchdog: true })
+      await bootTier('webgl2', { watchdog: true, overlay: true })
     }
   }
 }
@@ -317,6 +419,22 @@ function startLoop() {
     if (dt < 0.25) msAvg = msAvg * 0.95 + dt * 1000 * 0.05
     // a failed boot leaves no tier — idle the loop honestly (no deref spam)
     if (tier === null) { if (frameIndex % 6 === 0) refreshHud(); return }
+    // Task 220 — THE OVERLAY RETIREMENT: the rescue boot's old tier
+    // (frozen under the new canvas) retires the moment the NEW tier
+    // lands its first present — live legs count synchronous blits,
+    // snapshot legs count landed readbacks. Until then the underlay
+    // stays (a frozen frame under the booting rescue beats black; a
+    // REFUSING rescue leaves it in place too — the chain's next rung
+    // decides, the frozen frame keeps showing through the blank canvas).
+    if (overlayTier !== null && typeof tier.presentHealth === 'function') {
+      const h = tier.presentHealth()
+      const landed = tier.kind === 'live' ? h.presents > 0 : h.landed > 0
+      if (landed) {
+        if (tier.canvas !== null && tier.canvas !== undefined) tier.canvas.style.visibility = ''
+        try { overlayTier.dispose() } catch { /* already dead */ }
+        overlayTier = null
+      }
+    }
     // THE WATCHDOG (staged frames, webgpu only): an empty canvas past the
     // grace window = the presents never landed — the fallback chain runs
     if (tier.mode === 'webgpu' && frameIndex >= wdNextFrame) {
@@ -700,9 +818,20 @@ async function finishValidation() {
     }
     const graph = tier.graphStats()
     const live = graph !== null ? graph.live : []
-    const harvestLive = live.includes('depth-harvest') && !live.includes('feedback-fill')
     const terrainLive = live.includes('terrain-color')
-    check('the A6 shape law — a still camera swaps the fill for the harvest', harvestLive, live.join(','))
+    // Task 220 — THE CAPABILITY SPLIT: the MSAA surface (every real-GPU
+    // live leg now) has no sampleable depth on WG — the spec has no depth
+    // resolve — so the still-camera law takes the tier's own capability
+    // as its expected shape: a harvest-capable surface (1x legs, every GL
+    // leg — blitFramebuffer resolves depth) MUST swap the fill for the
+    // harvest; a WG MSAA surface MUST honestly keep the feedback fill
+    // (the reuse declined, the pre-A6 shape — the documented trade).
+    const harvestCapable = tier.surface.depthTextureId !== undefined
+    const harvestLive = live.includes('depth-harvest') && !live.includes('feedback-fill')
+    const fillHonest = live.includes('feedback-fill') && !live.includes('depth-harvest')
+    check('the A6 shape law — a still camera swaps the fill for the harvest where the surface can harvest',
+      harvestCapable ? harvestLive : fillHonest,
+      `${harvestCapable ? 'harvest-capable' : 'MSAA-no-depth'} · ${live.join(',')}`)
     check('the terrain passes live in the frame', terrainLive, live.join(','))
     // the scale governor's law (the channel probe): sustained over-budget
     // frames step the ladder down; the level logic is backend-free
@@ -713,11 +842,19 @@ async function finishValidation() {
     governor.setLevel(SCALE_LEVELS.length - 1) // re-arm for the live loop
     // the pixels law: the drawn count MOVED across the run
     check('the pixels law — the camera walked (drawn moved)', drawnFirst === -1 || drawnMid !== drawnFirst, `${drawnFirst}→${drawnMid}`)
-    check('zero errors during the validation', errors.length === 0, `${errors.length} errors`)
+    // Task 220 — the law counts NEW errors from the run's own start: a
+    // watchdog rescue's pre-run notes are the CHAIN's evidence, not this
+    // run's failure (the field log's «validation FAIL — zero errors
+    // during the validation» — 14 laws held, the count didn't)
+    check('zero new errors during the validation', errors.length === validationErrorsAtStart,
+      `${errors.length - validationErrorsAtStart} new (baseline ${validationErrorsAtStart})`)
     const pass = checks.every(c => c.pass)
     stats.validation = { pass, checks: checks.length }
     if (pass) shell.log.event(`validation PASS — ${checks.length} laws held (the autopilot walked the course)`)
     else shell.log.warn(`validation FAIL — ${checks.filter(c => !c.pass).map(c => c.name).join(' · ')}`)
+    // Task 220 — the HUD's error badge rides the RUN's own count now (a
+    // rescue chain's notes are history, not a live defect)
+    stats.errors = errors.length
     if (typeof window !== 'undefined' && window.__walkerGate !== undefined && typeof window.__walkerGate.resolve === 'function') {
       window.__walkerGate.resolve({ pass, checks: checks.slice() })
     }

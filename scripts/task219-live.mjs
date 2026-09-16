@@ -37,6 +37,9 @@ check('source: the pyramid-equality law ships (the pyramid at the surface dims)'
 check('source: the surface ladder ships (the caps)', files.tier.includes('CAP_SOFTWARE') && files.tier.includes('CAP_LIVE') && files.tier.includes("follow === 'canvas'"))
 check('source: the honest damper ships (hystFrames: 4)', files.main.includes('hystFrames: 4'))
 check('source: the tightened watchdog + the snapshot predicate ship', files.main.includes('wdNextFrame = 30') && files.main.includes('snapshotHealth'))
+// Task 220 — the two-stage verdict superseded the one-sample swap: a
+// blank probe is a suspect (+6 frames to confirm), never the verdict
+check('source: the two-stage verdict + the overlay swap ship (Task 220)', files.main.includes('wdSuspectFrame') && files.main.includes('overlayTier'))
 check('source: THE CANVAS-PASS LAW ships in dist (the construct cannot return)', files.dist.includes('the canvas-pass law'))
 check('source: the GL software probe ships in dist (the unmasked renderer)', files.dist.includes('UNMASKED_RENDERER_WEBGL'))
 check('source: the blit shaders ship (the Y-map conventions)', files.shaders.includes('0.5 - q.y * 0.5') && files.shaders.includes('a_q.y * 0.5 + 0.5'))
@@ -133,8 +136,8 @@ async function fallbackLeg() {
   check('[fallback] the watchdog walks the dead live-WG to a LIVING tier at the TIGHTENED cadence',
     landed && (state.backend === 'webgl2' || (state.backend === 'webgpu' && state.kind === 'snapshot')) && state.drawn > 0,
     JSON.stringify(state))
-  check('[fallback] the catch is the 30-frame cadence (not the masking era\'s 90)',
-    state.notes.some(n => n.includes('(frame 30)')), state.notes.join(' | '))
+  check('[fallback] the catch is the staged cadence (the Task-220 two-stage verdict or the device-lost accelerator)',
+    state.notes.some(n => n.includes('suspect frame')) || state.notes.some(n => /device lost/i.test(n)), state.notes.join(' | '))
   const pixels = await page.evaluate(() => {
     const c = document.getElementById('hiz-canvas')
     const m = document.createElement('canvas'); m.width = 16; m.height = 16

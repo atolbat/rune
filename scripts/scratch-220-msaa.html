@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Task 220 — the MSAA surface law</title>
+<!--
+  scripts/scratch-220-msaa.html — THE MSAA RESOLVE LAW (Task 220's own
+  isolation page). The field report: «одни лесенки» — Task 219's
+  single-pass present had retired every AA path while moving the scene
+  into the offscreen surface. The cure: the SURFACE itself renders 4x and
+  resolves into the same 1x texture every reader already consumes.
+
+  This page drives the DEVICE layer directly (no tier, no watchdog — the
+  law is the facade's own): a clip-space triangle over a contrasting
+  clear, rendered at 1x and at 4x into two surfaces, read back, and the
+  boundary column compared.
+
+  THE LAW (geometric edges only — MSAA does not touch shader-value
+  edges, so the edge MUST be a primitive's coverage boundary):
+    · 1x: the diagonal boundary is a hard red/blue cut — ~zero blended
+      pixels (a rasterizer assigns each pixel center to one side);
+    · 4x: the resolve averages the samples — the boundary column carries
+      intermediate blends (25/50/75% coverage). MANY blended pixels.
+
+  The WG door law rides along: samples > 1 + depthTexture REFUSES (the
+  spec has no depth resolve); the GL leg takes the combo (the blit
+  resolves depth too — the documented asymmetry).
+-->
+<style>
+  body { background: #0b0d13; color: #dfe5f1; font: 13px/1.6 ui-monospace, Menlo, Consolas, monospace; margin: 24px; }
+  pre { white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h3>Task 220 — the MSAA surface law</h3>
+<pre id="out">booting…</pre>
+<script type="module">
+import { createDevice } from '../dist/rune.esm.js?v=220'
+
+const out = document.getElementById('out')
+const log = m => { out.textContent = m + '\n' + out.textContent }
+
+// The lower-left half triangle: the hypotenuse (1,-1)→(-1,1) is the
+// screen's main diagonal — a pure geometric coverage edge.
+const TRI = new Float32Array([-1, -1, 0, 1, -1, 0, -1, 1, 0])
+const CLEAR = [0.05, 0.1, 0.6, 1] // blue
+const WG_CODE = `
+struct P { pad: vec4<f32> }
+@group(0) @binding(0) var<uniform> p: P;
+struct VOut { @builtin(position) pos: vec4<f32> }
+@vertex fn vsMain(@location(0) a_pos: vec3<f32>) -> VOut {
+  var o: VOut;
+  o.pos = vec4<f32>(a_pos.xy, 0.5, 1.0);
+  return o;
+}
+@fragment fn fsMain(v: VOut) -> @location(0) vec4<f32> {
+  return vec4<f32>(0.95, 0.25, 0.1, 1.0);
+}`
+const GL_VS = `#version 300 es
+layout(location=0) in vec3 a_pos;
+void main() { gl_Position = vec4(a_pos.xy, 0.5, 1.0); }`
+const GL_FS = `#version 300 es
+precision highp float;
+out vec4 o;
+void main() { o = vec4(0.95, 0.25, 0.1, 1.0); }`
+
+async function measure(backend, samples) {
+  const canvas = document.createElement('canvas')
+  const device = await createDevice({
+    backend,
+    canvas,
+    clear: { color: CLEAR, depth: 1 },
+    antialias: false,
+    dprCap: 1,
+    onError: m => log(`[${backend}] device error: ${m}`),
+  })
+  const W = 128, H = 128
+  const surface = device.surface(W, H, { depth: false, samples })
+  const prog = device.program({
+    depth: false,
+    cull: 'none',
+    wg: { code: WG_CODE, attrs: [3] },
+    gl: {
+      vs: GL_VS, fs: GL_FS,
+      attrs: [{ location: 0, from: 'mesh', mesh: 0, size: 3, stride: 12, offset: 0, divisor: 0 }],
+      lanes: [],
+    },
+  })
+  const pad = new Float32Array(4)
+  device.drawMesh({ target: surface.targetId, clear: true, program: prog, geometry: { positions: TRI, vertexCount: 3 }, uniforms: pad })
+  device.submit()
+  const read = await surface.read()
+  device.dispose()
+  let inside = 0, blended = 0, outside = 0
+  const { data } = read
+  for (let k = 0; k < data.length; k += 4) {
+    const r = data[k], b = data[k + 2]
+    if (r > 200 && b < 90) inside++
+    else if (r < 40 && b > 110) outside++
+    else if (r > 30 && b > 40) blended++ // a red/blue average — ONLY the resolve makes these
+  }
+  return { backend, samples, w: read.width, h: read.height, inside, outside, blended }
+}
+
+async function doorLaw() {
+  // WG: the combo refuses; GL: the combo rides. Two fresh devices (the
+  // pages never share a device across legs).
+  const results = {}
+  for (const backend of ['webgpu', 'webgl2']) {
+    const canvas = document.createElement('canvas')
+    try {
+      const device = await createDevice({ backend, canvas, clear: { color: [0, 0, 0, 1], depth: 1 }, antialias: false, dprCap: 1 })
+      let refused = null
+      try {
+        device.surface(64, 64, { depth: true, depthTexture: true, samples: 4 })
+        refused = false
+      } catch (e) {
+        refused = String(e instanceof Error ? e.message : e)
+      }
+      device.dispose()
+      results[backend] = { refused }
+    } catch (e) {
+      results[backend] = { bootError: String(e instanceof Error ? e.message : e) }
+    }
+  }
+  return results
+}
+
+window.__msaaRun = async () => {
+  const report = { legs: {}, doors: await doorLaw() }
+  for (const backend of ['webgpu', 'webgl2']) {
+    try {
+      report.legs[backend] = {
+        x1: await measure(backend, 1),
+        x4: await measure(backend, 4),
+      }
+      log(`[${backend}] 1x blended=${report.legs[backend].x1.blended} · 4x blended=${report.legs[backend].x4.blended}`)
+    } catch (e) {
+      report.legs[backend] = { error: String(e instanceof Error ? e.message : e) }
+      log(`[${backend}] ERROR ${report.legs[backend].error}`)
+    }
+  }
+  log('done — window.__msaaReport carries the full numbers')
+  window.__msaaReport = report
+  return report
+}
+window.__msaaRun().catch(e => log(`FATAL ${e}`))
+</script>
+</body>
+</html>

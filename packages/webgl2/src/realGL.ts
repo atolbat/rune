@@ -95,6 +95,17 @@ interface TargetRecord {
    *  renderbuffer): deleteTarget leaves the texture alone. */
   readonly depthTexture: boolean
   readonly color: readonly number[]
+  /** Task 220 — THE MSAA SURFACE: the multisampled twins. The target's
+   *  own `fbo` above becomes the RESOLVE framebuffer (it holds the
+   *  CALLER's color texture — and the caller's depth texture when asked);
+   * `msaaFbo` holds the 4x color+depth renderbuffers the passes render
+   * into. `resolveMsaa` blits (READ: msaaFbo → DRAW: fbo) at every pass
+   * boundary LEAVING the target — GL's explicit twin of WebGPU's inline
+   * resolveTarget. Null on every 1x target. */
+  readonly msaaFbo: WebGLFramebuffer | null
+  readonly msaaColorRb: WebGLRenderbuffer | null
+  readonly msaaDepthRb: WebGLRenderbuffer | null
+  readonly samples: number
 }
 
 /** Task 161 — THE PROGRAM-BINARY CACHE POISON: on ARM Mali drivers the
@@ -1104,7 +1115,13 @@ export function createRealGL(
     color: readonly [number, number, number, number],
     depthBits?: 16 | 24 | 32,
     depthTextureId?: number,
+    samples?: number,
   ): number {
+    // Task 220 — THE MSAA SURFACE: >1 = the multisampled target. WebGL2
+    // core guarantees MAX_SAMPLES ≥ 4; a driver that still refuses the
+    // storage leaves the MSAA FBO incomplete and the honest throw below
+    // fires (the caller's capability ladder catches it and re-boots 1x).
+    const targetSamples = samples !== undefined && samples > 1 ? samples : 1
     const fbo = gl.createFramebuffer()
     if (fbo === null) throw new Error('rune: createFramebuffer returned null')
     let depthRenderbuffer: WebGLRenderbuffer | null = null
@@ -1145,10 +1162,50 @@ export function createRealGL(
       }
     }
     const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER)
+    // ── Task 220 — THE MSAA TWINS: the RESOLVE fbo above (the caller's
+    //    color texture + the depth attachment) passed its completeness —
+    //    now the 4x render fbo: rgba8 color + depth24 renderbuffers at the
+    //    target's size, all at the same sample count (the completeness
+    //    law). This fbo is what bindTarget binds for a multisampled
+    //    target; the resolve blit carries the pixels into the caller's
+    //    texture at every pass boundary leaving the target.
+    let msaaFbo: WebGLFramebuffer | null = null
+    let msaaColorRb: WebGLRenderbuffer | null = null
+    let msaaDepthRb: WebGLRenderbuffer | null = null
+    if (targetSamples > 1) {
+      msaaFbo = gl.createFramebuffer()
+      if (msaaFbo === null) throw new Error('rune: createFramebuffer returned null')
+      msaaColorRb = gl.createRenderbuffer()
+      if (msaaColorRb === null) throw new Error('rune: createRenderbuffer returned null')
+      gl.bindRenderbuffer(gl.RENDERBUFFER, msaaColorRb)
+      gl.renderbufferStorageMultisample(gl.RENDERBUFFER, targetSamples, gl.RGBA8, width, height)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, msaaFbo)
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, msaaColorRb)
+      if (depth) {
+        msaaDepthRb = gl.createRenderbuffer()
+        if (msaaDepthRb === null) throw new Error('rune: createRenderbuffer returned null')
+        gl.bindRenderbuffer(gl.RENDERBUFFER, msaaDepthRb)
+        gl.renderbufferStorageMultisample(gl.RENDERBUFFER, targetSamples, gl.DEPTH_COMPONENT24, width, height)
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, msaaDepthRb)
+      }
+      const msaaStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER)
+      if (msaaStatus !== gl.FRAMEBUFFER_COMPLETE) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, currentTarget === 0 ? null : targets.get(currentTarget)?.fbo ?? null)
+        if (msaaDepthRb !== null) gl.deleteRenderbuffer(msaaDepthRb)
+        if (msaaColorRb !== null) gl.deleteRenderbuffer(msaaColorRb)
+        gl.deleteFramebuffer(msaaFbo)
+        if (depthRenderbuffer !== null) gl.deleteRenderbuffer(depthRenderbuffer)
+        gl.deleteFramebuffer(fbo)
+        throw new Error(`rune: surface MSAA FBO incomplete (status ${msaaStatus}) — ${targetSamples}x at ${width}x${height}`)
+      }
+    }
     // Restore the previous target before a possible throw: the state does not leak
     gl.bindFramebuffer(gl.FRAMEBUFFER, currentTarget === 0 ? null : targets.get(currentTarget)?.fbo ?? null)
     if (status !== gl.FRAMEBUFFER_COMPLETE) {
       // Cleanup: the created FBO and renderbuffer are garbage
+      if (msaaDepthRb !== null) gl.deleteRenderbuffer(msaaDepthRb)
+      if (msaaColorRb !== null) gl.deleteRenderbuffer(msaaColorRb)
+      if (msaaFbo !== null) gl.deleteFramebuffer(msaaFbo)
       if (depthRenderbuffer !== null) gl.deleteRenderbuffer(depthRenderbuffer)
       gl.deleteFramebuffer(fbo)
       throw new Error(`rune: surface FBO incomplete (status ${status}) — size ${width}x${height}`)
@@ -1165,11 +1222,42 @@ export function createRealGL(
       // FBO holds a reference, the deletion stays with the texture's owner
       depthTexture: attachedDepthTexture,
       color,
+      msaaFbo,
+      msaaColorRb,
+      msaaDepthRb,
+      samples: targetSamples,
     })
     return id
   }
 
+  /** Task 220 — THE MSAA RESOLVE: blitFramebuffer (READ: the target's 4x
+   *  render fbo → DRAW: the target's own fbo — the caller's color texture,
+   *  plus the caller's depth texture when the target carries one). NEAREST
+   *  — the only legal filter for a multisampled resolve with depth. The
+   *  caller re-binds its own target afterwards (the resolve does not
+   *  pretend to know the next binding); bindings here are restored to the
+   *  CURRENT target's own fbo (or the canvas). */
+  function resolveMsaaTarget(target: TargetRecord): void {
+    if (target.msaaFbo === null) return
+    const mask = target.depthTexture ? gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT : gl.COLOR_BUFFER_BIT
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, target.msaaFbo)
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, target.fbo)
+    gl.blitFramebuffer(0, 0, target.width, target.height, 0, 0, target.width, target.height, mask, gl.NEAREST)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, currentTarget === 0 ? null : targets.get(currentTarget)?.fbo ?? null)
+  }
+
   function bindTarget(targetId: number, clear: boolean): void {
+    // Task 220 — LEAVING an MSAA target: the resolve rides the boundary —
+    // BEFORE any branch (the canvas switch included — the present blit's
+    // own path), every switch away from a multisampled target first
+    // carries the 4x samples into the caller's 1x textures, so every later
+    // reader (a blit, a readback, the harvest's reduce) sees the resolved
+    // image. Same-target re-opens (the early return below) do not resolve
+    // — the pass continues on the 4x fbo.
+    if (targetId !== currentTarget && currentTarget !== 0) {
+      const leaving = targets.get(currentTarget)
+      if (leaving !== undefined && leaving.msaaFbo !== null) resolveMsaaTarget(leaving)
+    }
     if (targetId === 0) {
       // Task 129 — THE SELF-HEALING CANVAS BIND. The GL viewport is global
       // mutable state: anything that touched this context between our
@@ -1227,7 +1315,9 @@ export function createRealGL(
         unitTextures.delete(unit)
       }
     }
-    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo)
+    // Task 220 — an MSAA target binds its 4x RENDER fbo (the passes draw
+    // into the renderbuffers); the target's own fbo stays the RESOLVE side.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.msaaFbo !== null ? target.msaaFbo : target.fbo)
     gl.viewport(0, 0, target.width, target.height)
     if (clear) {
       gl.clearColor(target.color[0], target.color[1], target.color[2], target.color[3])
@@ -1265,6 +1355,11 @@ export function createRealGL(
     }
     const w = target.width
     const h = target.height
+    // Task 220 — an MSAA target reads its RESOLVED image: resolve first (a
+    // read with the loop parked ON the multisampled target — the resolve
+    // normally rides the pass boundary away, this is the boundary-less
+    // reader), then readPixels from the resolve fbo (the caller's texture).
+    if (target.msaaFbo !== null) resolveMsaaTarget(target)
     // The FBO binding does not leak: we read in our own binding, restore the previous one after.
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo)
     const rowBytes = w * 4
@@ -1468,6 +1563,11 @@ export function createRealGL(
       currentTarget = 0
     }
     if (target.depthRenderbuffer !== null) gl.deleteRenderbuffer(target.depthRenderbuffer)
+    // Task 220 — the MSAA twins follow the target down (the resolved 1x
+    // textures stay the CALLER's own — deleteTexture's business).
+    if (target.msaaColorRb !== null) gl.deleteRenderbuffer(target.msaaColorRb)
+    if (target.msaaDepthRb !== null) gl.deleteRenderbuffer(target.msaaDepthRb)
+    if (target.msaaFbo !== null) gl.deleteFramebuffer(target.msaaFbo)
     gl.deleteFramebuffer(target.fbo)
     targets.delete(targetId)
   }

@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>219a — the WG canvas-present isolation matrix</title>
+<style>
+  body { margin: 0; background: #10141d; color: #dfe5f1; font: 13px/1.6 ui-monospace, monospace; }
+  canvas { display: block; width: 360px; height: 240px; background: #05070c; }
+  #log { white-space: pre-wrap; padding: 8px 12px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="log">booting…</div>
+<script type="module">
+// scratch-219a — THE ISOLATION MATRIX (Task 219).
+// One scenario per ?s= param, each in this ONE page (fresh page per scenario
+// from the driver script — a death here kills the page's GPU connection, so
+// the driver restarts the browser per scenario):
+//   s1 — 1x canvas, ONE clear pass per frame                  (the innocent)
+//   s2 — 1x canvas, TWO passes (clear, then load)             (double getCurrentTexture)
+//   s3 — MSAA 4x canvas, ONE resolve pass per frame           (the spec shape)
+//   s4 — MSAA 4x canvas, TWO resolve passes: pass A storeOp
+//        'discard', pass B loadOp 'load' on the same MSAA view
+//        + a second getCurrentTexture — THE TIER'S EXACT LIVE SHAPE
+// The verdict channel (window.__iso): frames survived, device.lost,
+// uncaptured errors, the probe's alpha (did ANY present land), readback health.
+const q = new URLSearchParams(location.search)
+const SCENARIO = q.get('s') ?? 's1'
+const FRAMES = +q.get('n') || 40
+const log = document.getElementById('log')
+const canvas = document.getElementById('c')
+canvas.width = 360; canvas.height = 240
+
+const iso = window.__iso = { scenario: SCENARIO, frames: 0, lost: null, errors: [], probeAlpha: -1, readback: 'pending', presents: 0 }
+
+function note(m) { iso.errors.push(String(m)); log.textContent += `\n${m}` }
+if (typeof navigator !== 'undefined' && navigator.gpu === undefined) {
+  iso.errors.push('no navigator.gpu'); log.textContent = 'NO WEBGPU'
+}
+
+const adapter = await navigator.gpu.requestAdapter()
+const device = await adapter.requestDevice()
+device.lost.then(info => { iso.lost = info.reason; note(`DEVICE LOST (${info.reason})`) })
+device.addEventListener?.('uncapturederror', e => note(`uncaptured: ${e.error?.message ?? e}`))
+const ctx = canvas.getContext('webgpu')
+const format = navigator.gpu.getPreferredCanvasFormat()
+ctx.configure({ device, format, alphaMode: 'opaque' })
+
+const RED = { r: 0.75, g: 0.45, b: 0.2, a: 1 }
+const BLUE = { r: 0.2, g: 0.5, b: 0.85, a: 1 }
+const msaa = device.createTexture({ size: [360, 240], format, sampleCount: 4, usage: GPUTextureUsage.RENDER_ATTACHMENT })
+const msaaView = msaa.createView()
+const depth1x = device.createTexture({ size: [360, 240], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT })
+const depthMs = device.createTexture({ size: [360, 240], format: 'depth24plus', sampleCount: 4, usage: GPUTextureUsage.RENDER_ATTACHMENT })
+const readbackBuf = device.createBuffer({ size: 360 * 240 * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ })
+
+let frame = 0
+function step() {
+  if (frame >= FRAMES) { finish(); return }
+  frame++
+  iso.frames = frame
+  const enc = device.createCommandEncoder()
+  // PASS A — the frame's first canvas pass (the tier's terrain-color):
+  // clear the canvas (1x) or the MSAA twin (resolve into canvas #1)
+  const cvA = ctx.getCurrentTexture().createView()
+  const passA = enc.beginRenderPass({
+    colorAttachments: [{
+      view: SCENARIO === 's3' || SCENARIO === 's4' ? msaaView : cvA,
+      resolveTarget: SCENARIO === 's3' || SCENARIO === 's4' ? cvA : undefined,
+      clearValue: RED, loadOp: 'clear', storeOp: SCENARIO === 's3' || SCENARIO === 's4' ? 'discard' : 'store',
+    }],
+    depthStencilAttachment: { view: (SCENARIO === 's3' || SCENARIO === 's4' ? depthMs : depth1x).createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
+  })
+  passA.end()
+  if (SCENARIO === 's2' || SCENARIO === 's4') {
+    // PASS B — the tier's crowd color pass: SAME target again, NO clear (load)
+    const cvB = ctx.getCurrentTexture().createView()
+    const passB = enc.beginRenderPass({
+      colorAttachments: [{
+        view: SCENARIO === 's4' ? msaaView : cvB,
+        resolveTarget: SCENARIO === 's4' ? cvB : undefined,
+        clearValue: BLUE, loadOp: 'load', storeOp: SCENARIO === 's4' ? 'discard' : 'store',
+      }],
+      depthStencilAttachment: { view: (SCENARIO === 's4' ? depthMs : depth1x).createView(), depthClearValue: 1, depthLoadOp: 'load', depthStoreOp: 'store' },
+    })
+    passB.end()
+  }
+  device.queue.submit([enc.finish()])
+  requestAnimationFrame(step)
+}
+
+// the probe: mirror the canvas into a 2D context — any alpha ≥ 8 = a present landed
+const probe = document.createElement('canvas'); probe.width = 16; probe.height = 16
+function probeAlpha() {
+  try {
+    const x = probe.getContext('2d', { willReadFrequently: true })
+    x.clearRect(0, 0, 16, 16); x.drawImage(canvas, 0, 0, 16, 16)
+    const d = x.getImageData(0, 0, 16, 16).data
+    let sum = 0, lit = 0
+    for (let k = 3; k < d.length; k += 4) { sum += d[k]; if (d[k] >= 8) lit++ }
+    return { avg: sum / 64, lit }
+  } catch (e) { return { avg: -1, lit: -1, err: String(e) } }
+}
+
+async function finish() {
+  // readback health: copy the canvas texture — a dead device refuses
+  try {
+    const enc = device.createCommandEncoder()
+    enc.copyTextureToBuffer({ texture: ctx.getCurrentTexture() }, { buffer: readbackBuf, bytesPerRow: 360 * 4, rowsPerImage: 240 }, [360, 240, 1])
+    device.queue.submit([enc.finish()])
+    await readbackBuf.mapAsync(GPUMapMode.READ)
+    const bytes = new Uint8Array(readbackBuf.getMappedRange())
+    iso.readback = `ok firstPx(${bytes[0]},${bytes[1]},${bytes[2]},${bytes[3]})`
+    readbackBuf.unmap()
+  } catch (e) { iso.readback = `DEAD: ${e instanceof Error ? e.message : String(e)}` }
+  const p = probeAlpha()
+  iso.probeAlpha = p.avg
+  iso.probeLit = p.lit
+  iso.done = true
+  log.textContent = `scenario ${SCENARIO}: frames=${iso.frames} lost=${iso.lost} readback=${iso.readback} probeAvg=${p.avg} lit=${p.lit} errors=${iso.errors.length}`
+}
+if (navigator.gpu !== undefined) requestAnimationFrame(step)
+else finish()
+</script>
+</body>
+</html>

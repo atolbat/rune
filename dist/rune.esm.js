@@ -8750,7 +8750,8 @@ function createRealGL(gl, onViewportHeal) {
     canvasHeight = height;
     gl.viewport(0, 0, width, height);
   }
-  function createTarget(textureId, width, height, depth2, color, depthBits, depthTextureId) {
+  function createTarget(textureId, width, height, depth2, color, depthBits, depthTextureId, samples) {
+    const targetSamples = samples !== undefined && samples > 1 ? samples : 1;
     const fbo = gl.createFramebuffer();
     if (fbo === null)
       throw new Error("rune: createFramebuffer returned null");
@@ -8779,8 +8780,50 @@ function createRealGL(gl, onViewportHeal) {
       }
     }
     const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    let msaaFbo = null;
+    let msaaColorRb = null;
+    let msaaDepthRb = null;
+    if (targetSamples > 1) {
+      msaaFbo = gl.createFramebuffer();
+      if (msaaFbo === null)
+        throw new Error("rune: createFramebuffer returned null");
+      msaaColorRb = gl.createRenderbuffer();
+      if (msaaColorRb === null)
+        throw new Error("rune: createRenderbuffer returned null");
+      gl.bindRenderbuffer(gl.RENDERBUFFER, msaaColorRb);
+      gl.renderbufferStorageMultisample(gl.RENDERBUFFER, targetSamples, gl.RGBA8, width, height);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, msaaFbo);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, msaaColorRb);
+      if (depth2) {
+        msaaDepthRb = gl.createRenderbuffer();
+        if (msaaDepthRb === null)
+          throw new Error("rune: createRenderbuffer returned null");
+        gl.bindRenderbuffer(gl.RENDERBUFFER, msaaDepthRb);
+        gl.renderbufferStorageMultisample(gl.RENDERBUFFER, targetSamples, gl.DEPTH_COMPONENT24, width, height);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, msaaDepthRb);
+      }
+      const msaaStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+      if (msaaStatus !== gl.FRAMEBUFFER_COMPLETE) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, currentTarget === 0 ? null : targets.get(currentTarget)?.fbo ?? null);
+        if (msaaDepthRb !== null)
+          gl.deleteRenderbuffer(msaaDepthRb);
+        if (msaaColorRb !== null)
+          gl.deleteRenderbuffer(msaaColorRb);
+        gl.deleteFramebuffer(msaaFbo);
+        if (depthRenderbuffer !== null)
+          gl.deleteRenderbuffer(depthRenderbuffer);
+        gl.deleteFramebuffer(fbo);
+        throw new Error(`rune: surface MSAA FBO incomplete (status ${msaaStatus}) — ${targetSamples}x at ${width}x${height}`);
+      }
+    }
     gl.bindFramebuffer(gl.FRAMEBUFFER, currentTarget === 0 ? null : targets.get(currentTarget)?.fbo ?? null);
     if (status !== gl.FRAMEBUFFER_COMPLETE) {
+      if (msaaDepthRb !== null)
+        gl.deleteRenderbuffer(msaaDepthRb);
+      if (msaaColorRb !== null)
+        gl.deleteRenderbuffer(msaaColorRb);
+      if (msaaFbo !== null)
+        gl.deleteFramebuffer(msaaFbo);
       if (depthRenderbuffer !== null)
         gl.deleteRenderbuffer(depthRenderbuffer);
       gl.deleteFramebuffer(fbo);
@@ -8795,11 +8838,29 @@ function createRealGL(gl, onViewportHeal) {
       depth: depth2,
       depthRenderbuffer,
       depthTexture: attachedDepthTexture,
-      color
+      color,
+      msaaFbo,
+      msaaColorRb,
+      msaaDepthRb,
+      samples: targetSamples
     });
     return id;
   }
+  function resolveMsaaTarget(target) {
+    if (target.msaaFbo === null)
+      return;
+    const mask = target.depthTexture ? gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT : gl.COLOR_BUFFER_BIT;
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, target.msaaFbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, target.fbo);
+    gl.blitFramebuffer(0, 0, target.width, target.height, 0, 0, target.width, target.height, mask, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, currentTarget === 0 ? null : targets.get(currentTarget)?.fbo ?? null);
+  }
   function bindTarget(targetId, clear2) {
+    if (targetId !== currentTarget && currentTarget !== 0) {
+      const leaving = targets.get(currentTarget);
+      if (leaving !== undefined && leaving.msaaFbo !== null)
+        resolveMsaaTarget(leaving);
+    }
     if (targetId === 0) {
       currentTarget = 0;
       invalidateUnitBinds();
@@ -8830,7 +8891,7 @@ function createRealGL(gl, onViewportHeal) {
         unitTextures.delete(unit);
       }
     }
-    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.msaaFbo !== null ? target.msaaFbo : target.fbo);
     gl.viewport(0, 0, target.width, target.height);
     if (clear2) {
       gl.clearColor(target.color[0], target.color[1], target.color[2], target.color[3]);
@@ -8862,6 +8923,8 @@ function createRealGL(gl, onViewportHeal) {
     }
     const w = target.width;
     const h = target.height;
+    if (target.msaaFbo !== null)
+      resolveMsaaTarget(target);
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
     const rowBytes = w * 4;
     const bottomUp = new Uint8Array(rowBytes * h);
@@ -8998,6 +9061,12 @@ function createRealGL(gl, onViewportHeal) {
     }
     if (target.depthRenderbuffer !== null)
       gl.deleteRenderbuffer(target.depthRenderbuffer);
+    if (target.msaaColorRb !== null)
+      gl.deleteRenderbuffer(target.msaaColorRb);
+    if (target.msaaDepthRb !== null)
+      gl.deleteRenderbuffer(target.msaaDepthRb);
+    if (target.msaaFbo !== null)
+      gl.deleteFramebuffer(target.msaaFbo);
     gl.deleteFramebuffer(target.fbo);
     targets.delete(targetId);
   }
@@ -12316,7 +12385,8 @@ function createWebGL2Renderer(options) {
     const color = surfaceOptions.color ?? (options.clear ?? DEFAULT_CLEAR2).color;
     const textureId = gl.createTexture(width, height);
     const depthTextureId = surfaceOptions.depthTexture === true && depth2 ? gl.createTexture(width, height, { format: "depth32f" }) : undefined;
-    const targetId = gl.createTarget(textureId, width, height, depth2, color, surfaceOptions.depthBits, depthTextureId);
+    const samples = surfaceOptions.samples !== undefined && surfaceOptions.samples > 1 ? surfaceOptions.samples : 1;
+    const targetId = gl.createTarget(textureId, width, height, depth2, color, surfaceOptions.depthBits, depthTextureId, samples);
     let surfaceDisposed = false;
     const result = {
       targetId,
@@ -14391,10 +14461,36 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
     canvasClearA = a;
     canvasDepthClear = depth2 ?? 1;
   }
-  function createTarget(textureId, targetWidth, targetHeight, depth2, color, depthTextureId) {
+  function createTarget(textureId, targetWidth, targetHeight, depth2, color, depthTextureId, samples) {
     const record = textureRecords[textureId];
     if (record === undefined)
       throw new Error(`rune: createTarget — texture ${textureId} not found`);
+    const targetSamples = samples !== undefined && samples > 1 ? samples : 1;
+    if (targetSamples > 1 && depthTextureId !== undefined) {
+      throw new Error("rune: createTarget — samples > 1 cannot carry a depthTextureId: the WebGPU spec has no depth resolve " + "(depth24plus is not a valid resolveTarget). Boot the surface with samples: 1 when the A6 depth harvest is required, " + "or drop depthTexture on the multisampled leg (the still-camera reuse declines honestly to the feedback fill).");
+    }
+    let msaaColorTexture2 = null;
+    let msaaColorView2 = null;
+    let msaaDepthTexture2 = null;
+    let msaaDepthView2 = null;
+    if (targetSamples > 1) {
+      msaaColorTexture2 = device.createTexture({
+        size: [targetWidth, targetHeight],
+        format: record.format,
+        sampleCount: targetSamples,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT
+      });
+      msaaColorView2 = msaaColorTexture2.createView();
+      if (depth2) {
+        msaaDepthTexture2 = device.createTexture({
+          size: [targetWidth, targetHeight],
+          format: "depth24plus",
+          sampleCount: targetSamples,
+          usage: GPUTextureUsage.RENDER_ATTACHMENT
+        });
+        msaaDepthView2 = msaaDepthTexture2.createView();
+      }
+    }
     let targetDepthView = null;
     let targetDepthTexture = null;
     let targetDepthFormat = "depth24plus";
@@ -14422,7 +14518,21 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
       }
     }
     const id = nextTargetId++;
-    targets.set(id, { view: record.view, depthView: targetDepthView, depthTexture: targetDepthTexture, depthFormat: targetDepthFormat, color, width: targetWidth, height: targetHeight, textureId });
+    targets.set(id, {
+      view: record.view,
+      depthView: targetDepthView,
+      depthTexture: targetDepthTexture,
+      depthFormat: targetDepthFormat,
+      color,
+      width: targetWidth,
+      height: targetHeight,
+      textureId,
+      msaaColorView: msaaColorView2,
+      msaaColorTexture: msaaColorTexture2,
+      msaaDepthView: msaaDepthView2,
+      msaaDepthTexture: msaaDepthTexture2,
+      samples: targetSamples
+    });
     return id;
   }
   function bindTarget(targetId, clear) {
@@ -14478,18 +14588,32 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
         } : undefined;
       }
     } else {
-      passSamples = 1;
       const target = targets.get(targetId);
-      if (target === undefined)
+      if (target === undefined) {
+        passSamples = 1;
         return;
-      colorView = target.view;
+      }
       clearValue = { r: target.color[0], g: target.color[1], b: target.color[2], a: target.color[3] };
-      depthAttachment = target.depthView !== null ? {
-        view: target.depthView,
-        depthClearValue: 1,
-        depthLoadOp: loadOp,
-        depthStoreOp: "store"
-      } : undefined;
+      passSamples = target.samples;
+      if (target.samples > 1 && target.msaaColorView !== null) {
+        colorView = target.msaaColorView;
+        resolveTarget = target.view;
+        storeOp = "discard";
+        depthAttachment = target.msaaDepthView !== null ? {
+          view: target.msaaDepthView,
+          depthClearValue: 1,
+          depthLoadOp: loadOp,
+          depthStoreOp: "store"
+        } : undefined;
+      } else {
+        colorView = target.view;
+        depthAttachment = target.depthView !== null ? {
+          view: target.depthView,
+          depthClearValue: 1,
+          depthLoadOp: loadOp,
+          depthStoreOp: "store"
+        } : undefined;
+      }
     }
     pass = encoder.beginRenderPass({
       colorAttachments: [{
@@ -14770,6 +14894,8 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
     if (target === undefined)
       return;
     target.depthTexture?.destroy();
+    target.msaaColorTexture?.destroy();
+    target.msaaDepthTexture?.destroy();
     targets.delete(targetId);
   }
   let facadeDisposed = false;
@@ -16055,8 +16181,13 @@ async function createWebGpuRenderer(options) {
     const depth2 = surfaceOptions.depth ?? false;
     const color = surfaceOptions.color ?? DEFAULT_SURFACE_COLOR;
     const textureId = gpu.createTexture(width, height, "canvas");
+    const samples = surfaceOptions.samples !== undefined && surfaceOptions.samples > 1 ? surfaceOptions.samples : 1;
+    if (samples > 1 && surfaceOptions.depthTexture === true) {
+      gpu.deleteTexture(textureId);
+      throw new Error("rune: surface — samples > 1 cannot carry depthTexture on WebGPU (the spec has no depth resolve; " + "depth24plus is not a valid resolveTarget). The still-camera A6 harvest needs samples: 1 — " + "or drop depthTexture and let the reuse decline to the feedback fill.");
+    }
     const depthTextureId = surfaceOptions.depthTexture === true && depth2 ? gpu.createTexture(width, height, "depth32float") : undefined;
-    const targetId = gpu.createTarget(textureId, width, height, depth2, color, depthTextureId);
+    const targetId = gpu.createTarget(textureId, width, height, depth2, color, depthTextureId, samples);
     let surfaceDisposed = false;
     return {
       targetId,
@@ -17699,7 +17830,7 @@ ${SPD_DEPTH}${TOP}`;
     return new Float32Array(f.buffer, f.byteOffset + (s.recordsWord + first * stride) * 4, count * stride);
   }
   function surface(width, height, surfaceOptions) {
-    const s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color, ...surfaceOptions?.depthTexture === true ? { depthTexture: true } : {} });
+    const s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color, ...surfaceOptions?.depthTexture === true ? { depthTexture: true } : {}, ...surfaceOptions?.samples !== undefined ? { samples: surfaceOptions.samples } : {} });
     return {
       targetId: s.targetId,
       width,
@@ -18169,8 +18300,9 @@ function createGlDevice(renderer, options, clear) {
     };
   }
   function surface(width, height, surfaceOptions) {
+    const samples = surfaceOptions?.samples;
     if (surfaceOptions?.depthTexture === true) {
-      const s2 = renderer.surface({ width, height, depth: true, color: clear.color, depthTexture: true });
+      const s2 = renderer.surface({ width, height, depth: true, color: clear.color, depthTexture: true, ...samples !== undefined ? { samples } : {} });
       return {
         targetId: s2.targetId,
         width,
@@ -18183,7 +18315,7 @@ function createGlDevice(renderer, options, clear) {
     let s = null;
     for (const bits of [24, 16]) {
       try {
-        s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color, depthBits: bits });
+        s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color, depthBits: bits, ...samples !== undefined ? { samples } : {} });
         break;
       } catch {}
     }

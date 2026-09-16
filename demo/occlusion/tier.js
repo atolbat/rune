@@ -111,7 +111,7 @@
 // visible box (its own rect holds either background 1.0 or surfaces
 // behind it), so the final verdicts stay pixel-exact at any camera,
 // however old the seed. The one-frame lag costs fill, never a pixel.
-import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=219'
+import { createDevice, createFrameGraph } from '../../dist/rune.esm.js?v=220'
 import { buildShaders } from './shaders.js?v=210'
 import { BOX_VERTS, BOX_INDICES } from './scene.js?v=203'
 const SKY = [0.045, 0.055, 0.09, 1]
@@ -310,13 +310,47 @@ export async function buildTier(deps) {
   const terrainColorProg = terrainSpec !== null
     ? device.program({ depth: { test: 'less', write: true }, cull: 'back', wg: terrainSpec.color.wg, gl: terrainSpec.color.gl })
     : null
+  // ── Task 220 — THE MSAA LADDER (the field report's «одни лесенки»):
+  //    the single-pass present of Task 219 moved the whole scene into the
+  //    offscreen surface — and quietly retired every antialiasing path
+  //    with it (the WG canvas MSAA was the field death's construct; the GL
+  //    context cascade only ever covered the default framebuffer, which
+  //    now receives nothing but the presentation blit). The AA's new home
+  //    is the SURFACE itself: 4x samples on every real-GPU leg, resolved
+  //    into the same 1x texture the blit presents (WG: the pass's inline
+  //    resolveTarget; GL: the boundary blit) — the single-resolve shape
+  //    the Task-219 matrix proved healthy, now pointed at a surface.
+  //    · probe legs stay 1x (the validation's exact-pixel laws);
+  //    · software adapters stay 1x (the 4x fill on SwiftShader — the
+  //      caps' whole point — and the snapshot path is the degrade);
+  //    · WG cannot resolve DEPTH (no spec shape) — a multisampled WG
+  //      surface drops the sampleable-depth harvest texture: the
+  //      still-camera reuse declines honestly to the feedback fill (the
+  //      pre-A6 shape, ~1 extra depth-only draw of the visible set);
+  //    · GL resolves depth too (blitFramebuffer DEPTH_BUFFER_BIT) — the
+  //      harvest rides the multisampled leg for free;
+  //    · a driver that refuses the 4x storage falls to 1x LOUDLY (the
+  //      capability ladder's own note, never a silent degrade).
+  let SAMPLES = MODE === 'probe' || device.software ? 1 : 4
+  let surface = null
+  for (;;) {
+    const depthTex = SAMPLES === 1 || backend === 'webgl2'
+    try {
+      surface = device.surface(SURF_W, SURF_H, { depth: true, depthTexture: depthTex, samples: SAMPLES })
+      break
+    } catch (e) {
+      if (SAMPLES === 1) throw e
+      noteError(`the ${SAMPLES}x MSAA surface was refused (${e instanceof Error ? e.message : String(e)}) — the surface re-boots at 1x (no AA, everything else intact)`)
+      SAMPLES = 1
+    }
+  }
   // Task 215 (A6 — the depth-reuse harvest): the surface's depth attachment
   // is a SAMPLEABLE depth texture (WG: depth32float / GL: DEPTH_COMPONENT32F)
   // — the color pass's own depth survives the pass, and a STILL camera can
   // rebuild the pyramid from it instead of re-rendering the survivors
   // depth-only (the presented frame IS the front layer — the fixed-point
-  // law's own product).
-  const surface = device.surface(SURF_W, SURF_H, { depth: true, depthTexture: true })
+  // law's own product). Absent on the WG MSAA legs (the spec has no depth
+  // resolve — the Task-220 trade documented above).
   // Task 219 — THE PRESENTATION BLIT: the live canvas's whole interaction
   // with the frame — ONE fullscreen quad sampling the surface's color
   // texture (the canonical single-pass present; the multi-pass canvas is
@@ -574,7 +608,11 @@ export async function buildTier(deps) {
     name: 'present', kind: 'present', cost: 1,
     reads: [R.target],
     execute: () => {
-      if (MODE === 'live') device.blitToCanvas({ program: blitProg, surface })
+      // Task 220 — the live present ledger: the tier's own frame counter
+      // (the overlay swap waits for the FIRST landed present before
+      // retiring the old canvas — a fallback boot must never black-flash
+      // the screen it is rescuing).
+      if (MODE === 'live') { device.blitToCanvas({ program: blitProg, surface }); livePresents++ }
       device.submit()
     },
   })
@@ -733,6 +771,8 @@ export async function buildTier(deps) {
   }
 
   // ── the snapshot blit (software WG — zero presents) ─────────────────────
+  let livePresents = 0 // Task 220 — the live leg's own present ledger (the
+  // overlay swap's predicate — see the present pass)
   let blitPending = false
   let blitLanded = 0 // Task 219 — the snapshot's own "present" counter: the
   let blitRefused = 0 // async readback+putImageData IS this leg's present —
@@ -991,8 +1031,8 @@ export async function buildTier(deps) {
     device,
     __scene: sceneHandle,
     tierLine: backend === 'webgl2'
-      ? `WebGL2 — FBO pyramid + TF cull + vertex-collapse draw${device.antialias ? ' · context MSAA' : ''}`
-      : `WebGPU — storage pyramid + compute cull + one drawIndexedIndirect${device.antialias ? ' · MSAA 4x resolve' : ''}`,
+      ? `WebGL2 — FBO pyramid + TF cull + vertex-collapse draw${SAMPLES > 1 ? ` · MSAA ${SAMPLES}x surface (blit resolve)` : ''}`
+      : `WebGPU — storage pyramid + compute cull + one drawIndexedIndirect${SAMPLES > 1 ? ` · MSAA ${SAMPLES}x surface (inline resolve)` : ''}`,
     drawsLine: backend === 'webgl2'
       ? `draws: 2 (fill + collapse color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid; Task 215 — a STILL camera swaps the fill for the depth harvest: 1 quad + the ladder, the presented frame's own depth) · TF passes: 2 (cull + hysteresis; +1 cull ON the feedback) · ${pyramid.levels - 1} reduce quads (×2 the feedback frame; ×1 the seed frame)`
       : `draws: 2 (fill + indirect color; +1 history set draw ON; +1 feedback fill ON — the same-frame city self-occlusion; the seed frame drops the fill + the first reduce — phase 1 reads the carried pyramid; Task 215 — a STILL camera swaps the fill for TWO DISPATCHES: the SPD pair over the presented frame's own depth32float) · dispatches: 3 (cull + hysteresis + compact; +1 cull ON the feedback; +1 order ON the near-first list — the early-Z harvest) · Task 214 — the pyramid builds in ONE SPD DISPATCH PAIR (${Math.ceil(SURF_W / 64) * Math.ceil(SURF_H / 64)} region workgroups + the top reduce) where the legacy chain spent ${pyramid.levels} (×2 the feedback frame; ×1 the seed frame)`,
@@ -1013,6 +1053,13 @@ export async function buildTier(deps) {
      * watchdog judges it at the frame cadence; a snapshot canvas is judged
      * only once a blit has LANDED or been REFUSED. */
     snapshotHealth: () => ({ landed: blitLanded, refused: blitRefused }),
+    /** Task 220 — THE PRESENT LEDGER (the overlay swap's predicate): the
+     * live leg's `presents` counts submitted canvas blits (synchronous —
+     * the first one means the new tier is ALREADY on screen); the
+     * snapshot's `landed`/`refused` ride the async readback. The overlay
+     * boot keeps the OLD canvas visible until this channel says the new
+     * one has landed its first frame — the fallback never black-flashes. */
+    presentHealth: () => ({ presents: livePresents, landed: blitLanded, refused: blitRefused }),
     renderTo,
     frame,
     applyEdits,

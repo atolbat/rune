@@ -126,8 +126,14 @@ export function createRecordingGPU(): RecordingGPU {
       calls.push(`readTargetPixels(${targetId})`)
       return Promise.resolve(new Uint8Array(0))
     },
-    createTarget: (textureId, width, height, depth, color, depthTextureId) => {
-      calls.push(`createTarget(${textureId},${width},${height}${depth ? ',depth' : ''}${depthTextureId !== undefined ? `,depthTex=${depthTextureId}` : ''})`)
+    createTarget: (textureId, width, height, depth, color, depthTextureId, samples) => {
+      // Task 220 — the MSAA combo law mirrors realGPU's door: the recorder
+      // has no GPU, but the REFUSAL is part of the facade's contract (a
+      // journaled boot must fail the same way a real one would).
+      if (samples !== undefined && samples > 1 && depthTextureId !== undefined) {
+        throw new Error('rune: createTarget — samples > 1 cannot carry a depthTextureId: the WebGPU spec has no depth resolve (depth24plus is not a valid resolveTarget).')
+      }
+      calls.push(`createTarget(${textureId},${width},${height}${depth ? ',depth' : ''}${depthTextureId !== undefined ? `,depthTex=${depthTextureId}` : ''}${samples !== undefined && samples > 1 ? `,samples=${samples}` : ''})`)
       return nextTargetId++
     },
     bindTarget: (targetId, clear) => {

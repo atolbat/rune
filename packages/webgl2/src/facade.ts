@@ -304,6 +304,14 @@ export interface GLFacade {
      *  honest refusal for every mismatch (a non-depth texture or a wrong
      *  size leaves the FBO incomplete and createTarget throws). */
     depthTextureId?: number,
+    /** Task 220 — THE MSAA SURFACE (the GL twin of the WG facade's): 4 =
+     *  the target renders into multisampled color+depth RENDERBUFFERS and
+     *  RESOLVES into the caller's own color texture (and the caller's
+     *  depth texture, when depthTextureId is given — GL's blitFramebuffer
+     *  resolves depth too, the one advantage over the WG spec) at every
+     *  pass-boundary LEAVING the target and before any readback. Default
+     *  1. */
+    samples?: number,
   ): number
   /** Switch the target: 0 = the canvas. clear — clear the target with its color
    *  (ignored for the canvas: BeginPass clears the canvas). */

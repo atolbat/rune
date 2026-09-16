@@ -61,6 +61,17 @@ export interface SurfaceOptions {
   *  true. On GL the precision is 32f exactly (the harvest's parity anchor
   *  — depthBits is ignored in this mode). */
   readonly depthTexture?: boolean
+  /** Task 220 — THE MSAA SURFACE: the target's sample count (4 = 4x
+  *  multisampling; default 1). The passes render into multisampled
+  *  attachments and the surface's own EXPOSED texture stays the RESOLVED
+  *  1x image — every existing reader (a presentation blit, read(), a
+  *  sampler) keeps its contract unchanged. WG: the resolve is the pass
+  *  descriptor's resolveTarget (inline, automatic); the spec has no depth
+  * resolve, so samples > 1 + depthTexture is REFUSED on the WG leg. GL:
+  *  renderbufferStorageMultisample twins + a blitFramebuffer resolve at
+  *  every pass boundary leaving the target — depthTexture RIDES FREE
+  *  (GL resolves depth too). */
+  readonly samples?: number
 }
 
 /** Result of reading a surface (Task 80: readback — the first slice of

@@ -553,9 +553,15 @@ export function createWebGL2Renderer(options: WebGL2RendererOptions): WebGL2Rend
     const depthTextureId = surfaceOptions.depthTexture === true && depth
       ? gl.createTexture(width, height, { format: 'depth32f' })
       : undefined
+    // Task 220 — THE MSAA SURFACE (the GL twin): >1 samples renders into
+    // 4x color+depth renderbuffers, resolved by a blitFramebuffer at every
+    // pass boundary LEAVING the target — GL resolves DEPTH too, so the
+    // harvest texture rides free here (the documented WG asymmetry: the
+    // WG spec has no depth resolve and refuses the combo).
+    const samples = surfaceOptions.samples !== undefined && surfaceOptions.samples > 1 ? surfaceOptions.samples : 1
     // Task 197: the depth precision axis passes through (16 default / 24 /
     // 32-float — the Hi-Z parity anchor; see GLFacade.createTarget).
-    const targetId = gl.createTarget(textureId, width, height, depth, color, surfaceOptions.depthBits, depthTextureId)
+    const targetId = gl.createTarget(textureId, width, height, depth, color, surfaceOptions.depthBits, depthTextureId, samples)
     let surfaceDisposed = false
     const result: Surface<CompiledCommand> = {
       targetId,

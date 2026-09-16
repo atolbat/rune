@@ -759,7 +759,12 @@ export interface RenderDevice {
    *  the dither mirror and the debug strip all live here. */
   hizScene(spec: HizSceneSpec): HizSceneHandle
   readCullStats(scene: SceneHandle): Promise<CullStats>
-  surface(width: number, height: number, options?: { depth?: boolean }): DeviceSurface
+  /** Task 220 — samples: the MSAA surface (4 = 4x). The surface's
+   *  exposed texture is the RESOLVED 1x image on both backends (WG: the
+   *  inline resolveTarget; GL: the boundary blit). depthTexture +
+   *  samples > 1 is refused on the WG leg (the spec has no depth
+   *  resolve); the GL leg resolves depth too and keeps the harvest. */
+  surface(width: number, height: number, options?: { depth?: boolean; depthTexture?: boolean; samples?: number }): DeviceSurface
   submit(): void
   dispose(): void
 }
@@ -2144,11 +2149,14 @@ ${SPD_DEPTH}${TOP}`
     return new Float32Array(f.buffer, f.byteOffset + (s.recordsWord + first * stride) * 4, count * stride)
   }
 
-  function surface(width: number, height: number, surfaceOptions?: { depth?: boolean; depthTexture?: boolean }): DeviceSurface {
+  function surface(width: number, height: number, surfaceOptions?: { depth?: boolean; depthTexture?: boolean; samples?: number }): DeviceSurface {
     // Task 215 (A6) — depthTexture: the surface's depth attachment becomes
     // a SAMPLEABLE depth32float texture (the color pass's own depth, alive
     // after the pass — the harvest's source)
-    const s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color, ...(surfaceOptions?.depthTexture === true ? { depthTexture: true } : {}) })
+    // Task 220 — samples rides through (the WG renderer refuses the
+    // depthTexture + samples > 1 combo itself — the spec has no depth
+    // resolve; the caller sizes its capability ladder around that door).
+    const s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color, ...(surfaceOptions?.depthTexture === true ? { depthTexture: true } : {}), ...(surfaceOptions?.samples !== undefined ? { samples: surfaceOptions.samples } : {}) })
     return {
       targetId: s.targetId,
       width,
@@ -2717,13 +2725,17 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     }
   }
 
-  function surface(width: number, height: number, surfaceOptions?: { depth?: boolean; depthTexture?: boolean }): DeviceSurface {
+  function surface(width: number, height: number, surfaceOptions?: { depth?: boolean; depthTexture?: boolean; samples?: number }): DeviceSurface {
     // Task 215 (A6) — depthTexture: the surface's depth attachment becomes
     // a SAMPLEABLE DEPTH_COMPONENT32F texture — the harvest's source AND
     // the parity anchor (the same exact-f32 precision the tile's own
     // ladder prefers; the ladder below stays the non-harvest fallback)
+    // Task 220 — samples rides BOTH branches (the MSAA surface's resolved
+    // image is what this factory has always exposed; GL resolves depth
+    // too, so the harvest texture rides the multisampled leg for free).
+    const samples = surfaceOptions?.samples
     if (surfaceOptions?.depthTexture === true) {
-      const s = renderer.surface({ width, height, depth: true, color: clear.color, depthTexture: true })
+      const s = renderer.surface({ width, height, depth: true, color: clear.color, depthTexture: true, ...(samples !== undefined ? { samples } : {}) })
       return {
         targetId: s.targetId,
         width,
@@ -2738,7 +2750,7 @@ function createGlDevice(renderer: WebGL2Renderer, options: DeviceOptions, clear:
     let s: ReturnType<WebGL2Renderer['surface']> | null = null
     for (const bits of [24, 16] as const) {
       try {
-        s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color, depthBits: bits })
+        s = renderer.surface({ width, height, depth: surfaceOptions?.depth ?? true, color: clear.color, depthBits: bits, ...(samples !== undefined ? { samples } : {}) })
         break
       } catch { /* the next rung */ }
     }

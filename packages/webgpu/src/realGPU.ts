@@ -170,6 +170,17 @@ export async function createRealGPU(
     width: number
     height: number
     textureId: number
+    /** Task 220 — THE MSAA SURFACE: the pass's 4x color attachment and its
+     *  4x depth twin. `view` above stays the RESOLVED 1x texture (the
+     *  pass's resolveTarget — the resolve lands automatically when the
+     *  pass ends, the one spec shape for a multisampled render target;
+     *  every reader — blit, readback, a later pass's sampler — reads the
+     *  resolved image). Null on every 1x target. */
+    msaaColorView: GPUTextureView | null
+    msaaColorTexture: GPUTexture | null
+    msaaDepthView: GPUTextureView | null
+    msaaDepthTexture: GPUTexture | null
+    samples: number
   }>()
   let nextTextureId = 1
   let nextTargetId = 1
@@ -1304,9 +1315,48 @@ export async function createRealGPU(
     depth: boolean,
     color: readonly [number, number, number, number],
     depthTextureId?: number,
+    samples?: number,
   ): number {
     const record = textureRecords[textureId]
     if (record === undefined) throw new Error(`rune: createTarget — texture ${textureId} not found`)
+    // Task 220 — THE MSAA SURFACE: 4x (or 1x). The multisampled pass
+    // renders into the 4x twins below and RESOLVES into the caller's own
+    // texture (the resolveTarget of the color attachment — the resolve
+    // rides the pass descriptor, zero extra commands). The SPEC HAS NO
+    // DEPTH RESOLVE (depth24plus cannot be a resolveTarget) — a
+    // multisampled target therefore cannot carry the A6 sampleable-depth
+    // harvest texture, and the combo is refused loudly at the door
+    // instead of silently degrading into an unresolvable attachment.
+    const targetSamples = samples !== undefined && samples > 1 ? samples : 1
+    if (targetSamples > 1 && depthTextureId !== undefined) {
+      throw new Error(
+        'rune: createTarget — samples > 1 cannot carry a depthTextureId: the WebGPU spec has no depth resolve ' +
+        '(depth24plus is not a valid resolveTarget). Boot the surface with samples: 1 when the A6 depth harvest is required, ' +
+        'or drop depthTexture on the multisampled leg (the still-camera reuse declines honestly to the feedback fill).',
+      )
+    }
+    let msaaColorTexture: GPUTexture | null = null
+    let msaaColorView: GPUTextureView | null = null
+    let msaaDepthTexture: GPUTexture | null = null
+    let msaaDepthView: GPUTextureView | null = null
+    if (targetSamples > 1) {
+      msaaColorTexture = device.createTexture({
+        size: [targetWidth, targetHeight],
+        format: record.format,
+        sampleCount: targetSamples,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      })
+      msaaColorView = msaaColorTexture.createView()
+      if (depth) {
+        msaaDepthTexture = device.createTexture({
+          size: [targetWidth, targetHeight],
+          format: 'depth24plus',
+          sampleCount: targetSamples,
+          usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        })
+        msaaDepthView = msaaDepthTexture.createView()
+      }
+    }
     let targetDepthView: GPUTextureView | null = null
     let targetDepthTexture: GPUTexture | null = null
     let targetDepthFormat: GPUTextureFormat = 'depth24plus'
@@ -1340,7 +1390,21 @@ export async function createRealGPU(
       }
     }
     const id = nextTargetId++
-    targets.set(id, { view: record.view, depthView: targetDepthView, depthTexture: targetDepthTexture, depthFormat: targetDepthFormat, color, width: targetWidth, height: targetHeight, textureId })
+    targets.set(id, {
+      view: record.view,
+      depthView: targetDepthView,
+      depthTexture: targetDepthTexture,
+      depthFormat: targetDepthFormat,
+      color,
+      width: targetWidth,
+      height: targetHeight,
+      textureId,
+      msaaColorView,
+      msaaColorTexture,
+      msaaDepthView,
+      msaaDepthTexture,
+      samples: targetSamples,
+    })
     return id
   }
 
@@ -1435,17 +1499,42 @@ export async function createRealGPU(
         } : undefined
       }
     } else {
-      passSamples = 1
       const target = targets.get(targetId)
-      if (target === undefined) return
-      colorView = target.view
+      if (target === undefined) { passSamples = 1; return }
+      // The target's clear color serves BOTH shapes: the 1x attachment's
+      // clear and the 4x attachment's clear (the resolve carries the
+      // cleared samples into the caller's texture on an empty pass).
       clearValue = { r: target.color[0], g: target.color[1], b: target.color[2], a: target.color[3] }
-      depthAttachment = target.depthView !== null ? {
-        view: target.depthView,
-        depthClearValue: 1,
-        depthLoadOp: loadOp,
-        depthStoreOp: 'store',
-      } : undefined
+      // Task 220 — THE MSAA SURFACE PASS: render into the 4x color twin,
+      // RESOLVE into the caller's own 1x texture (resolveTarget — the
+      // resolve is part of the pass, landing when the pass ends; one pass,
+      // one resolve — the healthy single-resolve shape of the Task-219
+      // isolation matrix, now pointed at a surface instead of the canvas).
+      // storeOp 'discard': the 4x contents are never read again — only the
+      // resolve matters. The depth rides the 4x twin (all attachments of a
+      // pass share the sample count). The pipeline variant axis (Task 198)
+      // keys on passSamples — the 4x twins compile lazily, exactly like the
+      // canvas-MSAA era's.
+      passSamples = target.samples
+      if (target.samples > 1 && target.msaaColorView !== null) {
+        colorView = target.msaaColorView
+        resolveTarget = target.view
+        storeOp = 'discard'
+        depthAttachment = target.msaaDepthView !== null ? {
+          view: target.msaaDepthView,
+          depthClearValue: 1,
+          depthLoadOp: loadOp,
+          depthStoreOp: 'store',
+        } : undefined
+      } else {
+        colorView = target.view
+        depthAttachment = target.depthView !== null ? {
+          view: target.depthView,
+          depthClearValue: 1,
+          depthLoadOp: loadOp,
+          depthStoreOp: 'store',
+        } : undefined
+      }
     }
     pass = encoder.beginRenderPass({
       colorAttachments: [{
@@ -1833,6 +1922,10 @@ export async function createRealGPU(
     const target = targets.get(targetId)
     if (target === undefined) return
     target.depthTexture?.destroy()
+    // Task 220 — the MSAA twins follow the target down (the resolved 1x
+    // texture stays the CALLER's own — deleteTexture's business).
+    target.msaaColorTexture?.destroy()
+    target.msaaDepthTexture?.destroy()
     targets.delete(targetId)
   }
 

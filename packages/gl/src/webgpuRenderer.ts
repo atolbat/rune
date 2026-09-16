@@ -278,6 +278,20 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
     // Canvas format: pipelines (targets: [format]) fit both the canvas
     // and the surface — no second pipeline-creation branch
     const textureId = gpu.createTexture(width, height, 'canvas')
+    // Task 220 — THE MSAA SURFACE: >1 samples renders into 4x twins and
+    // resolves into the texture above (the pass descriptor's
+    // resolveTarget — automatic). The spec has no DEPTH resolve: the
+    // harvest texture cannot ride a multisampled surface — refused at the
+    // door (the honest error beats a silently unresolvable attachment).
+    const samples = surfaceOptions.samples !== undefined && surfaceOptions.samples > 1 ? surfaceOptions.samples : 1
+    if (samples > 1 && surfaceOptions.depthTexture === true) {
+      gpu.deleteTexture(textureId)
+      throw new Error(
+        'rune: surface — samples > 1 cannot carry depthTexture on WebGPU (the spec has no depth resolve; ' +
+        'depth24plus is not a valid resolveTarget). The still-camera A6 harvest needs samples: 1 — ' +
+        'or drop depthTexture and let the reuse decline to the feedback fill.',
+      )
+    }
     // Task 215 (A6 — the depth-reuse harvest): the surface's depth as a
     // SAMPLEABLE depth32float texture — the color pass's depth survives
     // the pass for the late downsample (needs depth: true; the internal
@@ -285,7 +299,7 @@ export async function createWebGpuRenderer(options: WebGpuRendererOptions): Prom
     const depthTextureId = surfaceOptions.depthTexture === true && depth
       ? gpu.createTexture(width, height, 'depth32float')
       : undefined
-    const targetId = gpu.createTarget(textureId, width, height, depth, color, depthTextureId)
+    const targetId = gpu.createTarget(textureId, width, height, depth, color, depthTextureId, samples)
     let surfaceDisposed = false
     return {
       targetId,

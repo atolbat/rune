@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>rune — first-person parkour walker</title>
-  <link rel="stylesheet" href="../shared/demo-shell.css?v=219" />
+  <link rel="stylesheet" href="../shared/demo-shell.css?v=220" />
   <style>
     /* Task 217 — THE GAME IS THE SCREEN: the shell's fullscreen layout
      * (body.rd-fs) fixes the stage over the whole viewport; the walker's
@@ -17,7 +17,11 @@
      * the report's own complaint: «канвас на весь экран». */
     .walker-stage { position: relative; }
     .walker-stage canvas {
-      display: block; width: 100%; height: 100%;
+      /* Task 220 — THE OVERLAY SWAP: the rescue boot's new canvas lands on
+         top of the frozen old one (DOM order); absolute stacking keeps
+         both over the SAME stage pixels — the swap never shows the page
+         background, not even for one frame */
+      position: absolute; inset: 0; display: block; width: 100%; height: 100%;
       touch-action: none; /* the pointer events own every touch */
     }
     .walker-hud {
@@ -75,7 +79,7 @@
 </head>
 <body>
   <div id="app"></div>
-  <script src="../shared/demo-shell.js?v=219"></script>
-  <script type="module" src="./main.js?v=219"></script>
+  <script src="../shared/demo-shell.js?v=220"></script>
+  <script type="module" src="./main.js?v=220"></script>
 </body>
 </html>

@@ -30,7 +30,7 @@
 import {
   createScene, createCamera, createSceneWorkerBridge, createSceneStoreMirror,
   runScenePipeline, bitsBase, H_CAMERA_COUNT, H_NODE_COUNT,
-} from '../../dist/rune-scene.esm.js?v=219'
+} from '../../dist/rune-scene.esm.js?v=220'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
