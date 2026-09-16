@@ -266,6 +266,22 @@ async function mobileLeg(mode) {
   check(`[${mode}:mobile] the look law — the right-half drag turns the camera`,
     Math.abs(yaw1 - yaw0) > 0.15, `yaw ${yaw0.toFixed(2)} → ${yaw1.toFixed(2)}`)
 
+  // Task 222 — THE TOUCH LOOK LAW (the fourth field report: «поменяй вверх
+  // вниз когда камеру пальцем вращаешь»): the vertical drag is the STANDARD
+  // mobile convention — drag DOWN looks DOWN (pitch falls, the horizon
+  // glued to the finger); the old sign was the inverted "flight yoke".
+  const pitch0 = await page.evaluate(() => window.__walker.pitch)
+  await touch(page, 'pointerdown', lx, ly)
+  for (let k = 1; k <= 10; k++) {
+    await touch(page, 'pointermove', lx, ly + k * 12)
+    await page.waitForTimeout(30)
+  }
+  await touch(page, 'pointerup', lx, ly + 120)
+  await page.waitForTimeout(200)
+  const pitch1 = await page.evaluate(() => window.__walker.pitch)
+  check(`[${mode}:mobile] the touch look law — dragging DOWN looks DOWN (the standard convention)`,
+    pitch1 < pitch0 - 0.1, `pitch ${pitch0.toFixed(2)} → ${pitch1.toFixed(2)}`)
+
   // the JUMP button: revealed by touch, pressing leaves the ground
   const jump = await page.evaluate(() => {
     const b = document.querySelector('.walker-jump')

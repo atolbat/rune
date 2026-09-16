@@ -24,12 +24,12 @@
 // window.__walker — the live counters (the smoke/gates read it);
 // window.__walkerGate — the boot validation's promise (the deterministic
 // autopilot: a scripted walk over the course, the laws asserted live).
-import { buildTier } from '../occlusion/tier.js?v=221'
+import { buildTier } from '../occlusion/tier.js?v=222'
 import { perspective, lookAt, mat4Mul, BOX_VERTS, BOX_INDICES } from '../occlusion/scene.js?v=203'
-import { createWorld, BODY, EYE_HEIGHT } from './world.js?v=221'
-import { createControls } from './controls.js?v=221'
-import { terrainShaders } from './shaders-terrain.js?v=221'
-import { createCharacter, createScaleGovernor } from '../../dist/rune.esm.js?v=221'
+import { createWorld, BODY, EYE_HEIGHT } from './world.js?v=222'
+import { createControls } from './controls.js?v=222'
+import { terrainShaders } from './shaders-terrain.js?v=222'
+import { createCharacter, createScaleGovernor } from '../../dist/rune.esm.js?v=222'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -112,10 +112,10 @@ let wdSuspectFrame = -1 // Task 220 — the two-stage verdict's first blank
 let wdBusy = false
 const wdMirror = typeof document !== 'undefined' ? document.createElement('canvas') : null
 if (wdMirror !== null) { wdMirror.width = 16; wdMirror.height = 16 }
-function canvasHasPixels() {
-  if (wdMirror === null || tier === null || tier.canvas === null || tier.canvas === undefined) return true
+function canvasProbe() {
+  if (wdMirror === null || tier === null || tier.canvas === null || tier.canvas === undefined) return { lit: true, max: -1, w: 0, h: 0 }
   const c = tier.canvas
-  if (c.width === 0 || c.height === 0) return false
+  if (c.width === 0 || c.height === 0) return { lit: false, max: -1, w: 0, h: 0 }
   try {
     const x = wdMirror.getContext('2d', { willReadFrequently: true })
     x.clearRect(0, 0, 16, 16)
@@ -124,17 +124,28 @@ function canvasHasPixels() {
     // Task 220 — ANY channel: the sky's own RGB is 143/168/199 — a
     // visible frame lights R, G and B even when a straight/premultiplied
     // alpha quirk zeroes the A byte (the alpha-only check's blind spot).
+    // Task 222 — THE PROBE'S OWN EVIDENCE (the field's own ask: «можешь
+    // сделать больше логов»): the max channel over the mirror rides every
+    // verdict note — a BLIND probe reads max 0/255 over a healthy-sized
+    // canvas (the Android overlay class), a resize-gap reads the same but
+    // heals in frames, a genuinely dead canvas reads it forever — the
+    // notes now carry the numbers the field needs to tell them apart.
+    let max = 0
     for (let k = 0; k < d.length; k += 4) {
-      if (d[k] >= 8 || d[k + 1] >= 8 || d[k + 2] >= 8 || d[k + 3] >= 8) return true
+      if (d[k] > max) max = d[k]
+      if (d[k + 1] > max) max = d[k + 1]
+      if (d[k + 2] > max) max = d[k + 2]
+      if (d[k + 3] > max) max = d[k + 3]
     }
-    return false
-  } catch { return true } // a failed read is not proof of death
+    return { lit: max >= 8, max, w: c.width, h: c.height }
+  } catch { return { lit: true, max: -1, w: 0, h: 0 } } // a failed read is not proof of death
 }
 async function watchdogStep() {
   if (wdBusy || wdStage >= 2 || tier === null) return
   wdBusy = true
   try {
-    if (canvasHasPixels()) { wdStage = 2; wdSuspectFrame = -1; return } // healthy — retire
+    const probe = canvasProbe()
+    if (probe.lit) { wdStage = 2; wdSuspectFrame = -1; return } // healthy — retire
     // Task 219 — THE SNAPSHOT PREDICATE (the false-positive cure): the
     // snapshot leg's present is an ASYNC readback+putImageData — a software
     // stack can take dozens of frames to land the first one. An empty
@@ -153,7 +164,7 @@ async function watchdogStep() {
       if (wdSuspectFrame < 0) {
         wdSuspectFrame = frameIndex
         wdNextFrame = frameIndex + 6
-        shell.log.info(`the live canvas reads blank (frame ${frameIndex}) — a resize-clear or a first-present gap can look like this: confirming at frame ${frameIndex + 6}`)
+        shell.log.info(`the live canvas reads blank (frame ${frameIndex} — the probe's own read: max channel ${probe.max}/255 over ${probe.w}×${probe.h}) — a resize-clear or a first-present gap can look like this: confirming at frame ${frameIndex + 6}`)
         return
       }
       // Task 220 — STAGE TWO (the verdict): blank twice, 6+ frames apart —
@@ -205,10 +216,32 @@ async function watchdogStep() {
           }
         } catch { litPct = null } // the read itself died — the device is gone
         if (litPct !== null && litPct > 0) {
-          noteError(`the canvas never presents but the content is alive (suspect frame ${wdSuspectFrame}, confirmed frame ${frameIndex}, ${ledger.presents} blits submitted, ${litPct}% of the surface lit) — the present lane drops the frames — the WG snapshot path takes over`)
+          // Task 222 — THE BLIND-PROBE LAW (the fourth field report: «на
+          // вебгпу в начале начинает работать, а потом скидывается в
+          // начало» — the log's own evidence: 35 blits submitted, 100% of
+          // the surface lit, THE SCREEN WAS WORKING while the mirror read
+          // blank). Android Chrome promotes an accelerated canvas to a
+          // HARDWARE OVERLAY (direct scanout), and the 2D drawImage
+          // snapshot of an overlay-promoted canvas reads BLANK on a
+          // healthy screen — the probe is BLIND on this device class, not
+          // the present dead. The takeover this branch used to fire
+          // teleported the player to spawn and re-armed the autopilot
+          // (the report's «сбрасывается в начало») for a screen that was
+          // fine — the worst possible rescue. NO programmatic signal can
+          // split a blind probe from a dead present lane (the phone's own
+          // history: every real-device blank verdict so far was either
+          // content-black or this blindness — never a true present
+          // death), and the takeover's cost on a blind probe (a working
+          // game broken: reset + stolen input + the slow readback path
+          // forever) outweighs the miss on a genuinely dead one — the
+          // user's eyes are the present-proof, the note tells them the
+          // radio is the escape. The render is ALIVE — retire, keep the
+          // fast path. A WARN, not an ERROR: a healthy phone's validation
+          // must not fail over its own diagnostics (the zero-new-errors
+          // law counts ERRORs).
+          shell.log.warn(`the mirror probe reads blank but the render is alive (suspect frame ${wdSuspectFrame}, confirmed frame ${frameIndex}, ${ledger.presents} blits submitted, ${litPct}% of the surface lit, the probe's own read: max channel ${probe.max}/255 over ${probe.w}×${probe.h}) — a BLIND PROBE (Android overlay canvases snapshot blank through 2D drawImage), not a present death: the game keeps the fast path — if the screen is actually black, switch the mode — the watchdog retires`)
           wdSuspectFrame = -1
-          wdStage = 1; wdNextFrame = frameIndex + 30
-          await bootTier('webgpu', { snapshot: true, watchdog: true, overlay: true })
+          wdStage = 2
           return
         }
         if (litPct === null) {
@@ -316,6 +349,16 @@ let validationErrorsAtStart = 0 // Task 220 — the re-armed validation's own
 // every law held, the chain's pre-run notes poisoned the count)
 let finishRequested = false
 let finishRunning = false
+// Task 222 — THE GAME PRESERVATION LAW (the fourth field report's
+// «потом скидывается в начало»): every boot after the FIRST keeps the
+// player's game — the walker's transform, the camera, the FRAME CLOCK
+// (the movers' phase: a frameIndex rewind would teleport the elevator
+// out from under the rider's feet mid-carry), and a COMPLETED validation
+// (the laws already held; the old unconditional re-arm yanked the player
+// back to spawn and stole the input for another autopilot run). A
+// rendering rescue must never restart the game it rescues.
+let bootCount = 0
+let settleLawDone = false // the spawn law fires ONCE — a resumed validation mid-course must not re-judge it
 let stripOn = false
 let hizOn = true
 
@@ -334,8 +377,11 @@ async function bootTier(backend, opts = {}) {
   if (!overlay) {
     if (tier !== null) { try { tier.dispose() } catch { /* already dead */ } tier = null }
     // a user-driven boot re-arms the watchdog chain; a watchdog-driven one
-    // (the fallback itself) keeps its stage — the chain must not restart
-    if (opts.watchdog !== true) { wdStage = 0; wdNextFrame = 30 }
+    // (the fallback itself) keeps its stage — the chain must not restart.
+    // Task 222 — the grace is 30 frames FROM NOW (the preserved frame
+    // clock: a mid-game mode switch with the old fixed 30 would probe the
+    // fresh canvas BEFORE its first present — a guaranteed suspect)
+    if (opts.watchdog !== true) { wdStage = 0; wdNextFrame = frameIndex + 30 }
   } else {
     // the old canvas keeps its pixels but must not keep its ID — the
     // gates and the diagnostics address THE canvas (getElementById); the
@@ -346,12 +392,15 @@ async function bootTier(backend, opts = {}) {
   // a fresh tier = a fresh loop state: a validation finish that hung on a
   // dead device left the loop parked (paused) — without this reset the
   // fallback boots into a frozen loop and the watchdog never re-checks.
-  // A watchdog boot also re-arms the validation (a fresh chance on the
-  // healthy backend; the hung promise is orphaned with its dead tier).
+  // A watchdog boot also re-arms the validation — Task 222: ONLY when the
+  // previous run never finished (a hung promise is orphaned with its dead
+  // tier; a COMPLETED run stays completed — re-arming a finished game
+  // steals the input and walks the player back through the course).
+  const priorValidationDone = validationDone
   paused = false
   finishRequested = false
   finishRunning = false
-  if (opts.watchdog === true) validationRunning = false
+  if (opts.watchdog === true && !priorValidationDone) validationRunning = false
   try {
     const nextTier = await buildTier({
       backend,
@@ -430,13 +479,20 @@ async function bootTier(backend, opts = {}) {
     stats.backend = tier.mode
     stats.kind = tier.kind
     stats.errors = errors.length
-    // respawn + a fresh camera at the course's start
-    walker.teleport(world.spawn.x, world.spawn.y, world.spawn.z)
-    cam.yaw = world.spawn.yaw
-    cam.pitch = -0.06
-    frameIndex = 0
+    // Task 222 — THE GAME PRESERVATION LAW: the FIRST boot alone spawns
+    // the course; every later boot (a rescue, a mode switch) keeps the
+    // player's world — position, camera, frame clock — and a completed
+    // validation stays completed. The old unconditional teleport+rewind
+    // was the «сбрасывается в начало» half of the fourth report (the
+    // takeover was the trigger; this was the damage).
+    if (bootCount === 0) {
+      walker.teleport(world.spawn.x, world.spawn.y, world.spawn.z)
+      cam.yaw = world.spawn.yaw
+      cam.pitch = -0.06
+      frameIndex = 0
+    }
+    bootCount++
     lastT = -1
-    validationDone = false
     if (typeof window !== 'undefined') window.__walkerTier = tier
     // (re)position the HUD + the jump button over the tier's canvas
     stage.appendChild(hud)
@@ -444,7 +500,7 @@ async function bootTier(backend, opts = {}) {
     if (jb !== null) stage.appendChild(jb) // keep the button on top
     shell.markReady()
     startLoop()
-    if (!BARE && !validationRunning) {
+    if (!BARE && !validationRunning && !validationDone) {
       validationErrorsAtStart = errors.length // Task 220 — the fresh run's own baseline
       void runValidation()
     }
@@ -558,6 +614,15 @@ function startLoop() {
     stats.scaleLevel = g.level
     if (g.changed) {
       stats.scaleApplied = qualityAuto ? tier.setRenderScale(SCALE_LEVELS[g.level]) : null
+      // Task 222 — THE FIELD VISIBILITY (the report's own ask: «можешь
+      // сделать больше логов»): every level change is now a log line —
+      // the scale math AND the resize-clear warning (a canvas.width write
+      // clears the bitmap until the next present — spec — so a blank
+      // watchdog probe inside this window is the resize, not death; the
+      // correlation is now readable straight from the field log).
+      if (qualityAuto) {
+        shell.log.info(`render scale → ${SCALE_LEVELS[g.level]}× (frame ${frameIndex}, frame-time EMA ${(g.ema * 1000).toFixed(1)} ms) — the canvas re-derives its backing store (a brief bitmap clear until the next present is spec behavior, not a glitch)`)
+      }
     }
 
     // 5. THE FRAME (the tier's own contract; the terrain passes ride inside)
@@ -673,7 +738,8 @@ function autopilot(dt, simT) {
   // THE SETTLE: the first 24 frames stand still (spawn → grounded on the
   // plaza slab); the law reads at frame 20, the walk begins after
   if (frameIndex < 24) {
-    if (frameIndex === 20) {
+    if (frameIndex === 20 && !settleLawDone) {
+      settleLawDone = true // Task 222 — the spawn law fires once; a resumed run re-arms the validation WITHOUT re-judging the spawn (the walker is mid-course)
       check('the settle law — spawns onto the plaza, grounded', s.grounded && Math.abs(s.y - (course.plazaH + 0.25)) < 0.05, `y=${s.y.toFixed(2)}`)
     }
     return idle

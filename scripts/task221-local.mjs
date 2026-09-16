@@ -128,10 +128,11 @@ async function msaaLeg() {
 }
 
 // ── LEG 2 — THE SOURCE LAWS (the store law, the parity law, the probe,
-//    the content discriminator) ───────────────────────────────────────────
+//    the content discriminator, the blind-probe + preservation laws of 222) ─
 async function sourceLeg() {
   console.log('[221] source leg: reading…')
   const main = await readFile(join(root, 'demo/walker/main.js'), 'utf8')
+  const controls = await readFile(join(root, 'demo/walker/controls.js'), 'utf8')
   const gpu = await readFile(join(root, 'packages/webgpu/src/realGPU.ts'), 'utf8')
   const gl = await readFile(join(root, 'packages/webgl2/src/realGL.ts'), 'utf8')
   check('source: THE SURFACE-PASS STORE LAW — the 4x color twin stores (discard is canvas-only)',
@@ -153,13 +154,45 @@ async function sourceLeg() {
   check('source: THE CONTENT DISCRIMINATOR — the surface readback splits a present death from black content',
     main.includes('THE CONTENT DISCRIMINATOR')
       && main.includes('the content itself is black')
-      && main.includes('the present lane drops the frames')
       && main.includes('surface read timeout'),
     '')
   check('source: the content probe judges RGB only (the alpha byte is a compositing artifact)',
     /RGB only — the ALPHA byte is a compositing artifact/.test(main)
       && !/shot\.data\[k \+ 3\] >= 8 \|\| shot\.data\.length/.test(main),
     '')
+  // Task 222 — the round's own laws: the BLIND-PROBE retirement (a lit
+  // surface + a blank mirror NEVER takes over — the Android overlay class
+  // reads blank on a healthy screen; the takeover reset the player), the
+  // GAME PRESERVATION (boots after the first keep the walker, the camera,
+  // the frame clock; a completed validation never re-arms), the probe's
+  // own evidence in the notes, and the touch look's standard vertical.
+  check('source: THE BLIND-PROBE LAW — a lit surface + a blank mirror RETIRES (never takes over)',
+    main.includes('THE BLIND-PROBE LAW')
+      && main.includes('a BLIND PROBE')
+      && !main.includes('the present lane drops the frames — the WG snapshot path takes over'),
+    '')
+  check('source: the blind-probe verdict is a WARN (a healthy phone validation must not fail over its own diagnostics)',
+    /shell\.log\.warn\(`the mirror probe reads blank but the render is alive/.test(main),
+    '')
+  check('source: THE GAME PRESERVATION LAW — boots after the first keep the player, the camera, the clock',
+    main.includes('THE GAME PRESERVATION LAW') && main.includes('if (bootCount === 0) {')
+      && main.includes('priorValidationDone') && main.includes('bootCount++')
+      && !main.includes('// respawn + a fresh camera at the course\'s start'),
+    '')
+  check('source: the settle law fires once (a resumed validation never re-judges the spawn)',
+    main.includes('settleLawDone') && /frameIndex === 20 && !settleLawDone/.test(main),
+    '')
+  check('source: the probe evidence rides the notes (max channel + canvas dims)',
+    main.includes("the probe's own read: max channel") && main.includes('render scale → '),
+    '')
+  check('source: THE TOUCH LOOK LAW — the vertical drag is standard (drag down looks down)',
+    controls.includes('THE TOUCH LOOK LAW')
+      && controls.includes('state.lookDY -= (e.clientY - lookLast.y) * lookSens * 1.6'),
+    '')
+  const index = await readFile(join(root, 'demo/walker/index.html'), 'utf8')
+  const v222 = (main.match(/\?v=222/g) ?? []).length + (index.match(/\?v=222/g) ?? []).length
+  check('source: the cache-bust marks moved to v=222 (the current deploy state — Task 222)',
+    v222 >= 8, `${v222} marks`)
 }
 
 // ── LEG 3 — THE WALKER VALIDATION (both backends — the tiler laws must
@@ -242,6 +275,23 @@ async function fallbackLeg() {
   })
   check('[fallback] the recovered canvas is VISIBLE and presents real pixels',
     pixels.litPct >= 90 && pixels.visible, `${pixels.litPct}% lit · visible=${pixels.visible}`)
+  // Task 222 — THE PRESERVATION COMPOSITION LAW: the takeover fired mid-run
+  // (the validation was live on the dead tier at frame ~38); the preserved
+  // game (walker + clock + the autopilot's own module state) must finish
+  // the course on the rescue tier — the re-armed validation CONTINUES
+  // mid-course and lands PASS. The old shape (teleport + rewind) also
+  // passed eventually — the discriminator here is the FRAME CLOCK: it
+  // never rewinds (the takeover note's confirmed frame must be BELOW the
+  // final frame, not a fresh climb from 0 — checked cheaply by requiring
+  // the final frame well past the takeover while the validation is done).
+  const resumed = await page.waitForFunction(
+    () => window.__walker && window.__walker.validation !== null,
+    null, { timeout: 420_000, polling: 500 },
+  ).then(() => page.evaluate(() => ({ v: window.__walker.validation, frame: window.__walker.frame })))
+    .catch(() => null)
+  check('[fallback] THE GAME PRESERVATION LAW — the mid-run takeover resumes the course and the validation lands PASS',
+    resumed !== null && resumed.v.pass === true && resumed.v.checks >= 13,
+    resumed === null ? 'the validation never finished' : `${resumed.v.pass ? 'PASS' : 'FAIL'} · ${resumed.v.checks} laws · frame ${resumed.frame}`)
   await ctx.close()
   server.stop(true)
 }

@@ -8,7 +8,7 @@
 //
 // The import is the dist bundle (the same bytes the main thread loads) —
 // one library, two threads, zero copies: the SAB regions ARE the store.
-import { runSceneWorker } from '../../dist/rune-scene.esm.js?v=221'
+import { runSceneWorker } from '../../dist/rune-scene.esm.js?v=222'
 
 self.onmessage = (e) => {
   const m = e.data

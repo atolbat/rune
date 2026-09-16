@@ -157,7 +157,14 @@ export function createControls(opts = {}) {
         moveKnob(kx, ky)
       } else if (e.pointerId === lookId && lookLast !== null) {
         state.lookDX += (e.clientX - lookLast.x) * lookSens * 1.6
-        state.lookDY += (e.clientY - lookLast.y) * lookSens * 1.6
+        // Task 222 — THE TOUCH LOOK LAW (the fourth field report: «еще
+        // поменяй вверх вниз когда камеру пальцем вращаешь»): the vertical
+        // drag is the STANDARD mobile convention — drag DOWN looks DOWN
+        // (the horizon feels glued to the finger). The old sign was the
+        // inverted "flight yoke" feel (drag down = look up); the desktop
+        // pointer-lock axis (movementY, a different convention of its own)
+        // is untouched — the ask was the finger alone.
+        state.lookDY -= (e.clientY - lookLast.y) * lookSens * 1.6
         lookLast = { x: e.clientX, y: e.clientY }
       }
       e.preventDefault()

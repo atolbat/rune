@@ -124,7 +124,12 @@ async function sourceLeg() {
   check('source: the confirm cadence is 6 frames (past every resize-clear gap)',
     main.includes('wdNextFrame = frameIndex + 6'), '')
   check('source: the probe reads ANY channel (the alpha-only blind spot is dead)',
-    /d\[k \+ 1\] >= 8 \|\| d\[k \+ 2\] >= 8/.test(main), '')
+    // Task 222 — canvasProbe: the max scan covers R, G, B AND A (any lit
+    // channel lights the probe); the old per-index shape moved into the
+    // max-channel form (the evidence rides the verdict notes now)
+    /if \(d\[k\] > max\) max = d\[k\]/.test(main)
+      && /if \(d\[k \+ 3\] > max\) max = d\[k \+ 3\]/.test(main),
+    '')
   check('source: the overlay swap ships (the underlay + the invisible-until-landed canvas)',
     main.includes('overlayTier') && main.includes("style.visibility = 'hidden'") && main.includes("style.visibility = ''"),
     '')
@@ -138,9 +143,9 @@ async function sourceLeg() {
     index.includes('position: absolute; inset: 0'), '')
   check('source: the A6 capability-split law ships (harvest where the surface can, fill where it cannot)',
     main.includes('harvestCapable') && main.includes('tier.surface.depthTextureId !== undefined'), '')
-  const v221 = (main.match(/\?v=221/g) ?? []).length + (index.match(/\?v=221/g) ?? []).length
-  check('source: the cache-bust marks moved to v=221 (the current deploy state — Task 221)',
-    v221 >= 8, `${v221} marks`)
+  const v222 = (main.match(/\?v=222/g) ?? []).length + (index.match(/\?v=222/g) ?? []).length
+  check('source: the cache-bust marks moved to v=222 (the current deploy state — Task 222)',
+    v222 >= 8, `${v222} marks`)
 }
 
 // ── LEG 3 — THE WALKER VALIDATION (both backends: the 14 laws hold with

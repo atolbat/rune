@@ -22,7 +22,7 @@
 import {
   terrain, terrainGrid, gridHeightSampler, heightHills,
   buildOctreeRecords, recordView, adoptStore,
-} from '../../dist/rune.esm.js?v=221'
+} from '../../dist/rune.esm.js?v=222'
 
 export const TERRAIN_SIZE = 512
 export const TERRAIN_SEG = 128 // step 4 m exactly (the sampler's power-of-two round trip)

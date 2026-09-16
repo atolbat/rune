@@ -24,7 +24,7 @@
 // window.__hizStats — the live counters (the smoke/gates read it);
 // window.__hizGate — the probe verdict (?probe=1: WG-only, the Task-196
 // contract; ?probe=1&mode=webgl2: both tiers + the cross-tier parity).
-import { buildTier } from './tier.js?v=221'
+import { buildTier } from './tier.js?v=222'
 import {
   createScene, cameraAt, VAL_CAMERAS,
   HIZ_W, HIZ_H, LEVELS,
@@ -33,7 +33,7 @@ import {
   buildOctreeRecords, buildBVHRecords, frustumPlanes, aabbOutsideFrustum,
   recordView, flatCull, clusterize, softwareOccluder, cameraRay, rayBoxes,
   layerPolicy, adoptStore,
-} from '../../dist/rune.esm.js?v=221'
+} from '../../dist/rune.esm.js?v=222'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
