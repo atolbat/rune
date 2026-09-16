@@ -1122,6 +1122,26 @@ export function createRealGL(
     // storage leaves the MSAA FBO incomplete and the honest throw below
     // fires (the caller's capability ladder catches it and re-boots 1x).
     const targetSamples = samples !== undefined && samples > 1 ? samples : 1
+    // Task 221 — THE DEPTH-FORMAT PARITY LAW (the phone field report's
+    // «на вебгл ничего не рендерится вообще» + the log's
+    // «GL error: INVALID_OPERATION — an error accumulated in the last
+    // frame»): the boundary resolve blits DEPTH whenever the target
+    // carries a depthTexture, and blitFramebuffer REQUIRES the read and
+    // draw depth formats to be IDENTICAL — the 220 shape hardcoded
+    // DEPTH_COMPONENT24 for the 4x twin against the 1x side's
+    // DEPTH_COMPONENT32F texture (and DEPTH_COMPONENT16/32F renderbuffers
+    // for the depthBits legs): both FBOs reported COMPLETE (the mismatch
+    // is invisible to checkFramebufferStatus — it judges each FBO alone),
+    // then EVERY resolve blit raised INVALID_OPERATION and no-op'd —
+    // COLOR included — so the caller's texture never received a pixel and
+    // the presentation blit showed an empty surface. One depth format for
+    // the whole target — the 1x attachment and the 4x twin share it by
+    // construction, and the blit is format-identical by the same law.
+    const depthFormat = depthTextureId !== undefined
+      ? gl.DEPTH_COMPONENT32F
+      : depthBits === 24 ? gl.DEPTH_COMPONENT24
+        : depthBits === 32 ? gl.DEPTH_COMPONENT32F
+          : gl.DEPTH_COMPONENT16
     const fbo = gl.createFramebuffer()
     if (fbo === null) throw new Error('rune: createFramebuffer returned null')
     let depthRenderbuffer: WebGLRenderbuffer | null = null
@@ -1153,22 +1173,24 @@ export function createRealGL(
       // the exact f32 z the fragment computes, so a GPU cull pass that
       // compares f32 tile values against the attachment's decisions has NO
       // quantization gap to sliver on).
-      const depthFormat = depthBits === 24 ? gl.DEPTH_COMPONENT24 : depthBits === 32 ? gl.DEPTH_COMPONENT32F : gl.DEPTH_COMPONENT16
-      depthRenderbuffer = gl.createRenderbuffer()
-      if (depthRenderbuffer === null) throw new Error('rune: createRenderbuffer returned null')
-      gl.bindRenderbuffer(gl.RENDERBUFFER, depthRenderbuffer)
-      gl.renderbufferStorage(gl.RENDERBUFFER, depthFormat, width, height)
-      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthRenderbuffer)
+        depthRenderbuffer = gl.createRenderbuffer()
+        if (depthRenderbuffer === null) throw new Error('rune: createRenderbuffer returned null')
+        gl.bindRenderbuffer(gl.RENDERBUFFER, depthRenderbuffer)
+        gl.renderbufferStorage(gl.RENDERBUFFER, depthFormat, width, height)
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthRenderbuffer)
       }
     }
     const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER)
     // ── Task 220 — THE MSAA TWINS: the RESOLVE fbo above (the caller's
     //    color texture + the depth attachment) passed its completeness —
-    //    now the 4x render fbo: rgba8 color + depth24 renderbuffers at the
+    //    now the 4x render fbo: rgba8 color + depth renderbuffers at the
     //    target's size, all at the same sample count (the completeness
     //    law). This fbo is what bindTarget binds for a multisampled
     //    target; the resolve blit carries the pixels into the caller's
     //    texture at every pass boundary leaving the target.
+    //    Task 221: the depth twin rides the TARGET's own depthFormat (the
+    //    parity law above) — DEPTH_COMPONENT32F when the resolve side is
+    //    the 32f harvest texture, the depthBits pick otherwise.
     let msaaFbo: WebGLFramebuffer | null = null
     let msaaColorRb: WebGLRenderbuffer | null = null
     let msaaDepthRb: WebGLRenderbuffer | null = null
@@ -1185,7 +1207,7 @@ export function createRealGL(
         msaaDepthRb = gl.createRenderbuffer()
         if (msaaDepthRb === null) throw new Error('rune: createRenderbuffer returned null')
         gl.bindRenderbuffer(gl.RENDERBUFFER, msaaDepthRb)
-        gl.renderbufferStorageMultisample(gl.RENDERBUFFER, targetSamples, gl.DEPTH_COMPONENT24, width, height)
+        gl.renderbufferStorageMultisample(gl.RENDERBUFFER, targetSamples, depthFormat, width, height)
         gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, msaaDepthRb)
       }
       const msaaStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER)
@@ -1197,6 +1219,43 @@ export function createRealGL(
         if (depthRenderbuffer !== null) gl.deleteRenderbuffer(depthRenderbuffer)
         gl.deleteFramebuffer(fbo)
         throw new Error(`rune: surface MSAA FBO incomplete (status ${msaaStatus}) — ${targetSamples}x at ${width}x${height}`)
+      }
+      // Task 221 — THE CREATION-TIME RESOLVE PROBE (the capability
+      // ladder's missing rung): FBO completeness judges each framebuffer
+      // ALONE — it cannot see that the RESOLVE BLIT between them will be
+      // refused (the 220 field death: both FBOs COMPLETE, every boundary
+      // blit INVALID_OPERATION, the canvas blank while the log only said
+      // so seconds later). A 1×1 dry-run of the exact resolve blit (the
+      // same mask, the same NEAREST filter) at creation converts the
+      // class into a LOUD boot-time refusal the caller's ladder catches
+      // (the 1x re-boot with the note) — the storage probe above cannot:
+      // a driver can accept the storages and still refuse the blit. The
+      // probe writes one pixel into the caller's just-created (still
+      // uninitialized) textures — the first real frame's clear + full
+      // resolve overwrite it. Sticky errors are drained BEFORE the blit
+      // so a stale flag from an earlier op cannot poison the verdict.
+      if (typeof gl.getError === 'function') {
+        // bounded drain (the renderer's own getError sweep discipline): a
+        // mock or a broken driver must not hang the boot in this loop
+        for (let i = 0; i < 16; i++) { if (gl.getError() === 0) break }
+        const probeMask = attachedDepthTexture ? gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT : gl.COLOR_BUFFER_BIT
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, msaaFbo)
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fbo)
+        gl.blitFramebuffer(0, 0, 1, 1, 0, 0, 1, 1, probeMask, gl.NEAREST)
+        gl.bindFramebuffer(gl.FRAMEBUFFER, currentTarget === 0 ? null : targets.get(currentTarget)?.fbo ?? null)
+        const probeError = gl.getError()
+        if (probeError !== 0) {
+          if (msaaDepthRb !== null) gl.deleteRenderbuffer(msaaDepthRb)
+          if (msaaColorRb !== null) gl.deleteRenderbuffer(msaaColorRb)
+          gl.deleteFramebuffer(msaaFbo)
+          if (depthRenderbuffer !== null) gl.deleteRenderbuffer(depthRenderbuffer)
+          gl.deleteFramebuffer(fbo)
+          throw new Error(
+            `rune: the driver refused the multisample resolve blit (GL error 0x${probeError.toString(16)}) — ` +
+            `${targetSamples}x at ${width}x${height}. The MSAA surface declines loudly instead of rendering blank frames; ` +
+            'the caller re-boots the surface at 1x.',
+          )
+        }
       }
     }
     // Restore the previous target before a possible throw: the state does not leak

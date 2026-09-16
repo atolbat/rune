@@ -24,12 +24,12 @@
 // window.__walker — the live counters (the smoke/gates read it);
 // window.__walkerGate — the boot validation's promise (the deterministic
 // autopilot: a scripted walk over the course, the laws asserted live).
-import { buildTier } from '../occlusion/tier.js?v=220'
+import { buildTier } from '../occlusion/tier.js?v=221'
 import { perspective, lookAt, mat4Mul, BOX_VERTS, BOX_INDICES } from '../occlusion/scene.js?v=203'
-import { createWorld, BODY, EYE_HEIGHT } from './world.js?v=220'
-import { createControls } from './controls.js?v=220'
-import { terrainShaders } from './shaders-terrain.js?v=220'
-import { createCharacter, createScaleGovernor } from '../../dist/rune.esm.js?v=220'
+import { createWorld, BODY, EYE_HEIGHT } from './world.js?v=221'
+import { createControls } from './controls.js?v=221'
+import { terrainShaders } from './shaders-terrain.js?v=221'
+import { createCharacter, createScaleGovernor } from '../../dist/rune.esm.js?v=221'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const PROBE = PARAMS.has('probe')
@@ -159,6 +159,70 @@ async function watchdogStep() {
       // Task 220 — STAGE TWO (the verdict): blank twice, 6+ frames apart —
       // the presents genuinely never land. The message carries BOTH
       // frames (the field log's own evidence trail).
+      // Task 221 — THE CONTENT DISCRIMINATOR (the third field report's
+      // lesson): a blank canvas is not one disease. THE PRESENT-LEDGER
+      // first — presents === 0 means the blits never even submitted (the
+      // present lane is dead: the device-death class — the snapshot
+      // rescue presents through the readback lane and takes over, the
+      // chain as designed). presents > 0 means the blits RUN yet the
+      // canvas reads black — and THAT splits in two, so the SURFACE's own
+      // readback discriminates (it rides the copy lane, not the present
+      // lane): LIT content + a blank canvas = the present lane drops the
+      // frames while the render is fine — the snapshot rescue SAVES
+      // exactly this class (the takeover, with the evidence); BLANK
+      // content = the render itself is black (the Task-220/221
+      // load-after-discard class) — the snapshot path renders the SAME
+      // bytes through its readback, the rescue would show the same black
+      // while burning the fast path — the honest verdict is the note +
+      // retirement; a REJECTED read = the device died mid-run — a fresh
+      // device walks the chain.
+      const ledger = typeof tier.presentHealth === 'function' ? tier.presentHealth() : { presents: 0, landed: 0, refused: 0 }
+      if ((ledger.presents ?? 0) > 0) {
+        let litPct = null
+        try {
+          // bounded: a hung read must not hang the verdict with it — the
+          // surface is probed through a 1.5 s race; on a live device the
+          // readback lands in a few frames, on a dead one it rejects (or
+          // stalls — and a stalled read + a blank canvas is the chain
+          // walking either way)
+          const shot = await Promise.race([
+            tier.surface.read(),
+            new Promise((_, reject) => { setTimeout(() => reject(new Error('surface read timeout')), 1500) }),
+          ])
+          if (shot.width > 0 && shot.height > 0 && shot.data.length >= shot.width * shot.height * 4) {
+            let lit = 0
+            const total = shot.width * shot.height
+            // RGB only — the ALPHA byte is a compositing artifact, not
+            // content: a driver's discarded-memory resolve can read as
+            // (0,0,0,255) — opaque BLACK — and an alpha-inclusive check
+            // would call that "alive" while the screen shows darkness.
+            // The walker's own sky is 143/168/199 — a healthy frame lights
+            // the RGB channels wall to wall.
+            for (let k = 0; k < shot.data.length; k += 4) {
+              if (shot.data[k] >= 8 || shot.data[k + 1] >= 8 || shot.data[k + 2] >= 8) lit++
+            }
+            litPct = Math.round(lit / total * 100)
+          }
+        } catch { litPct = null } // the read itself died — the device is gone
+        if (litPct !== null && litPct > 0) {
+          noteError(`the canvas never presents but the content is alive (suspect frame ${wdSuspectFrame}, confirmed frame ${frameIndex}, ${ledger.presents} blits submitted, ${litPct}% of the surface lit) — the present lane drops the frames — the WG snapshot path takes over`)
+          wdSuspectFrame = -1
+          wdStage = 1; wdNextFrame = frameIndex + 30
+          await bootTier('webgpu', { snapshot: true, watchdog: true, overlay: true })
+          return
+        }
+        if (litPct === null) {
+          noteError(`the canvas reads blank and the surface read died with it (suspect frame ${wdSuspectFrame}, confirmed frame ${frameIndex}, ${ledger.presents} blits submitted before the death) — the WG device is gone — the chain walks`)
+          wdSuspectFrame = -1
+          wdStage = 1; wdNextFrame = frameIndex + 30
+          await bootTier('webgpu', { snapshot: true, watchdog: true, overlay: true })
+          return
+        }
+        noteError(`the content itself is black (suspect frame ${wdSuspectFrame}, confirmed frame ${frameIndex}, ${ledger.presents} blits submitted, ${litPct}% of the surface lit) — a rendering fault, not a present death (the snapshot path would render the same bytes) — the watchdog retires`)
+        wdSuspectFrame = -1
+        wdStage = 2
+        return
+      }
       noteError(`the live canvas never presented (suspect frame ${wdSuspectFrame}, confirmed frame ${frameIndex}) — the WG snapshot path takes over`)
       wdSuspectFrame = -1
       wdStage = 1; wdNextFrame = frameIndex + 30

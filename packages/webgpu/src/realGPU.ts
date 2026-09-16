@@ -1510,16 +1510,31 @@ export async function createRealGPU(
       // resolve is part of the pass, landing when the pass ends; one pass,
       // one resolve — the healthy single-resolve shape of the Task-219
       // isolation matrix, now pointed at a surface instead of the canvas).
-      // storeOp 'discard': the 4x contents are never read again — only the
-      // resolve matters. The depth rides the 4x twin (all attachments of a
-      // pass share the sample count). The pipeline variant axis (Task 198)
-      // keys on passSamples — the 4x twins compile lazily, exactly like the
-      // canvas-MSAA era's.
+      // Task 221 — THE SURFACE-PASS STORE LAW (the phone field report's
+      // «опять тёмный экран»): a surface target is RE-OPENED BY DESIGN —
+      // the drawMesh tape contract ENDS its pass (the compute bricks
+      // refuse to run under an open render pass), and the next brick
+      // re-binds the SAME target with loadOp:'load' (the walker's own
+      // frame: terrain-color ends its pass, the crowd's color pass re-opens
+      // the surface to merge over it). storeOp:'discard' — the 220 shape —
+      // left those re-opens reading DISCARDED samples: spec-legal,
+      // contents UNDEFINED, «black screens on mobile tilers, garbage on
+      // desktops» (the canvas-pass law's own words — the exact class it
+      // was written against, re-grown on the surface). The discard
+      // optimization is legal ONLY under a PROVEN one-pass contract; a
+      // surface has none (any caller may end and re-open), so the 4x
+      // samples STORE at every pass end and every loadOp:'load' re-open
+      // reads real pixels. The resolve still lands at each pass end — the
+      // later resolve overwrites the earlier whole-surface blit, idempotent.
+      // The DEPTH twin already stored (depthStoreOp:'store' — the 220 code
+      // got the depth right and the color wrong); only the color changes.
+      // The pipeline variant axis (Task 198) keys on passSamples — the 4x
+      // twins compile lazily, exactly like the canvas-MSAA era's.
       passSamples = target.samples
       if (target.samples > 1 && target.msaaColorView !== null) {
         colorView = target.msaaColorView
         resolveTarget = target.view
-        storeOp = 'discard'
+        storeOp = 'store'
         depthAttachment = target.msaaDepthView !== null ? {
           view: target.msaaDepthView,
           depthClearValue: 1,

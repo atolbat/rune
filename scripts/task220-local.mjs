@@ -138,8 +138,9 @@ async function sourceLeg() {
     index.includes('position: absolute; inset: 0'), '')
   check('source: the A6 capability-split law ships (harvest where the surface can, fill where it cannot)',
     main.includes('harvestCapable') && main.includes('tier.surface.depthTextureId !== undefined'), '')
-  const v220 = (main.match(/\?v=220/g) ?? []).length + (index.match(/\?v=220/g) ?? []).length
-  check('source: the cache-bust marks moved to v=220', v220 >= 8, `${v220} marks`)
+  const v221 = (main.match(/\?v=221/g) ?? []).length + (index.match(/\?v=221/g) ?? []).length
+  check('source: the cache-bust marks moved to v=221 (the current deploy state — Task 221)',
+    v221 >= 8, `${v221} marks`)
 }
 
 // ── LEG 3 — THE WALKER VALIDATION (both backends: the 14 laws hold with

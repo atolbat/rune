@@ -8752,6 +8752,7 @@ function createRealGL(gl, onViewportHeal) {
   }
   function createTarget(textureId, width, height, depth2, color, depthBits, depthTextureId, samples) {
     const targetSamples = samples !== undefined && samples > 1 ? samples : 1;
+    const depthFormat2 = depthTextureId !== undefined ? gl.DEPTH_COMPONENT32F : depthBits === 24 ? gl.DEPTH_COMPONENT24 : depthBits === 32 ? gl.DEPTH_COMPONENT32F : gl.DEPTH_COMPONENT16;
     const fbo = gl.createFramebuffer();
     if (fbo === null)
       throw new Error("rune: createFramebuffer returned null");
@@ -8770,7 +8771,6 @@ function createRealGL(gl, onViewportHeal) {
         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, depthTexture, 0);
         attachedDepthTexture = true;
       } else {
-        const depthFormat2 = depthBits === 24 ? gl.DEPTH_COMPONENT24 : depthBits === 32 ? gl.DEPTH_COMPONENT32F : gl.DEPTH_COMPONENT16;
         depthRenderbuffer = gl.createRenderbuffer();
         if (depthRenderbuffer === null)
           throw new Error("rune: createRenderbuffer returned null");
@@ -8799,7 +8799,7 @@ function createRealGL(gl, onViewportHeal) {
         if (msaaDepthRb === null)
           throw new Error("rune: createRenderbuffer returned null");
         gl.bindRenderbuffer(gl.RENDERBUFFER, msaaDepthRb);
-        gl.renderbufferStorageMultisample(gl.RENDERBUFFER, targetSamples, gl.DEPTH_COMPONENT24, width, height);
+        gl.renderbufferStorageMultisample(gl.RENDERBUFFER, targetSamples, depthFormat2, width, height);
         gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, msaaDepthRb);
       }
       const msaaStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
@@ -8814,6 +8814,29 @@ function createRealGL(gl, onViewportHeal) {
           gl.deleteRenderbuffer(depthRenderbuffer);
         gl.deleteFramebuffer(fbo);
         throw new Error(`rune: surface MSAA FBO incomplete (status ${msaaStatus}) — ${targetSamples}x at ${width}x${height}`);
+      }
+      if (typeof gl.getError === "function") {
+        for (let i = 0;i < 16; i++) {
+          if (gl.getError() === 0)
+            break;
+        }
+        const probeMask = attachedDepthTexture ? gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT : gl.COLOR_BUFFER_BIT;
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, msaaFbo);
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fbo);
+        gl.blitFramebuffer(0, 0, 1, 1, 0, 0, 1, 1, probeMask, gl.NEAREST);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, currentTarget === 0 ? null : targets.get(currentTarget)?.fbo ?? null);
+        const probeError = gl.getError();
+        if (probeError !== 0) {
+          if (msaaDepthRb !== null)
+            gl.deleteRenderbuffer(msaaDepthRb);
+          if (msaaColorRb !== null)
+            gl.deleteRenderbuffer(msaaColorRb);
+          gl.deleteFramebuffer(msaaFbo);
+          if (depthRenderbuffer !== null)
+            gl.deleteRenderbuffer(depthRenderbuffer);
+          gl.deleteFramebuffer(fbo);
+          throw new Error(`rune: the driver refused the multisample resolve blit (GL error 0x${probeError.toString(16)}) — ` + `${targetSamples}x at ${width}x${height}. The MSAA surface declines loudly instead of rendering blank frames; ` + "the caller re-boots the surface at 1x.");
+        }
       }
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, currentTarget === 0 ? null : targets.get(currentTarget)?.fbo ?? null);
@@ -14598,7 +14621,7 @@ async function createRealGPU(canvas, onGpuError, onDeviceLost, hints) {
       if (target.samples > 1 && target.msaaColorView !== null) {
         colorView = target.msaaColorView;
         resolveTarget = target.view;
-        storeOp = "discard";
+        storeOp = "store";
         depthAttachment = target.msaaDepthView !== null ? {
           view: target.msaaDepthView,
           depthClearValue: 1,
