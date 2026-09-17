@@ -77,9 +77,24 @@ const shell = window.RuneDemoShell.mount({
 })
 
 const errors = []
+// ── THE FIELD LOG (Task 224 — the phone report's «там нет ничего лога,
+// только инфобокс сверху»): the shell's log panel lives behind the FAB
+// sheet — on a phone in the field that is a HIDDEN drawer, and a
+// present-lane death leaves the screen black with the evidence locked
+// away. The HUD itself now carries the tail: the boot shape, the
+// validation verdict, every failed law, and every device error ride the
+// SCREEN — the channel that would have shown this round's own bug as
+// on-screen text («a validation error killed the submit») instead of a
+// bare black flicker.
+const fieldLog = []
+function fieldNote(tag, message) {
+  fieldLog.push(`${tag} ${message}`)
+  if (fieldLog.length > 5) fieldLog.shift()
+}
 function noteError(message) {
   errors.push(message)
   if (typeof window !== 'undefined') window.__forestErrs = errors.slice()
+  fieldNote('ERR', message)
   shell.log.error(message)
 }
 
@@ -175,11 +190,11 @@ function cameraAt(aspect) {
 let tier = null
 let bootToken = 0
 const stats = {
-  backend: null, kind: null, frame: 0,
+  backend: null, kind: null, frame: 0, presents: 0,
   drawn: -1, occluded: -1, frustumCulled: -1, total: 0,
   runs: [0, 0, 0, 0], instances: [0, 0, 0, 0],
   fps: 0, validation: null, checks: [], errors: 0,
-  loadMs: 0, bytes: 0,
+  loadMs: 0, bytes: 0, tail: fieldLog,
 }
 if (typeof window !== 'undefined') window.__forest = stats
 
@@ -577,6 +592,11 @@ async function bootTier(backend) {
   let blitLanded = 0
   let presentEvery = 1
   function present() {
+    // THE PRESENT LEDGER: every invocation counts (the walker's own
+    // witness). The frame's own law: presents === frameIndex (+1 mid-
+    // frame) — a present() called anywhere else on the frame path doubles
+    // the count and the regression is measurable from the field itself.
+    stats.presents++
     if (MODE === 'snapshot') {
       // THE READBACK LANE'S AIR: the snapshot present reads the surface
       // EVERY frame on a 60fps software leg — an endless mapAsync chain
@@ -618,7 +638,22 @@ async function bootTier(backend) {
     const props = { camera, runs: { all, byBand }, target: surface.targetId, wantStats }
     lastFrame = fg.compile(props)
     lastReport = lastFrame.run(props)
-    present()
+    // THE ONE-PRESENT LAW (Task 224 — the phone report's «постоянно мигает
+    // на чёрный экран, потом появляется террейн, деревья могут появиться,
+    // а могут и нет»): the present pass above IS the frame boundary — ONE
+    // blit, submitted inside the frame that encoded it. A present() call
+    // HERE was a SECOND canvas pass opened into a fresh encoder with no
+    // submit of its own: the pass rode the NEXT frame's submit against an
+    // EXPIRED canvas texture (getCurrentTexture() hands each frame its own
+    // texture and the compositor expires it at the frame boundary), the
+    // validation error killed the WHOLE submit — the next frame's own blit
+    // included — and every other frame never presented. The phone's
+    // overlay canvas answers a missed present with BLACK (the content-
+    // black class, the canvas-pass law's own family — Tasks 198/219/221),
+    // and the surviving frames carried the orbiting camera — terrain,
+    // then a variable set of trees, then none. One frame, one blit, one
+    // submit — the occlusion tier's own phone-proven boundary (tier.js's
+    // present pass: blit + submit, nothing after).
     frameIndex++
     // the counters
     stats.frame = frameIndex
@@ -685,6 +720,9 @@ async function bootTier(backend) {
   }
   cam.target[1] = world.terrainSampler(0, 0) + 5
   if (typeof window !== 'undefined') window.__tier = tier
+  // the boot shape rides the screen (the field log's first line): the
+  // backend, the tier (live/snapshot), the soft flag, the surface, the load
+  fieldNote('boot', `${backend} ${MODE}${device.software ? ' (soft)' : ''} · ${SURF_W}×${SURF_H}@${SAMPLES}x · ${stats.loadMs} ms · ${world.N} trees`)
   shell.markReady()
   requestAnimationFrame(frame)
   if (!BARE) void runValidation()
@@ -693,16 +731,28 @@ async function bootTier(backend) {
 // ── the HUD (the walker's own pattern — a pre over the stage) ──────────────
 const hud = document.createElement('pre')
 hud.className = 'walker-hud'
+// the HUD rides the body from module init — a load-time failure (the
+// asset fetch, the boot refusal) must find the tail ALREADY on screen,
+// not wait for a boot that never comes
+if (typeof document !== 'undefined') document.body.appendChild(hud)
 function refreshHud() {
-  if (tier === null) { return }
+  // THE FIELD LOG's tail (Task 224): the last lines ride the screen —
+  // escaped (a device error message owns no HTML privileges here)
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const tail = fieldLog.map(l => esc(l)).join('\n')
+  if (tier === null) {
+    if (fieldLog.length > 0) hud.textContent = tail
+    return
+  }
   const [r0, r1, r2, r3] = stats.runs
   const [i0, i1, i2, i3] = stats.instances
   hud.innerHTML =
-    `<b>forest</b> ${stats.backend} ${stats.kind} · frame ${stats.frame} · load ${stats.loadMs} ms` +
+    `<b>forest</b> ${stats.backend} ${stats.kind} · frame ${stats.frame} · present ${stats.presents} · load ${stats.loadMs} ms` +
     (errors.length > 0 ? ` · <b>err ${errors.length}</b>` : '') +
     `\ntrees ${stats.drawn < 0 ? '…' : `${stats.drawn}/${stats.total}`} drawn · ${stats.occluded} occluded · ${stats.frustumCulled} frustum` +
     `\nLOD bands ${i0}/${i1}/${i2}/${i3} trees in ${r0}/${r1}/${r2}/${r3} runs` +
     (stats.validation === null ? '\nvalidation: running…' : `\nvalidation: ${stats.validation.pass ? 'PASS' : 'FAIL'} — ${stats.validation.checks} laws`)
+    + (tail.length > 0 ? `\n${tail}` : '')
 }
 
 // ── the controls: orbit drag + wheel zoom + pinch ─────────────────────────
@@ -754,7 +804,10 @@ async function runValidation() {
     checks.push({ name, pass: pass === true, detail })
     stats.checks = checks.slice()
     stats.validation = { pass: checks.every(c => c.pass), checks: checks.length }
-    if (!pass) shell.log.error(`law failed: ${name} (${detail})`)
+    if (!pass) {
+      fieldNote('LAW', `${name} — ${detail}`)
+      shell.log.error(`law failed: ${name} (${detail})`)
+    }
   }
   const wait = frames => new Promise(resolve => {
     const target = tier.frameNow() + frames
@@ -863,6 +916,7 @@ async function runValidation() {
   }
   const pass = checks.every(c => c.pass)
   stats.validation = { pass, checks: checks.length }
+  fieldNote('valid', `${pass ? 'PASS' : 'FAIL'} — ${checks.filter(c => c.pass).length}/${checks.length} laws`)
   shell.log.info(`validation ${pass ? 'PASS' : 'FAIL'} — ${checks.filter(c => c.pass).length}/${checks.length} laws`)
   if (typeof window !== 'undefined' && window.__forestGate !== undefined && typeof window.__forestGate.resolve === 'function') {
     window.__forestGate.resolve({ pass, checks: checks.length, list: checks.slice() })
@@ -891,6 +945,7 @@ setInterval(refreshHud, 500)
 void bootTier(MODE_PARAM === 'webgl2' ? 'webgl2' : 'webgpu').catch(e => {
   noteError(`boot failed: ${e instanceof Error ? e.message : String(e)}`)
   if ((MODE_PARAM ?? 'webgpu') !== 'webgl2') {
+    fieldNote('boot', 'the WebGPU boot refused — the WebGL2 leg takes over')
     shell.log.info('the WebGPU boot refused — the WebGL2 leg takes over')
     void bootTier('webgl2').catch(e2 => noteError(`the WebGL2 boot failed too: ${e2 instanceof Error ? e2.message : String(e2)}`))
   }
