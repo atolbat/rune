@@ -24,6 +24,15 @@
 //     draw calls per band, zero per-instance CPU work.
 //   · THE BANDS — the LOD ladder's distances (cell-center based):
 //     [0,32) LOD0 full · [32,90) LOD1 · [90,175) LOD2 · [175,∞) LOD3.
+//   · THE GROWING FOREST (Task 225 — «Начни с парочки на экране»): the
+//     full candidate grid is planted first, then the forest KEEPS THE
+//     NEAREST `trees` candidates to the clearing — the amphitheater's
+//     wall fills first, the rings grow outward. A sparse forest is a
+//     RING AROUND THE CAMERA (on screen at every orbit yaw, by
+//     construction); a full one is the whole map (identical to the old
+//     unthinned grid at the dense end). The old `coarse` thinning could
+//     not plant below ~60 (its Math.max(60, N) floor) and scattered its
+//     keep across the whole map — a "couple on screen" was impossible.
 
 import {
   terrain, terrainGrid, gridHeightSampler, heightHills,
@@ -73,14 +82,13 @@ export function createWorld(treeBBox, opts = {}) {
   const placed = []
   const half = TERRAIN_SIZE / 2 - SPACING
   const step = SPACING
-  // the thinning: keep every `coarse`-th cell to land near the target
-  // (the grid count / target — the OLD inverted math thinned NOTHING)
-  const gridCount = Math.ceil(2 * half / step) ** 2
-  const coarse = Math.max(1, Math.round(gridCount / Math.max(60, N_TREES_TARGET)))
-  let skip = 0
+  // THE GROWING FOREST: plant EVERY candidate (no coarse thinning — it
+  // floored the count at ~60 and scattered its keep map-wide), then keep
+  // the NEAREST `trees` to the clearing. The first trees stand in the
+  // amphitheater's wall — «парочка на экране» by construction; every
+  // increment grows the forest outward ring by ring.
   for (let gz = -half; gz <= half; gz += step) {
     for (let gx = -half; gx <= half; gx += step) {
-      if (++skip % coarse !== 0 && coarse > 1) continue // thin to the target count
       const x = gx + (rand() - 0.5) * step * 0.9
       const z = gz + (rand() - 0.5) * step * 0.9
       const d = Math.hypot(x, z)
@@ -89,8 +97,13 @@ export function createWorld(treeBBox, opts = {}) {
       const scale = 0.75 + rand() * 0.45
       const yaw = rand() * Math.PI * 2
       const y = h(x, z) - fy0 * scale // the trunk base anchors ON the terrain
-      placed.push({ x, y, z, scale, yaw })
+      placed.push({ x, y, z, scale, yaw, d })
     }
+  }
+  const MAX_TREES = placed.length // the slider's own ceiling (the full grid)
+  if (placed.length > N_TREES_TARGET) {
+    placed.sort((a, b) => a.d - b.d) // stable: ties keep the grid order
+    placed.length = Math.max(0, Math.min(N_TREES_TARGET, placed.length))
   }
   const N = placed.length
 
@@ -174,7 +187,7 @@ export function createWorld(treeBBox, opts = {}) {
   return {
     terrainGeometry: soup,
     terrainSampler: h,
-    N, STRIDE,
+    N, STRIDE, maxTrees: MAX_TREES,
     LIST_WORDS, FLAGS_OFF, HIST_OFF, INST_OFF,
     sceneWords, sceneF32,
     FIELDS: { center: 0, half: 3 },

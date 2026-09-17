@@ -44,18 +44,35 @@
 // window.__forest — the live counters (the smoke/gates read it);
 // window.__forestGate — the boot validation's promise (the deterministic
 // orbit autopilot + the laws).
+//
+// Task 225 — THE SCREEN LOG + THE LIVE COUNTERS + THE GROWING FOREST.
+// The second field report: «Ничего не изменилось. А что я могу тебе из
+// инфобокса диктовать? Там цифры меняются. Че ты просто норм лог не
+// прикрутишь, как везде … drawn -1 frustum -1 occludee. Сделай еще
+// слайдер, чтобы менять колво деревьев. Начни с парочки на экране.»
+//   · THE SCREEN LOG — a real log panel ON the screen (docked, scrollable,
+//     copyable), not a five-line HUD tail and not a drawer behind the FAB.
+//   · THE LIVE COUNTERS — the validation's own sweep reads feed the HUD
+//     counters in real time; the -1 window (the validation owning the
+//     stats channel for tens of seconds on a phone) is dead.
+//   · THE SLIDER + THE GROWING FOREST — «начни с парочки»: the default is
+//     two trees (planted in the amphitheater's wall, on screen at every
+//     orbit yaw by construction) and the slider grows the forest to the
+//     full grid, replanting on release.
 import { createDevice, createFrameGraph, frustumPlanes, aabbOutsideFrustum } from '../../dist/rune.esm.js?v=223'
 import { perspective, lookAt, mat4Mul } from '../occlusion/scene.js?v=203'
 import { buildShaders } from '../occlusion/shaders.js?v=223'
 import { terrainShaders } from '../walker/shaders-terrain.js?v=223'
-import { createWorld, TERRAIN_SIZE, BANDS } from './world.js?v=223'
+import { createWorld, TERRAIN_SIZE, BANDS } from './world.js?v=225'
 import { treeShaders } from './shaders.js?v=223'
 
 const PARAMS = new URLSearchParams(typeof location !== 'undefined' ? location.search : '')
 const BARE = PARAMS.has('bare')
 const FORCE_SNAPSHOT = PARAMS.has('snapshot')
 const MODE_PARAM = PARAMS.get('mode')
-const N_PARAM = Number(PARAMS.get('trees')) || 2450
+// «Начни с парочки на экране» — the default forest is TWO trees (the
+// slider grows it; ?trees=N overrides for the gates and the links)
+const N_PARAM = Number(PARAMS.get('trees')) || 2
 
 const SKY = [0.56, 0.66, 0.78]
 const LIGHT = [0.45, 0.78, 0.42]
@@ -77,6 +94,119 @@ const shell = window.RuneDemoShell.mount({
 })
 
 const errors = []
+// ── THE SCREEN LOG (Task 225 — «Че ты просто норм лог не прикрутишь,
+// как везде»): a real log panel docked ON the screen — scrollable,
+// copyable, color-coded, visible from module init. The feed is a tee of
+// everything: the shell's own entries (the boot, the backend switches),
+// every console.error/warn (wrapped AFTER the shell, so third-party
+// debris reaches BOTH panels), the field notes, the validation's
+// progress, the replants, the frame-gap witness. The shell's panel keeps
+// working behind the FAB sheet exactly as before — this dock is the
+// phone's field channel, the one that cannot be missed.
+const screenEntries = [] // { time, level, msg } — the copy report's own source
+const dock = document.createElement('div')
+dock.className = 'forest-dock'
+dock.id = 'forest-dock'
+dock.innerHTML =
+  '<div class="fd-row">' +
+  '  <span class="fd-label">trees</span>' +
+  '  <output id="fd-count" for="fd-slider">…</output>' +
+  '  <input type="range" id="fd-slider" min="2" max="2000" step="1" value="2" disabled aria-label="The number of trees">' +
+  '  <span class="fd-max" id="fd-max">…</span>' +
+  '</div>' +
+  '<div class="fd-head">' +
+  '  <button type="button" class="fd-btn" id="fd-toggle" aria-expanded="true">log <span id="fd-n">0</span></button>' +
+  '  <button type="button" class="fd-btn" id="fd-copy">copy</button>' +
+  '  <button type="button" class="fd-btn" id="fd-clear">clear</button>' +
+  '</div>' +
+  '<ol class="fd-list" id="fd-list"></ol>'
+if (typeof document !== 'undefined') document.body.appendChild(dock)
+const fdList = dock.querySelector('#fd-list')
+const fdCount = dock.querySelector('#fd-n')
+const fdSlider = dock.querySelector('#fd-slider')
+const fdValue = dock.querySelector('#fd-count')
+const fdMax = dock.querySelector('#fd-max')
+function fdTime() {
+  const d = new Date()
+  const p = (n, w = 2) => String(n).padStart(w, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+const FD_LEVEL = { error: 'ERROR', warn: 'WARN', event: 'EVENT', info: 'INFO' }
+function screenPush(level, msg) {
+  const text = String(msg)
+  screenEntries.push({ time: fdTime(), level, msg: text })
+  if (screenEntries.length > 120) screenEntries.shift()
+  const li = document.createElement('li')
+  li.className = `fd-entry fd-entry--${level}`
+  const t = document.createElement('time')
+  t.textContent = fdTime()
+  const lv = document.createElement('span')
+  lv.className = 'fd-level'
+  lv.textContent = FD_LEVEL[level] ?? level
+  const m = document.createElement('span')
+  m.className = 'fd-msg'
+  m.textContent = text.length > 600 ? text.slice(0, 600) + ' …[truncated]' : text
+  li.append(t, lv, m)
+  fdList.append(li)
+  while (fdList.children.length > 120) fdList.firstElementChild.remove()
+  fdCount.textContent = String(screenEntries.length)
+  fdList.scrollTop = fdList.scrollHeight
+}
+// THE SINGLE ENTRY POINT: the screen dock AND the shell's panel in one call
+function slog(level, msg) {
+  screenPush(level, msg)
+  shell.log[level](msg)
+}
+// the console tee — wrapped AFTER the shell mounted, so console debris
+// reaches the screen dock directly AND the shell's panel through the
+// shell's own wrap (each panel sees it exactly once)
+const shellConsoleError = console.error.bind(console)
+const shellConsoleWarn = console.warn.bind(console)
+function fdFormat(value) {
+  if (value instanceof Error) return value.stack ?? value.message
+  if (typeof value === 'object' && value !== null) {
+    try { return JSON.stringify(value) } catch { return String(value) }
+  }
+  return String(value)
+}
+console.error = function (...args) { screenPush('error', args.map(fdFormat).join(' ')); shellConsoleError(...args) }
+console.warn = function (...args) { screenPush('warn', args.map(fdFormat).join(' ')); shellConsoleWarn(...args) }
+// the copy report — the field's own dictation channel («что я могу тебе
+// диктовать?» — this button answers: everything, in one paste)
+function fdReport() {
+  const head = [
+    'rune forest log',
+    `url: ${typeof location !== 'undefined' ? location.href : ''}`,
+    `time: ${new Date().toISOString()}`,
+    `viewport: ${typeof window !== 'undefined' ? `${window.innerWidth}x${window.innerHeight} (dpr ${window.devicePixelRatio})` : ''}`,
+    `ua: ${typeof navigator !== 'undefined' ? navigator.userAgent : ''}`,
+    `entries: ${screenEntries.length}`,
+    '---',
+  ]
+  return head.concat(screenEntries.map(e => `[${e.time}] ${FD_LEVEL[e.level] ?? e.level}: ${e.msg}`)).join('\n')
+}
+dock.querySelector('#fd-copy').addEventListener('click', function () {
+  const text = fdReport()
+  const done = via => { slog('event', `the log copied to the clipboard (${via}, ${screenEntries.length} entries)`) }
+  const fail = e => { slog('error', `the log copy failed: ${fdFormat(e)}`) }
+  if (navigator.clipboard !== undefined && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(() => done('clipboard API'), e => fail(e))
+  } else {
+    fail(new Error('the clipboard needs https or localhost'))
+  }
+})
+dock.querySelector('#fd-clear').addEventListener('click', () => {
+  screenEntries.length = 0
+  fdList.replaceChildren()
+  fdCount.textContent = '0'
+})
+let fdCollapsed = false
+dock.querySelector('#fd-toggle').addEventListener('click', function () {
+  fdCollapsed = !fdCollapsed
+  dock.classList.toggle('fd-collapsed', fdCollapsed)
+  this.setAttribute('aria-expanded', String(!fdCollapsed))
+})
+
 // ── THE FIELD LOG (Task 224 — the phone report's «там нет ничего лога,
 // только инфобокс сверху»): the shell's log panel lives behind the FAB
 // sheet — on a phone in the field that is a HIDDEN drawer, and a
@@ -90,16 +220,46 @@ const fieldLog = []
 function fieldNote(tag, message) {
   fieldLog.push(`${tag} ${message}`)
   if (fieldLog.length > 5) fieldLog.shift()
+  slog(tag === 'ERR' ? 'error' : 'info', `${tag} ${message}`)
 }
 function noteError(message) {
   errors.push(message)
   if (typeof window !== 'undefined') window.__forestErrs = errors.slice()
   fieldNote('ERR', message)
-  shell.log.error(message)
+}
+// ── THE STALL WITNESS (Task 225): a counts readback that never lands must
+// not latch the lane forever (statsInFlight) nor hang the validation —
+// every read races a timeout; the loser WARNs on the screen and releases.
+// THE BUDGET'S OWN LADDER: 4 s on a REAL adapter (a phone that has not
+// landed a 16-byte copy in 4 s is genuinely stalled — the witness fires);
+// the software legs (SwiftShader) keep the patient 60 s — their mapAsync
+// latency is the documented container class (the gates measured reads at
+// 5–20 s each under load), not a stall, and a false witness would fail a
+// healthy leg's validation
+const STALL_MS = 4000 // the real-GPU budget (the phone's own witness)
+let stallBudget = STALL_MS
+function withStall(promise, ms, tag) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${tag} stalled — no landing in ${ms} ms`)), ms)
+    promise.then(v => { clearTimeout(timer); resolve(v) }, e => { clearTimeout(timer); reject(e) })
+  })
+}
+let lastStallWarn = 0
+function stallWarn(e) {
+  const now = performance.now()
+  if (now - lastStallWarn < 5000) return
+  lastStallWarn = now
+  slog('warn', `${e instanceof Error ? e.message : String(e)} — the lane is released, the HUD keeps the last landed counts`)
 }
 
 // ── the asset: tree.bin.gz → the quantized LOD geometries + the textures ──
+// THE ASSET CACHE (Task 225): a replant must not re-fetch + re-inflate
+// the 7 MB tree on every slider release — the parsed LODs + the bitmap
+// chains are parsed ONCE and reused by every boot (the mode switch rides
+// the same cache)
+let assetCache = null
 async function loadTree() {
+  if (assetCache !== null) return assetCache
   const res = await fetch(new URL('assets/tree.bin.gz', import.meta.url))
   if (!res.ok) throw new Error(`tree.bin.gz: HTTP ${res.status}`)
   const gzBuf = await res.arrayBuffer()
@@ -162,7 +322,8 @@ async function loadTree() {
     return out
   }
   const [leafChain, barkChain] = await Promise.all([chain('assets/leaf.jpg'), chain('assets/bark.jpg')])
-  return { lods, mats, meshes, leafChain, barkChain }
+  assetCache = { lods, mats, meshes, leafChain, barkChain }
+  return assetCache
 }
 
 // ── the camera (orbit) ─────────────────────────────────────────────────────
@@ -189,17 +350,36 @@ function cameraAt(aspect) {
 // ── the boot + the tier ────────────────────────────────────────────────────
 let tier = null
 let bootToken = 0
+// THE SLIDER'S OWN TARGET (Task 225): the live tree count — bootTier plants
+// `treeTarget` trees; the slider writes it on release and reboots the tier
+let treeTarget = N_PARAM
 const stats = {
   backend: null, kind: null, frame: 0, presents: 0,
   drawn: -1, occluded: -1, frustumCulled: -1, total: 0,
   runs: [0, 0, 0, 0], instances: [0, 0, 0, 0],
   fps: 0, validation: null, checks: [], errors: 0,
   loadMs: 0, bytes: 0, tail: fieldLog,
+  ms: 0, progress: '', // the frame-time EMA + the validation's own progress line
 }
 if (typeof window !== 'undefined') window.__forest = stats
 
 async function bootTier(backend) {
   const token = ++bootToken
+  validationDone = false // every boot validates its own forest (a replant is a new law set)
+  // THE PER-BOOT RESET: the ledger and the counters are the TIER's own — a
+  // replant starts a fresh present/frame account (the global counter made
+  // presents 161 vs frame 43 after one replant — the ledger law is
+  // per-boot, or it is nothing)
+  stats.frame = 0
+  stats.presents = 0
+  stats.drawn = -1
+  stats.occluded = -1
+  stats.frustumCulled = -1
+  stats.validation = null // the stale verdict dies with the old forest (a
+  stats.checks = []       // poll must never read the previous N's PASS)
+  stats.ms = 0
+  stats.progress = ''
+  stallBudget = STALL_MS
   const t0 = performance.now()
   const asset = await loadTree()
   if (token !== bootToken) return
@@ -215,16 +395,19 @@ async function bootTier(backend) {
     antialias: backend === 'webgl2',
     dprCap: 2,
     onError: noteError,
-    onInfo: message => shell.log.info(message),
+    onInfo: message => slog('info', message),
   })
   if (token !== bootToken) { device.dispose(); return }
   const FORCE_LIVE = PARAMS.has('live')
   const SNAPSHOT = backend === 'webgpu' && !FORCE_LIVE && (FORCE_SNAPSHOT || device.software)
   const MODE = SNAPSHOT ? 'snapshot' : 'live'
+  // THE STALL BUDGET'S OWN LADDER: the software legs keep the patient 60 s
+  // (SwiftShader's mapAsync latency is the documented container class)
+  stallBudget = device.software ? 60000 : STALL_MS
   if (SNAPSHOT) {
     // the documented container class: a software WG canvas present kills
     // the GPU process — the snapshot degrade (the tier's own ladder)
-    shell.log.info('the software WG adapter — the snapshot degrade (zero canvas presents)')
+    slog('info', 'the software WG adapter — the snapshot degrade (zero canvas presents)')
   }
 
   // the surface: the stage's shape × the boot dpr, the caps' ladder
@@ -264,8 +447,16 @@ async function bootTier(backend) {
   if (SOFT) {
     BANDS[0] = 18; BANDS[1] = 48; BANDS[2] = 105
   }
-  const world = createWorld(treeBounds, { trees: SOFT ? Math.min(N_PARAM, 320) : N_PARAM })
+  const world = createWorld(treeBounds, { trees: SOFT ? Math.min(treeTarget, 320) : treeTarget })
   stats.total = world.N
+  // THE SLIDER's own truth: the range ceiling is the world's full grid
+  // (the soft legs clamp to their honest 320 — the container's renderer
+  // capacity), the thumb sits at the planted count
+  fdSlider.max = String(SOFT ? Math.min(world.maxTrees, 320) : world.maxTrees)
+  fdSlider.value = String(world.N)
+  fdSlider.disabled = false
+  fdValue.textContent = String(world.N)
+  fdMax.textContent = String(SOFT ? Math.min(world.maxTrees, 320) : world.maxTrees)
 
   // the scene + the bricks
   const sceneHandle = device.scene({
@@ -371,11 +562,17 @@ async function bootTier(backend) {
       }
       runs.push(rr)
     }
-    // THE SOFTWARE LOD0 CAP: a single showcase tree is 139k tris — the
-    // software legs (SwiftShader: WG snapshot / GL) cannot carry a wall of
-    // them (the container renderer dies). The soft legs keep at most SIX
-    // band-0 trees (the nearest runs, trimmed mid-run); the real GPUs
-    // (the phone, the desktop) run the full showcase.
+    // THE SOFTWARE LOD0 CAP + THE NEAR-BAND DENSITY BUDGET: a single
+    // showcase tree is 139k tris — the software legs (SwiftShader: WG
+    // snapshot / GL) cannot carry a wall of them (the container renderer
+    // dies). The soft legs keep at most SIX band-0 trees (the nearest
+    // runs, trimmed mid-run) and THE NEAR BANDS' DENSITY BUDGET (Task 225:
+    // the growing forest concentrates its ring around the camera — a
+    // 60-tree ring put ~54 LOD1 trees in band 1 and every soft-leg frame
+    // ground for seconds; band 1 keeps ≤16 instances, band 2 ≤24 — the
+    // VERDICTS (the laws' own counters) cover every record regardless of
+    // the trim, only the drawn instances thin); the real GPUs (the phone,
+    // the desktop) run the full showcase.
     if (SOFT) {
       let budget = 6
       const trimmed = []
@@ -385,6 +582,18 @@ async function bootTier(backend) {
         else { trimmed.push({ base: r.base, count: budget }); budget = 0 }
       }
       runs[0] = trimmed
+      const trimBand = (band, cap) => {
+        let b = cap
+        const out = []
+        for (const r of runs[band]) {
+          if (b <= 0) break
+          if (r.count <= b) { out.push(r); b -= r.count }
+          else { out.push({ base: r.base, count: b }); b = 0 }
+        }
+        runs[band] = out
+      }
+      trimBand(1, 16)
+      trimBand(2, 24)
     }
     return runs
   }
@@ -424,9 +633,13 @@ async function bootTier(backend) {
       // (band0/1 → LOD1, band2 → LOD2 — every one a strict subset of the
       // band's color coverage: the pyramid can only UNDER-occlude); the
       // FAR band never writes depth (it occludes nothing behind it and
-      // its crowd would cost more than the whole refine)
+      // its crowd would cost more than the whole refine). THE SOFT LEGS
+      // ride LOD2 for every z band (Task 225: the software renderer's
+      // triangle rate made each sync readback drain seconds of fill —
+      // the coarser subset halves the z cost, sound by the same subset
+      // law; the proxies carry the wall)
       for (let band = 0; band < 3; band++) {
-        const lod = band <= 1 ? 1 : 2
+        const lod = SOFT ? 2 : (band <= 1 ? 1 : 2)
         for (let m = 0; m < 2; m++) {
           const g = mesh(lod, m)
           for (const run of props.runs.byBand[band]) {
@@ -471,10 +684,13 @@ async function bootTier(backend) {
       zBlock.set(props.camera.mvp, 0)
       device.drawMesh({ target: pyramid.zTarget, clear: true, program: terrainZProg, geometry: world.terrainGeometry, uniforms: zBlock })
       // THE VISIBLE SET at its OWN color LOD (the exact coverage — the
-      // strongest pyramid; bands 0-2 only, the far band never occludes)
+      // strongest pyramid; bands 0-2 only, the far band never occludes).
+      // THE SOFT LEGS ride one LOD coarser (min(band+1, 2) — still a
+      // strict subset of the color's coverage, the same under-occlusion
+      // law; the software renderer's budget)
       for (let band = 0; band < 3; band++) {
         for (let m = 0; m < 2; m++) {
-          const g = mesh(band, m)
+          const g = mesh(SOFT ? Math.min(band + 1, 2) : band, m)
           for (const run of props.runs.byBand[band]) {
             packTree(treeBlock, g, props.camera.mvp, run.base, true, props.camera.eye)
             device.drawMeshInstanced({ target: pyramid.zTarget, clear: false, program: m === 0 ? barkZProg : leafZProg, geometry: g, uniforms: treeBlock, records: sceneHandle, baseInstance: run.base, instances: run.count })
@@ -598,13 +814,18 @@ async function bootTier(backend) {
     // the count and the regression is measurable from the field itself.
     stats.presents++
     if (MODE === 'snapshot') {
-      // THE READBACK LANE'S AIR: the snapshot present reads the surface
-      // EVERY frame on a 60fps software leg — an endless mapAsync chain
-      // that starves every other readback (the stats/validation lanes
-      // hung for 25s+ behind it). Present every 3rd frame: the software
-      // degrade's honest budget, and the lane breathes.
+      // THE READBACK LANE'S RIGHT OF WAY (Task 225): the validation's
+      // 16-byte counts reads used to queue behind the snapshot present's
+      // ~614 KB surface readback — every validation read paid the FULL
+      // surface-read latency (measured 5–20 s each on SwiftShader, 21
+      // reads per validation, minutes per leg). While the validation owns
+      // the readback lane, the snapshot present still COUNTS (the ledger
+      // law: presents ≡ frame) but DEFERS its read — the canvas holds its
+      // last blit for the validation's duration. The LIVE legs (every
+      // real GPU, the phone included) never read a surface to present at
+      // all — this is the container's own lane discipline.
       presentEvery = (presentEvery + 1) % 3
-      if (presentEvery !== 0 || blitPending) return
+      if (presentEvery !== 0 || blitPending || validationActive) return
       blitPending = true
       surface.read().then(result => {
         blitPending = false
@@ -614,6 +835,15 @@ async function bootTier(backend) {
         }
       }).catch(() => { blitPending = false })
     } else {
+      // THE RIGHT OF WAY, THE LIVE TWIN: the GL leg's counts reads are
+      // SYNC getBufferSubData calls — each drains every pending GL byte,
+      // the canvas presents included (the compositor's outstanding work
+      // rode every read on the software legs). While the validation owns
+      // the lane the live present COUNTS (the ledger) but defers its
+      // blit — the canvas holds the last frame. On a real GPU the whole
+      // validation spans milliseconds; on the software legs this is the
+      // difference between a two-minute walk and a ten-minute one.
+      if (validationActive) return
       device.blitToCanvas({ program: blitProg, surface })
     }
   }
@@ -622,8 +852,24 @@ async function bootTier(backend) {
   let frameIndex = 0
   let paused = false
   let validationActive = false // the validation owns the stats channel while it runs
+  // THE FRAME WITNESS (Task 225): the EMA of the frame time rides the HUD
+  // and a >250 ms gap (throttled to one per 5 s) rides the SCREEN LOG —
+  // the phone's own overload line («так каждый полсекунды» — the log will
+  // SHOW the half-second gaps as measured numbers, not as a flicker)
+  let lastFrameT = 0
+  let frameMsEma = 0
+  let lastGapWarn = 0
   function frame() {
     if (paused) return
+    const now = performance.now()
+    const dt = lastFrameT === 0 ? 16.7 : now - lastFrameT
+    lastFrameT = now
+    frameMsEma = frameMsEma === 0 ? dt : frameMsEma * 0.97 + dt * 0.03
+    stats.ms = Math.round(frameMsEma)
+    if (dt > 250 && now - lastGapWarn > 5000) {
+      lastGapWarn = now
+      slog('warn', `frame gap ${Math.round(dt)} ms (ema ${stats.ms} ms) — the load class, not a present death (presents ${stats.presents} = frames ${frameIndex})`)
+    }
     const aspect = (stage.clientWidth || 480) / Math.max(1, stage.clientHeight || 270)
     const camera = cameraAt(aspect)
     const runs = computeRuns(camera.mvp, camera.eye)
@@ -665,18 +911,20 @@ async function bootTier(backend) {
     if (pendingStats !== null) {
       const p = pendingStats
       pendingStats = null
-      p.then(s => {
+      // THE STALL WITNESS rides the copy lane too: a read that never lands
+      // releases the lane and WARNs instead of latching -1 forever
+      withStall(p, stallBudget, 'the counts readback').then(s => {
         statsInFlight = false
         stats.drawn = s.drawn
         stats.occluded = s.occluded
         stats.frustumCulled = s.frustum
-      }).catch(() => { statsInFlight = false })
+      }).catch(e => { statsInFlight = false; stallWarn(e) })
     }
     requestAnimationFrame(frame)
   }
   stats.bytes = asset.meshes.reduce((a, m) => a + m.positions.byteLength + m.normals.byteLength + m.uvs.byteLength + m.indices.byteLength, 0)
   democtl.pause = () => { paused = true }
-  democtl.resume = () => { if (paused) { paused = false; requestAnimationFrame(frame) } }
+  democtl.resume = () => { if (paused) { paused = false; lastFrameT = 0; requestAnimationFrame(frame) } }
 
   tier = {
     device, backend, mode: MODE, surface, sceneHandle, pyramid, world,
@@ -697,11 +945,13 @@ async function bootTier(backend) {
         return p
       }
       // WG: the args-buffer stats (the compact fills the counters — see
-      // the copy lane's own note; NEVER the scene storage mid-loop)
+      // the copy lane's own note; NEVER the scene storage mid-loop) —
+      // THE STALL WITNESS races every read (a hung mapAsync must not hang
+      // the validation too)
       if (device.runCullCompact(sceneHandle)) {
         device.submit()
       }
-      return device.readCullStats(sceneHandle)
+      return withStall(device.readCullStats(sceneHandle), stallBudget, 'the counts readback')
     },
     readVerdicts: () => device.readVerdicts(sceneHandle),
     setCamera(yaw, pitch, radius) {
@@ -747,11 +997,13 @@ function refreshHud() {
   const [r0, r1, r2, r3] = stats.runs
   const [i0, i1, i2, i3] = stats.instances
   hud.innerHTML =
-    `<b>forest</b> ${stats.backend} ${stats.kind} · frame ${stats.frame} · present ${stats.presents} · load ${stats.loadMs} ms` +
+    `<b>forest</b> ${stats.backend} ${stats.kind} · frame ${stats.frame} · present ${stats.presents} · ${stats.ms > 0 ? stats.ms : '…'} ms/f · load ${stats.loadMs} ms` +
     (errors.length > 0 ? ` · <b>err ${errors.length}</b>` : '') +
     `\ntrees ${stats.drawn < 0 ? '…' : `${stats.drawn}/${stats.total}`} drawn · ${stats.occluded} occluded · ${stats.frustumCulled} frustum` +
     `\nLOD bands ${i0}/${i1}/${i2}/${i3} trees in ${r0}/${r1}/${r2}/${r3} runs` +
-    (stats.validation === null ? '\nvalidation: running…' : `\nvalidation: ${stats.validation.pass ? 'PASS' : 'FAIL'} — ${stats.validation.checks} laws`)
+    (stats.validation === null
+      ? `\nvalidation: running${stats.progress !== '' ? ` · ${stats.progress}` : '…'}`
+      : `\nvalidation: ${stats.validation.pass ? 'PASS' : 'FAIL'} — ${stats.validation.checks} laws`)
     + (tail.length > 0 ? `\n${tail}` : '')
 }
 
@@ -796,11 +1048,17 @@ function attachControls(canvas) {
 
 // ── the boot validation (the deterministic orbit autopilot + the laws) ────
 let validationDone = false
+let validationRun = 0 // THE SUPERSEDE TOKEN: a replant mid-validation must
+// not fight the new tier for the camera, the stats channel, or the verdict
 async function runValidation() {
   if (tier === null || validationDone) return
   validationDone = true
+  const run = ++validationRun
+  const myTier = tier
+  const superseded = () => run !== validationRun
   const checks = []
   const check = (name, pass, detail = '') => {
+    if (superseded()) return // the new boot's validation owns the verdict
     checks.push({ name, pass: pass === true, detail })
     stats.checks = checks.slice()
     stats.validation = { pass: checks.every(c => c.pass), checks: checks.length }
@@ -809,22 +1067,41 @@ async function runValidation() {
       shell.log.error(`law failed: ${name} (${detail})`)
     }
   }
-  const wait = frames => new Promise(resolve => {
-    const target = tier.frameNow() + frames
-    const poll = () => { tier.frameNow() >= target ? resolve() : setTimeout(poll, 60) }
+  const prog = text => { if (!superseded()) stats.progress = text }
+  const wait = frames => new Promise((resolve, reject) => {
+    const target = myTier.frameNow() + frames
+    const poll = () => {
+      if (superseded()) { reject(new Error('superseded — the tier was rebooted (a replant)')); return }
+      myTier.frameNow() >= target ? resolve() : setTimeout(poll, 60)
+    }
     poll()
   })
+  const tVal = performance.now()
   try {
-    tier.beginValidationReads()
+    myTier.beginValidationReads()
     const readWhilePaused = async fn => {
       // THE 211 DISCIPLINE: readbacks on a PAUSED loop (a live loop's
       // concurrent maps starve the software WG queue — the walker's own law)
-      tier.pause()
+      myTier.pause()
       try {
         return await fn()
       } finally {
-        tier.resume()
+        myTier.resume()
       }
+    }
+    // THE LIVE COUNTERS (Task 225 — «drawn -1 frustum -1 occludee»): the
+    // validation owns the stats channel while it runs, and on a phone the
+    // dense sweep takes TENS OF SECONDS — the HUD sat at -1 the whole
+    // time and the field read a dead demo. The sweep's own reads now feed
+    // the HUD counters in real time: the numbers ride the screen from the
+    // FIRST read (~a second after boot) and the copy lane takes over when
+    // the validation ends. A stall WARNs (withStall below) instead of
+    // latching -1 forever.
+    const liveCounters = s => {
+      if (superseded()) return
+      stats.drawn = s.drawn
+      stats.occluded = s.occluded
+      stats.frustumCulled = s.frustum
     }
     // Phase A — the orbit sweep (the FULL loop on real GPUs; the SOFT legs
     // take the light branch — the elevated view draws a third of the wall
@@ -832,77 +1109,113 @@ async function runValidation() {
     // one). The occlusion probe lands at the WALL LEVEL separately (the
     // eye in the canopy's own plane — the near crowns fill the view and
     // the far trees cull behind them; the elevated pitch sees over the
-    // tops and the occlusion honestly reads zero)
+    // tops and the occlusion honestly reads zero). THE SWEEP ANCHORS AT
+    // THE CURRENT YAW — a replant must not yank the view to a fixed
+    // compass heading.
     const SOFT_VAL = stats.total <= 340 // the software ladder's own cap
+    const SPARSE = stats.total < 100 // «парочка» — the wall/frustum laws need density
     const STEPS = SOFT_VAL ? 10 : 48
     const SWEEP_PITCH = SOFT_VAL ? 0.28 : 0.05
-    tier.setCamera(0.6, SWEEP_PITCH, 30)
+    const YAW0 = cam.yaw
+    myTier.setCamera(YAW0, SWEEP_PITCH, 30)
     let drawnMin = 1e9, drawnMax = -1, occludedMax = -1, frustumMax = -1
     for (let step = 0; step < STEPS; step++) {
-      const yaw = 0.6 + (step / STEPS) * Math.PI * 2
-      tier.setCamera(yaw, SWEEP_PITCH, 30)
+      const yaw = YAW0 + (step / STEPS) * Math.PI * 2
+      myTier.setCamera(yaw, SWEEP_PITCH, 30)
       await wait(SOFT_VAL ? 3 : 4)
-      const s = await readWhilePaused(() => tier.readStats())
+      const s = await readWhilePaused(() => myTier.readStats())
+      liveCounters(s)
+      prog(`sweep ${step + 1}/${STEPS} · ${Math.round((performance.now() - tVal) / 1000)} s`)
       drawnMin = Math.min(drawnMin, s.drawn); drawnMax = Math.max(drawnMax, s.drawn)
       occludedMax = Math.max(occludedMax, s.occluded)
       frustumMax = Math.max(frustumMax, s.frustum)
     }
     // the occlusion probe: the wall level, one sample
-    tier.setCamera(1.9, 0.05, 26)
+    myTier.setCamera(1.9, 0.05, 26)
     await wait(8)
     {
-      const s = await readWhilePaused(() => tier.readStats())
+      const s = await readWhilePaused(() => myTier.readStats())
+      liveCounters(s)
       occludedMax = Math.max(occludedMax, s.occluded)
       drawnMin = Math.min(drawnMin, s.drawn)
       drawnMax = Math.max(drawnMax, s.drawn)
     }
-    check('the drawn law — the forest renders (a healthy band, never all, never none)',
-      drawnMin > stats.total * 0.03 && drawnMax < stats.total && drawnMax > 0,
-      `drawn ${drawnMin}..${drawnMax} of ${stats.total}`)
-    // the threshold scales with the forest: the real legs (2.4k trees,
-    // full bands) measure in the hundreds; the software validation legs
-    // (150 trees, clamped bands) honestly carry a handful — the MECHANISM
-    // is the law, the count is the leg's own density
-    check('the occlusion law — trees hide trees (the dense wall works)',
-      occludedMax > (SOFT_VAL ? 4 : 20), `occluded max ${occludedMax}`)
-    check('the frustum law — most of the forest is out of view',
-      frustumMax > stats.total * 0.3, `frustum max ${frustumMax}`)
+    if (SPARSE) {
+      // THE SPARSE CLASS («начни с парочки»): two trees cannot hide each
+      // other behind a wall that does not exist — the occlusion and
+      // frustum laws ride the dense classes (grow past 100 trees). The
+      // drawn law keeps its honest sparse form: at least one tree renders
+      // at some yaw, never more than planted.
+      check('the drawn law — the sparse forest renders (never none, never more than planted)',
+        drawnMax >= 1 && drawnMax <= stats.total,
+        `drawn ${drawnMin}..${drawnMax} of ${stats.total} — the occlusion/frustum laws ride the dense classes (grow past 100)`)
+      slog('info', `sparse forest (${stats.total} trees) — the occlusion + frustum laws ride the dense classes (grow the forest past 100 trees) — the 5 sparse laws hold`)
+    } else {
+      check('the drawn law — the forest renders (a healthy band, never all, never none)',
+        drawnMin > stats.total * 0.03 && drawnMax < stats.total && drawnMax > 0,
+        `drawn ${drawnMin}..${drawnMax} of ${stats.total}`)
+      // the threshold scales with the forest: the real legs (full grid,
+      // full bands) measure in the hundreds; the software validation legs
+      // (150 trees, clamped bands) honestly carry a handful — the MECHANISM
+      // is the law, the count is the leg's own density
+      check('the occlusion law — trees hide trees (the dense wall works)',
+        occludedMax > (SOFT_VAL ? 4 : 20), `occluded max ${occludedMax}`)
+      check('the frustum law — most of the forest is out of view',
+        frustumMax > stats.total * 0.3, `frustum max ${frustumMax}`)
+    }
     // Phase B — the still-camera zero-flip law (Task 219's own). GL reads
     // the per-record verdicts (a SYNC readback — always safe); WG rides
     // the COUNTS channel (drawn/occluded/frustum/straddle — the scene
     // readback is the software-queue poison; a stable count set is the
     // honest zero-flip witness at the stats granularity)
-    const WG = tier.backend === 'webgpu'
-    tier.setCamera(1.1, 0.22, 26)
+    const WG = myTier.backend === 'webgpu'
+    myTier.setCamera(1.1, 0.22, 26)
     await wait(8)
     let flips = 0
     let prev = null
     for (let f = 0; f < 10; f++) {
       if (WG) {
-        const s = await readWhilePaused(() => tier.readStats())
+        const s = await readWhilePaused(() => myTier.readStats())
+        liveCounters(s)
         const key = `${s.drawn}/${s.frustum}/${s.occluded}/${s.straddle}`
         if (prev !== null && key !== prev) flips++
         prev = key
       } else {
-        const v = await readWhilePaused(() => tier.readVerdicts())
+        const v = await readWhilePaused(() => myTier.readVerdicts())
         if (prev !== null) {
           for (let k = 0; k < v.length; k++) if (v[k] !== prev[k]) flips++
         }
         prev = v
       }
+      prog(`zero-flip ${f + 1}/10`)
       await wait(1)
     }
     check('the still-camera zero-flip law — a frozen camera flips NO verdicts',
       flips === 0, `${flips} flips over 10 frames (${WG ? 'the counts channel' : 'the per-record verdicts'})`)
-    // Phase C — the dive INTO the wall (radius 26 = the clearing's edge:
-    // the eye among the first crowns — the LOD0 band's own showcase)
-    tier.setCamera(1.1, 0.02, 26)
+    // Phase C — the dive INTO THE WALL (the LOD0 band's own showcase).
+    // THE DIVE TARGETS THE NEAREST TREE'S OWN AZIMUTH + DISTANCE (Task
+    // 225): a fixed compass heading (the old yaw 1.1, radius 26) walks
+    // the dense ring fine but can stand in the EMPTY quarter of a sparse
+    // forest — two trees at the wall, the eye three quadrants away, zero
+    // band-0 runs, an honest law failing for a camera-placement reason.
+    // The dive lands BESIDE the nearest planted tree — at every N.
+    {
+      const trees = myTier.world.trees
+      let near = trees[0], nd = 1e9
+      for (const t of trees) {
+        const d = Math.hypot(t.x, t.z)
+        if (d < nd) { nd = d; near = t }
+      }
+      const diveYaw = Math.atan2(near.x, near.z)
+      const diveRadius = Math.max(9, Math.min(30, nd))
+      myTier.setCamera(diveYaw, 0.02, diveRadius)
+    }
     await wait(8)
     const lodRuns = stats.runs[0]
     check('the LOD law — the near band carries runs (the full-detail trees)',
       lodRuns > 0, `LOD0 runs ${lodRuns}`)
     // the frame shape: the graph's live passes
-    const g = tier.graphStats()
+    const g = myTier.graphStats()
     check('the frame law — the declared passes live (terrain + trees + culls)',
       g !== null && g.live.includes('terrain-z') && g.live.includes('tree-z')
       && g.live.includes('cull-verdicts') && g.live.includes('tree-color'),
@@ -910,10 +1223,15 @@ async function runValidation() {
     check('zero page errors during the validation',
       errors.length === 0, errors.slice(0, 2).join(' | '))
   } catch (e) {
+    if (superseded()) return // a replant superseded this run — the new boot owns the verdict
     check('the validation completed', false, e instanceof Error ? e.message : String(e))
   } finally {
-    tier.endValidationReads()
+    if (!superseded()) {
+      myTier.endValidationReads()
+      stats.progress = ''
+    }
   }
+  if (superseded()) return
   const pass = checks.every(c => c.pass)
   stats.validation = { pass, checks: checks.length }
   fieldNote('valid', `${pass ? 'PASS' : 'FAIL'} — ${checks.filter(c => c.pass).length}/${checks.length} laws`)
@@ -942,11 +1260,51 @@ if (typeof window !== 'undefined') {
 // the HUD line (2 Hz — the walker's cadence)
 setInterval(refreshHud, 500)
 
+// ── THE SLIDER (Task 225 — «Сделай еще слайдер, чтобы менять колво
+// деревьев. Начни с парочки на экране»): the thumb rides the dock's top
+// row; dragging updates the label live, RELEASE replants (the tier
+// reboots at the new count — the world, the scene, the shaders, the
+// validation's own law class). The asset rides the cache — a replant is
+// a world build + a device reboot, not a 7 MB fetch.
+let replantBusy = false
+async function replant(n) {
+  if (replantBusy) return
+  const ceiling = Number(fdSlider.max) || 2000
+  const target = Math.max(2, Math.min(Math.round(n), ceiling))
+  if (target === treeTarget && tier !== null) { fdSlider.value = String(target); return }
+  replantBusy = true
+  treeTarget = target
+  const backendNow = tier !== null ? tier.backend : (MODE_PARAM === 'webgl2' ? 'webgl2' : 'webgpu')
+  const t0 = performance.now()
+  try {
+    try {
+      const usp = new URLSearchParams(location.search)
+      usp.set('trees', String(target))
+      history.replaceState(null, '', `?${usp.toString()}`)
+    } catch { /* file:// and friends — the URL is a courtesy, not a law */ }
+    await bootTier(backendNow)
+    slog('event', `replant — the forest is now ${target} trees (${Math.max(0, Math.round(performance.now() - t0))} ms)${target >= 100 ? '' : ' — the sparse laws hold; grow past 100 for the occlusion wall'}`)
+  } catch (e) {
+    slog('error', `replant failed on ${backendNow}: ${e instanceof Error ? e.message : String(e)}`)
+    if (backendNow !== 'webgl2') {
+      try {
+        await bootTier('webgl2')
+        slog('event', `replant — the WebGL2 leg carried the forest to ${target} trees`)
+      } catch (e2) {
+        slog('error', `the WebGL2 replant failed too: ${e2 instanceof Error ? e2.message : String(e2)}`)
+      }
+    }
+  } finally {
+    replantBusy = false
+  }
+}
+fdSlider.addEventListener('input', () => { fdValue.textContent = fdSlider.value })
+fdSlider.addEventListener('change', () => { void replant(Number(fdSlider.value)) })
+
 void bootTier(MODE_PARAM === 'webgl2' ? 'webgl2' : 'webgpu').catch(e => {
   noteError(`boot failed: ${e instanceof Error ? e.message : String(e)}`)
   if ((MODE_PARAM ?? 'webgpu') !== 'webgl2') {
     fieldNote('boot', 'the WebGPU boot refused — the WebGL2 leg takes over')
-    shell.log.info('the WebGPU boot refused — the WebGL2 leg takes over')
     void bootTier('webgl2').catch(e2 => noteError(`the WebGL2 boot failed too: ${e2 instanceof Error ? e2.message : String(e2)}`))
   }
 })

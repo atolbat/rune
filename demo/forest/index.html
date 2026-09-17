@@ -22,11 +22,54 @@
       z-index: 4;
     }
     .walker-hud b { color: #e8b34b; }
+    /* Task 225 — THE SCREEN LOG + THE SLIDER DOCK: a real log panel ON the
+     * screen (the shell's own log hides behind the FAB sheet — on a phone
+     * in the field that is a hidden drawer), plus the tree-count slider
+     * («Сделай еще слайдер, чтобы менять колво деревьев»). The dock rides
+     * the bottom edge, collapsible, copyable, scrollable. */
+    .forest-dock {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 6;
+      display: flex; flex-direction: column;
+      max-width: 780px; margin: 0 auto;
+      background: rgba(8, 10, 16, 0.88);
+      border-top: 1px solid #26304a; border-radius: 10px 10px 0 0;
+      font: 10px/1.5 ui-monospace, Menlo, Consolas, monospace;
+      color: #9fb4d8;
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+    }
+    .fd-row { display: flex; align-items: center; gap: 8px; padding: 8px 12px 2px; }
+    .fd-label { color: #e8b34b; font-weight: 700; }
+    #fd-count { min-width: 40px; text-align: right; color: #dfe5f1; font-weight: 700; }
+    #fd-slider { flex: 1; accent-color: #e8b34b; height: 34px; touch-action: pan-y; }
+    #fd-slider:disabled { opacity: 0.4; }
+    .fd-max { color: #5b6b8c; min-width: 40px; }
+    .fd-head { display: flex; gap: 6px; padding: 4px 12px; align-items: center; }
+    .fd-btn {
+      font: inherit; padding: 3px 10px; border-radius: 6px;
+      border: 1px solid #26304a; background: #131a2a; color: #9fb4d8;
+      cursor: pointer; min-height: 26px;
+    }
+    .fd-btn:hover { color: #dfe5f1; border-color: #3a4a6e; }
+    .fd-list {
+      margin: 0; padding: 2px 12px 8px; list-style: none;
+      max-height: 30vh; overflow-y: auto; overscroll-behavior: contain;
+    }
+    .forest-dock.fd-collapsed .fd-list { display: none; }
+    .fd-entry { display: flex; gap: 6px; padding: 1px 0; }
+    .fd-entry time { color: #5b6b8c; flex: none; }
+    .fd-level { flex: none; font-weight: 700; }
+    .fd-entry--error .fd-level, .fd-entry--error .fd-msg { color: #e06c75; }
+    .fd-entry--warn .fd-level, .fd-entry--warn .fd-msg { color: #d8a657; }
+    .fd-entry--event .fd-level { color: #7daea3; }
+    .fd-entry--event .fd-msg { color: #a9c4ef; }
+    .fd-msg { word-break: break-word; min-width: 0; }
   </style>
 </head>
 <body>
   <div id="app"></div>
   <script src="../shared/demo-shell.js?v=223"></script>
-  <script type="module" src="./main.js?v=224"></script>
+  <script type="module" src="./main.js?v=225"></script>
 </body>
 </html>

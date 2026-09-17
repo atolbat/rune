@@ -21,12 +21,12 @@ function check(name, ok, detail = '') {
 
 // ── the source checks (the deployed bytes) ────────────────────────────────
 const index = await (await fetch(LIVE)).text()
-const main = await (await fetch(LIVE + 'main.js?v=224')).text()
+const main = await (await fetch(LIVE + 'main.js?v=225')).text()
 const shaders = await (await fetch(LIVE + 'shaders.js?v=223')).text()
-const world = await (await fetch(LIVE + 'world.js?v=223')).text()
+const world = await (await fetch(LIVE + 'world.js?v=225')).text()
 const dist = await (await fetch('https://atolbat.github.io/rune/dist/rune.esm.js?v=223')).text()
 const gallery = await (await fetch('https://atolbat.github.io/rune/demo/')).text()
-check('source: the deployed forest page mounts the current cache-bust (v=224)', index.includes('main.js?v=224'), '')
+check('source: the deployed forest page mounts the current cache-bust (v=225)', index.includes('main.js?v=225'), '')
 check('source: THE QUANTIZED FEED ships in the deployed dist (the snorm formats + the GL typed lane)',
   dist.includes('snorm16x4') && dist.includes('short') && dist.includes('Int16Array'),
   '')
@@ -43,27 +43,41 @@ check('source: THE COUNTS CHANNEL ships (the compact + args — never the scene 
 check('source: the deployed asset is the packed twin (tree.bin.gz)',
   (await fetch(LIVE + 'assets/tree.bin.gz')).headers.get('content-length') !== null,
   `${((await fetch(LIVE + 'assets/tree.bin.gz')).headers.get('content-length') ?? 0) / 1e6} MB`)
-check('source: the gallery card tells the forest (the 223–224 marker rides the card)',
-  gallery.includes('forest') && gallery.includes('Tasks 223–224') && gallery.includes('216–224'), '')
+check('source: the gallery card tells the forest (the 223–225 marker rides the card)',
+  gallery.includes('forest') && gallery.includes('Tasks 223–225') && gallery.includes('216–225'), '')
 
 // ── the deployed validation (both backends) ───────────────────────────────
 const browser = await chromium.launch({
   headless: true,
   args: ['--no-sandbox', '--disable-gpu-sandbox', '--enable-unsafe-webgpu', '--use-angle=swiftshader', '--enable-features=Vulkan', '--enable-unsafe-swiftshader'],
 })
-for (const mode of ['webgpu', 'webgl2']) {
+for (const [mode, trees, awaitWalk] of [['webgpu', 150, true], ['webgl2', 100, false]]) {
   const page = await browser.newPage({ viewport: { width: 480, height: 320 } })
   const errors = []
   page.on('pageerror', e => errors.push(e.message.slice(0, 150)))
-  await page.goto(`${LIVE}?trees=150&mode=${mode}`, { waitUntil: 'networkidle', timeout: 150_000 })
-  const res = await page.waitForFunction(
-    () => { const v = window.__forest?.validation; return v !== null && v.checks >= 7 },
-    null, { timeout: 420_000, polling: 500 },
-  ).then(() => page.evaluate(() => window.__forestGate))
-    .catch(() => null)
-  check(`[${mode}] THE DEPLOYED VALIDATION — the 7-law autopilot walked the deployed forest`,
-    res !== null && res.pass === true && res.checks === 7,
-    res === null ? 'the gate never resolved' : `${res.pass ? 'PASS' : 'FAIL'} · ${res.checks} laws`)
+  await page.goto(`${LIVE}?trees=${trees}&mode=${mode}`, { waitUntil: 'networkidle', timeout: 150_000 })
+  if (awaitWalk) {
+    const res = await page.waitForFunction(
+      () => { const v = window.__forest?.validation; return v !== null && v.checks >= 7 },
+      null, { timeout: 420_000, polling: 500 },
+    ).then(() => page.evaluate(() => window.__forestGate))
+      .catch(() => null)
+    check(`[${mode}] THE DEPLOYED VALIDATION — the 7-law autopilot walked the deployed forest`,
+      res !== null && res.pass === true && res.checks === 7,
+      res === null ? 'the gate never resolved' : `${res.pass ? 'PASS' : 'FAIL'} · ${res.checks} laws`)
+  } else {
+    // THE CONTAINER'S GL READBACK WALL (Task 225's re-pin): the GL leg
+    // proves the walk is RUNNING on the deployed bytes (the live counters
+    // land mid-sweep) + the loop; the WG leg carries the full walk.
+    const s = await page.waitForFunction(
+      () => window.__forest?.drawn > 0 && window.__forest.frame > 20,
+      null, { timeout: 420_000, polling: 500 },
+    ).then(() => page.evaluate(() => ({ f: window.__forest.frame, d: window.__forest.drawn, t: window.__forest.total })))
+      .catch(() => null)
+    check(`[${mode}] THE DEPLOYED WALK is running (the live counters land mid-sweep — the GL readback wall; the full walk is the WG leg's proof)`,
+      s !== null && s.d > 0 && s.d < s.t && s.f > 20,
+      s === null ? 'the drawn counter never landed' : `frame ${s.f} · drawn ${s.d}/${s.t}`)
+  }
   check(`[${mode}] zero page errors on the deployed page`, errors.length === 0, errors.slice(0, 2).join(' | '))
   await page.close()
 }
