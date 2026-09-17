@@ -51,7 +51,8 @@ const browser = await chromium.launch({
   headless: true,
   args: ['--no-sandbox', '--disable-gpu-sandbox', '--enable-unsafe-webgpu', '--use-angle=swiftshader', '--enable-features=Vulkan', '--enable-unsafe-swiftshader'],
 })
-for (const [mode, trees, awaitWalk] of [['webgpu', 150, true], ['webgl2', 100, false]]) {
+const LEG = process.argv[2] ?? 'all'
+for (const [mode, trees, awaitWalk] of LEG === 'b' ? [['webgl2', 100, false]] : LEG === 'a' ? [['webgpu', 150, true]] : [['webgpu', 150, true], ['webgl2', 100, false]]) {
   const page = await browser.newPage({ viewport: { width: 480, height: 320 } })
   const errors = []
   page.on('pageerror', e => errors.push(e.message.slice(0, 150)))
