@@ -43,8 +43,8 @@ check('source: THE COUNTS CHANNEL ships (the compact + args — never the scene 
 check('source: the deployed asset is the packed twin (tree.bin.gz)',
   (await fetch(LIVE + 'assets/tree.bin.gz')).headers.get('content-length') !== null,
   `${((await fetch(LIVE + 'assets/tree.bin.gz')).headers.get('content-length') ?? 0) / 1e6} MB`)
-check('source: the gallery card tells the forest',
-  gallery.includes('forest') && gallery.includes('Task 223') && gallery.includes('216–224'), '')
+check('source: the gallery card tells the forest (the 223–224 marker rides the card)',
+  gallery.includes('forest') && gallery.includes('Tasks 223–224') && gallery.includes('216–224'), '')
 
 // ── the deployed validation (both backends) ───────────────────────────────
 const browser = await chromium.launch({

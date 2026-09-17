@@ -31,7 +31,7 @@ check('source: THE ONE-PRESENT LAW — exactly ONE present() call site in the de
 check('source: the present pass submits INSIDE the frame (the deployed boundary)',
   /execute: \(\) => \{\s*\n\s*present\(\)\s*\n\s*device\.submit\(\)\s*\n\s*\},/.test(main),
   '')
-check('source: THE PRESENT LEDGER ships (presents === frame — the field's own witness)',
+check("source: THE PRESENT LEDGER ships (presents === frame — the field's own witness)",
   main.includes('stats.presents++') && main.includes('presents: 0'), '')
 check('source: THE FIELD LOG ships (the on-screen tail — boot, verdicts, errors)',
   main.includes('function fieldNote') && main.includes('tail: fieldLog') && main.includes("fieldNote('ERR', message)"),
