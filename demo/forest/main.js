@@ -59,6 +59,31 @@
 //     two trees (planted in the amphitheater's wall, on screen at every
 //     orbit yaw by construction) and the slider grows the forest to the
 //     full grid, replanting on release.
+//
+// Task 226 — THE PIXEL LADDER + THE PATIENT WITNESS. The third field
+// report: «Даже с двумя деревьями 100 мс на фрейм. Но не мигает.» + the
+// copied log (boot 720×1326@4x on a dpr-3 panel; the replant to 74
+// trees; «the counts readback stalled — no landing in 4000 ms» →
+// «valid FAIL — 0/1 laws»; frame gaps 674..1568 ms with presents ≡
+// frames on every line — the load class, not a present death).
+//   · THE PIXEL LADDER — the boot's own shape (dpr capped at 2, 4x
+//     MSAA) shades ~15 M samples a frame on a mid phone, 7× the
+//     panel's own pixels, and NO TREE COUNT fixes a per-pixel cost —
+//     two trees read 100 ms/frame. The tier now boots on a LADDER of
+//     dpr-cap × MSAA rungs and THE GOVERNOR rides the measured frame
+//     EMA: over budget → one re-boot at the rung the numbers predict
+//     (the forest, the camera and the verdict stand — the laws count
+//     trees, not pixels); under budget with headroom → one rung back
+//     up. A dpr ≥ 2.5 panel boots two rungs down; ?res=0..4 pins a
+//     rung (the field's A/B lane); the software legs stand down.
+//   · THE PATIENT WITNESS — at 74 trees the phone frames at ~1 s and
+//     the 16-byte counts reads queue behind that backlog; the fixed
+//     4 s stall budget lost the race and wrote a FALSE «valid FAIL —
+//     0/1» into a healthy forest. The budget now rides the load (16×
+//     the frame EMA, the 4 s floor), a stall is NOT a law death (the
+//     verdict goes STALLED, the log WARNs, the walk re-arms — three
+//     attempts), and the sparse sweep shrinks to twelve yaws (a
+//     2-law question no longer bills a phone minutes).
 import { createDevice, createFrameGraph, frustumPlanes, aabbOutsideFrustum } from '../../dist/rune.esm.js?v=223'
 import { perspective, lookAt, mat4Mul } from '../occlusion/scene.js?v=203'
 import { buildShaders } from '../occlusion/shaders.js?v=223'
@@ -73,10 +98,37 @@ const MODE_PARAM = PARAMS.get('mode')
 // «Начни с парочки на экране» — the default forest is TWO trees (the
 // slider grows it; ?trees=N overrides for the gates and the links)
 const N_PARAM = Number(PARAMS.get('trees')) || 2
+// ?res=0..4 — pin a pixel-ladder rung (the field's A/B lane; the
+// governor stands down while a rung is pinned)
+const RES_PARAM = PARAMS.has('res') ? Number(PARAMS.get('res')) : Number.NaN
 
 const SKY = [0.56, 0.66, 0.78]
 const LIGHT = [0.45, 0.78, 0.42]
 const HYST = 6
+
+// ── THE PIXEL LADDER (Task 226 — «Даже с двумя деревьями 100 мс на
+// фрейм»): the boot's own shape (dpr capped at 2, 4x MSAA) shades ~15 M
+// samples a frame on a mid phone — 7× the panel's physical pixels — and
+// the per-pixel cost is the load at ANY tree count. The tier boots on a
+// rung and THE GOVERNOR (in the boot, below) rides the measured frame
+// EMA between the two budgets. The rung SURVIVES replants (a denser
+// forest must not re-climb from the showcase top), the ladder re-boot
+// keeps the verdict (the laws count trees, not pixels), and the
+// software legs never leave the top rung (SwiftShader's frame time is
+// not a budget signal — the container's shape is its own ladder).
+const LADDER = [
+  { dprCap: 2.0, msaa: 4, tag: '2× dpr · 4x MSAA' }, // the showcase top
+  { dprCap: 2.0, msaa: 2, tag: '2× dpr · 2x MSAA' },
+  { dprCap: 1.5, msaa: 2, tag: '1.5× dpr · 2x MSAA' }, // the phone's honest boot
+  { dprCap: 1.0, msaa: 2, tag: '1× dpr · 2x MSAA' },
+  { dprCap: 1.0, msaa: 1, tag: '1× dpr · 1x MSAA' }, // the floor
+]
+const LADDER_HIGH_MS = 42 // the descent budget (~24 fps — past this the rung drops)
+const LADDER_LOW_MS = 15 // the ascent headroom (< 15 ms sustained — a 60 Hz vsync lock never ascends)
+let ladderStep = 0
+let ladderPinned = false // ?res= pins the rung — the governor stands down
+let ladderChosen = false // the session's first real boot picks the phone's honest rung
+let ladderBusy = false // a re-boot in flight — no second governor tick may stack
 
 const democtl = { pause() {}, resume() {} }
 const shell = window.RuneDemoShell.mount({
@@ -240,7 +292,14 @@ const STALL_MS = 4000 // the real-GPU budget (the phone's own witness)
 let stallBudget = STALL_MS
 function withStall(promise, ms, tag) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${tag} stalled — no landing in ${ms} ms`)), ms)
+    const timer = setTimeout(() => {
+      // THE TAG RIDES THE ERROR (Task 226): a stall is a WITNESS, not a
+      // law death — the validation's catch reads it and the verdict goes
+      // STALLED (re-arming), never a false FAIL
+      const e = new Error(`${tag} stalled — no landing in ${ms} ms`)
+      e.stall = true
+      reject(e)
+    }, ms)
     promise.then(v => { clearTimeout(timer); resolve(v) }, e => { clearTimeout(timer); reject(e) })
   })
 }
@@ -359,13 +418,30 @@ const stats = {
   runs: [0, 0, 0, 0], instances: [0, 0, 0, 0],
   fps: 0, validation: null, checks: [], errors: 0,
   loadMs: 0, bytes: 0, tail: fieldLog,
-  ms: 0, progress: '', // the frame-time EMA + the validation's own progress line
+  ms: 0, progress: '', res: '', // the frame-time EMA + the validation's own progress line + the rung's shape
 }
 if (typeof window !== 'undefined') window.__forest = stats
 
-async function bootTier(backend) {
+async function bootTier(backend, opts = {}) {
   const token = ++bootToken
-  validationDone = false // every boot validates its own forest (a replant is a new law set)
+  // THE LADDER RE-BOOT (Task 226): the governor's own re-boot keeps the
+  // forest — the rung is a pixel shape, the laws count trees, not
+  // pixels — so a standing verdict survives it (a re-run would bill the
+  // phone minutes for a verdict it already owns). A replant or a mode
+  // switch passes no flag: the full reset stands, the fresh walk runs.
+  const LADDER_REBOOT = opts.ladderReboot === true
+  const KEEP_VERDICT = LADDER_REBOOT && stats.validation !== null
+    && (stats.validation.pass === true || stats.validation.pass === false)
+  // ANY re-boot supersedes a running walk (the token was the replant's
+  // own discipline; the ladder re-boot must own it too — an in-flight
+  // read on the dying device must never write into the new tier's
+  // verdict, and a walk that outlives its tier is a walk without a
+  // witness)
+  validationRun++
+  validationDone = KEEP_VERDICT // every boot validates its own forest
+  // (a replant is a new law set) — except the ladder re-boot, which
+  // keeps the standing one (the same forest, the same laws)
+  validationStalls = 0
   // THE PER-BOOT RESET: the ledger and the counters are the TIER's own — a
   // replant starts a fresh present/frame account (the global counter made
   // presents 161 vs frame 43 after one replant — the ledger law is
@@ -375,10 +451,18 @@ async function bootTier(backend) {
   stats.drawn = -1
   stats.occluded = -1
   stats.frustumCulled = -1
-  stats.validation = null // the stale verdict dies with the old forest (a
-  stats.checks = []       // poll must never read the previous N's PASS)
+  if (KEEP_VERDICT) {
+    // THE VERDICT STANDS: the ladder re-boot plants the SAME forest —
+    // the laws count trees, not pixels, and the log says so (a stalled
+    // verdict does NOT stand: a stall under load re-runs on the cheaper
+    // rung — the patient witness's own second chance)
+  } else {
+    stats.validation = null // the stale verdict dies with the old forest (a
+    stats.checks = []       // poll must never read the previous N's PASS)
+  }
   stats.ms = 0
   stats.progress = ''
+  stats.res = ''
   stallBudget = STALL_MS
   const t0 = performance.now()
   const asset = await loadTree()
@@ -410,8 +494,33 @@ async function bootTier(backend) {
     slog('info', 'the software WG adapter — the snapshot degrade (zero canvas presents)')
   }
 
-  // the surface: the stage's shape × the boot dpr, the caps' ladder
-  const dpr = Math.min(typeof window !== 'undefined' ? window.devicePixelRatio ?? 1 : 1, 2)
+  // THE RUNG'S OWN CHOICE (Task 226, the session's first boot): a dpr
+  // ≥ 2.5 panel is a phone-class screen — the 2× dpr + 4x MSAA showcase
+  // rung shades ~7× its physical pixels, and the field's own report
+  // opened at 100 ms/frame on TWO trees. Such a panel boots two rungs
+  // down (1.5× dpr · 2x MSAA) and the governor tunes from there — down
+  // under load, back up when the load allows. ?res=0..4 pins any rung
+  // (the field's A/B lane); the software legs stay at the top (the
+  // container's budget is not a frame-time budget). The choice is the
+  // SESSION's, not the boot's: a replant (or the WG→GL fallback) must
+  // not re-climb to a rung the governor already walked down from.
+  if (!ladderChosen) {
+    ladderChosen = true
+    if (Number.isFinite(RES_PARAM) && RES_PARAM >= 0 && RES_PARAM < LADDER.length) {
+      ladderStep = Math.round(RES_PARAM)
+      ladderPinned = true
+      slog('info', `the pixel ladder pinned at rung ${ladderStep} (${LADDER[ladderStep].tag}) by ?res= — the governor stands down`)
+    } else if (!device.software && MODE === 'live' && typeof window !== 'undefined' && (window.devicePixelRatio ?? 1) >= 2.5) {
+      ladderStep = 2
+      slog('info', `the pixel ladder — a dpr ${window.devicePixelRatio} panel boots at rung 2 (${LADDER[2].tag}), not the ${LADDER[0].tag} showcase — the governor rides the load from there`)
+    } else {
+      ladderStep = 0
+    }
+  }
+
+  // the surface: the stage's shape × the rung's own caps, the area ladder
+  const rung = LADDER[ladderStep]
+  const dpr = Math.min(typeof window !== 'undefined' ? window.devicePixelRatio ?? 1 : 1, rung.dprCap)
   let SURF_W = Math.max(2, Math.round((stage.clientWidth || 480) * dpr))
   let SURF_H = Math.max(2, Math.round((stage.clientHeight || 270) * dpr))
   const CAP = device.software ? 155_520 : 1_048_576
@@ -421,7 +530,7 @@ async function bootTier(backend) {
     SURF_W = Math.max(2, Math.floor(SURF_W * s))
     SURF_H = Math.max(2, Math.floor(SURF_H * s))
   }
-  let SAMPLES = device.software ? 1 : 4
+  let SAMPLES = device.software ? 1 : rung.msaa
   let surface = null
   for (;;) {
     try {
@@ -433,6 +542,10 @@ async function bootTier(backend) {
       SAMPLES = 1
     }
   }
+  // THE RUNG'S OWN SHAPE rides the HUD (Task 226): the field reads the
+  // pixels it is paying for — the res chip on line one, the boot line on
+  // the dock, and every ladder step logs the rung it moved to
+  stats.res = `${SURF_W}×${SURF_H}@${SAMPLES}x`
 
   // the world (the records + the cells) — the tree's own bounds feed the AABBs
   const treeBounds = {
@@ -760,6 +873,10 @@ async function bootTier(backend) {
   // time on a live loop (a pile of concurrent mapAsync starves SwiftShader
   // WG — the consume used to clear pendingStats BEFORE the resolve, arming
   // a fresh read every cycle while the old ones hung)
+  // THE PIXEL GOVERNOR's own stop (Task 226): the interval is the TIER's —
+  // a re-boot (a replant, a mode switch, a ladder step) must not leave
+  // the old tier's governor ticking over the new one
+  let govStop = null
   fg.pass({
     // THE STATS EXPORT (the copy lane — the tier's own): the readback rides
     // the frame's own graph, beside the color render. THE GATE reads the
@@ -866,6 +983,16 @@ async function bootTier(backend) {
     lastFrameT = now
     frameMsEma = frameMsEma === 0 ? dt : frameMsEma * 0.97 + dt * 0.03
     stats.ms = Math.round(frameMsEma)
+    // THE STALL BUDGET RIDES THE LOAD (Task 226 — the phone's own
+    // «the counts readback stalled — no landing in 4000 ms» on a forest
+    // whose presents never missed): at a second a frame the 16-byte
+    // counts reads queue behind real GPU work, and a FIXED 4 s witness
+    // fires first — a false FAIL into a healthy forest. The witness
+    // stays a witness (a real hang still fires, just later) but the
+    // budget scales with the measured frame cost: 16× the EMA, the 4 s
+    // floor for the healthy case (the software legs keep their own
+    // patient 60 s ladder, set at boot).
+    if (!device.software) stallBudget = Math.max(STALL_MS, frameMsEma * 16)
     if (dt > 250 && now - lastGapWarn > 5000) {
       lastGapWarn = now
       slog('warn', `frame gap ${Math.round(dt)} ms (ema ${stats.ms} ms) — the load class, not a present death (presents ${stats.presents} = frames ${frameIndex})`)
@@ -965,17 +1092,102 @@ async function bootTier(backend) {
     frameNow: () => frameIndex,
     dispose() {
       paused = true
+      if (govStop !== null) govStop()
       try { device.dispose() } catch { /* gone */ }
     },
   }
   cam.target[1] = world.terrainSampler(0, 0) + 5
   if (typeof window !== 'undefined') window.__tier = tier
+
+  // ── THE PIXEL GOVERNOR (Task 226 — «Даже с двумя деревьями 100 мс на
+  // фрейм»): one tick a second, the measured frame EMA against the two
+  // budgets. THE DESCENT needs a SETTLED over-budget EMA (three ticks
+  // inside a 1.4× band — a climbing load is not yet a measured one — or
+  // six raw ticks when it keeps climbing) and lands directly on the rung
+  // the numbers predict (cost ≈ pixels × samples; one re-boot, not a
+  // rung-by-rung crawl), never less than one rung down. THE ASCENT
+  // climbs ONE rung after ten quiet ticks (a vsync-locked loop never
+  // ascends: 16.7 ms > the 15 ms headroom — only real headroom climbs).
+  // The re-boot keeps the forest, the camera and the standing verdict
+  // (the laws count trees, not pixels) and NEVER fires mid-walk (the
+  // validation owns the lane), mid-replant, mid-drag… a hidden tab or a
+  // stale EMA (no frame for 1.5 s) is not a signal. The software legs
+  // and the pinned ?res= legs stand down entirely.
+  {
+    let govTimer = null
+    let govHigh = 0, govLow = 0
+    const govHist = []
+    const bootReadyAt = performance.now()
+    const realDpr = typeof window !== 'undefined' ? window.devicePixelRatio ?? 1 : 1
+    // the rung cost table (pixels × samples — the prediction only needs
+    // to be honest enough to SKIP rungs; the governor iterates from
+    // wherever the prediction lands)
+    const govCost = LADDER.map(l => {
+      const w = Math.max(2, Math.round((stage.clientWidth || 480) * Math.min(realDpr, l.dprCap)))
+      const h = Math.max(2, Math.round((stage.clientHeight || 270) * Math.min(realDpr, l.dprCap)))
+      return w * h * l.msaa
+    })
+    const ladderRebootLocal = (target, ema, up) => {
+      const from = ladderStep
+      ladderStep = target
+      ladderBusy = true
+      slog('event', `the pixel ladder ${up ? 'climbs' : 'steps down'} ${from}→${target} (${LADDER[target].tag}) — ema ${Math.round(ema)} ms ${up ? 'under the' : 'over the'} ${up ? LADDER_LOW_MS : LADDER_HIGH_MS} ms ${up ? 'headroom' : 'budget'} — the tier re-boots, the forest stands, the verdict stands (the laws count trees, not pixels)`)
+      void bootTier(backend, { ladderReboot: true }).catch(e => {
+        slog('error', `the ladder re-boot failed (${e instanceof Error ? e.message : String(e)}) — rolling back to rung ${from}`)
+        ladderStep = from
+        // the failed boot may have left the tier dead — the rollback
+        // re-boots it at the old rung (a standing verdict survives both
+        // re-boots; a stalled one re-runs on the old rung)
+        if (tier === null) {
+          void bootTier(backend, { ladderReboot: true }).catch(e2 => noteError(`the ladder rollback re-boot failed too: ${e2 instanceof Error ? e2.message : String(e2)}`))
+        }
+      }).finally(() => { ladderBusy = false })
+    }
+    if (MODE === 'live' && !device.software && !ladderPinned) {
+      govTimer = setInterval(() => {
+        if (ladderBusy || replantBusy || paused || validationActive) { govHigh = 0; govLow = 0; govHist.length = 0; return }
+        if (document.hidden) return
+        const now = performance.now()
+        if (now - lastFrameT > 1500 || now - bootReadyAt < 2500) return // stale/idle EMA, or the boot's own settle window
+        const ema = frameMsEma
+        if (ema > LADDER_HIGH_MS && ladderStep < LADDER.length - 1) {
+          govLow = 0
+          govHist.push(ema)
+          if (govHist.length > 3) govHist.shift()
+          const settled = govHist.length === 3 && Math.max(...govHist) / Math.min(...govHist) < 1.4
+          if (settled || ++govHigh >= 6) {
+            const ratio = (LADDER_HIGH_MS * 0.72) / ema
+            let target = ladderStep
+            for (let j = ladderStep + 1; j < LADDER.length; j++) {
+              if (govCost[j] / govCost[ladderStep] <= ratio) target = j
+            }
+            ladderRebootLocal(target === ladderStep ? ladderStep + 1 : target, ema, false)
+            govHigh = 0; govHist.length = 0
+          }
+        } else if (ema < LADDER_LOW_MS && ladderStep > 0) {
+          govHigh = 0; govHist.length = 0
+          if (++govLow >= 10) { ladderRebootLocal(ladderStep - 1, ema, true); govLow = 0 }
+        } else {
+          govHigh = 0; govLow = 0; govHist.length = 0
+        }
+      }, 1000)
+    }
+    govStop = () => { if (govTimer !== null) clearInterval(govTimer) }
+  }
+
   // the boot shape rides the screen (the field log's first line): the
   // backend, the tier (live/snapshot), the soft flag, the surface, the load
   fieldNote('boot', `${backend} ${MODE}${device.software ? ' (soft)' : ''} · ${SURF_W}×${SURF_H}@${SAMPLES}x · ${stats.loadMs} ms · ${world.N} trees`)
+  if (KEEP_VERDICT) {
+    // THE VERDICT STANDS (the log's own line): the ladder re-boot owns
+    // its honesty — the field must read WHY the validation did not
+    // re-run (the same forest, the same laws — a pixel shape is not a
+    // law)
+    slog('event', 'the pixel ladder re-boot — the same forest stands, the verdict stands (the laws count trees, not pixels) — the res chip on the HUD carries the new rung')
+  }
   shell.markReady()
   requestAnimationFrame(frame)
-  if (!BARE) void runValidation()
+  if (!BARE && !KEEP_VERDICT) void runValidation()
 }
 
 // ── the HUD (the walker's own pattern — a pre over the stage) ──────────────
@@ -997,13 +1209,18 @@ function refreshHud() {
   const [r0, r1, r2, r3] = stats.runs
   const [i0, i1, i2, i3] = stats.instances
   hud.innerHTML =
-    `<b>forest</b> ${stats.backend} ${stats.kind} · frame ${stats.frame} · present ${stats.presents} · ${stats.ms > 0 ? stats.ms : '…'} ms/f · load ${stats.loadMs} ms` +
+    `<b>forest</b> ${stats.backend} ${stats.kind} · frame ${stats.frame} · present ${stats.presents} · ${stats.ms > 0 ? stats.ms : '…'} ms/f · ${stats.res !== '' ? stats.res : '…'} · load ${stats.loadMs} ms` +
     (errors.length > 0 ? ` · <b>err ${errors.length}</b>` : '') +
     `\ntrees ${stats.drawn < 0 ? '…' : `${stats.drawn}/${stats.total}`} drawn · ${stats.occluded} occluded · ${stats.frustumCulled} frustum` +
     `\nLOD bands ${i0}/${i1}/${i2}/${i3} trees in ${r0}/${r1}/${r2}/${r3} runs` +
     (stats.validation === null
       ? `\nvalidation: running${stats.progress !== '' ? ` · ${stats.progress}` : '…'}`
-      : `\nvalidation: ${stats.validation.pass ? 'PASS' : 'FAIL'} — ${stats.validation.checks} laws`)
+      : stats.validation.pass === null
+        // THE STALLED VERDICT (Task 226): a stall is the LOAD's own
+        // class, never a law death — the phone's false «valid FAIL —
+        // 0/1» is dead, and the HUD says exactly what happened
+        ? `\nvalidation: STALLED${(stats.validation.stalls ?? 1) > 1 ? ` ×${stats.validation.stalls}` : ''} — the load class${stats.validation.checks > 0 ? ` (${stats.validation.checks} laws in)` : ''}`
+        : `\nvalidation: ${stats.validation.pass ? 'PASS' : 'FAIL'} — ${stats.validation.checks} laws`)
     + (tail.length > 0 ? `\n${tail}` : '')
 }
 
@@ -1050,6 +1267,8 @@ function attachControls(canvas) {
 let validationDone = false
 let validationRun = 0 // THE SUPERSEDE TOKEN: a replant mid-validation must
 // not fight the new tier for the camera, the stats channel, or the verdict
+let validationStalls = 0 // THE PATIENT WITNESS's own ledger (Task 226): a
+// stalled walk re-arms — up to three attempts, then the honest STALLED
 async function runValidation() {
   if (tier === null || validationDone) return
   validationDone = true
@@ -1077,6 +1296,8 @@ async function runValidation() {
     poll()
   })
   const tVal = performance.now()
+  let stalled = false // THE PATIENT WITNESS (Task 226): a stalled read is
+  // the load's own class — the walk re-arms, the verdict never lies
   try {
     myTier.beginValidationReads()
     const readWhilePaused = async fn => {
@@ -1114,7 +1335,13 @@ async function runValidation() {
     // compass heading.
     const SOFT_VAL = stats.total <= 340 // the software ladder's own cap
     const SPARSE = stats.total < 100 // «парочка» — the wall/frustum laws need density
-    const STEPS = SOFT_VAL ? 10 : 48
+    // THE SPARSE SWEEP'S OWN BUDGET (Task 226): a sparse verdict is a
+    // 2-law question (something renders, never more than planted) — a
+    // dozen yaws answer it; the 48-step form billed a phone minutes at
+    // a second a frame. The dense classes keep the full sweep (their
+    // laws are yaw-wide by construction); the software legs keep their
+    // own ten (the container's readback wall, unchanged)
+    const STEPS = SOFT_VAL ? 10 : (SPARSE ? 12 : 48)
     const SWEEP_PITCH = SOFT_VAL ? 0.28 : 0.05
     const YAW0 = cam.yaw
     myTier.setCamera(YAW0, SWEEP_PITCH, 30)
@@ -1223,15 +1450,43 @@ async function runValidation() {
     check('zero page errors during the validation',
       errors.length === 0, errors.slice(0, 2).join(' | '))
   } catch (e) {
-    if (superseded()) return // a replant superseded this run — the new boot owns the verdict
-    check('the validation completed', false, e instanceof Error ? e.message : String(e))
+    if (superseded()) return // a replant/ladder re-boot superseded this run — the new boot owns the verdict
+    if (e instanceof Error && e.stall === true) {
+      // A STALL IS NOT A LAW DEATH (Task 226 — the phone's own «valid
+      // FAIL — 0/1 laws» on a forest whose presents never missed): the
+      // 16-byte read queued behind a second-a-frame backlog and the
+      // fixed budget lost the race. The verdict goes STALLED (never
+      // FAIL), the log WARNs with the numbers, and the walk RE-ARMS —
+      // up to three attempts (the budget itself rides the load now:
+      // 16× the frame EMA, so every re-arm is a more patient one)
+      validationStalls++
+      stats.validation = { pass: null, checks: checks.length, stalls: validationStalls }
+      fieldNote('valid', `STALLED — ${e.message} — the load class, not a law death${validationStalls < 3 ? ' — re-arming' : ''}`)
+      if (validationStalls < 3) {
+        const delay = 6000 * validationStalls
+        setTimeout(() => {
+          // still this tier's walk to run? a replant or a ladder
+          // re-boot owns the verdict instead (its own fresh walk, or
+          // the kept one) — the re-arm dies quietly
+          if (tier === myTier && validationRun === run) {
+            validationDone = false
+            void runValidation()
+          }
+        }, delay)
+      } else {
+        slog('warn', `the validation stalled ${validationStalls}× — the load class holds; the counters stay live, the verdict stays honest (a stall is not a law death)`)
+      }
+      stalled = true
+    } else {
+      check('the validation completed', false, e instanceof Error ? e.message : String(e))
+    }
   } finally {
     if (!superseded()) {
       myTier.endValidationReads()
       stats.progress = ''
     }
   }
-  if (superseded()) return
+  if (superseded() || stalled) return // a stalled walk wrote its own verdict — the gate promise stays pending for the re-arm
   const pass = checks.every(c => c.pass)
   stats.validation = { pass, checks: checks.length }
   fieldNote('valid', `${pass ? 'PASS' : 'FAIL'} — ${checks.filter(c => c.pass).length}/${checks.length} laws`)

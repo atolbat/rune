@@ -67,7 +67,7 @@ function check(name, ok, detail = '') {
   check('source: the HUD rides the body from module init (a load-time failure finds the screen)',
     main.includes('document.body.appendChild(hud)'),
     '')
-  check('source: the page mounts the current cache-bust (v=225)', index.includes('main.js?v=225'), '')
+  check('source: the page mounts the current cache-bust (v=226)', index.includes('main.js?v=226'), '')
 }
 
 // ── LEG 2 — the behavior (both backends) ─────────────────────────────────

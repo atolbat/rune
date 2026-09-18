@@ -21,12 +21,12 @@ function check(name, ok, detail = '') {
 
 // ── the source checks (the deployed bytes) ────────────────────────────────
 const index = await (await fetch(LIVE)).text()
-const main = await (await fetch(LIVE + 'main.js?v=225')).text()
+const main = await (await fetch(LIVE + 'main.js?v=226')).text()
 const shaders = await (await fetch(LIVE + 'shaders.js?v=223')).text()
 const world = await (await fetch(LIVE + 'world.js?v=225')).text()
 const dist = await (await fetch('https://atolbat.github.io/rune/dist/rune.esm.js?v=223')).text()
 const gallery = await (await fetch('https://atolbat.github.io/rune/demo/')).text()
-check('source: the deployed forest page mounts the current cache-bust (v=225)', index.includes('main.js?v=225'), '')
+check('source: the deployed forest page mounts the current cache-bust (v=226)', index.includes('main.js?v=226'), '')
 check('source: THE QUANTIZED FEED ships in the deployed dist (the snorm formats + the GL typed lane)',
   dist.includes('snorm16x4') && dist.includes('short') && dist.includes('Int16Array'),
   '')
@@ -43,8 +43,8 @@ check('source: THE COUNTS CHANNEL ships (the compact + args — never the scene 
 check('source: the deployed asset is the packed twin (tree.bin.gz)',
   (await fetch(LIVE + 'assets/tree.bin.gz')).headers.get('content-length') !== null,
   `${((await fetch(LIVE + 'assets/tree.bin.gz')).headers.get('content-length') ?? 0) / 1e6} MB`)
-check('source: the gallery card tells the forest (the 223–225 marker rides the card)',
-  gallery.includes('forest') && gallery.includes('Tasks 223–225') && gallery.includes('216–225'), '')
+check('source: the gallery card tells the forest (the 223–226 marker rides the card)',
+  gallery.includes('forest') && gallery.includes('Tasks 223–226') && gallery.includes('216–226'), '')
 
 // ── the deployed validation (both backends) ───────────────────────────────
 const browser = await chromium.launch({

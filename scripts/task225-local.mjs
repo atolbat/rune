@@ -14,7 +14,7 @@
  *     (withStall + the WARN release), the growing forest (nearest-N, the
  *     coarse thinning deleted, maxTrees), the slider (default 2, replant
  *     on release), the frame witness (the EMA + the gap line), the
- *     one-present law still holds, the v=225 bust.
+ *     one-present law still holds, the v=226 bust.
  *   · LEG 2 — THE BEHAVIOR (both backends): the sparse default boot (two
  *     trees, the 5 sparse laws), the live counters landing DURING the
  *     dense validation (never -1 again), the slider round-trip (a real
@@ -85,7 +85,7 @@ function check(name, ok, detail = '') {
   const callSites = (main.match(/^\s*present\(\)\s*$/gm) ?? []).length
   check('source: THE ONE-PRESENT LAW — still exactly ONE present() call site',
     callSites === 1, `${callSites} statement-level call sites`)
-  check('source: the page mounts the current cache-bust (v=225)', index.includes('main.js?v=225'), '')
+  check('source: the page mounts the current cache-bust (v=226)', index.includes('main.js?v=226'), '')
 }
 
 // ── LEG 2 — the behavior (both backends) ─────────────────────────────────

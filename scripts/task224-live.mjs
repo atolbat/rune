@@ -4,7 +4,7 @@
  * LAW + THE FIELD LOG) on the deployed Pages site:
  *   · the source checks — the deployed forest carries the round's own laws
  *     (exactly one present() call site, the present pass's in-frame
- *     submit, the present ledger, the field log's tail, the v=225 bust);
+ *     submit, the present ledger, the field log's tail, the v=226 bust);
  *   · the deployed behavior — both backends: the 7-law autopilot, the
  *     one-present law LIVE (presents within ±1 of frame), the field log
  *     riding the HUD, zero page errors.
@@ -20,10 +20,10 @@ function check(name, ok, detail = '') {
 
 // ── the source checks (the deployed bytes) ────────────────────────────────
 const index = await (await fetch(LIVE)).text()
-const main = await (await fetch(LIVE + 'main.js?v=225')).text()
+const main = await (await fetch(LIVE + 'main.js?v=226')).text()
 const gallery = await (await fetch('https://atolbat.github.io/rune/demo/')).text()
-check('source: the deployed forest page mounts the current cache-bust (v=225)',
-  index.includes('main.js?v=225'), '')
+check('source: the deployed forest page mounts the current cache-bust (v=226)',
+  index.includes('main.js?v=226'), '')
 const callSites = (main.match(/^\s*present\(\)\s*$/gm) ?? []).length
 check('source: THE ONE-PRESENT LAW — exactly ONE present() call site in the deployed bytes',
   callSites === 1 && main.includes('THE ONE-PRESENT LAW (Task 224'),
@@ -37,7 +37,7 @@ check('source: THE FIELD LOG ships (the on-screen tail — boot, verdicts, error
   main.includes('function fieldNote') && main.includes('tail: fieldLog') && main.includes("fieldNote('ERR', message)"),
   '')
 check('source: the gallery card carries the round',
-  gallery.includes('forest') && gallery.includes('Task 224') && gallery.includes('216–225'), '')
+  gallery.includes('forest') && gallery.includes('Task 224') && gallery.includes('216–226'), '')
 
 // ── the deployed behavior (both backends) ─────────────────────────────────
 const browser = await chromium.launch({

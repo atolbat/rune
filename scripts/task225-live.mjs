@@ -5,7 +5,7 @@
  * Pages site:
  *   · the source checks — the deployed forest carries the round (the dock,
  *     the console tee, the live counters, the stall witness, the growing
- *     forest, the slider, the v=225 bust, the gallery card);
+ *     forest, the slider, the v=226 bust, the gallery card);
  *   · the deployed behavior — the sparse default boot (two trees, the 5
  *     sparse laws) both backends, THE SLIDER round-trip on production (a
  *     real replant + the re-run validation + the replant line on the
@@ -22,11 +22,11 @@ function check(name, ok, detail = '') {
 
 // ── the source checks (the deployed bytes) ────────────────────────────────
 const index = await (await fetch(LIVE)).text()
-const main = await (await fetch(LIVE + 'main.js?v=225')).text()
+const main = await (await fetch(LIVE + 'main.js?v=226')).text()
 const world = await (await fetch(LIVE + 'world.js?v=225')).text()
 const gallery = await (await fetch('https://atolbat.github.io/rune/demo/')).text()
-check('source: the deployed forest page mounts the current cache-bust (v=225)',
-  index.includes('main.js?v=225'), '')
+check('source: the deployed forest page mounts the current cache-bust (v=226)',
+  index.includes('main.js?v=226'), '')
 check('source: THE SCREEN LOG ships in the deployed bytes (the dock + the console tee)',
   main.includes('forest-dock') && main.includes('function slog') && main.includes('shellConsoleError')
     && index.includes('.forest-dock'),
@@ -38,7 +38,7 @@ check('source: THE GROWING FOREST ships (nearest-N, no coarse thinning, maxTrees
 check('source: THE SLIDER ships (the default couple, the replant on release)',
   main.includes('function replant') && main.includes('Начни с парочки') && /\|\| 2\b/.test(main), '')
 check('source: the gallery card carries the round',
-  gallery.includes('forest') && gallery.includes('Tasks 223–225') && gallery.includes('216–225'), '')
+  gallery.includes('forest') && gallery.includes('Tasks 223–226') && gallery.includes('216–226'), '')
 
 // ── the deployed behavior ─────────────────────────────────────────────────
 // (chunked legs — `--leg=a` (source + WG) / `--leg=b` (GL); the default
